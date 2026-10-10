@@ -34,7 +34,9 @@ impl Intent {
         });
         // Category/task suffixes qualify the entity before them. They are
         // not independent evidence for a site called Converter or Vector.
-        for task in ["currency converter", "vector database", "database", "email"] {
+        // A bare "database" can be part of the identity (tz database),
+        // rather than a request for a product with the preceding name.
+        for task in ["currency converter", "vector database", "email"] {
             if let Some(prefix) = entity.strip_suffix(&format!(" {task}")) {
                 if !prefix.trim().is_empty() {
                     entity = prefix.trim().to_string();
@@ -43,7 +45,13 @@ impl Intent {
             }
         }
         Self {
-            words: name_words(&entity),
+            // Resource/type words inside an identity still distinguish it:
+            // a search filler list must not erase "center" or "database".
+            words: plumb_core::normalize_text(&entity)
+                .split_whitespace()
+                .filter(|word| !plumb_core::is_function_word(word))
+                .map(str::to_string)
+                .collect(),
             entity,
             country,
             country_name,
@@ -61,9 +69,95 @@ impl Intent {
     }
 
     pub fn matches_article(&self, page: &Page) -> bool {
-        self.matches(page.website.as_deref().unwrap_or(""), &page.title)
+        let title = plumb_core::normalize_text(&page.title);
+        // An article's website address alone cannot name the article's
+        // entity. Its title must show the identity, or expand its acronym
+        // (USNO -> United States Naval Observatory).
+        let title_names = self
+            .words
+            .iter()
+            .any(|word| title.split_whitespace().any(|shown| shown == word))
+            || self.expands_acronym(&title);
+        title_names
+            && self.matches(page.website.as_deref().unwrap_or(""), &page.title)
             && self.matches_country(page.site.as_deref().unwrap_or(""), None)
             && self.shows_jurisdiction(page.site.as_deref().unwrap_or(""), &page.title, None)
+    }
+
+    /// A name match is retrieval evidence, not ownership. A bare domain
+    /// namesake or a copied/generated title must remain a suggestion.
+    pub fn supports_site(&self, hit: &Hit) -> bool {
+        if !self.matches_site(hit)
+            || registrable_domain(&hit.url) != registrable_domain(&hit.domain)
+        {
+            return false;
+        }
+        let entity = plumb_core::normalize_text(&self.entity);
+        let host = host_of(&hit.domain).unwrap_or_default();
+        // An explicitly requested address identifies the destination
+        // itself; it does not require inferring an owner from a brand.
+        if self.entity.contains('.')
+            && host_of(&self.entity).is_some_and(|asked| {
+                asked == host || host_of(&hit.url).as_deref() == Some(asked.as_str())
+            })
+        {
+            return true;
+        }
+        let title = plumb_core::normalize_text(hit.title.as_deref().unwrap_or(""));
+        let title_shows = self.text_shows_entity(&title) || self.expands_acronym(&title);
+        let domain_names = plumb_core::normalize_text(&domain_label(&host)).replace(' ', "")
+            == entity.replace(' ', "");
+        // Wikidata's site-level flag is useful only after the whole entity
+        // is bound to the site; it is not a license for partial names.
+        if hit.official && title_shows {
+            return true;
+        }
+        // Preserve a jurisdiction-qualified entity when its full domain
+        // name and its own descriptive text corroborate that identity.
+        // This stays low confidence without an owner reference.
+        if self.country.is_some()
+            && domain_names
+            && self.text_shows_entity(&plumb_core::normalize_text(
+                hit.description.as_deref().unwrap_or(""),
+            ))
+        {
+            return true;
+        }
+        // A site's own title and complete domain name can corroborate one
+        // another. Every substantive identity word must appear in the
+        // domain, so Yosemite is not Yosemite National Park. A complete
+        // single name also covers project labels like trychroma, but never
+        // turns the label alone into ownership evidence.
+        let label = plumb_core::normalize_text(&domain_label(&host)).replace(' ', "");
+        let complete_label = domain_names
+            || (!self.words.is_empty() && self.words.iter().all(|word| label.contains(word)));
+        title_shows && complete_label
+    }
+
+    fn text_shows_entity(&self, text: &str) -> bool {
+        if self.words.is_empty() {
+            let entity = plumb_core::normalize_text(&self.entity);
+            return !entity.is_empty()
+                && (text == entity
+                    || (entity.chars().count() == 1
+                        && text.split_whitespace().any(|word| word == entity)));
+        }
+        self.words
+            .iter()
+            .all(|word| text.split_whitespace().any(|shown| shown == word))
+            || (self.words.len() > 1
+                && text
+                    .split_whitespace()
+                    .any(|word| word == self.words.concat()))
+    }
+
+    fn expands_acronym(&self, text: &str) -> bool {
+        let initials: String = text
+            .split_whitespace()
+            .filter(|word| !plumb_core::is_function_word(word))
+            .filter_map(|word| word.chars().next())
+            .collect();
+        self.words.len() == 1 && (3..=8).contains(&self.words[0].len()) && initials == self.words[0]
     }
 
     fn shows_jurisdiction(&self, address: &str, title: &str, country: Option<&str>) -> bool {

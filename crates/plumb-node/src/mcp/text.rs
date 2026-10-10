@@ -466,8 +466,12 @@ fn official_site(out: &mut String, answer: &Value) {
         );
     }
     if !flag(answer, "found") {
-        let _ = writeln!(out, "Plumb knows no site called \"{name}\".");
+        let _ = writeln!(
+            out,
+            "Plumb could not establish an official destination for \"{name}\"."
+        );
         why(out, answer, "why");
+        other_candidates(out, answer);
         if let Some(fixed) = text(answer, "did_you_mean") {
             let _ = writeln!(out, "Did you mean \"{fixed}\"?");
         }
@@ -475,7 +479,12 @@ fn official_site(out: &mut String, answer: &Value) {
     }
     let _ = writeln!(
         out,
-        "Official site for \"{name}\": {} {} (confidence {})",
+        "{} for \"{name}\": {} {} (confidence {})",
+        if text(answer, "confidence") == Some("low") {
+            "Unverified candidate"
+        } else {
+            "Official site"
+        },
         text(answer, "domain").unwrap_or(""),
         text(answer, "url").unwrap_or(""),
         text(answer, "confidence").unwrap_or("low")
@@ -488,15 +497,19 @@ fn official_site(out: &mut String, answer: &Value) {
         out.push('\n');
     }
     why(out, answer, "why");
+    other_candidates(out, answer);
+    if let Some(fixed) = text(answer, "did_you_mean") {
+        let _ = writeln!(out, "Did you mean \"{fixed}\"?");
+    }
+}
+
+fn other_candidates(out: &mut String, answer: &Value) {
     let others: Vec<&str> = list(answer, "alternatives")
         .iter()
         .filter_map(|site| text(site, "domain"))
         .collect();
     if !others.is_empty() {
         let _ = writeln!(out, "Other candidates: {}", others.join(", "));
-    }
-    if let Some(fixed) = text(answer, "did_you_mean") {
-        let _ = writeln!(out, "Did you mean \"{fixed}\"?");
     }
 }
 

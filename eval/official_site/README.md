@@ -27,6 +27,18 @@ report separates false definitive accusations from missed impersonations.
 verdict. Saved JSONL includes the complete answer, provenance, and case
 arguments; comparison keys distinguish country variants and tools.
 
+An inferred search name, a bare domain namesake, a copied title, or an
+acronym matching only part of a resource name is insufficient owner evidence.
+Those cases return `found:false` with candidates under `alternatives`.
+Matching title/domain text without an independent owner reference stays at
+low confidence. Resource words such as `database` and `center` remain part
+of the identity; an agency's parent site does not establish the destination
+of a separately named database or application. An exact package's homepage
+outweighs generated framework documentation on an unrelated host. These
+contracts are exercised by deterministic MCP tests for the wrong-owner
+evidence shapes observed in the combined candidate appendix; the tests do
+not add aliases or fill corpus gaps.
+
 Exact-host affiliation records in `mcp/identity.rs` are reviewed owner
 references observed on October 9, 2026. Hetzner's own status page identifies
 its old console host, its current Cloud page links the new destination, and

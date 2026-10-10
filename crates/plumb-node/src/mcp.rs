@@ -616,7 +616,18 @@ impl Mcp {
         let mut results = self.lookup(name, 1 + ALTERNATIVES, options)?;
         // Keep ranking within the requested entity. A popular spelling
         // suggestion or a task-word domain cannot validate another entity.
-        if let Some(at) = results.hits.iter().position(|hit| intent.matches_site(hit)) {
+        if let Some(at) = results
+            .hits
+            .iter()
+            .position(|hit| hit.official && intent.supports_site(hit))
+            .or_else(|| {
+                results
+                    .hits
+                    .iter()
+                    .position(|hit| intent.supports_site(hit))
+            })
+            .or_else(|| results.hits.iter().position(|hit| intent.matches_site(hit)))
+        {
             results.hits[..=at].rotate_right(1);
         }
         let did_you_mean = results.spelling.as_ref().map(|s| s.query.as_str());
@@ -692,7 +703,7 @@ impl Mcp {
             .cloned()
             .collect();
         let official = |hit: &Hit| {
-            (hit.official && intent.matches_site(hit))
+            (hit.official && intent.supports_site(hit))
                 || article_of(&hit.domain, &entity_pages).is_some()
         };
         let well_known = |hit: &Hit| hit.link_score >= WELL_KNOWN_LINK_SCORE;
@@ -701,11 +712,7 @@ impl Mcp {
         // names it, when the article on the United States Naval Observatory
         // gives navy.mil.
         let top_shows = intent.matches_site(top);
-        let about_site = about_site.or_else(|| {
-            (!top_shows)
-                .then(|| named_article_site(&entity_pages))
-                .flatten()
-        });
+        let about_site = about_site.or_else(|| named_article_site(&entity_pages));
         let mut why = Vec::new();
         let mut pick = top;
         let mut url = top.url.clone();
@@ -735,11 +742,10 @@ impl Mcp {
                 confidence = "high";
                 verified_destination = true;
             }
-            // The article's own site, unless the first site is a well-known
-            // or official site of exactly this name that shows it.
-            Some((page, site))
-                if !(top.named && (official(top) || well_known(top)) && top_shows) =>
-            {
+            // The article's own site, unless the first site has owner
+            // evidence for exactly this entity. Popularity alone cannot
+            // outweigh the article's explicit owner reference.
+            Some((page, site)) if !(top.named && official(top) && intent.supports_site(top)) => {
                 why.push(format!(
                     "Wikidata gives it as the official website of {}, the article this name \
                      names.",
@@ -895,11 +901,8 @@ impl Mcp {
                         domain = hit.domain.clone();
                         title = hit.title.clone();
                         description = hit.description.as_deref().map(short);
-                        // A distinctive identifier such as cube20 can be
-                        // followed by an explanation absent from its title.
-                        verified_destination = domain_label(&hit.domain)
-                            .chars()
-                            .any(|c| c.is_ascii_digit());
+                        // A distinctive label is still only a suggestion
+                        // without evidence for the complete requested entity.
                     }
                 }
             }
@@ -920,14 +923,7 @@ impl Mcp {
             .filter(|hit| hit.named || official(hit) || mentions_name(hit, &words))
             .map(|hit| brief_with(hit, &pages))
             .collect();
-        // Named only by its address, which a package of the name outweighs:
-        // skyfield.cloud is not the Skyfield library's.
-        let label_only = std::ptr::eq(pick, top)
-            && top.named
-            && !official(top)
-            && !well_known(top)
-            && confidence == "medium";
-        if confidence != "high" || wants_docs {
+        if confidence != "high" || wants_docs || (!verified_destination && !official(pick)) {
             // A software package of the name says where its home is:
             // FastAPI's PyPI card names fastapi.tiangolo.com.
             let found = self
@@ -968,9 +964,12 @@ impl Mcp {
                     confidence = "medium";
                     verified_destination = true;
                     did_you_mean = None;
-                } else if let Some(home_domain) = home_domain
-                    .filter(|_| !docs || wants_docs)
-                    .filter(|_| confidence == "low" || label_only)
+                } else if let Some(home_domain) =
+                    home_domain.filter(|_| !docs || wants_docs).filter(|_| {
+                        !verified_destination
+                            && (!intent.supports_site(pick)
+                                || (!official(pick) && !well_known(pick)))
+                    })
                 {
                     // Docs alone are no home: PyPI gives pandas.readthedocs.io
                     // for pandas, whose site is pandas.pydata.org.
@@ -1001,30 +1000,42 @@ impl Mcp {
         if confidence == "low" {
             // A name that spells out its abbreviation: "CIAAW Commission on
             // Isotopic Abundances and Atomic Weights" is ciaaw.org.
-            if let Some(hit) = self.abbreviation_site(name, options).filter(|hit| {
-                intent.matches_country(&hit.domain, hit.country.as_deref())
-                    && (intent.country.is_none() || intent.matches_site(hit))
-            }) {
-                why = vec![format!(
-                    "Its address is {}, an abbreviation in the name.",
-                    hit.domain
-                )];
-                alternatives.retain(|alt| alt["domain"] != hit.domain);
-                if pick.domain != hit.domain {
-                    alternatives.insert(0, brief_with(pick, &pages));
-                    alternatives.truncate(ALTERNATIVES);
+            if let Some(hit) = self.abbreviation_site(name, options) {
+                // An acronym lookup may recover an owner already described
+                // by Wikidata, but cannot discard the rest of the query.
+                if !hit.official || !intent.supports_site(&hit) {
+                    if !alternatives.iter().any(|alt| alt["domain"] == hit.domain) {
+                        alternatives.insert(0, brief_with(&hit, &pages));
+                        alternatives.truncate(ALTERNATIVES);
+                    }
+                } else {
+                    why = vec![format!(
+                        "Its address is {}, an abbreviation in the name.",
+                        hit.domain
+                    )];
+                    alternatives.retain(|alt| alt["domain"] != hit.domain);
+                    if pick.domain != hit.domain {
+                        alternatives.insert(0, brief_with(pick, &pages));
+                        alternatives.truncate(ALTERNATIVES);
+                    }
+                    url = hit.url.clone();
+                    domain = hit.domain.clone();
+                    title = hit.title.clone();
+                    description = hit.description.as_deref().map(short);
+                    confidence = "medium";
+                    verified_destination = true;
+                    did_you_mean = None;
                 }
-                url = hit.url.clone();
-                domain = hit.domain.clone();
-                title = hit.title.clone();
-                description = hit.description.as_deref().map(short);
-                confidence = "medium";
-                verified_destination = true;
-                did_you_mean = None;
             }
         }
         // "Python docs" is docs.python.org, a site of its own.
-        let bound = verified_destination || intent.matches_site(pick);
+        let bound = verified_destination || intent.supports_site(pick);
+        if bound && !verified_destination && !official(pick) {
+            // Popularity and agreeing title/domain words are useful
+            // suggestions, but do not verify ownership independently.
+            confidence = "low";
+            why.push("The site's title or descriptive text agrees with its domain name; its ownership is not independently verified.".to_string());
+        }
         if bound && wants_docs && url.contains(&format!("{domain}/")) {
             if let Some((site, _)) = plumb_core::subdomain_sites().find(|(site, parent)| {
                 *parent == domain && (site.starts_with("docs.") || site.starts_with("doc."))
@@ -1040,8 +1051,9 @@ impl Mcp {
             alternatives.insert(0, brief_with(pick, &pages));
             alternatives.truncate(ALTERNATIVES);
             why = vec![format!(
-                "No evidence ties the suggested site to {:?}; search suggestions and spelling \
-                 corrections do not establish its official destination.",
+                "No owner evidence establishes the suggested site as the destination for {:?}; \
+                 search names, titles, partial domain matches and spelling corrections alone \
+                 do not establish its official destination.",
                 intent.entity
             )];
             if let Some(page) = about {
@@ -1052,9 +1064,7 @@ impl Mcp {
             }
             confidence = "low";
         } else if confidence == "low" {
-            why.push(
-                "No site is called exactly this; it is the best match of the words.".to_string(),
-            );
+            why.push("Treat this as an unverified candidate for the requested name.".to_string());
         }
         Ok(json!({
             "name": name,
@@ -3269,22 +3279,6 @@ fn letters(text: &str) -> String {
         .collect()
 }
 
-/// The normalized words of `name` a site of that name would show:
-/// all but filler, what is wanted from the site and words of host names
-/// that say nothing of whose site it is ("com").
-fn name_words(name: &str) -> Vec<String> {
-    plumb_core::normalize_text(name)
-        .split_whitespace()
-        .filter(|word| {
-            word.chars().count() >= 2
-                && !plumb_core::packages::FILLER_WORDS.contains(word)
-                && !WANTED_WORDS.contains(word)
-                && !FILLER_WORDS.contains(word)
-        })
-        .map(str::to_string)
-        .collect()
-}
-
 /// What a site shows of itself: its address, title and description, as
 /// [`letters`].
 fn site_letters(hit: &Hit) -> String {
@@ -3306,9 +3300,9 @@ fn shows_name(hit: &Hit, words: &[String]) -> bool {
 /// with none of them is noise (sleepnumber.com for "Pillow").
 fn mentions_name(hit: &Hit, words: &[String]) -> bool {
     let shown = site_letters(hit);
-    words
-        .iter()
-        .any(|word| word.len() >= 3 && shown.contains(word.as_str()))
+    words.iter().any(|word| {
+        word.len() >= 3 && !FILLER_WORDS.contains(&word.as_str()) && shown.contains(word.as_str())
+    })
 }
 
 /// Least letters of a name a title must have whole for [`title_has`]:

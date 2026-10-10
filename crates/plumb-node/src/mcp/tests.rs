@@ -427,7 +427,7 @@ fn official_site_says_how_sure_it_is_and_why() {
     ]);
     let answer =
         &call(&mcp, "official_site", json!({ "name": "delta" }))["result"]["structuredContent"];
-    assert_eq!(answer["confidence"], "medium");
+    assert_eq!(answer["confidence"], "low");
     assert!(answer["why"].to_string().contains("deltafaucet.com"));
 
     // Only words in common.
@@ -1789,7 +1789,7 @@ fn official_site_is_unsure_of_a_namesake_of_an_article_without_a_site() {
 }
 
 #[test]
-fn official_site_prefers_a_site_whose_title_is_the_name() {
+fn official_site_keeps_an_unsupported_title_match_as_a_suggestion() {
     let mcp = scripted(|_| {
         let mut chess = titled("chess.com", "Chess.com - Play Chess Online", 0.9, false);
         chess.official = true;
@@ -1807,8 +1807,9 @@ fn official_site_prefers_a_site_whose_title_is_the_name() {
         )
     });
     let answer = official(&mcp, "Chess Programming Wiki");
-    assert_eq!(answer["domain"], "chessprogramming.org", "{answer}");
-    assert_eq!(answer["confidence"], "medium");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["alternatives"][0]["domain"], "chessprogramming.org");
+    assert_eq!(answer["confidence"], "low");
 }
 
 #[test]
@@ -1865,10 +1866,11 @@ fn official_site_trusts_no_unrelated_official_site() {
 #[test]
 fn official_site_finds_the_site_of_an_abbreviation_in_the_name() {
     let mcp = scripted(|query| match query {
-        "NPS" => results(
-            vec![titled("nps.gov", "National Park Service", 0.7, true)],
-            Vec::new(),
-        ),
+        "NPS" => {
+            let mut owner = titled("nps.gov", "National Park Service", 0.7, true);
+            owner.official = true;
+            results(vec![owner], Vec::new())
+        }
         _ => results(vec![titled("npmjs.org", "npm", 0.8, false)], Vec::new()),
     });
     let answer = official(&mcp, "NPS API developer");
@@ -2159,7 +2161,7 @@ fn official_site_takes_a_well_known_site_that_shows_the_whole_name() {
 }
 
 #[test]
-fn official_site_takes_a_site_whose_address_is_a_word_of_the_name() {
+fn official_site_keeps_a_partial_numeric_address_as_a_suggestion() {
     let mcp = scripted(|_| {
         let mut rubiks = titled("rubiks.com", "Rubik's", 0.8, false);
         rubiks.official = true;
@@ -2168,7 +2170,8 @@ fn official_site_takes_a_site_whose_address_is_a_word_of_the_name() {
         results(vec![rubiks, cube20], Vec::new())
     });
     let answer = official(&mcp, "cube20 God's number");
-    assert_eq!(answer["domain"], "cube20.org", "{answer}");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["alternatives"][0]["domain"], "cube20.org");
     assert_eq!(answer["confidence"], "low");
 }
 
@@ -2348,6 +2351,251 @@ fn official_site_uses_the_query_jurisdiction_and_reports_conflicting_preferences
             assert!(answer["country_conflict"].is_null());
         }
     }
+}
+
+#[test]
+fn official_site_abstains_on_domain_namesakes_and_copied_owner_titles() {
+    // These reproduce evidence shapes from the combined candidate run.
+    // Even a strong ranking/name/popularity signal is not owner evidence.
+    for (name, domain, title, description) in [
+        (
+            "LifeWiki",
+            "life-wiki.com",
+            Some("Free encyclopedia, created and edited by volunteers around the world"),
+            None,
+        ),
+        ("MathWorld", "mathworld.com", None, None),
+        ("NSSDC", "nssdc.ac.cn", None, None),
+        (
+            "European Central Bank",
+            "zentral-bank.eu",
+            Some("European Central Bank"),
+            Some("The European Central Bank (ECB) is the central bank of the European Union."),
+        ),
+        (
+            "Yosemite National Park",
+            "yosemite.com",
+            Some("Yosemite National Park | Lodging, Camping, Attractions | Yosemite.com"),
+            Some("Plan your vacation to Yosemite today!"),
+        ),
+        // A word normally ignored during search is part of this entity.
+        ("Delta Center", "delta.com", Some("Delta"), None),
+    ] {
+        for link_score in [0.1, 0.9] {
+            let mut candidate = hit(domain, 2.0, link_score, true);
+            candidate.title = title.map(str::to_string);
+            candidate.description = description.map(str::to_string);
+            let answer = official(&server(vec![candidate]), name);
+            assert_eq!(answer["found"], false, "{name}: {answer}");
+            assert_eq!(answer["status"], "unresolved");
+            assert_eq!(answer["confidence"], "low");
+            assert!(answer["url"].is_null());
+            assert_eq!(answer["alternatives"][0]["domain"], domain);
+        }
+    }
+}
+
+#[test]
+fn official_site_abbreviation_cannot_verify_an_unbound_resource() {
+    for (name, acronym, domain, title) in [
+        (
+            "NSSDC planetary fact sheet",
+            "NSSDC",
+            "nssdc.ac.cn",
+            "NSSDC",
+        ),
+        ("NASA Science", "NASA", "nasa.gov", "NASA"),
+        ("NIST Atomic Spectra Database", "NIST", "nist.gov", "NIST"),
+        ("NIST physical constants", "NIST", "nist.gov", "NIST"),
+        (
+            "US Naval Observatory Astronomical Applications",
+            "US",
+            "us.es",
+            "Universidad de Sevilla",
+        ),
+    ] {
+        let mcp = scripted(move |query| {
+            let mut candidate = titled(domain, title, 0.9, true);
+            candidate.official = true;
+            if query == acronym {
+                results(vec![candidate], Vec::new())
+            } else {
+                results(
+                    vec![titled("unrelated.example", "Unrelated", 0.1, false)],
+                    Vec::new(),
+                )
+            }
+        });
+        let answer = official(&mcp, name);
+        assert_eq!(answer["found"], false, "{name}: {answer}");
+        assert_eq!(answer["confidence"], "low");
+        assert!(answer["url"].is_null());
+        assert!(
+            answer["alternatives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alt| alt["domain"] == domain),
+            "{answer}"
+        );
+    }
+}
+
+#[test]
+fn official_site_database_qualifier_cannot_select_a_newspaper() {
+    let mut newspaper = titled("tz.de", "tz", 0.9, true);
+    newspaper.description = Some("German daily newspaper published in Munich".into());
+    newspaper.official = true;
+    let mcp = server(vec![newspaper]);
+    let answer = official(&mcp, "tz database");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["alternatives"][0]["domain"], "tz.de");
+    assert_eq!(official(&mcp, "tz")["domain"], "tz.de");
+}
+
+#[test]
+fn official_site_an_official_flag_does_not_bind_a_bare_domain_namesake() {
+    for (name, domain) in [("MathWorld", "mathworld.com"), ("NSSDC", "nssdc.ac.cn")] {
+        let mut namesake = hit(domain, 2.0, 0.9, true);
+        namesake.title = None;
+        namesake.official = true;
+        let answer = official(&server(vec![namesake]), name);
+        assert_eq!(answer["found"], false, "{answer}");
+        assert_eq!(answer["alternatives"][0]["domain"], domain);
+    }
+}
+
+#[test]
+fn official_site_package_owner_overrides_generated_framework_docs() {
+    for (title, named, popularity) in [("FastAPI - Swagger UI", false, 0.1), ("FastAPI", true, 0.9)]
+    {
+        let mcp = scripted(move |query| {
+            if query.ends_with("package") {
+                return results(
+                    Vec::new(),
+                    vec![package_page(
+                        "pypi",
+                        "fastapi",
+                        Some("https://fastapi.tiangolo.com/"),
+                        None,
+                    )],
+                );
+            }
+            let mut generated = titled("dalicc.net", title, popularity, named);
+            generated.url = "http://api.dalicc.net/docs".into();
+            results(vec![generated], Vec::new())
+        });
+        let answer = official(&mcp, "FastAPI");
+        assert_eq!(answer["url"], "https://fastapi.tiangolo.com/", "{answer}");
+        assert_eq!(answer["confidence"], "medium");
+        assert_eq!(answer["alternatives"][0]["domain"], "dalicc.net");
+        assert!(answer["why"].to_string().contains("PyPI"));
+    }
+    let mut generated = titled("dalicc.net", "FastAPI - Swagger UI", 0.9, true);
+    generated.url = "http://api.dalicc.net/docs".into();
+    let answer = official(&server(vec![generated]), "FastAPI");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(
+        answer["alternatives"][0]["url"],
+        "http://api.dalicc.net/docs"
+    );
+}
+
+#[test]
+fn official_site_owner_article_overrides_popular_domain_namesake() {
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("life-wiki.com", "LifeWiki", 0.9, true)],
+            vec![article(
+                "LifeWiki",
+                Some("conwaylife.com"),
+                Some("https://conwaylife.com/wiki/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "LifeWiki");
+    assert_eq!(answer["url"], "https://conwaylife.com/wiki/", "{answer}");
+    assert_eq!(answer["confidence"], "high");
+}
+
+#[test]
+fn official_site_package_namesake_does_not_verify_a_different_known_entity() {
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "vector",
+                    Some("https://geometry.example/vector/"),
+                    None,
+                )],
+            );
+        }
+        results(vec![titled("vector.dev", "Vector", 0.9, true)], Vec::new())
+    });
+    let answer = official(&mcp, "Vector");
+    assert_eq!(answer["domain"], "vector.dev", "{answer}");
+    assert_eq!(answer["confidence"], "low");
+    assert_eq!(answer["package_home"], "https://geometry.example/vector/");
+}
+
+#[test]
+fn official_site_does_not_bind_owner_metadata_through_its_address_alone() {
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("life-wiki.com", "Free encyclopedia", 0.9, true)],
+            vec![article(
+                "Unrelated encyclopedia",
+                Some("life-wiki.com"),
+                Some("https://life-wiki.com/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "LifeWiki");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["confidence"], "low");
+
+    let mut owner = titled("python.org", "Python", 0.9, true);
+    owner.official = true;
+    owner.url = "https://python.example/docs".into();
+    let answer = official(&server(vec![owner]), "Python docs");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(
+        answer["alternatives"][0]["url"],
+        "https://python.example/docs"
+    );
+}
+
+#[test]
+fn official_site_text_preserves_unverified_suggestions_without_owner_claims() {
+    let reply = call(
+        &server(vec![titled(
+            "zentral-bank.eu",
+            "European Central Bank",
+            0.9,
+            true,
+        )]),
+        "official_site",
+        json!({ "name": "European Central Bank" }),
+    );
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("could not establish an official destination"),
+        "{text}"
+    );
+    assert!(text.contains("Other candidates: zentral-bank.eu"), "{text}");
+    assert!(!text.contains("Official site for"), "{text}");
+
+    let reply = call(
+        &server(vec![titled("trychroma.com", "Chroma", 0.9, true)]),
+        "official_site",
+        json!({ "name": "Chroma vector database" }),
+    );
+    assert_eq!(reply["result"]["structuredContent"]["found"], true);
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("Unverified candidate for"), "{text}");
+    assert!(!text.contains("Official site for"), "{text}");
 }
 
 #[test]
