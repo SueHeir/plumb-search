@@ -1722,7 +1722,7 @@ impl Mcp {
             }
         };
         let found = self.lookup(subject, PROFILE_SEARCH_LIMIT, options)?;
-        let page = answers::fact_pages(&found.pages)
+        let page = answers::fact_pages_for(&found.pages, subject)
             .map(|placed| &placed.hit.page)
             .find(|page| {
                 page.facts.iter().any(|fact| {
