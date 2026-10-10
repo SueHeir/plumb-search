@@ -210,6 +210,19 @@ pub const KEEPS_ITS_NAME_LINK_SCORE: f32 = 0.4;
 /// link text (github.com for "docs"), so a query ending in them is ranked
 /// by the words before them. Each entry is one or more normalized words.
 const INTENT_WORDS: &[&str] = &[
+    "api",
+    "manual",
+    "policy",
+    "benefit",
+    "benefits",
+    "retirement benefits",
+    "baggage policy",
+    "guidance",
+    "instructions",
+    "website address",
+    "site address",
+    "student login",
+    "order tracking",
     "refund",
     "refund status",
     "online banking",
@@ -1622,11 +1635,48 @@ impl Searcher {
         };
 
         let default = RankConfig::default();
-        let navigation_words =
-            without_intent_words(query_text).map(|name| analysis::tokens(&self.words, &name).len());
-        // Refund/status requests can include a product qualifier (Amazon
-        // Prime refund); docs requests still require the named subject.
         let normalized = normalize_text(query_text);
+        let task_navigation = normalized.split_whitespace().last().is_some_and(|word| {
+            matches!(
+                word,
+                "api"
+                    | "manual"
+                    | "docs"
+                    | "documentation"
+                    | "policy"
+                    | "benefit"
+                    | "benefits"
+                    | "guidance"
+                    | "instructions"
+                    | "login"
+                    | "tracking"
+            )
+        });
+        let navigation_names = match navigation_subject(query_text)
+            .and_then(|subject| ParsedQuery::new(&subject, &self.words, &self.joined))
+        {
+            Some(subject) => self
+                .name_matches(&searcher, &subject, cfg)?
+                .into_iter()
+                .filter(|&(addr, name)| {
+                    link_score_of(addr) >= WELL_KNOWN_LINK_SCORE
+                        && (name.words() >= subject.len
+                            || task_navigation
+                                && name.words() > 0
+                                && subject.words.iter().skip(name.words()).all(|word| {
+                                    // Short API namespaces extend a named site's task;
+                                    // an unrelated topic such as "snake family"
+                                    // remains part of the subject.
+                                    word.len() <= 2 || word.chars().any(|c| c.is_ascii_digit())
+                                }))
+                })
+                .map(|(addr, _)| addr)
+                .collect::<HashSet<_>>(),
+            None => HashSet::new(),
+        };
+        // Refund/status requests can include a product qualifier (Amazon
+        // Prime refund). Other tasks require the subject or a bounded
+        // namespace/service qualifier after it.
         let refund_navigation =
             normalized.ends_with(" refund") || normalized.ends_with(" refund status");
         // A leading name needs an explicit navigation intent, rather than
@@ -1637,10 +1687,11 @@ impl Searcher {
                 name.typed
                     || (name.words() > 0
                         && (!cfg.whole_query_relevance
-                            || navigation_words == Some(name.words())
+                            || navigation_names.contains(&addr)
                             || refund_navigation)
                         && link_score_of(addr) >= WELL_KNOWN_LINK_SCORE)
-            });
+            })
+            || !navigation_names.is_empty();
         let alpha = match cfg.described_alpha {
             Some(described) if !navigational => unit_or(described, default.alpha),
             _ => unit_or(cfg.alpha, default.alpha),
@@ -1771,14 +1822,30 @@ impl Searcher {
             let lexical = &evidence[&addr];
             let semantic = closeness_of(addr).map(|score| unit_or(score, 0.0));
             let full_name = name.typed || name.words() >= query.len;
-            let explicit_navigation = name.words() > 0
-                && (navigation_words == Some(name.words()) || refund_navigation)
-                && link_score >= WELL_KNOWN_LINK_SCORE;
+            let explicit_navigation = navigation_names.contains(&addr)
+                || name.words() > 0 && refund_navigation && link_score >= WELL_KNOWN_LINK_SCORE;
             let protects_bare_name =
                 !bare.is_empty() && name.words() > 0 && link_score >= WELL_KNOWN_LINK_SCORE;
             let protected = full_name || is_kind || explicit_navigation || protects_bare_name;
-            let support = lexical.substantive.max(semantic.unwrap_or(0.0));
-            let whole_share = if !cfg.whole_query_relevance || protected {
+            // The meaning-only floor already calibrates descriptive
+            // queries. Do not impose the stricter partial-name floor on
+            // a semantic match whose domain name is absent from the query.
+            let domain_collision = column.domain(addr.doc_id).is_some_and(|domain| {
+                let label = analysis::tokens(&self.words, &schema::label_text(&domain));
+                !label.is_empty()
+                    && label.iter().all(|word| {
+                        query.words.contains(word)
+                            || query.others.iter().flatten().any(|other| other == word)
+                    })
+            });
+            let semantic_floor = cfg.meaning_only_relevance.unwrap_or(0.35).max(0.0);
+            let convincing = protected
+                || lexical.substantive >= 0.75
+                || semantic.is_some_and(|s| {
+                    s >= cfg.partial_closeness.unwrap_or(0.5).max(0.5)
+                        || !domain_collision && s >= semantic_floor.max(f32::EPSILON)
+                });
+            let whole_share = if !cfg.whole_query_relevance || convincing {
                 1.0
             } else {
                 // Retain weak lexical/semantic results as fallbacks; a
@@ -1787,18 +1854,12 @@ impl Searcher {
             };
             let remainder =
                 lexical.remaining(prefix_distinct.get(&name.words()).copied().unwrap_or(0));
-            let name_share = if !cfg.whole_query_relevance || protected {
+            let name_share = if !cfg.whole_query_relevance || convincing {
                 1.0
             } else {
                 remainder.max(semantic.unwrap_or(0.0))
             };
-            let relevance_tier = u8::from(
-                cfg.whole_query_relevance
-                    && (protected
-                        || support >= 0.75
-                        || semantic
-                            .is_some_and(|s| s >= cfg.partial_closeness.unwrap_or(0.5).max(0.5))),
-            );
+            let relevance_tier = u8::from(cfg.whole_query_relevance && convincing);
             // A site whose domain the whole query names stays whatever its
             // language: "spiegel" finds spiegel.de with English chosen.
             if let (Some(wanted), Some(site)) = (&language, column.language(addr.doc_id)) {
@@ -1968,7 +2029,7 @@ impl Searcher {
             let (named_inside, alias_inside) = self.names_inside(&searcher, &query, query_text)?;
             let mut partial = Vec::new();
             for r in &ranked {
-                if r.named || kinds.contains(&r.addr) {
+                if r.named || kinds.contains(&r.addr) || r.relevance_tier > 0 {
                     continue;
                 }
                 // A name only counts for a site known by it: hilton.com in
@@ -2629,6 +2690,31 @@ pub fn without_intent_words(query: &str) -> Option<String> {
         }
     }
     (words.len() < all).then(|| words.join(" "))
+}
+
+/// Explicit site/task requests can wrap the name in question words or
+/// generic institutional qualifiers. Resolve the remaining subject by
+/// indexed names; popularity alone never creates a navigation request.
+fn navigation_subject(query: &str) -> Option<String> {
+    let subject = without_intent_words(query)?;
+    let subject = [
+        "where is ",
+        "where can i find ",
+        "what is ",
+        "how do i find ",
+    ]
+    .iter()
+    .find_map(|prefix| subject.strip_prefix(prefix))
+    .unwrap_or(&subject);
+    let mut words: Vec<_> = subject.split_whitespace().collect();
+    // Keep function words inside real names (Bank of America, The Who).
+    while words.len() > 1 && matches!(words[0], "official" | "government") {
+        words.remove(0);
+    }
+    while words.len() > 1 && matches!(words.last(), Some(&"project" | &"agency")) {
+        words.pop();
+    }
+    (!words.is_empty()).then(|| words.join(" "))
 }
 
 /// Puts first the docs site of what `name` names when `query` asks for its
@@ -4260,6 +4346,261 @@ mod tests {
                 .iter()
                 .find(|(d, _)| *d == domain)
                 .map(|&(_, closeness)| closeness)
+        }
+    }
+
+    #[test]
+    fn calibrated_semantic_candidates_keep_their_scores_and_recall() {
+        let records = [
+            site(
+                "travel.state.gov",
+                Some("Bureau of Consular Affairs"),
+                Some("State Department services for citizens abroad"),
+                &[],
+                &[],
+                popular(1_000, 20_000),
+            ),
+            site(
+                "passport-services.example",
+                Some("Passport renewal services"),
+                None,
+                &[],
+                &[],
+                obscure(600_000, 5),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let meaning = FixedMeaning(vec![
+            ("passport-services.example", 0.8),
+            ("travel.state.gov", 0.48),
+        ]);
+        for query in [
+            "US passport renewal guidance",
+            "United States passport renew application",
+            "American passport renewal government instructions",
+        ] {
+            let options = SearchOptions {
+                exact: true,
+                ..Default::default()
+            };
+            let hits = searcher
+                .search_meaning(query, 10, &RankConfig::default(), &options, Some(&meaning))
+                .unwrap()
+                .hits;
+            let authority = hits
+                .iter()
+                .find(|hit| hit.domain == "travel.state.gov")
+                .unwrap_or_else(|| panic!("{query}: {hits:?}"));
+            assert_eq!(authority.query_evidence.as_ref().unwrap().relevance_tier, 1);
+            // The semantic score was already calibrated by meaning_weight;
+            // whole-query coverage must not multiply it a second time.
+            assert!(
+                authority.text_score >= 0.7 * 0.48 - 1e-5,
+                "{query}: {authority:?}"
+            );
+            assert!(
+                authority.score
+                    >= 0.5 * authority.link_score * (0.7 * 0.48 / 0.35) + 0.5 * 0.7 * 0.48 - 1e-5,
+                "{query}: the calibrated prior must survive too: {authority:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn whole_query_and_alias_evidence_survives_a_low_semantic_score() {
+        let records = [
+            site(
+                "w3.org",
+                Some("W3C"),
+                Some("Web standards consortium"),
+                &["W3C"],
+                &[],
+                popular(100, 30_000),
+            ),
+            site(
+                "apache.org",
+                Some("Apache Software Foundation"),
+                None,
+                &["Apache", "Kafka"],
+                &[],
+                popular(500, 20_000),
+            ),
+            site(
+                "unrelated.example",
+                Some("Online software"),
+                None,
+                &[],
+                &[],
+                obscure(500_000, 5),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let meaning = FixedMeaning(vec![
+            ("unrelated.example", 0.8),
+            ("w3.org", 0.45),
+            ("apache.org", 0.36),
+        ]);
+        for (query, wanted) in [
+            ("Where is W3C online", "w3.org"),
+            ("Where is W3C official website", "w3.org"),
+            ("apache kafka", "apache.org"),
+        ] {
+            let mut hits = searcher
+                .search_meaning(
+                    query,
+                    10,
+                    &RankConfig::default(),
+                    &SearchOptions::default(),
+                    Some(&meaning),
+                )
+                .unwrap()
+                .hits;
+            assert!(
+                hits.iter().any(|hit| hit.domain == wanted),
+                "{query}: {hits:?}"
+            );
+            let wanted_hit = hits.iter().find(|hit| hit.domain == wanted).unwrap();
+            assert_eq!(
+                wanted_hit.query_evidence.as_ref().unwrap().relevance_tier,
+                1,
+                "{query}: {hits:?}"
+            );
+            learned::reorder(learned::Model::builtin(), query, &mut hits, &mut Vec::new());
+            assert_eq!(hits[0].domain, wanted, "{query}: {hits:?}");
+        }
+    }
+
+    #[test]
+    fn explicit_tasks_keep_the_named_site_without_promoting_animal_namesakes() {
+        let records = [
+            site(
+                "openai.com",
+                Some("OpenAI research"),
+                None,
+                &["OpenAI"],
+                &[],
+                popular(100, 30_000),
+            ),
+            site(
+                "gitlab.com",
+                Some("GitLab software platform"),
+                None,
+                &["GitLab"],
+                &[],
+                popular(500, 20_000),
+            ),
+            site(
+                "mozilla.org",
+                Some("Mozilla browser project"),
+                None,
+                &["Mozilla"],
+                &[],
+                popular(100, 30_000),
+            ),
+            site(
+                "ssa.gov",
+                Some("Social Security Administration"),
+                Some("Independent federal agency"),
+                &["SSA", "Social Security"],
+                &[],
+                popular(1_000, 20_000),
+            ),
+            site(
+                "bankofamerica.com",
+                Some("Bank of America"),
+                None,
+                &["Bank of America"],
+                &[],
+                popular(500, 30_000),
+            ),
+            site(
+                "python.org",
+                Some("Python programming language"),
+                None,
+                &["Python"],
+                &[],
+                popular(100, 30_000),
+            ),
+            site(
+                "jaguar.com",
+                Some("Jaguar luxury cars"),
+                None,
+                &["Jaguar"],
+                &[],
+                popular(100, 30_000),
+            ),
+            site(
+                "subject-guide.example",
+                Some("Python snake family Jaguar animal species Panthera onca jaguar"),
+                None,
+                &[],
+                &[],
+                obscure(500_000, 5),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let meaning = FixedMeaning(vec![
+            ("subject-guide.example", 0.8),
+            ("openai.com", 0.23),
+            ("gitlab.com", 0.46),
+            ("mozilla.org", 0.0),
+            ("ssa.gov", 0.238),
+            ("bankofamerica.com", 0.0),
+            ("python.org", 0.30),
+            ("jaguar.com", 0.37),
+        ]);
+        for (query, wanted) in [
+            ("openai api", "openai.com"),
+            ("gitlab ci docs", "gitlab.com"),
+            ("Mozilla project website address", "mozilla.org"),
+            ("Social Security retirement benefits", "ssa.gov"),
+            ("SSA retirement benefits guidance", "ssa.gov"),
+            ("Government Social Security benefit guidance", "ssa.gov"),
+            ("Bank of America online", "bankofamerica.com"),
+        ] {
+            let mut hits = searcher
+                .search_meaning(
+                    query,
+                    10,
+                    &RankConfig::default(),
+                    &SearchOptions::default(),
+                    Some(&meaning),
+                )
+                .unwrap()
+                .hits;
+            assert_eq!(hits[0].domain, wanted, "{query}: {hits:?}");
+            learned::reorder(learned::Model::builtin(), query, &mut hits, &mut Vec::new());
+            assert_eq!(hits[0].domain, wanted, "{query}: {hits:?}");
+        }
+        for (query, wrong) in [
+            ("Python snake family", "python.org"),
+            ("Python snake family docs", "python.org"),
+            ("Family of python snakes", "python.org"),
+            ("Jaguar animal species", "jaguar.com"),
+            ("Jaguar animal species guidance", "jaguar.com"),
+            ("Panthera onca jaguar", "jaguar.com"),
+        ] {
+            let hits = searcher
+                .search_meaning(
+                    query,
+                    10,
+                    &RankConfig::default(),
+                    &SearchOptions {
+                        exact: true,
+                        ..Default::default()
+                    },
+                    Some(&meaning),
+                )
+                .unwrap()
+                .hits;
+            if let Some(hit) = hits.iter().find(|hit| hit.domain == wrong) {
+                assert_eq!(
+                    hit.query_evidence.as_ref().unwrap().relevance_tier,
+                    0,
+                    "{query}: {hits:?}"
+                );
+            }
+            assert_ne!(hits[0].domain, wrong, "{query}: {hits:?}");
         }
     }
 

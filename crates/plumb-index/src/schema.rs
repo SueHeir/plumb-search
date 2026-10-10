@@ -163,16 +163,17 @@ pub(crate) struct Fields {
 }
 
 impl Fields {
-    /// Fields that describe the site's subject, rather than merely spelling
-    /// a domain or repeating a name supplied by another site. This uses the
-    /// existing index fields, so older readable indexes need no rebuild.
-    pub(crate) fn substantive(self) -> [Field; 5] {
+    /// Fields that describe the site's subject or declare its aliases.
+    /// A domain label or incidental link text alone supplies no subject
+    /// evidence. These existing fields need no index rebuild.
+    pub(crate) fn substantive(self) -> [Field; 6] {
         [
             self.title,
             self.description,
             self.about,
             self.headings,
             self.terms,
+            self.aliases,
         ]
     }
 

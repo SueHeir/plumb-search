@@ -24,7 +24,7 @@ pub struct CandidateEvidence {
     pub semantic_closeness: Option<f32>,
     /// Weighted coverage in any searched field, ignoring question/filler words.
     pub query_coverage: f32,
-    /// Coverage in title, description, Wikidata description, headings and terms.
+    /// Coverage in title, description, Wikidata description, headings, terms and aliases.
     pub substantive_coverage: f32,
     /// Coverage of the substantive words after a leading partial name.
     pub remaining_coverage: f32,
