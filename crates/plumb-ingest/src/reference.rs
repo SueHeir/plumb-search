@@ -375,6 +375,7 @@ mod tests {
         .map(|(path, language)| FetchedDoc {
             url: format!("https://gesund.bund.de/{path}/information"),
             title: Some("Information".into()),
+            text: Some(format!("Useful health information for the {path} page.")),
             language: language.map(str::to_string),
             ..FetchedDoc::default()
         })

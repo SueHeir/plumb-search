@@ -513,7 +513,16 @@ fn fetch_sites<S: Copy + Send + std::fmt::Debug + 'static>(
         bail!("page caps must be greater than zero");
     }
     block_on(async move {
-        let cfg = plumb_crawl::CrawlConfig::default();
+        let cfg = plumb_crawl::CrawlConfig {
+            // Large API docs can have extensive navigation before main content.
+            // Keep a finite inner-page budget; homepage callers retain theirs.
+            max_bytes: if policy.extraction == plumb_crawl::InnerPageExtraction::Docs {
+                4 * 1024 * 1024
+            } else {
+                plumb_crawl::CrawlConfig::default().max_bytes
+            },
+            ..plumb_crawl::CrawlConfig::default()
+        };
         let mut running = tokio::task::JoinSet::new();
         let mut done = Vec::new();
         let mut queue = sites.into_iter();
