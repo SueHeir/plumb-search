@@ -361,11 +361,11 @@ pub struct RankConfig {
     /// cricket.com.au's). Fewer results are shown rather than these.
     /// `None` keeps them.
     pub partial_closeness: Option<f32>,
-    /// Measure the substantive coverage of every candidate before giving
+    /// Opt-in experiment: measure substantive coverage before giving
     /// partial names or popularity their boost. Exact names, typed domains
     /// and the existing explicit navigation intents retain their controls.
-    /// Disable coverage/tier adjustments for a focused fixed-corpus
-    /// comparison; source quality and intent parsing remain independent.
+    /// Disabled by default; diagnostic query evidence, source quality and
+    /// intent parsing remain independent of coverage/tier adjustments.
     pub whole_query_relevance: bool,
     /// BM25 boost of a query word matching a site's search terms
     /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
@@ -448,7 +448,7 @@ impl Default for RankConfig {
             named_share: Some(0.4),
             named_needs_all_words: true,
             partial_closeness: Some(0.5),
-            whole_query_relevance: true,
+            whole_query_relevance: false,
             terms_boost: 1.0,
             filler_words: true,
             questions_name_nothing: true,
@@ -1735,6 +1735,18 @@ impl Searcher {
                     .map(|domain| meaning.plain_closeness(&domain))
             })
         };
+        let domain_collision_of = |addr: DocAddress| {
+            columns[addr.segment_ord as usize]
+                .domain(addr.doc_id)
+                .is_some_and(|domain| {
+                    let label = analysis::tokens(&self.words, &schema::label_text(&domain));
+                    !label.is_empty()
+                        && label.iter().all(|word| {
+                            query.words.contains(word)
+                                || query.others.iter().flatten().any(|other| other == word)
+                        })
+                })
+        };
         let addresses: Vec<_> = candidates.iter().map(|&(_, addr)| addr).collect();
         let evidence = query.whole_query_evidence(&searcher, &self.fields, &addresses)?;
         let tokens = analysis::tokens(&self.words, query_text);
@@ -1943,14 +1955,7 @@ impl Searcher {
             let semantic = meaning.and(qualified_semantic);
             // Without a resolved subject, retain descriptive semantic recall
             // and its existing stricter check for literal domain collisions.
-            let domain_collision = column.domain(addr.doc_id).is_some_and(|domain| {
-                let label = analysis::tokens(&self.words, &schema::label_text(&domain));
-                !label.is_empty()
-                    && label.iter().all(|word| {
-                        query.words.contains(word)
-                            || query.others.iter().flatten().any(|other| other == word)
-                    })
-            });
+            let domain_collision = domain_collision_of(addr);
             let convincing = protected
                 || subject_supported
                     && (lexical.substantive >= 0.75
@@ -2184,10 +2189,25 @@ impl Searcher {
                         .domain(r.addr.doc_id)
                         .and_then(|domain| any.closeness(&domain)),
                 };
+                // Indexed semantic support at the existing descriptive
+                // floor is enough to retain a noncollision paraphrase,
+                // even when sparse text shares some generic query words.
+                // This changes retention, not its score or relevance tier.
+                let described = !domain_collision_of(r.addr)
+                    && r.query_evidence
+                        .as_ref()
+                        .is_some_and(|e| e.semantic_closeness.is_some())
+                    && cfg.meaning_only_relevance.is_some_and(|minimum| {
+                        minimum > 0.0 && closeness.is_some_and(|s| s >= minimum)
+                    });
+                if described {
+                    continue;
+                }
                 // A purely semantic paraphrase can remain as a weak
                 // fallback with real similarity. Nearest-list membership
                 // itself never exempts a partial lexical/name match.
-                let semantic_fallback = !convincing_alternative
+                let semantic_fallback = cfg.whole_query_relevance
+                    && !convincing_alternative
                     && evidence[&r.addr].coverage <= 0.0
                     && closeness.is_some_and(|s| s >= floor * 0.5);
                 if !semantic_fallback && closeness.is_none_or(|closeness| closeness < floor) {
@@ -4317,7 +4337,7 @@ mod tests {
             ));
         }
         let (_dir, searcher) = build(&records);
-        let hits = searcher.search("awesome python", 10).unwrap();
+        let hits = experimental_search(&searcher, "awesome python", 10);
         let at = domains(&hits)
             .iter()
             .position(|d| *d == "awesome-python.com");
@@ -4325,7 +4345,7 @@ mod tests {
         let pool = searcher
             .candidate_pool(
                 "awesome python",
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 None,
             )
@@ -4343,7 +4363,7 @@ mod tests {
         // when the homepage itself could not be crawled.
         records[1].add_alias("Awesome Python");
         let (_dir, searcher) = build(&records);
-        let hits = searcher.search("awesome python", 10).unwrap();
+        let hits = experimental_search(&searcher, "awesome python", 10);
         let at = domains(&hits)
             .iter()
             .position(|d| *d == "awesome-python.com");
@@ -4487,6 +4507,19 @@ mod tests {
     /// A [`Meaning`] with fixed closeness per domain.
     struct FixedMeaning(Vec<(&'static str, f32)>);
 
+    fn experimental_rank_config() -> RankConfig {
+        RankConfig {
+            whole_query_relevance: true,
+            ..RankConfig::default()
+        }
+    }
+
+    fn experimental_search(searcher: &Searcher, query: &str, n: usize) -> Vec<Hit> {
+        searcher
+            .search_with(query, n, &experimental_rank_config())
+            .unwrap()
+    }
+
     impl Meaning for FixedMeaning {
         fn nearest(&self) -> Vec<String> {
             self.0
@@ -4500,6 +4533,145 @@ mod tests {
                 .iter()
                 .find(|(d, _)| *d == domain)
                 .map(|&(_, closeness)| closeness)
+        }
+    }
+
+    #[test]
+    fn release_defaults_keep_the_guard_opt_in() {
+        assert!(!RankConfig::default().whole_query_relevance);
+        assert!(
+            !serde_json::from_str::<RankConfig>("{}")
+                .unwrap()
+                .whole_query_relevance
+        );
+        assert!(
+            serde_json::from_str::<RankConfig>("{\"whole_query_relevance\":true}")
+                .unwrap()
+                .whole_query_relevance
+        );
+    }
+
+    #[test]
+    fn default_retention_keeps_sparse_authority_paraphrases() {
+        let records = [
+            site(
+                "w3.org",
+                Some("World Wide Web Consortium"),
+                None,
+                &["W3C"],
+                &[],
+                popular(100, 30_000),
+            ),
+            site(
+                "travel.state.gov",
+                Some("Bureau of Consular Affairs"),
+                Some("State Department passport services and application guidance"),
+                &[],
+                &[],
+                popular(1_000, 20_000),
+            ),
+            // Independent links to an unrelated name cannot impose an
+            // experimental subject scope in the conservative release mode.
+            site(
+                "american.example",
+                Some("American magazine"),
+                None,
+                &[],
+                &[("American", 100)],
+                popular(500, 20_000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        for (query, domain, similarity) in [
+            ("Where is W3C online", "w3.org", 0.45623),
+            ("US passport renewal guidance", "travel.state.gov", 0.4102),
+            (
+                "United States passport renew application",
+                "travel.state.gov",
+                0.3979,
+            ),
+            (
+                "American passport renewal government instructions",
+                "travel.state.gov",
+                0.4743,
+            ),
+        ] {
+            let meaning = FixedMeaning(vec![(domain, similarity), ("american.example", 0.0)]);
+            let hits = searcher
+                .search_meaning(
+                    query,
+                    10,
+                    &RankConfig::default(),
+                    &SearchOptions {
+                        exact: true,
+                        ..Default::default()
+                    },
+                    Some(&meaning),
+                )
+                .unwrap()
+                .hits;
+            let owner = hits
+                .iter()
+                .find(|hit| hit.domain == domain)
+                .unwrap_or_else(|| panic!("{query}: {hits:?}"));
+            let evidence = owner.query_evidence.as_ref().unwrap();
+            assert_eq!(evidence.semantic_closeness, Some(similarity));
+            assert_eq!(evidence.relevance_tier, 0);
+            assert_eq!(evidence.named_subject_words, 0);
+            assert_eq!(evidence.subject_coverage, None);
+        }
+    }
+
+    #[test]
+    fn descriptive_retention_requires_calibrated_vectors_and_keeps_collision_floor() {
+        for (domain, similarity, retained) in [
+            ("authority.example", Some(0.35), true),
+            ("authority.example", Some(0.34), false),
+            ("authority.example", None, false),
+            ("nebula.example", Some(0.4), false),
+        ] {
+            let records = [
+                site(
+                    domain,
+                    Some("Application office"),
+                    None,
+                    &[],
+                    &[],
+                    obscure(700_000, 5),
+                ),
+                site(
+                    "reference.example",
+                    Some("Nebula application guidance"),
+                    None,
+                    &[],
+                    &[],
+                    popular(500, 20_000),
+                ),
+            ];
+            let (_dir, searcher) = build(&records);
+            let mut scores = vec![("reference.example", 0.9)];
+            if let Some(similarity) = similarity {
+                scores.push((domain, similarity));
+            }
+            let meaning = FixedMeaning(scores);
+            let hits = searcher
+                .search_meaning(
+                    "nebula application guidance",
+                    10,
+                    &RankConfig::default(),
+                    &SearchOptions {
+                        exact: true,
+                        ..Default::default()
+                    },
+                    Some(&meaning),
+                )
+                .unwrap()
+                .hits;
+            assert_eq!(
+                hits.iter().any(|hit| hit.domain == domain),
+                retained,
+                "{domain} {similarity:?}: {hits:?}"
+            );
         }
     }
 
@@ -4545,7 +4717,7 @@ mod tests {
                 .iter()
                 .find(|hit| hit.domain == "travel.state.gov")
                 .unwrap_or_else(|| panic!("{query}: {hits:?}"));
-            assert_eq!(authority.query_evidence.as_ref().unwrap().relevance_tier, 1);
+            assert_eq!(authority.query_evidence.as_ref().unwrap().relevance_tier, 0);
             // The semantic score was already calibrated by meaning_weight;
             // whole-query coverage must not multiply it a second time.
             assert!(
@@ -4594,7 +4766,7 @@ mod tests {
                 let pool = searcher
                     .candidate_pool(
                         query,
-                        &RankConfig::default(),
+                        &experimental_rank_config(),
                         &SearchOptions::default(),
                         vector,
                     )
@@ -4609,7 +4781,7 @@ mod tests {
                     .search_meaning(
                         query,
                         10,
-                        &RankConfig::default(),
+                        &experimental_rank_config(),
                         &SearchOptions::default(),
                         vector,
                     )
@@ -4669,7 +4841,7 @@ mod tests {
                 10,
                 &RankConfig {
                     partial_closeness: None,
-                    ..Default::default()
+                    ..experimental_rank_config()
                 },
                 &SearchOptions::default(),
                 Some(&meaning),
@@ -4686,7 +4858,7 @@ mod tests {
             .search_meaning(
                 "refund guidance",
                 10,
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 Some(&meaning),
             )
@@ -4711,7 +4883,7 @@ mod tests {
             let pool = searcher
                 .candidate_pool(
                     query,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     Some(&meaning),
                 )
@@ -4763,7 +4935,7 @@ mod tests {
                     .search_meaning(
                         "nimbus research project guidance status",
                         10,
-                        &RankConfig::default(),
+                        &experimental_rank_config(),
                         &SearchOptions {
                             exact: true,
                             ..Default::default()
@@ -4806,7 +4978,7 @@ mod tests {
                 .search_meaning(
                     query,
                     10,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     Some(&meaning),
                 )
@@ -4835,7 +5007,7 @@ mod tests {
             let pool = searcher
                 .candidate_pool(
                     query,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     Some(&meaning),
                 )
@@ -4876,7 +5048,7 @@ mod tests {
                 .search_meaning(
                     "aster runtime api",
                     10,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     Some(&meaning),
                 )
@@ -4904,7 +5076,7 @@ mod tests {
             .search_meaning(
                 "nimbus renewal",
                 10,
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 Some(&meaning),
             )
@@ -4939,7 +5111,7 @@ mod tests {
             ),
         ];
         let (_dir, searcher) = build(&records);
-        let hits = searcher.search("nimbus research", 10).unwrap();
+        let hits = experimental_search(&searcher, "nimbus research", 10);
         assert_eq!(hits[0].domain, "aster.example", "{hits:?}");
         let evidence = hits[0].query_evidence.as_ref().unwrap();
         assert!(evidence.full_name);
@@ -4980,7 +5152,7 @@ mod tests {
             let pool = searcher
                 .candidate_pool(
                     query,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     Some(&meaning),
                 )
@@ -5009,7 +5181,7 @@ mod tests {
                     10,
                     &RankConfig {
                         partial_closeness: None,
-                        ..Default::default()
+                        ..experimental_rank_config()
                     },
                     &SearchOptions::default(),
                     Some(&meaning),
@@ -5053,7 +5225,7 @@ mod tests {
                 .search_meaning(
                     "aster refund",
                     10,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     vector,
                 )
@@ -5077,7 +5249,7 @@ mod tests {
         let pool = searcher
             .candidate_pool(
                 "aster refund",
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 None,
             )
@@ -5118,7 +5290,7 @@ mod tests {
         let pool = searcher
             .candidate_pool(
                 &format!("{subject} refund"),
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 Some(&meaning),
             )
@@ -5136,7 +5308,7 @@ mod tests {
         let pool = searcher
             .candidate_pool(
                 &format!("{subject} refund"),
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 None,
             )
@@ -5175,7 +5347,7 @@ mod tests {
         let pool = searcher
             .candidate_pool(
                 "aster refund claim status",
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 Some(&meaning),
             )
@@ -5216,7 +5388,7 @@ mod tests {
             .search_meaning(
                 "celestial observation instruments",
                 10,
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 Some(&meaning),
             )
@@ -5256,7 +5428,7 @@ mod tests {
             .search_meaning(
                 "the aster and the dwarf planet",
                 10,
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 Some(&meaning),
             )
@@ -5296,7 +5468,7 @@ mod tests {
             .search_meaning(
                 "aster refund",
                 10,
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 Some(&meaning),
             )
@@ -5339,7 +5511,7 @@ mod tests {
             let pool = searcher
                 .candidate_pool(
                     query,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     None,
                 )
@@ -5362,7 +5534,7 @@ mod tests {
             .search_meaning(
                 "nimbus q9 api",
                 10,
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 Some(&meaning),
             )
@@ -5396,7 +5568,7 @@ mod tests {
             .search_meaning(
                 "nimbus q9 api",
                 10,
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 Some(&meaning),
             )
@@ -5438,7 +5610,7 @@ mod tests {
         let pool = searcher
             .candidate_pool(
                 "aster lunar nebula",
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 None,
             )
@@ -5456,7 +5628,7 @@ mod tests {
             .search_meaning(
                 "aster lunar nebula",
                 10,
-                &RankConfig::default(),
+                &experimental_rank_config(),
                 &SearchOptions::default(),
                 Some(&meaning),
             )
@@ -5476,7 +5648,7 @@ mod tests {
                 10,
                 &RankConfig {
                     whole_query_relevance: false,
-                    ..Default::default()
+                    ..experimental_rank_config()
                 },
                 &SearchOptions::default(),
                 Some(&meaning),
@@ -5493,7 +5665,7 @@ mod tests {
                 10,
                 &RankConfig {
                     whole_query_relevance: false,
-                    ..Default::default()
+                    ..experimental_rank_config()
                 },
                 &SearchOptions::default(),
             )
@@ -5552,7 +5724,7 @@ mod tests {
                 .search_meaning(
                     query,
                     10,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     Some(&meaning),
                 )
@@ -5668,7 +5840,7 @@ mod tests {
             let pool = searcher
                 .candidate_pool(
                     query,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     Some(&meaning),
                 )
@@ -5679,7 +5851,7 @@ mod tests {
                 .search_meaning(
                     query,
                     10,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     Some(&meaning),
                 )
@@ -5709,7 +5881,7 @@ mod tests {
                 .search_meaning(
                     query,
                     10,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions {
                         exact: true,
                         ..Default::default()
@@ -5825,7 +5997,7 @@ mod tests {
             };
             for vector in [None, Some(&meaning as &dyn Meaning)] {
                 let hits = searcher
-                    .search_meaning(query, 10, &RankConfig::default(), &options, vector)
+                    .search_meaning(query, 10, &experimental_rank_config(), &options, vector)
                     .unwrap()
                     .hits;
                 assert_eq!(hits.len().min(3), 3, "{query}: {hits:?}");
@@ -5865,7 +6037,7 @@ mod tests {
                     assert!(legacy.query_evidence.is_none());
                 }
                 let pool = searcher
-                    .candidate_pool(query, &RankConfig::default(), &options, vector)
+                    .candidate_pool(query, &experimental_rank_config(), &options, vector)
                     .unwrap();
                 let correct = pool
                     .evidence
@@ -5949,7 +6121,7 @@ mod tests {
                     .search_meaning(
                         query,
                         10,
-                        &RankConfig::default(),
+                        &experimental_rank_config(),
                         &SearchOptions::default(),
                         vector,
                     )
@@ -6483,11 +6655,21 @@ mod tests {
             &search("electric car maker", Some(&unembedded))[..2],
             ["tesla.com", "rivian.com"]
         );
-        // ...nor, having one word of three and no embedding, is it listed
-        // when only meaning can speak for it: the nearest site is all
-        // that is left.
+        // A nearest result below the release descriptive floor is not
+        // enough, even when it shares no words. The weak pure-semantic
+        // fallback remains available only to the opt-in experiment.
         let partial = FixedMeaning(vec![("tesla.com", 0.3)]);
-        assert_eq!(search("electric car maker", Some(&partial)), ["tesla.com"]);
+        assert!(search("electric car maker", Some(&partial)).is_empty());
+        let experimental = searcher
+            .search_meaning(
+                "electric car maker",
+                10,
+                &experimental_rank_config(),
+                &options,
+                Some(&partial),
+            )
+            .unwrap();
+        assert_eq!(domains(&experimental.hits), ["tesla.com"]);
         // A query naming a site is ranked as before.
         let named = FixedMeaning(vec![("tesla.com", 1.0)]);
         assert_eq!(search("rivian", Some(&named))[0], "rivian.com");
@@ -8283,7 +8465,7 @@ mod tests {
             let pool = searcher
                 .candidate_pool(
                     query,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     None,
                 )
@@ -8298,7 +8480,7 @@ mod tests {
                 .search_meaning(
                     query,
                     10,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     Some(&meaning),
                 )
@@ -8327,7 +8509,7 @@ mod tests {
                 .search_meaning(
                     query,
                     10,
-                    &RankConfig::default(),
+                    &experimental_rank_config(),
                     &SearchOptions::default(),
                     Some(&meaning),
                 )

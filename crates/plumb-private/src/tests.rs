@@ -58,6 +58,31 @@ fn index_top(
     options: &SearchOptions,
     n: usize,
 ) -> Vec<String> {
+    index_top_with_relevance(
+        records,
+        query,
+        options,
+        n,
+        RankConfig::default().whole_query_relevance,
+    )
+}
+
+fn experimental_index_top(
+    records: &[SiteRecord],
+    query: &str,
+    options: &SearchOptions,
+    n: usize,
+) -> Vec<String> {
+    index_top_with_relevance(records, query, options, n, true)
+}
+
+fn index_top_with_relevance(
+    records: &[SiteRecord],
+    query: &str,
+    options: &SearchOptions,
+    n: usize,
+    whole_query_relevance: bool,
+) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("index");
     build_index(&path, records).unwrap();
@@ -68,7 +93,15 @@ fn index_top(
     };
     Searcher::open(&path)
         .unwrap()
-        .search_full(query, n, &RankConfig::default(), &options)
+        .search_full(
+            query,
+            n,
+            &RankConfig {
+                whole_query_relevance,
+                ..RankConfig::default()
+            },
+            &options,
+        )
         .unwrap()
         .hits
         .into_iter()
@@ -83,9 +116,35 @@ fn private_top(records: &[SiteRecord], query: &str, options: &Options, n: usize)
         .collect()
 }
 
+fn experimental_rank(
+    query: &str,
+    records: &[SiteRecord],
+    options: &Options,
+    n: usize,
+) -> Vec<Ranked> {
+    rank::rank_with_whole_query_relevance(query, records, options, n, true)
+}
+
+fn experimental_private_top(
+    records: &[SiteRecord],
+    query: &str,
+    options: &Options,
+    n: usize,
+) -> Vec<String> {
+    experimental_rank(query, records, options, n)
+        .into_iter()
+        .map(|hit| hit.domain)
+        .collect()
+}
+
 #[test]
 fn constants_match_the_index_defaults() {
     let cfg = RankConfig::default();
+    assert!(!cfg.whole_query_relevance);
+    assert_eq!(
+        rank::DEFAULT_WHOLE_QUERY_RELEVANCE,
+        cfg.whole_query_relevance
+    );
     assert_eq!(rank::ALPHA, cfg.alpha);
     assert_eq!(Some(rank::DESCRIBED_ALPHA), cfg.described_alpha);
     assert_eq!(Some(rank::DESCRIBED_RELEVANCE), cfg.described_relevance);
@@ -105,6 +164,36 @@ fn constants_match_the_index_defaults() {
         plumb_index::WELL_KNOWN_LINK_SCORE
     );
     assert_eq!(rank::COUNTRY_BOOST, cfg.country_boost);
+}
+
+#[test]
+fn default_off_keeps_native_partial_name_blend_and_explicit_opt_in() {
+    let records = [
+        site("aster.example", "Aster Observatory", Some(1), 90_000),
+        site("nimbus.example", "Aster refund information", None, 0),
+    ];
+    let options = Options::default();
+    let legacy = rank("aster refund", &records, &options, 2);
+    assert_eq!(
+        legacy,
+        rank::rank_with_whole_query_relevance("aster refund", &records, &options, 2, false)
+    );
+    assert_eq!(
+        private_top(&records, "aster refund", &options, 1),
+        index_top(&records, "aster refund", &SearchOptions::default(), 1)
+    );
+    let owner = legacy
+        .iter()
+        .find(|hit| hit.domain == "aster.example")
+        .unwrap();
+    let expected = rank::ALPHA * owner.link_score
+        + (1.0 - rank::ALPHA) * owner.text_score
+        + rank::EXACT_LABEL_BONUS / 2.0;
+    assert!((owner.score - expected).abs() < 1e-6, "{owner:?}");
+    assert_eq!(
+        experimental_private_top(&records, "aster refund", &options, 1),
+        ["nimbus.example"]
+    );
 }
 
 #[test]
@@ -149,16 +238,16 @@ fn unsupported_qualifiers_do_not_inherit_a_partial_names_popularity() {
         let records = [popular, relevant];
         let expected = ["nimbus.example"];
         assert_eq!(
-            index_top(&records, &query, &SearchOptions::default(), 1),
+            experimental_index_top(&records, &query, &SearchOptions::default(), 1),
             expected,
             "native {query}"
         );
         assert_eq!(
-            private_top(&records, &query, &Options::default(), 1),
+            experimental_private_top(&records, &query, &Options::default(), 1),
             expected,
             "private {query}"
         );
-        let ranked = rank(&query, &records, &Options::default(), 2);
+        let ranked = experimental_rank(&query, &records, &Options::default(), 2);
         assert!(ranked.windows(2).all(|pair| pair[0].score > pair[1].score));
     }
 }
@@ -194,12 +283,12 @@ fn every_substantive_field_can_support_a_partial_names_task() {
         ];
         let expected = ["aster.example"];
         assert_eq!(
-            index_top(&records, "aster refund", &SearchOptions::default(), 1),
+            experimental_index_top(&records, "aster refund", &SearchOptions::default(), 1),
             expected,
             "native {field}"
         );
         assert_eq!(
-            private_top(&records, "aster refund", &Options::default(), 1),
+            experimental_private_top(&records, "aster refund", &Options::default(), 1),
             expected,
             "private {field}"
         );
@@ -245,12 +334,12 @@ fn navigation_preserves_the_entire_subject() {
             site("nimbus.example", title, None, 0),
         ];
         assert_eq!(
-            index_top(&records, query, &SearchOptions::default(), 1),
+            experimental_index_top(&records, query, &SearchOptions::default(), 1),
             [expected],
             "native {query}"
         );
         assert_eq!(
-            private_top(&records, query, &Options::default(), 1),
+            experimental_private_top(&records, query, &Options::default(), 1),
             [expected],
             "private {query}"
         );
@@ -267,12 +356,12 @@ fn a_redirected_homepages_words_do_not_establish_the_original_sites_task() {
         site("nimbus.example", "Aster refund information", None, 0),
     ];
     assert_eq!(
-        private_top(&records, "aster refund", &Options::default(), 1),
+        experimental_private_top(&records, "aster refund", &Options::default(), 1),
         ["nimbus.example"]
     );
     assert_eq!(
-        private_top(&records, "aster refund", &Options::default(), 1),
-        index_top(&records, "aster refund", &SearchOptions::default(), 1)
+        experimental_private_top(&records, "aster refund", &Options::default(), 1),
+        experimental_index_top(&records, "aster refund", &SearchOptions::default(), 1)
     );
 }
 
@@ -321,13 +410,13 @@ fn a_shared_named_subject_is_required_even_when_task_words_dominate() {
         ),
     ];
     let query = "aster refund claim policy guidance status";
-    let ranked = rank(query, &records, &Options::default(), 2);
+    let ranked = experimental_rank(query, &records, &Options::default(), 2);
     assert_eq!(ranked[0].domain, "aster.example");
     assert_eq!(ranked[1].text_score, 0.0);
     assert_eq!(ranked[1].score, 0.0);
     assert_eq!(
-        private_top(&records, query, &Options::default(), 1),
-        index_top(&records, query, &SearchOptions::default(), 1)
+        experimental_private_top(&records, query, &Options::default(), 1),
+        experimental_index_top(&records, query, &SearchOptions::default(), 1)
     );
     let subject = "Aster Nimbus Zephyr Lunar Observatory Institute Lab";
     let mut owner = site("aster.example", subject, Some(1), 90_000);
@@ -338,12 +427,12 @@ fn a_shared_named_subject_is_required_even_when_task_words_dominate() {
     ];
     let query = format!("{subject} refund");
     assert_eq!(
-        private_top(&records, &query, &Options::default(), 1),
+        experimental_private_top(&records, &query, &Options::default(), 1),
         ["aster.example"]
     );
     assert_eq!(
-        private_top(&records, &query, &Options::default(), 1),
-        index_top(&records, &query, &SearchOptions::default(), 1)
+        experimental_private_top(&records, &query, &Options::default(), 1),
+        experimental_index_top(&records, &query, &SearchOptions::default(), 1)
     );
 }
 
@@ -362,12 +451,12 @@ fn alias_subjects_precede_longer_domains_and_preserve_supported_qualifiers() {
         "aster labs 7 api",
     ] {
         assert_eq!(
-            private_top(&records, query, &Options::default(), 1),
+            experimental_private_top(&records, query, &Options::default(), 1),
             ["aster.example"]
         );
         assert_eq!(
-            private_top(&records, query, &Options::default(), 1),
-            index_top(&records, query, &SearchOptions::default(), 1),
+            experimental_private_top(&records, query, &Options::default(), 1),
+            experimental_index_top(&records, query, &SearchOptions::default(), 1),
             "{query}"
         );
     }
@@ -392,11 +481,11 @@ fn descriptive_queries_survive_self_labels_and_competing_unsupported_aliases() {
             site("aster.example", "Research project guidance status", None, 0),
         ];
         let query = "nimbus research project guidance status";
-        let ranked = rank(query, &records, &Options::default(), 3);
+        let ranked = experimental_rank(query, &records, &Options::default(), 3);
         assert_eq!(ranked[0].domain, "aster.example");
         assert_eq!(
-            private_top(&records, query, &Options::default(), 1),
-            index_top(&records, query, &SearchOptions::default(), 1)
+            experimental_private_top(&records, query, &Options::default(), 1),
+            experimental_index_top(&records, query, &SearchOptions::default(), 1)
         );
     }
 }
@@ -413,12 +502,12 @@ fn complete_alias_identity_survives_borrowed_homepage_and_partial_rivals() {
     let records = [owner, rival];
     let query = "nimbus research";
     assert_eq!(
-        private_top(&records, query, &Options::default(), 1),
+        experimental_private_top(&records, query, &Options::default(), 1),
         ["aster.example"]
     );
     assert_eq!(
-        private_top(&records, query, &Options::default(), 1),
-        index_top(&records, query, &SearchOptions::default(), 1)
+        experimental_private_top(&records, query, &Options::default(), 1),
+        experimental_index_top(&records, query, &SearchOptions::default(), 1)
     );
 }
 
@@ -429,12 +518,12 @@ fn a_complete_hostname_written_as_words_keeps_address_lookup() {
     let records = [owner, SiteRecord::new("asterresearch.fr")];
     let query = "asterresearch fr";
     assert_eq!(
-        private_top(&records, query, &Options::default(), 1),
+        experimental_private_top(&records, query, &Options::default(), 1),
         ["asterresearch.fr"]
     );
     assert_eq!(
-        private_top(&records, query, &Options::default(), 1),
-        index_top(&records, query, &SearchOptions::default(), 1)
+        experimental_private_top(&records, query, &Options::default(), 1),
+        experimental_index_top(&records, query, &SearchOptions::default(), 1)
     );
 }
 
@@ -450,13 +539,13 @@ fn a_bare_query_domain_needs_corroboration_except_when_typed() {
     let mut copier = SiteRecord::new("asterrefund.test");
     copier.signals.tranco_rank = Some(500_000);
     let records = [owner, copier];
-    let ranked = rank("aster refund", &records, &Options::default(), 2);
+    let ranked = experimental_rank("aster refund", &records, &Options::default(), 2);
     assert_eq!(ranked[0].domain, "aster.example");
     assert_eq!(ranked[1].score, 0.0);
     for query in ["aster refund", "asterrefund.test"] {
         assert_eq!(
-            private_top(&records, query, &Options::default(), 1),
-            index_top(&records, query, &SearchOptions::default(), 1),
+            experimental_private_top(&records, query, &Options::default(), 1),
+            experimental_index_top(&records, query, &SearchOptions::default(), 1),
             "{query}"
         );
     }

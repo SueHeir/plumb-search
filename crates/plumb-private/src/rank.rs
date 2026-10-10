@@ -6,7 +6,7 @@
 //!
 //! `score = alpha * link_score + trust * ((1 - alpha) * text_score + name_bonus) + country_bonus`
 //!
-//! Whole-query evidence precedes popularity, as in the index: exact names,
+//! Whole-query evidence is an opt-in experiment, as in the index: exact names,
 //! typed domains, kinds and established navigation subjects are protected;
 //! other sites need substantive coverage before receiving their full prior.
 //! The text match is simpler: each query word scores the boost of every
@@ -131,6 +131,10 @@ pub struct Options {
     pub language: Option<String>,
 }
 
+/// Keep the experimental coverage and relevance-tier policy off for the
+/// release default, in step with native `RankConfig::default()`.
+pub const DEFAULT_WHOLE_QUERY_RELEVANCE: bool = false;
+
 /// One result.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Ranked {
@@ -147,23 +151,41 @@ pub struct Ranked {
 /// The best `limit` of `sites` for `query`, best first. Search operators
 /// in the query ([`Operators`]) narrow the sites as on a node.
 pub fn rank(query: &str, sites: &[SiteRecord], options: &Options, limit: usize) -> Vec<Ranked> {
+    rank_with_whole_query_relevance(query, sites, options, limit, DEFAULT_WHOLE_QUERY_RELEVANCE)
+}
+
+/// Controlled opt-in to the experimental coverage/tier policy. Browser
+/// searches use [`rank`] and retain the conservative default.
+pub fn rank_with_whole_query_relevance(
+    query: &str,
+    sites: &[SiteRecord],
+    options: &Options,
+    limit: usize,
+    whole_query_relevance: bool,
+) -> Vec<Ranked> {
     let ops = Operators::parse(query);
     if !ops.any() {
-        return rank_words(query, sites, options, limit);
+        return rank_words(query, sites, options, limit, whole_query_relevance);
     }
     let kept: Vec<SiteRecord> = sites
         .iter()
         .filter(|site| ops.allows_host(&site.domain))
         .cloned()
         .collect();
-    rank_words(&ops.lookup_text(), &kept, options, kept.len())
-        .into_iter()
-        .filter(|ranked| {
-            let texts = [ranked.title.as_deref(), ranked.description.as_deref()];
-            ops.allows(&ranked.domain, texts.into_iter().flatten())
-        })
-        .take(limit)
-        .collect()
+    rank_words(
+        &ops.lookup_text(),
+        &kept,
+        options,
+        kept.len(),
+        whole_query_relevance,
+    )
+    .into_iter()
+    .filter(|ranked| {
+        let texts = [ranked.title.as_deref(), ranked.description.as_deref()];
+        ops.allows(&ranked.domain, texts.into_iter().flatten())
+    })
+    .take(limit)
+    .collect()
 }
 
 /// [`rank`] for a query without operators.
@@ -172,6 +194,7 @@ fn rank_words(
     sites: &[SiteRecord],
     options: &Options,
     limit: usize,
+    whole_query_relevance: bool,
 ) -> Vec<Ranked> {
     let Some(query) = Query::new(query_text) else {
         return Vec::new();
@@ -194,7 +217,14 @@ fn rank_words(
         })
         .collect();
     let named_in_full = names.iter().any(|name| name.words() >= query.len);
-    let navigational = named_in_full || query.domain.is_some() || navigation_names.contains(&true);
+    let navigational = named_in_full
+        || query.domain.is_some()
+        || navigation_names.contains(&true)
+        || !whole_query_relevance
+            && names
+                .iter()
+                .zip(&link_scores)
+                .any(|(name, &score)| name.words() > 0 && score >= WELL_KNOWN_LINK_SCORE);
     let alpha = if navigational { ALPHA } else { DESCRIBED_ALPHA };
     let mut relevance_floor = if navigational {
         NAVIGATIONAL_RELEVANCE
@@ -223,7 +253,7 @@ fn rank_words(
     let subject_names: Vec<_> = names
         .iter()
         .zip(&docs)
-        .filter(|_| !full_identity)
+        .filter(|_| whole_query_relevance && !full_identity)
         .map(|(name, doc)| (doc, name.alias))
         .filter(|(_, words)| {
             *words > 0
@@ -307,16 +337,17 @@ fn rank_words(
         };
         // There are no query vectors in private buckets. Missing semantic
         // evidence cannot promote a domain collision to a substantive match.
-        let convincing = protected
-            || subject_share >= 1.0 - f32::EPSILON
-                && (subject.is_none() || subject_evidence.task_supported)
-                && evidence.substantive >= 0.75;
-        let whole_share = if convincing {
+        let convincing = whole_query_relevance
+            && (protected
+                || subject_share >= 1.0 - f32::EPSILON
+                    && (subject.is_none() || subject_evidence.task_supported)
+                    && evidence.substantive >= 0.75);
+        let whole_share = if !whole_query_relevance || convincing {
             1.0
         } else {
             evidence.coverage * subject_share
         };
-        let name_share = if convincing {
+        let name_share = if !whole_query_relevance || convincing {
             1.0
         } else {
             evidence.remaining * subject_share
@@ -340,7 +371,12 @@ fn rank_words(
             let evidence = (link_score / trusted).min(1.0);
             UNTRUSTED_SHARE + (1.0 - UNTRUSTED_SHARE) * evidence
         };
-        let prior = if protected {
+        let prior_protected = if whole_query_relevance {
+            protected
+        } else {
+            name.words() > 0 || is_kind
+        };
+        let prior = if prior_protected {
             link_score
         } else {
             link_score * (text_score / relevance_floor).min(1.0)
@@ -985,6 +1021,22 @@ mod evidence_tests {
         assert_eq!(evidence.coverage, 1.0);
         assert!(evidence.substantive < 0.75);
         assert_eq!(evidence.remaining, 0.0);
+    }
+
+    #[test]
+    fn borrowed_words_remain_excluded_from_release_text_evidence() {
+        let mut record = SiteRecord::new("aster.example");
+        record.title = Some("Aster refund information".into());
+        record.description = Some("Aster refunds".into());
+        record.url = Some("https://nimbus.example/".into());
+        let docs = [Doc::new(&record)];
+        let query = Query::new("aster refund").unwrap();
+        let weights = query.evidence_weights(&docs);
+        let evidence = query.evidence(&docs[0], &weights, 1);
+        assert_eq!(evidence.substantive, 0.0);
+        assert_eq!(evidence.remaining, 0.0);
+        assert!(docs[0].title.is_empty());
+        assert!(docs[0].description.is_empty());
     }
 
     #[test]
