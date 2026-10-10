@@ -1149,6 +1149,12 @@ fn schema() -> (Schema, Fields) {
     )
 }
 
+/// Expected schema for the default-off local title probe.
+#[cfg(feature = "local-page-probe")]
+pub(crate) fn diagnostic_schema() -> Schema {
+    schema().0
+}
+
 /// Whether `id` is a Wikidata item's: `Q25188`.
 fn is_item_id(id: &str) -> bool {
     id.len() > 1 && id.starts_with('Q') && id[1..].bytes().all(|b| b.is_ascii_digit())

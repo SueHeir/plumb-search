@@ -73,6 +73,8 @@ use tantivy::directory::Directory;
 mod analysis;
 pub mod health;
 pub mod learned;
+#[cfg(feature = "local-page-probe")]
+pub mod page_probe;
 pub mod pages;
 pub mod places;
 mod query_evidence;
