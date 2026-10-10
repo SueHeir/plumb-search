@@ -12,16 +12,16 @@ Each implementation chat has its own managed worktree and topic branch. The pare
 
 | Chat | Task ID | Dispatch status |
 | --- | --- | --- |
-| Fix Plumb short docs retrieval | `01a12460-1900-7701-859f-58fcc89cdf8b` | Integrated; combined checks underway |
-| Improve Plumb docs symbols and passages | `01a12460-1bf9-7521-8e88-07e4d29f0e65` | Integrated; combined checks underway |
-| Fix Plumb domain collisions and spam ranking | `01a12460-1e06-7311-b86e-6fb416da8760` | Integrated; combined checks underway |
-| Fix Plumb official site and lookalike tools | `01a12460-2013-7e00-8e24-bd1a78b97182` | Integrated; combined checks underway |
-| Expose Plumb places and improve news results | `01a12460-21b3-7b93-b90e-fc5d7670eba0` | Integrated; combined checks underway |
-| Fix Plumb entity facts lookup and provenance | `01a12460-2330-7e73-90ba-b46ead007f90` | Integrated; combined checks underway |
-| Repair Plumb paper identity and recent research | `01a12460-25d4-7552-a7b0-f6e7deef8bc4` | Integrated; combined checks underway |
-| Fix Plumb refreshes and useful page coverage | `01a12460-277d-7d80-b355-18c1f0bf65c5` | Integrated; combined checks underway |
-| Improve Plumb language and location matching | `01a12460-2989-7033-9a3f-25d957274ec8` | Integrated; combined checks underway |
-| Prepare Plumb combined batch evaluation | `01a12460-2b54-7011-8183-586fcab4d92a` | Integrated; combined checks underway |
+| Fix Plumb short docs retrieval | `01a12460-1900-7701-859f-58fcc89cdf8b` | Integrated; core and software checks passed |
+| Improve Plumb docs symbols and passages | `01a12460-1bf9-7521-8e88-07e4d29f0e65` | Integrated; core and software checks passed |
+| Fix Plumb domain collisions and spam ranking | `01a12460-1e06-7311-b86e-6fb416da8760` | Integrated; core and software checks passed |
+| Fix Plumb official site and lookalike tools | `01a12460-2013-7e00-8e24-bd1a78b97182` | Integrated; core and software checks passed |
+| Expose Plumb places and improve news results | `01a12460-21b3-7b93-b90e-fc5d7670eba0` | Integrated; core and software checks passed |
+| Fix Plumb entity facts lookup and provenance | `01a12460-2330-7e73-90ba-b46ead007f90` | Integrated; core and software checks passed |
+| Repair Plumb paper identity and recent research | `01a12460-25d4-7552-a7b0-f6e7deef8bc4` | Integrated; core and software checks passed |
+| Fix Plumb refreshes and useful page coverage | `01a12460-277d-7d80-b355-18c1f0bf65c5` | Integrated; core and software checks passed |
+| Improve Plumb language and location matching | `01a12460-2989-7033-9a3f-25d957274ec8` | Integrated; core and software checks passed |
+| Prepare Plumb combined batch evaluation | `01a12460-2b54-7011-8183-586fcab4d92a` | Integrated; core and software checks passed |
 | Reclaim old DIRT SOIL GRASS storage on HPC | `01a12461-cfa1-7dc2-b308-f6f23b9dbf7f` | Complete: 111.4 GiB net reclaimed |
 
 All eleven chats use `gpt-6.1-sol` and `xhigh`. Storage cleanup is projectless and operates through SSH. Validation moved to separate Cargo target directories after a worker observed a foreign schema artifact in the initially shared directory. Worker builds use one job, no incremental compilation, and no development/test debug symbols to fit the Mac's 24 GiB RAM.
@@ -59,6 +59,14 @@ Baseline and candidate use identical ordered source inputs, embedding model, vec
 
 ## Integrated behavior
 
-The code batch includes whole-query site evidence and page-backed official identity; typed short docs, exact API identifiers, bounded anchored source excerpts; direct entity facts/profile lookup and targeted population refresh; publication dates, paper count provenance, canonical repair and bounded recent ingestion; shared places/news assembly; pre-cap language filtering and explicit location ambiguity; and versioned refresh caches with staged publication gates. Three optional article extensions (search, language, paper) coexist with legacy compact records.
+The code batch includes site evidence diagnostics and page-backed official identity; typed short docs, exact API identifiers, bounded anchored source excerpts; direct entity facts/profile lookup and targeted population refresh; publication dates, paper count provenance, canonical repair and bounded recent ingestion; shared places/news assembly; pre-cap language filtering and explicit location ambiguity; and versioned refresh caches with staged publication gates. Three optional article extensions (search, language, paper) coexist with legacy compact records.
 
 Code changes do not enrich the frozen corpus. Fresh docs/reference/language/paper generations must be staged, measured, and promoted separately. Large API pages still have partial coverage under the retained symbol/passage budgets. Live provider quotas can block recent-paper backfill. Production connector registration and deployed surface behavior require verification after activation.
+
+## Bounded release decision
+
+The experimental whole-query promotion is disabled by default in native and private search for this release. The final subject-guard candidate gained 22 acceptance cases but lost one present passport result and substantially demoted several correct owners. The conservative subset keeps the other batch improvements and fixes generic descriptive retention without restoring example-specific exceptions. Whole-query diagnostics and opt-in controls remain available for the next ranking iteration.
+
+The integrated `b5258b4` software checks passed: 1,691 workspace tests, five ignored tests, strict workspace Clippy, formatting, three MCP example tests, one paper helper test, and ten Python contract/provider-identity tests. These results apply to that revision; the final subset requires its own focused tests, CI and frozen parity readout. Production paper sources remain unchanged, and no partial canary corpus is promoted by this code release.
+
+Final conservative code `96198f5` passed all 959 frozen observations with 14 acceptance gains, zero pass-to-fail losses and no manual-regression flags. Legacy AI MRR is at parity; brand top-three/acceptance rates are unchanged with a small reported ordering tradeoff. All 1,696 workspace tests passed (five ignored), strict lint/format checks passed, and private WASM plus focused native/private checks passed. See [results and remaining priorities](search-quality-results.md) and the [generality audit](search-generality-audit.md). Final MCP parity passed with the same conservative identity/lookalike coverage and no new demonstrated confident wrong-owner claim. Exact-head CI and activation are separate milestones.

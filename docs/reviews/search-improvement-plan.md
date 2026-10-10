@@ -2,6 +2,8 @@
 
 Improve relevance and page retrieval first, repair the production data pipeline next, then expand coverage. Ship each change against a fixed corpus and a separate acceptance suite so data refreshes cannot be mistaken for ranking improvements.
 
+The [generality audit](search-generality-audit.md) records the final evidence rules and supersedes example-shaped proposals below. In particular, mandatory named-paper anchors and literal host, DOI, category or task exceptions were removed from the implementation. Named examples remain regression diagnostics; serving and publication gates require their own indexed or source evidence.
+
 This plan covers the October 9, 2026 search audit and the user's DeepSeek HPC evaluation report from October 10 UTC. The report strengthens the priority of short docs retrieval, whole-query relevance, and reliable identity tools; two additional changes below cover official-site/lookalike behavior and source quality. The local source baseline is `origin/main` at `786eb55a736a91f8dd36fa42ca0be19680dd15f5`. Deployment inspection confirms that **the HPC node runs 0.2.1**. The public website runs a separate 0.2.0 node. The earlier public status snapshot cannot identify the connector's deployment or corpus.
 
 ## Verified deployments, branches, and data
