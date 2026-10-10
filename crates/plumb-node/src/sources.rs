@@ -611,6 +611,7 @@ mod tests {
         PlacedPage {
             hit: plumb_index::pages::PageHit {
                 page: plumb_index::pages::Page {
+                    paper: None,
                     set: "wikipedia-en".to_string(),
                     url: "https://en.wikipedia.org/wiki/Weather".to_string(),
                     title: "Weather".to_string(),

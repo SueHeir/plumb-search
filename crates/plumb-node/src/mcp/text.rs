@@ -135,6 +135,18 @@ fn page_line(out: &mut String, page: &Value) {
     if let Some(url) = text(page, "url") {
         let _ = write!(out, " {url}");
     }
+    if text(page, "set") == Some("papers") {
+        if let Some(paper) = page.get("paper").and_then(|value| {
+            serde_json::from_value::<plumb_core::papers::PaperMetadata>(value.clone()).ok()
+        }) {
+            for (label, date) in paper.date_labels() {
+                let _ = write!(out, "; {label} {date}");
+            }
+            let _ = write!(out, "; {} {}", paper.count, paper.count_label());
+        } else {
+            out.push_str("; Published unknown; count type unknown");
+        }
+    }
     out.push('\n');
     if let Some(excerpt) = page.get("source_excerpt") {
         if let Some(source) = text(excerpt, "text") {
@@ -347,6 +359,16 @@ fn search(out: &mut String, answer: &Value) {
         for card in related {
             package_line(out, card);
         }
+    }
+    if let Some(message) = text(answer, "coverage_message") {
+        let _ = writeln!(out, "{message}");
+    }
+    if let Some(coverage) = answer.get("paper_coverage").filter(|p| p.is_object()) {
+        let _ = writeln!(
+            out,
+            "Indexed papers: {}; known publication year: {}; known publication day: {}.",
+            coverage["total"], coverage["publication_year"], coverage["publication_day"]
+        );
     }
     if let Some(site_search) = answer.get("site_search").filter(|s| s.is_object()) {
         let _ = writeln!(

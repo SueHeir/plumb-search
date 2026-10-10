@@ -26,6 +26,7 @@ pub mod news;
 pub mod oblivious;
 mod operators;
 pub mod packages;
+pub mod paper_query;
 pub mod papers;
 pub mod place;
 pub mod profiles;

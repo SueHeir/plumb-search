@@ -1509,6 +1509,49 @@ fn search_lists_one_kind_of_result_alone() {
 }
 
 #[test]
+fn paper_mcp_dates_are_validated_and_count_types_remain_explicit() {
+    let mcp = Mcp::new(Arc::new(Shelves::default()) as Arc<dyn SearchBackend>, None);
+    for args in [
+        json!({ "query": "transformer", "kind": "paper", "after": "2026-02-29" }),
+        json!({ "query": "transformer", "kind": "docs", "after": "2026" }),
+        json!({ "query": "transformer", "after": 2026 }),
+    ] {
+        let result = call(&mcp, "search", args);
+        assert_eq!(result["error"]["code"], INVALID_PARAMS);
+    }
+    let result = call(
+        &mcp,
+        "search",
+        json!({ "query": "transformer", "kind": "paper", "after": "2026", "order": "newest" }),
+    );
+    assert_eq!(result["result"]["structuredContent"]["kind"], "paper");
+    assert!(result["result"]["structuredContent"]["coverage_message"]
+        .as_str()
+        .unwrap()
+        .contains("indexed corpus"));
+    let page = Page::from_paper(plumb_core::article::Article {
+        title: "Example".into(),
+        item: Some("10.1234/a".into()),
+        paper: Some(plumb_core::papers::PaperMetadata {
+            count: 4,
+            count_kind: plumb_core::papers::PaperCountKind::MethodUses,
+            publication_date: Some("2026-01-02".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let entry = page_entry(&page, None, 1);
+    assert_eq!(entry["count"], json!({ "value": 4, "kind": "method_uses" }));
+    assert_eq!(entry["paper"]["publication_date"], "2026-01-02");
+    let rendered = super::text::render(
+        "search",
+        &json!({ "query": "Example", "pages": [entry], "results": [] }),
+    );
+    assert!(rendered.contains("4 method uses"), "{rendered}");
+    assert!(rendered.contains("Published 2026-01-02"), "{rendered}");
+}
+
+#[test]
 fn search_keeps_to_the_site_asked_for() {
     let shelves = Arc::new(Shelves::default());
     let mcp = Mcp::new(Arc::clone(&shelves) as Arc<dyn SearchBackend>, None);

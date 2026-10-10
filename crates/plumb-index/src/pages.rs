@@ -27,14 +27,18 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{article_url, Article, SearchContent};
 use plumb_core::packages::PackageInfo;
+use plumb_core::paper_query::{day_number, publication_year, PaperQuery};
+use plumb_core::papers::PaperMetadata;
 use plumb_core::{
     adult_level, host_of, normalize_text, registrable_domain, AdultLevel, Operators, SafeSearch,
 };
 use serde::{Deserialize, Serialize};
+use std::ops::Bound;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, Query, TermQuery};
+use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, Query, RangeQuery, TermQuery};
 use tantivy::schema::{
-    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED, STRING,
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, INDEXED, STORED,
+    STRING,
 };
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term};
@@ -95,7 +99,7 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 /// Most articles found by their leads looked at for one query.
 const LEAD_CANDIDATES: usize = 20;
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v5-rich-symbol-docs-scope";
+pub const PAGE_INDEX_VERSION: &str = "v6-paper-dates-rich-symbol-docs-scope";
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
 const ASKING_WORDS: &[&str] = &[
@@ -130,6 +134,9 @@ pub const QUESTION_TITLE_SHARE: f32 = 0.5;
 /// A single page that can be a result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page {
+    /// Structured scholarly identity, dates and provider count meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<PaperMetadata>,
     /// The page set it belongs to, e.g. `wikipedia-en`.
     pub set: String,
     pub url: String,
@@ -186,6 +193,7 @@ impl Page {
     /// The Wikipedia article `article` of Wikipedia in `lang`.
     pub fn from_article(lang: &str, article: Article) -> Self {
         Page {
+            paper: None,
             set: format!("wikipedia-{lang}"),
             url: article_url(lang, &article.title),
             title: article.title,
@@ -213,6 +221,7 @@ impl Page {
     /// `owner/name`, its views its stars, its site its homepage's domain.
     pub fn from_repo(repo: Article) -> Self {
         Page {
+            paper: None,
             set: GITHUB_SET.to_string(),
             url: format!("https://github.com/{}", repo.title),
             title: repo.title,
@@ -237,6 +246,7 @@ impl Page {
     /// item is the question's id and whose description is its tags.
     pub fn from_question(question: Article) -> Self {
         Page {
+            paper: None,
             set: STACKOVERFLOW_SET.to_string(),
             url: format!(
                 "https://stackoverflow.com/questions/{}",
@@ -271,6 +281,7 @@ impl Page {
         let (site, id) =
             plumb_core::stack_exchange::parse_question_item(question.item.as_deref()?)?;
         Some(Page {
+            paper: None,
             set: STACKEXCHANGE_SET.to_string(),
             url: site.question_url(id),
             title: question.title,
@@ -318,6 +329,7 @@ impl Page {
     /// the work id (`OL45804W`).
     pub fn from_book(book: Article) -> Self {
         Page {
+            paper: None,
             set: BOOKS_SET.to_string(),
             url: format!(
                 "https://openlibrary.org/works/{}",
@@ -346,6 +358,7 @@ impl Page {
     /// of its own.
     pub fn from_podcast(podcast: Article) -> Self {
         Page {
+            paper: None,
             set: PODCASTS_SET.to_string(),
             url: format!(
                 "https://podcastindex.org/podcast/{}",
@@ -383,6 +396,7 @@ impl Page {
             return None;
         }
         Some(Page {
+            paper: None,
             set: MUSIC_SET.to_string(),
             url: format!("https://musicbrainz.org/{item}"),
             title: music.title,
@@ -433,6 +447,7 @@ impl Page {
             Some(_) => return None,
         };
         Some(Page {
+            paper: None,
             set: FILMS_SET.to_string(),
             url,
             title: film.title,
@@ -463,6 +478,7 @@ impl Page {
                 && !item.contains(char::is_whitespace)
         })?;
         Some(Page {
+            paper: None,
             set: DOCS_SET.to_string(),
             url,
             title: doc.title,
@@ -498,6 +514,7 @@ impl Page {
                 && !item.contains(char::is_whitespace)
         })?;
         Some(Page {
+            paper: None,
             set: set.to_string(),
             url,
             title: page.title,
@@ -580,6 +597,7 @@ impl Page {
             format!("https://openalex.org/{item}")
         };
         Page {
+            paper: paper.paper,
             set: PAPERS_SET.to_string(),
             url,
             title: paper.title,
@@ -595,7 +613,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
-            search: None,
+            search: paper.search,
             content_language: paper
                 .language
                 .as_deref()
@@ -607,6 +625,7 @@ impl Page {
     /// English name and whose views are its sitelinks.
     pub fn from_item(item: Article) -> Self {
         Page {
+            paper: None,
             set: WIKIDATA_SET.to_string(),
             url: format!(
                 "https://www.wikidata.org/wiki/{}",
@@ -639,6 +658,7 @@ impl Page {
             1,
         );
         Page {
+            paper: None,
             set: WIKTIONARY_SET.to_string(),
             url,
             title: word.title,
@@ -668,6 +688,7 @@ impl Page {
         let info = package.package?;
         let url = info.page_url()?;
         Some(Page {
+            paper: None,
             set: PACKAGES_SET.to_string(),
             url,
             title: package.title,
@@ -736,7 +757,17 @@ impl Page {
     /// only.
     pub fn topic(&self) -> Option<String> {
         if self.set == PAPERS_SET {
-            return Some(self.title.clone());
+            let mut topic = self.title.clone();
+            for text in self
+                .aliases
+                .iter()
+                .chain(&self.description)
+                .chain(self.paper.iter().flat_map(|p| p.authors.iter()))
+            {
+                topic.push(' ');
+                topic.push_str(text);
+            }
+            return Some(topic);
         }
         if self.set == DOCS_SET || self.is_site_page() {
             let mut topic = self.title.clone();
@@ -1034,6 +1065,8 @@ struct Fields {
     /// article is about ([`Page::site`]), for [`PageSearcher::site_popularity`].
     site: Field,
     language: Field,
+    paper_year: Field,
+    paper_day: Field,
     page: Field,
 }
 
@@ -1091,6 +1124,8 @@ fn schema() -> (Schema, Fields) {
     let popularity = builder.add_u64_field("popularity", FAST | STORED);
     let site = builder.add_text_field("site", STRING);
     let language = builder.add_text_field("language", STRING);
+    let paper_year = builder.add_u64_field("paper_year", INDEXED | FAST);
+    let paper_day = builder.add_u64_field("paper_day", INDEXED | FAST);
     let page = builder.add_text_field("page", STORED);
     (
         builder.build(),
@@ -1105,6 +1140,8 @@ fn schema() -> (Schema, Fields) {
             popularity,
             site,
             language,
+            paper_year,
+            paper_day,
             page,
         },
     )
@@ -1341,9 +1378,21 @@ fn may_be_borrowed(site: &crate::Hit) -> bool {
             .is_some_and(|title| !squash(title).contains(&label))
 }
 
+/// Actual indexed paper coverage, not provider-wide coverage.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaperCoverage {
+    pub total: u64,
+    pub publication_year: u64,
+    pub publication_day: u64,
+    pub earliest_day: Option<String>,
+    pub latest_day: Option<String>,
+}
+
 /// What [`build_page_index`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageIndexStats {
+    #[serde(default)]
+    pub papers: PaperCoverage,
     pub pages: u64,
     pub most_views: u64,
     /// Counts of declared/set-supported content languages. Missing in
@@ -1387,6 +1436,39 @@ pub fn build_page_index(
             document.add_text(fields.language, "unknown");
         }
         document.add_text(fields.scope, format!("set:{}", page.set));
+        if page.set == PAPERS_SET {
+            stats.papers.total += 1;
+            if let Some(paper) = &page.paper {
+                if let Some(year) = publication_year(paper) {
+                    document.add_u64(fields.paper_year, year);
+                    stats.papers.publication_year += 1;
+                }
+                if let Some(date) = paper
+                    .publication_date
+                    .as_deref()
+                    .filter(|d| day_number(d).is_some())
+                {
+                    document.add_u64(fields.paper_day, day_number(date).unwrap());
+                    stats.papers.publication_day += 1;
+                    if stats
+                        .papers
+                        .earliest_day
+                        .as_deref()
+                        .is_none_or(|old| date < old)
+                    {
+                        stats.papers.earliest_day = Some(date.to_string());
+                    }
+                    if stats
+                        .papers
+                        .latest_day
+                        .as_deref()
+                        .is_none_or(|old| date > old)
+                    {
+                        stats.papers.latest_day = Some(date.to_string());
+                    }
+                }
+            }
+        }
         if let Some(host) = host_of(&page.url) {
             document.add_text(fields.scope, format!("host:{host}"));
             let mut suffix = host.as_str();
@@ -1528,6 +1610,195 @@ impl PageSearcher {
 
     pub fn num_pages(&self) -> u64 {
         self.stats.pages
+    }
+
+    pub fn paper_coverage(&self) -> &PaperCoverage {
+        &self.stats.papers
+    }
+
+    /// Paper eligibility, language and publication bounds apply before
+    /// both popularity and date candidate limits. Newest ordering stays
+    /// within relevance tiers: exact names, title matches, then bylines.
+    /// The extra date collector prevents older popular papers from
+    /// exhausting a newest request's candidate budget.
+    pub fn search_papers(&self, query: &PaperQuery, limit: usize) -> Result<Vec<PageHit>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let ops = Operators::parse(&query.query);
+        let words = hinted_name(&ops.words).map_or_else(|| ops.words.clone(), |(name, _)| name);
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> =
+            vec![(Occur::Must, self.scope_term("set:papers"))];
+        if let Some(scope) = self.page_scope(&ops, false) {
+            clauses.push((Occur::Must, scope));
+        }
+        for (bound, after) in [(query.after, true), (query.before, false)] {
+            if let Some(bound) = bound {
+                let (field, value) = bound
+                    .day
+                    .map_or((self.fields.paper_year, bound.year), |day| {
+                        (self.fields.paper_day, day)
+                    });
+                let low = if after { value } else { 1 };
+                let high = if after { u64::MAX } else { value };
+                clauses.push((
+                    Occur::Must,
+                    Box::new(RangeQuery::new(
+                        Bound::Included(Term::from_field_u64(field, low)),
+                        Bound::Included(Term::from_field_u64(field, high)),
+                    )),
+                ));
+            }
+        }
+        let stems = analysis::tokens(&self.stemmed, &words);
+        for stem in &stems {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.fields.topic, stem),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+        // A stop-word-only title remains an exact name query, while a
+        // date-only request intentionally lists the constrained corpus.
+        if stems.is_empty() && !words.trim().is_empty() {
+            if let Some(key) = analysis::tokens(&self.joined, &words).pop() {
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.fields.keys, &key),
+                        IndexRecordOption::Basic,
+                    )),
+                ));
+            }
+        }
+        let eligible = self.language_query(&BooleanQuery::new(clauses));
+        let searcher = self.reader.searcher();
+        let mut addresses: Vec<_> = searcher
+            .search(
+                eligible.as_ref(),
+                &TopDocs::with_limit(CANDIDATES)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+            )?
+            .into_iter()
+            .map(|(_, addr)| addr)
+            .collect();
+        if query.newest {
+            for field in ["paper_day", "paper_year"] {
+                for (_, addr) in searcher.search(
+                    eligible.as_ref(),
+                    &TopDocs::with_limit(CANDIDATES)
+                        .order_by_fast_field::<u64>(field, tantivy::Order::Desc),
+                )? {
+                    if !addresses.contains(&addr) {
+                        addresses.push(addr);
+                    }
+                }
+            }
+        }
+        let joined = analysis::tokens(&self.joined, &words)
+            .pop()
+            .unwrap_or_default();
+        // Exact identity/title candidates get a reserved collector, so
+        // popularity and recent topical matches cannot hide a named paper.
+        if !joined.is_empty() {
+            let named = BooleanQuery::new(vec![
+                (Occur::Must, eligible.box_clone()),
+                (
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.fields.keys, &joined),
+                        IndexRecordOption::Basic,
+                    )),
+                ),
+            ]);
+            for (_, address) in searcher.search(
+                &named,
+                &TopDocs::with_limit(CANDIDATES)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+            )? {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
+        let raw_words = analysis::tokens(&self.words, &words);
+        let word_set: HashSet<_> = raw_words.iter().map(String::as_str).collect();
+        let mut ranked = Vec::new();
+        for address in addresses {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if !query.allows(page.paper.as_ref()) || !operators_allow(&ops, &page) {
+                continue;
+            }
+            let popularity = document
+                .get_first(self.fields.popularity)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as f32
+                / POPULARITY_SCALE;
+            let (name, named) = self.name_match(&page, &words, &joined, &word_set);
+            let whole = named || self.book_match(&page, &raw_words);
+            let title_stems = analysis::tokens(&self.stemmed, &page.title);
+            let title_match = stems.iter().all(|s| title_stems.contains(s));
+            let tier = if whole {
+                2
+            } else if title_match {
+                1
+            } else {
+                0
+            };
+            let relevance = if named {
+                name
+            } else if title_match {
+                PARTIAL_MATCH
+            } else {
+                PARTIAL_MATCH * 0.8
+            };
+            ranked.push((
+                tier,
+                PageHit {
+                    page,
+                    score: relevance * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
+                    named,
+                    whole,
+                    popularity,
+                    learned: None,
+                },
+            ));
+        }
+        ranked.sort_by(|(ta, a), (tb, b)| {
+            tb.cmp(ta)
+                .then_with(|| {
+                    if query.newest {
+                        let date = |p: &Page| {
+                            p.paper.as_ref().and_then(|p| {
+                                publication_year(p).map(|y| {
+                                    (
+                                        y,
+                                        p.publication_date
+                                            .as_deref()
+                                            .and_then(day_number)
+                                            .unwrap_or(0),
+                                    )
+                                })
+                            })
+                        };
+                        date(&b.page).cmp(&date(&a.page))
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .then_with(|| b.score.total_cmp(&a.score))
+                .then_with(|| a.page.url.cmp(&b.page.url))
+        });
+        Ok(ranked.into_iter().take(limit).map(|(_, hit)| hit).collect())
     }
 
     /// A lightweight view restricted to declared/set-supported language
@@ -1913,6 +2184,10 @@ impl PageSearcher {
 
     /// The best `limit` pages for `query`, best first.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
+        let paper = PaperQuery::parse(query)?;
+        if paper.constrained {
+            return self.search_papers(&paper, limit);
+        }
         self.search_naming_docs(query, &Operators::default(), false, limit)
     }
 
@@ -3970,7 +4245,12 @@ pub fn operators_allow(ops: &Operators, page: &Page) -> bool {
     let texts = [page.title.as_str()]
         .into_iter()
         .chain(page.description.as_deref())
-        .chain(page.aliases.iter().map(String::as_str));
+        .chain(page.aliases.iter().map(String::as_str))
+        .chain(
+            page.paper
+                .iter()
+                .flat_map(|p| p.authors.iter().map(String::as_str)),
+        );
     ops.allows(&host, texts)
 }
 
@@ -4258,6 +4538,128 @@ mod tests {
         build_page_index(&path, pages.to_vec()).unwrap();
         let searcher = PageSearcher::open(&path).unwrap();
         (dir, searcher)
+    }
+
+    fn dated_paper(title: &str, date: Option<&str>, year: Option<i32>, count: u64) -> Page {
+        Page::from_paper(Article {
+            title: title.into(),
+            item: Some(format!("10.1234/{}", title.replace(' ', "-"))),
+            views: count,
+            paper: Some(PaperMetadata {
+                publication_date: date.map(str::to_string),
+                publication_year: year,
+                authors: vec!["Example Author".to_string()],
+                count_kind: plumb_core::papers::PaperCountKind::Citations,
+                count,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn paper_date_filter_precedes_candidate_limits_and_excludes_unknown_days() {
+        let mut pages: Vec<_> = (0..CANDIDATES + 25)
+            .map(|i| {
+                dated_paper(
+                    &format!("Transformer old {i}"),
+                    Some("2017-06-12"),
+                    Some(2017),
+                    10_000,
+                )
+            })
+            .collect();
+        pages.push(dated_paper(
+            "Transformer recent",
+            Some("2026-09-30"),
+            Some(2026),
+            0,
+        ));
+        pages.push(dated_paper("Transformer year only", None, Some(2026), 1));
+        pages.push(dated_paper("Transformer unknown", None, None, 5));
+        pages.push(page("Transformer wikipedia", 1_000_000, &[]));
+        let (_dir, index) = searcher(&pages);
+        let query = PaperQuery::parse("transformer after:2026-09-01 before:2026-09-30").unwrap();
+        let hits = index.search_papers(&query, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].page.title, "Transformer recent");
+        assert_eq!(hits[0].page.paper.as_ref().unwrap().count, 0);
+        assert_eq!(index.search("transformer after:2026", 10).unwrap().len(), 2);
+        assert_eq!(index.paper_coverage().total, (CANDIDATES + 28) as u64);
+        assert_eq!(
+            index.paper_coverage().publication_day,
+            (CANDIDATES + 26) as u64
+        );
+    }
+
+    #[test]
+    fn paper_newest_collects_recent_candidates_and_preserves_exact_relevance() {
+        let mut pages: Vec<_> = (0..CANDIDATES + 20)
+            .map(|i| {
+                dated_paper(
+                    &format!("Transformer old {i}"),
+                    Some("2017-06-12"),
+                    Some(2017),
+                    10_000,
+                )
+            })
+            .collect();
+        pages.push(dated_paper(
+            "Transformer recent",
+            Some("2026-09-30"),
+            Some(2026),
+            0,
+        ));
+        pages.push(dated_paper(
+            "Transformer",
+            Some("2010-01-01"),
+            Some(2010),
+            10_000,
+        ));
+        let (_dir, index) = searcher(&pages);
+        let hits = index
+            .search_papers(&PaperQuery::parse("transformer sort:newest").unwrap(), 2)
+            .unwrap();
+        assert_eq!(hits[0].page.title, "Transformer");
+        assert!(hits[0].named);
+        assert_eq!(hits[1].page.title, "Transformer recent");
+    }
+
+    #[test]
+    fn paper_metadata_round_trips_with_parent_language_and_search_fields() {
+        let mut source = Article {
+            title: "Research".into(),
+            item: Some("10.1234/research".into()),
+            language: Some("fr".into()),
+            paper: Some(PaperMetadata {
+                publication_date: Some("2026-01-02".into()),
+                preprint_date: Some("2025-01-01".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        source.search = Some(SearchContent::default());
+        let page = Page::from_paper(source);
+        let decoded: Page = serde_json::from_slice(&serde_json::to_vec(&page).unwrap()).unwrap();
+        assert_eq!(page, decoded);
+        assert_eq!(page.content_language.as_deref(), Some("fr"));
+        assert!(page.search.is_some());
+        let (_dir, index) = searcher(&[page]);
+        assert!(index
+            .in_language(Some("en"))
+            .search_papers(&PaperQuery::parse("after:2026").unwrap(), 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            index
+                .in_language(Some("fr"))
+                .search_papers(&PaperQuery::parse("after:2026").unwrap(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        let old: Page = serde_json::from_value(serde_json::json!({ "set": "papers", "url": "https://doi.org/10.1/x", "title": "Old", "views": 1 })).unwrap();
+        assert!(old.paper.is_none());
     }
 
     #[test]

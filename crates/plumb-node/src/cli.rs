@@ -1162,7 +1162,7 @@ pub struct SpellingArgs {
 
 #[derive(Debug, Args)]
 pub struct SearchArgs {
-    /// Index directory.
+    /// Site index directory, or a page index with --paper.
     #[arg(long, value_name = "DIR")]
     pub index: PathBuf,
     /// Number of results.
@@ -1175,6 +1175,18 @@ pub struct SearchArgs {
     /// Print the hits as JSON.
     #[arg(long)]
     pub json: bool,
+    /// Search only papers in a locally built page index.
+    #[arg(long)]
+    pub paper: bool,
+    /// Inclusive publication lower bound, YYYY or YYYY-MM-DD.
+    #[arg(long, requires = "paper")]
+    pub after: Option<String>,
+    /// Inclusive publication upper bound, YYYY or YYYY-MM-DD.
+    #[arg(long, requires = "paper")]
+    pub before: Option<String>,
+    /// Paper ordering; newest preserves relevance tiers.
+    #[arg(long, requires = "paper", value_parser = ["relevance", "newest"])]
+    pub order: Option<String>,
     /// Home country, a two-letter code such as US or DE: its sites rank a
     /// little higher, other countries' a little lower [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
@@ -1639,6 +1651,56 @@ mod tests {
         assert!(parse(&["search", "--index", "idx"]).is_err());
         assert!(parse(&["search", "--index", "idx", "--limit", "0", "x"]).is_err());
         assert!(parse(&["search", "--index", "idx", "--alpha", "1.5", "x"]).is_err());
+    }
+
+    #[test]
+    fn paper_search_cli_takes_typed_dates_and_order() {
+        let cli = parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--paper",
+            "--after",
+            "2025",
+            "--before",
+            "2026-09-30",
+            "--order",
+            "newest",
+            "transformer",
+        ])
+        .unwrap();
+        let Command::Search(args) = cli.command else {
+            panic!("not search");
+        };
+        assert!(args.paper);
+        let query = plumb_core::paper_query::PaperQuery::with_options(
+            &args.query.join(" "),
+            args.after.as_deref(),
+            args.before.as_deref(),
+            args.order.as_deref(),
+        )
+        .unwrap();
+        assert!(query.newest);
+        assert_eq!(query.before.unwrap().day, Some(20260930));
+        assert!(parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--after",
+            "2025",
+            "transformer"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--paper",
+            "--order",
+            "bad",
+            "transformer"
+        ])
+        .is_err());
     }
 
     #[test]

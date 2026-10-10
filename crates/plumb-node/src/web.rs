@@ -309,6 +309,22 @@ pub trait SearchBackend: Send + Sync {
         let _ = (query, limit, options, docs, keep);
         Vec::new()
     }
+
+    /// Typed paper retrieval applies publication constraints before caps.
+    fn papers(
+        &self,
+        query: &plumb_core::paper_query::PaperQuery,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<PageHit>> {
+        Ok(self.pages_of(&query.text(), limit, options, false, &|p| {
+            p.set == plumb_index::pages::PAPERS_SET && query.allows(p.paper.as_ref())
+        }))
+    }
+
+    fn paper_coverage(&self) -> Option<plumb_index::pages::PaperCoverage> {
+        None
+    }
 }
 
 /// A [`Searcher`] with fixed ranking settings.
@@ -925,6 +941,11 @@ pub(crate) async fn shutdown_signal() {
 struct SearchParams {
     #[serde(default)]
     q: String,
+    /// Paper-only API/HTML request and inclusive publication bounds.
+    kind: Option<String>,
+    after: Option<String>,
+    before: Option<String>,
+    order: Option<String>,
     /// A plugin's folder name: run it for this search, as a link it
     /// offers asks (see [`crate::plugins::Offer`]).
     run: Option<String>,
@@ -1004,6 +1025,30 @@ fn flag(value: &Option<String>) -> bool {
 }
 
 impl SearchParams {
+    fn paper_search_query(&self) -> Result<Option<String>> {
+        let typed = self.after.is_some() || self.before.is_some() || self.order.is_some();
+        if self.kind.is_some() && self.kind.as_deref() != Some("paper") && typed {
+            anyhow::bail!("publication bounds and order require kind=paper");
+        }
+        let paper = plumb_core::paper_query::PaperQuery::with_options(
+            &self.query(),
+            self.after.as_deref(),
+            self.before.as_deref(),
+            self.order.as_deref(),
+        )?;
+        if paper.constrained && self.kind.as_deref().is_some_and(|kind| kind != "paper") {
+            anyhow::bail!("publication bounds and order require kind=paper");
+        }
+        if self.kind.as_deref() == Some("paper") || typed || paper.constrained {
+            Ok(Some(format!(
+                "{} sort:{}",
+                paper.text(),
+                if paper.newest { "newest" } else { "relevance" }
+            )))
+        } else {
+            Ok(None)
+        }
+    }
     /// The query with whitespace collapsed, cut to [`MAX_QUERY_CHARS`].
     fn query(&self) -> String {
         truncate_chars(&collapse_whitespace(&self.q), MAX_QUERY_CHARS)
@@ -1235,6 +1280,18 @@ async fn search_page(
     if let Some(status) = state.setting_up() {
         // Reloading keeps the query, so the results show up once the index is ready.
         return setup_response(&status, now_unix(), state.local_controls(&headers));
+    }
+    match params.paper_search_query() {
+        Ok(Some(query)) => return paper_response(&state, &query, &params, &headers, false).await,
+        Ok(None) => {}
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                security_headers(),
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
     }
     let query = params.query();
     if query.is_empty() {
@@ -1566,6 +1623,63 @@ async fn search_page(
     }
 }
 
+/// Paper lists preserve their relevance/date order through rendering and
+/// report indexed coverage rather than asserting that research is absent.
+async fn paper_response(
+    state: &AppState,
+    query: &str,
+    params: &SearchParams,
+    headers: &HeaderMap,
+    json: bool,
+) -> Response {
+    let options = params.options(&state.settings, headers);
+    let paper = match plumb_core::paper_query::PaperQuery::parse(query) {
+        Ok(paper) => paper,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    let backend = Arc::clone(&state.backend);
+    let limit = params.limit();
+    let found = tokio::task::spawn_blocking(move || backend.papers(&paper, limit, &options)).await;
+    let hits = match found {
+        Ok(Ok(hits)) => hits,
+        _ => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "paper search failed" })),
+            )
+                .into_response()
+        }
+    };
+    let coverage = state.backend.paper_coverage();
+    let message = if hits.is_empty() {
+        Some("No matching papers in the indexed corpus with the requested publication precision. This does not establish that no such research exists.")
+    } else {
+        None
+    };
+    if json {
+        return (StatusCode::OK, security_headers(), Json(serde_json::json!({ "query": query, "kind": "paper", "results": [], "pages": hits, "coverage": coverage, "message": message }))).into_response();
+    }
+    let mut body = format!("<div class=\"wrap wide\">{}<main>", results_header(query));
+    if let Some(message) = message {
+        let _ = write!(body, "<p class=\"s\">{message}</p>");
+    }
+    if let Some(coverage) = coverage {
+        let _ = write!(body, "<p class=\"s\">Indexed papers: {}; known publication year: {}; known publication day: {}.</p>", coverage.total, coverage.publication_year, coverage.publication_day);
+    }
+    body.push_str("<ol class=\"results\">");
+    for hit in hits {
+        render_page(&mut body, &hit, None);
+    }
+    body.push_str("</ol></main></div>");
+    html_response(StatusCode::OK, page(query, &body))
+}
+
 async fn api_search(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1585,6 +1699,18 @@ async fn api_search(
             Json(body),
         )
             .into_response();
+    }
+    match params.paper_search_query() {
+        Ok(Some(query)) => return paper_response(&state, &query, &params, &headers, true).await,
+        Ok(None) => {}
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                security_headers(),
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
     }
     let query = params.query();
     let full = flag(&params.full);
@@ -1985,6 +2111,10 @@ async fn go(
 ) -> Response {
     let search = SearchParams {
         q: params.q,
+        kind: None,
+        after: None,
+        before: None,
+        order: None,
         run: None,
         limit: Some(MAX_LIMIT),
         country: params.country,
@@ -2505,6 +2635,25 @@ async fn run_search_ranked(
 ) -> Result<SearchResults> {
     if limit == 0 {
         return Ok(SearchResults::default());
+    }
+    let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
+    if paper.constrained {
+        let backend = Arc::clone(&state.backend);
+        let options = options.clone();
+        let found = tokio::task::spawn_blocking(move || backend.papers(&paper, limit, &options))
+            .await
+            .context("the paper search task failed")??;
+        return Ok(SearchResults {
+            pages: found
+                .into_iter()
+                .map(|hit| plumb_index::pages::PlacedPage {
+                    hit,
+                    under: None,
+                    at: 0,
+                })
+                .collect(),
+            ..Default::default()
+        });
     }
     let backend = Arc::clone(&state.backend);
     // "safeway near me": the places list is for "near me"; the sites are
@@ -3960,6 +4109,28 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
     if let Some(package) = &hit.page.package {
         render_package(out, package);
     }
+    if hit.page.set == plumb_index::pages::PAPERS_SET {
+        let parts = hit
+            .page
+            .paper
+            .as_ref()
+            .map(|paper| {
+                let mut parts: Vec<_> = paper
+                    .date_labels()
+                    .iter()
+                    .map(|(label, date)| format!("{label} {}", escape_html(date)))
+                    .collect();
+                parts.push(format!("{} {}", paper.count, paper.count_label()));
+                parts
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    "Published unknown".to_string(),
+                    format!("{} popularity (count type unknown)", hit.page.views),
+                ]
+            });
+        let _ = write!(out, "<p class=\"d pk\">{}</p>", parts.join(" &middot; "));
+    }
     if let Some(href) = hit.page.free_copy().and_then(http_url) {
         let host = display_url(&href);
         let host = host.split('/').next().unwrap_or(&host);
@@ -3973,7 +4144,11 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
     let _ = writeln!(
         out,
         "<div class=\"m rank-meta\"><span title=\"{} {}\">score {:.3}</span></div></li>",
-        hit.page.views,
+        hit.page
+            .paper
+            .as_ref()
+            .filter(|_| hit.page.set == plumb_index::pages::PAPERS_SET)
+            .map_or(hit.page.views, |p| p.count),
         match hit.page.set.as_str() {
             plumb_index::pages::GITHUB_SET => "stars",
             plumb_index::pages::BOOKS_SET => "readers",
@@ -3985,7 +4160,11 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
             plumb_index::pages::REFERENCE_SET | plumb_index::pages::SUBPAGES_SET => {
                 "the site's weight over the page's depth"
             }
-            plumb_index::pages::PAPERS_SET => "citations",
+            plumb_index::pages::PAPERS_SET => hit
+                .page
+                .paper
+                .as_ref()
+                .map_or("popularity (count type unknown)", |p| p.count_label()),
             plumb_index::pages::PACKAGES_SET => "use (share of the registry's most, in billionths)",
             _ => "views",
         },
@@ -5120,11 +5299,76 @@ mod tests {
     }
 
     #[test]
+    fn paper_dates_and_count_meanings_render_separately() {
+        let metadata = plumb_core::papers::PaperMetadata {
+            publication_date: Some("2024-07-01".into()),
+            preprint_date: Some("2023-01-02".into()),
+            preprint_version_date: Some("2025-03-04".into()),
+            count: 12,
+            count_kind: plumb_core::papers::PaperCountKind::MethodUses,
+            ..Default::default()
+        };
+        let mut hit = PageHit {
+            page: plumb_index::pages::Page::from_paper(plumb_core::article::Article {
+                title: "A <paper>".into(),
+                item: Some("10.1234/a".into()),
+                paper: Some(metadata),
+                ..Default::default()
+            }),
+            score: 1.0,
+            popularity: 0.0,
+            named: true,
+            whole: true,
+            learned: None,
+        };
+        let mut out = String::new();
+        render_page(&mut out, &hit, None);
+        assert!(out.contains("A &lt;paper&gt;"));
+        assert!(out.contains("Published 2024-07-01"));
+        assert!(out.contains("Preprint 2023-01-02"));
+        assert!(out.contains("Preprint revised 2025-03-04"));
+        assert!(out.contains("12 method uses"));
+        assert!(!out.contains("citations"));
+        hit.page.paper = None;
+        out.clear();
+        render_page(&mut out, &hit, None);
+        assert!(out.contains("Published unknown"));
+        assert!(out.contains("count type unknown"));
+    }
+
+    #[tokio::test]
+    async fn paper_api_validates_dates_and_reports_missing_index_coverage() {
+        let fake = backend(Vec::new());
+        let app = router_with(fake, HomeCountry::Off);
+        let (status, _, body) = send(
+            app.clone(),
+            "/api/search?q=transformer&kind=paper&after=2026-02-29",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("paper date"));
+        let (status, _, body) = send(
+            app.clone(),
+            "/api/search?q=transformer&kind=paper&after=2026&order=newest",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let data: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(data["kind"], "paper");
+        assert_eq!(data["pages"], serde_json::json!([]));
+        assert!(data["message"].as_str().unwrap().contains("indexed corpus"));
+        let (status, _, body) = send(app, "/search?q=transformer&kind=paper&after=2026").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("does not establish"));
+    }
+
+    #[test]
     fn plugins_are_shown_what_articles_are_about_and_mark_them_up() {
         use plumb_index::pages::{Page, PlacedPage};
         let url = "https://en.wikipedia.org/wiki/But_I%27m_a_Cheerleader";
         let article = PageHit {
             page: Page {
+                paper: None,
                 set: "wikipedia-en".into(),
                 url: url.into(),
                 title: "But I'm a Cheerleader".into(),
@@ -5227,6 +5471,7 @@ mod tests {
         use plumb_index::pages::Page;
         let article = PageHit {
             page: Page {
+                paper: None,
                 set: "wikipedia-en".into(),
                 url: "https://en.wikipedia.org/wiki/YouTube_Music".into(),
                 title: "YouTube Music".into(),
@@ -6712,6 +6957,7 @@ mod tests {
                 results.pages.push(PlacedPage {
                     hit: PageHit {
                         page: Page {
+                            paper: None,
                             set: "wikipedia-en".into(),
                             url: "https://en.wikipedia.org/wiki/MrBeast".into(),
                             title: "MrBeast".into(),
@@ -6789,6 +7035,7 @@ mod tests {
         use plumb_index::pages::{Page, PageHit, PlacedPage};
         let article = PageHit {
             page: Page {
+                paper: None,
                 set: "wikipedia-en".into(),
                 url: "https://en.wikipedia.org/wiki/Marie_Curie".into(),
                 title: "Marie Curie".into(),

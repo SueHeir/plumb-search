@@ -86,6 +86,42 @@ pub fn valid_date(date: &str) -> bool {
 }
 
 impl PaperMetadata {
+    pub fn count_label(&self) -> &'static str {
+        match self.count_kind {
+            PaperCountKind::Citations => "citations",
+            PaperCountKind::MethodUses => "method uses",
+            PaperCountKind::Unknown => "popularity (count type unknown)",
+        }
+    }
+
+    pub fn date_labels(&self) -> Vec<(&'static str, String)> {
+        let mut dates = Vec::new();
+        let published = self
+            .publication_date
+            .as_deref()
+            .filter(|d| valid_date(d))
+            .map(str::to_string)
+            .or_else(|| {
+                self.publication_year
+                    .filter(|y| (1..=9999).contains(y))
+                    .map(|y| y.to_string())
+            });
+        dates.push((
+            "Published",
+            published.unwrap_or_else(|| "unknown".to_string()),
+        ));
+        for (label, date) in [
+            ("Preprint", &self.preprint_date),
+            ("Version", &self.version_date),
+            ("Preprint revised", &self.preprint_version_date),
+        ] {
+            if let Some(date) = date.as_deref().filter(|d| valid_date(d)) {
+                dates.push((label, date.to_string()));
+            }
+        }
+        dates
+    }
+
     /// Percent encoding keeps JSON delimiters out of the profiles line.
     /// Old readers skip the unknown `paper` key and keep the six columns.
     pub fn write(&self) -> Option<String> {

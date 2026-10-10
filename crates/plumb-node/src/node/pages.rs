@@ -1014,6 +1014,16 @@ fn typed_pages(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
+    if paper.constrained {
+        return Ok(searcher
+            .in_language(options.language.as_deref())
+            .search_papers(&paper, KIND_PAGES)?
+            .into_iter()
+            .filter(|hit| options_allow(options, &hit.page) && keep(&hit.page))
+            .take(limit)
+            .collect());
+    }
     let ops = Operators::parse(query);
     let words = if ops.any() { ops.words.as_str() } else { query };
     let searcher = searcher.in_language(options.language.as_deref());
@@ -1025,6 +1035,39 @@ fn typed_pages(
         })
         .take(limit)
         .collect())
+}
+
+pub(super) fn papers(
+    inner: &Inner,
+    query: &plumb_core::paper_query::PaperQuery,
+    limit: usize,
+    options: &SearchOptions,
+) -> Result<Vec<PageHit>> {
+    let searcher = inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone());
+    let Some(searcher) = searcher else {
+        return Ok(Vec::new());
+    };
+    Ok(searcher
+        .in_language(options.language.as_deref())
+        .search_papers(query, KIND_PAGES)?
+        .into_iter()
+        .filter(|hit| options_allow(options, &hit.page))
+        .take(limit)
+        .collect())
+}
+
+pub(super) fn paper_coverage(inner: &Inner) -> Option<plumb_index::pages::PaperCoverage> {
+    inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.paper_coverage().clone())
 }
 
 /// Adds the pages found for `query` to `results`. When the results are for
@@ -1158,6 +1201,54 @@ pub(super) fn add_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_paper_date_search_keeps_structural_metadata() {
+        use plumb_index::pages::{build_page_index, Page, PageSearcher, PAPERS_SET};
+        let source = plumb_core::article::Article {
+            title: "Transformer recent".into(),
+            item: Some("10.1234/recent".into()),
+            paper: Some(plumb_core::papers::PaperMetadata {
+                publication_date: Some("2026-09-30".into()),
+                count_kind: plumb_core::papers::PaperCountKind::Citations,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        build_page_index(dir.path(), [Page::from_paper(source)]).unwrap();
+        let searcher = PageSearcher::open(dir.path()).unwrap();
+        let hits = typed_pages(
+            &searcher,
+            "transformer after:2026-09-01",
+            10,
+            &SearchOptions::default(),
+            false,
+            &|p| p.set == PAPERS_SET,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0]
+                .page
+                .paper
+                .as_ref()
+                .unwrap()
+                .publication_date
+                .as_deref(),
+            Some("2026-09-30")
+        );
+        assert!(typed_pages(
+            &searcher,
+            "transformer after:2026-10-01",
+            10,
+            &SearchOptions::default(),
+            false,
+            &|p| p.set == PAPERS_SET
+        )
+        .unwrap()
+        .is_empty());
+    }
 
     #[test]
     fn typed_docs_retrieve_and_serialize_existing_pages() {

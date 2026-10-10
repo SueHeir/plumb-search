@@ -469,10 +469,28 @@ impl Mcp {
                     Some(site) => format!("{query} site:{site}"),
                     None => query,
                 };
-                match kind_arg(args)? {
-                    None => self.search(&query, limit, &options),
-                    Some("site") => self.search_sites(&query, limit, &options),
-                    Some(kind) => self.search_pages(&query, kind, limit, &options),
+                let kind = kind_arg(args)?;
+                let paper = plumb_core::paper_query::PaperQuery::with_options(
+                    &query,
+                    paper_text_arg(args, "after")?,
+                    paper_text_arg(args, "before")?,
+                    paper_text_arg(args, "order")?,
+                )
+                .map_err(|error| (INVALID_PARAMS, error.to_string()))?;
+                if paper.constrained && kind.is_some_and(|k| k != "paper") {
+                    return Err((
+                        INVALID_PARAMS,
+                        "publication bounds and order require kind=paper".to_string(),
+                    ));
+                }
+                if paper.constrained || kind == Some("paper") {
+                    self.search_pages(&paper.text(), "paper", limit, &options)
+                } else {
+                    match kind {
+                        None => self.search(&query, limit, &options),
+                        Some("site") => self.search_sites(&query, limit, &options),
+                        Some(kind) => self.search_pages(&query, kind, limit, &options),
+                    }
                 }
             }
             "site_info" => {
@@ -1300,11 +1318,18 @@ impl Mcp {
         options: &SearchOptions,
     ) -> Result<Value> {
         let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
-        let found = self
-            .backend
-            .pages_of(query, limit, options, kind == "docs", &|page| {
-                kind_keeps(kind, page)
-            });
+        let found = if kind == "paper" {
+            self.backend.papers(
+                &plumb_core::paper_query::PaperQuery::parse(query)?,
+                limit,
+                options,
+            )?
+        } else {
+            self.backend
+                .pages_of(query, limit, options, kind == "docs", &|page| {
+                    kind_keeps(kind, page)
+                })
+        };
         // Pages Plumb lacks may still be on the site.
         let site_search = if plumb_core::Operators::parse(query).sites.is_empty() {
             None
@@ -1323,6 +1348,8 @@ impl Mcp {
             "pages": pages,
             "site_search": site_search,
             "spelling": Value::Null,
+            "paper_coverage": if kind == "paper" { self.backend.paper_coverage() } else { None },
+            "coverage_message": if kind == "paper" && found.is_empty() && plumb_core::paper_query::PaperQuery::parse(query)?.constrained { Some("No matching papers in the indexed corpus with the requested publication precision; research may exist outside indexed coverage.") } else { None },
         }))
     }
 
@@ -2542,6 +2569,9 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
                                 .join(", ")
                         ),
                     },
+                    "after": { "type": "string", "description": "Paper publication on or after YYYY or YYYY-MM-DD; unknown dates are excluded. Requires kind=paper when a kind is supplied." },
+                    "before": { "type": "string", "description": "Paper publication on or before YYYY or YYYY-MM-DD; day precision requires an actual publication day." },
+                    "order": { "type": "string", "enum": ["relevance", "newest"], "description": "Paper ordering; newest orders within relevance tiers." },
                 },
                 "required": ["query"],
             },
@@ -2793,6 +2823,13 @@ fn page_entry(page: &Page, query: &str, under: Option<&str>, position: usize) ->
     if let Some(free) = page.free_copy() {
         entry["free_copy"] = json!(free);
     }
+    if page.set == plumb_index::pages::PAPERS_SET {
+        entry["paper"] = json!(page.paper);
+        entry["count"] = page.paper.as_ref().map_or_else(
+            || json!({ "value": page.views, "kind": "unknown" }),
+            |paper| json!({ "value": paper.count, "kind": paper.count_kind }),
+        );
+    }
     if let Some(language) = &page.content_language {
         entry["language"] = json!(language);
     }
@@ -2915,6 +2952,17 @@ fn source_fragment_url(source: &str, anchor: &str) -> Option<String> {
     }
     url.set_fragment(Some(&anchor));
     Some(url.into())
+}
+
+fn paper_text_arg<'a>(
+    args: &'a Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'a str>, (i64, String)> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text)),
+        _ => Err((INVALID_PARAMS, format!("{key} must be a string"))),
+    }
 }
 
 /// `search`'s optional `site`: one domain, or a URL on it, whose results

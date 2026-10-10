@@ -2140,6 +2140,19 @@ impl SearchBackend for Inner {
         pages::pages_of(self, query, limit, options, docs, keep)
     }
 
+    fn papers(
+        &self,
+        query: &plumb_core::paper_query::PaperQuery,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        pages::papers(self, query, limit, options)
+    }
+
+    fn paper_coverage(&self) -> Option<plumb_index::pages::PaperCoverage> {
+        pages::paper_coverage(self)
+    }
+
     fn num_docs(&self) -> u64 {
         self.current_summary().map_or(0, |(_, docs)| docs)
     }
@@ -2155,6 +2168,21 @@ impl Inner {
         options: &SearchOptions,
         rank: Option<&RankConfig>,
     ) -> Result<SearchResults> {
+        let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
+        if paper.constrained {
+            let found = pages::papers(self, &paper, limit, options)?;
+            return Ok(SearchResults {
+                pages: found
+                    .into_iter()
+                    .map(|hit| plumb_index::pages::PlacedPage {
+                        hit,
+                        under: None,
+                        at: 0,
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        }
         let Some(index) = self.current() else {
             bail!("the search index is not ready yet");
         };
