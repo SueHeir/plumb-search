@@ -167,12 +167,7 @@ impl SetInfo {
     /// ("subpages" for [`plumb_index::pages::SUBPAGES_SET`]). Only for what
     /// people type: a set is never served or asked for by an old name.
     pub fn named(name: &str) -> Option<&'static SetInfo> {
-        let id = if name == plumb_index::pages::OLD_SUBPAGES_SET {
-            plumb_index::pages::SUBPAGES_SET
-        } else {
-            name
-        };
-        SetInfo::find(id)
+        SetInfo::find(plumb_index::pages::renamed_set(name).unwrap_or(name))
     }
 
     /// The set's file in `data_dir`.
@@ -542,10 +537,11 @@ pub struct PageSets(pub BTreeMap<String, PageSetSize>);
 
 impl PageSets {
     pub fn size(&self, set: &str) -> PageSetSize {
-        let old = (set == plumb_index::pages::SUBPAGES_SET)
-            .then(|| self.0.get(plumb_index::pages::OLD_SUBPAGES_SET))
-            .flatten();
         // A size chosen for the set under its old name still holds.
+        let old = plumb_index::pages::OLD_SET_NAMES
+            .iter()
+            .find(|(_, now)| *now == set)
+            .and_then(|(old, _)| self.0.get(*old));
         self.0.get(set).or(old).copied().unwrap_or_default()
     }
 
@@ -875,6 +871,11 @@ mod tests {
         // Never under the old name otherwise.
         assert!(SetInfo::find("subpages").is_none());
         assert_eq!(SetInfo::named("subpages").unwrap().id, subpages);
+        let reference = plumb_index::pages::REFERENCE_SET;
+        let saved: PageSets = serde_json::from_str(r#"{"reference":"off"}"#).unwrap();
+        assert_eq!(saved.size(reference), PageSetSize::Off);
+        assert!(SetInfo::find("reference").is_none());
+        assert_eq!(SetInfo::named("reference").unwrap().id, reference);
         let json = serde_json::to_string(&sets).unwrap();
         assert_eq!(json, r#"{"wikipedia-en":"off"}"#);
         assert_eq!(serde_json::from_str::<PageSets>(&json).unwrap(), sets);
