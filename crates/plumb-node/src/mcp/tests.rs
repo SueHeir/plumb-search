@@ -2859,13 +2859,17 @@ fn facts_resolve_identity_before_display_and_property_availability() {
         .search("Japan youtube", None, &SearchOptions::default())
         .unwrap();
     assert_eq!(search["profile"]["of"], "Japan");
-    for about in ["ceo", "founder", "founded"] {
-        let missing = mcp
+    let missing = mcp
+        .facts("Apple", Some("ceo"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(missing["item"], "Q312", "{missing}");
+    assert_eq!(missing["status"], "missing_enrichment");
+    assert_eq!(missing["found"], false);
+    for about in ["founder", "founded"] {
+        let ambiguous = mcp
             .facts("Apple", Some(about), &SearchOptions::default())
             .unwrap();
-        assert_eq!(missing["item"], "Q312", "{missing}");
-        assert_eq!(missing["status"], "missing_enrichment");
-        assert_eq!(missing["found"], false);
+        assert_eq!(ambiguous["status"], "ambiguous_entity", "{ambiguous}");
     }
     let partial = mcp
         .facts("Pear", Some("ceo"), &SearchOptions::default())
@@ -2884,6 +2888,96 @@ fn facts_resolve_identity_before_display_and_property_availability() {
         )
         .unwrap();
     assert_eq!(specified["item"], "Q925");
+}
+
+#[test]
+fn founding_facts_clarify_shared_names_and_keep_qualified_entity_coverage() {
+    use plumb_core::facts::{
+        Fact,
+        FactKind::{Founded, Founder},
+    };
+    let page = |title: &str, item: &str, description: &str, facts| {
+        Page::from_article(
+            "en",
+            plumb_core::Article {
+                title: title.into(),
+                item: Some(item.into()),
+                description: Some(description.into()),
+                aliases: vec!["Nacrelin".into()],
+                facts,
+                ..Default::default()
+            },
+        )
+    };
+    let pages = vec![
+        page("Nacrelin", "Q910101", "mineral", Vec::new()),
+        page(
+            "Nacrelin Inc.",
+            "Q910102",
+            "company",
+            vec![Fact {
+                kind: Founded,
+                value: "1901".into(),
+            }],
+        ),
+        page(
+            "Nacrelin (city)",
+            "Q910103",
+            "city",
+            vec![
+                Fact {
+                    kind: Founder,
+                    value: "Example founder".into(),
+                },
+                Fact {
+                    kind: Founded,
+                    value: "1801".into(),
+                },
+            ],
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let index = dir.path().join("pages");
+    plumb_index::pages::build_page_index(&index, pages).unwrap();
+    let mcp = Mcp::new(
+        Arc::new(EntityIndex(
+            plumb_index::pages::PageSearcher::open(&index).unwrap(),
+        )),
+        None,
+    );
+    for about in ["founder", "founded"] {
+        let answer = mcp
+            .facts("Nacrelin", Some(about), &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["status"], "ambiguous_entity", "{answer}");
+        assert_eq!(answer["candidates"].as_array().unwrap().len(), 3);
+    }
+    let city = mcp
+        .facts(
+            "Nacrelin (city)",
+            Some("founder"),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(city["status"], "ok", "{city}");
+    assert_eq!(city["item"], "Q910103");
+    assert_eq!(city["facts"][0]["value"], "Example founder");
+    let company = mcp
+        .facts("Nacrelin Inc.", Some("founded"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(company["status"], "ok", "{company}");
+    assert_eq!(company["item"], "Q910102");
+    assert_eq!(company["facts"][0]["value"], "1901");
+    let missing = mcp
+        .facts("Nacrelin Inc.", Some("founder"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(missing["status"], "missing_enrichment", "{missing}");
+    assert_eq!(missing["item"], "Q910102");
+    assert!(!missing["found"].as_bool().unwrap());
+    let search = mcp
+        .search("who founded Nacrelin", None, &SearchOptions::default())
+        .unwrap();
+    assert!(search["answer"].is_null(), "{search}");
 }
 
 #[test]

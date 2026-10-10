@@ -578,19 +578,13 @@ pub(crate) fn resolve_entity<'a>(
                 && seen.insert(hit.page.item.as_deref())
         })
         .collect();
-    // CEO/headquarters requests supply a type, independently of imported
-    // property availability. This preserves Apple the company/fruit.
+    // CEO/headquarters requests supply an organization type, independently
+    // of imported property availability. Founding properties do not:
+    // settlements and other entities can have a founder or inception too.
     let company = kinds.is_some_and(|kinds| {
-        kinds.iter().any(|kind| {
-            matches!(kind, FactKind::Ceo | FactKind::Headquarters)
-                || matches!(kind, FactKind::Founder | FactKind::Founded)
-                    && candidates.iter().any(|hit| {
-                        key(&hit.page.title) == subject
-                            && key(hit.page.description.as_deref().unwrap_or(""))
-                                .split_whitespace()
-                                .any(|word| word == "fruit")
-                    })
-        })
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, FactKind::Ceo | FactKind::Headquarters))
     });
     if company {
         let organizations: Vec<_> = candidates
@@ -621,14 +615,6 @@ pub(crate) fn resolve_entity<'a>(
     if candidates.is_empty() {
         return EntityResolution::Unresolved;
     }
-    let exact: Vec<_> = candidates
-        .iter()
-        .copied()
-        .filter(|hit| key(&hit.page.title) == subject)
-        .collect();
-    if exact.len() == 1 {
-        return EntityResolution::Resolved(&exact[0].page);
-    }
     let legal_name = |title: &str| {
         let title = key(title);
         for suffix in [
@@ -647,6 +633,37 @@ pub(crate) fn resolve_entity<'a>(
         }
         title
     };
+    if kinds.is_some_and(|kinds| {
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, FactKind::Founder | FactKind::Founded))
+    }) {
+        // Compact records lack structured entity types. A founding
+        // question cannot prefer the plain title or a legal company name
+        // over another entity known by the same name. Ask for clarification
+        // rather than infer a type from a special-case description word.
+        let named: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|hit| {
+                key(&hit.page.title) == subject
+                    || legal_name(&hit.page.title) == subject
+                    || hit.named
+                    || hit.whole
+            })
+            .collect();
+        if named.len() > 1 {
+            return EntityResolution::Ambiguous(named.iter().map(|hit| &hit.page).collect());
+        }
+    }
+    let exact: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|hit| key(&hit.page.title) == subject)
+        .collect();
+    if exact.len() == 1 {
+        return EntityResolution::Resolved(&exact[0].page);
+    }
     let named: Vec<_> = candidates
         .iter()
         .copied()
@@ -1130,6 +1147,88 @@ mod tests {
         assert_eq!(answer.question, "anadromous");
         assert!(answer.answer.starts_with("(adjective) Of fish"));
         assert_eq!(answer.note.as_deref(), Some("From Wiktionary, CC BY-SA"));
+    }
+
+    #[test]
+    fn founding_questions_leave_shared_names_ambiguous_without_type_evidence() {
+        use plumb_core::facts::FactKind::{Founded, Founder};
+        for (subject, description) in [
+            ("Teral", "mineral"),
+            ("Vesrin", "city"),
+            ("Ordel", "organization"),
+            ("Navren", ""),
+        ] {
+            let mut main = article(subject, description, None);
+            main.page.item = Some("Q910001".into());
+            let mut namesake = with_facts(
+                article(&format!("{subject} Inc."), "company", None),
+                &[(Founder, "Example founder"), (Founded, "1901")],
+            );
+            namesake.page.item = Some("Q910002".into());
+            namesake.named = false;
+            for kind in [Founder, Founded] {
+                for candidates in [
+                    [main.clone(), namesake.clone()],
+                    [namesake.clone(), main.clone()],
+                ] {
+                    let EntityResolution::Ambiguous(found) =
+                        resolve_entity(subject, &candidates, Some(&[kind]))
+                    else {
+                        panic!("{subject} must remain ambiguous for {kind:?}");
+                    };
+                    assert_eq!(found.len(), 2);
+                }
+                // Removing all enrichment cannot change identity resolution.
+                let mut empty = namesake.clone();
+                empty.page.facts.clear();
+                assert!(matches!(
+                    resolve_entity(subject, &[main.clone(), empty], Some(&[kind])),
+                    EntityResolution::Ambiguous(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn founding_questions_resolve_unique_and_qualified_settlements_and_organizations() {
+        use plumb_core::facts::{fact_asked, FactKind::Founded};
+        let mut city = with_facts(article("Ravelin", "city", None), &[(Founded, "1801")]);
+        city.page.item = Some("Q910011".into());
+        let mut company = article("Ravelin Inc.", "company", None);
+        company.page.item = Some("Q910012".into());
+        company.named = false;
+        let asked = fact_asked("when was ravelin founded").unwrap();
+        let sole = [city.clone()];
+        let EntityResolution::Resolved(page) =
+            resolve_entity(&asked.subject, &sole, Some(&asked.kinds))
+        else {
+            panic!("a unique settlement must resolve");
+        };
+        assert_eq!(
+            fact_answer_from_page(&asked, page, 0).unwrap().answer,
+            "1801"
+        );
+
+        let only_company = [company.clone()];
+        let EntityResolution::Resolved(page) =
+            resolve_entity(&asked.subject, &only_company, Some(&asked.kinds))
+        else {
+            panic!("a unique legal organization name must resolve");
+        };
+        assert_eq!(fact_answer_from_page(&asked, page, 0), None);
+
+        // An explicit organization name must keep its missing fact even
+        // when the settlement has the requested founding date.
+        city.named = false;
+        let both = [city, company];
+        let asked = fact_asked("when was ravelin inc. founded").unwrap();
+        let EntityResolution::Resolved(page) =
+            resolve_entity(&asked.subject, &both, Some(&asked.kinds))
+        else {
+            panic!("a qualified organization must resolve");
+        };
+        assert_eq!(page.item.as_deref(), Some("Q910012"));
+        assert_eq!(fact_answer_from_page(&asked, page, 0), None);
     }
 
     #[test]
