@@ -1,5 +1,5 @@
 /* Node controls share the search window's navy, warm surfaces and quiet chrome. */
-.node-panel { max-width: 76rem; padding: 0 2rem 3rem; }
+.wrap.node-panel { max-width: 76rem; padding: 0 2rem 3rem; }
 .node-panel h1 { font-size: 1.8rem; }
 .node-panel h2 { font-size: 1.15rem; margin: 2rem 0 .7rem; }
 .node-panel h3 { font-size: 1rem; margin: 0 0 .5rem; }
@@ -90,3 +90,11 @@ dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
   .section-heading { flex-wrap: wrap; }
   .node-panel .feature p { margin-left: 0; }
 }
+
+
+.node-panel label:has(input[type=checkbox]), .node-panel label:has(input[type=radio]) { flex-wrap:nowrap; align-items:flex-start; }
+.node-panel label input[type=checkbox], .node-panel label input[type=radio] { margin-top:.25rem; }
+.btns { align-items:center; }
+.btns form { margin:0; }
+.btns form button { margin-top:0; }
+.card.setup, .card.setup-card { max-width:none; }

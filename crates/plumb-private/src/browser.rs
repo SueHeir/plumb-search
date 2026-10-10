@@ -19,8 +19,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    Document, Element, HtmlButtonElement, HtmlInputElement, Request, RequestCache,
-    RequestCredentials, RequestInit, RequestMode, Response, Window,
+    Document, Element, HtmlButtonElement, HtmlInputElement, HtmlSelectElement, Request,
+    RequestCache, RequestCredentials, RequestInit, RequestMode, Response, Window,
 };
 
 use crate::sealed::Targets;
@@ -69,10 +69,16 @@ fn submitted() -> Result<(), JsValue> {
     let document = window.document().ok_or("no document")?;
     let input: HtmlInputElement = element(&document, "pq-q")?.dyn_into()?;
     let query = input.value();
-    let fragment = format!(
-        "q={}",
-        String::from(js_sys::encode_uri_component(query.trim()))
-    );
+    let country: HtmlSelectElement = element(&document, "pq-country")?.dyn_into()?;
+    let only: HtmlInputElement = element(&document, "pq-only")?.dyn_into()?;
+    let mut params = url::form_urlencoded::Serializer::new(String::new());
+    params
+        .append_pair("q", query.trim())
+        .append_pair("country", &country.value());
+    if only.checked() {
+        params.append_pair("only", "1");
+    }
+    let fragment = params.finish();
     if window.location().hash()?.trim_start_matches('#') == fragment {
         // Same query again: no hashchange, so search here.
         wasm_bindgen_futures::spawn_local(show());
@@ -84,7 +90,11 @@ fn submitted() -> Result<(), JsValue> {
 
 /// Searches for the query in the fragment, if any, and shows the results.
 async fn show() {
+    let fragment = web_sys::window().and_then(|w| w.location().hash().ok());
     if let Err(err) = try_show().await {
+        if web_sys::window().and_then(|w| w.location().hash().ok()) != fragment {
+            return;
+        }
         let message = err
             .as_string()
             .unwrap_or_else(|| "Something went wrong.".to_string());
@@ -105,6 +115,23 @@ async fn try_show() -> Result<(), JsValue> {
     let list = element(&document, "pq-results")?;
     list.set_text_content(None);
     show_answer(&document, &query)?;
+    let page = element(&document, "pq")?;
+    let country: HtmlSelectElement = element(&document, "pq-country")?.dyn_into()?;
+    let only: HtmlInputElement = element(&document, "pq-only")?.dyn_into()?;
+    let fragment = window.location().hash()?;
+    let prefs: Vec<_> =
+        url::form_urlencoded::parse(fragment.trim_start_matches('#').as_bytes()).collect();
+    if let Some((_, value)) = prefs.iter().find(|(k, _)| k == "country") {
+        country.set_value(value);
+        only.set_checked(prefs.iter().any(|(k, v)| k == "only" && v == "1"));
+    } else {
+        country.set_value(
+            &page
+                .get_attribute("data-country-mode")
+                .unwrap_or_else(|| "auto".into()),
+        );
+        only.set_checked(page.get_attribute("data-only").as_deref() == Some("1"));
+    }
     if query.is_empty() {
         document.set_title("Private search - Plumb Search");
         return set_status("");
@@ -112,18 +139,22 @@ async fn try_show() -> Result<(), JsValue> {
     document.set_title(&format!("{query} - Private search - Plumb Search"));
     set_status("Looking it up in your browser\u{2026}")?;
 
-    let page = element(&document, "pq")?;
+    let selected = country.value();
     let options = Options {
-        country: page
-            .get_attribute("data-country")
-            .filter(|c| !c.is_empty())
-            .or_else(|| {
-                window
-                    .navigator()
-                    .language()
-                    .and_then(|tag| language_country(&tag))
-            }),
-        only_country: false,
+        country: match selected.as_str() {
+            "any" => None,
+            "auto" | "" => page
+                .get_attribute("data-country")
+                .filter(|c| !c.is_empty())
+                .or_else(|| {
+                    window
+                        .navigator()
+                        .language()
+                        .and_then(|tag| language_country(&tag))
+                }),
+            _ => Some(selected.clone()),
+        },
+        only_country: selected != "any" && only.checked(),
         safe: page
             .get_attribute("data-safe")
             .and_then(|safe| plumb_core::SafeSearch::parse(&safe))
@@ -133,6 +164,18 @@ async fn try_show() -> Result<(), JsValue> {
             .and_then(|tag| plumb_core::language_code(&tag)),
     };
 
+    if let Ok(link) = element(&document, "pq-normal") {
+        let mut params = url::form_urlencoded::Serializer::new(String::new());
+        params
+            .append_pair("q", &query)
+            .append_pair("country", &selected);
+        if options.only_country {
+            params.append_pair("only", "1");
+        }
+        params.append_pair("safe", options.safe.as_str());
+        params.append_pair("lang", options.language.as_deref().unwrap_or("any"));
+        link.set_attribute("href", &format!("/search?{}", params.finish()))?;
+    }
     let info: TableInfo = serde_json::from_str(&fetch_text(&window, "/api/buckets").await?)
         .map_err(|_| JsValue::from_str("This site's private search is not ready yet."))?;
     if info.buckets != BUCKETS {
@@ -153,11 +196,8 @@ async fn try_show() -> Result<(), JsValue> {
     };
     let hits = search(&query, &keys, answers, &options, LIMIT);
 
-    // The query may have changed while the buckets came in.
-    let now = query_from_fragment(&window.location().hash()?, |s| {
-        js_sys::decode_uri_component(s).ok().map(String::from)
-    });
-    if now.trim() != query {
+    // Back or another submission may change filters even for the same query.
+    if window.location().hash()? != fragment {
         return Ok(());
     }
     list.set_text_content(None);

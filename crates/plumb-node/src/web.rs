@@ -862,7 +862,7 @@ fn app(state: AppState) -> Router {
         router = tune::routes(router);
         router = welcome::routes(router);
     }
-    router.with_state(state)
+    router.fallback(not_found).with_state(state)
 }
 
 /// Opens the index and serves it until Ctrl-C or SIGTERM.
@@ -949,6 +949,7 @@ struct SearchParams {
     /// A plugin's folder name: run it for this search, as a link it
     /// offers asks (see [`crate::plugins::Offer`]).
     run: Option<String>,
+    #[serde(default, deserialize_with = "parse_search_limit")]
     limit: Option<usize>,
     /// A two-letter code, `any` for no home country, or empty for the default.
     country: Option<String>,
@@ -961,6 +962,7 @@ struct SearchParams {
     /// `1` (or `on`, `true`): search for the query as typed, without
     /// correcting typos.
     exact: Option<String>,
+    debug: Option<String>,
     /// `1`: the settings gear's form sent the history choices below.
     hist: Option<String>,
     /// `1`: show past searches.
@@ -997,6 +999,96 @@ struct SearchParams {
     categories: Option<String>,
     /// SearXNG's time range (`day`, `week`, ...): recent headlines first.
     time_range: Option<String>,
+}
+
+fn parse_search_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let digits = value
+        .strip_prefix('-')
+        .or_else(|| value.strip_prefix('+'))
+        .unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_digit()) {
+        return Err(serde::de::Error::custom("Use a whole number for limit."));
+    }
+    let limit = if value.starts_with('-') {
+        0
+    } else {
+        digits.parse::<usize>().unwrap_or(MAX_LIMIT).min(MAX_LIMIT)
+    };
+    Ok(Some(limit))
+}
+
+fn error_settings(state: &AppState, params: &SearchParams, headers: &HeaderMap) -> Settings {
+    Settings {
+        manage: state.local_controls(headers),
+        options: params.page_options(&state.settings, headers),
+        network: state.net_setting(params),
+        scope: state.search_scope(),
+        private: state.private_search(),
+        country_mode: params.country_mode(),
+        debug: flag(&params.debug),
+        request_fields: params.request_fields(),
+        history: None,
+        browser_about: None,
+        welcome: false,
+        experiment: None,
+    }
+}
+
+async fn not_found(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let settings = error_settings(&state, &SearchParams::default(), &headers);
+    html_response(
+        StatusCode::NOT_FOUND,
+        message_page(
+            "Page not found",
+            "There is no page at this address. Search below or return home.",
+            "",
+            &settings,
+        ),
+    )
+}
+
+fn message_page(title: &str, message: &str, query: &str, settings: &Settings) -> String {
+    page(
+        title,
+        &format!(
+            "<div class=\"wrap wide\">{}<main><h1>{}</h1><p>{}</p></main></div>",
+            results_form(query, settings),
+            escape_html(title),
+            escape_html(message)
+        ),
+    )
+}
+
+fn bad_search_query(state: &AppState, headers: &HeaderMap, uri: &Uri) -> Response {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    let mut seen = HashSet::new();
+    for (key, value) in url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()) {
+        if key != "limit" && seen.insert(key.to_string()) {
+            query.append_pair(&key, &value);
+        }
+    }
+    let recovered: Uri = format!("/search?{}", query.finish())
+        .parse()
+        .expect("encoded URI");
+    let params = Query::<SearchParams>::try_from_uri(&recovered)
+        .map(|q| q.0)
+        .unwrap_or_default();
+    html_response(
+        StatusCode::BAD_REQUEST,
+        message_page(
+            "Check your search",
+            "Use a whole number for the result limit and try again.",
+            &params.query(),
+            &error_settings(state, &params, headers),
+        ),
+    )
 }
 
 /// The language filter of a search that names none, when the browser's
@@ -1049,6 +1141,30 @@ impl SearchParams {
             Ok(None)
         }
     }
+    fn request_fields(&self) -> Vec<(&'static str, String)> {
+        [
+            ("kind", &self.kind),
+            ("after", &self.after),
+            ("before", &self.before),
+            ("order", &self.order),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.as_ref().map(|v| (name, v.clone())))
+        .collect()
+    }
+
+    fn country_mode(&self) -> String {
+        match self
+            .country
+            .as_deref()
+            .and_then(|c| HomeCountry::parse(c).ok())
+        {
+            Some(HomeCountry::Fixed(code)) => code,
+            Some(HomeCountry::Off) => "any".into(),
+            _ => "auto".into(),
+        }
+    }
+
     /// The query with whitespace collapsed, cut to [`MAX_QUERY_CHARS`].
     fn query(&self) -> String {
         truncate_chars(&collapse_whitespace(&self.q), MAX_QUERY_CHARS)
@@ -1154,6 +1270,9 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
                 network: state.net_setting(params),
                 scope: state.search_scope(),
                 private: state.private_search(),
+                country_mode: params.country_mode(),
+                debug: flag(&params.debug),
+                request_fields: params.request_fields(),
                 history: visitor.as_ref().map(history::Visitor::view),
                 browser_about,
                 experiment: None,
@@ -1200,6 +1319,10 @@ struct Settings {
     scope: plumb_net::SearchScope,
     /// This node offers private search (`/private`).
     private: bool,
+    country_mode: String,
+    debug: bool,
+    /// Typed paper request constraints carried through form/error retries.
+    request_fields: Vec<(&'static str, String)>,
     /// The searcher's history, on a node that keeps one.
     history: Option<history::HistoryView>,
     /// On a node that keeps no profiles, the About profile the browser
@@ -1263,8 +1386,12 @@ async fn search_page(
     extensions: Extensions,
     headers: HeaderMap,
     uri: Uri,
-    Query(params): Query<SearchParams>,
+    params: Result<Query<SearchParams>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
+    let params = match params {
+        Ok(Query(params)) => params,
+        Err(_) => return bad_search_query(&state, &headers, &uri),
+    };
     let client = mcp::client_of(&extensions, &headers);
     if params
         .format
@@ -1312,6 +1439,9 @@ async fn search_page(
         network: state.net_setting(&params),
         scope: state.search_scope(),
         private: state.private_search(),
+        country_mode: params.country_mode(),
+        debug: flag(&params.debug),
+        request_fields: params.request_fields(),
         history: None,
         browser_about: (visitor.is_none() && state.node.is_some())
             .then(|| history::browser_about(&headers)),
@@ -1614,7 +1744,10 @@ async fn search_page(
         }
         Err(_) => {
             error!("search page local lookup failed");
-            html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
+            html_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                render_error(&query, &settings),
+            )
         }
     };
     match &visitor {
@@ -1665,7 +1798,11 @@ async fn paper_response(
     if json {
         return (StatusCode::OK, security_headers(), Json(serde_json::json!({ "query": query, "kind": "paper", "results": [], "pages": hits, "coverage": coverage, "message": message }))).into_response();
     }
-    let mut body = format!("<div class=\"wrap wide\">{}<main>", results_header(query));
+    let mut body = format!(
+        "<div class=\"wrap wide\">{}<main><h1 class=\"visually-hidden\">Paper results for {}</h1>",
+        results_form(&params.query(), &error_settings(state, params, headers)),
+        escape_html(&params.query())
+    );
     if let Some(message) = message {
         let _ = write!(body, "<p class=\"s\">{message}</p>");
     }
@@ -2122,6 +2259,7 @@ async fn go(
         full: None,
         net: None,
         exact: params.exact,
+        debug: None,
         hist: None,
         hs: None,
         hr: None,
@@ -2282,11 +2420,25 @@ async fn network_page(
     State(state): State<AppState>,
     extensions: Extensions,
     headers: HeaderMap,
-    Query(params): Query<SearchParams>,
+    uri: Uri,
+    params: Result<Query<SearchParams>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
+    let params = match params {
+        Ok(Query(params)) => params,
+        Err(_) => return bad_search_query(&state, &headers, &uri),
+    };
+    let settings = error_settings(&state, &params, &headers);
     let client = mcp::client_of(&extensions, &headers);
     if state.network().is_none() {
-        return html_response(StatusCode::NOT_FOUND, render_no_network());
+        return html_response(
+            StatusCode::NOT_FOUND,
+            message_page(
+                "Network search unavailable",
+                "This node does not search the network. You can still search its own index.",
+                &params.query(),
+                &settings,
+            ),
+        );
     }
     let query = params.query();
     if query.is_empty() {
@@ -2297,11 +2449,17 @@ async fn network_page(
         Ok(results) => {
             let domains = results.hits.iter().map(|r| r.hit.domain.clone()).collect();
             let icons = state.icons(domains).await;
-            html_response(StatusCode::OK, render_network(&query, &results, &icons))
+            html_response(
+                StatusCode::OK,
+                render_network(&query, &results, &icons, &settings),
+            )
         }
         Err(_) => {
             error!("network search page lookup failed");
-            html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
+            html_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                render_error(&query, &settings),
+            )
         }
     }
 }
@@ -2991,17 +3149,6 @@ fn page_with_head(title: &str, head: &str, body: &str) -> String {
     )
 }
 
-fn search_form(query: &str, autofocus: bool) -> String {
-    format!(
-        "<form action=\"/search\" method=\"get\" role=\"search\">\
-         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Search sites, articles, questions and more\" \
-         aria-label=\"Search\" autocomplete=\"off\"{}>\
-         <button type=\"submit\">Search</button></form>",
-        escape_html(query),
-        if autofocus { " autofocus" } else { "" }
-    )
-}
-
 /// The search form with its settings tucked behind a gear: the home
 /// country, whether to leave out other countries' sites, and whether to
 /// ask the Plumb network too. A `<details>` opens the gear, so it needs no
@@ -3029,12 +3176,16 @@ const LANGUAGE_CHOICES: &[(&str, &str)] = &[
 
 fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
     let options = &settings.options;
-    let current = options.country.as_deref();
-    let mut choices = format!(
-        "<option value=\"any\"{}>Any country</option>",
-        if current.is_none() { " selected" } else { "" }
+    let current = Some(settings.country_mode.as_str());
+    let mut choices =
+        format!(
+        "<option value=\"auto\"{}>Automatic</option><option value=\"any\"{}>Any country</option>",
+        if current == Some("auto") { " selected" } else { "" },
+        if current == Some("any") { " selected" } else { "" }
     );
-    let listed = current.is_some_and(|c| COUNTRY_CHOICES.iter().any(|(code, _)| *code == c));
+    let listed = current.is_some_and(|c| {
+        c == "auto" || c == "any" || COUNTRY_CHOICES.iter().any(|(code, _)| *code == c)
+    });
     if let (Some(code), false) = (current, listed) {
         let _ = write!(
             choices,
@@ -3149,12 +3300,15 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
         ""
     };
     let private = if settings.private {
-        private_toggle(false)
+        private_toggle_link(
+            false,
+            &settings_link("/private", "", settings, options, false).replace("?q=&", "?"),
+        )
     } else {
         String::new()
     };
     format!(
-        "<form action=\"/search\" method=\"get\" role=\"search\">\
+        "<form action=\"/search\" method=\"get\" role=\"search\">{request_fields}\
          <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Search sites, articles, questions and more\" \
          aria-label=\"Search\" autocomplete=\"off\"{}>\
          <details class=\"gear\"><summary title=\"Settings\" aria-label=\"Settings\">\
@@ -3164,11 +3318,14 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
          <label>Language <select name=\"lang\">{language_choices}</select></label>\
          <label>Safe search <select name=\"safe\">{safe_choices}</select></label>\
          <label>Recent news <select name=\"news\">{news_choices}</select></label>\
-         {network}{network_hint}{history}{kinds}{private}<button type=\"submit\">Apply</button></div></details>\
+         {network}{network_hint}{history}{kinds}{private}<label><input type=\"checkbox\" name=\"exact\" value=\"1\"{exact}> Search exactly as typed</label><label><input type=\"checkbox\" name=\"debug\" value=\"1\"{debug}> Show ranking details</label><button type=\"submit\">Apply</button></div></details>\
          <button type=\"submit\">Search</button></form>",
         escape_html(query),
         if autofocus { " autofocus" } else { "" },
-        if options.only_country { " checked" } else { "" }
+        if options.only_country { " checked" } else { "" },
+        request_fields = settings.request_fields.iter().map(|(name, value)| format!("<input type=\"hidden\" name=\"{name}\" value=\"{}\">", escape_html(value))).collect::<String>(),
+        exact = if options.exact { " checked" } else { "" },
+        debug = if settings.debug { " checked" } else { "" }
     )
 }
 
@@ -3177,11 +3334,17 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
 /// sends what is typed in the search box: it opens `/private`, and turning
 /// it off there goes back to normal search.
 fn private_toggle(on: bool) -> String {
-    let (href, checked) = if on {
+    let (href, _checked) = if on {
         ("/", "true")
     } else {
         ("/private", "false")
     };
+    private_toggle_link(on, href)
+}
+
+fn private_toggle_link(on: bool, href: &str) -> String {
+    let checked = if on { "true" } else { "false" };
+    let href = escape_html(href);
     format!(
         "<div class=\"pv\"><a class=\"tg\" href=\"{href}\" role=\"switch\" \
          aria-checked=\"{checked}\"><span class=\"knob\" aria-hidden=\"true\"></span>\
@@ -3291,7 +3454,7 @@ fn render_setup_with(status: &Status, now: u64, controls: bool) -> String {
         let max = progress.total.max(progress.done).max(1);
         let _ = writeln!(
             body,
-            "<progress value=\"{}\" max=\"{max}\"></progress>\n<p>{} of {} {}</p>",
+            "<progress aria-label=\"Setup progress\" value=\"{}\" max=\"{max}\"></progress>\n<p>{} of {} {}</p>",
             progress.done,
             group_thousands(progress.done),
             group_thousands(progress.total),
@@ -3331,14 +3494,6 @@ fn render_setup_with(status: &Status, now: u64, controls: bool) -> String {
     page_with_head("Setting up - Plumb Search", &head, &body)
 }
 
-fn results_header(query: &str) -> String {
-    format!(
-        "{}<header class=\"results-header\">{}</header>",
-        app_bar("search", false),
-        search_form(query, false)
-    )
-}
-
 /// The results page's header: the logo and the search form with its
 /// settings gear.
 fn results_form(query: &str, settings: &Settings) -> String {
@@ -3367,11 +3522,41 @@ fn search_link(path: &str, query: &str, options: &SearchOptions, net: bool) -> S
     format!("{path}?{}", params.finish())
 }
 
+fn settings_link(
+    path: &str,
+    query: &str,
+    settings: &Settings,
+    options: &SearchOptions,
+    net: bool,
+) -> String {
+    let link = search_link(path, query, options, net);
+    let (_, pairs) = link.split_once('?').expect("search link");
+    let mut params = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in url::form_urlencoded::parse(pairs.as_bytes()) {
+        params.append_pair(
+            &key,
+            if key == "country" {
+                &settings.country_mode
+            } else {
+                &value
+            },
+        );
+    }
+    if settings.debug {
+        params.append_pair("debug", "1");
+    }
+    for (name, value) in &settings.request_fields {
+        params.append_pair(name, value);
+    }
+    format!("{path}?{}", params.finish())
+}
+
 /// "Did you mean amazon?" above the results, which are for the query as
 /// typed; or, when the results are for the spelling
 /// ([`Spelling::applied`]), "Showing results for kanye west", with a link
 /// to search for `typed` as typed.
-fn render_spelling(out: &mut String, spelling: &Spelling, typed: &str, options: &SearchOptions) {
+fn render_spelling(out: &mut String, spelling: &Spelling, typed: &str, settings: &Settings) {
+    let options = &settings.options;
     if spelling.applied {
         let as_typed = SearchOptions {
             exact: true,
@@ -3382,7 +3567,13 @@ fn render_spelling(out: &mut String, spelling: &Spelling, typed: &str, options: 
             "<p class=\"sp\">Showing results for <strong>{}</strong>. Search instead for \
              <a href=\"{}\">{}</a></p>",
             escape_html(&truncate_chars(&spelling.query, 150)),
-            escape_html(&search_link("/search", typed, &as_typed, false)),
+            escape_html(&settings_link(
+                "/search",
+                typed,
+                settings,
+                &as_typed,
+                settings.network == NetSetting::On
+            )),
             escape_html(&truncate_chars(typed, 150))
         );
         return;
@@ -3393,11 +3584,12 @@ fn render_spelling(out: &mut String, spelling: &Spelling, typed: &str, options: 
     };
     let fixed = format!(
         "<a href=\"{}\"><strong>{}</strong></a>",
-        escape_html(&search_link(
+        escape_html(&settings_link(
             "/search",
             &spelling.query,
+            settings,
             &fixed_options,
-            false
+            settings.network == NetSetting::On
         )),
         escape_html(&truncate_chars(&spelling.query, 150))
     );
@@ -3515,7 +3707,13 @@ fn render_source(
         (NetSetting::Unavailable, _) => "From this site's own index.".to_string(),
         (_, NetOutcome::NotAsked) => format!(
             "From this site's own index. <a href=\"{}\">Use the Plumb network too</a>",
-            escape_html(&search_link("/search", query, &settings.options, true))
+            escape_html(&settings_link(
+                "/search",
+                query,
+                settings,
+                &settings.options,
+                true
+            ))
         ),
         (_, NetOutcome::Failed) => {
             "From this site's own index: the Plumb network did not answer this time.".to_string()
@@ -3637,7 +3835,15 @@ fn render_results_with(
     let token = extras.and_then(|e| e.plugin_token.as_deref());
     let marked = |url: Option<String>| render_notes(notes_on(url), query, token);
     let from_network = shown.iter().filter(|s| s.network.is_some()).count();
-    let mut body = String::from("<main>\n");
+    let mut body = format!(
+        "<main{}>\n<h1 class=\"visually-hidden\">Results for {}</h1>",
+        if settings.debug {
+            " class=\"ranking-debug\""
+        } else {
+            ""
+        },
+        escape_html(query)
+    );
     // Tuning: its bar comes first, above the places too.
     if let Some(bar) = settings.history.as_ref().and_then(|h| h.tune_bar.as_ref()) {
         body.push_str(bar);
@@ -3653,9 +3859,10 @@ fn render_results_with(
     render_source(&mut body, query, settings, network, from_network);
     if let Some(history) = &settings.history {
         // Edit mode: buttons to move results and fold boxes.
-        let here = search_link(
+        let here = settings_link(
             "/search",
             query,
+            settings,
             &settings.options,
             settings.network == NetSetting::On,
         );
@@ -3677,7 +3884,7 @@ fn render_results_with(
         }
     }
     if let Some(spelling) = &results.spelling {
-        render_spelling(&mut body, spelling, query, &settings.options);
+        render_spelling(&mut body, spelling, query, settings);
     }
     // Picks are noted for the query: shared, or kept in the searcher's
     // history.
@@ -3871,16 +4078,28 @@ fn render_results_with(
         );
     }
     let options = &settings.options;
-    let api = escape_html(&search_link("/api/search", query, options, false));
+    let api = escape_html(&settings_link(
+        "/api/search",
+        query,
+        settings,
+        options,
+        false,
+    ));
     let mut json = format!("<a href=\"{api}\">{api}</a>");
     if matches!(network, NetOutcome::Answered(_)) {
-        let api = escape_html(&search_link("/api/network/search", query, options, false));
+        let api = escape_html(&settings_link(
+            "/api/network/search",
+            query,
+            settings,
+            options,
+            false,
+        ));
         let _ = write!(json, " and <a href=\"{api}\">{api}</a>");
     }
-    let _ = write!(
-        body,
-        "<p class=\"s\">As JSON: {json}</p>\n{FOOTER}\n</main>\n"
-    );
+    if settings.debug {
+        let _ = write!(body, "<p class=\"s\">As JSON: {json}</p>");
+    }
+    let _ = write!(body, "{FOOTER}\n</main>\n");
     // Results keep the same left edge whether or not an info box shows; the
     // box sits beside them (above them on a narrow screen, unless a profile
     // asked for leads).
@@ -3903,10 +4122,15 @@ fn render_results_with(
 
 /// What other nodes answered, and nothing from this node. Their text is as
 /// untrusted as any record's, and is escaped the same way.
-fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> String {
+fn render_network(
+    query: &str,
+    results: &NetworkResults,
+    icons: &Icons,
+    settings: &Settings,
+) -> String {
     let mut body = format!(
         "<div class=\"wrap wide\">\n{}\n<main>\n",
-        results_header(query)
+        results_form(query, settings)
     );
     if results.asked == 0 && (results.cached > 0 || results.pending > 0) {
         body.push_str(
@@ -3983,25 +4207,32 @@ fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> Strin
         }
         body.push_str("</ol>\n");
     }
-    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
-    let local = escape_html(&format!("/search?q={encoded}"));
-    let api = escape_html(&format!("/api/network/search?q={encoded}"));
+    let local = escape_html(&settings_link(
+        "/search",
+        query,
+        settings,
+        &settings.options,
+        settings.network == NetSetting::On,
+    ));
     let _ = write!(
         body,
-        "<p class=\"s\"><a href=\"{local}\">Back to this node's results</a> &middot; \
-         As JSON: <a href=\"{api}\">{api}</a></p>\n{FOOTER}\n</main>\n</div>"
+        "<p class=\"s\"><a href=\"{local}\">Back to this node's results</a></p>"
     );
+    if settings.debug {
+        let api = escape_html(&settings_link(
+            "/api/network/search",
+            query,
+            settings,
+            &settings.options,
+            false,
+        ));
+        let _ = write!(
+            body,
+            "<p class=\"s\">As JSON: <a href=\"{api}\">{api}</a></p>"
+        );
+    }
+    let _ = write!(body, "{FOOTER}</main></div>");
     page(&format!("{query} (network) - Plumb Search"), &body)
-}
-
-fn render_no_network() -> String {
-    let body = format!(
-        "<div class=\"wrap wide\">\n{}\n<main>\n<p class=\"none\">This node has not joined the \
-         Plumb network. Start it with <code>plumb run --network</code> to search other \
-         nodes.</p>\n</main>\n</div>",
-        results_header("")
-    );
-    page("Network search - Plumb Search", &body)
 }
 
 /// "Search github.com for sueheir plumb-search", above the results.
@@ -4639,13 +4870,8 @@ fn render_hit(
     );
 }
 
-fn render_error(query: &str) -> String {
-    let body = format!(
-        "<div class=\"wrap wide\">\n{}\n<main>\n<p class=\"none\">Something went wrong while searching. \
-         The server log has the details.</p>\n</main>\n</div>",
-        results_header(query)
-    );
-    page("Error - Plumb Search", &body)
+fn render_error(query: &str, settings: &Settings) -> String {
+    message_page("Search could not finish", "Please try again in a moment. If you run this node, check Activity in the panel for details.", query, settings)
 }
 
 #[cfg(test)]
@@ -5191,10 +5417,13 @@ mod tests {
         // Without an icon, a site gets its first letter.
         assert!(body.contains("aria-hidden=\"true\">U</span>"));
         assert!(body.contains("value=\"us bank\""));
-        assert!(body.contains("href=\"/api/search?q=us+bank&amp;country=any&amp;lang=en\""));
+        assert!(!body.contains("As JSON:"));
+        let (_, _, debug) = get(fake.clone(), "/search?q=us+bank&debug=1").await;
+        assert!(debug
+            .contains("href=\"/api/search?q=us+bank&amp;country=auto&amp;lang=en&amp;debug=1\""));
         assert_eq!(
             *fake.calls.lock().unwrap(),
-            vec![("us bank".to_string(), DEFAULT_LIMIT)]
+            vec![("us bank".to_string(), DEFAULT_LIMIT); 2]
         );
     }
 
@@ -5334,6 +5563,76 @@ mod tests {
         render_page(&mut out, &hit, None);
         assert!(out.contains("Published unknown"));
         assert!(out.contains("count type unknown"));
+    }
+
+    #[tokio::test]
+    async fn paper_limit_retry_submits_the_original_publication_constraints() {
+        #[derive(Default)]
+        struct Papers(Mutex<Vec<plumb_core::paper_query::PaperQuery>>);
+        impl SearchBackend for Papers {
+            fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+                panic!("a paper retry must not become ordinary site search");
+            }
+            fn papers(
+                &self,
+                query: &plumb_core::paper_query::PaperQuery,
+                _: usize,
+                _: &SearchOptions,
+            ) -> Result<Vec<PageHit>> {
+                self.0.lock().unwrap().push(query.clone());
+                Ok(Vec::new())
+            }
+            fn num_docs(&self) -> u64 {
+                1
+            }
+        }
+        let backend = Arc::new(Papers::default());
+        let app = node_router(backend.clone(), node(node_status(Phase::Ready, Step::Idle)));
+        let (status, _, body) = send(app.clone(), "/search?q=transformer&kind=paper&after=2020-02-29&before=2024&order=newest&limit=invalid&country=DE&lang=de&safe=strict").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(backend.0.lock().unwrap().is_empty());
+        // Read the actual retry form's hidden controls, as a browser would.
+        let mut retry = url::form_urlencoded::Serializer::new(String::new());
+        retry.append_pair("q", "transformer");
+        let mut count = 0;
+        for input in body.split("<input type=\"hidden\" name=\"").skip(1) {
+            let (name, rest) = input.split_once('"').unwrap();
+            if ["kind", "after", "before", "order"].contains(&name) {
+                let value = rest
+                    .split_once("value=\"")
+                    .unwrap()
+                    .1
+                    .split('"')
+                    .next()
+                    .unwrap();
+                retry.append_pair(name, value);
+                count += 1;
+            }
+        }
+        assert_eq!(count, 4);
+        let (status, _, body) = send(app, &format!("/search?{}", retry.finish())).await;
+        assert_eq!(status, StatusCode::OK);
+        let called = backend.0.lock().unwrap();
+        assert_eq!(called.len(), 1);
+        assert_eq!(called[0].query, "transformer");
+        assert_eq!(called[0].after.unwrap().day, Some(20200229));
+        assert_eq!(called[0].before.unwrap().year, 2024);
+        assert!(called[0].newest);
+        assert!(body.contains("name=\"kind\" value=\"paper\""));
+        assert!(body.contains("value=\"transformer\""));
+        assert!(body.contains("Paper results for transformer"));
+    }
+
+    #[tokio::test]
+    async fn recovered_paper_fields_escape_untrusted_values() {
+        let (_, _, body) = get(
+            backend(Vec::new()),
+            "/search?q=research&kind=%22%3E%3Cscript%3E&after=%22%3E%3Cscript%3E&limit=invalid",
+        )
+        .await;
+        assert!(body.contains("name=\"kind\" value=\"&quot;&gt;&lt;script&gt;\""));
+        assert!(body.contains("name=\"after\" value=\"&quot;&gt;&lt;script&gt;\""));
+        assert!(!body.contains("<script>"));
     }
 
     #[tokio::test]
@@ -5589,6 +5888,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_limit_keeps_search_preferences_and_does_not_search() {
+        let fake = backend(Vec::new());
+        for path in ["/search", "/network"] {
+            let (status, _, body) = send(node_router(fake.clone(), node(node_status(Phase::Ready, Step::Idle))), &format!("{path}?q=a%3Cb%3E&limit=lots&country=DE&only=1&safe=strict&lang=de&news=off&exact=1&debug=1")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body.contains("value=\"a&lt;b&gt;\""));
+            assert!(body.contains("<option value=\"DE\" selected>"));
+            assert!(body.contains("name=\"only\" value=\"1\" checked"));
+            assert!(body.contains("<option value=\"strict\" selected>"));
+            assert!(body.contains("value=\"de\" lang=\"de\" selected>"));
+            assert!(body.contains("name=\"exact\" value=\"1\" checked"));
+            assert!(body.contains("name=\"debug\" value=\"1\" checked"));
+            assert!(!body.contains("<script>"));
+        }
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn backend_errors_become_500s() {
         let failing = Arc::new(FakeBackend {
             fail: true,
@@ -5596,7 +5913,7 @@ mod tests {
         });
         let (status, _, body) = get(Arc::clone(&failing), "/search?q=x").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains("Something went wrong"));
+        assert!(body.contains("Search could not finish"));
         assert!(!body.contains("index is broken"));
         let (status, _, body) = get(failing, "/api/search?q=x").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -5769,7 +6086,7 @@ mod tests {
                 "<meta http-equiv=\"refresh\" content=\"5\">",
                 "<title>Setting up - Plumb Search</title>",
                 "<p class=\"step\">Waiting &lt;to&gt; try again</p>",
-                "<progress value=\"1500\" max=\"10000\"></progress>",
+                "<progress aria-label=\"Setup progress\" value=\"1500\" max=\"10000\"></progress>",
                 "1,500 of 10,000 homepages",
                 "Something went wrong</strong> 2 minutes ago:",
                 "HTTP 503: &lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; more",
@@ -5811,7 +6128,8 @@ mod tests {
             retry_at: None,
         });
         let body = render_setup(&status, 1_700_000_000);
-        assert!(body.contains("<progress value=\"0\" max=\"1\"></progress>"));
+        assert!(body
+            .contains("<progress aria-label=\"Setup progress\" value=\"0\" max=\"1\"></progress>"));
         assert!(body.contains("Something went wrong</strong> just now:"));
         assert!(!body.contains("will try again"));
     }
@@ -6292,7 +6610,7 @@ mod tests {
         assert!(body.contains(
             "<div class=\"m\">United States<span class=\"rank-meta\"> &middot; <span title=\"text"
         ));
-        assert!(body.contains("country=DE&amp;only=1"), "{body}");
+        assert!(body.contains("name=\"only\" value=\"1\" checked"), "{body}");
 
         // No country asked for: the server's setting, then the browser's.
         send(app(), "/search?q=github").await;
@@ -6345,13 +6663,16 @@ mod tests {
         // A new search, from a link or another site's search box: the
         // server's choices, shown in the gear.
         let (_, _, body) = send_with_headers(app(), "/search?q=github", &german).await;
-        assert!(body.contains("<option value=\"US\" selected>"), "{body}");
+        assert!(
+            body.contains("<option value=\"auto\" selected>Automatic"),
+            "{body}"
+        );
         assert!(body.contains("name=\"only\" value=\"1\" checked"), "{body}");
         assert!(
             body.contains("<option value=\"en\" lang=\"en\" selected>"),
             "{body}"
         );
-        assert!(body.contains("country=US&amp;only=1"), "{body}");
+        assert!(body.contains("name=\"only\" value=\"1\" checked"), "{body}");
         let (_, _, home) = send(app(), "/").await;
         assert!(home.contains("name=\"only\" value=\"1\" checked"), "{home}");
         // The gear's form with the box unchecked names the country, and so
@@ -6430,6 +6751,9 @@ mod tests {
             network: NetSetting::Unavailable,
             scope: plumb_net::SearchScope::default(),
             private: false,
+            country_mode: "any".into(),
+            debug: false,
+            request_fields: Vec::new(),
         }
     }
 
@@ -6583,7 +6907,8 @@ mod tests {
         let on = settings_form("x", false, &settings);
         // A link, so turning it on never submits what was typed.
         assert!(
-            on.contains("href=\"/private\" role=\"switch\" aria-checked=\"false\""),
+            on.contains("href=\"/private?country=any")
+                && on.contains("role=\"switch\" aria-checked=\"false\""),
             "{on}"
         );
         assert!(!on.contains("name=\"private\""));
@@ -6716,7 +7041,7 @@ mod tests {
         assert!(page.contains("6 of 8 requests to other nodes answered"));
         assert!(page.contains("Tinted results came only from the network."));
         assert!(page.contains("from the Plumb network (signed crawl, checked, in 2 answers)"));
-        assert!(page.contains("/api/network/search?q=q"));
+        assert!(!page.contains("As JSON:"));
     }
 
     #[tokio::test]
@@ -7186,6 +7511,7 @@ mod tests {
         };
         let mut settings = no_settings();
         settings.options.country = Some("DE".into());
+        settings.country_mode = "DE".into();
         let page = render_results(
             "amazom",
             &results,
@@ -7323,6 +7649,7 @@ mod tests {
         let mut settings = no_settings();
         settings.network = NetSetting::Off;
         settings.options.country = Some("DE".into());
+        settings.country_mode = "DE".into();
         let page = render_results(
             "q",
             &results,
@@ -7386,7 +7713,7 @@ mod tests {
             pending: 2,
             ..Default::default()
         };
-        let page = render_network("us bank", &pending, &Icons::default());
+        let page = render_network("us bank", &pending, &Icons::default(), &no_settings());
         assert!(
             page.contains("waiting for the next background download"),
             "{page}"
