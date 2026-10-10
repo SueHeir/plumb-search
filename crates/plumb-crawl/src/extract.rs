@@ -1181,7 +1181,7 @@ mod tests {
             <div hidden><pre>hidden_symbol</pre></div>
             <div aria-hidden="true"><code>aria_symbol</code></div>
             <div style="display: NONE !important"><code>style_symbol</code></div>
-            <script>script_symbol</script><svg><text>svg_symbol</text></svg>
+            <script>script_symbol</script><svg><text>svg_symbol</text></svg><svg/><math/>
             <h2 id="visible">Visible</h2><p><code>visible_symbol</code> explains the supported API.
             <div hidden><span></nonsense>malformed_secret</div>"#;
         let base = Url::parse("https://example.com/docs").unwrap();

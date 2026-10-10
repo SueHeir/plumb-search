@@ -21,6 +21,7 @@ struct Frame {
     name: String,
     hidden: bool,
     code: bool,
+    foreign: bool,
     anchor: Option<String>,
 }
 
@@ -111,7 +112,11 @@ impl RichText {
                     .and_then(search_anchor)
             })
             .flatten();
-        if !VOID.contains(&name) {
+        let foreign =
+            matches!(name, "svg" | "math") || self.frames.last().is_some_and(|f| f.foreign);
+        // HTML ignores a self-closing slash on ordinary elements, but it
+        // closes SVG/MathML elements. An icon must not hide later prose.
+        if !VOID.contains(&name) && !(foreign && tag.self_closing) {
             if self.frames.len() == MAX_DEPTH {
                 self.overflow = 1;
                 return;
@@ -122,6 +127,7 @@ impl RichText {
                 name: name.chars().take(64).collect(),
                 hidden,
                 code,
+                foreign,
                 anchor: anchor.clone(),
             });
         }
