@@ -4765,6 +4765,285 @@ async fn idle_maintenance_reconciles_owner_bytes_only_at_the_bounded_checkpoint(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_batches() {
+    use plumb_net::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
+    use plumb_net::batch::Batch;
+    use plumb_net::store::BatchStore;
+    use sha2::{Digest, Sha256};
+
+    const SITES: usize = plumb_net::batch::MAX_BATCH_RECORDS;
+    let dir = seeded_dir();
+    let now = now_unix();
+    let epoch = epoch_of(now);
+    let batches = dir.path().join("net/batches");
+    std::fs::create_dir_all(&batches).unwrap();
+    let mut store = BatchStore::open(&batches).unwrap();
+    let mut signed = Vec::new();
+    let mut made = now;
+    let own_key = plumb_net::node::load_or_create_key(&dir.path().join("net/node.key")).unwrap();
+    let good_key = plumb_net::node::load_or_create_key(&dir.path().join("following.key")).unwrap();
+    let trigger_key = plumb_net::node::load_or_create_key(&dir.path().join("trigger.key")).unwrap();
+    let trigger_peer = trigger_key.public().to_peer_id();
+    let domains: Vec<_> = (0u64..)
+        .map(|n| format!("oversized-facts-{n}.example"))
+        .filter(|domain| is_assigned(epoch, &trigger_peer, domain, MAX_SHARE_PPM))
+        .take(SITES)
+        .collect();
+    // Each earlier fact is exactly the protocol's 16 KiB record limit,
+    // spread over eight legal 16 MiB batches. Punctuation does not change
+    // agreement's normalized description. The later thin crawl agrees with
+    // the earlier, newer own/trusted facts and releases those actual facts:
+    // 4096 * 16384 bytes plus the receiver's 4096 newlines exceeds 64 MiB.
+    for (key, own) in [(&own_key, true), (&good_key, false)] {
+        let peer = key.public().to_peer_id();
+        for chunk in domains.chunks(1024) {
+            let records: Vec<_> = chunk
+                .iter()
+                .map(|domain| {
+                    let mut record = SiteRecord::new(domain);
+                    record.crawled_at = Some(now + 1);
+                    record.description = Some("same".into());
+                    let extra = plumb_net::batch::MAX_RECORD_BYTES
+                        - serde_json::to_vec(&record).unwrap().len();
+                    record
+                        .description
+                        .as_mut()
+                        .unwrap()
+                        .extend(std::iter::repeat_n('.', extra));
+                    assert_eq!(
+                        serde_json::to_vec(&record).unwrap().len(),
+                        plumb_net::batch::MAX_RECORD_BYTES
+                    );
+                    record
+                })
+                .collect();
+            let batch = Batch::sign(&key, &records, epoch, MAX_SHARE_PPM, made)
+                .unwrap()
+                .unwrap();
+            assert_eq!(batch.records.len(), records.len());
+            assert_eq!(batch.check(made).unwrap(), peer);
+            assert!(batch
+                .records
+                .iter()
+                .all(|line| line.len() <= plumb_net::batch::MAX_RECORD_BYTES));
+            store.insert(&batch).unwrap();
+            if !own {
+                std::fs::write(
+                    batches.join(format!("{}.delivered-trusted", batch.id())),
+                    b"persisted\n",
+                )
+                .unwrap();
+            }
+            signed.push((
+                batch.id(),
+                Sha256::digest(
+                    std::fs::read(batches.join(format!("{}.json", batch.id()))).unwrap(),
+                ),
+            ));
+            made += 1;
+        }
+    }
+    let thin: Vec<_> = domains
+        .iter()
+        .map(|domain| {
+            let mut record = SiteRecord::new(domain);
+            record.crawled_at = Some(now);
+            record.description = Some("same".into());
+            record
+        })
+        .collect();
+    let trigger = Batch::sign(&trigger_key, &thin, epoch, MAX_SHARE_PPM, made)
+        .unwrap()
+        .unwrap();
+    assert_eq!(trigger.records.len(), thin.len());
+    trigger.check(made).unwrap();
+    let trigger_id = trigger.id();
+    store.insert(&trigger).unwrap();
+    let trigger_signed = std::fs::read(batches.join(format!("{trigger_id}.json"))).unwrap();
+
+    let good_peer = good_key.public().to_peer_id();
+    let mut good = SiteRecord::new("following-replay.example");
+    good.title = Some("Smaller batch after unsupported output".into());
+    good.crawled_at = Some(now);
+    good.news = vec![plumb_core::Headline::checked(
+        &good.domain,
+        "Following headline",
+        "https://following-replay.example/news",
+        now,
+        now,
+    )
+    .unwrap()];
+    let following = Batch::sign(&good_key, &[good], epoch, MAX_SHARE_PPM, made + 1)
+        .unwrap()
+        .unwrap();
+    let following_id = following.id();
+    store.insert(&following).unwrap();
+    let following_signed = std::fs::read(batches.join(format!("{following_id}.json"))).unwrap();
+    drop(store);
+
+    let credits = dir.path().join("net/credits");
+    let mut ledger = plumb_net::credits::Ledger::open(&credits).unwrap();
+    ledger.record(&[plumb_net::agree::Verdict {
+        crawler: good_peer,
+        crawled_at: now,
+        agreed: true,
+        witnesses: 0,
+        trusted: true,
+    }]);
+    ledger.save().unwrap();
+    let credit_bytes = std::fs::read(credits.join("ledger.json")).unwrap();
+    let mut config = test_config(dir.path());
+    config.take_new_sites = true;
+    let rank = RankConfig::default();
+    let opened = open_data_dir(&config, rank).unwrap();
+    let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let inner = Arc::new(Inner::new(
+        config,
+        rank,
+        opened,
+        stopped,
+        Some(budget.clone()),
+    ));
+    let raw = std::fs::read(&inner.paths.records).unwrap();
+    let table = Arc::new(
+        plumb_net::BucketTable::build::<SiteRecord>(&inner.paths.net.join("buckets"), &[]).unwrap(),
+    );
+    let mut net_config = plumb_net::NetConfig::new(inner.paths.net.clone());
+    net_config.listen.clear();
+    net_config.bootstrap.clear();
+    net_config.upnp = false;
+    net_config.local_discovery = false;
+    net_config.round_every = None;
+    net_config.fill = false;
+    net_config.trusted_peers = vec![good_peer];
+    net_config.storage_budget = Some(budget.clone());
+    let mut cap = None;
+    for restart in [false, true] {
+        eprintln!("starting genuine signed replay restart={restart}");
+        let (net, mut received) = tokio::time::timeout(
+            Duration::from_secs(300),
+            plumb_net::start(net_config.clone(), table.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        if cap.is_none() {
+            let limit = budget.status().used_bytes + 128 * 1024;
+            budget.set_limit(limit);
+            cap = Some(limit);
+        }
+        let oversized = tokio::time::timeout(Duration::from_secs(900), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            oversized.reservation.is_none(),
+            "oversized replay waited for an impossible token"
+        );
+        assert!(!batches
+            .join(format!("{trigger_id}.delivered-agreed"))
+            .exists());
+        let (news, records): (Vec<_>, Vec<_>) = oversized
+            .records
+            .into_iter()
+            .partition(|r| !r.news.is_empty());
+        let mut count = plumb_core::storage::ByteCount {
+            bytes: 0,
+            limit: u64::MAX,
+        };
+        for record in &records {
+            serde_json::to_writer(&mut count, record).unwrap();
+            std::io::Write::write_all(&mut count, b"\n").unwrap();
+        }
+        assert_eq!(records.len(), SITES);
+        assert_eq!(
+            count.bytes,
+            plumb_net::node::MAX_RECORD_DELIVERY_BYTES + SITES as u64
+        );
+        eprintln!("genuine signed replay restart={restart}: input={} final={} receiver_limit={} quota_room=131072", trigger.records.iter().map(String::len).sum::<usize>(), count.bytes, plumb_net::node::MAX_RECORD_DELIVERY_BYTES);
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            super::network::persist_delivery(
+                inner.clone(),
+                records,
+                news,
+                oversized.reservation,
+                Some(oversized.acknowledgment),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(!batches
+            .join(format!("{trigger_id}.delivered-agreed"))
+            .exists());
+        if !restart {
+            let delivery = tokio::time::timeout(Duration::from_secs(10), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(delivery.reservation.is_some());
+            let (news, records): (Vec<_>, Vec<_>) = delivery
+                .records
+                .into_iter()
+                .partition(|r| !r.news.is_empty());
+            assert_eq!(news.len(), 1);
+            assert_eq!(records.len(), 1);
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                super::network::persist_delivery(
+                    inner.clone(),
+                    records,
+                    news,
+                    delivery.reservation,
+                    Some(delivery.acknowledgment),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(batches
+                .join(format!("{following_id}.delivered-trusted"))
+                .exists());
+            assert_eq!(
+                read_jsonl::<SiteRecord>(&inner.paths.inbox).unwrap().len(),
+                1
+            );
+            assert_eq!(inner.news.headline_count(), 1);
+        } else {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), received.recv())
+                    .await
+                    .is_err(),
+                "acknowledged following delivery replayed twice"
+            );
+        }
+        assert_eq!(budget.status().limit_bytes, cap.unwrap());
+        assert_eq!(std::fs::read(&inner.paths.records).unwrap(), raw);
+        assert_eq!(
+            std::fs::read(batches.join(format!("{trigger_id}.json"))).unwrap(),
+            trigger_signed
+        );
+        assert_eq!(
+            std::fs::read(batches.join(format!("{following_id}.json"))).unwrap(),
+            following_signed
+        );
+        for (id, hash) in &signed {
+            assert_eq!(
+                Sha256::digest(std::fs::read(batches.join(format!("{id}.json"))).unwrap()),
+                *hash
+            );
+        }
+        net.shutdown().await;
+        drop(received);
+        assert_eq!(
+            std::fs::read(credits.join("ledger.json")).unwrap(),
+            credit_bytes
+        );
+    }
+    assert_eq!(budget.status().reserved_bytes, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_payloads_pending() {
     for unsupported in [false, true] {
         let source_dir = tempfile::tempdir().unwrap();

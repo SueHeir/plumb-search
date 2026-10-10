@@ -579,6 +579,14 @@ pub(super) async fn persist_delivery(
         let acknowledgment = acknowledgment.clone();
         let mut admitted = reservation.take();
         let saved = tokio::task::spawn_blocking(move || {
+            // Classify permanent raw encoding failures before either destination
+            // can wait for quota. Filtering and headline partitioning already ran.
+            // Ordinary worker failures retain the delivery through the retry path.
+            if !persisted {
+                if let Err(err) = check_inbox_payload(&payload) {
+                    return (news_persisted, false, admitted, Err(err));
+                }
+            }
             let mut news_durable = news_persisted;
             if !news_durable {
                 // Headline persistence rewrites its complete store. It admits
@@ -647,6 +655,18 @@ pub(super) async fn persist_delivery(
         }
         delay = delay.saturating_mul(2).min(Duration::from_secs(5));
     }
+}
+
+fn check_inbox_payload(records: &[SiteRecord]) -> Result<()> {
+    let mut size = plumb_core::storage::ByteCount {
+        bytes: 0,
+        limit: MAX_INBOX_PAYLOAD as u64,
+    };
+    for record in records {
+        serde_json::to_writer(&mut size, record).context(UnsupportedInboxPayload)?;
+        size.write_all(b"\n").context(UnsupportedInboxPayload)?;
+    }
+    Ok(())
 }
 
 fn append_inbox_reserved(
@@ -721,7 +741,7 @@ fn append_inbox_reserved(
     written.with_context(|| format!("writing {}", path.display()))
 }
 
-const MAX_INBOX_PAYLOAD: usize = 64 * 1024 * 1024;
+const MAX_INBOX_PAYLOAD: usize = plumb_net::node::MAX_RECORD_DELIVERY_BYTES as usize;
 
 /// This final payload cannot be encoded within the receiver's bounded memory.
 /// Retrying quota or filesystem I/O cannot change that payload's size.

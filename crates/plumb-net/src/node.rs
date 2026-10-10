@@ -1056,6 +1056,11 @@ pub struct RecordDelivery {
     pub acknowledgment: crate::store::DeliveryAck,
 }
 
+/// The receiver's bounded raw encoding envelope. A recovered output above
+/// this size reaches the receiver without a storage token: only the receiver
+/// can partition headlines and filter sites before deciding what to persist.
+pub const MAX_RECORD_DELIVERY_BYTES: u64 = 64 * 1024 * 1024;
+
 fn max_delivery_bytes(records: usize) -> u64 {
     // Agreement can release a crawl and a mention per input record. Leave
     // room for merged metadata as well as a full protocol-sized record.
@@ -1067,11 +1072,12 @@ fn max_delivery_bytes(records: usize) -> u64 {
 /// Queue only the serialized payload's allocation, including the append's
 /// possible recovery newline. News admits its complete rewrite separately.
 fn delivery_bytes(records: &[SiteRecord]) -> Result<u64> {
+    delivery_bytes_up_to(records, u64::MAX)
+}
+
+fn delivery_bytes_up_to(records: &[SiteRecord], limit: u64) -> Result<u64> {
     use std::io::Write;
-    let mut size = plumb_core::storage::ByteCount {
-        bytes: 0,
-        limit: u64::MAX,
-    };
+    let mut size = plumb_core::storage::ByteCount { bytes: 0, limit };
     for record in records {
         serde_json::to_writer(&mut size, record)?;
         size.write_all(b"\n")?;
@@ -4810,21 +4816,30 @@ fn resend_pending(
             continue;
         }
         let bytes = if budget.is_some() {
-            match delivery_bytes(&confirmed) {
-                Ok(bytes) => bytes,
+            match delivery_bytes_up_to(&confirmed, MAX_RECORD_DELIVERY_BYTES) {
+                Ok(bytes) => Some(bytes),
                 Err(err) => {
-                    warn!("cannot size pending delivery {id}: {err:#}");
-                    continue;
+                    // Agreement can merge observations from many signed
+                    // batches. Their individual bounds do not bound this
+                    // final output. Never wait for an impossible full-output
+                    // admission before the receiver can classify it; its
+                    // headline partition and site filter may also make the
+                    // actual raw payload smaller than this envelope.
+                    warn!("pending delivery exceeds sizing envelope; receiver will classify and admit it: {err:#}");
+                    None
                 }
             }
         } else {
-            0
+            None
         };
         let mut delay = std::time::Duration::from_millis(100);
         let reservation = loop {
             if stopping() {
                 return;
             }
+            let Some(bytes) = bytes else {
+                break None;
+            };
             match budget.as_ref().map(|b| b.reserve(bytes, false)).transpose() {
                 Ok(reservation) => break reservation,
                 Err(err) => {
