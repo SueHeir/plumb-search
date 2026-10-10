@@ -869,24 +869,25 @@ fn write_atomic_mode(
         .transpose()
         .map_err(io::Error::other)?;
     let result = (|| {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            if private {
-                options.mode(0o600);
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                if private {
+                    options.mode(0o600);
+                }
             }
+            #[cfg(not(unix))]
+            let _ = private;
+            let mut file = options.open(part)?;
+            file.write_all(bytes)?;
+            if let Some(modified) = modified {
+                file.set_modified(modified)?;
+            }
+            file.sync_all()?;
         }
-        #[cfg(not(unix))]
-        let _ = private;
-        let mut file = options.open(part)?;
-        file.write_all(bytes)?;
-        if let Some(modified) = modified {
-            file.set_modified(modified)?;
-        }
-        file.sync_all()?;
-        drop(file);
         fs::rename(part, dest)
     })();
     if result.is_err() {
