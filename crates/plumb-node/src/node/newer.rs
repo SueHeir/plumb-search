@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use plumb_net::pages::{layers_path, read_layers, Layers, PagesChunk};
+use plumb_net::pages::{layers_path, quality_path, read_layers, Layers, PagesChunk, SetQuality};
 use plumb_net::{NetHandle, PeerId};
 use tracing::warn;
 
@@ -64,6 +64,7 @@ pub(super) struct Offer {
     pub size: u64,
     pub modified: u64,
     pub layers: Option<Vec<String>>,
+    pub quality: Option<SetQuality>,
 }
 
 /// This node's file of a set, as [`newest`] weighs it.
@@ -79,6 +80,7 @@ pub(super) struct Mine {
     /// A newer file may be any size bigger (the set is named in
     /// `--set-updates`), not only [`MAX_GROWTH_PERCENT`] of this one.
     pub may_grow: bool,
+    pub quality: Option<SetQuality>,
 }
 
 /// The trusted nodes' files of `set`, from asking each connected one that
@@ -110,6 +112,7 @@ pub(super) fn offers(inner: &Inner, net: &NetHandle, set: &str) -> Result<Option
                 size: chunk.size,
                 modified: chunk.modified,
                 layers: chunk.layers,
+                quality: chunk.quality,
             });
         }
     }
@@ -152,6 +155,20 @@ pub(super) fn newest<'a>(
             why = "a trusted node's newer file lacks entries this one has";
             continue;
         }
+        if let Some(quality) = &mine.quality {
+            let holds_quality = offer.quality.as_ref().is_some_and(|theirs| {
+                quality.stages.iter().filter(|s| s.complete).all(|stage| {
+                    theirs
+                        .stages
+                        .iter()
+                        .any(|s| s.name == stage.name && s.complete)
+                })
+            });
+            if !holds_quality {
+                why = "a trusted node's newer file lacks completed quality stages this one has";
+                continue;
+            }
+        }
         if best.is_none_or(|b| offer.modified > b.modified) {
             best = Some(offer);
         }
@@ -161,12 +178,20 @@ pub(super) fn newest<'a>(
 
 /// Sets whose files carry lines of entries besides their pages, which a
 /// newer file must also carry.
-pub(super) const LAYERED_SETS: [&str; 2] = ["wikipedia-en", plumb_index::pages::WIKIDATA_SET];
+pub(super) const LAYERED_SETS: [&str; 7] = [
+    "wikipedia-en",
+    plumb_index::pages::WIKIDATA_SET,
+    plumb_index::pages::DOCS_SET,
+    plumb_index::pages::REFERENCE_SET,
+    plumb_index::pages::SUBPAGES_SET,
+    plumb_index::pages::OLD_SUBPAGES_SET,
+    plumb_index::pages::PAPERS_SET,
+];
 
 /// The kinds of entries on the lines of profiles of an articles file (see
 /// `plumb_core::article`): `website`, `lead`, `name`, each fact (`f-capital`)
 /// and `profiles` for any service, sorted.
-pub(super) fn layers_of(path: &Path) -> Result<Vec<String>> {
+pub(crate) fn layers_of(path: &Path) -> Result<Vec<String>> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(flate2::read::MultiGzDecoder::new(file));
     let mut kinds = std::collections::BTreeSet::new();
@@ -183,9 +208,12 @@ pub(super) fn layers_of(path: &Path) -> Result<Vec<String>> {
                 continue;
             };
             let kind = match key {
-                "website" | "lead" | "name" => key,
+                "website" | "lead" | "name" | "section" | "symbol" | "passage" | "language"
+                | "task-type" | "source-date" => key,
                 fact if fact.starts_with("f-") => fact,
-                _ => "profiles",
+                service if plumb_core::profiles::service_by_key(service).is_some() => "profiles",
+                // Unknown extensions are not social profiles.
+                _ => continue,
             };
             if !kinds.contains(kind) {
                 kinds.insert(kind.to_string());
@@ -231,7 +259,7 @@ pub(super) fn layers(set: &str, path: &Path) -> Vec<String> {
 }
 
 /// A file's time (Unix seconds) and size.
-pub(super) fn stamp(path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn stamp(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let modified = meta
         .modified()
@@ -251,7 +279,7 @@ pub(super) fn set_time(path: &Path, modified: u64) -> Result<()> {
 }
 
 /// `<file>.prev`.
-pub(super) fn prev_path(file: &Path) -> PathBuf {
+pub(crate) fn prev_path(file: &Path) -> PathBuf {
     let mut name = file.as_os_str().to_owned();
     name.push(".prev");
     PathBuf::from(name)
@@ -259,15 +287,47 @@ pub(super) fn prev_path(file: &Path) -> PathBuf {
 
 /// Puts the downloaded `part` in place of `file`, keeping the file it
 /// replaces as `<file>.prev`, and gives it its maker's time `modified`.
-pub(super) fn install(part: &Path, file: &Path, modified: u64) -> Result<()> {
+pub(crate) fn install(part: &Path, file: &Path, modified: u64) -> Result<()> {
+    // Finish potentially failing metadata work before touching the current file.
+    set_time(part, modified)?;
     if file.is_file() {
-        std::fs::rename(file, prev_path(file))
+        let parent = file
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let backup = tempfile::tempdir_in(parent)?;
+        let previous = backup.path().join("previous");
+        // Same-filesystem hard links keep large maps/sets reversible without
+        // another full copy. Fall back when the filesystem cannot link files.
+        if std::fs::hard_link(file, &previous).is_err() {
+            std::fs::copy(file, &previous)?;
+        }
+        std::fs::File::open(&previous)?.sync_all()?;
+        std::fs::rename(&previous, prev_path(file))
             .with_context(|| format!("keeping {} as .prev", file.display()))?;
     }
-    let _ = std::fs::remove_file(layers_path(file));
     std::fs::rename(part, file)
         .with_context(|| format!("renaming {} to {}", part.display(), file.display()))?;
-    set_time(file, modified)
+    let _ = std::fs::remove_file(layers_path(file));
+    let _ = std::fs::remove_file(quality_path(file));
+    Ok(())
+}
+
+/// Verify the offered generation after a whole transfer, before installation.
+pub(super) fn file_checksum(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut bytes = [0; 64 * 1024];
+    loop {
+        let len = file.read(&mut bytes)?;
+        if len == 0 {
+            break;
+        }
+        hash.update(&bytes[..len]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 #[cfg(test)]
@@ -281,6 +341,7 @@ mod tests {
             size,
             modified,
             layers: layers.map(|l| l.iter().map(|s| s.to_string()).collect()),
+            quality: None,
         }
     }
 
@@ -291,7 +352,73 @@ mod tests {
             complete: true,
             layers: layers.iter().map(|s| s.to_string()).collect(),
             may_grow: false,
+            quality: None,
         }
+    }
+
+    #[test]
+    fn completed_quality_stages_survive_optional_peer_metadata() {
+        use plumb_net::pages::QualityStage;
+        let quality = SetQuality {
+            generation: "g1".into(),
+            sha256: "0".repeat(64),
+            fetched_at: 1000,
+            records: 10,
+            hosts: 1,
+            failed_hosts: 0,
+            capped: false,
+            stages: vec![QualityStage {
+                name: "paper-repair".into(),
+                complete: true,
+            }],
+        };
+        let mine = Mine {
+            quality: Some(quality.clone()),
+            ..mine(&[])
+        };
+        assert!(newest(&mine, &[offer(1000, 2000, None)], 10_000).is_err());
+        let mut degraded = quality.clone();
+        degraded.stages[0].complete = false;
+        assert!(newest(
+            &mine,
+            &[Offer {
+                quality: Some(degraded),
+                ..offer(1000, 2000, None)
+            }],
+            10_000
+        )
+        .is_err());
+        assert!(newest(
+            &mine,
+            &[Offer {
+                quality: Some(quality),
+                ..offer(1000, 2000, None)
+            }],
+            10_000
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rich_docs_are_layers_and_unknown_extensions_are_not_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("docs.tsv.gz");
+        let mut gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&file).unwrap(),
+            flate2::Compression::fast(),
+        );
+        writeln!(gz, "profiles\thttps://example.org/api\tsection=API|symbol=padStart|passage=Usage|future-data=unknown").unwrap();
+        gz.finish().unwrap();
+        assert_eq!(layers("docs", &file), ["passage", "section", "symbol"]);
+    }
+
+    #[test]
+    fn failed_install_keeps_the_current_advertised_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("docs.tsv.gz");
+        std::fs::write(&file, b"old").unwrap();
+        assert!(install(&dir.path().join("missing.part"), &file, 123).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"old");
     }
 
     #[test]

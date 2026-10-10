@@ -43,6 +43,83 @@ pub struct PagesChunk {
     pub busy: bool,
     /// What the file holds besides its pages, when the node knows.
     pub layers: Option<Vec<String>>,
+    /// Optional ingestion quality, independent of receiving all file bytes.
+    pub quality: Option<SetQuality>,
+}
+
+/// Bounded metadata shared with legacy-compatible peers and public status.
+/// Host errors and cache paths belong only in the local generation manifest.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SetQuality {
+    pub generation: String,
+    pub sha256: String,
+    pub fetched_at: u64,
+    pub records: u64,
+    pub hosts: u64,
+    pub failed_hosts: u64,
+    pub capped: bool,
+    pub stages: Vec<QualityStage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QualityStage {
+    pub name: String,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QualityNote {
+    pub modified: u64,
+    pub size: u64,
+    pub quality: SetQuality,
+}
+
+pub fn quality_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".quality");
+    name.into()
+}
+
+/// Read only a small stamp-bound note, never scan the corpus per request.
+pub fn read_quality(path: &Path, modified: u64, size: u64) -> Option<SetQuality> {
+    let file = File::open(quality_path(path)).ok()?;
+    if file.metadata().ok()?.len() > 16 * 1024 {
+        return None;
+    }
+    let note: QualityNote = serde_json::from_reader(file).ok()?;
+    let quality = note.quality;
+    (note.modified == modified
+        && note.size == size
+        && quality.stages.len() <= 32
+        && quality.stages.iter().all(|s| s.name.len() <= 64)
+        && quality.generation.len() <= 128
+        && quality
+            .generation
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        && quality.sha256.len() == 64
+        && quality.sha256.bytes().all(|c| c.is_ascii_hexdigit()))
+    .then_some(quality)
+}
+
+/// Use an immutable local snapshot when a publisher installed one. Peers
+/// and legacy files without a local snapshot keep using their advertised file.
+pub fn generation_file(path: &Path) -> Option<std::path::PathBuf> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let quality = read_quality(path, modified, meta.len())?;
+    let mut directory = path.as_os_str().to_owned();
+    directory.push(".generations");
+    let file = std::path::PathBuf::from(directory)
+        .join(quality.generation)
+        .join("pages.tsv.gz");
+    let snapshot = std::fs::metadata(&file).ok()?;
+    (snapshot.is_file() && snapshot.len() == meta.len()).then_some(file)
 }
 
 /// What a node notes next to a page set file, as `<file>.layers`: the
@@ -86,6 +163,7 @@ pub fn answer(path: Option<&Path>, request: &PagesRequest) -> PagesResponse {
         bytes: ByteBuf::new(),
         busy: false,
         layers: None,
+        quality: None,
     };
     let Some(path) = path else {
         return empty;
@@ -110,6 +188,7 @@ pub fn answer(path: Option<&Path>, request: &PagesRequest) -> PagesResponse {
             bytes: ByteBuf::from(bytes),
             busy: false,
             layers: read_layers(path, modified, size),
+            quality: read_quality(path, modified, size),
         })
     };
     read().unwrap_or(empty)
@@ -118,6 +197,54 @@ pub fn answer(path: Option<&Path>, request: &PagesRequest) -> PagesResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_responses_and_optional_quality_are_compatible_and_stamp_bound() {
+        let legacy = br#"{"size":10,"modified":100,"bytes":[],"layers":null}"#;
+        let response: PagesResponse = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(response.quality, None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docs.tsv.gz");
+        let quality = SetQuality {
+            generation: "generation".into(),
+            sha256: "0".repeat(64),
+            fetched_at: 90,
+            records: 4,
+            hosts: 1,
+            failed_hosts: 1,
+            capped: false,
+            stages: vec![QualityStage {
+                name: "source-refresh".into(),
+                complete: false,
+            }],
+        };
+        let note = QualityNote {
+            modified: 100,
+            size: 10,
+            quality: quality.clone(),
+        };
+        std::fs::write(quality_path(&path), serde_json::to_vec(&note).unwrap()).unwrap();
+        assert_eq!(read_quality(&path, 100, 10), Some(quality.clone()));
+        assert_eq!(read_quality(&path, 101, 10), None);
+        assert_eq!(read_quality(&path, 100, 11), None);
+        let response = PagesResponse {
+            quality: Some(quality),
+            ..response
+        };
+        // CBOR maps allow older readers to ignore the new optional field.
+        let bytes = cbor4ii::serde::to_vec(Vec::new(), &response).unwrap();
+        let back: PagesResponse = cbor4ii::serde::from_slice(&bytes).unwrap();
+        assert_eq!(back, response);
+        #[derive(serde::Deserialize)]
+        struct OldResponse {
+            size: u64,
+            modified: u64,
+        }
+        let old: OldResponse = cbor4ii::serde::from_slice(&bytes).unwrap();
+        assert_eq!((old.size, old.modified), (10, 100));
+        std::fs::write(quality_path(&path), vec![b'x'; 20 * 1024]).unwrap();
+        assert_eq!(read_quality(&path, 100, 10), None);
+    }
 
     #[test]
     fn answers_pieces_of_the_file() {

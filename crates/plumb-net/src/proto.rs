@@ -257,6 +257,8 @@ pub struct PagesResponse {
     /// worked that out; `None` from nodes before it, or before they did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<crate::pages::SetQuality>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

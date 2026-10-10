@@ -18,6 +18,8 @@ pub struct ReferenceSite {
     pub roots: &'static [&'static str],
     /// Its sitemaps, when robots.txt names none or names others.
     pub sitemaps: &'static [&'static str],
+    /// Explicit task/section discovery pages; also considered page candidates.
+    pub index_pages: &'static [&'static str],
     /// How much its pages weigh against other sites', 1 to 10: the most
     /// used weigh most.
     pub weight: u64,
@@ -36,6 +38,13 @@ impl ReferenceSite {
         }
     }
 
+    /// Task indexes, falling back to the permitted roots for link discovery.
+    pub fn index_pages(&self) -> Vec<String> {
+        let mut pages = self.roots();
+        pages.extend(self.index_pages.iter().map(|p| p.to_string()));
+        pages
+    }
+
     /// Its host without `www.`: `healthline.com`, as the site is keyed.
     pub fn key(&self) -> &'static str {
         self.host.strip_prefix("www.").unwrap_or(self.host)
@@ -48,6 +57,7 @@ const fn whole(host: &'static str, weight: u64) -> ReferenceSite {
         host,
         roots: &[],
         sitemaps: &[],
+        index_pages: &[],
         weight,
         max_pages: None,
     }
@@ -59,6 +69,7 @@ const fn under(host: &'static str, roots: &'static [&'static str], weight: u64) 
         host,
         roots,
         sitemaps: &[],
+        index_pages: &[],
         weight,
         max_pages: None,
     }
@@ -70,8 +81,28 @@ const fn big(host: &'static str, weight: u64, max_pages: usize) -> ReferenceSite
         host,
         roots: &[],
         sitemaps: &[],
+        index_pages: &[],
         weight,
         max_pages: Some(max_pages),
+    }
+}
+
+/// A bounded task batch with explicit discovery hints. Existing hosts keep
+/// their permitted whole-site roots so a targeted refresh retains old tasks.
+const fn tasks(
+    host: &'static str,
+    roots: &'static [&'static str],
+    indexes: &'static [&'static str],
+    weight: u64,
+    cap: usize,
+) -> ReferenceSite {
+    ReferenceSite {
+        host,
+        roots,
+        sitemaps: &[],
+        index_pages: indexes,
+        weight,
+        max_pages: Some(cap),
     }
 }
 
@@ -101,7 +132,17 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
     big("www.drugs.com", 9, 10_000),
     big("www.medicinenet.com", 8, 10_000),
     under("medlineplus.gov", &["https://medlineplus.gov/"], 9),
-    whole("www.cdc.gov", 9),
+    tasks(
+        "www.cdc.gov",
+        &[],
+        &[
+            "https://www.cdc.gov/health-topics.html",
+            "https://www.cdc.gov/flu/prevention/index.html",
+            "https://www.cdc.gov/covid/prevention/index.html",
+        ],
+        9,
+        5_000,
+    ),
     under(
         "www.nhs.uk",
         &[
@@ -242,15 +283,82 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
     whole("www.thebalancecareers.com", 3),
     // Government.
     big("www.gov.uk", 10, 10_000),
-    whole("www.irs.gov", 10),
-    whole("www.ssa.gov", 8),
+    tasks(
+        "www.irs.gov",
+        &[],
+        &[
+            "https://www.irs.gov/forms-instructions",
+            "https://www.irs.gov/retirement-plans",
+            "https://www.irs.gov/payments",
+        ],
+        10,
+        5_000,
+    ),
+    tasks(
+        "www.ssa.gov",
+        &[],
+        &[
+            "https://www.ssa.gov/benefits",
+            "https://www.ssa.gov/number-card",
+            "https://www.ssa.gov/medicare",
+        ],
+        8,
+        5_000,
+    ),
     whole("www.usa.gov", 7),
     whole("www.uscis.gov", 6),
     whole("travel.state.gov", 6),
     whole("www.va.gov", 6),
     whole("www.medicare.gov", 6),
     whole("www.healthcare.gov", 5),
-    whole("studentaid.gov", 5),
+    tasks(
+        "studentaid.gov",
+        &[],
+        &[
+            "https://studentaid.gov/understand-aid",
+            "https://studentaid.gov/manage-loans",
+            "https://studentaid.gov/h/apply-for-aid/fafsa",
+        ],
+        5,
+        5_000,
+    ),
+    tasks(
+        "www.treasurydirect.gov",
+        &[
+            "https://www.treasurydirect.gov/savings-bonds/",
+            "https://www.treasurydirect.gov/marketable-securities/",
+        ],
+        &["https://www.treasurydirect.gov/savings-bonds/"],
+        7,
+        1_000,
+    ),
+    tasks(
+        "tools.usps.com",
+        &["https://tools.usps.com/go/"],
+        &[
+            "https://tools.usps.com/go/TrackConfirmAction_input",
+            "https://tools.usps.com/go/ZipLookupAction_input",
+            "https://tools.usps.com/go/POLocatorAction_input",
+        ],
+        6,
+        100,
+    ),
+    tasks(
+        "tfl.gov.uk",
+        &[
+            "https://tfl.gov.uk/plan-a-journey/",
+            "https://tfl.gov.uk/fares/",
+            "https://tfl.gov.uk/status-updates/",
+            "https://tfl.gov.uk/travel-information/",
+        ],
+        &[
+            "https://tfl.gov.uk/plan-a-journey/",
+            "https://tfl.gov.uk/fares/",
+            "https://tfl.gov.uk/status-updates/",
+        ],
+        7,
+        1_000,
+    ),
     whole("www.fda.gov", 5),
     whole("www.epa.gov", 4),
     whole("www.bls.gov", 5),
@@ -299,6 +407,10 @@ mod tests {
             for root in site.roots() {
                 assert!(root.starts_with("https://"), "{root}");
                 assert!(root.ends_with('/'), "{root}");
+            }
+            for index in site.index_pages {
+                assert!(index.starts_with("https://"), "{index}");
+                assert_eq!(crate::host_of(index).as_deref(), Some(site.host));
             }
         }
     }

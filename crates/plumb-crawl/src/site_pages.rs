@@ -70,6 +70,20 @@ pub struct SitePagesResult {
     /// Pages asked for that robots.txt disallowed, did not answer with a
     /// web page, or failed.
     pub skipped: usize,
+    /// Per requested URL, including skipped pages. Reasons are bounded
+    /// categories, rather than upstream bodies or sensitive error strings.
+    #[serde(default)]
+    pub outcomes: Vec<SitePageOutcome>,
+    /// Reached the end of the bounded page list (not transfer completeness).
+    #[serde(default)]
+    pub finished: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SitePageOutcome {
+    pub url: String,
+    pub final_url: Option<String>,
+    pub status: String,
 }
 
 /// Fetches the inner pages of `target`: those its sitemaps and index pages
@@ -122,6 +136,11 @@ pub async fn fetch_site_pages_with_extraction(
         let Ok(url) = http_url(index) else { continue };
         match fetch_list(&mut visit, &cfg, url.clone()).await {
             Ok((at, body)) => {
+                result.outcomes.push(SitePageOutcome {
+                    url: url.to_string(),
+                    final_url: Some(at.to_string()),
+                    status: "discovery-fetched".into(),
+                });
                 // "en/stable/contents/" sends you on to "en/5.2/contents/":
                 // the pages are under "en/5.2/" too.
                 if let Some(root) = moved_root(&url, &at, &roots) {
@@ -130,20 +149,35 @@ pub async fn fetch_site_pages_with_extraction(
                 }
                 indexes.push((at, body));
             }
-            Err(error) => info!("{}: index page {url}: {error}", target.domain),
+            Err(error) => {
+                result.outcomes.push(SitePageOutcome {
+                    url: url.to_string(),
+                    final_url: None,
+                    status: "discovery-failed".into(),
+                });
+                info!("{}: index page {url}: {error}", target.domain);
+            }
         }
     }
     let wanted = target.max_pages.max(1);
     let mut found = Found::new(&roots, wanted.saturating_mul(FOUND_FACTOR));
     for (at, body) in &indexes {
+        if crate::extract::extract_page_meta(at, &String::from_utf8_lossy(body))
+            .title
+            .is_some()
+        {
+            found.add(at.clone());
+        }
         for link in page_links(at, &String::from_utf8_lossy(body)) {
             found.add(link);
         }
     }
     let sitemaps = sitemaps_of(&mut visit, target, &roots).await;
-    read_sitemaps(&mut visit, &cfg, &target.domain, sitemaps, &mut found).await;
+    result
+        .outcomes
+        .extend(read_sitemaps(&mut visit, &cfg, &target.domain, sitemaps, &mut found).await);
     result.found = found.count;
-    let urls = found.shallowest(wanted);
+    let urls = found.balanced(wanted);
     info!(
         "{}: {} pages found under {}, fetching {}",
         target.domain,
@@ -170,6 +204,7 @@ pub async fn fetch_site_pages_with_extraction(
                 }
             }
         }
+        let mut final_url = None;
         let skipped = match outcome {
             CrawlOutcome::Fetched(page) => {
                 let at = Url::parse(&page.final_url).ok().map(|mut at| {
@@ -184,6 +219,7 @@ pub async fn fetch_site_pages_with_extraction(
                             && !seen.contains(at.as_str()) =>
                     {
                         seen.insert(at.to_string());
+                        final_url = Some(at.to_string());
                         result.pages.push(SitePage {
                             url: at.into(),
                             meta: page.meta,
@@ -208,6 +244,11 @@ pub async fn fetch_site_pages_with_extraction(
                 })
             }
         };
+        result.outcomes.push(SitePageOutcome {
+            url: url.to_string(),
+            final_url,
+            status: skipped.clone().unwrap_or_else(|| "fetched".into()),
+        });
         if let Some(reason) = skipped {
             result.skipped += 1;
             *why.entry(reason).or_default() += 1;
@@ -228,6 +269,7 @@ pub async fn fetch_site_pages_with_extraction(
             format!(" ({})", why.join(", "))
         }
     );
+    result.finished = true;
     result
 }
 
@@ -273,7 +315,8 @@ async fn read_sitemaps(
     domain: &str,
     sitemaps: Vec<Url>,
     found: &mut Found<'_>,
-) {
+) -> Vec<SitePageOutcome> {
+    let mut outcomes = Vec::new();
     let mut queue: std::collections::VecDeque<Url> = sitemaps.into();
     let mut read = HashSet::new();
     while let Some(sitemap) = queue.pop_front() {
@@ -286,14 +329,34 @@ async fn read_sitemaps(
         let body = match fetch_list(visit, cfg, sitemap.clone()).await {
             Ok((_, body)) => body,
             Err(error) => {
+                outcomes.push(SitePageOutcome {
+                    url: sitemap.to_string(),
+                    final_url: None,
+                    status: if error.contains("404") {
+                        "discovery-unavailable"
+                    } else {
+                        "discovery-failed"
+                    }
+                    .into(),
+                });
                 info!("{domain}: sitemap {sitemap}: {error}");
                 continue;
             }
         };
         let Some(listed) = parse_sitemap(&body) else {
+            outcomes.push(SitePageOutcome {
+                url: sitemap.to_string(),
+                final_url: None,
+                status: "discovery-unavailable".into(),
+            });
             info!("{domain}: sitemap {sitemap} does not read");
             continue;
         };
+        outcomes.push(SitePageOutcome {
+            url: sitemap.to_string(),
+            final_url: None,
+            status: "discovery-fetched".into(),
+        });
         for nested in listed.sitemaps {
             if let Ok(url) = http_url(&nested) {
                 // Only a site's own sitemaps: robots.txt may name another
@@ -314,6 +377,7 @@ async fn read_sitemaps(
         read.len(),
         found.count
     );
+    outcomes
 }
 
 /// Fetches a sitemap or index page at `url`, following redirects on the
@@ -623,6 +687,63 @@ impl<'a> Found<'a> {
         self.urls.len() >= self.most
     }
 
+    /// Reserve slots across configured roots (or top-level sections of a
+    /// whole-site root), then take shallow pages within each section.
+    fn balanced(self, wanted: usize) -> Vec<Url> {
+        if self.urls.len() <= wanted {
+            return self.shallowest(wanted);
+        }
+        let mut groups = std::collections::BTreeMap::<String, Vec<Url>>::new();
+        for url in self.urls {
+            let root = self
+                .roots
+                .iter()
+                .filter(|root| under_roots(&url, std::slice::from_ref(root)))
+                .max_by_key(|root| root.path().len());
+            let Some(root) = root else { continue };
+            let key = if self.roots.len() > 1 {
+                root.as_str().to_string()
+            } else {
+                let relative = url.path().strip_prefix(root.path()).unwrap_or(url.path());
+                let section = relative
+                    .trim_start_matches('/')
+                    .split('/')
+                    .next()
+                    .unwrap_or("");
+                if section.contains('.') || section.is_empty() {
+                    "overview".into()
+                } else {
+                    section.into()
+                }
+            };
+            groups.entry(key).or_default().push(url);
+        }
+        let mut groups: Vec<_> = groups
+            .into_values()
+            .map(|mut urls| {
+                urls.sort_by_key(depth);
+                std::collections::VecDeque::from(urls)
+            })
+            .collect();
+        groups.sort_by_key(|g| g.front().map_or(usize::MAX, depth));
+        let mut chosen = Vec::new();
+        while chosen.len() < wanted {
+            let before = chosen.len();
+            for group in &mut groups {
+                if let Some(url) = group.pop_front() {
+                    chosen.push(url);
+                }
+                if chosen.len() == wanted {
+                    break;
+                }
+            }
+            if chosen.len() == before {
+                break;
+            }
+        }
+        chosen
+    }
+
     /// The `wanted` shallowest pages, those listed first among equals.
     fn shallowest(self, wanted: usize) -> Vec<Url> {
         let mut urls: Vec<(usize, usize, Url)> = self
@@ -657,6 +778,22 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn bounded_selection_reserves_slots_across_roots() {
+        let roots = [
+            Url::parse("https://example.org/forms/").unwrap(),
+            Url::parse("https://example.org/benefits/").unwrap(),
+        ];
+        let mut found = Found::new(&roots, 100);
+        for i in 0..20 {
+            found.add(Url::parse(&format!("https://example.org/forms/{i}")).unwrap());
+        }
+        found.add(Url::parse("https://example.org/benefits/retirement/apply").unwrap());
+        let chosen = found.balanced(4);
+        assert_eq!(chosen.len(), 4);
+        assert!(chosen.iter().any(|u| u.path().starts_with("/benefits/")));
+    }
 
     #[tokio::test]
     async fn fetches_the_pages_sitemaps_and_index_pages_list() {
@@ -745,6 +882,11 @@ mod tests {
         assert_eq!(result.found, 5);
         assert_eq!(result.skipped, 2);
         assert!(result.pages.iter().all(|page| page.meta.search.is_none()));
+        assert!(result.finished);
+        assert!(result
+            .outcomes
+            .iter()
+            .any(|o| o.url.ends_with("secret.html") && o.status == "disallowed by robots.txt"));
 
         let few = fetch_site_pages(
             &SitePagesTarget {

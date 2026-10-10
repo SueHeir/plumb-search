@@ -17,6 +17,7 @@ fn main() {
     build_revision();
     println!("cargo:rerun-if-env-changed=PLUMB_PRIVATE_DIR");
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("set by Cargo"));
+    source_revision(&manifest);
     let dir = match env::var_os("PLUMB_PRIVATE_DIR") {
         Some(dir) => manifest.join(dir),
         None => manifest.join("../../target/private"),
@@ -34,6 +35,44 @@ fn main() {
             "PLUMB_PRIVATE_DIR is set, but {} does not hold {}",
             dir.display(),
             FILES.join(" and ")
+        );
+    }
+}
+
+/// Stamp publication manifests with the source that actually built the binary.
+/// Source archives keep this unknown unless the builder supplies a revision.
+fn source_revision(manifest: &Path) {
+    println!("cargo:rerun-if-env-changed=PLUMB_SOURCE_REVISION");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(manifest)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|s| s.trim().to_string())
+    };
+    for name in ["HEAD", "index"] {
+        if let Some(path) = git(&["rev-parse", "--git-path", name]) {
+            println!("cargo:rerun-if-changed={}", manifest.join(path).display());
+        }
+    }
+    if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(path) = git(&["rev-parse", "--git-path", &reference]) {
+            println!("cargo:rerun-if-changed={}", manifest.join(path).display());
+        }
+    }
+    let revision = env::var("PLUMB_SOURCE_REVISION")
+        .ok()
+        .or_else(|| git(&["rev-parse", "HEAD"]));
+    if let Some(revision) =
+        revision.filter(|r| r.len() == 40 && r.bytes().all(|c| c.is_ascii_hexdigit()))
+    {
+        let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
+        println!(
+            "cargo:rustc-env=PLUMB_SOURCE_REVISION={revision}{}",
+            if dirty { "+dirty" } else { "" }
         );
     }
 }

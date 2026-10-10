@@ -6,6 +6,9 @@ use anyhow::{bail, Context, Result};
 use plumb_ingest::{articles, download, facts, intros, kind_sites};
 use tracing::{error, info, warn};
 
+mod cache;
+mod publication;
+
 use crate::block_on;
 use crate::cli::{
     FetchDataArgs, FetchFactsArgs, FetchLeadsArgs, FetchPagesArgs, FetchProfilesArgs,
@@ -348,117 +351,34 @@ fn run_films(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     write_set(dest, &films, "films and shows")
 }
 
-/// Docs sites fetched at once; each site's pages are fetched one at a time.
-const DOCS_SITES_AT_ONCE: usize = 16;
-
-/// Makes the docs set file `dest` from the docs sites' pages (see
-/// [`plumb_core::docs`]). With --work, each site's pages are kept there as
-/// `docs-rich-VERSION-KEY.json` when fetched, and a site already kept is not fetched
-/// again.
-fn run_docs(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
-    use plumb_core::docs::{DocsSite, DOCS_SITES};
-    use plumb_ingest::docs::{docs_articles, sort_docs, FetchedDoc};
-
-    let sites: Vec<&'static DocsSite> = if args.docs_sites.is_empty() {
+/// Refresh selected docs hosts, keeping unrelated and failed hosts.
+fn run_docs(args: &FetchPagesArgs, dest: &Path) -> Result<()> {
+    use plumb_core::docs::DOCS_SITES;
+    let sites = if args.docs_sites.is_empty() {
         DOCS_SITES.iter().collect()
     } else {
         args.docs_sites
             .iter()
             .map(|key| {
-                plumb_core::docs::site(key).with_context(|| {
-                    let keys: Vec<&str> = DOCS_SITES.iter().map(|site| site.key).collect();
-                    format!("unknown docs site {key:?}; there are: {}", keys.join(", "))
-                })
+                plumb_core::docs::site(key).with_context(|| format!("unknown docs site {key:?}"))
             })
-            .collect::<Result<_>>()?
+            .collect::<Result<Vec<_>>>()?
     };
-    if let Some(work) = &args.work {
-        std::fs::create_dir_all(work).with_context(|| format!("creating {}", work.display()))?;
-    }
-    let max_pages = args.max_docs_per_site;
-    let work = args.work.clone();
-    let fetched = block_on(async move {
-        let cfg = plumb_crawl::CrawlConfig::default();
-        let mut running = tokio::task::JoinSet::new();
-        let mut done = Vec::new();
-        let mut queue = sites.into_iter();
-        loop {
-            while running.len() < DOCS_SITES_AT_ONCE {
-                let Some(site) = queue.next() else { break };
-                let cfg = cfg.clone();
-                let kept = work.as_ref().map(|work| {
-                    work.join(format!(
-                        "docs-rich-{}-{}.json",
-                        plumb_crawl::DOCS_EXTRACTOR_VERSION,
-                        site.key
-                    ))
-                });
-                running.spawn(async move {
-                    if let Some(docs) = kept.as_deref().and_then(read_kept_docs) {
-                        info!(
-                            "{}: {} pages kept from an earlier run",
-                            site.key,
-                            docs.len()
-                        );
-                        return (site, docs);
-                    }
-                    let target = plumb_crawl::SitePagesTarget {
-                        domain: site.domain.to_string(),
-                        roots: site.roots.iter().map(|r| r.to_string()).collect(),
-                        sitemaps: site.sitemaps.iter().map(|r| r.to_string()).collect(),
-                        index_pages: site.index_pages.iter().map(|r| r.to_string()).collect(),
-                        max_pages,
-                    };
-                    let result = plumb_crawl::fetch_site_pages_with_extraction(
-                        &target,
-                        &cfg,
-                        plumb_crawl::InnerPageExtraction::Docs,
-                    )
-                    .await;
-                    let docs: Vec<FetchedDoc> = result
-                        .pages
-                        .into_iter()
-                        .map(|page| FetchedDoc {
-                            url: page.url,
-                            title: page.meta.title,
-                            description: page.meta.description,
-                            text: page.meta.body_text,
-                            sections: page.meta.sections,
-                            search: page.meta.search,
-                            language: page.meta.language,
-                        })
-                        .collect();
-                    if let Some(kept) = &kept {
-                        if !docs.is_empty() {
-                            if let Err(err) = write_kept_docs(kept, &docs) {
-                                warn!("{}: keeping its pages: {err:#}", site.key);
-                            }
-                        }
-                    }
-                    (site, docs)
-                });
-            }
-            match running.join_next().await {
-                Some(Ok(site_docs)) => done.push(site_docs),
-                Some(Err(err)) => warn!("a docs site's fetch failed: {err}"),
-                None => break,
-            }
-        }
-        done
-    })?;
-    let mut pages = Vec::new();
-    for (site, docs) in &fetched {
-        let articles = docs_articles(site, docs);
-        info!(
-            "{}: {} pages of {} fetched",
+    let fetched = fetch_sites(args, sites, "docs", |site| {
+        (
             site.key,
-            articles.len(),
-            docs.len()
-        );
-        pages.extend(articles);
-    }
-    sort_docs(&mut pages);
-    write_set(dest, &pages, "docs pages")
+            plumb_crawl::SitePagesTarget {
+                domain: site.domain.into(),
+                roots: site.roots.iter().map(|r| r.to_string()).collect(),
+                sitemaps: site.sitemaps.iter().map(|r| r.to_string()).collect(),
+                index_pages: site.index_pages.iter().map(|r| r.to_string()).collect(),
+                max_pages: args.max_docs_per_site,
+            },
+        )
+    })?;
+    publish_sites(args, dest, fetched, |site, docs| {
+        plumb_ingest::docs::docs_articles(site, docs)
+    })
 }
 
 /// Reference or subpage sites whose pages are fetched at once, each one
@@ -471,7 +391,7 @@ const REFERENCE_SITES_AT_ONCE: usize = 32;
 /// stopped run carries on.
 fn run_reference(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     use plumb_core::reference::{ReferenceSite, REFERENCE_SITES};
-    use plumb_ingest::reference::{reference_articles, sort_reference};
+    use plumb_ingest::reference::reference_articles;
 
     let sites: Vec<&'static ReferenceSite> = if args.reference_sites.is_empty() {
         REFERENCE_SITES.iter().collect()
@@ -485,7 +405,6 @@ fn run_reference(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
             })
             .collect::<Result<_>>()?
     };
-    let most = args.max_reference_per_site;
     let fetched = fetch_sites(args, sites, "reference", |site| {
         (
             site.key(),
@@ -493,24 +412,18 @@ fn run_reference(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
                 domain: site.key().to_string(),
                 roots: site.roots(),
                 sitemaps: site.sitemaps.iter().map(|r| r.to_string()).collect(),
-                index_pages: Vec::new(),
-                max_pages: site.max_pages.unwrap_or(most),
+                index_pages: site.index_pages(),
+                max_pages: args.max_reference_per_site.map_or(
+                    site.max_pages
+                        .unwrap_or(plumb_ingest::reference::DEFAULT_MAX_PER_SITE),
+                    |limit| limit.min(site.max_pages.unwrap_or(limit)),
+                ),
             },
         )
     })?;
-    let mut pages = Vec::new();
-    for (site, docs) in &fetched {
-        let articles = reference_articles(site, docs);
-        info!(
-            "{}: {} pages of {} fetched",
-            site.key(),
-            articles.len(),
-            docs.len()
-        );
-        pages.extend(articles);
-    }
-    sort_reference(&mut pages);
-    write_set(dest, &pages, "reference pages")
+    publish_sites(args, dest, fetched, |site, docs| {
+        reference_articles(site, docs)
+    })
 }
 
 /// Makes the subpages set file `dest`: the pages of the subpage sites (or
@@ -520,7 +433,6 @@ fn run_reference(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
 /// carries on.
 fn run_subpages(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     use plumb_core::subpages::{SubpageKind, SubpageSite, SUBPAGE_SITES};
-    use plumb_ingest::reference::sort_reference;
     use plumb_ingest::subpages::subpage_articles;
 
     let kinds: Vec<SubpageKind> = args
@@ -558,48 +470,43 @@ fn run_subpages(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
                 roots: site.roots(),
                 sitemaps: site.site.sitemaps.iter().map(|r| r.to_string()).collect(),
                 index_pages: site.index_pages(),
-                max_pages: site.max_pages(),
+                max_pages: args
+                    .max_subpages_per_site
+                    .map_or(site.max_pages(), |limit| limit.min(site.max_pages())),
             },
         )
     })?;
-    let mut pages = Vec::new();
-    for (site, docs) in &fetched {
-        let articles = subpage_articles(site, docs);
-        info!(
-            "{}: {} pages of {} fetched",
-            site.key(),
-            articles.len(),
-            docs.len()
-        );
-        pages.extend(articles);
-    }
-    sort_reference(&mut pages);
-    write_set(dest, &pages, "subpages")
+    publish_sites(args, dest, fetched, |site, docs| {
+        subpage_articles(site, docs)
+    })
 }
 
-/// Fetches the pages of `sites`, [`REFERENCE_SITES_AT_ONCE`] sites at a
-/// time, each site's key and pages to fetch given by `target`. With
-/// --work, each site's pages are kept as `{prefix}-{key}.json` there, and
-/// a site kept by an earlier run is not fetched again.
-fn fetch_sites<S: Copy + Send + 'static>(
+/// Fetch independent hosts concurrently; cache compatibility includes the
+/// complete profile (title policy/weights included) and crawl settings.
+fn fetch_sites<S: Copy + Send + std::fmt::Debug + 'static>(
     args: &FetchPagesArgs,
     sites: Vec<S>,
     prefix: &'static str,
     target: impl Fn(S) -> (&'static str, plumb_crawl::SitePagesTarget),
-) -> Result<Vec<(S, Vec<plumb_ingest::docs::FetchedDoc>)>> {
-    use plumb_ingest::docs::FetchedDoc;
-
+) -> Result<Vec<cache::SiteFetch<S>>> {
     if let Some(work) = &args.work {
-        std::fs::create_dir_all(work).with_context(|| format!("creating {}", work.display()))?;
+        std::fs::create_dir_all(work)?;
     }
     let work = args.work.clone();
-    let sites: Vec<(S, &'static str, plumb_crawl::SitePagesTarget)> = sites
+    let policy = cache::Policy {
+        max_age: args.cache_max_age_days.saturating_mul(86_400),
+        force: args.force_refresh,
+    };
+    let sites: Vec<_> = sites
         .into_iter()
         .map(|site| {
             let (key, target) = target(site);
-            (site, key, target)
+            (site, key, target, format!("{site:?}"))
         })
         .collect();
+    if sites.iter().any(|(_, _, target, _)| target.max_pages == 0) {
+        bail!("page caps must be greater than zero");
+    }
     block_on(async move {
         let cfg = plumb_crawl::CrawlConfig::default();
         let mut running = tokio::task::JoinSet::new();
@@ -607,64 +514,72 @@ fn fetch_sites<S: Copy + Send + 'static>(
         let mut queue = sites.into_iter();
         loop {
             while running.len() < REFERENCE_SITES_AT_ONCE {
-                let Some((site, key, target)) = queue.next() else {
+                let Some((site, key, target, profile)) = queue.next() else {
                     break;
                 };
                 let cfg = cfg.clone();
-                let kept = work
+                let path = work
                     .as_ref()
-                    .map(|work| work.join(format!("{prefix}-{key}.json")));
+                    .map(|w| w.join(format!("{prefix}-{key}.json")));
                 running.spawn(async move {
-                    if let Some(docs) = kept.as_deref().and_then(read_kept_docs) {
-                        info!("{key}: {} pages kept from an earlier run", docs.len());
-                        return (site, docs);
+                    let cached =
+                        cache::fetch(key, &target, &profile, &cfg, path.as_deref(), policy).await;
+                    cache::SiteFetch {
+                        site,
+                        target,
+                        cached,
                     }
-                    let result = plumb_crawl::fetch_site_pages(&target, &cfg).await;
-                    let docs: Vec<FetchedDoc> = result
-                        .pages
-                        .into_iter()
-                        .map(|page| FetchedDoc {
-                            url: page.url,
-                            title: page.meta.title,
-                            description: page.meta.description,
-                            text: page.meta.body_text,
-                            sections: page.meta.sections,
-                            search: page.meta.search,
-                            language: page.meta.language,
-                        })
-                        .collect();
-                    if let Some(kept) = &kept {
-                        if !docs.is_empty() {
-                            if let Err(err) = write_kept_docs(kept, &docs) {
-                                warn!("{key}: keeping its pages: {err:#}");
-                            }
-                        }
-                    }
-                    (site, docs)
                 });
             }
             match running.join_next().await {
-                Some(Ok(site_docs)) => done.push(site_docs),
-                Some(Err(err)) => warn!("a site's fetch failed: {err}"),
+                Some(Ok(fetched)) => done.push(fetched),
+                // Never publish an incomplete selection after a lost task.
+                Some(Err(err)) => return Err(anyhow::anyhow!("host fetch task failed: {err}")),
                 None => break,
             }
         }
-        done
-    })
+        Ok(done)
+    })?
 }
 
-/// The pages of a docs site kept at `path` by an earlier run.
-fn read_kept_docs(path: &std::path::Path) -> Option<Vec<plumb_ingest::docs::FetchedDoc>> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+fn publication_options(args: &FetchPagesArgs) -> publication::Options {
+    publication::Options {
+        replace: args.replace_set,
+        stage_only: args.stage_only,
+        allow_growth: args.allow_set_growth,
+        max_bytes: args.max_set_bytes,
+    }
 }
 
-/// Keeps the pages `docs` of a docs site at `path`.
-fn write_kept_docs(path: &std::path::Path, docs: &[plumb_ingest::docs::FetchedDoc]) -> Result<()> {
-    let part = path.with_extension("json.part");
-    std::fs::write(&part, serde_json::to_vec(docs)?)?;
-    std::fs::rename(&part, path)?;
-    Ok(())
+fn publish_sites<S>(
+    args: &FetchPagesArgs,
+    dest: &Path,
+    fetched: Vec<cache::SiteFetch<S>>,
+    convert: impl Fn(&S, &[plumb_ingest::docs::FetchedDoc]) -> Vec<plumb_core::Article>,
+) -> Result<()> {
+    let batches = fetched
+        .into_iter()
+        .map(|fetch| {
+            let useful: Vec<_> = fetch
+                .cached
+                .envelope
+                .docs
+                .iter()
+                .filter(|doc| plumb_ingest::reference::useful_page(doc))
+                .cloned()
+                .collect();
+            let pages = convert(&fetch.site, &useful);
+            publication::HostBatch::new(fetch.target, fetch.cached, pages, args.min_useful_pages)
+        })
+        .collect::<Vec<_>>();
+    publication::publish(
+        dest,
+        crate::pages::SetInfo::named(&args.set)
+            .context("known set")?
+            .id,
+        batches,
+        publication_options(args),
+    )
 }
 
 /// Makes the papers set file `dest` from OpenAlex's API, with free copies
@@ -1056,6 +971,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
         (None, Some(data)) => set.file(data),
         (None, None) => bail!("pass --data DIR or --out PATH"),
     };
+    if let Some(generation) = &args.promote_generation {
+        return publication::promote(generation, &dest, set.id, publication_options(&args));
+    }
     if set.id == plumb_index::pages::GITHUB_SET {
         return run_github(&args, &dest);
     }

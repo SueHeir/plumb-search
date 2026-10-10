@@ -142,6 +142,7 @@ const fn sized(
             host,
             roots,
             sitemaps: &[],
+            index_pages: &[],
             weight,
             max_pages,
         },

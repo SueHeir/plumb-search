@@ -52,6 +52,40 @@ pub(super) const BUSY_WAIT: Duration = Duration::from_secs(5);
 /// download failed.
 const FETCH_RETRY_WAIT: Duration = Duration::from_secs(15 * 60);
 
+/// Summaries were computed when the file was published/transferred; status
+/// reads small notes and the active index counter, never the corpus itself.
+pub(super) fn coverage(inner: &Inner) -> super::PageCoverage {
+    let settings = inner.settings();
+    let sets = crate::pages::SETS
+        .iter()
+        .map(|set| {
+            let file = set.file(&inner.paths.data);
+            let notes: Option<SetFileNotes> = std::fs::File::open(notes_path(&file))
+                .ok()
+                .filter(|f| f.metadata().is_ok_and(|m| m.len() <= 16 * 1024))
+                .and_then(|f| serde_json::from_reader(f).ok());
+            let file_quality = super::newer::stamp(&file)
+                .and_then(|(modified, size)| plumb_net::pages::read_quality(&file, modified, size));
+            super::SetCoverage {
+                set: set.id.into(),
+                enabled: set.kept(&settings.page_sets, settings.storage_limit_mb) > 0,
+                stored_records: notes
+                    .as_ref()
+                    .map(|n| n.lines)
+                    .or_else(|| file_quality.as_ref().map(|q| q.records)),
+                transfer_complete: notes.as_ref().map(|n| n.complete),
+                file_quality,
+            }
+        })
+        .collect();
+    let pages = inner.pages.read().unwrap_or_else(PoisonError::into_inner);
+    super::PageCoverage {
+        indexed_pages: pages.as_ref().map_or(0, |(_, p)| p.num_pages()),
+        index_generation: pages.as_ref().map(|(key, _)| key.clone()),
+        sets,
+    }
+}
+
 /// Runs until the node stops, on a blocking thread.
 pub(super) fn run(inner: Arc<Inner>) {
     remove_stale_parts(&inner.paths.data);
@@ -334,6 +368,7 @@ fn fetch_if_needed(
                 size,
                 complete: n.complete,
                 layers: super::newer::layers(set.id, &file),
+                quality: plumb_net::pages::read_quality(&file, modified, size),
                 may_grow,
             };
             match super::newer::newest(&mine, &offers, now) {
@@ -399,6 +434,14 @@ fn fetch_if_needed(
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
+    if first.modified != chosen.modified
+        || first.size != chosen.size
+        || first.layers != chosen.layers
+        || first.quality != chosen.quality
+    {
+        bail!("peer changed the offered generation before transfer");
+    }
+    let mut quality = first.quality.clone();
     let taken = take(inner, net, set, &part, first, pages, near);
     if !matches!(taken, Ok(Some(_))) {
         // Stopped, or failed: the part is of no use to a later try.
@@ -407,7 +450,27 @@ fn fetch_if_needed(
     let Some((lines, complete, modified, offset)) = taken? else {
         return Ok(());
     };
+    if complete {
+        if let Some(quality) = &mut quality {
+            // The cutter re-compresses even whole sets. Its checksum describes
+            // the locally advertised bytes; the wire checksum is checked in take.
+            quality.sha256 = super::newer::file_checksum(&part)?;
+        }
+    }
     super::newer::install(&part, &file, modified)?;
+    if complete {
+        if let Some(quality) = quality {
+            let size = std::fs::metadata(&file)?.len();
+            super::store::write_atomically(
+                &plumb_net::pages::quality_path(&file),
+                &serde_json::to_vec(&plumb_net::pages::QualityNote {
+                    modified,
+                    size,
+                    quality,
+                })?,
+            )?;
+        }
+    }
     write_notes(
         &file,
         &SetFileNotes {
@@ -442,6 +505,9 @@ fn take(
 ) -> Result<Option<(u64, bool, u64, u64)>> {
     let runtime = tokio::runtime::Handle::current();
     let from = first.peer;
+    let quality = first.quality.clone();
+    use sha2::{Digest, Sha256};
+    let mut wire_hash = Sha256::new();
     let mut cutter = SetFileCutter::create(part, pages)?;
     if !near.is_empty() {
         cutter = cutter.keep_past(crate::places::near_lines(near.to_vec()));
@@ -450,6 +516,7 @@ fn take(
     let mut offset = 0u64;
     let mut chunk = first;
     loop {
+        wire_hash.update(&chunk.bytes);
         decoder
             .write_all(&chunk.bytes)
             .with_context(|| format!("unpacking {} from {}", set.id, chunk.peer))?;
@@ -482,7 +549,11 @@ fn take(
                         return Ok(None);
                     }
                 }
-                Some(next) if next.size != size || next.modified != modified => {
+                Some(next)
+                    if next.size != size
+                        || next.modified != modified
+                        || next.quality != quality =>
+                {
                     bail!("{from} got a new {} file while it was taken", set.id)
                 }
                 Some(next) => break next,
@@ -491,6 +562,14 @@ fn take(
     }
     let cutter = decoder.get_mut();
     let complete = offset >= chunk.size && !cutter.cut();
+    if complete {
+        if let Some(quality) = quality {
+            anyhow::ensure!(
+                format!("{:x}", wire_hash.finalize()) == quality.sha256,
+                "downloaded set differs from its offered generation checksum"
+            );
+        }
+    }
     let lines = cutter.pages();
     cutter.finish()?;
     drop(decoder);
@@ -557,6 +636,7 @@ fn keep_map(
         complete: size > 0,
         layers: Vec::new(),
         may_grow,
+        quality: None,
     };
     let offer = match super::newer::newest(&mine, &offers, now_unix()) {
         Ok(offer) => offer.clone(),

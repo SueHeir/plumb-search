@@ -113,7 +113,7 @@ pub mod features;
 mod fill;
 pub mod journal;
 mod network;
-mod newer;
+pub(crate) mod newer;
 mod news;
 mod pages;
 mod places;
@@ -689,6 +689,27 @@ pub struct Status {
     /// feature changes (the desktop app's node can).
     #[serde(default)]
     pub can_restart: bool,
+    /// Indexed page count/generation plus bounded source-file quality notes.
+    /// File generation may be newer than the index while a rebuild is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_coverage: Option<PageCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageCoverage {
+    pub indexed_pages: u64,
+    pub index_generation: Option<String>,
+    pub sets: Vec<SetCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetCoverage {
+    pub set: String,
+    pub enabled: bool,
+    pub stored_records: Option<u64>,
+    /// Receiving the whole file is independent of its enrichment quality.
+    pub transfer_complete: Option<bool>,
+    pub file_quality: Option<plumb_net::pages::SetQuality>,
 }
 
 /// Work going on beside the main step, for the panel.
@@ -1557,6 +1578,7 @@ impl Inner {
             meaning_sites: self.meaning.get().map(|meaning| meaning.len() as u64),
             meaning_work: self.meaning_work(),
             can_restart: self.restart.can_restart(),
+            page_coverage: Some(pages::coverage(self)),
             background_updates: self.settings().background_updates,
             paused: pause.as_ref().map(|p| p.reason.clone()),
             paused_until: pause.and_then(|p| p.until),

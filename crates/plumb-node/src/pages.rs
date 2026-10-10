@@ -752,6 +752,7 @@ impl Wanted {
                 .filter_map(|set| {
                     let pages = set.kept(sets, storage_limit_mb);
                     let file = set.file(data_dir);
+                    let file = plumb_net::pages::generation_file(&file).unwrap_or(file);
                     (pages > 0 && file.is_file()).then_some((set, file, pages))
                 })
                 .collect(),
@@ -776,6 +777,9 @@ impl Wanted {
                 .map_or(0, |d| d.as_secs());
             let len = meta.map_or(0, |m| m.len());
             text.push_str(&format!("|{}:{len}:{modified}:{pages}", set.id));
+            if let Some(quality) = plumb_net::pages::read_quality(file, modified, len) {
+                text.push_str(&format!(":generation={}", quality.generation));
+            }
         }
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(text.as_bytes());

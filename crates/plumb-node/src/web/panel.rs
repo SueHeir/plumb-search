@@ -2540,6 +2540,7 @@ mod tests {
             meaning_sites: None,
             meaning_work: None,
             can_restart: false,
+            page_coverage: None,
             paused_until: None,
             network: None,
             fill: None,

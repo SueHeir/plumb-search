@@ -47,8 +47,8 @@ pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
 pub use records::{to_records, CRAWL_VERSION};
 pub use site_pages::{
-    fetch_site_pages, fetch_site_pages_with_extraction, SitePage, SitePagesResult, SitePagesTarget,
-    MAX_SITEMAPS,
+    fetch_site_pages, fetch_site_pages_with_extraction, SitePage, SitePageOutcome, SitePagesResult,
+    SitePagesTarget, MAX_SITEMAPS,
 };
 pub use terms::{pick_terms, words_of, TERM_WORDS};
 

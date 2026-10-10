@@ -3774,6 +3774,7 @@ impl Task {
                             bytes: serde_bytes::ByteBuf::new(),
                             busy: true,
                             layers: None,
+                            quality: None,
                         },
                     );
                     return;
@@ -3806,6 +3807,7 @@ impl Task {
                     bytes: response.bytes.into_vec(),
                     busy: response.busy,
                     layers: response.layers,
+                    quality: response.quality,
                 })));
             }
             request_response::Event::OutboundFailure {

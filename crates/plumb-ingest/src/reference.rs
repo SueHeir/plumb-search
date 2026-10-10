@@ -61,6 +61,9 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
     let mut articles = Vec::new();
     for (doc, title) in docs.iter().zip(titles) {
         let Some(title) = title else { continue };
+        if !useful_page(doc) {
+            continue;
+        }
         let Some(depth) = depth_of(&doc.url) else {
             continue;
         };
@@ -94,10 +97,81 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
             language,
             item: Some(doc.url.clone()),
             views: site.weight * VIEWS_PER_WEIGHT / depth.max(1) as u64,
+            sections: useful_sections(&doc.sections),
             ..Article::default()
         });
     }
     articles
+}
+
+/// Exclude soft errors, site indexes, search/redirect pages and empty JS
+/// shells from useful coverage, even when HTTP returned 200. Shared by the
+/// publication gate for docs and reference/subpages.
+pub fn useful_page(doc: &FetchedDoc) -> bool {
+    let Some(title) = doc.title.as_deref() else {
+        return false;
+    };
+    let lower = plumb_core::collapse_whitespace(title).to_lowercase();
+    let head = TITLE_SEPARATORS
+        .iter()
+        .filter_map(|s| lower.split_once(s).map(|p| p.0))
+        .next()
+        .unwrap_or(&lower);
+    if NOT_PAGES.contains(&head)
+        || [
+            "site index",
+            "sitemap",
+            "access denied",
+            "403 forbidden",
+            "internal server error",
+            "service unavailable",
+            "just a moment",
+            "enable javascript",
+        ]
+        .contains(&head)
+        || head.starts_with("redirecting")
+        || head.starts_with("404 ")
+    {
+        return false;
+    }
+    let text = doc.text.as_deref().unwrap_or("").trim();
+    if text
+        .to_lowercase()
+        .contains("you need to enable javascript to run this app")
+    {
+        return false;
+    }
+    !title.trim().is_empty()
+        && (doc
+            .description
+            .as_deref()
+            .is_some_and(|d| !d.trim().is_empty())
+            || !text.is_empty())
+}
+
+fn useful_sections(sections: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut chars = 0;
+    sections
+        .iter()
+        .filter_map(|s| {
+            let s = plumb_core::collapse_whitespace(s);
+            let lower = s.to_lowercase();
+            if s.is_empty()
+                || ["navigation", "menu", "search", "on this page"].contains(&lower.as_str())
+                || !seen.insert(lower)
+            {
+                return None;
+            }
+            let n = s.chars().count();
+            if chars + n > plumb_core::article::MAX_SECTIONS_CHARS {
+                return None;
+            }
+            chars += n;
+            Some(s)
+        })
+        .take(plumb_core::article::MAX_SECTIONS)
+        .collect()
 }
 
 /// Sorts `articles` most viewed first, keeping each address once.
@@ -194,6 +268,33 @@ mod tests {
             search: None,
             language: None,
         }
+    }
+
+    #[test]
+    fn useful_coverage_rejects_indexes_errors_empty_and_js_shells() {
+        for title in [
+            "Site Index | Agency",
+            "Search Results",
+            "Access Denied",
+            "Redirecting…",
+            "404 Not Found",
+            "Internal Server Error",
+        ] {
+            assert!(
+                !useful_page(&doc("https://example.org/task", title, "Boilerplate")),
+                "{title}"
+            );
+        }
+        let mut empty = doc("https://example.org/empty", "Agency", "");
+        empty.text = None;
+        assert!(!useful_page(&empty));
+        empty.text = Some("You need to enable JavaScript to run this app.".into());
+        assert!(!useful_page(&empty));
+        assert!(useful_page(&doc(
+            "https://example.org/form-1040",
+            "About Form 1040",
+            "How to file your tax return"
+        )));
     }
 
     #[test]
