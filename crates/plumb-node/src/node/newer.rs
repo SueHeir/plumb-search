@@ -209,7 +209,7 @@ pub(crate) fn layers_of(path: &Path) -> Result<Vec<String>> {
             };
             let kind = match key {
                 "website" | "lead" | "name" | "section" | "symbol" | "passage" | "language"
-                | "task-type" | "source-date" => key,
+                | "task-type" | "source-date" | "search" | "paper" => key,
                 fact if fact.starts_with("f-") => fact,
                 service if plumb_core::profiles::service_by_key(service).is_some() => "profiles",
                 // Unknown extensions are not social profiles.
@@ -239,6 +239,7 @@ pub(super) fn layers(set: &str, path: &Path) -> Vec<String> {
     match layers_of(path) {
         Ok(kinds) => {
             let note = Layers {
+                version: plumb_net::pages::LAYERS_VERSION,
                 modified,
                 size,
                 kinds: kinds.clone(),
@@ -407,9 +408,24 @@ mod tests {
             std::fs::File::create(&file).unwrap(),
             flate2::Compression::fast(),
         );
-        writeln!(gz, "profiles\thttps://example.org/api\tsection=API|symbol=padStart|passage=Usage|future-data=unknown").unwrap();
+        writeln!(gz, "profiles\thttps://example.org/api\tsection=API|symbol=padStart|passage=Usage|search={{\"version\":1}}|paper={{\"version\":1}}|future-data=unknown").unwrap();
         gz.finish().unwrap();
-        assert_eq!(layers("docs", &file), ["passage", "section", "symbol"]);
+        let (modified, size) = stamp(&file).unwrap();
+        std::fs::write(
+            layers_path(&file),
+            format!(r#"{{"modified":{modified},"size":{size},"kinds":["section"]}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            layers("docs", &file),
+            ["paper", "passage", "search", "section", "symbol"]
+        );
+        assert!(newest(
+            &mine(&["paper", "search"]),
+            &[offer(1_000, 2_000, Some(&["search"]))],
+            10_000,
+        )
+        .is_err());
     }
 
     #[test]

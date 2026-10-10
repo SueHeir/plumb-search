@@ -130,9 +130,14 @@ pub fn generation_file(path: &Path) -> Option<std::path::PathBuf> {
 /// file can't take the place of one with facts and leads added.
 pub const LAYERS_SUFFIX: &str = ".layers";
 
+/// Recompute notes made before typed search and paper extensions were recognized.
+pub const LAYERS_VERSION: u32 = 2;
+
 /// The layers noted next to `path` (see [`LAYERS_SUFFIX`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Layers {
+    #[serde(default)]
+    pub version: u32,
     /// The file's time (Unix seconds) and size they were worked out for.
     pub modified: u64,
     pub size: u64,
@@ -151,7 +156,8 @@ pub fn layers_path(path: &Path) -> std::path::PathBuf {
 pub fn read_layers(path: &Path, modified: u64, size: u64) -> Option<Vec<String>> {
     let bytes = std::fs::read(layers_path(path)).ok()?;
     let layers: Layers = serde_json::from_slice(&bytes).ok()?;
-    (layers.modified == modified && layers.size == size).then_some(layers.kinds)
+    (layers.version == LAYERS_VERSION && layers.modified == modified && layers.size == size)
+        .then_some(layers.kinds)
 }
 
 /// The answer to `request` from the set file at `path` (`None` when this
@@ -267,6 +273,7 @@ mod tests {
         // Layers are sent only when noted for the file as it is.
         assert_eq!(piece.layers, None);
         let note = |modified| Layers {
+            version: LAYERS_VERSION,
             modified,
             size: 10,
             kinds: vec!["lead".into()],
@@ -280,6 +287,15 @@ mod tests {
             Some(vec!["lead".into()])
         );
         write(&note(piece.modified - 1));
+        assert_eq!(answer(Some(&path), &ask(0, 4)).layers, None);
+        std::fs::write(
+            layers_path(&path),
+            format!(
+                r#"{{"modified":{},"size":10,"kinds":["lead"]}}"#,
+                piece.modified
+            ),
+        )
+        .unwrap();
         assert_eq!(answer(Some(&path), &ask(0, 4)).layers, None);
     }
 }
