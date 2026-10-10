@@ -6017,6 +6017,7 @@ dependencies = [
  "plumb-core",
  "serde",
  "serde_json",
+ "sha2",
  "stable_deref_trait",
  "tantivy",
  "tantivy-fst",

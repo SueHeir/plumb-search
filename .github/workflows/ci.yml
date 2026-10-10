@@ -27,6 +27,8 @@ jobs:
       - run: cargo fmt --all --check
       # The desktop app needs GUI libraries; the desktop job checks it.
       - run: cargo clippy --workspace --exclude plumb-desktop --all-targets -- -D warnings
+      - name: Test frozen12 in-process adapter with tiny synthetic indexes
+        run: cargo test --locked -p plumb-node --example frozen12 -- --test-threads=1
       - run: cargo test --workspace --exclude plumb-desktop
 
   # Every third-party crate's license is one about.toml accepts, and the

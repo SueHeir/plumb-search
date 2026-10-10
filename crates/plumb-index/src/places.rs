@@ -499,6 +499,20 @@ impl PlaceSearcher {
     pub fn open(dir: &Path) -> Result<Self> {
         let index = Index::open_in_dir(dir)
             .with_context(|| format!("opening the place index in {}", dir.display()))?;
+        let stats = std::fs::read(dir.join("places.json"))
+            .with_context(|| format!("reading {}/places.json", dir.display()))?;
+        Self::from_index(index, dir, &stats)
+    }
+
+    /// Opens a prebuilt externally retained immutable generation without disk writes.
+    pub fn open_retained(generation: &crate::retained::RetainedGeneration) -> Result<Self> {
+        let stats = generation.read_metadata("places.json")?;
+        let searcher = Self::from_index(generation.index()?, generation.path(), &stats)?;
+        generation.verify()?;
+        Ok(searcher)
+    }
+
+    fn from_index(index: Index, dir: &Path, stats: &[u8]) -> Result<Self> {
         analysis::register(index.tokenizers());
         let (schema, fields) = schema();
         if index.schema() != schema {
@@ -507,10 +521,7 @@ impl PlaceSearcher {
                 dir.display()
             );
         }
-        let stats: PlaceIndexStats = serde_json::from_slice(
-            &std::fs::read(dir.join("places.json"))
-                .with_context(|| format!("reading {}/places.json", dir.display()))?,
-        )?;
+        let stats: PlaceIndexStats = serde_json::from_slice(stats)?;
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
