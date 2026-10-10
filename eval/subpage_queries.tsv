@@ -2,7 +2,7 @@
 # or reference site: a research wiki's or a researcher's page, a company's
 # product page, a government publication, a league's standings, a
 # museum's visiting page. The answer is that page (or any page under it).
-# Run with --pages subpages.tsv.gz made with `fetch-pages --set subpages`
+# Run with --pages subpages2.tsv.gz made with `fetch-pages --set subpages2`
 # (and the other sets a node keeps).
 # Universities, labs and researchers.
 perft results	https://chessprogramming.org/Perft_Results
