@@ -2754,8 +2754,9 @@ const TITLE_STOP_WORDS: &[&str] = &[
 /// Whether `hit`, when it is a page of the subpages set, may be listed for
 /// `query`: named by its whole title, on one of the query's best sites
 /// ("rotten tomatoes oppenheimer", "met museum hours"), or with most of
-/// its title's words in the query ("amazon leadership principles" for
-/// "Leadership Principles"). A big site's news, press releases and reviews
+/// its title's words, or of its title before a colon, in the query
+/// ("amazon leadership principles" for "Amazon Leadership Principles:
+/// Values and company culture"). A big site's news, press releases and reviews
 /// share words with all sorts of searches: "seven summits" is not a
 /// leadership summit at jnj.com, nor "mount everest" a film review at
 /// ign.com. Pages of other sets always may.
@@ -2790,10 +2791,20 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
             .filter(|word| !TITLE_STOP_WORDS.contains(&word.as_str()))
             .collect()
     };
-    let title = words(&hit.page.title);
     let asked = words(query);
-    let shared = title.intersection(&asked).count();
-    shared >= 2 && shared as f32 >= SUBPAGE_TITLE_SHARE * title.len() as f32
+    let has_most = |title: &str| {
+        let title = words(title);
+        let shared = title.intersection(&asked).count();
+        shared >= 2 && shared as f32 >= SUBPAGE_TITLE_SHARE * title.len() as f32
+    };
+    // Or of its title before a subtitle: "Declaration of Independence" in
+    // "Declaration of Independence: A Transcription".
+    has_most(&hit.page.title)
+        || hit
+            .page
+            .title
+            .split_once(':')
+            .is_some_and(|(head, _)| has_most(head))
 }
 
 /// Languages a site's pages in another language than English are under
@@ -3652,6 +3663,31 @@ mod tests {
             "planetary fact sheet",
             &["planetary.org"],
             fact_sheet()
+        ));
+        // Or of its title before a subtitle, not before a dash.
+        let culture = || {
+            hit(
+                "https://www.aboutamazon.com/about-us/leadership-principles",
+                "Amazon Leadership Principles: Values and company culture",
+                false,
+            )
+        };
+        assert!(listed(
+            "amazon leadership principles",
+            &["amazon.jobs"],
+            culture()
+        ));
+        let transcript = || {
+            hit(
+                "https://www.archives.gov/founding-docs/declaration-transcript",
+                "Declaration of Independence: A Transcription",
+                false,
+            )
+        };
+        assert!(listed(
+            "declaration of independence transcript",
+            &["wikipedia.org"],
+            transcript()
         ));
         // Named by its whole title, or on a subdomain of a best site.
         assert!(listed(
