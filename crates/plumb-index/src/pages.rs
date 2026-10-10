@@ -3388,7 +3388,10 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
     if (hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET) || hit.named {
         return true;
     }
-    if in_other_language(&hit.page.url) {
+    // Retrieval/options already constrain known language. A locale-like
+    // path is only a fallback for older pages with no language metadata.
+    let language = hit.page.language();
+    if language.is_none() && in_other_language(&hit.page.url) {
         return false;
     }
     let domain = registrable_domain(&hit.page.url);
@@ -3402,7 +3405,16 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
     }
     static STEMS: std::sync::LazyLock<TextAnalyzer> =
         std::sync::LazyLock::new(analysis::stemmed_analyzer);
+    let content_analyzer = language
+        .filter(|language| *language != "en")
+        .map(|language| analysis::content_analyzer(Some(language)));
     let words = |text: &str| -> Vec<String> {
+        if let Some(analyzer) = &content_analyzer {
+            return analysis::tokens(analyzer, text)
+                .into_iter()
+                .filter(|word| word.chars().count() > 1)
+                .collect();
+        }
         text.split(|c: char| !c.is_alphanumeric())
             // The "s" of "John's" says nothing.
             .filter(|word| word.chars().count() > 1)
@@ -5016,6 +5028,56 @@ mod tests {
         );
         // Part of a title names nothing.
         assert!(found("perft").is_empty());
+    }
+
+    #[test]
+    fn declared_subpage_language_survives_retrieval_and_placement() {
+        for (language, title, query) in [
+            ("es", "Receta fácil de galleta", "recetas fáciles galletas"),
+            (
+                "de",
+                "Gesunde Ernährung und Bewegung",
+                "gesunden ernährung bewegungen",
+            ),
+        ] {
+            // Exercise the URL heuristic and the title-word gate separately.
+            for path in [language, "guide"] {
+                let page = Page::from_set(
+                    SUBPAGES_SET,
+                    Article {
+                        title: title.into(),
+                        item: Some(format!("https://reference.example/{path}/article")),
+                        language: Some(language.into()),
+                        views: 2_000,
+                        ..Article::default()
+                    },
+                )
+                .unwrap();
+                let mut unknown = page.clone();
+                unknown.content_language = None;
+                unknown.url.push_str("-unknown");
+                let options = crate::SearchOptions {
+                    language: Some(language.into()),
+                    ..crate::SearchOptions::default()
+                };
+                assert_eq!(unknown.language(), None);
+                assert!(!options_allow(&options, &unknown));
+                let (_dir, searcher) = searcher(&[page.clone(), unknown]);
+                let hits = searcher
+                    .in_language(options.language.as_deref())
+                    .search(query, 5)
+                    .unwrap();
+                assert_eq!(hits.len(), 1, "{language} /{path}: {hits:?}");
+                assert!(
+                    !hits[0].named,
+                    "must exercise the title-word placement gate"
+                );
+                assert!(options_allow(&options, &hits[0].page));
+                let placed = place_pages(query, &[], hits);
+                assert_eq!(placed.len(), 1, "{language} /{path}");
+                assert_eq!(placed[0].hit.page.url, page.url);
+            }
+        }
     }
 
     #[test]
