@@ -7464,6 +7464,7 @@ mod tests {
             ("Perf1 benchmark", 80),
             ("Perft results", 1),
             ("Erft cycling", 25),
+            ("Perf tools", 25),
             ("Ikala karaoke", 80),
             ("Inkala sudoku", 3),
             ("Kanye West albums", 40),
@@ -7572,10 +7573,11 @@ mod tests {
             spelled_with(&searcher, "kiwipete perft position", &RankConfig::default()),
             None
         );
-        // A real typo of a known word is still fixed.
+        // A word no site says counts as if one did: dropping a `t` from
+        // "perf", which only a few dozen sites say, is the rarer reading.
         assert_eq!(
-            spelled_with(&searcher, "turkey travle", &RankConfig::default()).as_deref(),
-            Some("turkey travel")
+            spelled_with(&searcher, "perft tools", &RankConfig::default()),
+            None
         );
     }
 
@@ -7651,7 +7653,6 @@ mod tests {
             ("gooogle", "google", "google.com"),
             ("bank of amercia", "bank of america", "bankofamerica.com"),
             ("bank of americ", "bank of america", "bankofamerica.com"),
-            ("weather forcast", "weather forecast", "weather.com"),
         ] {
             let results = search_spelled(&searcher, typed);
             assert_eq!(suggestion(&results), suggested(fixed), "{typed}");
@@ -7659,6 +7660,21 @@ mod tests {
             let fixed_hits = search_spelled(&searcher, fixed).hits;
             assert_eq!(fixed_hits[0].domain, domain, "{typed}");
         }
+        // A word's typo is fixed to the nearest common word. With the
+        // learned model, "forecast" would have to be in far more sites than
+        // this small index has to outweigh an edit it never saw.
+        let by_edits = RankConfig {
+            spelling_channel: false,
+            ..RankConfig::default()
+        };
+        assert_eq!(
+            spelled_with(&searcher, "weather forcast", &by_edits).as_deref(),
+            Some("weather forecast")
+        );
+        assert_eq!(
+            search_spelled(&searcher, "weather forecast").hits[0].domain,
+            "weather.com"
+        );
     }
 
     #[test]

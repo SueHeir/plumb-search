@@ -624,6 +624,7 @@ mod tests {
                     facts: Vec::new(),
                     lead: None,
                     names: Vec::new(),
+                    sections: Vec::new(),
                 },
                 score: 1.0,
                 named: true,

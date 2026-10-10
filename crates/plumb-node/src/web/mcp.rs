@@ -17,6 +17,10 @@
 //! must not become a way to knock on other servers' ports or to load the
 //! web through it.
 //!
+//! `/mcp?answers=text` leaves the JSON copy of each tool's answer out, for
+//! AI apps that would give the model the JSON instead of the short text
+//! ([`crate::mcp::text_only`]).
+//!
 //! `report_finding`, and the findings listed with search results, are
 //! offered only to apps on the node's own computer, always: they hold
 //! what its agents searched for (see [`crate::findings`]). So are the
@@ -32,7 +36,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
-use axum::http::{header, Extensions, HeaderMap, StatusCode};
+use axum::http::{header, Extensions, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -40,7 +44,7 @@ use serde_json::{json, Value};
 use tracing::error;
 
 use super::{security_headers, AppState};
-use crate::mcp::{error as rpc_error, parse_error, Mcp, Reader};
+use crate::mcp::{error as rpc_error, parse_error, text_only, Mcp, Reader};
 
 /// The largest message taken.
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -293,6 +297,15 @@ async fn not_streamed() -> Response {
         .into_response()
 }
 
+/// Whether the address asks for tool answers as text alone
+/// (`/mcp?answers=text`).
+fn wants_text_answers(uri: &Uri) -> bool {
+    uri.query().is_some_and(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .any(|(key, value)| key == "answers" && value.eq_ignore_ascii_case("text"))
+    })
+}
+
 async fn mcp(State(state): State<AppState>, request: Request) -> Response {
     if foreign_origin(request.headers()) {
         return answer(
@@ -307,6 +320,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
     let client = client(&request);
     let here = from_this_computer(&request);
     let reads_pages = state.settings.read_pages_for_all || here;
+    let text_answers = wants_text_answers(request.uri());
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
         return answer(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -381,7 +395,12 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     let reply = tokio::task::spawn_blocking(move || server.handle(&message)).await;
     match reply {
-        Ok(Some(reply)) => answer(StatusCode::OK, reply),
+        Ok(Some(mut reply)) => {
+            if text_answers {
+                text_only(&mut reply);
+            }
+            answer(StatusCode::OK, reply)
+        }
         Ok(None) => (StatusCode::ACCEPTED, security_headers()).into_response(),
         Err(_) => {
             error!("an MCP request failed");
@@ -488,6 +507,16 @@ mod tests {
             client(&request("[2001:db8:1:2:3:4:5:6]:5000", None)),
             ip("2001:db8:1:2::")
         );
+    }
+
+    #[test]
+    fn answers_text_alone_when_the_address_asks() {
+        let asks = |uri: &str| wants_text_answers(&uri.parse::<Uri>().unwrap());
+        assert!(asks("/mcp?answers=text"));
+        assert!(asks("/mcp?x=1&answers=Text"));
+        assert!(!asks("/mcp"));
+        assert!(!asks("/mcp?answers=json"));
+        assert!(!asks("/mcp?text"));
     }
 
     #[test]

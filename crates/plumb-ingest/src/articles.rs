@@ -470,6 +470,7 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
                 facts: Vec::new(),
                 lead: None,
                 names: Vec::new(),
+                sections: Vec::new(),
             }
         })
         .collect();
@@ -528,11 +529,17 @@ fn open_pageviews(path: &Path) -> Result<Box<dyn BufRead>> {
     }
 }
 
-/// Official websites by Wikidata item ([`ItemSite`]).
+/// Official websites by Wikidata item ([`ItemSite`]). A claim on a
+/// subdomain or an inner page counts only when the item's label names the
+/// domain ([`crate::OfficialSite::names_its_domain`]): YouTube Music at
+/// music.youtube.com, not the film Rocky at a bit.ly link, whose article
+/// would otherwise stand for bit.ly.
 fn official_site_by_item(path: &Path) -> Result<HashMap<String, ItemSite>> {
     let mut sites = HashMap::new();
     for claim in crate::load_wikidata_official_sites(path)? {
-        ItemSite::add(&mut sites, &claim);
+        if claim.is_root_homepage() || claim.names_its_domain() {
+            ItemSite::add(&mut sites, &claim);
+        }
     }
     Ok(sites)
 }
@@ -709,7 +716,7 @@ de.wikipedia Marie_Curie 1 desktop 70000 A1
         let sites = write(
             "sites.tsv",
             "item\tlabel\twebsite\nQ28865\tPython\thttps://www.python.org/\n\
-             Q7186\tMarie Curie\thttps://curie.example.org/\n",
+             Q7186\tMarie Curie\thttps://museum.curie.fr/\n",
         );
         ArticleDumps {
             page: write("page.sql", PAGE),
@@ -796,9 +803,9 @@ UNLOCK TABLES;
             curie.aliases,
             ["Madame Curie", "Sklodowska", "Maria Sklodowska-Curie"]
         );
-        // Her site is a part of example.org, so its address is kept.
-        assert_eq!(curie.site.as_deref(), Some("example.org"));
-        assert_eq!(curie.website.as_deref(), Some("https://curie.example.org/"));
+        // Her site is a part of curie.fr, so its address is kept.
+        assert_eq!(curie.site.as_deref(), Some("curie.fr"));
+        assert_eq!(curie.website.as_deref(), Some("https://museum.curie.fr/"));
         let python = &articles[0];
         assert_eq!(python.site.as_deref(), Some("python.org"));
         assert_eq!(python.website, None);
