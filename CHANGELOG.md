@@ -8,7 +8,7 @@
 
 ### Crawling
 
-- Homepage text is read in blocks. Cookie notices, browser warnings, obvious code and link menus are left out, and repeated blocks are kept once. Brief business details, mathematical prose and descriptions of policy or JavaScript products remain. Generic action labels are used only when no substantive text is available. Crawl version 2 makes nodes read older homepages again, best-known first.
+- Homepage text is read in blocks. Cookie notices, browser warnings, obvious code and link menus are left out, and repeated blocks are kept once. Brief business details, mathematical prose and descriptions of policy or JavaScript products remain. Generic action labels are used only when no substantive text is available. Crawl version 2 makes nodes read older homepages again, best-known first. Inner-page fetch caches also become stale so the next fetch uses the changed text extraction.
 
 ## 0.2.1
 

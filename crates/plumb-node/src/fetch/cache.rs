@@ -12,7 +12,7 @@ use tracing::{info, warn};
 const SCHEMA: u32 = 1;
 /// Bump when extraction, passage/symbol limits or title policies change.
 /// Kept here so richer FetchedDoc fields can be added independently.
-pub(super) const EXTRACTOR_VERSION: &str = "inner-pages-3-rich-language";
+pub(super) const EXTRACTOR_VERSION: &str = "inner-pages-4-boilerplate";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Envelope {

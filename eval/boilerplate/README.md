@@ -39,7 +39,7 @@ The sample is small, manually chosen and has no ranking/index/embedding A/B. Rul
 
 ## Combined main comparison
 
-The recovery was replayed on main `9fe493b062fa2e1c41c324cefe2228b797436865` after PR #416 merged. Only the changelog needed conflict resolution. Rich docs extraction, section spacing, language metadata fallback and docs extractor version 2 remain. The block filter changes compact text; the rich docs collector sees the original token stream independently.
+The recovery was replayed on main `9fe493b062fa2e1c41c324cefe2228b797436865` after PR #416 merged. Only the changelog needed conflict resolution. Rich docs extraction, section spacing, language metadata fallback and docs extractor version 2 remain. Because compact inner-page text also changes, the node’s inner-page cache identity is bumped to `inner-pages-4-boilerplate`; otherwise cached text from before this change could be treated as fresh. The block filter changes compact text; the rich docs collector sees the original token stream independently.
 
 The same 21 fixtures and seven previously saved public pages were extracted by main and the combined candidate. All required fixture phrases remained and all four unwanted phrases were removed. Rich docs payloads were identical for all 28 pages, as were inspected titles, descriptions, headings, sections and structured names on the seven public pages. The public pages' page-text word counts were unchanged from the earlier conservative comparison above. These counts describe `page_text`, the input for term selection; `body_text`, kept for embeddings, is shorter.
 
