@@ -118,6 +118,12 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 300,
     },
     SetInfo {
+        id: plumb_index::pages::REFERENCE2_SET,
+        name: "Staged reference pages (stricter title relevance)",
+        pages: 700_000,
+        bytes_per_page: 300,
+    },
+    SetInfo {
         id: plumb_index::pages::SUBPAGES_SET,
         name: "Pages of universities, companies, government, entertainment and museums",
         pages: 300_000,
@@ -258,6 +264,9 @@ impl SetInfo {
     /// The set's file in `data_dir` when it is whole, so it can be handed
     /// to other nodes.
     pub fn servable_file(&self, data_dir: &Path) -> Option<PathBuf> {
+        if self.id == plumb_index::pages::REFERENCE2_SET && !reference_stage_ready(data_dir) {
+            return None;
+        }
         self.file_notes(data_dir)
             .filter(|notes| notes.complete)
             .map(|_| self.file(data_dir))
@@ -607,6 +616,12 @@ pub struct PageSets(pub BTreeMap<String, PageSetSize>);
 
 impl PageSets {
     pub fn size(&self, set: &str) -> PageSetSize {
+        // Migration is opt-in. An upgrade keeps the legacy file/settings
+        // while the new generation is evaluated; it never implicitly
+        // downloads a differently gated dataset.
+        if set == plumb_index::pages::REFERENCE2_SET {
+            return self.0.get(set).copied().unwrap_or(PageSetSize::Off);
+        }
         let old = (set == plumb_index::pages::SUBPAGES_SET)
             .then(|| self.0.get(plumb_index::pages::OLD_SUBPAGES_SET))
             .flatten();
@@ -615,7 +630,7 @@ impl PageSets {
     }
 
     pub fn set(&mut self, set: &str, size: PageSetSize) {
-        if size == PageSetSize::Auto {
+        if size == PageSetSize::Auto && set != plumb_index::pages::REFERENCE2_SET {
             self.0.remove(set);
         } else {
             self.0.insert(set.to_string(), size);
@@ -719,10 +734,21 @@ impl Wanted {
     /// The sets of `data_dir` to keep under `sets` and a storage limit of
     /// `storage_limit_mb`; sets with no file yet are left out.
     pub fn new(data_dir: &Path, sets: &PageSets, storage_limit_mb: u64) -> Self {
+        let staged = SetInfo::find(plumb_index::pages::REFERENCE2_SET).unwrap();
+        let use_staged = staged.kept(sets, storage_limit_mb) > 0 && reference_stage_ready(data_dir);
         Wanted {
             sets: SETS
                 .iter()
                 .filter(|set| set.id != plumb_index::places::PLACES_SET)
+                .filter(|set| {
+                    if set.id == plumb_index::pages::REFERENCE2_SET {
+                        use_staged
+                    } else if set.id == plumb_index::pages::REFERENCE_SET {
+                        !use_staged
+                    } else {
+                        true
+                    }
+                })
                 .filter_map(|set| {
                     let pages = set.kept(sets, storage_limit_mb);
                     let file = set.file(data_dir);
@@ -755,6 +781,25 @@ impl Wanted {
         let digest = Sha256::digest(text.as_bytes());
         Some(digest[..8].iter().map(|b| format!("{b:02x}")).collect())
     }
+}
+
+/// A staged reference generation must have explicit complete/count notes.
+/// Unknown legacy counts cannot establish preserved coverage. A completed
+/// stage may lose at most the existing peer transfer coverage allowance
+/// (10%) before replacing the legacy generation in this reader. Removing
+/// or disabling the stage falls back to the retained legacy file.
+fn reference_stage_ready(data_dir: &Path) -> bool {
+    let staged = SetInfo::find(plumb_index::pages::REFERENCE2_SET).unwrap();
+    let Some(notes) = staged.file_notes(data_dir) else {
+        return false;
+    };
+    if !notes.complete || notes.lines == 0 || notes.lines == u64::MAX {
+        return false;
+    }
+    let legacy = SetInfo::find(plumb_index::pages::REFERENCE_SET).unwrap();
+    legacy.file_notes(data_dir).is_none_or(|old| {
+        old.lines != u64::MAX && notes.lines.saturating_mul(100) >= old.lines.saturating_mul(90)
+    })
 }
 
 /// The directory of the page index named `key`.
@@ -866,6 +911,69 @@ mod tests {
             }
         }
         assert!(!Page::has_reader("no-such-set"));
+    }
+
+    #[test]
+    fn reference2_is_opt_in_and_preserves_legacy_coverage_until_ready() {
+        use plumb_index::pages::{REFERENCE2_SET, REFERENCE_SET};
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = SetInfo::find(REFERENCE_SET).unwrap();
+        let staged = SetInfo::find(REFERENCE2_SET).unwrap();
+        std::fs::create_dir_all(sets_dir(dir.path())).unwrap();
+        std::fs::write(legacy.file(dir.path()), b"legacy").unwrap();
+        std::fs::write(staged.file(dir.path()), b"staged").unwrap();
+        let defaults = PageSets::default();
+        assert_eq!(defaults.size(REFERENCE2_SET), PageSetSize::Off);
+        assert_eq!(defaults.size(REFERENCE_SET), PageSetSize::Auto);
+        let mut automatic = PageSets::default();
+        automatic.set(REFERENCE2_SET, PageSetSize::Auto);
+        assert_eq!(automatic.size(REFERENCE2_SET), PageSetSize::Auto);
+        let old_settings: PageSets = serde_json::from_str(r#"{"reference":"all"}"#).unwrap();
+        assert_eq!(old_settings.size(REFERENCE_SET), PageSetSize::All);
+        assert_eq!(old_settings.size(REFERENCE2_SET), PageSetSize::Off);
+        assert_eq!(SetInfo::named("reference").unwrap().id, REFERENCE_SET);
+        assert_eq!(SetInfo::named("reference2").unwrap().id, REFERENCE2_SET);
+        let mut settings = old_settings;
+        settings.set(REFERENCE2_SET, PageSetSize::All);
+        let selected = || {
+            Wanted::new(dir.path(), &settings, 0)
+                .sets
+                .into_iter()
+                .map(|(set, _, _)| set.id)
+                .collect::<Vec<_>>()
+        };
+        let notes = |set: &SetInfo, lines: u64, complete: bool| {
+            std::fs::write(
+                notes_path(&set.file(dir.path())),
+                serde_json::to_vec(&SetFileNotes {
+                    lines,
+                    complete,
+                    source_modified: 0,
+                    fetched_at: 0,
+                    near: 0,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        // A bare renamed file does not establish completion or coverage.
+        assert_eq!(selected(), [REFERENCE_SET]);
+        assert!(staged.servable_file(dir.path()).is_none());
+        assert!(legacy.servable_file(dir.path()).is_some());
+        notes(legacy, 1_000, true);
+        notes(staged, 1_000, false);
+        assert_eq!(selected(), [REFERENCE_SET]);
+        notes(staged, 899, true);
+        assert_eq!(selected(), [REFERENCE_SET]);
+        assert!(staged.servable_file(dir.path()).is_none());
+        notes(staged, 900, true);
+        assert_eq!(selected(), [REFERENCE2_SET]);
+        assert!(staged.servable_file(dir.path()).is_some());
+        // New name is served separately; legacy bytes remain available to
+        // older readers and rollback. Never index both generations.
+        assert!(legacy.file(dir.path()).is_file());
+        std::fs::remove_file(staged.file(dir.path())).unwrap();
+        assert_eq!(selected(), [REFERENCE_SET]);
     }
 
     #[test]

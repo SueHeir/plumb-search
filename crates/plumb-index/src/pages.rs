@@ -521,7 +521,7 @@ impl Page {
     /// Whether the page is an inner page of a site of the reference or
     /// subpages set, found by the same rules.
     pub fn is_site_page(&self) -> bool {
-        self.set == REFERENCE_SET || self.set == SUBPAGES_SET
+        self.set == REFERENCE_SET || self.set == REFERENCE2_SET || self.set == SUBPAGES_SET
     }
 
     /// The host of a docs, reference or subpages page's address, without
@@ -700,6 +700,7 @@ impl Page {
             || set == FILMS_SET
             || set == DOCS_SET
             || set == REFERENCE_SET
+            || set == REFERENCE2_SET
             || set == SUBPAGES_SET
             || Page::from_set(set, Article::default()).is_some()
     }
@@ -722,6 +723,7 @@ impl Page {
             FILMS_SET => Page::from_film(article)?,
             DOCS_SET => Page::from_docs(article)?,
             REFERENCE_SET => Page::from_reference(article)?,
+            REFERENCE2_SET => Page::from_site_page(REFERENCE2_SET, article)?,
             SUBPAGES_SET => Page::from_site_page(SUBPAGES_SET, article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
@@ -927,6 +929,10 @@ pub const DOCS_SET: &str = "docs";
 /// dictionaries, recipes, how-tos, government (see
 /// `plumb_core::reference`).
 pub const REFERENCE_SET: &str = "reference";
+/// Opt-in staged reference pages with the stricter title relevance gate.
+/// Legacy `reference` remains readable until a complete, coverage-checked
+/// generation is explicitly selected. Older readers never request this id.
+pub const REFERENCE2_SET: &str = "reference2";
 /// The set of inner pages of other well-known sites: universities and
 /// labs, big companies, government agencies, entertainment and museums
 /// (see `plumb_core::subpages`). Found like reference pages, but listed
@@ -2189,7 +2195,7 @@ impl PageSearcher {
                 }
                 // A different receiver/namespace cannot satisfy an exact
                 // qualified API symbol through ordinary word overlap.
-                if canonical_docs_symbol(&topic).is_some() && topic.contains(['.', ':']) {
+                if canonical_docs_symbol(&topic).is_some() && topic.contains(['.', ':', '_']) {
                     continue;
                 }
                 let stems = self.question_words(&topic);
@@ -3375,10 +3381,11 @@ const SUBPAGE_TITLE_SHARE: f32 = 0.75;
 const SUBPAGE_HELD_SHARE: f32 = 0.5;
 /// Words a title shares with anything, left out of [`SUBPAGE_TITLE_SHARE`].
 const TITLE_STOP_WORDS: &[&str] = &[
-    "a", "an", "and", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with",
+    "a", "an", "and", "at", "by", "for", "from", "in", "my", "of", "on", "or", "the", "to", "with",
+    "you", "your",
 ];
 
-/// Whether `hit`, when it is a page of the subpages set, may be listed for
+/// Whether `hit`, when it is a subpage or staged reference page, may be listed for
 /// `query`: named by its whole title, on one of the query's best sites
 /// ("rotten tomatoes oppenheimer", "met museum hours"), or with most of
 /// its title's words, or of its title before a colon, in the query
@@ -3388,7 +3395,7 @@ const TITLE_STOP_WORDS: &[&str] = &[
 /// leadership summit at jnj.com, nor "mount everest" a film review at
 /// ign.com. Pages of other sets always may.
 fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
-    if hit.page.set != SUBPAGES_SET || hit.named {
+    if (hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET) || hit.named {
         return true;
     }
     if in_other_language(&hit.page.url) {
@@ -3403,24 +3410,27 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
     {
         return true;
     }
-    let words = |text: &str| -> HashSet<String> {
+    static STEMS: std::sync::LazyLock<TextAnalyzer> =
+        std::sync::LazyLock::new(analysis::stemmed_analyzer);
+    let words = |text: &str| -> Vec<String> {
         text.split(|c: char| !c.is_alphanumeric())
             // The "s" of "John's" says nothing.
             .filter(|word| word.chars().count() > 1)
-            .map(|word| {
-                let word = word.to_lowercase();
-                // "Sheets" is "sheet".
-                match word.strip_suffix('s') {
-                    Some(one) if one.len() > 2 => one.to_string(),
-                    _ => word,
-                }
+            .map(str::to_lowercase)
+            .filter(|word| {
+                !ASKING_WORDS.contains(&word.as_str()) && !TITLE_STOP_WORDS.contains(&word.as_str())
             })
-            .filter(|word| !TITLE_STOP_WORDS.contains(&word.as_str()))
+            .flat_map(|word| analysis::tokens(&STEMS, &word))
             .collect()
     };
-    let asked = words(query);
+    let asked: HashSet<String> = words(query).into_iter().collect();
+    let fewest = asked.len().min(2);
+    if fewest == 0 {
+        return false;
+    }
     let has_most = |title: &str| {
-        let title = words(title);
+        let in_order = words(title);
+        let title: HashSet<String> = in_order.iter().cloned().collect();
         // A year the query asks for and the title lacks is another page:
         // "nobel prize in physics 2025" is not "A Nobel prize for particle
         // physics".
@@ -3433,12 +3443,18 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
         let shared = title.intersection(&asked).count();
         // A query the title holds whole needs only half of it: "john
         // martinis" for "John Martinis - CHM".
-        let share = if asked.is_subset(&title) {
+        // The relaxed threshold requires the query's terms together:
+        // "seven summits" is not "The Seven Second Summits of the World".
+        let held = in_order.windows(asked.len()).any(|run| {
+            run.iter().all(|word| asked.contains(word))
+                && run.iter().collect::<HashSet<_>>().len() == asked.len()
+        });
+        let share = if held {
             SUBPAGE_HELD_SHARE
         } else {
             SUBPAGE_TITLE_SHARE
         };
-        shared >= 2 && shared as f32 >= share * title.len() as f32
+        shared >= fewest && shared as f32 >= share * title.len() as f32
     };
     // Or of its title before a subtitle, "Declaration of Independence" in
     // "Declaration of Independence: A Transcription", or before the site's
@@ -3738,11 +3754,12 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
 }
 
 /// Cuts `hits`, best first, to `limit`, keeping the best docs page and the
-/// best subpage among them: the many Stack Overflow questions with the
+/// best subpage/reference page among them: the many Stack Overflow questions with the
 /// words of "javascript array sort" are more read than MDN's page on it,
 /// and would crowd it out.
 fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
-    for set in [DOCS_SET, SUBPAGES_SET] {
+    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE2_SET];
+    for set in kept {
         if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
             continue;
         }
@@ -3752,7 +3769,7 @@ fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
         // In place of the last hit that is not one kept already.
         let Some(last) = (0..limit)
             .rev()
-            .find(|&i| hits[i].page.set != DOCS_SET && hits[i].page.set != SUBPAGES_SET)
+            .find(|&i| !kept.contains(&hits[i].page.set.as_str()))
         else {
             continue;
         };
@@ -4000,7 +4017,12 @@ fn docs_intent(query: &str) -> bool {
 fn docs_without_intent(query: &str) -> String {
     query
         .split_whitespace()
-        .filter(|word| !DOCS_INTENT_WORDS.contains(&word.to_lowercase().as_str()))
+        .filter(|word| {
+            let word = word.to_lowercase();
+            !DOCS_INTENT_WORDS.contains(&word.as_str())
+                && !ASKING_WORDS.contains(&word.as_str())
+                && !plumb_core::is_function_word(&word)
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -4015,6 +4037,8 @@ fn docs_topic(site: &plumb_core::docs::DocsSite, query: &str) -> String {
                 && word != site.product.to_lowercase()
                 && !site.asked_by.contains(&word)
                 && !DOCS_INTENT_WORDS.contains(&word)
+                && !ASKING_WORDS.contains(&word)
+                && !plumb_core::is_function_word(word)
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -4318,6 +4342,9 @@ mod tests {
             broad.views = 1_000_000;
             pages.push(broad);
         }
+        // Production files are ordered by views; put the deliberately
+        // popular distractors before the low-view docs fixture as well.
+        pages.sort_by_key(|page| std::cmp::Reverse(page.views));
         let (_dir, searcher) = searcher(&pages);
         // Legacy mixed-set retrieval loses the named docs to popular
         // article aliases. Docs are eligible within their own cap now.
@@ -4326,10 +4353,14 @@ mod tests {
             .unwrap()
             .iter()
             .any(|hit| hit.page.url.ends_with("/library/tomllib.html")));
-        for query in ["python tomllib", "tomllib site:docs.python.org"] {
+        for (query, docs) in [
+            ("python tomllib", true),
+            ("tomllib site:docs.python.org", true),
+            ("tomllib site:docs.python.org", false),
+        ] {
             let ops = Operators::parse(query);
             let hits = searcher
-                .search_naming_docs(&ops.words, &ops, true, 10)
+                .search_naming_docs(&ops.words, &ops, docs, 10)
                 .unwrap();
             assert!(
                 hits.iter()
@@ -4387,6 +4418,7 @@ mod tests {
             "python list comprehension",
             "list comprehension site:docs.python.org",
             "python documentation",
+            "what is tomllib documentation",
         ] {
             let ops = Operators::parse(query);
             assert!(
@@ -4446,7 +4478,101 @@ mod tests {
             .search_naming_docs("tomllib", &Operators::default(), true, 0)
             .unwrap()
             .is_empty());
-        assert_eq!(QUESTION_QUERY_WORDS, 3);
+        let question = Page::from_question(Article {
+            title: "How do I parse configuration files?".into(),
+            description: Some("python, tomllib".into()),
+            item: Some("1".into()),
+            ..Article::default()
+        });
+        assert_eq!(
+            searcher.question_match(&question, &searcher.question_words("python tomllib"), None),
+            (0.0, false)
+        );
+        assert!(
+            searcher
+                .question_match(
+                    &question,
+                    &searcher.question_words("parse configuration python"),
+                    None
+                )
+                .0
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn staged_reference_gate_rejects_partial_topics_and_keeps_practical_pages() {
+        let allowed = |set: &str, query: &str, title: &str| {
+            let hit = PageHit {
+                page: Page::from_set(
+                    set,
+                    Article {
+                        title: title.into(),
+                        item: Some("https://reference.example/article".into()),
+                        views: 2_000,
+                        ..Article::default()
+                    },
+                )
+                .unwrap(),
+                score: 0.9,
+                named: false,
+                popularity: 0.5,
+                whole: false,
+                learned: None,
+            };
+            subpage_asked(query, &[], &hit)
+        };
+        for (query, title) in [
+            ("celiac disease", "Celiac disease"),
+            (
+                "how to renew a green card",
+                "How to renew or replace your green card",
+            ),
+            (
+                "symptoms of type 2 diabetes",
+                "Type 2 diabetes: Symptoms, diagnosis and treatment",
+            ),
+            ("define prioritize", "Prioritize Definition & Meaning"),
+            ("stool smell", "Foul-Smelling Stool: Causes and Treatment"),
+            ("how to fix a leaking faucet", "Fixing a leaking faucet"),
+        ] {
+            assert!(allowed(REFERENCE2_SET, query, title), "{query}: {title}");
+        }
+        for (query, title) in [
+            ("seven summits", "The Seven Second Summits of the World"),
+            (
+                "time in st john's",
+                "The Best Time to Visit the US Virgin Islands",
+            ),
+            (
+                "nobel prize in physics 2025",
+                "John F. Clauser: Nobel Prize-winning physicist",
+            ),
+            (
+                "the great gatsby f scott fitzgerald",
+                "The Great Gatsby Questions for Study and Discussion",
+            ),
+            ("leaking faucet repair", "Faucet installation cost"),
+        ] {
+            // Legacy coverage stays available until the new generation
+            // has passed the combined evaluation and is explicitly chosen.
+            assert!(allowed(REFERENCE_SET, query, title));
+            assert!(!allowed(REFERENCE2_SET, query, title), "{query}: {title}");
+        }
+        let page = Page::from_set(
+            REFERENCE2_SET,
+            Article {
+                title: "Celiac disease".into(),
+                item: Some("https://www.healthline.com/health/celiac".into()),
+                ..Article::default()
+            },
+        )
+        .unwrap();
+        assert!(Page::has_reader(REFERENCE2_SET));
+        assert!(Page::has_reader(REFERENCE_SET));
+        assert!(page.is_site_page());
+        assert_eq!(page.set_name(), "healthline.com");
+        assert_eq!(page.set_domain(), "healthline.com");
     }
 
     fn reference_page(url: &str, title: &str, description: &str) -> Page {
