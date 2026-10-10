@@ -32,21 +32,10 @@ impl Intent {
             entity = prefix;
             country
         });
-        // Category/task suffixes qualify the entity before them. They are
-        // not independent evidence for a site called Converter or Vector.
-        // A bare "database" can be part of the identity (tz database),
-        // rather than a request for a product with the preceding name.
-        for task in ["currency converter", "vector database", "email"] {
-            if let Some(prefix) = entity.strip_suffix(&format!(" {task}")) {
-                if !prefix.trim().is_empty() {
-                    entity = prefix.trim().to_string();
-                    break;
-                }
-            }
-        }
         Self {
-            // Resource/type words inside an identity still distinguish it:
-            // a search filler list must not erase "center" or "database".
+            // Categories and resources distinguish the requested entity.
+            // Keep every substantive word after documented docs/login intent
+            // parsing; no category suffix can silently manufacture a match.
             words: plumb_core::normalize_text(&entity)
                 .split_whitespace()
                 .filter(|word| !plumb_core::is_function_word(word))
@@ -208,44 +197,4 @@ impl Intent {
                 .is_none_or(|shown| shown.eq_ignore_ascii_case(asked))
         })
     }
-}
-
-/// A reviewed owner reference for an exact host. There is deliberately no
-/// same-label/different-TLD inference and no inheritance to child hosts.
-/// Owner references establish affiliation; a redirect only records where
-/// a verified alias currently leads. No network access is needed at runtime.
-pub(super) fn affiliation(host: &str) -> Option<Value> {
-    let (owner, destination, sources, redirect) = match host {
-        "console.hetzner.cloud" => (
-            "hetzner.com",
-            "https://console.hetzner.com/",
-            vec![
-                "https://status.hetzner.com/incident/62839f8e-073a-4159-87a1-b05d093fe689",
-                "https://www.hetzner.com/cloud/",
-            ],
-            Some("https://console.hetzner.cloud/"),
-        ),
-        "console.hetzner.com" => (
-            "hetzner.com",
-            "https://console.hetzner.com/",
-            vec!["https://www.hetzner.com/cloud/"],
-            None,
-        ),
-        "api.semanticscholar.org" => (
-            "semanticscholar.org",
-            "https://api.semanticscholar.org/",
-            vec!["https://webflow.semanticscholar.org/product/api/tutorial"],
-            None,
-        ),
-        _ => return None,
-    };
-    Some(json!({
-        "host": host,
-        "owner": owner,
-        "official_url": destination,
-        "sources": sources,
-        "verified_at": "2026-10-09",
-        "kind": if redirect.is_some() { "verified_migration" } else { "owner_reference" },
-        "observed_redirect": redirect.map(|from| json!({ "from": from, "to": destination })),
-    }))
 }

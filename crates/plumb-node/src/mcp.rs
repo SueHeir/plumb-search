@@ -721,6 +721,7 @@ impl Mcp {
         let mut description = top.description.as_deref().map(short);
         let mut did_you_mean = did_you_mean;
         let mut package_home = None;
+        let mut package_ambiguity = None;
         let mut verified_destination = false;
         let mut confidence;
         match about_site {
@@ -803,11 +804,9 @@ impl Mcp {
                 // (lifewire.com for "LifeWiki"), nor is one of two official,
                 // well-known sites of the name ("Elixir").
                 let rival = results.hits[1..].iter().any(|hit| {
-                    hit.named
-                        && official(hit)
-                        && well_known(hit)
-                        && intent.matches_site(hit)
-                        && shows_name(hit, &words)
+                    // A metadata-supported owner remains a namesake even
+                    // when it is less popular or retrieval missed its alias.
+                    official(hit) && intent.supports_site(hit)
                 });
                 confidence = if top.named
                     && (official(top) || well_known(top))
@@ -931,7 +930,42 @@ impl Mcp {
                 .or_else(|| self.package_home(bare.as_deref()?, wants_docs, options));
             if let Some((home, registry, docs, owner)) = found {
                 let home_domain = registrable_domain(&home);
-                if home_domain.as_deref() == Some(domain.as_str()) {
+                // Rejecting an inferred owner label does not establish that
+                // a same-name package is the requested entity. Keep a full
+                // matching official candidate as unresolved evidence, even
+                // when its title does not spell or expand the query's name.
+                let conflict = results.hits.iter().find(|hit| {
+                    !verified_destination
+                        && hit.official
+                        && intent.matches_site(hit)
+                        && !intent.supports_site(hit)
+                        && registrable_domain(&hit.url) == registrable_domain(&hit.domain)
+                        && home_domain.as_deref() != Some(hit.domain.as_str())
+                });
+                if let Some(conflict) = conflict {
+                    alternatives.retain(|alt| {
+                        alt["domain"] != conflict.domain
+                            && alt["domain"].as_str() != home_domain.as_deref()
+                    });
+                    alternatives.insert(
+                        0,
+                        json!({
+                            "domain": home_domain,
+                            "url": home,
+                            "title": format!("{registry} package {bare_or_name}"),
+                            "official": false,
+                            "well_known": false,
+                        }),
+                    );
+                    alternatives.insert(0, brief_with(conflict, &pages));
+                    alternatives.truncate(ALTERNATIVES);
+                    package_ambiguity = Some(format!(
+                        "Both {} and the {registry} package's {home} are candidates; \
+                         the package name does not resolve which entity was requested.",
+                        conflict.url
+                    ));
+                    package_home = Some(home);
+                } else if home_domain.as_deref() == Some(domain.as_str()) {
                     why.push(format!(
                         "The {registry} package of this name gives it as its home page."
                     ));
@@ -1029,7 +1063,33 @@ impl Mcp {
             }
         }
         // "Python docs" is docs.python.org, a site of its own.
-        let bound = verified_destination || intent.supports_site(pick);
+        let owner_domains: std::collections::BTreeSet<_> = results
+            .hits
+            .iter()
+            .filter(|hit| official(hit) && intent.supports_site(hit))
+            .filter_map(|hit| registrable_domain(&hit.url))
+            .collect();
+        // An explicit address identifies the destination. An unqualified
+        // shared name does not identify one of several documented owners,
+        // even if popularity or a same-name package favors one candidate.
+        let owner_ambiguity =
+            registrable_domain(&intent.entity).is_none() && owner_domains.len() > 1;
+        let ambiguous = owner_ambiguity || package_ambiguity.is_some();
+        let bound = (verified_destination || intent.supports_site(pick)) && !ambiguous;
+        if ambiguous {
+            alternatives.retain(|alt| alt["url"] != url);
+            alternatives.insert(
+                0,
+                json!({
+                    "domain": domain,
+                    "url": url,
+                    "title": title,
+                    "official": official(pick),
+                    "well_known": well_known(pick),
+                }),
+            );
+            alternatives.truncate(ALTERNATIVES);
+        }
         if bound && !verified_destination && !official(pick) {
             // Popularity and agreeing title/domain words are useful
             // suggestions, but do not verify ownership independently.
@@ -1048,6 +1108,7 @@ impl Mcp {
             }
         }
         if !bound {
+            alternatives.retain(|alt| alt["domain"] != pick.domain);
             alternatives.insert(0, brief_with(pick, &pages));
             alternatives.truncate(ALTERNATIVES);
             why = vec![format!(
@@ -1066,10 +1127,19 @@ impl Mcp {
         } else if confidence == "low" {
             why.push("Treat this as an unverified candidate for the requested name.".to_string());
         }
+        if owner_ambiguity {
+            why.push(format!(
+                "Several documented owners match the requested name: {}. Specify the entity or its purpose before choosing an official destination.",
+                owner_domains.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if let Some(ambiguity) = package_ambiguity {
+            why.push(ambiguity);
+        }
         Ok(json!({
             "name": name,
             "found": bound,
-            "status": if bound { "resolved" } else { "unresolved" },
+            "status": if ambiguous { "ambiguous" } else if bound { "resolved" } else { "unresolved" },
             "domain": bound.then_some(domain),
             "url": bound.then_some(url),
             "package_home": package_home,
@@ -1147,24 +1217,6 @@ impl Mcp {
         let Some(domain) = registrable_domain(&host) else {
             bail!("{host:?} has no registrable domain");
         };
-        if let Some(evidence) = identity::affiliation(&host) {
-            return Ok(json!({
-                "input": input,
-                "host": host,
-                "domain": domain,
-                "verdict": "official",
-                "lookalike": false,
-                "reasons": [format!(
-                    "{} identifies this exact host as its service in the owner references: {}.",
-                    evidence["owner"].as_str().unwrap_or("The owner"),
-                    evidence["sources"].as_array().unwrap().iter()
-                        .filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
-                )],
-                "affiliation": evidence,
-                "imitates": Value::Null,
-                "site": Value::Null,
-            }));
-        }
         let mut searches = 0;
         // The site itself: a typed hostname names it.
         let own = self.lookup(&domain, 1, options)?;
@@ -1230,18 +1282,10 @@ impl Mcp {
                 "known_site"
             }
             (_, Some(other)) => {
-                // Sharing an entire brand label on another TLD can also
-                // describe a legitimate regional or product domain. Without
-                // owner evidence it is suspected, never automatically trusted.
-                if domain_label(&domain) == domain_label(&other.domain)
-                    && (domain.matches('.').count() == 1
-                        || plumb_core::tld_country(&domain).is_some())
-                    && !host
-                        .strip_suffix(&domain)
-                        .unwrap_or("")
-                        .split(['.', '-'])
-                        .any(|word| matches!(word, "login" | "signin" | "verify" | "secure"))
-                {
+                // An exact brand label on another suffix or hosting tenant
+                // can also be a legitimate regional/product/service host.
+                // Service words do not prove affiliation or impersonation.
+                if domain_label(&domain) == domain_label(&other.domain) {
                     reasons.push(format!(
                         "Its name resembles {}, but Plumb has no owner reference establishing \
                          affiliation or evidence confirming impersonation.",
@@ -2533,8 +2577,8 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
             "title": "Check for a look-alike site",
             "description": "Whether a URL or domain is a real site or one made to look like \
                  another (paypal-login.us, twiter.com). Returns a verdict (official, known_site, \
-                 little_known, lookalike, suspected or unknown), the reasons, and any verified \
-                 owner references or the real site it resembles. Suspected means affiliation \
+                 little_known, lookalike, suspected or unknown), the reasons from indexed \
+                 evidence, and the real site it resembles. Suspected means affiliation \
                  is unverified and impersonation is not established. \
                  Use it before entering credentials or trusting a link.",
             "inputSchema": {

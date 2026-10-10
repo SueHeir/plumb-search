@@ -31,26 +31,42 @@ An inferred search name, a bare domain namesake, a copied title, or an
 acronym matching only part of a resource name is insufficient owner evidence.
 Those cases return `found:false` with candidates under `alternatives`.
 Matching title/domain text without an independent owner reference stays at
-low confidence. Resource words such as `database` and `center` remain part
-of the identity; an agency's parent site does not establish the destination
-of a separately named database or application. An exact package's homepage
+low confidence. Category and resource words remain part of the requested
+identity; no category suffix is stripped to validate a familiar brand. A
+title/identity lacking those words can leave a plausible candidate unresolved,
+even if the strict suite expects its domain. An agency's parent site does
+not establish the destination of a separately named database or application.
+An exact package's homepage
 outweighs generated framework documentation on an unrelated host. These
 contracts are exercised by deterministic MCP tests for the wrong-owner
 evidence shapes observed in the combined candidate appendix; the tests do
 not add aliases or fill corpus gaps.
 
-Exact-host affiliation records in `mcp/identity.rs` are reviewed owner
-references observed on October 9, 2026. Hetzner's own status page identifies
-its old console host, its current Cloud page links the new destination, and
-the old host was observed redirecting there. The redirect corroborates an
-owner reference; it is never used on its own to establish ownership. The
-Semantic Scholar tutorial documents its API host and remains a control for
-an already correct result. Adding another alias requires an owner reference,
-a verification date, and boundary/impersonation controls. No TLD, wildcard,
-hosting-tenant, or redirect-only exception is accepted.
+Historical verification facts observed on October 9, 2026 remain regression
+provenance, rather than embedded runtime answers. Hetzner's own
+[status page](https://status.hetzner.com/incident/62839f8e-073a-4159-87a1-b05d093fe689)
+identifies its old console host; its [Cloud page](https://www.hetzner.com/cloud/)
+links the new destination, and the old host was observed redirecting there.
+The [Semantic Scholar tutorial](https://webflow.semanticscholar.org/product/api/tutorial)
+documents its API host. No exact-host exemption table, canned owner map, or
+redirect-only ownership rule is used by the identity tools.
+
+Runtime lookalike decisions require backend evidence. An exact brand label
+on another suffix or hosting tenant stays `suspected` without affiliation
+evidence; service words alone do not establish ownership or impersonation.
+Frozen evaluation labels remain unchanged: missing indexed owner evidence
+can lower strict `official` coverage and must be reported separately from
+false definitive accusations. Typo, suffix-borrowing and homograph controls
+continue to exercise impersonation detection.
 
 Run deterministic scoring contracts without a node:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s eval/official_site -p 'test_*.py'
 ```
+
+When multiple documented owners match the complete requested name, the tool
+returns `found:false`, `status:ambiguous`, low confidence and alternatives.
+Popularity, result ordering and a same-name package cannot resolve this
+identity. An explicit address or a qualifier that distinguishes one owner
+can resolve it through the same evidence checks.

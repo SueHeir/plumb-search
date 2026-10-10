@@ -2106,7 +2106,9 @@ fn official_site_is_unsure_of_a_name_its_site_does_not_show() {
         results(vec![europe, lang], Vec::new())
     });
     let answer = official(&mcp, "elixir");
-    assert_eq!(answer["confidence"], "medium", "{answer}");
+    assert_eq!(answer["confidence"], "low", "{answer}");
+    assert_eq!(answer["status"], "ambiguous");
+    assert_eq!(answer["found"], false);
 
     // One alone is sure.
     let mcp = scripted(|_| {
@@ -2146,7 +2148,7 @@ fn official_site_keeps_a_well_known_sites_own_docs() {
 }
 
 #[test]
-fn official_site_takes_a_well_known_site_that_shows_the_whole_name() {
+fn official_site_does_not_erase_an_email_category_missing_from_the_identity() {
     let mcp = scripted(|_| {
         let mut office = titled("office.com", "Office.com", 0.9, false);
         office.official = true;
@@ -2157,7 +2159,12 @@ fn official_site_takes_a_well_known_site_that_shows_the_whole_name() {
         results(vec![office, outlook], Vec::new())
     });
     let answer = official(&mcp, "outlook email");
-    assert_eq!(answer["domain"], "outlook.live.com", "{answer}");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert!(answer["alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|alt| alt["domain"] == "outlook.live.com"));
 }
 
 #[test]
@@ -2231,20 +2238,19 @@ fn official_site_task_domains_cannot_displace_the_entity_even_for_short_brands()
             "converter.app",
             "Text converter",
             "xe.com",
-            "Xe",
+            "Xe currency converter",
         ),
         (
             "Chroma vector database",
             "vector.dev",
             "Vector",
             "trychroma.com",
-            "Chroma",
+            "Chroma vector database",
         ),
     ] {
-        let mcp = server(vec![
-            titled(task_domain, task_title, 0.9, true),
-            titled(entity_domain, entity_title, 0.5, true),
-        ]);
+        let mut entity = titled(entity_domain, entity_title, 0.5, true);
+        entity.official = true;
+        let mcp = server(vec![titled(task_domain, task_title, 0.9, true), entity]);
         let answer = official(&mcp, name);
         assert_eq!(answer["domain"], entity_domain, "{name}: {answer}");
         assert_eq!(answer["found"], true);
@@ -2259,6 +2265,29 @@ fn official_site_task_domains_cannot_displace_the_entity_even_for_short_brands()
     namesake.official = true;
     let answer = official(&server(vec![namesake]), "Chroma vector database");
     assert_eq!(answer["found"], false, "{answer}");
+}
+
+#[test]
+fn official_site_categories_need_full_identity_evidence_without_an_ontology_table() {
+    for (name, brand, domain) in [
+        ("Xe currency converter", "Xe", "xe.com"),
+        ("Chroma vector database", "Chroma", "trychroma.com"),
+        ("Outlook email", "Outlook", "outlook.live.com"),
+        ("Orion observability pipeline", "Orion", "orion.example"),
+    ] {
+        assert_eq!(identity::Intent::of(name).entity, name.to_lowercase());
+        let mut bare_owner = titled(domain, brand, 0.9, true);
+        bare_owner.official = true;
+        let answer = official(&server(vec![bare_owner]), name);
+        assert_eq!(answer["found"], false, "{name}: {answer}");
+        assert_eq!(answer["confidence"], "low");
+        assert_eq!(answer["alternatives"][0]["domain"], domain);
+        let mut complete = titled(domain, name, 0.9, true);
+        complete.official = true;
+        let answer = official(&server(vec![complete]), name);
+        assert_eq!(answer["found"], true, "{name}: {answer}");
+        assert_eq!(answer["domain"], domain);
+    }
 }
 
 #[test]
@@ -2483,7 +2512,9 @@ fn official_site_package_owner_overrides_generated_framework_docs() {
             }
             let mut generated = titled("dalicc.net", title, popularity, named);
             generated.url = "http://api.dalicc.net/docs".into();
-            results(vec![generated], Vec::new())
+            let mut unrelated = titled("standards.example", "Other Standards Body", 0.9, true);
+            unrelated.official = true;
+            results(vec![generated, unrelated], Vec::new())
         });
         let answer = official(&mcp, "FastAPI");
         assert_eq!(answer["url"], "https://fastapi.tiangolo.com/", "{answer}");
@@ -2541,6 +2572,137 @@ fn official_site_package_namesake_does_not_verify_a_different_known_entity() {
 }
 
 #[test]
+fn official_site_package_cannot_resolve_an_unverified_organization_namesake() {
+    for (name, domain, title, description, country, registry, home) in [
+        (
+            "ISO",
+            "iso.org",
+            "International Organization for Standardization",
+            "international standards development organization",
+            "CH",
+            "gem",
+            "http://github.com/tigrish/iso",
+        ),
+        (
+            "CNA",
+            "cna.example",
+            "Federation of National Academies",
+            "research coordination organization",
+            "CA",
+            "pypi",
+            "https://code.example/cna/",
+        ),
+    ] {
+        // Exercise an organization ranked first and behind generated docs.
+        // Neither label is derived by simple initials of its supplied title.
+        for org_first in [true, false] {
+            let mcp = scripted(move |query| {
+                if query.ends_with("package") {
+                    return results(
+                        Vec::new(),
+                        vec![package_page(
+                            registry,
+                            &name.to_lowercase(),
+                            Some(home),
+                            None,
+                        )],
+                    );
+                }
+                let mut organization = titled(domain, title, 0.9, true);
+                organization.official = true;
+                organization.description = Some(description.into());
+                organization.country = Some(country.into());
+                organization.url = format!("https://{domain}/");
+                let mut generated = titled("unrelated.example", name, 0.9, true);
+                generated.url = "https://unrelated.example/docs/".into();
+                let hits = if org_first {
+                    vec![organization, generated]
+                } else {
+                    vec![generated, organization]
+                };
+                results(hits, Vec::new())
+            });
+            let reply = call(&mcp, "official_site", json!({ "name": name }));
+            let answer = &reply["result"]["structuredContent"];
+            assert_eq!(answer["found"], false, "{name}: {answer}");
+            assert_eq!(answer["status"], "ambiguous");
+            assert_eq!(answer["confidence"], "low");
+            assert!(answer["url"].is_null());
+            assert_eq!(answer["package_home"], home);
+            let alternatives = answer["alternatives"].as_array().unwrap();
+            assert!(
+                alternatives.iter().any(|alt| alt["domain"] == domain),
+                "{answer}"
+            );
+            assert!(
+                alternatives.iter().any(|alt| alt["url"] == home),
+                "{answer}"
+            );
+            let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains(home) && text.contains(domain), "{text}");
+            assert!(!text.contains("Official site for"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn official_site_known_owner_namesakes_remain_ambiguous_without_a_task() {
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "vector",
+                    None,
+                    Some("https://vector.readthedocs.io/"),
+                )],
+            );
+        }
+        let mut company = titled(
+            "vector.com",
+            "Vector: Building the Intelligent Foundation | Vector",
+            0.9,
+            true,
+        );
+        company.official = true;
+        company.score = 2.0;
+        let mut pipeline = titled(
+            "vector.dev",
+            "Vector | A lightweight, ultra-fast tool for building observability pipelines",
+            0.1,
+            true,
+        );
+        pipeline.score = 0.5;
+        let mut game = titled(
+            "vector.game",
+            "Vector — Free Online Parkour Runner Game | Nekki",
+            0.1,
+            false,
+        );
+        game.official = true;
+        game.score = 0.3;
+        results(vec![company, pipeline, game], Vec::new())
+    });
+    let answer = official(&mcp, "Vector");
+    // Both company and game have owner metadata for this single name;
+    // popularity cannot resolve which owner was requested.
+    assert_eq!(answer["confidence"], "low", "{answer}");
+    assert_eq!(answer["status"], "ambiguous");
+    assert_eq!(answer["found"], false);
+    assert_ne!(answer["url"], "https://vector.readthedocs.io/");
+    let urls: Vec<_> = answer["alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|alt| alt["url"].as_str())
+        .collect();
+    for domain in ["vector.com", "vector.dev", "vector.game"] {
+        assert!(urls.iter().any(|url| url.contains(domain)), "{answer}");
+    }
+}
+
+#[test]
 fn official_site_does_not_bind_owner_metadata_through_its_address_alone() {
     let mcp = scripted(|_| {
         results(
@@ -2590,7 +2752,7 @@ fn official_site_text_preserves_unverified_suggestions_without_owner_claims() {
     let reply = call(
         &server(vec![titled("trychroma.com", "Chroma", 0.9, true)]),
         "official_site",
-        json!({ "name": "Chroma vector database" }),
+        json!({ "name": "Chroma" }),
     );
     assert_eq!(reply["result"]["structuredContent"]["found"], true);
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
@@ -2599,44 +2761,58 @@ fn official_site_text_preserves_unverified_suggestions_without_owner_claims() {
 }
 
 #[test]
-fn check_lookalike_accepts_only_the_provenance_backed_exact_aliases() {
-    let mcp = Mcp::new(Arc::new(Broken), None);
+fn check_lookalike_requires_backend_evidence_for_previously_verified_hosts() {
+    let empty = server(Vec::new());
+    let broken = Mcp::new(Arc::new(Broken), None);
     for host in [
         "console.hetzner.cloud",
         "console.hetzner.com",
         "api.semanticscholar.org",
     ] {
-        let answer = mcp
+        let answer = empty
             .check_lookalike(host, &SearchOptions::default())
             .unwrap();
-        assert_eq!(answer["verdict"], "official", "{answer}");
+        assert_eq!(answer["verdict"], "unknown", "{answer}");
         assert_eq!(answer["lookalike"], false);
-        assert_eq!(answer["affiliation"]["host"], host);
-        assert!(!answer["affiliation"]["sources"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-        assert!(answer["reasons"].to_string().contains("https://"));
+        assert!(answer["affiliation"].is_null());
+        // No embedded owner assertion survives a failed index lookup.
+        assert!(broken
+            .check_lookalike(host, &SearchOptions::default())
+            .is_err());
     }
-    let migration = identity::affiliation("console.hetzner.cloud").unwrap();
-    assert_eq!(migration["kind"], "verified_migration");
-    assert_eq!(
-        migration["observed_redirect"]["to"],
-        "https://console.hetzner.com/"
-    );
-    // No wildcard, suffix, same-TLD brand, hosted-tenant or Unicode exception.
-    for host in [
-        "hetzner.cloud",
-        "hetzner.net",
-        "login.console.hetzner.cloud",
-        "console.hetzner.cloud.attacker.example",
-        "console.hetzner.cloud.github.io",
-        "console.hеtzner.cloud",
+}
+
+#[test]
+fn check_lookalike_uses_indexed_public_owner_evidence_and_abstains_on_alternates() {
+    for (owner, public_host, alternate) in [
+        (
+            "hetzner.com",
+            "console.hetzner.com",
+            "console.hetzner.cloud",
+        ),
+        (
+            "semanticscholar.org",
+            "api.semanticscholar.org",
+            "api.semanticscholar.cloud",
+        ),
+        ("quartz.example", "api.quartz.example", "api.quartz.cloud"),
     ] {
-        assert!(
-            identity::affiliation(&host_of(host).unwrap()).is_none(),
-            "{host}"
-        );
+        let mut indexed = hit(owner, 2.0, 0.9, true);
+        indexed.official = true;
+        let mcp = server(vec![indexed]);
+        let answer = mcp
+            .check_lookalike(public_host, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "official", "{answer}");
+        assert_eq!(answer["site"]["domain"], owner);
+        assert_eq!(answer["lookalike"], false);
+        let answer = mcp
+            .check_lookalike(alternate, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "suspected", "{answer}");
+        assert_eq!(answer["lookalike"], false);
+        assert!(answer["site"].is_null());
+        assert!(answer["affiliation"].is_null());
     }
 }
 
@@ -2656,7 +2832,6 @@ fn check_lookalike_preserves_impersonation_and_unverified_tenant_controls() {
         "paypa1.com",
         "paypal-login.us",
         "paypal.com.attacker.example",
-        "paypal.readthedocs.io",
         "раypal.com",
         "console.hetzner.cloud.attacker.example",
     ] {
@@ -2667,13 +2842,20 @@ fn check_lookalike_preserves_impersonation_and_unverified_tenant_controls() {
         assert_eq!(answer["lookalike"], true);
         assert!(answer["affiliation"].is_null());
     }
-    // An unverified alternate domain is suspected, with no claim of ownership.
-    let answer = mcp
-        .check_lookalike("console.hetzner.net", &SearchOptions::default())
-        .unwrap();
-    assert_eq!(answer["verdict"], "suspected", "{answer}");
-    assert_eq!(answer["lookalike"], false);
-    assert_eq!(answer["suspected"], true);
+    // Exact-name alternate namespaces can host legitimate services/docs.
+    // Neither credential words nor private hosting proves who operates them.
+    for host in [
+        "console.hetzner.net",
+        "login.console.hetzner.cloud",
+        "paypal.readthedocs.io",
+    ] {
+        let answer = mcp
+            .check_lookalike(host, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "suspected", "{host}: {answer}");
+        assert_eq!(answer["lookalike"], false);
+        assert_eq!(answer["suspected"], true);
+    }
 }
 
 #[test]
@@ -3079,4 +3261,34 @@ fn facts_entity_profiles_keep_the_existing_music_fallback() {
         .as_str()
         .unwrap()
         .starts_with("https://genius.com/search?"));
+}
+
+#[test]
+fn official_site_arbitrary_namesakes_require_disambiguation() {
+    for name in ["Brindle", "Velora"] {
+        for reversed in [false, true] {
+            let mut museum = titled("museum.example", &format!("{name} Museum"), 0.9, true);
+            museum.official = true;
+            museum.score = 10.0;
+            let mut laboratory =
+                titled("laboratory.test", &format!("{name} Laboratory"), 0.1, false);
+            laboratory.official = true;
+            laboratory.score = 0.01;
+            let mut hits = vec![museum, laboratory];
+            if reversed {
+                hits.reverse();
+            }
+            let mcp = server(hits);
+            let ambiguous = official(&mcp, name);
+            assert_eq!(ambiguous["status"], "ambiguous", "{ambiguous}");
+            assert_eq!(ambiguous["confidence"], "low");
+            assert_eq!(ambiguous["found"], false);
+            assert!(ambiguous["url"].is_null());
+            assert_eq!(ambiguous["alternatives"].as_array().unwrap().len(), 2);
+            let qualified = official(&mcp, &format!("{name} Museum"));
+            assert_eq!(qualified["found"], true, "{qualified}");
+            assert_eq!(qualified["domain"], "museum.example");
+            assert_ne!(qualified["status"], "ambiguous");
+        }
+    }
 }
