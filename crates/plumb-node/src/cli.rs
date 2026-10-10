@@ -1492,7 +1492,6 @@ mod tests {
     #[test]
     fn facts_targeted_flags_require_an_explicit_item_list() {
         let cli = parse(&[
-            "plumb",
             "fetch-facts",
             "--articles",
             "staged.tsv.gz",
@@ -1510,7 +1509,6 @@ mod tests {
         assert_eq!(args.items, ["Q17", "Q408"]);
         assert_eq!(args.properties, ["population", "capital"]);
         assert!(parse(&[
-            "plumb",
             "fetch-facts",
             "--articles",
             "staged.tsv.gz",
@@ -1519,7 +1517,6 @@ mod tests {
         ])
         .is_err());
         assert!(parse(&[
-            "plumb",
             "fetch-facts",
             "--articles",
             "staged.tsv.gz",
@@ -1530,7 +1527,6 @@ mod tests {
         ])
         .is_err());
         let cli = parse(&[
-            "plumb",
             "fetch-facts",
             "--articles",
             "staged.tsv.gz",
