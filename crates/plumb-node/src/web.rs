@@ -5024,6 +5024,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_navigation_api_html_and_click_redirect_choose_the_same_destination() {
+        let ready = node(node_status(Phase::Ready, Step::Idle));
         let (query, site, selected_url) = crate::assembly::task_navigation_fixture();
         let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
         let (status, _, body) = get(
@@ -5076,11 +5077,12 @@ mod tests {
             )),
             "{html}"
         );
-        let (_, headers, _) = get(
-            backend(vec![site.clone()]),
+        let (status, headers, _) = send(
+            node_router(backend(vec![site.clone()]), ready.clone()),
             &format!("/go?q={encoded}&d={}", site.domain),
         )
         .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
         assert_eq!(
             headers.get(header::LOCATION).unwrap().to_str().unwrap(),
             selected_url
@@ -5176,11 +5178,15 @@ mod tests {
             assert!(!html.contains(&format!("href=\"{page_url}\"")), "{html}");
             assert!(!html.contains("Site navigation:"), "{html}");
             assert!(html.contains("Shelf: Site badge"), "{html}");
-            let app = router(Arc::new(SongBackend {
-                hits: results.hits.clone(),
-                pages: results.pages.clone(),
-            }));
-            let (_, headers, _) = send(app, &go).await;
+            let app = node_router(
+                Arc::new(SongBackend {
+                    hits: results.hits.clone(),
+                    pages: results.pages.clone(),
+                }),
+                ready.clone(),
+            );
+            let (status, headers, _) = send(app, &go).await;
+            assert_eq!(status, StatusCode::SEE_OTHER);
             assert_eq!(
                 headers.get(header::LOCATION).unwrap().to_str().unwrap(),
                 shown[0].url
@@ -5229,7 +5235,7 @@ mod tests {
             hits: results.hits.clone(),
             pages: results.pages.clone(),
         });
-        let app = router(backend.clone());
+        let app = node_router(backend.clone(), ready);
         let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
         let (_, _, body) = send(
             app.clone(),
@@ -5260,7 +5266,8 @@ mod tests {
             html.contains(&format!("href=\"{}\"", escape_html(&go))),
             "{html}"
         );
-        let (_, headers, _) = send(app, &go).await;
+        let (status, headers, _) = send(app, &go).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
         assert_eq!(
             headers.get(header::LOCATION).unwrap().to_str().unwrap(),
             site.url
