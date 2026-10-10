@@ -375,12 +375,16 @@ fn search(out: &mut String, answer: &Value) {
     if !recent.is_empty() {
         out.push_str("Recent headlines:\n");
         for headline in recent {
+            let date = text(headline, "published_date")
+                .map(|date| format!(", {date}"))
+                .unwrap_or_default();
             let _ = writeln!(
                 out,
-                "- {} ({}, {}) {}",
+                "- {} ({}, {}{}) {}",
                 text(headline, "title").unwrap_or(""),
                 text(headline, "site").unwrap_or(""),
                 text(headline, "published").unwrap_or(""),
+                date,
                 text(headline, "url").unwrap_or("")
             );
         }
