@@ -910,7 +910,7 @@ fn search_is_in_english_unless_asked() {
 }
 
 /// Finds Wikipedia's article on Australia, with its facts, for any query
-/// naming it.
+/// naming it, and Mount Everest's for any naming that.
 struct Australia;
 
 impl SearchBackend for Australia {
@@ -926,26 +926,37 @@ impl SearchBackend for Australia {
     ) -> Result<SearchResults> {
         use plumb_core::facts::{Fact, FactKind};
         let mut pages = Vec::new();
-        if query.to_lowercase().contains("australia") {
-            let page = plumb_index::pages::Page::from_article(
-                "en",
-                plumb_core::article::Article {
-                    title: "Australia".into(),
-                    description: Some("country in Oceania".into()),
-                    item: Some("Q408".into()),
-                    facts: vec![
-                        Fact {
-                            kind: FactKind::Capital,
-                            value: "Canberra".into(),
-                        },
-                        Fact {
-                            kind: FactKind::Population,
-                            value: "27204809;2024".into(),
-                        },
-                    ],
-                    ..Default::default()
-                },
-            );
+        let article = match query.to_lowercase() {
+            query if query.contains("australia") => Some(plumb_core::article::Article {
+                title: "Australia".into(),
+                description: Some("country in Oceania".into()),
+                item: Some("Q408".into()),
+                facts: vec![
+                    Fact {
+                        kind: FactKind::Capital,
+                        value: "Canberra".into(),
+                    },
+                    Fact {
+                        kind: FactKind::Population,
+                        value: "27204809;2024".into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            query if query.contains("everest") => Some(plumb_core::article::Article {
+                title: "Mount Everest".into(),
+                description: Some("highest mountain on Earth".into()),
+                item: Some("Q513".into()),
+                facts: vec![Fact {
+                    kind: FactKind::Elevation,
+                    value: "8848.86".into(),
+                }],
+                ..Default::default()
+            }),
+            _ => None,
+        };
+        if let Some(article) = article {
+            let page = plumb_index::pages::Page::from_article("en", article);
             pages.push(plumb_index::pages::PlacedPage {
                 hit: plumb_index::pages::PageHit {
                     page,
@@ -1008,6 +1019,24 @@ fn facts_come_with_the_wikidata_item_and_property_they_are_from() {
         assert_eq!(facts.len(), 1, "{about}: {answer}");
         assert_eq!(facts[0]["kind"], "capital");
     }
+    // A mountain's height is its elevation; a country has neither.
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "Mount Everest", "about": "height" }),
+    );
+    let facts = answer["result"]["structuredContent"]["facts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(facts.len(), 1, "{answer}");
+    assert_eq!(facts[0]["kind"], "elevation");
+    assert_eq!(facts[0]["property"], "P2044");
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "australia", "about": "height" }),
+    );
+    assert_eq!(answer["result"]["structuredContent"]["found"], false);
     // A kind it has no fact of, a kind it never keeps, a subject it lacks.
     let answer = call(
         &mcp,
@@ -1141,9 +1170,13 @@ impl SearchBackend for Shelves {
         query: &str,
         limit: usize,
         _options: &SearchOptions,
+        docs: bool,
         keep: &dyn Fn(&Page) -> bool,
     ) -> Vec<plumb_index::pages::PageHit> {
         self.0.lock().unwrap().push(query.to_string());
+        if docs {
+            self.0.lock().unwrap().push(format!("docs: {query}"));
+        }
         shelf()
             .into_iter()
             .filter(|page| keep(page))
@@ -1217,6 +1250,11 @@ fn search_keeps_to_the_site_asked_for() {
     let asked = shelves.0.lock().unwrap().clone();
     assert!(
         asked.contains(&"spawn site:docs.rs".to_string()),
+        "{asked:?}"
+    );
+    // Docs pages are searched for as such.
+    assert!(
+        asked.contains(&"docs: spawn site:docs.rs".to_string()),
         "{asked:?}"
     );
 

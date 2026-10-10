@@ -1671,6 +1671,44 @@ impl PageSearcher {
         Ok(hits)
     }
 
+    /// [`PageSearcher::search`] for `words`, with the docs pages of each
+    /// site [`docs_sites_wanted`] gives for the search's operators `ops`
+    /// and whether it wants docs pages alone (`docs`), found by `words`
+    /// with what its docs are of named: "asyncio site:docs.python.org"
+    /// finds what "python asyncio" does on docs.python.org. Best first.
+    pub fn search_naming_docs(
+        &self,
+        words: &str,
+        ops: &Operators,
+        docs: bool,
+        limit: usize,
+    ) -> Result<Vec<PageHit>> {
+        let mut hits = self.search(words, limit)?;
+        let wanted = docs_sites_wanted(ops, words, docs, &hits);
+        if wanted.is_empty() {
+            return Ok(hits);
+        }
+        for site in wanted {
+            for hit in self.search(&naming_docs(site, words), limit)? {
+                // Its docs pages alone: the rest is not what was searched for.
+                let of_site = hit.page.set == DOCS_SET
+                    && plumb_core::docs::site_of_url(&hit.page.url)
+                        .is_some_and(|of| of.key == site.key);
+                if !of_site {
+                    continue;
+                }
+                match hits.iter_mut().find(|h| h.page == hit.page) {
+                    Some(kept) if kept.score >= hit.score => {}
+                    Some(kept) => *kept = hit,
+                    None => hits.push(hit),
+                }
+            }
+        }
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        truncate_keeping_inner_pages(&mut hits, limit);
+        Ok(hits)
+    }
+
     /// The Wiktionary word `name` is ([`WIKTIONARY_SET`]), written as it
     /// is or with other capitals ("anadromous", "AWOL"): the best-known
     /// such word, the one written alike first.
@@ -3155,6 +3193,99 @@ fn docs_asked(page: &Page, query: &str) -> bool {
         .is_some_and(|site| plumb_core::docs::asks_about(site, query))
 }
 
+/// Most docs sites [`PageSearcher::search_naming_docs`] searches by name.
+const MAX_NAMED_DOCS: usize = 3;
+/// The first pages found for a search's words that [`docs_sites_wanted`]
+/// reads for the docs they ask about.
+const DOCS_HINT_PAGES: usize = 20;
+/// How many of them must ask about a docs site for it to be wanted.
+const DOCS_HINT_AGREE: usize = 2;
+
+/// The docs sites whose pages a search for `words` wants without naming
+/// what their docs are of, so that none of their pages is found by its
+/// words alone ([`docs_asked`]): those on the hosts its `site:` operators
+/// `ops` name ("asyncio site:docs.python.org"), and, for a search for
+/// docs pages alone (`docs`) with no `site:`, those that most of the
+/// first pages `found` for its words ask about, as questions tagged
+/// python do for "asyncio". None whose product `words` names already.
+pub fn docs_sites_wanted(
+    ops: &Operators,
+    words: &str,
+    docs: bool,
+    found: &[PageHit],
+) -> Vec<&'static plumb_core::docs::DocsSite> {
+    use plumb_core::docs::{asks_about, DOCS_SITES};
+    if words.trim().is_empty() || DOCS_SITES.iter().any(|site| asks_about(site, words)) {
+        return Vec::new();
+    }
+    if !ops.sites.is_empty() {
+        // A host, not a top-level domain: "site:org" names no docs.
+        let on_sites = |host: &str| {
+            ops.sites.iter().any(|site| {
+                site.contains('.')
+                    && (host == site
+                        || host
+                            .strip_suffix(site.as_str())
+                            .is_some_and(|sub| sub.ends_with('.')))
+            })
+        };
+        return DOCS_SITES
+            .iter()
+            .filter(|site| {
+                site.roots
+                    .iter()
+                    .filter_map(|root| host_of(root))
+                    .any(|host| on_sites(&host))
+            })
+            .take(MAX_NAMED_DOCS)
+            .collect();
+    }
+    if !docs {
+        return Vec::new();
+    }
+    let counts: Vec<usize> = DOCS_SITES
+        .iter()
+        .map(|site| {
+            found
+                .iter()
+                .take(DOCS_HINT_PAGES)
+                .filter(|hit| {
+                    let text = format!(
+                        "{} {}",
+                        hit.page.title,
+                        hit.page.description.as_deref().unwrap_or("")
+                    );
+                    asks_about(site, &text)
+                })
+                .count()
+        })
+        .collect();
+    let most = counts.iter().copied().max().unwrap_or(0);
+    if most < DOCS_HINT_AGREE {
+        return Vec::new();
+    }
+    // Questions tagged javascript and reactjs ask about MDN and React
+    // alike: both are searched.
+    DOCS_SITES
+        .iter()
+        .zip(counts)
+        .filter(|(_, count)| *count == most)
+        .map(|(site, _)| site)
+        .take(MAX_NAMED_DOCS)
+        .collect()
+}
+
+/// `words` with what `site`'s docs are of named first, as its pages'
+/// other names are ("Python asyncio"), by its product's name or else by
+/// a word that asks about it ("dotnet" for .NET).
+fn naming_docs(site: &plumb_core::docs::DocsSite, words: &str) -> String {
+    std::iter::once(site.product)
+        .chain(site.asked_by.iter().copied())
+        .map(|name| format!("{name} {words}"))
+        .find(|query| plumb_core::docs::asks_about(site, query))
+        .unwrap_or_else(|| format!("{} {words}", site.product))
+}
+
 /// Words a search asked as a question starts with.
 const QUESTION_WORDS: &[&str] = &[
     "how", "why", "what", "whats", "what's", "when", "where", "which", "who", "can", "could",
@@ -3515,6 +3646,92 @@ mod tests {
             },
         );
         assert_eq!(read, Some(structures));
+    }
+
+    #[test]
+    fn docs_pages_are_found_by_a_word_on_their_site_or_when_docs_are_wanted() {
+        let asyncio = docs_page(
+            "https://docs.python.org/3/library/asyncio.html",
+            "asyncio",
+            &["Python asyncio", "asyncio Python"],
+            "asyncio is a library to write concurrent code using the async/await syntax.",
+        );
+        let question = |title: &str, item: &str, tags: &str| {
+            Page::from_question(Article {
+                title: title.into(),
+                description: Some(tags.into()),
+                item: Some(item.into()),
+                views: 1_000_000,
+                ..Article::default()
+            })
+        };
+        let (_dir, searcher) = searcher(&[
+            asyncio.clone(),
+            question(
+                "How do I use asyncio with threads?",
+                "1",
+                "python, python-asyncio",
+            ),
+            question("asyncio: event loop is closed", "2", "python, python-3.x"),
+        ]);
+        let found = |query: &str, docs: bool| -> Vec<String> {
+            let ops = Operators::parse(query);
+            searcher
+                .search_naming_docs(&ops.words, &ops, docs, 10)
+                .unwrap()
+                .into_iter()
+                .filter(|hit| operators_allow(&ops, &hit.page))
+                .map(|hit| hit.page.title)
+                .collect()
+        };
+        // The word alone names no docs: the questions alone, as before.
+        let titles = |hits: Vec<PageHit>| -> Vec<String> {
+            hits.into_iter().map(|hit| hit.page.title).collect()
+        };
+        assert_eq!(
+            found("asyncio", false),
+            titles(searcher.search("asyncio", 10).unwrap())
+        );
+        assert!(!found("asyncio", false).contains(&"asyncio".to_string()));
+        // Its site names them, and so does a search for docs pages alone,
+        // by the questions it finds, which are about Python.
+        assert_eq!(found("asyncio site:docs.python.org", false), ["asyncio"]);
+        assert_eq!(found("asyncio site:python.org", false), ["asyncio"]);
+        assert!(found("asyncio", true).contains(&"asyncio".to_string()));
+        // Another docs site, or a top-level domain, names other docs.
+        assert!(found("asyncio site:developer.mozilla.org", false).is_empty());
+        assert!(!found("asyncio site:org", true).contains(&"asyncio".to_string()));
+
+        let python = plumb_core::docs::site("python").unwrap();
+        assert_eq!(naming_docs(python, "asyncio"), "Python asyncio");
+        // .NET's pages are named "dotnet …" too.
+        let dotnet = plumb_core::docs::site("dotnet").unwrap();
+        assert_eq!(naming_docs(dotnet, "linq"), "dotnet linq");
+        // Questions about JavaScript and React ask about both docs; one
+        // question alone says too little.
+        let tagged = |tags: &str, item: &str| PageHit {
+            page: question("useState not updating", item, tags),
+            score: 1.0,
+            named: false,
+            popularity: 1.0,
+            whole: false,
+            learned: None,
+        };
+        let none = Operators::default();
+        let keys = |found: &[PageHit]| -> Vec<&str> {
+            docs_sites_wanted(&none, "usestate", true, found)
+                .iter()
+                .map(|site| site.key)
+                .collect()
+        };
+        let both = [
+            tagged("javascript, reactjs", "1"),
+            tagged("javascript, reactjs, react-hooks", "2"),
+        ];
+        assert_eq!(keys(&both), ["mdn", "react"]);
+        assert!(keys(&both[..1]).is_empty());
+        assert!(docs_sites_wanted(&none, "usestate", false, &both).is_empty());
+        assert!(docs_sites_wanted(&none, "react usestate", true, &both).is_empty());
     }
 
     #[test]

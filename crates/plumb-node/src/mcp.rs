@@ -1169,7 +1169,9 @@ impl Mcp {
         let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
         let found = self
             .backend
-            .pages_of(query, limit, options, &|page| kind_keeps(kind, page));
+            .pages_of(query, limit, options, kind == "docs", &|page| {
+                kind_keeps(kind, page)
+            });
         // Pages Plumb lacks may still be on the site.
         let site_search = if plumb_core::Operators::parse(query).sites.is_empty() {
             None
@@ -1689,31 +1691,59 @@ impl Mcp {
         options: &SearchOptions,
     ) -> Result<Value> {
         use plumb_core::facts::{fact_asked, FactKind, KINDS};
-        let kinds: Option<Vec<FactKind>> = match about {
-            None => None,
+        // The kinds asked for, and whether only the first of them a page
+        // has is wanted.
+        let (kinds, first_only): (Option<Vec<FactKind>>, bool) = match about {
+            None => (None, false),
             Some(about) => {
                 let key = about.to_lowercase().replace([' ', '_'], "-");
-                let kinds = FactKind::from_key(&key)
-                    .map(|kind| vec![kind])
-                    .or_else(|| fact_asked(&format!("{about} of {subject}")).map(|q| q.kinds))
-                    .or_else(|| fact_asked(&format!("{subject} {about}")).map(|q| q.kinds));
-                let Some(kinds) = kinds else {
+                let asked = |question: String| fact_asked(&question).map(|q| q.kinds);
+                let kinds = match FactKind::from_key(&key) {
+                    // Then the kinds the question asks for after it:
+                    // "height of mount everest" is its elevation, as a
+                    // mountain has no height.
+                    Some(kind) => Some((
+                        asked(format!("{about} of {subject}"))
+                            .filter(|kinds| kinds.first() == Some(&kind))
+                            .unwrap_or_else(|| vec![kind]),
+                        true,
+                    )),
+                    None => asked(format!("{about} of {subject}"))
+                        .or_else(|| asked(format!("{subject} {about}")))
+                        .map(|kinds| (kinds, false)),
+                };
+                let Some((kinds, first_only)) = kinds else {
                     bail!(
                         "Plumb keeps no facts of the kind {about:?}; it knows {}",
                         KINDS.iter().map(|k| k.key()).collect::<Vec<_>>().join(", ")
                     );
                 };
-                Some(kinds)
+                (Some(kinds), first_only)
             }
         };
-        let wanted = |kind: &FactKind| kinds.as_ref().is_none_or(|kinds| kinds.contains(kind));
         let found = self.lookup(subject, PROFILE_SEARCH_LIMIT, options)?;
         let page = answers::fact_pages(&found.pages)
             .map(|placed| &placed.hit.page)
-            .find(|page| page.facts.iter().any(|fact| wanted(&fact.kind)));
+            .find(|page| {
+                page.facts.iter().any(|fact| {
+                    kinds
+                        .as_ref()
+                        .is_none_or(|kinds| kinds.contains(&fact.kind))
+                })
+            });
         let Some(page) = page else {
             return Ok(json!({ "subject": subject, "found": false }));
         };
+        let kinds = kinds.map(|kinds| {
+            match kinds
+                .iter()
+                .find(|kind| page.facts.iter().any(|fact| fact.kind == **kind))
+            {
+                Some(&first) if first_only => vec![first],
+                _ => kinds,
+            }
+        });
+        let wanted = |kind: &FactKind| kinds.as_ref().is_none_or(|kinds| kinds.contains(kind));
         let item_url = page
             .item
             .as_deref()

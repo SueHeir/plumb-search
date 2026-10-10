@@ -868,12 +868,15 @@ pub(super) fn definition(inner: &Inner, name: &str) -> Option<plumb_index::pages
 
 /// The best `limit` pages for `query` that `keep` keeps, best first; see
 /// [`crate::web::SearchBackend::pages_of`]. Of the first [`KIND_PAGES`]
-/// found, as a `site:` search looks at more pages than others.
+/// found, as a `site:` search looks at more pages than others, with the
+/// docs pages a search for docs pages (`docs`) or on a docs site wants
+/// ([`plumb_index::pages::PageSearcher::search_naming_docs`]).
 pub(super) fn pages_of(
     inner: &Inner,
     query: &str,
     limit: usize,
     options: &SearchOptions,
+    docs: bool,
     keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
 ) -> Vec<PageHit> {
     let Some(searcher) = inner
@@ -887,7 +890,7 @@ pub(super) fn pages_of(
     };
     let ops = Operators::parse(query);
     let words = if ops.any() { ops.words.as_str() } else { query };
-    match searcher.search(words, KIND_PAGES) {
+    match searcher.search_naming_docs(words, &ops, docs, KIND_PAGES) {
         Ok(found) => found
             .into_iter()
             .filter(|hit| {
@@ -927,7 +930,9 @@ pub(super) fn add_pages(
         if ops.words.is_empty() {
             return;
         }
-        match searcher.search(&ops.words, OPERATOR_PAGES) {
+        // "asyncio site:docs.python.org" finds what "python asyncio" does
+        // there.
+        match searcher.search_naming_docs(&ops.words, &ops, false, OPERATOR_PAGES) {
             Ok(mut found) => {
                 found.retain(|hit| options_allow(options, &hit.page));
                 results.pages = place_operator_pages(&ops, &results.hits, found);

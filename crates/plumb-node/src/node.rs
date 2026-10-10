@@ -2078,9 +2078,10 @@ impl SearchBackend for Inner {
         query: &str,
         limit: usize,
         options: &SearchOptions,
+        docs: bool,
         keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
     ) -> Vec<plumb_index::pages::PageHit> {
-        pages::pages_of(self, query, limit, options, keep)
+        pages::pages_of(self, query, limit, options, docs, keep)
     }
 
     fn num_docs(&self) -> u64 {
