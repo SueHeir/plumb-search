@@ -886,16 +886,11 @@ impl Mcp {
         let rivals: Vec<&str> = results
             .hits
             .iter()
-            .filter(|hit| {
-                hit.domain != pick.domain && intent.matches_site(hit) && (hit.named || hit.official)
-            })
+            .filter(|hit| hit.domain != pick.domain && (hit.named || hit.official))
             .map(|hit| hit.domain.as_str())
             .collect();
         if !rivals.is_empty() && confidence != "high" {
-            why.push(format!(
-                "Other sites also go by this name: {}.",
-                rivals.join(", ")
-            ));
+            why.push(format!("Other search candidates: {}.", rivals.join(", ")));
         }
         let mut alternatives: Vec<Value> = results
             .hits
