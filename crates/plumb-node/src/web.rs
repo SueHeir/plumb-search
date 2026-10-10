@@ -4042,7 +4042,9 @@ fn render_results_with(
             };
             let mut rendered = String::new();
             let (destination, navigation) = if item.network.is_none() {
-                crate::assembly::site_destination(query, &item.hit, pages)
+                // Display filters do not change the evidence used by `/go`,
+                // plugin annotations, or the API to select this site's URL.
+                crate::assembly::site_destination(query, &item.hit, &results.pages)
             } else {
                 (Cow::Borrowed(item.hit.as_ref()), None)
             };
@@ -5035,6 +5037,15 @@ mod tests {
             output["assembled"]["rows"][0]["site"]["title"],
             site.title.as_deref().unwrap()
         );
+        // The legacy main-only API remains a raw site-hit list; assembly is
+        // exposed by full=1 and the task-aware presentation adapters.
+        let (_, _, body) = get(
+            backend(vec![site.clone()]),
+            &format!("/api/search?q={encoded}&limit=10"),
+        )
+        .await;
+        let raw: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(raw[0]["url"], site.url);
         let results = SearchResults {
             hits: vec![site.clone()],
             ..SearchResults::default()
@@ -5070,6 +5081,105 @@ mod tests {
         );
         let shown = shown_results(&query, &results, 10);
         assert_eq!(shown[0].url, selected_url);
+
+        // A retrieved page still vetoes link-only navigation when the display
+        // hides it. Pick tracking and plugin notes must use that same URL.
+        let page_url = format!("{}restaurants/guide/", site.url);
+        let page = plumb_index::pages::Page::from_reference(plumb_core::Article {
+            title: query.clone(),
+            item: Some(page_url.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        let results = SearchResults {
+            hits: vec![site.clone()],
+            pages: vec![plumb_index::pages::PlacedPage {
+                hit: PageHit {
+                    page,
+                    score: 0.8,
+                    popularity: 0.0,
+                    named: true,
+                    whole: true,
+                    learned: None,
+                },
+                under: None,
+                at: 0,
+            }],
+            ..SearchResults::default()
+        };
+        let shown = shown_results(&query, &results, 10);
+        assert_eq!(shown[0].url, site.url);
+        let mut extras = answers::Extras::default();
+        extras.plugin_notes.insert(
+            shown[0].url.clone(),
+            vec![crate::plugins::ResultNote {
+                name: "Shelf".into(),
+                badge: Some("Site badge".into()),
+                ..Default::default()
+            }],
+        );
+        let visible = render_results(
+            &query,
+            &results,
+            Some(&extras),
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            false,
+            &Icons::default(),
+        );
+        assert!(
+            visible.contains(&format!("href=\"{page_url}\"")),
+            "{visible}"
+        );
+        for hidden_by_plugin in [true, false] {
+            let mut settings = no_settings();
+            if hidden_by_plugin {
+                extras.plugin_notes.insert(
+                    page_url.clone(),
+                    vec![crate::plugins::ResultNote {
+                        hide: true,
+                        ..Default::default()
+                    }],
+                );
+            } else {
+                extras.plugin_notes.remove(&page_url);
+                settings.browser_about =
+                    Some(About::default().with_kinds([(
+                        plumb_index::pages::REFERENCE_SET,
+                        crate::about::Amount::Off,
+                    )]));
+            }
+            let html = render_results(
+                &query,
+                &results,
+                Some(&extras),
+                &NetOutcome::NotAsked,
+                &settings,
+                None,
+                10,
+                true,
+                &Icons::default(),
+            );
+            let go = go_link(&query, &settings.options, &site.domain);
+            assert!(
+                html.contains(&format!("href=\"{}\"", escape_html(&go))),
+                "{html}"
+            );
+            assert!(!html.contains(&format!("href=\"{page_url}\"")), "{html}");
+            assert!(!html.contains("Site navigation:"), "{html}");
+            assert!(html.contains("Shelf: Site badge"), "{html}");
+            let app = router(Arc::new(SongBackend {
+                hits: results.hits.clone(),
+                pages: results.pages.clone(),
+            }));
+            let (_, headers, _) = send(app, &go).await;
+            assert_eq!(
+                headers.get(header::LOCATION).unwrap().to_str().unwrap(),
+                shown[0].url
+            );
+        }
     }
 
     #[tokio::test]
