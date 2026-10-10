@@ -437,7 +437,7 @@ async fn main() -> Result<()> {
     }
     let rank: RankConfig = serde_json::from_str(&args.rank).context("reading --rank JSON")?;
     let meaning = SharedMeaning::new(MeaningIndex::from_args(&args.meaning)?);
-    let mut sites = IndexBackend::new(Searcher::open(&index)?, rank.clone()).with_meaning(meaning);
+    let mut sites = IndexBackend::new(Searcher::open(&index)?, rank).with_meaning(meaning);
     let mut place_count = None;
     if let Some(path) = &args.place_index {
         let path = scratch_path(&root, path)?;
@@ -569,7 +569,7 @@ mod tests {
         build_page_index(&pages_dir, pages).unwrap();
         let rank = RankConfig::default();
         let backend = Arc::new(FrozenBackend {
-            sites: IndexBackend::new(Searcher::open(&index).unwrap(), rank.clone()),
+            sites: IndexBackend::new(Searcher::open(&index).unwrap(), rank),
             pages: PageSearcher::open(&pages_dir).unwrap(),
             rank,
         });
