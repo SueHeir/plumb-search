@@ -42,6 +42,7 @@ RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry 
  && wasm-bindgen --target web --no-typescript --out-dir target/private \
         target/wasm32-unknown-unknown/wasm/plumb_private.wasm \
  && PLUMB_BUILD_REVISION=${PLUMB_BUILD_REVISION} PLUMB_BUILD_DIRTY=${PLUMB_BUILD_DIRTY} \
+        PLUMB_SOURCE_REVISION=${PLUMB_BUILD_REVISION} \
         PLUMB_PRIVATE_DIR=/src/target/private cargo build --release --locked -p plumb-node \
  && install -D -m 0755 target/release/plumb /out/plumb
 # The licenses and notices of every third-party crate in the binary and the
