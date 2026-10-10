@@ -221,7 +221,8 @@ fn strip_tags(text: &str) -> String {
 
 impl Work {
     /// The work as an articles file line (see the module docs), `None`
-    /// without a title.
+    /// without a usable title or primary identity. Rejected provider
+    /// identities are reported; blank DOI values are missing metadata.
     pub fn to_article(&self) -> Option<Article> {
         let title = plumb_core::collapse_whitespace(&strip_tags(
             self.display_name.as_deref().unwrap_or(""),
@@ -229,15 +230,43 @@ impl Work {
         if title.is_empty() || title.chars().count() > 2000 {
             return None;
         }
-        let item = match self.doi.as_deref() {
-            Some(doi) => doi
-                .trim_start_matches("https://doi.org/")
-                .trim_start_matches("http://doi.org/")
-                .to_string(),
-            None => self
-                .id
-                .trim_start_matches("https://openalex.org/")
-                .to_string(),
+        let doi = self
+            .doi
+            .as_deref()
+            .map(|value| {
+                value
+                    .trim()
+                    .trim_start_matches("https://doi.org/")
+                    .trim_start_matches("http://doi.org/")
+                    .trim()
+                    .to_ascii_lowercase()
+            })
+            .filter(|value| !value.is_empty());
+        if doi.as_deref().is_some_and(|id| {
+            id.contains(char::is_whitespace)
+                || !id
+                    .strip_prefix("10.")
+                    .and_then(|rest| rest.split_once('/'))
+                    .is_some_and(|(prefix, suffix)| {
+                        !prefix.is_empty()
+                            && prefix.bytes().all(|b| b.is_ascii_digit())
+                            && !suffix.is_empty()
+                    })
+        }) {
+            warn!("OpenAlex work has a malformed DOI; record rejected before caching");
+            return None;
+        }
+        let provider_id = self.id.trim().trim_start_matches("https://openalex.org/");
+        let openalex_id = provider_id
+            .strip_prefix('W')
+            .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+            .map(|_| provider_id.to_string());
+        if openalex_id.is_none() {
+            warn!("OpenAlex work has no valid OpenAlex identifier");
+        }
+        let Some(item) = doi.clone().or_else(|| openalex_id.clone()) else {
+            warn!("OpenAlex work has no usable primary identity; record rejected before caching");
+            return None;
         };
         let authors: Vec<&str> = self
             .authorships
@@ -290,18 +319,9 @@ impl Work {
             search: None,
             language: None,
             paper: Some(PaperMetadata {
-                doi: self.doi.as_ref().map(|doi| {
-                    doi.trim_start_matches("https://doi.org/")
-                        .trim_start_matches("http://doi.org/")
-                        .to_ascii_lowercase()
-                }),
-                openalex_id: Some(
-                    self.id
-                        .trim_start_matches("https://openalex.org/")
-                        .to_string(),
-                ),
-                arxiv_id: self
-                    .doi
+                doi: doi.clone(),
+                openalex_id,
+                arxiv_id: doi
                     .as_ref()
                     .and_then(|doi| {
                         doi.to_ascii_lowercase()
@@ -634,6 +654,35 @@ mod tests {
         assert_eq!(articles[1].title, "Growth of E. coli");
         assert_eq!(articles[1].item.as_deref(), Some("W1"));
         assert_eq!(articles[1].description.as_deref(), Some("Paper"));
+    }
+
+    #[test]
+    fn provider_identities_keep_blank_dois_out_of_primary_and_metadata_fields() {
+        for doi in [None, Some(""), Some("  "), Some("https://doi.org/")] {
+            let work: Work = serde_json::from_value(serde_json::json!({
+                "id": "https://openalex.org/W987654", "doi": doi,
+                "display_name": "Unseen synthetic publication"
+            }))
+            .unwrap();
+            let article = work.to_article().unwrap();
+            assert_eq!(article.item.as_deref(), Some("W987654"));
+            let metadata = article.paper.as_ref().unwrap();
+            assert_eq!(metadata.doi, None);
+            assert_eq!(metadata.openalex_id.as_deref(), Some("W987654"));
+            crate::paper_validation::validate_consistency(&[article]).unwrap();
+        }
+        for doi in ["not-a-doi", "10./missing", "10.1234/", "10.1234/has space"] {
+            let work: Work = serde_json::from_value(serde_json::json!({
+                "id": "W987654", "doi": doi, "display_name": "Synthetic publication"
+            }))
+            .unwrap();
+            assert!(work.to_article().is_none(), "{doi}");
+        }
+        let work: Work = serde_json::from_value(serde_json::json!({
+            "id": "invalid-provider-id", "doi": "", "display_name": "Synthetic publication"
+        }))
+        .unwrap();
+        assert!(work.to_article().is_none());
     }
 
     #[test]
