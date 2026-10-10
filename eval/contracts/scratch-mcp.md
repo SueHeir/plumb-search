@@ -9,8 +9,8 @@ All input paths must resolve inside the explicit scratch root. Opening Tantivy
 readers may create lock files there; use the scratch copy of the site index.
 
 The adapter requires the combined candidate APIs (`SearchBackend::entities`,
-`PageSearcher::entities`, and `PageSearcher::in_language`). Its explicit
-`eval-candidate` feature keeps it out of harness-only baseline all-target builds.
+`PageSearcher::entities`, and `PageSearcher::in_language`). The frozen harness-only baseline predates this example; the integrated candidate
+includes it in normal all-target checks.
 Do not add feature APIs to the baseline just to run this appendix: compare core
 reports first, then run candidate surface contracts. This is not a paired
 baseline/candidate MCP result by itself.
@@ -35,7 +35,7 @@ coordinator's memory/time limits. This command is a build recipe, not part of
 QUALITY_ROOT=/home/suehr/scratch/plumb-quality-20261009
 CARGO_TARGET_DIR="$QUALITY_ROOT/candidate-target" \
   CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=0 \
-  cargo build --release -p plumb-node --example eval_mcp --features eval-candidate
+  cargo build --release -p plumb-node --example eval_mcp
 ```
 
 Once core comparison is recorded and the retained page cache is ready, run the
@@ -105,5 +105,5 @@ build metadata, web page enrichment and disabled outbound paths:
 ```sh
 CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 \
   CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
-  cargo test -p plumb-node --example eval_mcp --features eval-candidate
+  cargo test -p plumb-node --example eval_mcp
 ```

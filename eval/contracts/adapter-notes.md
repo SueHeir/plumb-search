@@ -19,7 +19,7 @@ no feature flag. This follow-up requires the candidate's PageSearcher APIs;
 cherry-pick it only into the integrated candidate. This old harness worktree
 cannot compile the final report patch against the baseline APIs, so validation
 uses a clean candidate source archive with only this patch overlaid. The
-`eval-candidate` feature is only an explicit entry point for the scratch example.
+scratch example is included in normal all-target candidate checks.
 The baseline binary stays unchanged and retains its observed after-cap
 language behavior; no baseline rebuild/replay or shared scoring change is
 required.

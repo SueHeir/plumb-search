@@ -11,15 +11,6 @@ publish = false
 name = "plumb"
 path = "src/main.rs"
 
-# The combined search candidate adds entity and language retrieval APIs.
-# Keep its scratch adapter out of harness-only baseline all-target builds.
-[features]
-eval-candidate = []
-
-[[example]]
-name = "eval_mcp"
-required-features = ["eval-candidate"]
-
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["multipart"] }
