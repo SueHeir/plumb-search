@@ -77,6 +77,10 @@ pub struct FetchedDoc {
     /// Optional rich content; absent in old caches and compact fetches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search: Option<SearchContent>,
+    /// Declared page language, carried from `PageMeta`, never inferred
+    /// from the host or the source's country.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 /// The articles of `site`'s pages `docs`, in the order given, leaving out
@@ -272,6 +276,7 @@ fn article_of(site: &DocsSite, doc: &FetchedDoc, shared: &Shared) -> Option<Arti
         aliases: aliases(site, &title),
         sections: sections_of(&title, doc, shared),
         search: doc.search.as_ref().and_then(SearchContent::bounded),
+        language: doc.language.as_deref().and_then(plumb_core::language_code),
         title,
         description,
         item: Some(doc.url.clone()),
@@ -398,6 +403,7 @@ mod tests {
             text: Some("Python lists have a built-in list.sort() method.".into()),
             sections: Vec::new(),
             search: None,
+            language: None,
         }
     }
 
@@ -525,6 +531,36 @@ mod tests {
     }
 
     #[test]
+    fn declared_languages_survive_ingestion_and_do_not_deduplicate_translations() {
+        let mdn = site("mdn").unwrap();
+        let docs: Vec<FetchedDoc> = [("en-US", "en"), ("es", "es-ES"), ("de", "de")]
+            .into_iter().map(|(path, language)| FetchedDoc {
+                url: format!("https://developer.mozilla.org/{path}/docs/Web/JavaScript/Reference/Global_Objects/Array"),
+                title: Some("Array - JavaScript | MDN".into()),
+                language: Some(language.into()),
+                ..FetchedDoc::default()
+            }).collect();
+        let articles = docs_articles(mdn, &docs);
+        assert_eq!(articles.len(), 3);
+        assert_eq!(
+            articles
+                .iter()
+                .filter_map(|article| article.language.as_deref())
+                .collect::<Vec<_>>(),
+            ["en", "es", "de"]
+        );
+        let old: FetchedDoc = serde_json::from_str(
+            r#"{"url":"https://docs.python.org/3/tutorial/index.html","title":"Tutorial"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.language, None);
+        assert_eq!(
+            doc_article(site("python").unwrap(), &old).unwrap().language,
+            None
+        );
+    }
+
+    #[test]
     fn keeps_distinct_urls_with_shared_titles_and_sorts_by_views() {
         let python = site("python").unwrap();
         let mut articles = docs_articles(
@@ -563,6 +599,7 @@ mod tests {
             text: Some(text.into()),
             sections: Vec::new(),
             search: None,
+            language: None,
         };
         let articles = docs_articles(
             react,
@@ -612,6 +649,7 @@ mod tests {
             text: Some(format!("About {title}")),
             sections: sections.iter().map(|s| s.to_string()).collect(),
             search: None,
+            language: None,
         };
         let docs = [
             page(

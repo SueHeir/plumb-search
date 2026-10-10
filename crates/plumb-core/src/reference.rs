@@ -78,6 +78,22 @@ const fn big(host: &'static str, weight: u64, max_pages: usize) -> ReferenceSite
 /// The reference sites, by what they are about, the most used of each
 /// first.
 pub const REFERENCE_SITES: &[ReferenceSite] = &[
+    // Bounded initial Spanish/German institutional coverage. Language is
+    // taken from each fetched page, not assigned to the whole host.
+    ReferenceSite {
+        host: "www.dnielectronico.es",
+        roots: &["https://www.dnielectronico.es/PortalDNIe/"],
+        sitemaps: &[],
+        weight: 6,
+        max_pages: Some(500),
+    },
+    ReferenceSite {
+        host: "gesund.bund.de",
+        roots: &["https://gesund.bund.de/"],
+        sitemaps: &[],
+        weight: 6,
+        max_pages: Some(500),
+    },
     // Health.
     big("www.webmd.com", 10, 10_000),
     big("www.healthline.com", 10, 10_000),

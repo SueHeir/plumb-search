@@ -113,12 +113,19 @@ pub const COUNTRY_CHOICES: &[(&str, &str)] = &[
 ];
 
 /// The code of the country named `name` in English ("germany" -> `DE`),
-/// of those in [`COUNTRY_CHOICES`] plus a few other names.
+/// of those in [`COUNTRY_CHOICES`] plus a few common Spanish/German names.
 pub fn country_of_name(name: &str) -> Option<&'static str> {
     let name = crate::normalize_text(name);
     let other = match name.as_str() {
         "usa" | "us" | "america" | "united states of america" => Some("US"),
         "uk" | "england" | "scotland" | "wales" | "great britain" | "britain" => Some("GB"),
+        "méxico" => Some("MX"),
+        "españa" | "espana" | "spanien" => Some("ES"),
+        "deutschland" | "alemania" => Some("DE"),
+        "francia" | "frankreich" => Some("FR"),
+        "italia" | "italien" => Some("IT"),
+        "estados unidos" | "vereinigte staaten" => Some("US"),
+        "reino unido" | "vereinigtes königreich" => Some("GB"),
         _ => None,
     };
     other.or_else(|| {

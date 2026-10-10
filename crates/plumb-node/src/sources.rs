@@ -625,6 +625,7 @@ mod tests {
                     lead: None,
                     names: Vec::new(),
                     sections: Vec::new(),
+                    content_language: None,
                 },
                 score: 1.0,
                 named: true,

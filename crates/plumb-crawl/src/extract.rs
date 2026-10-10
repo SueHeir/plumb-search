@@ -277,6 +277,8 @@ struct Page<'a> {
     search_url: Option<String>,
     /// The `<html lang>` of the page, once its `<html>` is read.
     language: Option<String>,
+    meta_language: Option<String>,
+    og_language: Option<String>,
     html_seen: bool,
     /// `<link rel="icon">` and the like, with their [`icon_rank`].
     icons: Vec<(u32, String)>,
@@ -389,6 +391,8 @@ impl<'a> Page<'a> {
             site_name: None,
             search_url: None,
             language: None,
+            meta_language: None,
+            og_language: None,
             html_seen: false,
             icons: Vec::new(),
             feed: None,
@@ -763,6 +767,16 @@ impl<'a> Page<'a> {
         // Open Graph belongs in `property`, but `name` is a common mistake.
         let is_og =
             |key: &str| name.eq_ignore_ascii_case(key) || property.eq_ignore_ascii_case(key);
+        if self.foreign == 0
+            && self.meta_language.is_none()
+            && attr(tag, "http-equiv")
+                .is_some_and(|key| key.eq_ignore_ascii_case("content-language"))
+        {
+            self.meta_language = plumb_core::language_code(content);
+        }
+        if self.foreign == 0 && self.og_language.is_none() && is_og("og:locale") {
+            self.og_language = plumb_core::language_code(content);
+        }
         if self.description.is_none() && name.eq_ignore_ascii_case("description") {
             self.description = clean_text(content);
         }
@@ -901,7 +915,7 @@ impl<'a> Page<'a> {
                 self.own_domain.as_deref(),
             ),
             search_url: self.search_url,
-            language: self.language,
+            language: self.language.or(self.meta_language).or(self.og_language),
             icons: best_icons(self.icons),
             key_pages: match &self.own_domain {
                 Some(domain) => pick_key_pages(
@@ -1272,6 +1286,23 @@ mod tests {
         );
         assert_eq!(lang("<html><title>x</title>"), None);
         assert_eq!(lang("<html lang=\"x-default\">"), None);
+        assert_eq!(
+            lang("<html><meta http-equiv=\"Content-Language\" content=\"es-ES\">").as_deref(),
+            Some("es")
+        );
+        assert_eq!(
+            lang("<html><meta property=\"og:locale\" content=\"de_DE\">").as_deref(),
+            Some("de")
+        );
+        assert_eq!(
+            lang("<html lang=\"es\"><meta property=\"og:locale\" content=\"en_US\">").as_deref(),
+            Some("es")
+        );
+        assert_eq!(lang("<html><meta property=\"og:locale\" content=\"en_US\"><meta http-equiv=\"Content-Language\" content=\"es\">").as_deref(), Some("es"));
+        assert_eq!(
+            lang("<html><meta http-equiv=\"Content-Language\" content=\"es,de\">"),
+            None
+        );
         // Only the page's own <html>.
         assert_eq!(lang("<html><svg><html lang=\"fr\"></svg>"), None);
     }

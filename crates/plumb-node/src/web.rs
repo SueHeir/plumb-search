@@ -5096,6 +5096,7 @@ mod tests {
                 lead: None,
                 names: Vec::new(),
                 sections: Vec::new(),
+                content_language: None,
             },
             score: 1.0,
             named: true,
@@ -5196,6 +5197,7 @@ mod tests {
                 lead: None,
                 names: Vec::new(),
                 sections: Vec::new(),
+                content_language: None,
             },
             score: 1.0,
             named: true,
@@ -6483,6 +6485,7 @@ mod tests {
                             lead: None,
                             names: Vec::new(),
                             sections: Vec::new(),
+                            content_language: None,
                         },
                         score: 1.0,
                         named: query == "mrbeast",
@@ -6541,6 +6544,7 @@ mod tests {
                 lead: None,
                 names: Vec::new(),
                 sections: Vec::new(),
+                content_language: None,
             },
             score: 1.0,
             named: true,
@@ -7199,6 +7203,7 @@ mod tests {
                 ..Place::default()
             };
             Some(plumb_index::places::PlaceResults {
+                location: None,
                 what: "bank".into(),
                 center: Some(at(town, "place=city", "n1")),
                 near_me: false,
@@ -7271,6 +7276,7 @@ mod tests {
             };
             if query.ends_with("near me") {
                 return Some(plumb_index::places::PlaceResults {
+                    location: None,
                     what: "brewery".into(),
                     center: None,
                     near_me: true,
@@ -7282,6 +7288,7 @@ mod tests {
             // A town without any mapped.
             if query.contains("aurora") {
                 return Some(plumb_index::places::PlaceResults {
+                    location: None,
                     what: "brewery".into(),
                     center: Some(at("Aurora", "place=city", "n5", None)),
                     near_me: false,
@@ -7296,6 +7303,7 @@ mod tests {
                     km: 1.0,
                 };
             Some(plumb_index::places::PlaceResults {
+                location: None,
                 what: "brewery".into(),
                 center: Some(at("Denver", "place=city", "n1", None)),
                 near_me: false,

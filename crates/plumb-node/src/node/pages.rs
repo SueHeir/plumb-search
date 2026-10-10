@@ -916,6 +916,7 @@ pub(super) fn pages_of(
     };
     let ops = Operators::parse(query);
     let words = if ops.any() { ops.words.as_str() } else { query };
+    let searcher = searcher.in_language(options.language.as_deref());
     match searcher.search_naming_docs(words, &ops, docs, KIND_PAGES) {
         Ok(found) => found
             .into_iter()
@@ -951,6 +952,7 @@ pub(super) fn add_pages(
     else {
         return;
     };
+    let searcher = searcher.in_language(options.language.as_deref());
     let ops = Operators::parse(query);
     if ops.any() {
         if ops.words.is_empty() {

@@ -11,8 +11,8 @@
 
 use plumb_core::{joined, normalize_text};
 use tantivy::tokenizer::{
-    AsciiFoldingFilter, Language, LowerCaser, RemoveLongFilter, Stemmer, StopWordFilter,
-    TextAnalyzer, Token, TokenStream, Tokenizer, TokenizerManager,
+    AsciiFoldingFilter, Language, LowerCaser, PreTokenizedString, RemoveLongFilter, Stemmer,
+    StopWordFilter, TextAnalyzer, Token, TokenStream, Tokenizer, TokenizerManager,
 };
 
 /// Analyzer for word fields: one token per word of the normalized text,
@@ -38,13 +38,55 @@ pub(crate) fn register(manager: &TokenizerManager) {
 
 /// The analyzer registered as [`STEMMED_ANALYZER`].
 pub(crate) fn stemmed_analyzer() -> TextAnalyzer {
+    stemmed_in(Language::English)
+}
+
+/// Bounded language support for prose fields. Names and symbols keep the
+/// unstemmed analyzers. Other explicitly declared languages stay lexical.
+pub(crate) fn content_analyzer(language: Option<&str>) -> TextAnalyzer {
+    match language {
+        Some("es") => translated_analyzer(Language::Spanish),
+        Some("de") => translated_analyzer(Language::German),
+        None | Some("en") => stemmed_analyzer(),
+        _ => words_analyzer(),
+    }
+}
+
+fn translated_analyzer(language: Language) -> TextAnalyzer {
+    TextAnalyzer::builder(WordTokenizer::default())
+        .filter(LowerCaser)
+        .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
+        // Remove accented stop words before folding: "für", "más".
+        .filter(StopWordFilter::new(language).expect("supported stop words"))
+        .filter(AsciiFoldingFilter)
+        .filter(LowerCaser)
+        .filter(Stemmer::new(language))
+        .build()
+}
+
+fn stemmed_in(language: Language) -> TextAnalyzer {
     TextAnalyzer::builder(WordTokenizer::default())
         .filter(AsciiFoldingFilter)
         .filter(LowerCaser)
         .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
-        .filter(StopWordFilter::new(Language::English).expect("English stop words"))
-        .filter(Stemmer::new(Language::English))
+        .filter(StopWordFilter::new(language).expect("supported stop words"))
+        .filter(Stemmer::new(language))
         .build()
+}
+
+/// Tokenize prose using the page's own language, bypassing the field's
+/// default English analyzer. No extra multilingual name field is needed.
+pub(crate) fn content_tokens(language: Option<&str>, text: &str) -> PreTokenizedString {
+    let text = normalize_text(text);
+    let mut analyzer = content_analyzer(language);
+    let mut tokens = Vec::new();
+    {
+        let mut stream = analyzer.token_stream(&text);
+        while let Some(token) = stream.next() {
+            tokens.push(token.clone());
+        }
+    }
+    PreTokenizedString { text, tokens }
 }
 
 /// The analyzer registered as [`WORDS_ANALYZER`].
@@ -214,6 +256,23 @@ mod tests {
             ),
             ["how", "do", "i", "undo", "most", "recent", "commit"]
         );
+    }
+
+    #[test]
+    fn spanish_and_german_prose_uses_native_stop_words_and_inflections() {
+        assert!(tokens(&content_analyzer(Some("de")), "für die und").is_empty());
+        assert!(tokens(&content_analyzer(Some("es")), "más de la").is_empty());
+        assert_eq!(
+            tokens(&content_analyzer(Some("es")), "receta fácil galleta"),
+            tokens(&content_analyzer(Some("es")), "recetas fáciles galletas")
+        );
+        assert_eq!(
+            tokens(&content_analyzer(Some("de")), "gesunde bewegung"),
+            tokens(&content_analyzer(Some("de")), "gesunden bewegungen")
+        );
+        // Unsupported languages keep exact neutral words rather than
+        // applying English morphology to them.
+        assert_eq!(tokens(&content_analyzer(Some("fr")), "types"), ["types"]);
     }
 
     #[test]

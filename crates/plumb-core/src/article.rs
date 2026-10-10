@@ -317,6 +317,10 @@ pub struct Article {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Optional inner-page search metadata; independent of display text.
     pub search: Option<SearchContent>,
+    /// Declared content language, as a primary code (`es`, `de`). Unknown
+    /// stays absent; a host's country is not evidence of content language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 /// The key of an official website on a line of profiles.
@@ -327,6 +331,8 @@ pub const LEAD_KEY: &str = "lead";
 pub const NAME_KEY: &str = "name";
 /// The key of one of a docs page's sections on a line of profiles.
 pub const SECTION_KEY: &str = "section";
+/// The declared page language on the existing optional extension line.
+pub const LANGUAGE_KEY: &str = "language";
 
 /// What starts a line of profiles in an articles file.
 pub const PROFILES_LINE: &str = "profiles\t";
@@ -348,6 +354,7 @@ pub struct ProfilesLine<'a> {
     pub names: Vec<String>,
     pub sections: Vec<String>,
     pub search: Option<SearchContent>,
+    pub language: Option<String>,
 }
 
 /// The item, profiles, official website and facts of a line of profiles,
@@ -381,6 +388,12 @@ pub fn parse_profiles_line(line: &str) -> Option<ProfilesLine<'_>> {
             let (key, value) = pair.split_once('=')?;
             (key.trim() == SEARCH_KEY)
                 .then(|| parse_search(value.trim()))
+                .flatten()
+        }),
+        language: profiles.split('|').find_map(|pair| {
+            let (key, tag) = pair.split_once('=')?;
+            (key.trim() == LANGUAGE_KEY)
+                .then(|| crate::language_code(tag))
                 .flatten()
         }),
     })
@@ -463,11 +476,13 @@ pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result
     let lead = article.lead.as_deref().map(field);
     let names = article.names.iter().map(|name| field(name));
     let sections = article.sections.iter().map(|section| field(section));
+    let language = article.language.as_deref().and_then(crate::language_code);
     for (key, value) in lead
         .into_iter()
         .map(|lead| (LEAD_KEY, lead))
         .chain(names.map(|name| (NAME_KEY, name)))
         .chain(sections.map(|section| (SECTION_KEY, section)))
+        .chain(language.map(|language| (LANGUAGE_KEY, language)))
         .filter(|(_, value)| !value.is_empty())
     {
         if !profiles.is_empty() {
@@ -550,6 +565,7 @@ impl<I: Iterator<Item = String>> Iterator for ArticleLines<I> {
                         article.names = found.names;
                         article.sections = found.sections;
                         article.search = found.search;
+                        article.language = found.language;
                     }
                 }
                 continue;
@@ -622,6 +638,7 @@ pub fn parse_article(line: &str) -> Result<Article> {
         names: Vec::new(),
         sections: Vec::new(),
         search: None,
+        language: None,
     })
 }
 
@@ -767,6 +784,7 @@ mod tests {
             names: Vec::new(),
             sections: Vec::new(),
             search: None,
+            language: None,
         };
         let mut out = Vec::new();
         out.extend_from_slice(ARTICLES_HEADER.as_bytes());
@@ -1025,6 +1043,46 @@ mod tests {
         let encoded = search_json(&bounded);
         assert!(encoded.len() <= MAX_SEARCH_BYTES);
         assert_eq!(parse_search(&encoded), Some(bounded));
+    }
+
+    #[test]
+    fn declared_language_uses_the_optional_extension_without_changing_six_columns() {
+        let article = Article {
+            title: "Introducción".into(),
+            item: Some("https://docs.python.org/es/3/tutorial/".into()),
+            language: Some("es-ES".into()),
+            sections: vec!["Listas".into()],
+            ..Article::default()
+        };
+        let mut out = Vec::new();
+        write_article(&mut out, &article).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        let base = text.lines().next().unwrap();
+        assert_eq!(base.split('\t').count(), 6);
+        assert_eq!(parse_article(base).unwrap().language, None);
+        assert!(text.contains("|language=es\n"));
+        let back = read_articles(&out[..], 10).unwrap();
+        assert_eq!(back[0].language.as_deref(), Some("es"));
+        assert_eq!(back[0].sections, ["Listas"]);
+        assert!(parse_profiles("language=es").is_empty());
+        assert!(parse_facts("language=es").is_empty());
+        assert_eq!(
+            parse_profiles_line("profiles\tQ1\tlanguage=und")
+                .unwrap()
+                .language,
+            None
+        );
+        assert_eq!(
+            parse_profiles_line("profiles\tQ1\tlanguage=en-@@")
+                .unwrap()
+                .language,
+            None
+        );
+        let mismatched = format!("{base}\nprofiles\tQ1\tlanguage=de\n");
+        assert_eq!(
+            read_articles(mismatched.as_bytes(), 1).unwrap()[0].language,
+            None
+        );
     }
 
     #[test]

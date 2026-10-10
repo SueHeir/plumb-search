@@ -43,9 +43,16 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
         .iter()
         .map(|doc| doc.title.as_deref().and_then(|t| page_title(t, &endings)))
         .collect();
-    let mut title_counts: HashMap<String, usize> = HashMap::new();
-    for title in titles.iter().flatten() {
-        *title_counts.entry(title.to_lowercase()).or_default() += 1;
+    let mut title_counts = HashMap::new();
+    for (doc, title) in docs.iter().zip(&titles) {
+        if let Some(title) = title {
+            *title_counts
+                .entry((
+                    title.to_lowercase(),
+                    doc.language.as_deref().and_then(plumb_core::language_code),
+                ))
+                .or_default() += 1;
+        }
     }
     let descriptions = shared(docs.iter().map(|doc| doc.description.as_deref()));
     let texts = shared(docs.iter().map(|doc| doc.text.as_deref()));
@@ -58,10 +65,15 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
             continue;
         };
         let lower = title.to_lowercase();
-        if title_counts.get(&lower).copied().unwrap_or(0) >= SHARED_BY
+        let language = doc.language.as_deref().and_then(plumb_core::language_code);
+        if title_counts
+            .get(&(lower.clone(), language.clone()))
+            .copied()
+            .unwrap_or(0)
+            >= SHARED_BY
             || NOT_PAGES.contains(&lower.as_str())
             || !seen_urls.insert(doc.url.clone())
-            || !seen_titles.insert(lower)
+            || !seen_titles.insert((lower, language.clone()))
         {
             continue;
         }
@@ -79,6 +91,7 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
         articles.push(Article {
             title,
             description,
+            language,
             item: Some(doc.url.clone()),
             views: site.weight * VIEWS_PER_WEIGHT / depth.max(1) as u64,
             ..Article::default()
@@ -179,6 +192,7 @@ mod tests {
             text: Some(format!("Text of {title}")),
             sections: Vec::new(),
             search: None,
+            language: None,
         }
     }
 
@@ -241,6 +255,34 @@ mod tests {
         // Weight 10 over two segments deep; three deep weighs less.
         assert_eq!(articles[0].views, 5_000);
         assert_eq!(articles[2].views, 3_333);
+    }
+
+    #[test]
+    fn language_is_declared_per_page_even_on_a_multilingual_host() {
+        let site = plumb_core::reference::site("gesund.bund.de").unwrap();
+        let docs: Vec<FetchedDoc> = [
+            ("de", Some("de-DE")),
+            ("en", Some("en")),
+            ("es", Some("es")),
+            ("unknown", None),
+        ]
+        .into_iter()
+        .map(|(path, language)| FetchedDoc {
+            url: format!("https://gesund.bund.de/{path}/information"),
+            title: Some("Information".into()),
+            language: language.map(str::to_string),
+            ..FetchedDoc::default()
+        })
+        .collect();
+        let articles = reference_articles(site, &docs);
+        assert_eq!(articles.len(), 4);
+        assert_eq!(
+            articles
+                .iter()
+                .map(|article| article.language.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("de"), Some("en"), Some("es"), None]
+        );
     }
 
     #[test]

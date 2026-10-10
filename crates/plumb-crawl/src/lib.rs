@@ -200,7 +200,8 @@ pub struct PageMeta {
     /// to the same site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_url: Option<String>,
-    /// The page's language from `<html lang>`, as
+    /// The page's declared language from `<html lang>`, then HTML
+    /// Content-Language metadata, then `og:locale`, as
     /// [`plumb_core::language_code`] gives it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,

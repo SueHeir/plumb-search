@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 
 use plumb_core::place::{Place, OSM_COPYRIGHT_URL};
-use plumb_index::places::{PlaceHit, PlaceResults};
+use plumb_index::places::{LocationStatus, PlaceHit, PlaceResults};
 use plumb_index::Hit;
 
 use super::{escape_html, http_url, Icons};
@@ -112,6 +112,23 @@ pub(super) fn render_places(
 ) -> String {
     let what = escape_html(&found.what);
     let Some(center) = &found.center else {
+        if let Some(location) = &found.location {
+            let requested = escape_html(&location.requested);
+            let message = match location.status {
+                LocationStatus::AmbiguousLocation => {
+                    let alternatives = location.candidates.iter()
+                        .map(|place| escape_html(&place_name(place)))
+                        .collect::<Vec<_>>().join("; ");
+                    format!("Several indexed places match <strong>{requested}</strong>: {alternatives}. Add a region or country.")
+                }
+                LocationStatus::UnknownLocation => format!("The places index cannot locate <strong>{requested}</strong>. Add a city, region or country; this does not establish that the place has no businesses."),
+                LocationStatus::ConflictingConstraints => format!("<strong>{requested}</strong> conflicts with the requested country. Keep a matching city and country to search places."),
+                _ => String::new(),
+            };
+            if !message.is_empty() {
+                return format!("<section class=\"pl\" aria-label=\"Places\"><p class=\"m\">{message}</p></section>\n");
+            }
+        }
         // "Near me", and no town to go by.
         let how = if about {
             "To list places near you, tell Plumb your town on \
@@ -139,7 +156,7 @@ pub(super) fn render_places(
     if found.hits.is_empty() {
         let _ = writeln!(
             out,
-            "<p class=\"m\">No places found for <strong>{what}</strong> within {}.</p>",
+            "<p class=\"m\">No indexed places found for <strong>{what}</strong> within {}. The indexed collection may be incomplete.</p>",
             distance_words(found.radius_km, miles)
         );
     } else {
@@ -538,6 +555,7 @@ mod tests {
 
     fn found() -> PlaceResults {
         PlaceResults {
+            location: None,
             what: "pizza".into(),
             center: Some(place("Denver", "place=city", 39.7392, -104.9903)),
             near_me: false,
@@ -611,6 +629,26 @@ mod tests {
         assert!(html.contains("href=\"/about\""));
         let html = render_places(&found, None, false, None, &Icons::default(), &same);
         assert!(html.contains("pizza in Denver"));
+    }
+
+    #[test]
+    fn unknown_and_ambiguous_locations_do_not_claim_to_be_near_me() {
+        let mut found = found();
+        found.center = None;
+        found.hits.clear();
+        found.location = Some(plumb_index::places::LocationResolution {
+            requested: "Portland <unknown>".into(),
+            status: LocationStatus::AmbiguousLocation,
+            candidates: vec![place("Portland", "place=city", 45.5, -122.6)],
+        });
+        let html = render_places(&found, None, true, None, &Icons::default(), &same);
+        assert!(html.contains("Several indexed places"));
+        assert!(html.contains("Portland &lt;unknown&gt;"));
+        assert!(!html.contains("About you"));
+        found.location.as_mut().unwrap().status = LocationStatus::UnknownLocation;
+        let html = render_places(&found, None, true, None, &Icons::default(), &same);
+        assert!(html.contains("cannot locate"));
+        assert!(!html.contains("About you"));
     }
 
     /// Finds pizza in Denver and nothing else.

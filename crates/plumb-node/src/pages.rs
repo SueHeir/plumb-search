@@ -52,6 +52,18 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 100,
     },
     SetInfo {
+        id: "wikipedia-es",
+        name: "Spanish Wikipedia articles",
+        pages: 2_000_000,
+        bytes_per_page: 100,
+    },
+    SetInfo {
+        id: "wikipedia-de",
+        name: "German Wikipedia articles",
+        pages: 3_000_000,
+        bytes_per_page: 100,
+    },
+    SetInfo {
         id: plumb_index::pages::GITHUB_SET,
         name: "GitHub repositories",
         pages: 300_000,
@@ -152,6 +164,9 @@ impl SetInfo {
     /// (see [`crate::places::auto_places`]).
     pub fn kept(&self, sets: &PageSets, storage_limit_mb: u64) -> u64 {
         match sets.size(self.id) {
+            // Initial language editions are opt-in by count or All;
+            // adding support does not trigger an unbounded download.
+            PageSetSize::Auto if matches!(self.id, "wikipedia-es" | "wikipedia-de") => 0,
             PageSetSize::Auto if self.id == plumb_index::places::PLACES_SET => {
                 crate::places::auto_places(storage_limit_mb)
             }
@@ -723,8 +738,8 @@ impl Wanted {
         if self.sets.is_empty() {
             return None;
         }
-        // v2: pages keep their Wikidata item.
-        let mut text = String::from("v2");
+        // v3: declared content language is indexed before candidate caps.
+        let mut text = String::from("v3");
         for (set, file, pages) in &self.sets {
             let meta = std::fs::metadata(file).ok();
             let modified = meta
@@ -791,6 +806,15 @@ pub fn remove_other_indexes(data_dir: &Path, keep: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spanish_and_german_editions_are_explicitly_selectable_and_not_implicitly_downloaded() {
+        for id in ["wikipedia-es", "wikipedia-de"] {
+            let set = super::SetInfo::find(id).unwrap();
+            assert_eq!(set.kept(&super::PageSets::default(), 0), 0);
+            let chosen = super::PageSets::parse(&format!("{id}=25000")).unwrap();
+            assert_eq!(set.kept(&chosen, 0), 25_000);
+        }
+    }
     use super::*;
 
     #[test]

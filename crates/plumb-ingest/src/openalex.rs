@@ -272,6 +272,7 @@ impl Work {
             names: Vec::new(),
             sections: Vec::new(),
             search: None,
+            language: None,
         })
     }
 }

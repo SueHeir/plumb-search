@@ -32,7 +32,7 @@ use plumb_core::{
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED, STRING,
 };
@@ -171,6 +171,10 @@ pub struct Page {
     /// "Data Structures"), which it is found by with [`Page::topic`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<String>,
+    /// Declared primary content language. Absent for older files and
+    /// pages with no declaration; `language()` can also use set evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_language: Option<String>,
 }
 
 impl Page {
@@ -192,6 +196,10 @@ impl Page {
             lead: article.lead,
             names: article.names,
             sections: Vec::new(),
+            content_language: article
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         }
     }
 
@@ -214,6 +222,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: repo.language.as_deref().and_then(plumb_core::language_code),
         }
     }
 
@@ -239,6 +248,10 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: question
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         }
     }
 
@@ -265,6 +278,10 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: question
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         })
     }
 
@@ -310,6 +327,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: book.language.as_deref().and_then(plumb_core::language_code),
         }
     }
 
@@ -336,6 +354,10 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: podcast
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         }
     }
 
@@ -365,6 +387,10 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: music
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         })
     }
 
@@ -410,6 +436,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: film.language.as_deref().and_then(plumb_core::language_code),
         })
     }
 
@@ -438,6 +465,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: doc.sections,
+            content_language: doc.language.as_deref().and_then(plumb_core::language_code),
         })
     }
 
@@ -471,6 +499,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: page.language.as_deref().and_then(plumb_core::language_code),
         })
     }
 
@@ -551,6 +580,10 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: paper
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         }
     }
 
@@ -576,6 +609,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: item.language.as_deref().and_then(plumb_core::language_code),
         }
     }
 
@@ -603,6 +637,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: word.language.as_deref().and_then(plumb_core::language_code),
         }
     }
 
@@ -630,6 +665,10 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: package
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         })
     }
 
@@ -796,7 +835,13 @@ impl Page {
     /// The language the page is in, when its set says: `en` for
     /// English Wikipedia, GitHub and Stack Exchange's questions.
     pub fn language(&self) -> Option<&str> {
-        if let Some(lang) = self.set.strip_prefix("wikipedia-") {
+        if let Some(lang) = self
+            .content_language
+            .as_deref()
+            .filter(|lang| plumb_core::language_code(lang).as_deref() == Some(*lang))
+        {
+            Some(lang)
+        } else if let Some(lang) = self.set.strip_prefix("wikipedia-") {
             Some(lang)
         } else if self.set == GITHUB_SET || self.is_question() || self.is_film_with_article() {
             Some("en")
@@ -937,6 +982,7 @@ pub enum LearnedPlace {
     Last,
 }
 
+#[derive(Clone, Copy)]
 struct Fields {
     words: Field,
     keys: Field,
@@ -955,6 +1001,7 @@ struct Fields {
     /// The registrable domain of the official website of what a Wikipedia
     /// article is about ([`Page::site`]), for [`PageSearcher::site_popularity`].
     site: Field,
+    language: Field,
     page: Field,
 }
 
@@ -1010,6 +1057,7 @@ fn schema() -> (Schema, Fields) {
     );
     let popularity = builder.add_u64_field("popularity", FAST | STORED);
     let site = builder.add_text_field("site", STRING);
+    let language = builder.add_text_field("language", STRING);
     let page = builder.add_text_field("page", STORED);
     (
         builder.build(),
@@ -1022,6 +1070,7 @@ fn schema() -> (Schema, Fields) {
             word,
             popularity,
             site,
+            language,
             page,
         },
     )
@@ -1259,10 +1308,14 @@ fn may_be_borrowed(site: &crate::Hit) -> bool {
 }
 
 /// What [`build_page_index`] did.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageIndexStats {
     pub pages: u64,
     pub most_views: u64,
+    /// Counts of declared/set-supported content languages. Missing in
+    /// old manifests; unknown pages are `pages - sum(languages)`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub languages: std::collections::BTreeMap<String, u64>,
 }
 
 /// Builds the page index of `pages` in `dir`, replacing any there.
@@ -1293,6 +1346,12 @@ pub fn build_page_index(
             ((page.views as f32).ln_1p() / (*most as f32).ln_1p()).min(1.0)
         };
         let mut document = TantivyDocument::default();
+        if let Some(language) = page.language() {
+            document.add_text(fields.language, language);
+            *stats.languages.entry(language.to_string()).or_default() += 1;
+        } else {
+            document.add_text(fields.language, "unknown");
+        }
         document.add_u64(
             fields.popularity,
             (popularity * POPULARITY_SCALE).round() as u64,
@@ -1313,13 +1372,22 @@ pub fn build_page_index(
             document.add_text(fields.keys, name);
         }
         if let Some(topic) = page.topic() {
-            document.add_text(fields.topic, topic);
+            document.add_pre_tokenized_text(
+                fields.topic,
+                analysis::content_tokens(page.language(), &topic),
+            );
         }
         if let Some(about) = page.about() {
-            document.add_text(fields.about, about);
+            document.add_pre_tokenized_text(
+                fields.about,
+                analysis::content_tokens(page.language(), &about),
+            );
         }
         if let Some(lead) = page.lead.as_deref().filter(|_| page.is_article()) {
-            document.add_text(fields.lead, lead);
+            document.add_pre_tokenized_text(
+                fields.lead,
+                analysis::content_tokens(page.language(), lead),
+            );
         }
         // A docs page's title alone ("Introduction") names nothing: it is
         // named by its product's name and title ("python sorting
@@ -1367,6 +1435,7 @@ pub struct PageSearcher {
     joined: TextAnalyzer,
     stemmed: TextAnalyzer,
     stats: PageIndexStats,
+    requested_language: Option<String>,
 }
 
 impl PageSearcher {
@@ -1396,11 +1465,79 @@ impl PageSearcher {
             joined: analysis::joined_analyzer(),
             stemmed: analysis::stemmed_analyzer(),
             stats,
+            requested_language: None,
         })
     }
 
     pub fn num_pages(&self) -> u64 {
         self.stats.pages
+    }
+
+    /// A lightweight view restricted to declared/set-supported language
+    /// before each candidate collector's cap. The existing English path
+    /// retains old records with unknown language, still labeled unknown;
+    /// other languages require actual metadata. Invalid tags match nothing.
+    pub fn in_language(&self, language: Option<&str>) -> Self {
+        Self {
+            reader: self.reader.clone(),
+            fields: self.fields,
+            words: self.words.clone(),
+            joined: self.joined.clone(),
+            stemmed: analysis::content_analyzer(
+                language.and_then(plumb_core::language_code).as_deref(),
+            ),
+            stats: self.stats.clone(),
+            requested_language: language
+                .map(|tag| plumb_core::language_code(tag).unwrap_or_else(|| "invalid".to_string())),
+        }
+    }
+
+    /// Actual indexed language counts, for explaining empty constrained
+    /// results without claiming that the requested pages do not exist.
+    pub fn language_coverage(&self) -> (&std::collections::BTreeMap<String, u64>, u64) {
+        let known = self
+            .stats
+            .languages
+            .values()
+            .fold(0u64, |count, pages| count.saturating_add(*pages));
+        (
+            &self.stats.languages,
+            self.stats.pages.saturating_sub(known),
+        )
+    }
+
+    fn language_query(&self, query: &dyn Query) -> Box<dyn Query> {
+        match &self.requested_language {
+            None => query.box_clone(),
+            Some(language) => {
+                let mut allowed = vec![(
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.fields.language, language),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>,
+                )];
+                if language == "en" {
+                    allowed.push((
+                        Occur::Should,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.language, "unknown"),
+                            IndexRecordOption::Basic,
+                        )),
+                    ));
+                }
+                Box::new(BooleanQuery::new(vec![
+                    (Occur::Must, query.box_clone()),
+                    (
+                        Occur::Must,
+                        Box::new(ConstScoreQuery::new(
+                            Box::new(BooleanQuery::new(allowed)),
+                            0.0,
+                        )),
+                    ),
+                ]))
+            }
+        }
     }
 
     /// How much the most read Wikipedia article about what `domain` is the
@@ -1997,11 +2134,17 @@ impl PageSearcher {
                 .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc)
         };
         let mut addresses: Vec<_> = searcher
-            .search(&named_by_query, &by_popularity())?
+            .search(
+                self.language_query(&named_by_query).as_ref(),
+                &by_popularity(),
+            )?
             .into_iter()
             .map(|(_, address)| address)
             .collect();
-        for (_, address) in searcher.search(&BooleanQuery::new(clauses), &by_popularity())? {
+        for (_, address) in searcher.search(
+            self.language_query(&BooleanQuery::new(clauses)).as_ref(),
+            &by_popularity(),
+        )? {
             if !addresses.contains(&address) {
                 addresses.push(address);
             }
@@ -2022,7 +2165,9 @@ impl PageSearcher {
                 Term::from_field_text(self.fields.keys, &key),
                 IndexRecordOption::Basic,
             );
-            for (_, address) in searcher.search(&named, &by_popularity())? {
+            for (_, address) in
+                searcher.search(self.language_query(&named).as_ref(), &by_popularity())?
+            {
                 if !addresses.contains(&address) {
                     addresses.push(address);
                     by_title_first.insert(address);
@@ -2043,7 +2188,9 @@ impl PageSearcher {
                 Term::from_field_text(self.fields.keys, key),
                 IndexRecordOption::Basic,
             );
-            for (_, address) in searcher.search(&named, &by_popularity())? {
+            for (_, address) in
+                searcher.search(self.language_query(&named).as_ref(), &by_popularity())?
+            {
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -2069,7 +2216,9 @@ impl PageSearcher {
                     .collect(),
                 needed,
             );
-            for (_, address) in searcher.search(&most_words, &by_popularity())? {
+            for (_, address) in
+                searcher.search(self.language_query(&most_words).as_ref(), &by_popularity())?
+            {
                 // Found by most of the query's words, not only by a title
                 // that starts it: "react usestate hook" is the docs page
                 // "React useState" and more of its words.
@@ -2105,7 +2254,9 @@ impl PageSearcher {
                         .collect(),
                     needed,
                 );
-                for (_, address) in searcher.search(&most_words, &by_popularity())? {
+                for (_, address) in
+                    searcher.search(self.language_query(&most_words).as_ref(), &by_popularity())?
+                {
                     if !addresses.contains(&address) {
                         addresses.push(address);
                     }
@@ -2143,7 +2294,7 @@ impl PageSearcher {
                     .collect(),
             );
             for (score, address) in searcher.search(
-                &every_word,
+                self.language_query(&every_word).as_ref(),
                 &TopDocs::with_limit(LEAD_CANDIDATES).order_by_score(),
             )? {
                 lead_scores.insert(address, score);
@@ -2201,7 +2352,9 @@ impl PageSearcher {
                 inside_keys.insert(key);
                 let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
                     .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
-                for (_, address) in searcher.search(&named, &most_read)? {
+                for (_, address) in
+                    searcher.search(self.language_query(&named).as_ref(), &most_read)?
+                {
                     if !addresses.contains(&address) {
                         addresses.push(address);
                         only_inside.insert(address);
@@ -3457,8 +3610,13 @@ pub fn operators_allow(ops: &Operators, page: &Page) -> bool {
 /// strict safe search leaves out pages whose title or description is
 /// suggestive.
 pub fn options_allow(options: &crate::SearchOptions, page: &Page) -> bool {
-    if let (Some(wanted), Some(language)) = (&options.language, page.language()) {
-        if wanted != language {
+    if let Some(wanted) = &options.language {
+        let Some(wanted) = plumb_core::language_code(wanted) else {
+            return false;
+        };
+        if Some(wanted.as_str()) != page.language()
+            && !(wanted == "en" && page.language().is_none())
+        {
             return false;
         }
     }
@@ -3837,6 +3995,7 @@ mod tests {
                 views: structures.views,
                 aliases: structures.aliases.clone(),
                 sections: structures.sections.clone(),
+                language: structures.content_language.clone(),
                 ..Article::default()
             },
         );
@@ -4346,6 +4505,113 @@ mod tests {
     }
 
     #[test]
+    fn language_is_filtered_before_popular_candidates_fill_the_cap() {
+        let mut pages: Vec<Page> = (0..CANDIDATES + 25)
+            .map(|i| {
+                let mut page = page("Language control", 10_000 - i as u64, &[]);
+                page.url = format!("https://en.wikipedia.org/wiki/Control_{i}");
+                page
+            })
+            .collect();
+        let mut spanish = page("Language control", 1, &[]);
+        spanish.set = "wikipedia-es".into();
+        spanish.url = "https://es.wikipedia.org/wiki/Control".into();
+        pages.push(spanish.clone());
+        let mut german = spanish.clone();
+        german.set = "wikipedia-de".into();
+        german.url = "https://de.wikipedia.org/wiki/Control".into();
+        pages.push(german.clone());
+        let (_dir, searcher) = searcher(&pages);
+        for (lang, expected) in [("es-MX", spanish), ("de", german)] {
+            let hits = searcher
+                .in_language(Some(lang))
+                .search("language control", 1)
+                .unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].page.url, expected.url);
+        }
+        assert!(searcher
+            .in_language(Some("fr"))
+            .search("language control", 1)
+            .unwrap()
+            .is_empty());
+        assert!(searcher
+            .in_language(Some("bogus"))
+            .search("language control", 1)
+            .unwrap()
+            .is_empty());
+        let (known, unknown) = searcher.language_coverage();
+        assert_eq!(known.get("es"), Some(&1));
+        assert_eq!(known.get("de"), Some(&1));
+        assert_eq!(unknown, 0);
+    }
+
+    #[test]
+    fn declared_reference_language_beats_host_country_and_unknown_is_reported() {
+        let spanish = Page::from_reference(Article {
+            title: "Receta fácil de galleta".into(),
+            item: Some("https://recipes.example.de/galletas".into()),
+            language: Some("es".into()),
+            ..Article::default()
+        })
+        .unwrap();
+        let german = Page::from_reference(Article {
+            title: "Gesunde Ernährung und Bewegung".into(),
+            item: Some("https://gesund.bund.de/ernaehrung".into()),
+            language: Some("de-DE".into()),
+            ..Article::default()
+        })
+        .unwrap();
+        let unknown = Page::from_reference(Article {
+            title: "Receta fácil de galleta".into(),
+            item: Some("https://unknown.example.es/recipe".into()),
+            ..Article::default()
+        })
+        .unwrap();
+        assert_eq!(spanish.language(), Some("es"));
+        assert_eq!(german.language(), Some("de"));
+        assert_eq!(unknown.language(), None);
+        let (_dir, searcher) = searcher(&[spanish.clone(), german.clone(), unknown]);
+        let es = searcher
+            .in_language(Some("es"))
+            .search("recetas fáciles galletas", 5)
+            .unwrap();
+        assert!(es.iter().any(|hit| hit.page.url == spanish.url), "{es:?}");
+        let de = searcher
+            .in_language(Some("de"))
+            .search("gesunde ernährung bewegung", 5)
+            .unwrap();
+        assert!(de.iter().any(|hit| hit.page.url == german.url), "{de:?}");
+        assert_eq!(searcher.language_coverage().1, 1);
+    }
+
+    #[test]
+    fn spanish_dni_appointment_filter_never_returns_english_us_intelligence() {
+        let spanish = Page::from_reference(Article {
+            title: "Cita previa DNI".into(),
+            item: Some("https://www.dnielectronico.es/PortalDNIe/ciudadanos".into()),
+            language: Some("es".into()),
+            ..Article::default()
+        })
+        .unwrap();
+        let english = Page::from_reference(Article {
+            title: "Cita previa DNI".into(),
+            item: Some("https://www.dni.gov/".into()),
+            views: 100_000,
+            language: Some("en".into()),
+            ..Article::default()
+        })
+        .unwrap();
+        let (_dir, searcher) = searcher(&[english, spanish.clone()]);
+        let found = searcher
+            .in_language(Some("es"))
+            .search("cita previa dni", 5)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].page.url, spanish.url);
+    }
+
+    #[test]
     fn pages_follow_the_language_and_strict_safe_search() {
         let article = page("Einstein", 1, &[]);
         let mut book = page("Sexy beasts", 1, &[]);
@@ -4355,7 +4621,10 @@ mod tests {
             ..crate::SearchOptions::default()
         };
         assert!(options_allow(&en, &article));
-        assert!(options_allow(&en, &book), "books do not say their language");
+        assert!(
+            options_allow(&en, &book),
+            "old English-filter behavior keeps identifiable unknown-language records"
+        );
         let de = crate::SearchOptions {
             language: Some("de".into()),
             ..crate::SearchOptions::default()

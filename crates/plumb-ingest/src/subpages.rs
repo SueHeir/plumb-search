@@ -75,6 +75,7 @@ mod tests {
             text: None,
             sections: Vec::new(),
             search: None,
+            language: None,
         }
     }
 
