@@ -1051,6 +1051,12 @@ mod tests {
             sections: vec!["Method Descriptions".into()],
             search: Some(search.clone()),
             language: Some("es".into()),
+            paper: Some(PaperMetadata {
+                doi: Some("10.48550/arxiv.1706.03762".into()),
+                authors: vec!["Ashish Vaswani".into()],
+                publication_date: Some("2017-06-12".into()),
+                ..PaperMetadata::default()
+            }),
             ..Article::default()
         };
         let mut out = Vec::new();
