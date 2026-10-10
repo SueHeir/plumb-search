@@ -1,0 +1,64 @@
+{
+  "purpose": "Tuning/regression only; captured baseline and frozen qrels are unchanged.",
+  "capture_sha256": "d077d9906b42c9c7c6a83fda5d2734b764af3c090a6d2a2cb15dfd6f9dff22f4",
+  "captured_revision": "9fe493b062fa2e1c41c324cefe2228b797436865",
+  "query": "Find restaurants within 2 km of Denver Union Station, with names and map locations.",
+  "site": {
+    "domain": "denverunionstation.com",
+    "url": "https://www.denverunionstation.com/",
+    "title": "Shop, Dine & Stay in Downtown Denver | Denver Union Station",
+    "description": "Union Station boasts an array of Denver\u2019s top restaurants, bars, and shops in addition to The Crawford Hotel and RTD Station. See what we have to offer.",
+    "score": 0.50740904,
+    "text_score": 1.0,
+    "link_score": 0.3900467,
+    "placing_text_score": 1.0,
+    "country": "US",
+    "official": true,
+    "key_pages": [
+      {
+        "label": "Faqs",
+        "url": "https://www.denverunionstation.com/about/faqs/"
+      },
+      {
+        "label": "About",
+        "url": "https://www.denverunionstation.com/about/"
+      },
+      {
+        "label": "Dine & Shop",
+        "url": "https://www.denverunionstation.com/dine-shop/"
+      },
+      {
+        "label": "Dining",
+        "url": "https://www.denverunionstation.com/dine-and-shop/?filter=dine"
+      },
+      {
+        "label": "Shopping",
+        "url": "https://www.denverunionstation.com/dine-and-shop/?filter=shop"
+      },
+      {
+        "label": "Experience",
+        "url": "https://www.denverunionstation.com/experience/"
+      }
+    ],
+    "missing_words": true,
+    "query_evidence": {
+      "domain": "denverunionstation.com",
+      "lexical_score": 125.54341,
+      "semantic_closeness": 1.0,
+      "query_coverage": 0.3986711,
+      "substantive_coverage": 0.3986711,
+      "remaining_coverage": 0.3986711,
+      "named_subject_words": 0,
+      "named_subject_domain": null,
+      "named_subject_reason": null,
+      "subject_coverage": null,
+      "subject_remaining_coverage": null,
+      "full_name": false,
+      "typed_domain": false,
+      "partial_name_words": 0,
+      "relevance_tier": 0,
+      "source_quality": null
+    }
+  },
+  "candidate_url": "https://www.denverunionstation.com/dine-shop/"
+}

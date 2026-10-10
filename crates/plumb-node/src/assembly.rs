@@ -9,6 +9,22 @@ use serde::Serialize;
 
 use crate::web::http_url;
 
+mod navigation;
+pub(crate) use navigation::{site_destination, NavigationDestination};
+
+#[cfg(test)]
+pub(crate) fn task_navigation_fixture() -> (String, Hit, String) {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "assembly/navigation/fixtures/frozen-pg10-navigation.json"
+    ))
+    .unwrap();
+    (
+        fixture["query"].as_str().unwrap().to_string(),
+        serde_json::from_value(fixture["site"].clone()).unwrap(),
+        fixture["candidate_url"].as_str().unwrap().to_string(),
+    )
+}
+
 pub(crate) const MAX_PLACES: usize = 8;
 
 /// A guessed town must not turn a named non-place into local businesses.
@@ -114,8 +130,10 @@ pub(crate) fn places(
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Row<'a> {
     Site {
-        site: &'a Hit,
+        site: std::borrow::Cow<'a, Hit>,
         pages: Vec<&'a PlacedPage>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        navigation: Option<NavigationDestination>,
     },
     Page {
         page: &'a PlacedPage,
@@ -137,6 +155,7 @@ pub(crate) struct Assembled<'a> {
 }
 
 pub(crate) fn ordered_rows<'a>(
+    query: &str,
     hits: &'a [Hit],
     pages: &'a [PlacedPage],
     limit: usize,
@@ -149,12 +168,15 @@ pub(crate) fn ordered_rows<'a>(
                 .filter(|p| p.under.is_none() && p.at == at)
                 .map(|page| Row::Page { page }),
         );
+        let supporting = pages
+            .iter()
+            .filter(|p| p.under.as_deref() == Some(site.domain.as_str()))
+            .collect();
+        let (site, navigation) = site_destination(query, site, pages);
         rows.push(Row::Site {
             site,
-            pages: pages
-                .iter()
-                .filter(|p| p.under.as_deref() == Some(site.domain.as_str()))
-                .collect(),
+            pages: supporting,
+            navigation,
         });
     }
     rows.extend(

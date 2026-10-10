@@ -1478,7 +1478,9 @@ async fn search_page(
         Err(_) => None,
     };
     let shown_to_plugins = match &local {
-        Ok(results) if state.settings.plugins.any_annotate() => shown_results(results, limit),
+        Ok(results) if state.settings.plugins.any_annotate() => {
+            shown_results(&query, results, limit)
+        }
         _ => Vec::new(),
     };
     (extras.plugins, extras.plugin_notes) = tokio::join!(
@@ -1904,7 +1906,7 @@ async fn api_search(
             );
             let about = plugin_about(&state, &query, &results, &extras, &options).await;
             let shown_to_plugins = if state.settings.plugins.any_annotate() {
-                shown_results(&results, params.limit())
+                shown_results(&query, &results, params.limit())
             } else {
                 Vec::new()
             };
@@ -1954,7 +1956,7 @@ async fn api_search(
                 )
             };
             let assembled = crate::assembly::Assembled {
-                rows: crate::assembly::ordered_rows(&results.hits, &placed, params.limit()),
+                rows: crate::assembly::ordered_rows(&query, &results.hits, &placed, params.limit()),
                 places: places.clone(),
                 recent: recent.clone(),
                 answer: extras.answer.as_ref(),
@@ -1967,8 +1969,8 @@ async fn api_search(
             };
             for row in &assembled.rows {
                 match row {
-                    crate::assembly::Row::Site { site, pages } => {
-                        limited.hits.push((*site).clone());
+                    crate::assembly::Row::Site { site, pages, .. } => {
+                        limited.hits.push(site.as_ref().clone());
                         limited.pages.extend(pages.iter().map(|p| (**p).clone()));
                     }
                     crate::assembly::Row::Page { page } => limited.pages.push((*page).clone()),
@@ -2291,7 +2293,11 @@ async fn go(
         let options = search.options(&state.settings, &headers);
         match run_search(&state, &query, MAX_LIMIT, &options).await {
             Ok(results) => match results.hits.iter().find(|hit| hit.domain == params.d) {
-                Some(hit) => Some(hit.clone()),
+                Some(hit) => Some(
+                    crate::assembly::site_destination(&query, hit, &results.pages)
+                        .0
+                        .into_owned(),
+                ),
                 // Or one of the local sites the page puts first.
                 None => {
                     place_site(&state, &headers, &query, &options, &results.hits, &params.d).await
@@ -2841,14 +2847,19 @@ async fn run_search_ranked(
 
 /// The node's own results for its plugins to mark up: its sites, then
 /// its articles, each with what it is about when the node knows.
-fn shown_results(results: &SearchResults, limit: usize) -> Vec<plumb_plugin::ShownResult> {
+fn shown_results(
+    query: &str,
+    results: &SearchResults,
+    limit: usize,
+) -> Vec<plumb_plugin::ShownResult> {
     let about_of = |page: &plumb_index::pages::Page| {
         (page.item.is_some() || page.set.starts_with("wikipedia-"))
             .then(|| crate::plugins::about_page(page))
     };
     let mut shown = Vec::new();
     for hit in results.hits.iter().take(limit) {
-        let Some(url) = safe_href(hit) else {
+        let (destination, _) = crate::assembly::site_destination(query, hit, &results.pages);
+        let Some(url) = safe_href(&destination) else {
             continue;
         };
         // The article a site's result carries is about what the site is.
@@ -3831,7 +3842,13 @@ fn render_results_with(
     let mut shown = merge_results(&results.hits, network, limit);
     // Results a plugin of this node leaves out; other nodes' results are
     // not this node's to mark up.
-    shown.retain(|item| item.network.is_some() || !hidden(safe_href(&item.hit)));
+    shown.retain(|item| {
+        item.network.is_some() || {
+            let (destination, _) =
+                crate::assembly::site_destination(query, &item.hit, &results.pages);
+            !hidden(safe_href(&item.hit)) && !hidden(safe_href(&destination))
+        }
+    });
     let token = extras.and_then(|e| e.plugin_token.as_deref());
     let marked = |url: Option<String>| render_notes(notes_on(url), query, token);
     let from_network = shown.iter().filter(|s| s.network.is_some()).count();
@@ -4024,14 +4041,27 @@ fn render_results_with(
                 (None, None) => Vec::new(),
             };
             let mut rendered = String::new();
+            let (destination, navigation) = if item.network.is_none() {
+                crate::assembly::site_destination(query, &item.hit, pages)
+            } else {
+                (Cow::Borrowed(item.hit.as_ref()), None)
+            };
             render_hit(
                 &mut rendered,
-                &item.hit,
+                &destination,
                 item.network,
                 go.as_deref(),
                 icon,
                 &notes,
             );
+            if let Some(navigation) = &navigation {
+                if let Some(end) = rendered.rfind("</li>") {
+                    rendered.insert_str(end, &format!(
+                        "<p class=\"s\">Site navigation: {} &middot; <a href=\"{}\" rel=\"noreferrer\">Homepage</a></p>",
+                        escape_html(&navigation.label), escape_html(&navigation.homepage_url),
+                    ));
+                }
+            }
             let carried = pages
                 .iter()
                 .find(|p| p.under.as_deref() == Some(item.hit.domain.as_str()));
@@ -4041,7 +4071,7 @@ fn render_results_with(
                 }
             }
             if item.network.is_none() {
-                let line = marked(safe_href(&item.hit));
+                let line = marked(safe_href(&destination));
                 if let Some(end) = rendered.rfind("</li>") {
                     rendered.insert_str(end, &line);
                 }
@@ -4985,6 +5015,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_navigation_api_html_and_click_redirect_choose_the_same_destination() {
+        let (query, site, selected_url) = crate::assembly::task_navigation_fixture();
+        let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+        let (status, _, body) = get(
+            backend(vec![site.clone()]),
+            &format!("/api/search?q={encoded}&full=1&limit=10"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let output: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(output["assembled"]["rows"][0]["site"]["url"], selected_url);
+        assert_eq!(output["hits"][0]["url"], selected_url);
+        assert_eq!(
+            output["assembled"]["rows"][0]["navigation"]["homepage_url"],
+            site.url
+        );
+        assert_eq!(
+            output["assembled"]["rows"][0]["site"]["title"],
+            site.title.as_deref().unwrap()
+        );
+        let results = SearchResults {
+            hits: vec![site.clone()],
+            ..SearchResults::default()
+        };
+        let html = render_results(
+            &query,
+            &results,
+            None,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            false,
+            &Icons::default(),
+        );
+        assert!(html.contains(&format!("href=\"{selected_url}\"")), "{html}");
+        assert!(html.contains("Site navigation: Dine &amp; Shop"), "{html}");
+        assert!(
+            html.contains(&format!(
+                "href=\"{}\" rel=\"noreferrer\">Homepage",
+                site.url
+            )),
+            "{html}"
+        );
+        let (_, headers, _) = get(
+            backend(vec![site.clone()]),
+            &format!("/go?q={encoded}&d={}", site.domain),
+        )
+        .await;
+        assert_eq!(
+            headers.get(header::LOCATION).unwrap().to_str().unwrap(),
+            selected_url
+        );
+        let shown = shown_results(&query, &results, 10);
+        assert_eq!(shown[0].url, selected_url);
+    }
+
+    #[tokio::test]
     async fn plugins_mark_up_and_leave_out_the_nodes_own_results() {
         // Results are shown to plugins sites first: usbank.com is 0, the
         // look-alike 1.
@@ -5702,7 +5790,7 @@ mod tests {
             site_search: None,
             spelling: None,
         };
-        let shown = shown_results(&results, 10);
+        let shown = shown_results("but i'm a cheerleader", &results, 10);
         assert_eq!(shown.len(), 2);
         assert_eq!(shown[0].site, "cheerz.com");
         assert!(shown[0].about.is_none());

@@ -1720,7 +1720,12 @@ impl Mcp {
             None => DEFAULT_SEARCH_LIMIT,
         };
         let assembled = crate::assembly::Assembled {
-            rows: crate::assembly::ordered_rows(&results.hits, &placed, cap),
+            rows: crate::assembly::ordered_rows(
+                if sites_only { "" } else { query },
+                &results.hits,
+                &placed,
+                cap,
+            ),
             places,
             recent: recent.clone(),
             answer: answer.as_ref(),
@@ -1733,8 +1738,13 @@ impl Mcp {
                 crate::assembly::Row::Site {
                     site,
                     pages: supporting,
+                    navigation,
                 } => {
-                    sites.push(brief_with(site, &results.pages));
+                    let mut entry = brief_with(site, &results.pages);
+                    if let Some(navigation) = navigation {
+                        entry["navigation"] = json!(navigation);
+                    }
+                    sites.push(entry);
                     pages.extend(supporting.iter().map(|page| {
                         page_entry(&page.hit.page, query, page.under.as_deref(), page.at + 1)
                     }));
@@ -1751,7 +1761,15 @@ impl Mcp {
             .rows
             .iter()
             .map(|row| match row {
-                crate::assembly::Row::Site { site, .. } => json!({"kind": "site", "url": site.url}),
+                crate::assembly::Row::Site {
+                    site, navigation, ..
+                } => {
+                    let mut entry = json!({"kind": "site", "url": site.url});
+                    if let Some(navigation) = navigation {
+                        entry["navigation"] = json!(navigation);
+                    }
+                    entry
+                }
                 crate::assembly::Row::Page { page } => {
                     let url = pages
                         .iter()
