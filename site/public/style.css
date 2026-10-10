@@ -98,3 +98,14 @@ footer { padding-top: 2rem; padding-bottom: 3rem; border-top: 1px solid var(--li
 }
 @media (pointer: coarse) { .button, button, .top nav a { min-height: 44px; } }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+.try { position: relative; }
+.gear > summary { cursor: pointer; padding: .7em; border: 1px solid var(--line); border-radius: 10px; list-style: none; }
+.gear > summary::-webkit-details-marker { display: none; }
+.search-settings { position: absolute; right: 0; top: calc(100% + .4rem); z-index: 2; width: min(22rem, calc(100vw - 2rem)); display: grid; gap: .7rem; padding: 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px #0003; }
+.search-settings label { display: flex; align-items: center; gap: .5rem; }
+.search-settings input { flex: none; }
+.search-settings select { font: inherit; max-width: 100%; background: var(--surface); color: var(--text); }
+.search-settings:has(option[value=any]:checked) label:has(input[name=only]) { display: none; }
+
+@media(max-width:400px) { .try { flex-wrap:wrap; } .try > input { flex-basis:100%; } }

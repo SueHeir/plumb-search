@@ -306,3 +306,9 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: 1rem; }
   .gear > summary { min-width: 44px; min-height: 44px; }
   input, select, textarea { font-size: 16px; }
 }
+
+.visually-hidden { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+.panel:has(option[value=any]:checked) label:has(input[name=only]) { display:none; }
+main.ranking-debug span.rank-meta { display:inline; }
+main.ranking-debug div.rank-meta, main.ranking-debug .m:has(> .rank-meta:only-child) { display:block; }

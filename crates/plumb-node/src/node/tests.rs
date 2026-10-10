@@ -1002,7 +1002,7 @@ async fn stops_promptly_in_the_middle_of_a_download() {
     assert_eq!(code, 200);
     assert!(body.contains("Downloading the Tranco list"), "{body}");
     assert!(
-        body.contains("<progress value=\"0\" max=\"1\"></progress>"),
+        body.contains("<progress aria-label=\"Setup progress\" value=\"0\" max=\"1\"></progress>"),
         "{body}"
     );
     assert!(body.contains("0 of 1 files"), "{body}");
@@ -1687,7 +1687,7 @@ async fn private_search_serves_buckets_a_browser_can_search() {
     wait_for(addr, "the first index", ready_and_idle).await;
     assert_eq!(get(addr, "/api/buckets").await.0, 503);
     assert_eq!(get(addr, "/private").await.0, 503);
-    assert!(!get(addr, "/").await.2.contains("href=\"/private\""));
+    assert!(!get(addr, "/").await.2.contains("href=\"/private?"));
     node.shutdown().await.unwrap();
 
     // Turned on, the index built before it is rebuilt with its buckets.
@@ -1737,7 +1737,7 @@ async fn private_search_serves_buckets_a_browser_can_search() {
             head.contains("script-src 'self' 'wasm-unsafe-eval'"),
             "{head}"
         );
-        assert!(get(addr, "/").await.2.contains("href=\"/private\""));
+        assert!(get(addr, "/").await.2.contains("href=\"/private?"));
     } else {
         assert_eq!(code, 503, "{body}");
     }

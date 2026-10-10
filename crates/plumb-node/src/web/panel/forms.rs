@@ -41,18 +41,39 @@ pub(in crate::web) fn settings_error(
         // A number input silently discards invalid text, hiding what needs fixing.
         fields.push_str(&format!("<label for=\"{name}\">{label}</label><input id=\"{name}\" name=\"{name}\" type=\"text\" inputmode=\"numeric\" value=\"{}\" aria-describedby=\"{name}-help\"{invalid}><p id=\"{name}-help\" class=\"hint\">{hint}</p>", escape_html(value)));
     }
-    // The workload and crawl hours go back as they were chosen.
-    for (name, value) in [
-        ("workload", Some(&form.workload)),
-        ("crawl_hours", form.crawl_hours.as_ref()),
-        ("crawl_from", Some(&form.crawl_from)),
-        ("crawl_to", Some(&form.crawl_to)),
+    fields.push_str(&format!("<label for=\"workload\">Workload</label><input id=\"workload\" name=\"workload\" type=\"text\" value=\"{}\"><p class=\"hint\">light, steady, fast or custom</p>", escape_html(&form.workload)));
+    fields.push_str(&checkbox(
+        "crawl_hours",
+        "Limit crawling to these hours",
+        form.crawl_hours.is_some(),
+    ));
+    for (name, label, value) in [
+        ("crawl_from", "First hour (0–23)", &form.crawl_from),
+        ("crawl_to", "Last hour (0–23)", &form.crawl_to),
     ] {
-        if let Some(value) = value.filter(|v| !v.is_empty()) {
-            fields.push_str(&format!(
-                "<input type=\"hidden\" name=\"{name}\" value=\"{}\">",
-                escape_html(value)
-            ));
+        fields.push_str(&format!("<label for=\"{name}\">{label}</label><input id=\"{name}\" name=\"{name}\" type=\"text\" inputmode=\"numeric\" value=\"{}\">", escape_html(value)));
+    }
+    if form.fill_shown.is_some() {
+        fields.push_str("<input type=\"hidden\" name=\"fill_shown\" value=\"1\">");
+        fields.push_str(&checkbox(
+            "fill_from_network",
+            "Fill free space from the network",
+            form.fill_from_network.is_some(),
+        ));
+    }
+    if form.focus_shown.is_some() {
+        fields.push_str(&format!("<input type=\"hidden\" name=\"focus_shown\" value=\"1\"><label for=\"focus_topics\">Focus topics</label><textarea id=\"focus_topics\" name=\"focus_topics\">{}</textarea>", escape_html(&form.focus_topics)));
+    }
+    if form.page_sets_shown.is_some() {
+        fields.push_str("<input type=\"hidden\" name=\"page_sets_shown\" value=\"1\">");
+        let mut choices: Vec<_> = form
+            .other
+            .iter()
+            .filter(|(name, _)| name.starts_with("page_set."))
+            .collect();
+        choices.sort_by_key(|(name, _)| *name);
+        for (name, value) in choices {
+            fields.push_str(&format!("<label for=\"{}\">{}</label><input id=\"{}\" name=\"{}\" type=\"text\" value=\"{}\">", escape_html(name), escape_html(name), escape_html(name), escape_html(name), escape_html(value)));
         }
     }
     retry_page(
@@ -85,9 +106,9 @@ pub(in crate::web) fn features_error(
             form.search_by_meaning.is_some(),
         ));
         fields.push_str(&checkbox(
-            "private_search",
-            "Private browser search",
-            form.private_search.is_some(),
+            "search_history",
+            "Remember searches",
+            form.search_history.is_some(),
         ));
     } else {
         fields.push_str(&checkbox(
@@ -114,6 +135,17 @@ pub(in crate::web) fn features_error(
                 form.default_trust.is_some(),
             ));
             fields.push_str(&format!("<label for=\"trusted\">Trusted nodes</label><p id=\"trusted-help\" class=\"hint\">Other node ids whose crawls are taken in at once, one per line. Only add nodes you run or know.</p><textarea id=\"trusted\" name=\"trusted\" spellcheck=\"false\" aria-describedby=\"trusted-help\">{}</textarea>", escape_html(&form.trusted)));
+        }
+        if let Some(scope) = &form.search_from {
+            fields.push_str(&format!("<label for=\"search_from\">Search scope</label><input id=\"search_from\" name=\"search_from\" type=\"text\" value=\"{}\">", escape_html(scope)));
+        }
+        if form.credits_shown.is_some() {
+            fields.push_str(&format!("<input type=\"hidden\" name=\"credits_shown\" value=\"1\"><label for=\"answer_per_day\">Daily answer limit</label><input id=\"answer_per_day\" name=\"answer_per_day\" type=\"text\" inputmode=\"numeric\" value=\"{}\">", escape_html(&form.answer_per_day)));
+            fields.push_str(&checkbox(
+                "spend_credits",
+                "Use credits for network search",
+                form.spend_credits.is_some(),
+            ));
         }
     }
     retry_page(
@@ -184,6 +216,12 @@ mod tests {
                 crawl_hours: Some("1".into()),
                 crawl_from: "22".into(),
                 crawl_to: "7".into(),
+                fill_shown: Some("1".into()),
+                focus_shown: Some("1".into()),
+                focus_topics: "astronomy\ngardening".into(),
+                page_sets_shown: Some("1".into()),
+                other: [("page_set.wikipedia".into(), "off".into())].into(),
+                ..Default::default()
             };
             let body = text(settings_error(
                 StatusCode::BAD_REQUEST,
@@ -194,10 +232,15 @@ mod tests {
             .await;
             assert!(body.contains("name=\"background_updates\" value=\"1\" checked"));
             assert!(body.contains("value=\"250\""));
-            assert!(body.contains("name=\"workload\" value=\"light\""));
-            assert!(body.contains("name=\"crawl_from\" value=\"22\""));
+            assert!(body.contains("name=\"workload\" type=\"text\" value=\"light\""));
+            assert!(body
+                .contains("name=\"crawl_from\" type=\"text\" inputmode=\"numeric\" value=\"22\""));
             assert!(body.contains("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"));
             assert!(body.contains("aria-invalid=\"true\""));
+            assert!(body.contains("name=\"fill_shown\""));
+            assert!(!body.contains("name=\"fill_from_network\" value=\"1\" checked"));
+            assert!(body.contains(">astronomy\ngardening</textarea>"));
+            assert!(body.contains("name=\"page_set.wikipedia\" type=\"text\" value=\"off\""));
             assert!(body.contains(&format!("action=\"{base}/settings\"")));
             assert!(body.contains(&format!("href=\"{base}?section=resources\"")));
             assert!(!body.contains("http-equiv=\"refresh\""));
@@ -225,7 +268,7 @@ mod tests {
         assert!(body.contains("name=\"network\" value=\"1\" checked"));
         assert!(!body.contains("name=\"share_popularity\" value=\"1\" checked"));
         form.section = "search".into();
-        form.private_search = Some("1".into());
+        form.search_history = Some("1".into());
         let body = text(features_error(
             StatusCode::BAD_GATEWAY,
             &form,
@@ -234,7 +277,7 @@ mod tests {
         ))
         .await;
         assert!(body.contains("name=\"section\" value=\"search\""));
-        assert!(body.contains("name=\"private_search\" value=\"1\" checked"));
+        assert!(body.contains("name=\"search_history\" value=\"1\" checked"));
         assert!(!body.contains("name=\"bootstrap\""));
     }
     #[tokio::test]
