@@ -669,6 +669,14 @@ async fn answering_earns_credits_and_a_node_keeps_to_its_daily_limit() {
     r.handle.publish(vec![site.clone()]).await.unwrap().unwrap();
     let a = Node::start(false, vec![r.addr().await], vec![]).await;
     wait_for(|| (a.handle.status().connected_peers >= 1).then_some(())).await;
+    // A transport connection can precede Identify registering the bucket protocol.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !a.handle.bucket_peers().await.unwrap().contains(&r_peer) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("R did not become eligible for bucket searches within 30 s");
 
     let wait = Duration::from_secs(10);
     let found = a.handle.search("fairx", wait).await.unwrap();
