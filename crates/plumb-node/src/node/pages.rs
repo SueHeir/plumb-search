@@ -18,8 +18,8 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, Operators};
 use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, options_allow, place_operator_pages,
-    place_pages, OPERATOR_PAGES,
+    add_named_site, drop_namesakes_of_words, lift_named_sites, operators_allow, options_allow,
+    place_operator_pages, place_pages, PageHit, OPERATOR_PAGES,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -43,6 +43,9 @@ const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 const TICK: Duration = Duration::from_millis(250);
 /// Pages looked at per search, before [`place_pages`] picks.
 const PAGES_PER_SEARCH: usize = 10;
+/// Pages looked at for a search that asks for one kind of page, before
+/// the kind narrows them.
+const KIND_PAGES: usize = 200;
 /// Wait after a node said it was busy.
 pub(super) const BUSY_WAIT: Duration = Duration::from_secs(5);
 /// Wait before asking again after no trusted node had the set, or a
@@ -863,6 +866,47 @@ pub(super) fn definition(inner: &Inner, name: &str) -> Option<plumb_index::pages
     }
 }
 
+/// The best `limit` pages for `query` that `keep` keeps, best first; see
+/// [`crate::web::SearchBackend::pages_of`]. Of the first [`KIND_PAGES`]
+/// found, as a `site:` search looks at more pages than others, with the
+/// docs pages a search for docs pages (`docs`) or on a docs site wants
+/// ([`plumb_index::pages::PageSearcher::search_naming_docs`]).
+pub(super) fn pages_of(
+    inner: &Inner,
+    query: &str,
+    limit: usize,
+    options: &SearchOptions,
+    docs: bool,
+    keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
+) -> Vec<PageHit> {
+    let Some(searcher) = inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone())
+    else {
+        return Vec::new();
+    };
+    let ops = Operators::parse(query);
+    let words = if ops.any() { ops.words.as_str() } else { query };
+    match searcher.search_naming_docs(words, &ops, docs, KIND_PAGES) {
+        Ok(found) => found
+            .into_iter()
+            .filter(|hit| {
+                options_allow(options, &hit.page)
+                    && operators_allow(&ops, &hit.page)
+                    && keep(&hit.page)
+            })
+            .take(limit)
+            .collect(),
+        Err(err) => {
+            warn!("searching pages: {err:#}");
+            Vec::new()
+        }
+    }
+}
+
 /// Adds the pages found for `query` to `results`. When the results are for
 /// a spelling of it ([`plumb_index::Spelling::applied`]), the pages are
 /// for that spelling too.
@@ -886,7 +930,9 @@ pub(super) fn add_pages(
         if ops.words.is_empty() {
             return;
         }
-        match searcher.search(&ops.words, OPERATOR_PAGES) {
+        // "asyncio site:docs.python.org" finds what "python asyncio" does
+        // there.
+        match searcher.search_naming_docs(&ops.words, &ops, false, OPERATOR_PAGES) {
             Ok(mut found) => {
                 found.retain(|hit| options_allow(options, &hit.page));
                 results.pages = place_operator_pages(&ops, &results.hits, found);

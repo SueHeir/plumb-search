@@ -313,11 +313,15 @@ fn search(out: &mut String, answer: &Value) {
         page_line(out, page);
     }
     if sites.is_empty() && pages.is_empty() {
-        let _ = writeln!(
-            out,
-            "No results for \"{}\".",
-            text(answer, "query").unwrap_or("")
-        );
+        let query = text(answer, "query").unwrap_or("");
+        match text(answer, "kind") {
+            Some(kind) => {
+                let _ = writeln!(out, "No results of kind {kind} for \"{query}\".");
+            }
+            None => {
+                let _ = writeln!(out, "No results for \"{query}\".");
+            }
+        }
     }
     if let Some(site_search) = answer.get("site_search").filter(|s| s.is_object()) {
         let _ = writeln!(
@@ -496,6 +500,14 @@ fn relate(out: &mut String, answer: &Value) {
 }
 
 fn facts(out: &mut String, answer: &Value) {
+    subject_facts(out, answer);
+    for more in list(answer, "more") {
+        subject_facts(out, more);
+    }
+}
+
+/// The facts about one subject.
+fn subject_facts(out: &mut String, answer: &Value) {
     if !flag(answer, "found") {
         let subject = text(answer, "subject").unwrap_or("");
         let _ = writeln!(out, "Plumb has no facts about {subject}.");
