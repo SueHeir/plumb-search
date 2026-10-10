@@ -16,6 +16,9 @@ ARG RUST_VERSION=1
 # it runs with.
 FROM rust:${RUST_VERSION}-slim-bookworm AS build
 ARG TARGETPLATFORM
+# Source archives exclude .git; CI supplies the exact revision and clean state.
+ARG PLUMB_BUILD_REVISION=unknown
+ARG PLUMB_BUILD_DIRTY=unknown
 # The private search page's WebAssembly (crates/plumb-private) needs the
 # wasm32 target and the wasm-bindgen command of the same version as the
 # crate (docs/private-search.md). cargo-about writes the notices of the
@@ -38,7 +41,9 @@ RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry 
     cargo build --locked -p plumb-private --target wasm32-unknown-unknown --profile wasm \
  && wasm-bindgen --target web --no-typescript --out-dir target/private \
         target/wasm32-unknown-unknown/wasm/plumb_private.wasm \
- && PLUMB_PRIVATE_DIR=/src/target/private cargo build --release --locked -p plumb-node \
+ && PLUMB_BUILD_REVISION=${PLUMB_BUILD_REVISION} PLUMB_BUILD_DIRTY=${PLUMB_BUILD_DIRTY} \
+        PLUMB_SOURCE_REVISION=${PLUMB_BUILD_REVISION} \
+        PLUMB_PRIVATE_DIR=/src/target/private cargo build --release --locked -p plumb-node \
  && install -D -m 0755 target/release/plumb /out/plumb
 # The licenses and notices of every third-party crate in the binary and the
 # private search page (and the desktop app's, which share Cargo.lock).

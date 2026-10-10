@@ -2558,6 +2558,7 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
     write(&peer_articles, &[article("Marie Curie", None)]);
     let (modified, size) = super::newer::stamp(&peer_articles).unwrap();
     let note = plumb_net::pages::Layers {
+        version: plumb_net::pages::LAYERS_VERSION,
         modified,
         size,
         kinds: vec![],

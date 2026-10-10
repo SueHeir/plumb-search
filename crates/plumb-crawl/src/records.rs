@@ -188,6 +188,7 @@ mod tests {
                     key_pages: Vec::new(),
                     headings: Vec::new(),
                     sections: Vec::new(),
+                    search: None,
                     body_text: None,
                     page_text: String::new(),
                     terms: Vec::new(),

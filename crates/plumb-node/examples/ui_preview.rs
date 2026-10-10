@@ -39,6 +39,7 @@ impl SearchBackend for PreviewSearch {
                 key_pages: Vec::new(),
                 demand: None,
                 missing_words: false,
+                query_evidence: None,
             })
             .collect())
     }
@@ -73,6 +74,7 @@ impl StatusSource for PreviewNode {
             network: None,
             fill: None,
             crawl_left: 0,
+            page_coverage: None,
             background_updates: settings.background_updates,
             paused: None,
             paused_until: None,

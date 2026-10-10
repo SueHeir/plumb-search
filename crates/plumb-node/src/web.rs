@@ -154,6 +154,10 @@ async fn run_places(
     home: Option<&str>,
     country: Option<&str>,
 ) -> Option<plumb_index::places::PlaceResults> {
+    if plumb_core::Operators::parse(query).any() {
+        return None;
+    }
+    plumb_index::places::parse_place_query(query)?;
     let backend = Arc::clone(&state.backend);
     let (query, home, country) = (
         query.to_string(),
@@ -176,32 +180,14 @@ async fn run_places(
 /// ([`places::site_named_for`]). They come after the places that give
 /// one.
 async fn place_sites(state: &AppState, found: &plumb_index::places::PlaceResults) -> Vec<Hit> {
-    let sites = places::local_sites(found);
-    let unsited = places::places_without_sites(found);
-    if sites.is_empty() && unsited.is_empty() {
-        return Vec::new();
-    }
     let backend = Arc::clone(&state.backend);
+    let found = found.clone();
     tokio::task::spawn_blocking(move || {
-        let mut sites: Vec<Hit> = sites
-            .into_iter()
-            .map(|site| backend.site(&site.domain).unwrap_or(site))
-            .collect();
-        for place in unsited {
-            let Ok(hits) = backend.search(&place.name, 5) else {
-                continue;
-            };
-            if let Some(mut site) = places::site_named_for(&place, hits) {
-                if !sites.iter().any(|s| s.domain == site.domain) {
-                    site.score = 0.0;
-                    site.text_score = 0.0;
-                    site.placing_text_score = None;
-                    site.named = false;
-                    sites.push(site);
-                }
-            }
-        }
-        sites
+        crate::assembly::linked_sites(
+            &found,
+            |domain| backend.site(domain),
+            |name| backend.search(name, 5).unwrap_or_default(),
+        )
     })
     .await
     .unwrap_or_default()
@@ -211,14 +197,7 @@ async fn place_sites(state: &AppState, found: &plumb_index::places::PlaceResults
 /// the top.
 const PLACES_MARK: &str = "<!--places-->\n";
 
-/// `found`, unless its town was guessed from a query that is the name of
-/// a site: "us bank" is the bank, not banks in Us, France.
-fn not_a_name(
-    found: Option<plumb_index::places::PlaceResults>,
-    hits: &[Hit],
-) -> Option<plumb_index::places::PlaceResults> {
-    found.filter(|found| !(found.guessed && hits.iter().any(|hit| hit.named)))
-}
+use crate::assembly::not_a_name;
 
 /// Answers queries for the web handlers. [`IndexBackend`] is the real one;
 /// tests can plug in their own.
@@ -302,6 +281,18 @@ pub trait SearchBackend: Send + Sync {
         None
     }
 
+    /// Bounded named-entity candidates with stable Wikidata IDs, before
+    /// display blending. Backends without a page index return none.
+    fn entities(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        let _ = (query, limit, options);
+        Ok(Vec::new())
+    }
+
     /// The best `limit` pages for `query` that `keep` keeps, best first,
     /// when the node keeps page sets: for a search that asks for one kind
     /// of page (`kind` of MCP's `search`), docs pages when `docs`. Search
@@ -317,6 +308,22 @@ pub trait SearchBackend: Send + Sync {
     ) -> Vec<plumb_index::pages::PageHit> {
         let _ = (query, limit, options, docs, keep);
         Vec::new()
+    }
+
+    /// Typed paper retrieval applies publication constraints before caps.
+    fn papers(
+        &self,
+        query: &plumb_core::paper_query::PaperQuery,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<PageHit>> {
+        Ok(self.pages_of(&query.text(), limit, options, false, &|p| {
+            p.set == plumb_index::pages::PAPERS_SET && query.allows(p.paper.as_ref())
+        }))
+    }
+
+    fn paper_coverage(&self) -> Option<plumb_index::pages::PaperCoverage> {
+        None
     }
 }
 
@@ -934,6 +941,11 @@ pub(crate) async fn shutdown_signal() {
 struct SearchParams {
     #[serde(default)]
     q: String,
+    /// Paper-only API/HTML request and inclusive publication bounds.
+    kind: Option<String>,
+    after: Option<String>,
+    before: Option<String>,
+    order: Option<String>,
     /// A plugin's folder name: run it for this search, as a link it
     /// offers asks (see [`crate::plugins::Offer`]).
     run: Option<String>,
@@ -1013,6 +1025,30 @@ fn flag(value: &Option<String>) -> bool {
 }
 
 impl SearchParams {
+    fn paper_search_query(&self) -> Result<Option<String>> {
+        let typed = self.after.is_some() || self.before.is_some() || self.order.is_some();
+        if self.kind.is_some() && self.kind.as_deref() != Some("paper") && typed {
+            anyhow::bail!("publication bounds and order require kind=paper");
+        }
+        let paper = plumb_core::paper_query::PaperQuery::with_options(
+            &self.query(),
+            self.after.as_deref(),
+            self.before.as_deref(),
+            self.order.as_deref(),
+        )?;
+        if paper.constrained && self.kind.as_deref().is_some_and(|kind| kind != "paper") {
+            anyhow::bail!("publication bounds and order require kind=paper");
+        }
+        if self.kind.as_deref() == Some("paper") || typed || paper.constrained {
+            Ok(Some(format!(
+                "{} sort:{}",
+                paper.text(),
+                if paper.newest { "newest" } else { "relevance" }
+            )))
+        } else {
+            Ok(None)
+        }
+    }
     /// The query with whitespace collapsed, cut to [`MAX_QUERY_CHARS`].
     fn query(&self) -> String {
         truncate_chars(&collapse_whitespace(&self.q), MAX_QUERY_CHARS)
@@ -1245,6 +1281,18 @@ async fn search_page(
         // Reloading keeps the query, so the results show up once the index is ready.
         return setup_response(&status, now_unix(), state.local_controls(&headers));
     }
+    match params.paper_search_query() {
+        Ok(Some(query)) => return paper_response(&state, &query, &params, &headers, false).await,
+        Ok(None) => {}
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                security_headers(),
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    }
     let query = params.query();
     if query.is_empty() {
         return home_or_setup(&state, &params, &headers);
@@ -1290,7 +1338,7 @@ async fn search_page(
         None => settings.browser_about.as_ref().and_then(About::town),
     };
     let mut extras = match &local {
-        Ok(results) => extras(&state, &query, results, &settings.options, town).await,
+        Ok(_) => extras(&state, &query, &settings.options, town).await,
         Err(_) => answers::Extras::default(),
     };
     // Plugins run once the node knows what the search is about, so that
@@ -1359,7 +1407,19 @@ async fn search_page(
                 &mut results,
                 limit,
             );
-            let found_places = not_a_name(found_places, &results.hits);
+            let found_places = crate::assembly::places(
+                &query,
+                found_places,
+                &results.hits,
+                &settings.options,
+                |domain| {
+                    state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            )
+            .map(|places| places.found);
             if let Some(found) = &found_places {
                 let local = place_sites(&state, found).await;
                 places::local_first(found, &mut results.hits, local, limit);
@@ -1429,7 +1489,18 @@ async fn search_page(
                 domains.extend(places::website_domains(found));
             }
             let icons = state.icons(domains).await;
-            let recent = state.recent(&query, &results);
+            let recent = crate::assembly::recent(
+                &query,
+                state.recent(&query, &results),
+                &settings.options,
+                limit,
+                |domain| {
+                    state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            );
             // What the searcher's clicks taught this node: places they
             // seldom open for searches like this are folded, headlines they
             // read come unfolded.
@@ -1552,6 +1623,63 @@ async fn search_page(
     }
 }
 
+/// Paper lists preserve their relevance/date order through rendering and
+/// report indexed coverage rather than asserting that research is absent.
+async fn paper_response(
+    state: &AppState,
+    query: &str,
+    params: &SearchParams,
+    headers: &HeaderMap,
+    json: bool,
+) -> Response {
+    let options = params.options(&state.settings, headers);
+    let paper = match plumb_core::paper_query::PaperQuery::parse(query) {
+        Ok(paper) => paper,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    let backend = Arc::clone(&state.backend);
+    let limit = params.limit();
+    let found = tokio::task::spawn_blocking(move || backend.papers(&paper, limit, &options)).await;
+    let hits = match found {
+        Ok(Ok(hits)) => hits,
+        _ => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "paper search failed" })),
+            )
+                .into_response()
+        }
+    };
+    let coverage = state.backend.paper_coverage();
+    let message = if hits.is_empty() {
+        Some("No matching papers in the indexed corpus with the requested publication precision. This does not establish that no such research exists.")
+    } else {
+        None
+    };
+    if json {
+        return (StatusCode::OK, security_headers(), Json(serde_json::json!({ "query": query, "kind": "paper", "results": [], "pages": hits, "coverage": coverage, "message": message }))).into_response();
+    }
+    let mut body = format!("<div class=\"wrap wide\">{}<main>", results_header(query));
+    if let Some(message) = message {
+        let _ = write!(body, "<p class=\"s\">{message}</p>");
+    }
+    if let Some(coverage) = coverage {
+        let _ = write!(body, "<p class=\"s\">Indexed papers: {}; known publication year: {}; known publication day: {}.</p>", coverage.total, coverage.publication_year, coverage.publication_day);
+    }
+    body.push_str("<ol class=\"results\">");
+    for hit in hits {
+        render_page(&mut body, &hit, None);
+    }
+    body.push_str("</ol></main></div>");
+    html_response(StatusCode::OK, page(query, &body))
+}
+
 async fn api_search(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1572,6 +1700,18 @@ async fn api_search(
         )
             .into_response();
     }
+    match params.paper_search_query() {
+        Ok(Some(query)) => return paper_response(&state, &query, &params, &headers, true).await,
+        Ok(None) => {}
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                security_headers(),
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    }
     let query = params.query();
     let full = flag(&params.full);
     if query.is_empty() {
@@ -1590,19 +1730,33 @@ async fn api_search(
     let found = run_search(&state, &query, params.limit(), &options).await;
     match found {
         Ok(mut results) if full => {
-            // No town is given here, so "near me" finds no places: an
-            // empty list around nowhere says nothing.
-            let places = not_a_name(
+            let places = crate::assembly::places(
+                &query,
                 run_places(&state, &query, None, options.country.as_deref()).await,
                 &results.hits,
-            )
-            .filter(|found| found.center.is_some());
+                &options,
+                |domain| {
+                    state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            );
             if let Some(found) = &places {
-                let local = place_sites(&state, found).await;
-                places::local_first(found, &mut results.hits, local, params.limit());
+                let local = place_sites(&state, &found.found)
+                    .await
+                    .into_iter()
+                    .filter(|hit| {
+                        options.safe == SafeSearch::Off
+                            || !state
+                                .node
+                                .as_ref()
+                                .is_some_and(|node| node.blocks_adult(&hit.domain))
+                    })
+                    .collect();
+                places::local_first(&found.found, &mut results.hits, local, params.limit());
             }
-            let places = places.filter(|found| !found.hits.is_empty());
-            let extras = extras(&state, &query, &results, &options, None).await;
+            let extras = extras(&state, &query, &options, None).await;
             route_sources(
                 &state,
                 &query,
@@ -1637,10 +1791,58 @@ async fn api_search(
                     answers::info_box(&results.hits, &placed)
                 }
             };
+            let recent = crate::assembly::recent(
+                &query,
+                state.recent(&query, &results),
+                &options,
+                params.limit(),
+                |domain| {
+                    state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            );
+            let placed = if plumb_core::Operators::parse(&query).any() {
+                place_operator_pages(
+                    &plumb_core::Operators::parse(&query),
+                    &results.hits,
+                    results.pages.iter().map(|p| p.hit.clone()).collect(),
+                )
+            } else {
+                place_pages(
+                    &query,
+                    &results.hits,
+                    results.pages.iter().map(|p| p.hit.clone()).collect(),
+                )
+            };
+            let assembled = crate::assembly::Assembled {
+                rows: crate::assembly::ordered_rows(&results.hits, &placed, params.limit()),
+                places: places.clone(),
+                recent: recent.clone(),
+                answer: extras.answer.as_ref(),
+                profile: extras.profile.as_ref(),
+            };
+            let mut limited = SearchResults {
+                site_search: results.site_search.clone(),
+                spelling: results.spelling.clone(),
+                ..Default::default()
+            };
+            for row in &assembled.rows {
+                match row {
+                    crate::assembly::Row::Site { site, pages } => {
+                        limited.hits.push((*site).clone());
+                        limited.pages.extend(pages.iter().map(|p| (**p).clone()));
+                    }
+                    crate::assembly::Row::Page { page } => limited.pages.push((*page).clone()),
+                }
+            }
             let body = FullResults {
-                results: &results,
-                answer: extras.answer,
-                profile: extras.profile,
+                assembled,
+                recent,
+                results: &limited,
+                answer: extras.answer.clone(),
+                profile: extras.profile.clone(),
                 info,
                 places,
                 plugins,
@@ -1676,7 +1878,18 @@ async fn api_recent(
     } else {
         let options = params.options(&state.settings, &headers);
         match run_search(&state, &query, params.limit(), &options).await {
-            Ok(results) => state.recent(&query, &results),
+            Ok(results) => crate::assembly::recent(
+                &query,
+                state.recent(&query, &results),
+                &options,
+                params.limit(),
+                |domain| {
+                    state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            ),
             Err(_) => None,
         }
     };
@@ -1692,6 +1905,9 @@ async fn api_recent(
 /// the results page shows with them.
 #[derive(Serialize)]
 struct FullResults<'a> {
+    assembled: crate::assembly::Assembled<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recent: Option<Recent>,
     #[serde(flatten)]
     results: &'a SearchResults,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1701,7 +1917,7 @@ struct FullResults<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     info: Option<answers::InfoBox>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    places: Option<plumb_index::places::PlaceResults>,
+    places: Option<crate::assembly::Places>,
     /// What the node's plugins found; never from other nodes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     plugins: Vec<PluginResults>,
@@ -1715,13 +1931,11 @@ struct FullResults<'a> {
 }
 
 /// The instant answer and the official profile asked for, for `query`
-/// whose own results are `results`. The profile is looked up by searching
-/// again for the words before the service ("mrbeast" of "mrbeast
-/// youtube"), unless the whole query already names a page.
+/// by resolving the subject's stable entity before inspecting its facts
+/// or profiles. Displayed results cannot select a different namesake.
 async fn extras(
     state: &AppState,
     query: &str,
-    results: &SearchResults,
     options: &SearchOptions,
     town: Option<&str>,
 ) -> answers::Extras {
@@ -1729,26 +1943,55 @@ async fn extras(
         Some(answer) => Some(answer),
         None => weather::answer(state, query, town, options.country.as_deref()).await,
     };
-    let names_a_page = results.pages.iter().any(|placed| placed.hit.named);
     let mut profile = None;
-    if !names_a_page {
-        for name in answers::profile_lookups(query) {
-            profile = run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
-                .await
-                .ok()
-                .and_then(|found| answers::profile_answer(query, &found.pages));
-            if profile.is_some() {
-                break;
+    for name in answers::profile_lookups(query) {
+        let Ok(entities) = run_entities(state, &name, options).await else {
+            continue;
+        };
+        match answers::resolve_entity(&name, &entities, None) {
+            answers::EntityResolution::Resolved(page) => {
+                profile = answers::profile_answer_from_page(query, page);
+                if profile.is_some() {
+                    break;
+                }
+                if !name.ends_with(" song") {
+                    continue;
+                }
             }
+            answers::EntityResolution::Ambiguous(_) => continue,
+            answers::EntityResolution::Unresolved => {}
+        }
+        // MusicBrainz songs have no Wikidata ID. Keep the lyrics fallback
+        // when no entity resolved, or a requested song lacks its profile.
+        profile = run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
+            .await
+            .ok()
+            .and_then(|found| {
+                let songs: Vec<_> = found
+                    .pages
+                    .into_iter()
+                    .filter(|placed| placed.hit.page.set == plumb_index::pages::MUSIC_SET)
+                    .collect();
+                answers::profile_answer(query, &songs)
+            });
+        if profile.is_some() {
+            break;
         }
     }
     // A fact the query asks about something ("capital of australia"),
     // looked up by searching for that something.
     let answer = match (answer, plumb_core::facts::fact_asked(query)) {
-        (None, Some(asked)) => run_search(state, &asked.subject, PROFILE_SEARCH_LIMIT, options)
+        (None, Some(asked)) => run_entities(state, &asked.subject, options)
             .await
             .ok()
-            .and_then(|found| answers::fact_answer(&asked, &found.pages, now_unix())),
+            .and_then(|found| {
+                match answers::resolve_entity(&asked.subject, &found, Some(&asked.kinds)) {
+                    answers::EntityResolution::Resolved(page) => {
+                        answers::fact_answer_from_page(&asked, page, now_unix())
+                    }
+                    _ => None,
+                }
+            }),
         (answer, _) => answer,
     };
     // What something is ("what is a manatee"): the first sentence of the
@@ -1795,18 +2038,29 @@ fn route_sources(
     results: &mut SearchResults,
     limit: usize,
 ) {
-    let Some(route) = crate::sources::route(query, answer, country) else {
-        return;
-    };
-    let keep = results.hits.len().max(limit);
-    crate::sources::lead_with(&mut results.hits, &mut results.pages, &route, |domain| {
+    crate::assembly::route_sources(query, answer, country, results, limit, |domain| {
         state.backend.site(domain)
     });
-    results.hits.truncate(keep);
 }
 
 /// Results asked for when looking up whose profile a query asks for.
 const PROFILE_SEARCH_LIMIT: usize = 5;
+
+/// Direct entity candidates, before displayed-result limits and placement.
+const ENTITY_SEARCH_LIMIT: usize = 20;
+
+async fn run_entities(
+    state: &AppState,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<Vec<PageHit>> {
+    let backend = Arc::clone(&state.backend);
+    let query = query.to_string();
+    let options = options.clone();
+    tokio::task::spawn_blocking(move || backend.entities(&query, ENTITY_SEARCH_LIMIT, &options))
+        .await
+        .context("the entity lookup task failed")?
+}
 
 /// The instant answer to `query`, with currency rates when it needs them.
 /// "What time is it" is the time in `town`, the searcher's own, when they
@@ -1857,6 +2111,10 @@ async fn go(
 ) -> Response {
     let search = SearchParams {
         q: params.q,
+        kind: None,
+        after: None,
+        before: None,
+        order: None,
         run: None,
         limit: Some(MAX_LIMIT),
         country: params.country,
@@ -2272,7 +2530,12 @@ async fn api_status(State(state): State<AppState>) -> Response {
         StatusCode::OK,
         security_headers(),
         [(header::CACHE_CONTROL, "no-store")],
-        Json(node.status()),
+        Json({
+            let mut status = serde_json::to_value(node.status()).expect("serializable status");
+            status["build"] =
+                serde_json::to_value(crate::build_info::current()).expect("serializable build");
+            status
+        }),
     )
         .into_response()
 }
@@ -2372,6 +2635,25 @@ async fn run_search_ranked(
 ) -> Result<SearchResults> {
     if limit == 0 {
         return Ok(SearchResults::default());
+    }
+    let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
+    if paper.constrained {
+        let backend = Arc::clone(&state.backend);
+        let options = options.clone();
+        let found = tokio::task::spawn_blocking(move || backend.papers(&paper, limit, &options))
+            .await
+            .context("the paper search task failed")??;
+        return Ok(SearchResults {
+            pages: found
+                .into_iter()
+                .map(|hit| plumb_index::pages::PlacedPage {
+                    hit,
+                    under: None,
+                    at: 0,
+                })
+                .collect(),
+            ..Default::default()
+        });
     }
     let backend = Arc::clone(&state.backend);
     // "safeway near me": the places list is for "near me"; the sites are
@@ -2597,7 +2879,7 @@ fn safe_href(hit: &Hit) -> Option<String> {
 }
 
 /// `raw` re-serialized, when it is an absolute `http` or `https` URL with a host.
-fn http_url(raw: &str) -> Option<String> {
+pub(crate) fn http_url(raw: &str) -> Option<String> {
     let url = Url::parse(raw.trim()).ok()?;
     let ok = matches!(url.scheme(), "http" | "https") && url.host_str().is_some();
     ok.then(|| url.to_string())
@@ -3827,6 +4109,28 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
     if let Some(package) = &hit.page.package {
         render_package(out, package);
     }
+    if hit.page.set == plumb_index::pages::PAPERS_SET {
+        let parts = hit
+            .page
+            .paper
+            .as_ref()
+            .map(|paper| {
+                let mut parts: Vec<_> = paper
+                    .date_labels()
+                    .iter()
+                    .map(|(label, date)| format!("{label} {}", escape_html(date)))
+                    .collect();
+                parts.push(format!("{} {}", paper.count, paper.count_label()));
+                parts
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    "Published unknown".to_string(),
+                    format!("{} popularity (count type unknown)", hit.page.views),
+                ]
+            });
+        let _ = write!(out, "<p class=\"d pk\">{}</p>", parts.join(" &middot; "));
+    }
     if let Some(href) = hit.page.free_copy().and_then(http_url) {
         let host = display_url(&href);
         let host = host.split('/').next().unwrap_or(&host);
@@ -3840,7 +4144,11 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
     let _ = writeln!(
         out,
         "<div class=\"m rank-meta\"><span title=\"{} {}\">score {:.3}</span></div></li>",
-        hit.page.views,
+        hit.page
+            .paper
+            .as_ref()
+            .filter(|_| hit.page.set == plumb_index::pages::PAPERS_SET)
+            .map_or(hit.page.views, |p| p.count),
         match hit.page.set.as_str() {
             plumb_index::pages::GITHUB_SET => "stars",
             plumb_index::pages::BOOKS_SET => "readers",
@@ -3852,7 +4160,11 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
             plumb_index::pages::REFERENCE_SET | plumb_index::pages::SUBPAGES_SET => {
                 "the site's weight over the page's depth"
             }
-            plumb_index::pages::PAPERS_SET => "citations",
+            plumb_index::pages::PAPERS_SET => hit
+                .page
+                .paper
+                .as_ref()
+                .map_or("popularity (count type unknown)", |p| p.count_label()),
             plumb_index::pages::PACKAGES_SET => "use (share of the registry's most, in billionths)",
             _ => "views",
         },
@@ -3909,6 +4221,17 @@ fn render_recent(
         Some(site) => format!("Latest from {}", escape_html(site)),
         None => "Recent".to_string(),
     };
+    if recent.headlines.is_empty() {
+        let message = if recent.status == "source_unavailable" {
+            "No current indexed headlines available from this publisher's feeds."
+        } else {
+            "No indexed headlines match the requested constraints."
+        };
+        return format!(
+            "<li class=\"news\"><span class=\"nh\">{heading}</span> \
+            <span class=\"m\">{message}</span></li>\n"
+        );
+    }
     let mut items = String::new();
     let mut shown = 0;
     for headline in &recent.headlines {
@@ -4366,6 +4689,7 @@ mod tests {
         Hit {
             demand: None,
             missing_words: false,
+            query_evidence: None,
             placing_text_score: None,
             domain: domain.to_string(),
             url: url.to_string(),
@@ -4975,11 +5299,76 @@ mod tests {
     }
 
     #[test]
+    fn paper_dates_and_count_meanings_render_separately() {
+        let metadata = plumb_core::papers::PaperMetadata {
+            publication_date: Some("2024-07-01".into()),
+            preprint_date: Some("2023-01-02".into()),
+            preprint_version_date: Some("2025-03-04".into()),
+            count: 12,
+            count_kind: plumb_core::papers::PaperCountKind::MethodUses,
+            ..Default::default()
+        };
+        let mut hit = PageHit {
+            page: plumb_index::pages::Page::from_paper(plumb_core::article::Article {
+                title: "A <paper>".into(),
+                item: Some("10.1234/a".into()),
+                paper: Some(metadata),
+                ..Default::default()
+            }),
+            score: 1.0,
+            popularity: 0.0,
+            named: true,
+            whole: true,
+            learned: None,
+        };
+        let mut out = String::new();
+        render_page(&mut out, &hit, None);
+        assert!(out.contains("A &lt;paper&gt;"));
+        assert!(out.contains("Published 2024-07-01"));
+        assert!(out.contains("Preprint 2023-01-02"));
+        assert!(out.contains("Preprint revised 2025-03-04"));
+        assert!(out.contains("12 method uses"));
+        assert!(!out.contains("citations"));
+        hit.page.paper = None;
+        out.clear();
+        render_page(&mut out, &hit, None);
+        assert!(out.contains("Published unknown"));
+        assert!(out.contains("count type unknown"));
+    }
+
+    #[tokio::test]
+    async fn paper_api_validates_dates_and_reports_missing_index_coverage() {
+        let fake = backend(Vec::new());
+        let app = router_with(fake, HomeCountry::Off);
+        let (status, _, body) = send(
+            app.clone(),
+            "/api/search?q=transformer&kind=paper&after=2026-02-29",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("paper date"));
+        let (status, _, body) = send(
+            app.clone(),
+            "/api/search?q=transformer&kind=paper&after=2026&order=newest",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let data: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(data["kind"], "paper");
+        assert_eq!(data["pages"], serde_json::json!([]));
+        assert!(data["message"].as_str().unwrap().contains("indexed corpus"));
+        let (status, _, body) = send(app, "/search?q=transformer&kind=paper&after=2026").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("does not establish"));
+    }
+
+    #[test]
     fn plugins_are_shown_what_articles_are_about_and_mark_them_up() {
         use plumb_index::pages::{Page, PlacedPage};
         let url = "https://en.wikipedia.org/wiki/But_I%27m_a_Cheerleader";
         let article = PageHit {
             page: Page {
+                paper: None,
                 set: "wikipedia-en".into(),
                 url: url.into(),
                 title: "But I'm a Cheerleader".into(),
@@ -4995,6 +5384,8 @@ mod tests {
                 lead: None,
                 names: Vec::new(),
                 sections: Vec::new(),
+                content_language: None,
+                search: None,
             },
             score: 1.0,
             named: true,
@@ -5080,6 +5471,7 @@ mod tests {
         use plumb_index::pages::Page;
         let article = PageHit {
             page: Page {
+                paper: None,
                 set: "wikipedia-en".into(),
                 url: "https://en.wikipedia.org/wiki/YouTube_Music".into(),
                 title: "YouTube Music".into(),
@@ -5095,6 +5487,8 @@ mod tests {
                 lead: None,
                 names: Vec::new(),
                 sections: Vec::new(),
+                content_language: None,
+                search: None,
             },
             score: 1.0,
             named: true,
@@ -5290,6 +5684,7 @@ mod tests {
             meaning_sites: None,
             meaning_work: None,
             can_restart: false,
+            page_coverage: None,
             paused_until: None,
         }
     }
@@ -5315,6 +5710,10 @@ mod tests {
         assert_eq!(serde_json::from_str::<Status>(&body).unwrap(), status);
         // The names are an interface: the desktop app and scripts read them.
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            json["build"],
+            serde_json::to_value(crate::build_info::current()).unwrap()
+        );
         assert_eq!(json["phase"], "setting_up");
         assert_eq!(json["step"], "downloading");
         assert_eq!(
@@ -6339,6 +6738,204 @@ mod tests {
         assert!(json["hits"].is_array());
     }
 
+    struct EntityAnswersBackend {
+        displayed: Vec<plumb_index::pages::PlacedPage>,
+        candidates: Vec<PageHit>,
+        music: Vec<plumb_index::pages::PlacedPage>,
+        lookups: Mutex<Vec<String>>,
+    }
+
+    impl EntityAnswersBackend {
+        fn new(displayed: Vec<PageHit>, candidates: Vec<PageHit>) -> Self {
+            Self {
+                displayed: displayed
+                    .into_iter()
+                    .enumerate()
+                    .map(|(at, hit)| plumb_index::pages::PlacedPage {
+                        hit,
+                        under: None,
+                        at,
+                    })
+                    .collect(),
+                candidates,
+                music: Vec::new(),
+                lookups: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SearchBackend for EntityAnswersBackend {
+        fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+            Ok(Vec::new())
+        }
+
+        fn num_docs(&self) -> u64 {
+            self.displayed.len() as u64
+        }
+
+        fn search_full(&self, query: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
+            Ok(SearchResults {
+                pages: if query.ends_with(" song") {
+                    self.music.clone()
+                } else {
+                    self.displayed.clone()
+                },
+                ..Default::default()
+            })
+        }
+
+        fn entities(&self, query: &str, limit: usize, _: &SearchOptions) -> Result<Vec<PageHit>> {
+            self.lookups.lock().unwrap().push(query.to_string());
+            Ok(self.candidates.iter().take(limit).cloned().collect())
+        }
+    }
+
+    fn answer_entity(title: &str, item: &str, description: &str) -> PageHit {
+        PageHit {
+            page: plumb_index::pages::Page::from_article(
+                "en",
+                plumb_core::Article {
+                    title: title.into(),
+                    item: Some(item.into()),
+                    description: Some(description.into()),
+                    ..Default::default()
+                },
+            ),
+            named: true,
+            whole: true,
+            score: 1.0,
+            popularity: 0.9,
+            learned: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn facts_resolve_japan_when_who_takes_the_displayed_result() {
+        let mut who = answer_entity("Japan", "Q7817", "WHO country page");
+        who.page.set = "reference".into();
+        who.page.url = "https://www.who.int/countries/jpn/".into();
+        let mut japan = answer_entity("Japan", "Q17", "country in East Asia");
+        japan.page.facts.push(plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Population,
+            value: "123802000;2024".into(),
+        });
+        // Japan's article is a direct entity candidate but was discarded
+        // from the display lane, whose one available row belongs to WHO.
+        let backend = Arc::new(EntityAnswersBackend::new(vec![who], vec![japan]));
+        let app = router_with(backend.clone(), HomeCountry::Off);
+        let (status, _, body) =
+            send(app.clone(), "/api/search?q=japan+population&full=1&limit=1").await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["answer"]["question"], "Population of Japan");
+        assert_eq!(json["answer"]["answer"], "123,802,000");
+        assert_eq!(json["answer"]["note"], "Counted in 2024, from Wikidata");
+        assert_eq!(json["assembled"]["answer"], json["answer"]);
+        assert_eq!(
+            json["pages"][0]["page"]["url"],
+            "https://www.who.int/countries/jpn/"
+        );
+        let (status, _, body) = send(app, "/search?q=japan+population&limit=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<p class=\"iaq\">Population of Japan</p>"));
+        assert!(body.contains("<p class=\"iaa\">123,802,000</p>"));
+        assert!(body.contains("Counted in 2024, from Wikidata"));
+        assert!(body.contains("https://www.who.int/countries/jpn/"));
+        assert_eq!(*backend.lookups.lock().unwrap(), ["japan", "japan"]);
+    }
+
+    #[tokio::test]
+    async fn profiles_resolve_identity_even_when_the_display_names_another_page() {
+        let mut beast = answer_entity("MrBeast", "Q19897578", "American YouTuber");
+        beast.page.profiles.push(plumb_core::profiles::Profile {
+            service: "youtube-handle".into(),
+            id: "MrBeast".into(),
+        });
+        let unrelated = answer_entity("MrBeast (song)", "Q999", "song");
+        let backend = Arc::new(EntityAnswersBackend::new(vec![unrelated], vec![beast]));
+        let app = router_with(backend.clone(), HomeCountry::Off);
+        let (_, _, body) = send(app.clone(), "/search?q=mrbeast+youtube").await;
+        assert!(body.contains("<section class=\"pf\""));
+        assert!(body.contains("href=\"https://www.youtube.com/@MrBeast\""));
+        let (_, _, body) = send(app, "/api/search?q=mrbeast+youtube&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["profile"]["of"], "MrBeast");
+        assert_eq!(json["profile"]["url"], "https://www.youtube.com/@MrBeast");
+        assert_eq!(json["assembled"]["profile"], json["profile"]);
+        assert_eq!(*backend.lookups.lock().unwrap(), ["mrbeast", "mrbeast"]);
+    }
+
+    #[tokio::test]
+    async fn facts_and_profiles_do_not_resolve_by_enrichment_availability() {
+        let main = answer_entity("Japan", "Q17", "country in East Asia");
+        let mut namesake = answer_entity("Japan (band)", "Q127814", "English band");
+        namesake.page.facts.push(plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Population,
+            value: "5".into(),
+        });
+        namesake.page.profiles.push(plumb_core::profiles::Profile {
+            service: "youtube-handle".into(),
+            id: "namesake".into(),
+        });
+        let missing =
+            EntityAnswersBackend::new(vec![namesake.clone()], vec![namesake.clone(), main]);
+        let mut first = answer_entity("Springfield (Illinois)", "Q28515", "city");
+        first.page.facts = namesake.page.facts;
+        first.page.profiles = namesake.page.profiles;
+        let second = answer_entity("Springfield (Massachusetts)", "Q49158", "city");
+        let ambiguous = EntityAnswersBackend::new(vec![first.clone()], vec![first, second]);
+        for (backend, subject) in [(missing, "japan"), (ambiguous, "springfield")] {
+            let app = router_with(Arc::new(backend), HomeCountry::Off);
+            for property in ["population", "youtube"] {
+                let (_, _, body) = send(
+                    app.clone(),
+                    &format!("/api/search?q={subject}+{property}&full=1"),
+                )
+                .await;
+                let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert!(json.get("answer").is_none(), "{body}");
+                assert!(json.get("profile").is_none(), "{body}");
+                let (_, _, body) =
+                    send(app.clone(), &format!("/search?q={subject}+{property}")).await;
+                assert!(!body.contains("<section class=\"ia\""), "{body}");
+                assert!(!body.contains("<section class=\"pf\""), "{body}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn entity_profiles_keep_the_musicbrainz_lyrics_fallback() {
+        let entity = answer_entity("Hey Jude", "Q210179", "song by The Beatles");
+        let mut song = entity.clone();
+        song.page = plumb_index::pages::Page::from_music(plumb_core::Article {
+            title: "Hey Jude".into(),
+            description: Some("Song by The Beatles, 1968".into()),
+            aliases: vec!["Hey Jude The Beatles".into()],
+            item: Some("recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut backend = EntityAnswersBackend::new(vec![entity.clone()], vec![entity]);
+        backend.music.push(plumb_index::pages::PlacedPage {
+            hit: song,
+            at: 0,
+            under: None,
+        });
+        let app = router_with(Arc::new(backend), HomeCountry::Off);
+        let (_, _, body) = send(app.clone(), "/api/search?q=hey+jude+lyrics&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["profile"]["of"], "Hey Jude");
+        assert_eq!(json["profile"]["source"], "MusicBrainz");
+        assert_eq!(json["profile"]["search"], true);
+        assert_eq!(
+            json["profile"]["url"],
+            "https://genius.com/search?q=Hey+Jude+The+Beatles"
+        );
+        let (_, _, body) = send(app, "/search?q=hey+jude+lyrics").await;
+        assert!(body.contains("<section class=\"pf\""));
+        assert!(body.contains("https://genius.com/search?q=Hey+Jude+The+Beatles"));
+    }
+
     /// Finds the article on MrBeast, named by "mrbeast", with his profiles.
     struct BeastBackend;
 
@@ -6360,6 +6957,7 @@ mod tests {
                 results.pages.push(PlacedPage {
                     hit: PageHit {
                         page: Page {
+                            paper: None,
                             set: "wikipedia-en".into(),
                             url: "https://en.wikipedia.org/wiki/MrBeast".into(),
                             title: "MrBeast".into(),
@@ -6378,6 +6976,8 @@ mod tests {
                             lead: None,
                             names: Vec::new(),
                             sections: Vec::new(),
+                            content_language: None,
+                            search: None,
                         },
                         score: 1.0,
                         named: query == "mrbeast",
@@ -6394,6 +6994,20 @@ mod tests {
 
         fn num_docs(&self) -> u64 {
             1
+        }
+
+        fn entities(
+            &self,
+            query: &str,
+            limit: usize,
+            options: &SearchOptions,
+        ) -> Result<Vec<PageHit>> {
+            Ok(self
+                .search_full(query, limit, options)?
+                .pages
+                .into_iter()
+                .map(|placed| placed.hit)
+                .collect())
         }
     }
 
@@ -6421,6 +7035,7 @@ mod tests {
         use plumb_index::pages::{Page, PageHit, PlacedPage};
         let article = PageHit {
             page: Page {
+                paper: None,
                 set: "wikipedia-en".into(),
                 url: "https://en.wikipedia.org/wiki/Marie_Curie".into(),
                 title: "Marie Curie".into(),
@@ -6436,6 +7051,8 @@ mod tests {
                 lead: None,
                 names: Vec::new(),
                 sections: Vec::new(),
+                content_language: None,
+                search: None,
             },
             score: 1.0,
             named: true,
@@ -6889,6 +7506,8 @@ mod tests {
             at: now - 2 * 3600,
         };
         let recent = Recent {
+            status: "available".into(),
+            sources: Vec::new(),
             site: Some("news.com".into()),
             headlines: vec![
                 headline(
@@ -7092,6 +7711,7 @@ mod tests {
                 ..Place::default()
             };
             Some(plumb_index::places::PlaceResults {
+                location: None,
                 what: "bank".into(),
                 center: Some(at(town, "place=city", "n1")),
                 near_me: false,
@@ -7164,6 +7784,7 @@ mod tests {
             };
             if query.ends_with("near me") {
                 return Some(plumb_index::places::PlaceResults {
+                    location: None,
                     what: "brewery".into(),
                     center: None,
                     near_me: true,
@@ -7175,6 +7796,7 @@ mod tests {
             // A town without any mapped.
             if query.contains("aurora") {
                 return Some(plumb_index::places::PlaceResults {
+                    location: None,
                     what: "brewery".into(),
                     center: Some(at("Aurora", "place=city", "n5", None)),
                     near_me: false,
@@ -7189,6 +7811,7 @@ mod tests {
                     km: 1.0,
                 };
             Some(plumb_index::places::PlaceResults {
+                location: None,
                 what: "brewery".into(),
                 center: Some(at("Denver", "place=city", "n1", None)),
                 near_me: false,
@@ -7232,7 +7855,7 @@ mod tests {
             domains,
             ["westword.com", "denvergov.org", "denverbroncos.com"]
         );
-        assert!(json.get("places").is_none(), "{body}");
+        assert_eq!(json["places"]["status"], "no_indexed_matches", "{body}");
         let (_, _, page) = send(
             router(Arc::new(BreweryPlaces)),
             "/search?q=brewery+in+aurora",
@@ -7242,14 +7865,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_api_lists_no_places_around_nowhere() {
+    async fn the_api_reports_missing_location_around_nowhere() {
         let (_, _, body) = send(
             router(Arc::new(BreweryPlaces)),
             "/api/search?q=brewery+near+me&full=1",
         )
         .await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert!(json.get("places").is_none(), "{body}");
+        assert_eq!(json["places"]["status"], "missing_location", "{body}");
+        assert!(json["places"]["hits"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -7289,6 +7913,150 @@ mod tests {
             assert!(page.contains("<section class=\"pl\""), "{page}");
             assert!(at("www.westword.com") > 0, "{page}");
             assert!(!page.contains("denverbroncos.com"), "{page}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_json_and_searxng_share_bounded_places_and_navigation_controls() {
+        let query = "brewery in denver";
+        let mcp = crate::mcp::Mcp::new(Arc::new(BreweryPlaces), None);
+        let answer = mcp
+            .search(query, Some(2), &SearchOptions::default())
+            .unwrap();
+        let (_, _, body) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/api/search?q=brewery+in+denver&full=1&limit=2",
+        )
+        .await;
+        let api: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let (_, _, body) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/search?q=brewery+in+denver&format=json&limit=2",
+        )
+        .await;
+        let searx: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["places"], api["places"]);
+        assert_eq!(answer["places"], searx["places"]);
+        assert_eq!(answer["places"]["hits"][0]["place"]["osm"], "n2");
+        assert_eq!(answer["places"]["hits"][0]["km"], 1.0);
+        assert_eq!(answer["places"]["license"], "ODbL");
+        assert_eq!(answer["results"][0]["domain"], api["hits"][0]["domain"]);
+        assert_eq!(searx["results"].as_array().unwrap().len(), 2);
+        assert!(mcp
+            .search_sites(query, Some(2), &SearchOptions::default())
+            .unwrap()
+            .get("places")
+            .is_none());
+        assert!(mcp
+            .search(
+                "brewery in denver site:greatdivide.com",
+                Some(2),
+                &SearchOptions::default()
+            )
+            .unwrap()
+            .get("places")
+            .is_none());
+        let near = mcp
+            .search(
+                "brewery near me",
+                Some(2),
+                &SearchOptions {
+                    country: Some("US".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(near["places"]["status"], "missing_location");
+        let named = crate::mcp::Mcp::new(Arc::new(BankPlaces), None)
+            .search("us bank", None, &SearchOptions::default())
+            .unwrap();
+        assert!(named.get("places").is_none());
+    }
+
+    struct FeedNews(crate::news::NewsStore);
+
+    impl StatusSource for FeedNews {
+        fn status(&self) -> Status {
+            node_status(Phase::Ready, Step::Idle)
+        }
+        fn recent(&self, query: &str, top: Option<(&str, bool)>) -> Option<Recent> {
+            self.0.recent(query, top, now_unix())
+        }
+    }
+
+    #[tokio::test]
+    async fn publisher_headlines_share_dates_sources_and_unavailable_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::news::NewsStore::open(dir.path());
+        let now = now_unix();
+        store.watch(vec![("bbc.co.uk".into(), "https://www.bbc.co.uk/".into())]);
+        store.apply(
+            vec![plumb_crawl::FeedCheck {
+                domain: "bbc.co.uk".into(),
+                outcome: plumb_crawl::FeedOutcome::Read {
+                    feed: "https://feeds.bbci.co.uk/news/rss.xml".into(),
+                    etag: None,
+                    last_modified: None,
+                    headlines: vec![plumb_core::Headline {
+                        title: "NVIDIA earnings rise".into(),
+                        url: "https://www.bbc.com/news/business/1".into(),
+                        at: now - 60,
+                    }],
+                },
+            }],
+            now,
+        );
+        let node = Arc::new(FeedNews(store));
+        let backend = backend(bank_hits());
+        let mcp = crate::mcp::Mcp::new(backend.clone(), None).with_node(Some(node.clone()));
+        let answer = mcp
+            .search("BBC latest news", Some(2), &SearchOptions::default())
+            .unwrap();
+        let app = node_router(backend, node);
+        let (_, _, body) = send(app.clone(), "/api/search?q=BBC+latest+news&full=1&limit=2").await;
+        let api: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let (_, _, body) = send(app.clone(), "/api/recent?q=BBC+latest+news&limit=2").await;
+        let recent: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let (_, _, body) = send(
+            app.clone(),
+            "/search?q=BBC+latest+news&format=json&categories=news&limit=2",
+        )
+        .await;
+        let searx: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(api["recent"], recent);
+        assert_eq!(searx["recent"], recent);
+        assert_eq!(
+            answer["recent"][0]["published_at"],
+            recent["headlines"][0]["at"]
+        );
+        assert_eq!(
+            answer["recent"][0]["site"],
+            recent["headlines"][0]["domain"]
+        );
+        assert_eq!(answer["news_status"]["sources"], recent["sources"]);
+        assert_eq!(recent["sources"][1]["checked_at"], now);
+        assert!(answer["recent"][0]["published_date"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z'));
+        assert_eq!(searx["results"][0]["url"], answer["recent"][0]["url"]);
+        let (_, _, body) = send(app, "/api/recent?q=Reuters+latest+news").await;
+        let unavailable: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(unavailable["status"], "source_unavailable");
+        assert!(unavailable["headlines"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn caddy_exposes_recent_without_management_routes() {
+        let config = include_str!("../../../site/Caddyfile");
+        let paths = config
+            .lines()
+            .find(|line| line.trim_start().starts_with("@node path "))
+            .unwrap();
+        let allowed: Vec<_> = paths.split_whitespace().skip(2).collect();
+        assert!(allowed.contains(&"/api/recent"));
+        for private in ["/app", "/api/control", "/api/recent/*", "/api/*"] {
+            assert!(!allowed.contains(&private), "{private}");
         }
     }
 

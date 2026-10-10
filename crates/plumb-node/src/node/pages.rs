@@ -43,14 +43,48 @@ const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 const TICK: Duration = Duration::from_millis(250);
 /// Pages looked at per search, before [`place_pages`] picks.
 const PAGES_PER_SEARCH: usize = 10;
-/// Pages looked at for a search that asks for one kind of page, before
-/// the kind narrows them.
+/// Eligible pages scored for typed search. Docs kind and host constraints
+/// narrow retrieval before its internal candidate windows.
 const KIND_PAGES: usize = 200;
 /// Wait after a node said it was busy.
 pub(super) const BUSY_WAIT: Duration = Duration::from_secs(5);
 /// Wait before asking again after no trusted node had the set, or a
 /// download failed.
 const FETCH_RETRY_WAIT: Duration = Duration::from_secs(15 * 60);
+
+/// Summaries were computed when the file was published/transferred; status
+/// reads small notes and the active index counter, never the corpus itself.
+pub(super) fn coverage(inner: &Inner) -> super::PageCoverage {
+    let settings = inner.settings();
+    let sets = crate::pages::SETS
+        .iter()
+        .map(|set| {
+            let file = set.file(&inner.paths.data);
+            let notes: Option<SetFileNotes> = std::fs::File::open(notes_path(&file))
+                .ok()
+                .filter(|f| f.metadata().is_ok_and(|m| m.len() <= 16 * 1024))
+                .and_then(|f| serde_json::from_reader(f).ok());
+            let file_quality = super::newer::stamp(&file)
+                .and_then(|(modified, size)| plumb_net::pages::read_quality(&file, modified, size));
+            super::SetCoverage {
+                set: set.id.into(),
+                enabled: set.kept(&settings.page_sets, settings.storage_limit_mb) > 0,
+                stored_records: notes
+                    .as_ref()
+                    .map(|n| n.lines)
+                    .or_else(|| file_quality.as_ref().map(|q| q.records)),
+                transfer_complete: notes.as_ref().map(|n| n.complete),
+                file_quality,
+            }
+        })
+        .collect();
+    let pages = inner.pages.read().unwrap_or_else(PoisonError::into_inner);
+    super::PageCoverage {
+        indexed_pages: pages.as_ref().map_or(0, |(_, p)| p.num_pages()),
+        index_generation: pages.as_ref().map(|(key, _)| key.clone()),
+        sets,
+    }
+}
 
 /// Runs until the node stops, on a blocking thread.
 pub(super) fn run(inner: Arc<Inner>) {
@@ -334,6 +368,7 @@ fn fetch_if_needed(
                 size,
                 complete: n.complete,
                 layers: super::newer::layers(set.id, &file),
+                quality: plumb_net::pages::read_quality(&file, modified, size),
                 may_grow,
             };
             match super::newer::newest(&mine, &offers, now) {
@@ -399,6 +434,14 @@ fn fetch_if_needed(
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
+    if first.modified != chosen.modified
+        || first.size != chosen.size
+        || first.layers != chosen.layers
+        || first.quality != chosen.quality
+    {
+        bail!("peer changed the offered generation before transfer");
+    }
+    let mut quality = first.quality.clone();
     let taken = take(inner, net, set, &part, first, pages, near);
     if !matches!(taken, Ok(Some(_))) {
         // Stopped, or failed: the part is of no use to a later try.
@@ -407,7 +450,27 @@ fn fetch_if_needed(
     let Some((lines, complete, modified, offset)) = taken? else {
         return Ok(());
     };
+    if complete {
+        if let Some(quality) = &mut quality {
+            // The cutter re-compresses even whole sets. Its checksum describes
+            // the locally advertised bytes; the wire checksum is checked in take.
+            quality.sha256 = super::newer::file_checksum(&part)?;
+        }
+    }
     super::newer::install(&part, &file, modified)?;
+    if complete {
+        if let Some(quality) = quality {
+            let size = std::fs::metadata(&file)?.len();
+            super::store::write_atomically(
+                &plumb_net::pages::quality_path(&file),
+                &serde_json::to_vec(&plumb_net::pages::QualityNote {
+                    modified,
+                    size,
+                    quality,
+                })?,
+            )?;
+        }
+    }
     write_notes(
         &file,
         &SetFileNotes {
@@ -442,6 +505,9 @@ fn take(
 ) -> Result<Option<(u64, bool, u64, u64)>> {
     let runtime = tokio::runtime::Handle::current();
     let from = first.peer;
+    let quality = first.quality.clone();
+    use sha2::{Digest, Sha256};
+    let mut wire_hash = Sha256::new();
     let mut cutter = SetFileCutter::create(part, pages)?;
     if !near.is_empty() {
         cutter = cutter.keep_past(crate::places::near_lines(near.to_vec()));
@@ -450,6 +516,7 @@ fn take(
     let mut offset = 0u64;
     let mut chunk = first;
     loop {
+        wire_hash.update(&chunk.bytes);
         decoder
             .write_all(&chunk.bytes)
             .with_context(|| format!("unpacking {} from {}", set.id, chunk.peer))?;
@@ -482,7 +549,11 @@ fn take(
                         return Ok(None);
                     }
                 }
-                Some(next) if next.size != size || next.modified != modified => {
+                Some(next)
+                    if next.size != size
+                        || next.modified != modified
+                        || next.quality != quality =>
+                {
                     bail!("{from} got a new {} file while it was taken", set.id)
                 }
                 Some(next) => break next,
@@ -491,6 +562,14 @@ fn take(
     }
     let cutter = decoder.get_mut();
     let complete = offset >= chunk.size && !cutter.cut();
+    if complete {
+        if let Some(quality) = quality {
+            anyhow::ensure!(
+                format!("{:x}", wire_hash.finalize()) == quality.sha256,
+                "downloaded set differs from its offered generation checksum"
+            );
+        }
+    }
     let lines = cutter.pages();
     cutter.finish()?;
     drop(decoder);
@@ -557,6 +636,7 @@ fn keep_map(
         complete: size > 0,
         layers: Vec::new(),
         may_grow,
+        quality: None,
     };
     let offer = match super::newer::newest(&mine, &offers, now_unix()) {
         Ok(offer) => offer.clone(),
@@ -866,11 +946,37 @@ pub(super) fn definition(inner: &Inner, name: &str) -> Option<plumb_index::pages
     }
 }
 
+/// Entity lookup never passes through site or learned placement.
+pub(super) fn entities(
+    inner: &Inner,
+    query: &str,
+    limit: usize,
+    options: &SearchOptions,
+) -> Result<Vec<PageHit>> {
+    let Some(searcher) = inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone())
+    else {
+        return Ok(Vec::new());
+    };
+    let ops = Operators::parse(query);
+    let words = if ops.any() { ops.words.as_str() } else { query };
+    let searcher = searcher.in_language(options.language.as_deref());
+    Ok(searcher
+        .entities(words, KIND_PAGES)?
+        .into_iter()
+        .filter(|hit| options_allow(options, &hit.page) && operators_allow(&ops, &hit.page))
+        .take(limit.min(KIND_PAGES))
+        .collect())
+}
+
 /// The best `limit` pages for `query` that `keep` keeps, best first; see
-/// [`crate::web::SearchBackend::pages_of`]. Of the first [`KIND_PAGES`]
-/// found, as a `site:` search looks at more pages than others, with the
-/// docs pages a search for docs pages (`docs`) or on a docs site wants
-/// ([`plumb_index::pages::PageSearcher::search_naming_docs`]).
+/// [`crate::web::SearchBackend::pages_of`]. Docs kind and host eligibility
+/// are applied within retrieval, with the short docs route; other kind
+/// predicates, language and safe-search rules narrow the scored pages.
 pub(super) fn pages_of(
     inner: &Inner,
     query: &str,
@@ -888,23 +994,80 @@ pub(super) fn pages_of(
     else {
         return Vec::new();
     };
-    let ops = Operators::parse(query);
-    let words = if ops.any() { ops.words.as_str() } else { query };
-    match searcher.search_naming_docs(words, &ops, docs, KIND_PAGES) {
-        Ok(found) => found
-            .into_iter()
-            .filter(|hit| {
-                options_allow(options, &hit.page)
-                    && operators_allow(&ops, &hit.page)
-                    && keep(&hit.page)
-            })
-            .take(limit)
-            .collect(),
+    match typed_pages(&searcher, query, limit, options, docs, keep) {
+        Ok(found) => found,
         Err(err) => {
             warn!("searching pages: {err:#}");
             Vec::new()
         }
     }
+}
+
+fn typed_pages(
+    searcher: &plumb_index::pages::PageSearcher,
+    query: &str,
+    limit: usize,
+    options: &SearchOptions,
+    docs: bool,
+    keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
+) -> Result<Vec<PageHit>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
+    if paper.constrained {
+        return Ok(searcher
+            .in_language(options.language.as_deref())
+            .search_papers(&paper, KIND_PAGES)?
+            .into_iter()
+            .filter(|hit| options_allow(options, &hit.page) && keep(&hit.page))
+            .take(limit)
+            .collect());
+    }
+    let ops = Operators::parse(query);
+    let words = if ops.any() { ops.words.as_str() } else { query };
+    let searcher = searcher.in_language(options.language.as_deref());
+    Ok(searcher
+        .search_naming_docs(words, &ops, docs, KIND_PAGES)?
+        .into_iter()
+        .filter(|hit| {
+            options_allow(options, &hit.page) && operators_allow(&ops, &hit.page) && keep(&hit.page)
+        })
+        .take(limit)
+        .collect())
+}
+
+pub(super) fn papers(
+    inner: &Inner,
+    query: &plumb_core::paper_query::PaperQuery,
+    limit: usize,
+    options: &SearchOptions,
+) -> Result<Vec<PageHit>> {
+    let searcher = inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone());
+    let Some(searcher) = searcher else {
+        return Ok(Vec::new());
+    };
+    Ok(searcher
+        .in_language(options.language.as_deref())
+        .search_papers(query, KIND_PAGES)?
+        .into_iter()
+        .filter(|hit| options_allow(options, &hit.page))
+        .take(limit)
+        .collect())
+}
+
+pub(super) fn paper_coverage(inner: &Inner) -> Option<plumb_index::pages::PaperCoverage> {
+    inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.paper_coverage().clone())
 }
 
 /// Adds the pages found for `query` to `results`. When the results are for
@@ -925,6 +1088,7 @@ pub(super) fn add_pages(
     else {
         return;
     };
+    let searcher = searcher.in_language(options.language.as_deref());
     let ops = Operators::parse(query);
     if ops.any() {
         if ops.words.is_empty() {
@@ -1037,6 +1201,108 @@ pub(super) fn add_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_paper_date_search_keeps_structural_metadata() {
+        use plumb_index::pages::{build_page_index, Page, PageSearcher, PAPERS_SET};
+        let source = plumb_core::article::Article {
+            title: "Transformer recent".into(),
+            item: Some("10.1234/recent".into()),
+            paper: Some(plumb_core::papers::PaperMetadata {
+                publication_date: Some("2026-09-30".into()),
+                count_kind: plumb_core::papers::PaperCountKind::Citations,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        build_page_index(dir.path(), [Page::from_paper(source)]).unwrap();
+        let searcher = PageSearcher::open(dir.path()).unwrap();
+        let hits = typed_pages(
+            &searcher,
+            "transformer after:2026-09-01",
+            10,
+            &SearchOptions::default(),
+            false,
+            &|p| p.set == PAPERS_SET,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0]
+                .page
+                .paper
+                .as_ref()
+                .unwrap()
+                .publication_date
+                .as_deref(),
+            Some("2026-09-30")
+        );
+        assert!(typed_pages(
+            &searcher,
+            "transformer after:2026-10-01",
+            10,
+            &SearchOptions::default(),
+            false,
+            &|p| p.set == PAPERS_SET
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
+    fn typed_docs_retrieve_and_serialize_existing_pages() {
+        use plumb_index::pages::{build_page_index, Page, PageSearcher, DOCS_SET};
+        let pages = plumb_core::article::articles_of(
+            include_str!("../../../plumb-index/tests/fixtures/short-docs.tsv")
+                .lines()
+                .map(str::to_string),
+        )
+        .map(|(_, article)| Page::from_docs(article.unwrap()).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("index");
+        build_page_index(&index, pages).unwrap();
+        let searcher = PageSearcher::open(&index).unwrap();
+        let options = SearchOptions::default();
+        for query in [
+            "tomllib",
+            "python tomllib",
+            "tomllib site:docs.python.org",
+            "padStart",
+            "javascript padStart",
+            "react hooks",
+            "python",
+        ] {
+            let found = typed_pages(&searcher, query, 10, &options, true, &|page| {
+                page.set == DOCS_SET
+            })
+            .unwrap();
+            assert!(!found.is_empty(), "{query}");
+            assert!(found.iter().all(|hit| hit.page.set == DOCS_SET));
+            let json = serde_json::to_value(&found).unwrap();
+            assert!(json
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|hit| hit["page"]["set"] == "docs"));
+            assert!(found.iter().all(|hit| !hit.page.set_name().is_empty()));
+        }
+        assert!(typed_pages(
+            &searcher,
+            "tomllib -site:python.org",
+            10,
+            &options,
+            true,
+            &|_| true
+        )
+        .unwrap()
+        .is_empty());
+        assert!(
+            typed_pages(&searcher, "tomllib", 0, &options, true, &|_| true)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     fn notes(lines: u64, complete: bool, near: u64) -> SetFileNotes {
         SetFileNotes {

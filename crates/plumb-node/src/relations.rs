@@ -787,6 +787,7 @@ pub(crate) mod tests {
 
     fn page(title: &str, item: &str, description: &str, facts: &[(FactKind, &str)]) -> Page {
         Page {
+            paper: None,
             set: "wikipedia-en".into(),
             url: format!("https://en.wikipedia.org/wiki/{title}"),
             title: title.into(),
@@ -808,6 +809,8 @@ pub(crate) mod tests {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            content_language: None,
+            search: None,
         }
     }
 

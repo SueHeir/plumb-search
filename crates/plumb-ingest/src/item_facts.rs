@@ -21,7 +21,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use plumb_core::article::{articles_of, write_article, ARTICLES_HEADER};
 use plumb_core::facts::{Date, Fact, FactKind, ValueType, KINDS};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::download::{part_path, WikidataPacing};
@@ -44,6 +44,66 @@ pub const FILL_IN_ALWAYS: usize = 20_000;
 
 /// Facts by Wikidata item (`Q408`).
 pub type FactsByItem = HashMap<String, Vec<Fact>>;
+
+/// A fixed item/property pair to retry in background ingestion.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FactRetry {
+    pub item: String,
+    pub kind: FactKind,
+}
+
+/// Completion of one property's scan and bounded targeted repair.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropertyCompletion {
+    pub kind: FactKind,
+    pub endpoint: String,
+    pub targeted_endpoint: String,
+    pub stage: String,
+    pub scan_complete: bool,
+    pub stopped_at: Option<usize>,
+    pub resumed_stopped_at: Option<usize>,
+    pub targeted_items: usize,
+    pub targeted_batches: usize,
+    pub failed_items: usize,
+    pub items_with_facts: usize,
+}
+
+/// Retrieval time is ingestion provenance, not a fact's observation date.
+/// Interrupted scans cannot identify every omitted item; `retry` covers
+/// failed targeted queries and unresolved labels only.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct FactsCompletion {
+    pub retrieved_at: u64,
+    pub properties: Vec<PropertyCompletion>,
+    pub missing_labels: usize,
+    pub retry: Vec<FactRetry>,
+    /// Successful targeted reads, including properties with no current
+    /// statement. Only these may clear an existing fact during a refresh.
+    pub checked: Vec<FactRetry>,
+}
+
+#[derive(Debug)]
+pub struct FetchedFacts {
+    pub facts: FactsByItem,
+    pub completion: FactsCompletion,
+}
+
+fn retrieval_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_secs())
+}
+
+fn endpoint_name(endpoint: &str) -> String {
+    let Ok(mut url) = url::Url::parse(endpoint) else {
+        return "invalid endpoint".into();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
 
 #[derive(Debug, Deserialize)]
 struct Response {
@@ -547,7 +607,7 @@ async fn follow_namesakes(
     raw: &mut RawFacts,
     pairs: &[(String, String)],
     labels: &HashMap<String, String>,
-) -> Result<()> {
+) -> Result<Vec<FactRetry>> {
     let namesakes = namesakes(pairs, labels);
     let companies: Vec<String> = namesakes
         .iter()
@@ -561,6 +621,7 @@ async fn follow_namesakes(
     );
     let wanted: HashSet<String> = companies.iter().cloned().collect();
     let mut theirs = RawFacts::default();
+    let mut retry = Vec::new();
     for &kind in NAMESAKE_KINDS {
         for batch in companies.chunks(LABELS_BATCH) {
             tokio::time::sleep(pacing.pause).await;
@@ -568,16 +629,27 @@ async fn follow_namesakes(
                 Ok(json) => {
                     theirs.add_page(kind, &wanted, &json)?;
                 }
-                Err(err) => warn!(
-                    "{} of {} companies left out: {err:#}",
-                    kind.key(),
-                    batch.len()
-                ),
+                Err(err) => {
+                    warn!(
+                        "{} of {} companies left out: {err:#}",
+                        kind.key(),
+                        batch.len()
+                    );
+                    retry.extend(
+                        namesakes
+                            .iter()
+                            .filter(|(_, company)| batch.contains(company))
+                            .map(|(item, _)| FactRetry {
+                                item: item.clone(),
+                                kind,
+                            }),
+                    );
+                }
             }
         }
     }
     raw.take_from_namesakes(&namesakes, &theirs);
-    Ok(())
+    Ok(retry)
 }
 
 /// `amount` without needless digits: `8848.86`, `27204809`.
@@ -635,6 +707,21 @@ pub async fn fetch_facts(
     pacing: WikidataPacing,
     items: &[String],
 ) -> Result<FactsByItem> {
+    Ok(
+        fetch_facts_reported(client, endpoint, deep_endpoint, pacing, items)
+            .await?
+            .facts,
+    )
+}
+
+/// The existing scan/fallback workflow with completion diagnostics.
+pub async fn fetch_facts_reported(
+    client: &reqwest::Client,
+    endpoint: &str,
+    deep_endpoint: Option<&str>,
+    pacing: WikidataPacing,
+    items: &[String],
+) -> Result<FetchedFacts> {
     use futures_util::stream::{self, StreamExt, TryStreamExt};
     let wanted: HashSet<String> = items.iter().cloned().collect();
     let wanted = &wanted;
@@ -650,6 +737,7 @@ pub async fn fetch_facts(
     let mut kinds = Vec::with_capacity(read.len());
     for (kind, mut raw, stopped) in read {
         let mut cut_short = kind.by_name_only();
+        let mut resumed_stopped_at = None;
         if let Some(stopped_at) = stopped {
             let from = deep_endpoint.unwrap_or(endpoint);
             // Pages are read by offset without an order, and another
@@ -666,11 +754,29 @@ pub async fn fetch_facts(
             );
             let again = read_pages(client, from, pacing, &mut raw, kind, offset, wanted).await?;
             cut_short |= again.is_some();
+            resumed_stopped_at = again;
         }
-        kinds.push((kind, raw, cut_short));
+        let report = PropertyCompletion {
+            kind,
+            endpoint: endpoint_name(if stopped.is_some() {
+                deep_endpoint.unwrap_or(endpoint)
+            } else {
+                endpoint
+            }),
+            targeted_endpoint: endpoint_name(endpoint),
+            stage: "scan_and_targeted_repair".into(),
+            scan_complete: !cut_short,
+            stopped_at: stopped,
+            resumed_stopped_at,
+            targeted_items: 0,
+            targeted_batches: 0,
+            failed_items: 0,
+            items_with_facts: 0,
+        };
+        kinds.push((kind, raw, cut_short, report));
     }
     let mut filled = stream::iter(kinds)
-        .map(|(kind, mut raw, cut_short)| async move {
+        .map(|(kind, mut raw, cut_short, mut report)| async move {
             // Too big or too slow to read whole: the most read items by name.
             let top = if cut_short {
                 FILL_IN_TOP
@@ -678,14 +784,37 @@ pub async fn fetch_facts(
                 FILL_IN_ALWAYS
             };
             let most_read = &items[..top.min(items.len())];
-            fill_in(client, endpoint, pacing, &mut raw, kind, most_read, wanted).await?;
-            Ok::<_, anyhow::Error>(raw)
+            let targeted =
+                fill_in(client, endpoint, pacing, &mut raw, kind, most_read, wanted).await?;
+            report.targeted_items = targeted.checked.len() + targeted.retry.len();
+            report.targeted_batches = report.targeted_items.div_ceil(LABELS_BATCH);
+            report.failed_items = targeted.retry.len();
+            report.items_with_facts = raw.facts.len();
+            Ok::<_, anyhow::Error>((raw, report, targeted))
         })
         .buffered(PARALLEL_QUERIES);
     let mut raw = RawFacts::default();
-    while let Some(kind) = filled.try_next().await? {
+    let mut completion = FactsCompletion {
+        retrieved_at: retrieval_time(),
+        ..Default::default()
+    };
+    while let Some((kind, report, targeted)) = filled.try_next().await? {
         raw.merge(kind);
+        completion.properties.push(report);
+        completion.checked.extend(targeted.checked);
+        completion.retry.extend(targeted.retry);
     }
+    name_facts(client, endpoint, pacing, raw, completion).await
+}
+
+/// The existing label/namesake pipeline shared by scans and repairs.
+async fn name_facts(
+    client: &reqwest::Client,
+    endpoint: &str,
+    pacing: WikidataPacing,
+    mut raw: RawFacts,
+    mut completion: FactsCompletion,
+) -> Result<FetchedFacts> {
     raw.add_partial();
     // The items founded or owned by an item are named too, to tell which
     // are named after it.
@@ -696,14 +825,17 @@ pub async fn fetch_facts(
     items.dedup();
     info!("naming {} items the facts are about", items.len());
     let mut labels = fetch_labels(client, endpoint, pacing, &items).await?;
-    follow_namesakes(client, endpoint, pacing, &mut raw, &pairs, &labels).await?;
+    let retry = follow_namesakes(client, endpoint, pacing, &mut raw, &pairs, &labels).await?;
+    let retry_set: HashSet<_> = retry.iter().collect();
+    completion.checked.retain(|pair| !retry_set.contains(pair));
+    completion.retry.extend(retry);
     let unnamed: Vec<String> = raw
         .named_items()
         .into_iter()
         .filter(|item| !labels.contains_key(item))
         .collect();
     labels.extend(fetch_labels(client, endpoint, pacing, &unnamed).await?);
-    Ok(raw.named(&labels))
+    Ok(finish_named(raw, &labels, completion))
 }
 
 /// Queries to Wikidata at once: its query service allows five per client.
@@ -758,7 +890,7 @@ async fn fill_in(
     kind: FactKind,
     items: &[String],
     wanted: &HashSet<String>,
-) -> Result<()> {
+) -> Result<FactsCompletion> {
     let lacking: Vec<String> = items
         .iter()
         .filter(|item| {
@@ -776,11 +908,39 @@ async fn fill_in(
         items.len()
     );
     let mut found = 0;
+    let mut completion = FactsCompletion::default();
     for (n, batch) in lacking.chunks(LABELS_BATCH).enumerate() {
         tokio::time::sleep(pacing.pause).await;
         match sparql_json(client, endpoint, &items_query(kind, batch), pacing).await {
-            Ok(json) => found += raw.add_page(kind, wanted, &json)?,
-            Err(err) => warn!("{}: {} items left out: {err:#}", kind.key(), batch.len()),
+            Ok(json) => match raw.add_page(kind, wanted, &json) {
+                Ok(rows) => {
+                    found += rows;
+                    completion
+                        .checked
+                        .extend(batch.iter().map(|item| FactRetry {
+                            item: item.clone(),
+                            kind,
+                        }));
+                }
+                Err(err) => {
+                    warn!(
+                        "{}: malformed targeted answer for {} items: {err:#}",
+                        kind.key(),
+                        batch.len()
+                    );
+                    completion.retry.extend(batch.iter().map(|item| FactRetry {
+                        item: item.clone(),
+                        kind,
+                    }));
+                }
+            },
+            Err(err) => {
+                warn!("{}: {} items left out: {err:#}", kind.key(), batch.len());
+                completion.retry.extend(batch.iter().map(|item| FactRetry {
+                    item: item.clone(),
+                    kind,
+                }));
+            }
         }
         if n % 50 == 0 {
             info!(
@@ -791,7 +951,126 @@ async fn fill_in(
             );
         }
     }
-    Ok(())
+    Ok(completion)
+}
+
+fn finish_named(
+    raw: RawFacts,
+    labels: &HashMap<String, String>,
+    mut completion: FactsCompletion,
+) -> FetchedFacts {
+    completion.retrieved_at = retrieval_time();
+    let missing: HashSet<_> = raw
+        .named_items()
+        .into_iter()
+        .filter(|item| !labels.contains_key(item))
+        .collect();
+    completion.missing_labels = missing.len();
+    let failed: HashSet<_> = raw
+        .facts
+        .iter()
+        .flat_map(|(item, facts)| {
+            facts
+                .iter()
+                .filter(|fact| {
+                    fact.kind.value_type() == ValueType::Item && missing.contains(&fact.value)
+                })
+                .map(|fact| FactRetry {
+                    item: item.clone(),
+                    kind: fact.kind,
+                })
+        })
+        .collect();
+    completion.checked.retain(|pair| !failed.contains(pair));
+    completion.retry.extend(failed);
+    let mut seen = HashSet::new();
+    completion.retry.retain(|pair| seen.insert(pair.clone()));
+    let mut facts = raw.named(labels);
+    for pair in &completion.retry {
+        if let Some(values) = facts.get_mut(&pair.item) {
+            values.retain(|fact| fact.kind != pair.kind);
+        }
+    }
+    for property in &mut completion.properties {
+        property.items_with_facts = facts
+            .values()
+            .filter(|facts| facts.iter().any(|fact| fact.kind == property.kind))
+            .count();
+        property.failed_items = completion
+            .retry
+            .iter()
+            .filter(|pair| pair.kind == property.kind)
+            .count();
+    }
+    FetchedFacts { facts, completion }
+}
+
+/// Bounded, resumable repair of explicit item/property pairs. No worldwide
+/// pagination, and no user search triggers this upstream request.
+pub async fn fetch_targeted_facts(
+    client: &reqwest::Client,
+    endpoint: &str,
+    pacing: WikidataPacing,
+    pairs: &[FactRetry],
+) -> Result<FetchedFacts> {
+    anyhow::ensure!(
+        pairs.len() <= FILL_IN_TOP,
+        "too many targeted fact pairs (maximum {FILL_IN_TOP})"
+    );
+    anyhow::ensure!(
+        pairs.iter().all(|pair| is_item_id(&pair.item)),
+        "targeted facts require Wikidata item IDs"
+    );
+    let mut raw = RawFacts::default();
+    let mut completion = FactsCompletion {
+        retrieved_at: retrieval_time(),
+        ..Default::default()
+    };
+    for &kind in KINDS {
+        let mut items: Vec<_> = pairs
+            .iter()
+            .filter(|pair| pair.kind == kind)
+            .map(|pair| pair.item.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        items.sort_unstable();
+        let wanted: HashSet<_> = items.iter().cloned().collect();
+        let read = fill_in(client, endpoint, pacing, &mut raw, kind, &items, &wanted).await?;
+        completion.properties.push(PropertyCompletion {
+            kind,
+            endpoint: endpoint_name(endpoint),
+            targeted_endpoint: endpoint_name(endpoint),
+            stage: "targeted".into(),
+            scan_complete: false,
+            stopped_at: None,
+            resumed_stopped_at: None,
+            targeted_items: items.len(),
+            targeted_batches: items.len().div_ceil(LABELS_BATCH),
+            failed_items: read.retry.len(),
+            items_with_facts: 0,
+        });
+        completion.checked.extend(read.checked);
+        completion.retry.extend(read.retry);
+    }
+    let mut fetched = name_facts(client, endpoint, pacing, raw, completion).await?;
+    let requested: HashSet<_> = pairs.iter().cloned().collect();
+    for (item, facts) in &mut fetched.facts {
+        facts.retain(|fact| {
+            requested.contains(&FactRetry {
+                item: item.clone(),
+                kind: fact.kind,
+            })
+        });
+    }
+    fetched
+        .completion
+        .retry
+        .retain(|pair| requested.contains(pair));
+    Ok(fetched)
 }
 
 /// What [`add_facts_to_file`] did.
@@ -800,11 +1079,35 @@ pub struct AddedFacts {
     pub articles: u64,
     pub with_facts: u64,
     pub facts: u64,
+    /// Older or undated incoming population values did not replace a
+    /// count with a later source observation year.
+    pub kept_newer_populations: u64,
 }
 
-/// Rewrites the articles file `path` with the facts in `facts`, replacing
-/// any it had and keeping everything else.
+/// Replaces only the imported property kinds; keeps unrelated enrichment.
+/// For authoritative empty targeted reads use [`apply_fetched_facts`].
 pub fn add_facts_to_file(path: &Path, facts: &FactsByItem) -> Result<AddedFacts> {
+    write_facts_to_file(path, facts, &[])
+}
+
+/// Successful targeted reads may clear a now-ended statement. Failed
+/// reads and unresolved labels preserve the previous value.
+pub fn apply_fetched_facts(path: &Path, fetched: &FetchedFacts) -> Result<AddedFacts> {
+    write_facts_to_file(path, &fetched.facts, &fetched.completion.checked)
+}
+
+fn write_facts_to_file(
+    path: &Path,
+    facts: &FactsByItem,
+    checked: &[FactRetry],
+) -> Result<AddedFacts> {
+    let mut checked_by_item: HashMap<&str, HashSet<FactKind>> = HashMap::new();
+    for pair in checked {
+        checked_by_item
+            .entry(&pair.item)
+            .or_default()
+            .insert(pair.kind);
+    }
     let reader = open_maybe_gz(path)?;
     let mut failed = None;
     let lines = std::io::BufRead::lines(reader).map_while(|line| match line {
@@ -825,12 +1128,33 @@ pub fn add_facts_to_file(path: &Path, facts: &FactsByItem) -> Result<AddedFacts>
     let mut added = AddedFacts::default();
     for (n, article) in articles_of(lines) {
         let mut article = article.with_context(|| format!("{} line {n}", path.display()))?;
-        article.facts = article
-            .item
-            .as_deref()
-            .and_then(|item| facts.get(item))
-            .cloned()
-            .unwrap_or_default();
+        if let Some(item) = article.item.as_deref() {
+            let incoming = facts.get(item).map(Vec::as_slice).unwrap_or(&[]);
+            let checked = checked_by_item.get(item);
+            let keep_population = article
+                .facts
+                .iter()
+                .find(|fact| fact.kind == FactKind::Population)
+                .and_then(Fact::observation_year)
+                .zip(
+                    incoming
+                        .iter()
+                        .find(|fact| fact.kind == FactKind::Population),
+                )
+                .is_some_and(|(kept, new)| kept > new.observation_year().unwrap_or(i32::MIN));
+            added.kept_newer_populations += u64::from(keep_population);
+            article.facts.retain(|fact| {
+                keep_population && fact.kind == FactKind::Population
+                    || !incoming.iter().any(|new| new.kind == fact.kind)
+                        && !checked.is_some_and(|kinds| kinds.contains(&fact.kind))
+            });
+            article.facts.extend(
+                incoming
+                    .iter()
+                    .filter(|fact| !keep_population || fact.kind != FactKind::Population)
+                    .cloned(),
+            );
+        }
         added.articles += 1;
         if !article.facts.is_empty() {
             added.with_facts += 1;
@@ -855,6 +1179,13 @@ mod tests {
     use plumb_core::article::{read_articles, Article};
 
     use super::*;
+
+    fn fact(kind: FactKind, value: &str) -> Fact {
+        Fact {
+            kind,
+            value: value.into(),
+        }
+    }
 
     fn answer(rows: &[&[(&str, &str)]]) -> Vec<u8> {
         let bindings: Vec<serde_json::Value> = rows
@@ -883,6 +1214,256 @@ mod tests {
             })
             .collect();
         serde_json::to_vec(&serde_json::json!({ "results": { "bindings": bindings } })).unwrap()
+    }
+
+    #[test]
+    fn partial_refresh_preserves_other_facts_profiles_and_leads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wikipedia-en.tsv.gz");
+        let before = Article {
+            title: "Japan".into(),
+            item: Some("Q17".into()),
+            description: Some("country".into()),
+            lead: Some("Japan is a country in East Asia.".into()),
+            profiles: vec![plumb_core::profiles::Profile {
+                service: "youtube-handle".into(),
+                id: "JapanGov".into(),
+            }],
+            facts: vec![
+                fact(FactKind::Capital, "Tokyo"),
+                fact(FactKind::Population, "125000000;2020"),
+                fact(FactKind::Ceo, "Former CEO"),
+            ],
+            ..Default::default()
+        };
+        crate::articles::write_articles_file(&path, std::slice::from_ref(&before)).unwrap();
+        let mut fetched = FetchedFacts {
+            facts: HashMap::from([(
+                "Q17".into(),
+                vec![fact(FactKind::Population, "123802000;2024")],
+            )]),
+            completion: FactsCompletion {
+                checked: vec![FactRetry {
+                    item: "Q17".into(),
+                    kind: FactKind::Population,
+                }],
+                retry: vec![FactRetry {
+                    item: "Q17".into(),
+                    kind: FactKind::Ceo,
+                }],
+                ..Default::default()
+            },
+        };
+        apply_fetched_facts(&path, &fetched).unwrap();
+        let after = read_articles(open_maybe_gz(&path).unwrap(), 10)
+            .unwrap()
+            .remove(0);
+        assert_eq!(after.lead, before.lead);
+        assert_eq!(after.profiles, before.profiles);
+        assert!(after.facts.contains(&fact(FactKind::Capital, "Tokyo")));
+        assert!(after.facts.contains(&fact(FactKind::Ceo, "Former CEO")));
+        assert!(after
+            .facts
+            .contains(&fact(FactKind::Population, "123802000;2024")));
+        fetched.facts.clear();
+        fetched.completion.retry.clear();
+        fetched.completion.checked = vec![FactRetry {
+            item: "Q17".into(),
+            kind: FactKind::Ceo,
+        }];
+        apply_fetched_facts(&path, &fetched).unwrap();
+        let after = read_articles(open_maybe_gz(&path).unwrap(), 10)
+            .unwrap()
+            .remove(0);
+        assert!(!after.facts.iter().any(|fact| fact.kind == FactKind::Ceo));
+        assert_eq!(after.facts.len(), 2);
+    }
+
+    #[test]
+    fn older_population_observations_cannot_regress_a_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wikipedia-en.tsv.gz");
+        let before = Article {
+            title: "Example country".into(),
+            item: Some("Q17".into()),
+            facts: vec![fact(FactKind::Population, "100;2025")],
+            ..Default::default()
+        };
+        for (incoming, kept) in [("99;2024", true), ("99", true), ("101;2026", false)] {
+            crate::articles::write_articles_file(&path, std::slice::from_ref(&before)).unwrap();
+            let fetched = FetchedFacts {
+                facts: HashMap::from([("Q17".into(), vec![fact(FactKind::Population, incoming)])]),
+                completion: FactsCompletion {
+                    checked: vec![FactRetry {
+                        item: "Q17".into(),
+                        kind: FactKind::Population,
+                    }],
+                    ..Default::default()
+                },
+            };
+            let added = apply_fetched_facts(&path, &fetched).unwrap();
+            assert_eq!(added.kept_newer_populations, u64::from(kept));
+            let after = read_articles(open_maybe_gz(&path).unwrap(), 1)
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                after.facts,
+                vec![fact(
+                    FactKind::Population,
+                    if kept { "100;2025" } else { incoming }
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_labels_keep_the_entire_property_for_retry() {
+        let mut raw = RawFacts::default();
+        raw.facts.insert(
+            "Q312".into(),
+            vec![fact(FactKind::Founder, "Q1"), fact(FactKind::Founder, "Q2")],
+        );
+        let pair = FactRetry {
+            item: "Q312".into(),
+            kind: FactKind::Founder,
+        };
+        let completion = FactsCompletion {
+            checked: vec![pair.clone()],
+            ..Default::default()
+        };
+        let fetched = finish_named(
+            raw,
+            &HashMap::from([("Q1".into(), "Known founder".into())]),
+            completion,
+        );
+        assert!(fetched.facts["Q312"].is_empty());
+        assert_eq!(fetched.completion.missing_labels, 1);
+        assert_eq!(fetched.completion.retry, vec![pair]);
+        assert!(fetched.completion.checked.is_empty());
+        assert_eq!(
+            endpoint_name("https://name:password@example.test/sparql?key=secret#x"),
+            "https://example.test/sparql"
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_completion_can_retry_failed_pairs_without_global_scans() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/sparql", listener.local_addr().unwrap());
+        let queries = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = queries.clone();
+        let server = tokio::spawn(async move {
+            let mut capital_failed = false;
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                let body_start = loop {
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                };
+                let head = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
+                let length: usize = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                while request.len() < body_start + length {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let query = url::form_urlencoded::parse(&request[body_start..])
+                    .find(|(name, _)| name == "query")
+                    .unwrap()
+                    .1
+                    .into_owned();
+                log.lock().unwrap().push(query.clone());
+                let (status, body) = if query.contains("p:P36") && !capital_failed {
+                    capital_failed = true;
+                    ("400 Bad Request", Vec::new())
+                } else if query.contains("p:P1082") {
+                    (
+                        "200 OK",
+                        answer(&[&[
+                            ("item", "Q17"),
+                            ("v", "123802000"),
+                            ("t", "+2024-01-01T00:00:00Z"),
+                        ]]),
+                    )
+                } else if query.contains("p:P36") {
+                    ("200 OK", answer(&[&[("item", "Q17"), ("v", "Q1490")]]))
+                } else if query.contains("rdfs:label") {
+                    (
+                        "200 OK",
+                        answer(&[&[("item", "Q1490"), ("label", "Tokyo")]]),
+                    )
+                } else {
+                    ("200 OK", answer(&[]))
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(head.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            }
+        });
+        let pairs = vec![
+            FactRetry {
+                item: "Q17".into(),
+                kind: FactKind::Population,
+            },
+            FactRetry {
+                item: "Q17".into(),
+                kind: FactKind::Capital,
+            },
+            FactRetry {
+                item: "Q17".into(),
+                kind: FactKind::Ceo,
+            },
+        ];
+        let pacing = WikidataPacing {
+            pause: std::time::Duration::ZERO,
+            retry_wait: std::time::Duration::ZERO,
+        };
+        let client = reqwest::Client::new();
+        let first = fetch_targeted_facts(&client, &endpoint, pacing, &pairs)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.facts["Q17"],
+            vec![fact(FactKind::Population, "123802000;2024")]
+        );
+        assert_eq!(first.completion.retry, vec![pairs[1].clone()]);
+        assert!(first.completion.checked.contains(&pairs[2])); // no current CEO
+        let saved = serde_json::to_vec(&first.completion).unwrap();
+        let resume: FactsCompletion = serde_json::from_slice(&saved).unwrap();
+        let second = fetch_targeted_facts(&client, &endpoint, pacing, &resume.retry)
+            .await
+            .unwrap();
+        assert_eq!(second.facts["Q17"], vec![fact(FactKind::Capital, "Tokyo")]);
+        assert!(second.completion.retry.is_empty());
+        let queries = queries.lock().unwrap();
+        assert!(queries
+            .iter()
+            .all(|query| query.contains("VALUES ?item") && !query.contains("OFFSET")));
+        assert!(queries
+            .iter()
+            .find(|query| query.contains("p:P169"))
+            .unwrap()
+            .contains("FILTER NOT EXISTS { ?s pq:P582 [] }"));
+        server.abort();
     }
 
     #[test]

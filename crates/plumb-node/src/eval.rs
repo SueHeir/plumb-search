@@ -29,6 +29,8 @@ use tracing::info;
 use crate::cli::{EvalArgs, Half};
 use crate::meaning::MeaningIndex;
 
+pub mod contracts;
+
 /// One query of a queries file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalQuery {
@@ -233,6 +235,9 @@ struct Setup {
 }
 
 pub fn run(args: EvalArgs) -> Result<()> {
+    if args.report.is_some() {
+        return contracts::run(&args);
+    }
     let suites = args
         .queries
         .iter()
@@ -328,7 +333,7 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
         build_pages(args, dir.path())?;
         (Some(PageSearcher::open(dir.path())?), Some(dir))
     };
-    let page_urls = if args.recall {
+    let page_urls = if args.recall || args.report.is_some() {
         page_urls(args)?
     } else {
         HashSet::new()
@@ -347,7 +352,7 @@ const RECALL_WORDS_DEPTH: usize = 10_000;
 /// How far down the pages found for a query `--recall` looks.
 const RECALL_PAGES_DEPTH: usize = 1_000;
 /// The depths `--recall` counts answers within.
-const RECALL_DEPTHS: [usize; 4] = [50, 100, 1_000, 10_000];
+const RECALL_DEPTHS: [usize; 5] = [10, 50, 100, 1_000, 10_000];
 
 /// Where a query's answer stands before ranking (`plumb eval --recall`).
 /// Positions are 1-based, of the best expected answer.
@@ -1516,6 +1521,7 @@ mod tests {
         let site = |domain: &str, named: bool| Hit {
             demand: None,
             missing_words: false,
+            query_evidence: None,
             placing_text_score: None,
             domain: domain.into(),
             url: format!("https://{domain}/"),

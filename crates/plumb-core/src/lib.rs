@@ -26,6 +26,8 @@ pub mod news;
 pub mod oblivious;
 mod operators;
 pub mod packages;
+pub mod paper_query;
+pub mod papers;
 pub mod place;
 pub mod profiles;
 pub mod reference;
@@ -1229,7 +1231,15 @@ pub fn is_function_word(word: &str) -> bool {
 /// `zh-Hant-TW` -> `zh`, `DE` -> `de`. `None` for tags that name no
 /// language (`x-default`, `und`, `zxx`, `mul`) or are not tags at all.
 pub fn language_code(tag: &str) -> Option<String> {
-    let primary = tag.trim().split(['-', '_']).next()?.to_ascii_lowercase();
+    let tag = tag.trim();
+    if tag.len() > 63
+        || tag.split(['-', '_']).any(|part| {
+            part.is_empty() || part.len() > 8 || !part.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+    {
+        return None;
+    }
+    let primary = tag.split(['-', '_']).next()?.to_ascii_lowercase();
     let letters = primary.bytes().all(|b| b.is_ascii_lowercase());
     let named = !matches!(primary.as_str(), "und" | "zxx" | "mul" | "mis");
     (letters && (2..=3).contains(&primary.len()) && named).then_some(primary)

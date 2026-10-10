@@ -603,6 +603,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
         }
     }
 
@@ -610,6 +611,7 @@ mod tests {
         PlacedPage {
             hit: plumb_index::pages::PageHit {
                 page: plumb_index::pages::Page {
+                    paper: None,
                     set: "wikipedia-en".to_string(),
                     url: "https://en.wikipedia.org/wiki/Weather".to_string(),
                     title: "Weather".to_string(),
@@ -625,6 +627,8 @@ mod tests {
                     lead: None,
                     names: Vec::new(),
                     sections: Vec::new(),
+                    content_language: None,
+                    search: None,
                 },
                 score: 1.0,
                 named: true,

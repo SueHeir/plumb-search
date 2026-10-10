@@ -74,6 +74,8 @@ mod tests {
             description: Some(format!("About {title}")),
             text: None,
             sections: Vec::new(),
+            search: None,
+            language: None,
         }
     }
 

@@ -97,6 +97,57 @@ pub fn run_spelling(args: &SpellingArgs) -> Result<()> {
 }
 
 pub fn run_search(args: SearchArgs) -> Result<()> {
+    if args.paper {
+        let query = plumb_core::paper_query::PaperQuery::with_options(
+            &args.query.join(" "),
+            args.after.as_deref(),
+            args.before.as_deref(),
+            args.order.as_deref(),
+        )?;
+        let searcher = plumb_index::pages::PageSearcher::open(&args.index)?;
+        let hits = searcher.search_papers(&query, args.limit)?;
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({ "pages": hits, "coverage": searcher.paper_coverage() })
+                )?
+            );
+        } else {
+            if hits.is_empty() {
+                println!(
+                    "No matching papers in this index with the requested publication precision."
+                );
+            }
+            for hit in hits {
+                println!("{}\n  {}", hit.page.title, hit.page.url);
+                if let Some(paper) = &hit.page.paper {
+                    let dates: Vec<_> = paper
+                        .date_labels()
+                        .iter()
+                        .map(|(label, date)| format!("{label} {date}"))
+                        .collect();
+                    println!(
+                        "  {}; {} {}",
+                        dates.join("; "),
+                        paper.count,
+                        paper.count_label()
+                    );
+                } else {
+                    println!(
+                        "  Published unknown; {} popularity (count type unknown)",
+                        hit.page.views
+                    );
+                }
+            }
+            let coverage = searcher.paper_coverage();
+            println!(
+                "Indexed papers: {}; known publication year: {}; known publication day: {}",
+                coverage.total, coverage.publication_year, coverage.publication_day
+            );
+        }
+        return Ok(());
+    }
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let query = args.query.join(" ");
@@ -221,6 +272,7 @@ mod tests {
         Hit {
             demand: None,
             missing_words: false,
+            query_evidence: None,
             placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://www.{domain}/"),

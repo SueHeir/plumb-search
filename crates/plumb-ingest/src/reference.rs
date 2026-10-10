@@ -43,9 +43,16 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
         .iter()
         .map(|doc| doc.title.as_deref().and_then(|t| page_title(t, &endings)))
         .collect();
-    let mut title_counts: HashMap<String, usize> = HashMap::new();
-    for title in titles.iter().flatten() {
-        *title_counts.entry(title.to_lowercase()).or_default() += 1;
+    let mut title_counts = HashMap::new();
+    for (doc, title) in docs.iter().zip(&titles) {
+        if let Some(title) = title {
+            *title_counts
+                .entry((
+                    title.to_lowercase(),
+                    doc.language.as_deref().and_then(plumb_core::language_code),
+                ))
+                .or_default() += 1;
+        }
     }
     let descriptions = shared(docs.iter().map(|doc| doc.description.as_deref()));
     let texts = shared(docs.iter().map(|doc| doc.text.as_deref()));
@@ -54,14 +61,22 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
     let mut articles = Vec::new();
     for (doc, title) in docs.iter().zip(titles) {
         let Some(title) = title else { continue };
+        if !useful_page(doc) {
+            continue;
+        }
         let Some(depth) = depth_of(&doc.url) else {
             continue;
         };
         let lower = title.to_lowercase();
-        if title_counts.get(&lower).copied().unwrap_or(0) >= SHARED_BY
+        let language = doc.language.as_deref().and_then(plumb_core::language_code);
+        if title_counts
+            .get(&(lower.clone(), language.clone()))
+            .copied()
+            .unwrap_or(0)
+            >= SHARED_BY
             || NOT_PAGES.contains(&lower.as_str())
             || !seen_urls.insert(doc.url.clone())
-            || !seen_titles.insert(lower)
+            || !seen_titles.insert((lower, language.clone()))
         {
             continue;
         }
@@ -79,12 +94,88 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
         articles.push(Article {
             title,
             description,
+            language,
             item: Some(doc.url.clone()),
             views: site.weight * VIEWS_PER_WEIGHT / depth.max(1) as u64,
+            sections: useful_sections(&doc.sections),
+            search: doc
+                .search
+                .as_ref()
+                .and_then(plumb_core::article::SearchContent::bounded),
             ..Article::default()
         });
     }
     articles
+}
+
+/// Exclude soft errors, site indexes, search/redirect pages and empty JS
+/// shells from useful coverage, even when HTTP returned 200. Shared by the
+/// publication gate for docs and reference/subpages.
+pub fn useful_page(doc: &FetchedDoc) -> bool {
+    let Some(title) = doc.title.as_deref() else {
+        return false;
+    };
+    let lower = plumb_core::collapse_whitespace(title).to_lowercase();
+    let head = TITLE_SEPARATORS
+        .iter()
+        .filter_map(|s| lower.split_once(s).map(|p| p.0))
+        .next()
+        .unwrap_or(&lower);
+    if NOT_PAGES.contains(&head)
+        || [
+            "site index",
+            "sitemap",
+            "access denied",
+            "403 forbidden",
+            "internal server error",
+            "service unavailable",
+            "just a moment",
+            "enable javascript",
+        ]
+        .contains(&head)
+        || head.starts_with("redirecting")
+        || head.starts_with("404 ")
+    {
+        return false;
+    }
+    let text = doc.text.as_deref().unwrap_or("").trim();
+    if text
+        .to_lowercase()
+        .contains("you need to enable javascript to run this app")
+    {
+        return false;
+    }
+    !title.trim().is_empty()
+        && (doc
+            .description
+            .as_deref()
+            .is_some_and(|d| !d.trim().is_empty())
+            || !text.is_empty())
+}
+
+fn useful_sections(sections: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut chars = 0;
+    sections
+        .iter()
+        .filter_map(|s| {
+            let s = plumb_core::collapse_whitespace(s);
+            let lower = s.to_lowercase();
+            if s.is_empty()
+                || ["navigation", "menu", "search", "on this page"].contains(&lower.as_str())
+                || !seen.insert(lower)
+            {
+                return None;
+            }
+            let n = s.chars().count();
+            if chars + n > plumb_core::article::MAX_SECTIONS_CHARS {
+                return None;
+            }
+            chars += n;
+            Some(s)
+        })
+        .take(plumb_core::article::MAX_SECTIONS)
+        .collect()
 }
 
 /// Sorts `articles` most viewed first, keeping each address once.
@@ -178,7 +269,36 @@ mod tests {
             description: Some(description.to_string()),
             text: Some(format!("Text of {title}")),
             sections: Vec::new(),
+            search: None,
+            language: None,
         }
+    }
+
+    #[test]
+    fn useful_coverage_rejects_indexes_errors_empty_and_js_shells() {
+        for title in [
+            "Site Index | Agency",
+            "Search Results",
+            "Access Denied",
+            "Redirecting…",
+            "404 Not Found",
+            "Internal Server Error",
+        ] {
+            assert!(
+                !useful_page(&doc("https://example.org/task", title, "Boilerplate")),
+                "{title}"
+            );
+        }
+        let mut empty = doc("https://example.org/empty", "Agency", "");
+        empty.text = None;
+        assert!(!useful_page(&empty));
+        empty.text = Some("You need to enable JavaScript to run this app.".into());
+        assert!(!useful_page(&empty));
+        assert!(useful_page(&doc(
+            "https://example.org/form-1040",
+            "About Form 1040",
+            "How to file your tax return"
+        )));
     }
 
     #[test]
@@ -240,6 +360,35 @@ mod tests {
         // Weight 10 over two segments deep; three deep weighs less.
         assert_eq!(articles[0].views, 5_000);
         assert_eq!(articles[2].views, 3_333);
+    }
+
+    #[test]
+    fn language_is_declared_per_page_even_on_a_multilingual_host() {
+        let site = plumb_core::reference::site("gesund.bund.de").unwrap();
+        let docs: Vec<FetchedDoc> = [
+            ("de", Some("de-DE")),
+            ("en", Some("en")),
+            ("es", Some("es")),
+            ("unknown", None),
+        ]
+        .into_iter()
+        .map(|(path, language)| FetchedDoc {
+            url: format!("https://gesund.bund.de/{path}/information"),
+            title: Some("Information".into()),
+            text: Some(format!("Useful health information for the {path} page.")),
+            language: language.map(str::to_string),
+            ..FetchedDoc::default()
+        })
+        .collect();
+        let articles = reference_articles(site, &docs);
+        assert_eq!(articles.len(), 4);
+        assert_eq!(
+            articles
+                .iter()
+                .map(|article| article.language.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("de"), Some("en"), Some("es"), None]
+        );
     }
 
     #[test]

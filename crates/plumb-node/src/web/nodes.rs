@@ -1041,6 +1041,7 @@ mod end_to_end {
                 meaning_sites: None,
                 meaning_work: None,
                 can_restart: false,
+                page_coverage: None,
                 paused_until: None,
                 network: self
                     .peer

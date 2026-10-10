@@ -25,16 +25,20 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::article::{article_url, Article};
+use plumb_core::article::{article_url, Article, SearchContent};
 use plumb_core::packages::PackageInfo;
+use plumb_core::paper_query::{day_number, publication_year, PaperQuery};
+use plumb_core::papers::PaperMetadata;
 use plumb_core::{
     adult_level, host_of, normalize_text, registrable_domain, AdultLevel, Operators, SafeSearch,
 };
 use serde::{Deserialize, Serialize};
+use std::ops::Bound;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, Query, RangeQuery, TermQuery};
 use tantivy::schema::{
-    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED, STRING,
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, INDEXED, STORED,
+    STRING,
 };
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term};
@@ -94,6 +98,8 @@ pub const LEAD_MATCH: f32 = 0.55;
 const TITLE_INSIDE_CANDIDATES: usize = 20;
 /// Most articles found by their leads looked at for one query.
 const LEAD_CANDIDATES: usize = 20;
+/// Changes whenever the page index schema or indexed search fields change.
+pub const PAGE_INDEX_VERSION: &str = "v6-paper-dates-rich-symbol-docs-scope";
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
 const ASKING_WORDS: &[&str] = &[
@@ -128,6 +134,9 @@ pub const QUESTION_TITLE_SHARE: f32 = 0.5;
 /// A single page that can be a result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page {
+    /// Structured scholarly identity, dates and provider count meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<PaperMetadata>,
     /// The page set it belongs to, e.g. `wikipedia-en`.
     pub set: String,
     pub url: String,
@@ -171,12 +180,20 @@ pub struct Page {
     /// "Data Structures"), which it is found by with [`Page::topic`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<String>,
+    /// Declared primary content language. Absent for older files and
+    /// pages with no declaration; `language()` can also use set evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_language: Option<String>,
+    /// Bounded source symbols and passages, when an inner-page rebuild supplied them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<SearchContent>,
 }
 
 impl Page {
     /// The Wikipedia article `article` of Wikipedia in `lang`.
     pub fn from_article(lang: &str, article: Article) -> Self {
         Page {
+            paper: None,
             set: format!("wikipedia-{lang}"),
             url: article_url(lang, &article.title),
             title: article.title,
@@ -192,6 +209,11 @@ impl Page {
             lead: article.lead,
             names: article.names,
             sections: Vec::new(),
+            search: None,
+            content_language: article
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         }
     }
 
@@ -199,6 +221,7 @@ impl Page {
     /// `owner/name`, its views its stars, its site its homepage's domain.
     pub fn from_repo(repo: Article) -> Self {
         Page {
+            paper: None,
             set: GITHUB_SET.to_string(),
             url: format!("https://github.com/{}", repo.title),
             title: repo.title,
@@ -214,6 +237,8 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            content_language: repo.language.as_deref().and_then(plumb_core::language_code),
         }
     }
 
@@ -221,6 +246,7 @@ impl Page {
     /// item is the question's id and whose description is its tags.
     pub fn from_question(question: Article) -> Self {
         Page {
+            paper: None,
             set: STACKOVERFLOW_SET.to_string(),
             url: format!(
                 "https://stackoverflow.com/questions/{}",
@@ -239,6 +265,11 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            content_language: question
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         }
     }
 
@@ -250,6 +281,7 @@ impl Page {
         let (site, id) =
             plumb_core::stack_exchange::parse_question_item(question.item.as_deref()?)?;
         Some(Page {
+            paper: None,
             set: STACKEXCHANGE_SET.to_string(),
             url: site.question_url(id),
             title: question.title,
@@ -265,6 +297,11 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            content_language: question
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         })
     }
 
@@ -292,6 +329,7 @@ impl Page {
     /// the work id (`OL45804W`).
     pub fn from_book(book: Article) -> Self {
         Page {
+            paper: None,
             set: BOOKS_SET.to_string(),
             url: format!(
                 "https://openlibrary.org/works/{}",
@@ -310,6 +348,8 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            content_language: book.language.as_deref().and_then(plumb_core::language_code),
         }
     }
 
@@ -318,6 +358,7 @@ impl Page {
     /// of its own.
     pub fn from_podcast(podcast: Article) -> Self {
         Page {
+            paper: None,
             set: PODCASTS_SET.to_string(),
             url: format!(
                 "https://podcastindex.org/podcast/{}",
@@ -336,6 +377,11 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            content_language: podcast
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         }
     }
 
@@ -350,6 +396,7 @@ impl Page {
             return None;
         }
         Some(Page {
+            paper: None,
             set: MUSIC_SET.to_string(),
             url: format!("https://musicbrainz.org/{item}"),
             title: music.title,
@@ -365,6 +412,11 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            content_language: music
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         })
     }
 
@@ -395,6 +447,7 @@ impl Page {
             Some(_) => return None,
         };
         Some(Page {
+            paper: None,
             set: FILMS_SET.to_string(),
             url,
             title: film.title,
@@ -410,6 +463,8 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            content_language: film.language.as_deref().and_then(plumb_core::language_code),
         })
     }
 
@@ -423,6 +478,7 @@ impl Page {
                 && !item.contains(char::is_whitespace)
         })?;
         Some(Page {
+            paper: None,
             set: DOCS_SET.to_string(),
             url,
             title: doc.title,
@@ -438,6 +494,8 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: doc.sections,
+            search: doc.search.as_ref().and_then(SearchContent::bounded),
+            content_language: doc.language.as_deref().and_then(plumb_core::language_code),
         })
     }
 
@@ -456,6 +514,7 @@ impl Page {
                 && !item.contains(char::is_whitespace)
         })?;
         Some(Page {
+            paper: None,
             set: set.to_string(),
             url,
             title: page.title,
@@ -471,13 +530,15 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: page.search.as_ref().and_then(SearchContent::bounded),
+            content_language: page.language.as_deref().and_then(plumb_core::language_code),
         })
     }
 
     /// Whether the page is an inner page of a site of the reference or
     /// subpages set, found by the same rules.
     pub fn is_site_page(&self) -> bool {
-        self.set == REFERENCE_SET || self.set == SUBPAGES_SET
+        self.set == REFERENCE_SET || self.set == REFERENCE2_SET || self.set == SUBPAGES_SET
     }
 
     /// The host of a docs, reference or subpages page's address, without
@@ -536,6 +597,7 @@ impl Page {
             format!("https://openalex.org/{item}")
         };
         Page {
+            paper: paper.paper,
             set: PAPERS_SET.to_string(),
             url,
             title: paper.title,
@@ -551,6 +613,11 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: paper.search,
+            content_language: paper
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         }
     }
 
@@ -558,6 +625,7 @@ impl Page {
     /// English name and whose views are its sitelinks.
     pub fn from_item(item: Article) -> Self {
         Page {
+            paper: None,
             set: WIKIDATA_SET.to_string(),
             url: format!(
                 "https://www.wikidata.org/wiki/{}",
@@ -576,6 +644,8 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            content_language: item.language.as_deref().and_then(plumb_core::language_code),
         }
     }
 
@@ -588,6 +658,7 @@ impl Page {
             1,
         );
         Page {
+            paper: None,
             set: WIKTIONARY_SET.to_string(),
             url,
             title: word.title,
@@ -603,6 +674,8 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            content_language: word.language.as_deref().and_then(plumb_core::language_code),
         }
     }
 
@@ -615,6 +688,7 @@ impl Page {
         let info = package.package?;
         let url = info.page_url()?;
         Some(Page {
+            paper: None,
             set: PACKAGES_SET.to_string(),
             url,
             title: package.title,
@@ -630,6 +704,11 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            content_language: package
+                .language
+                .as_deref()
+                .and_then(plumb_core::language_code),
         })
     }
 
@@ -642,6 +721,7 @@ impl Page {
             || set == FILMS_SET
             || set == DOCS_SET
             || set == REFERENCE_SET
+            || set == REFERENCE2_SET
             || set == SUBPAGES_SET
             || Page::from_set(set, Article::default()).is_some()
     }
@@ -664,6 +744,7 @@ impl Page {
             FILMS_SET => Page::from_film(article)?,
             DOCS_SET => Page::from_docs(article)?,
             REFERENCE_SET => Page::from_reference(article)?,
+            REFERENCE2_SET => Page::from_site_page(REFERENCE2_SET, article)?,
             SUBPAGES_SET => Page::from_site_page(SUBPAGES_SET, article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
@@ -676,7 +757,17 @@ impl Page {
     /// only.
     pub fn topic(&self) -> Option<String> {
         if self.set == PAPERS_SET {
-            return Some(self.title.clone());
+            let mut topic = self.title.clone();
+            for text in self
+                .aliases
+                .iter()
+                .chain(&self.description)
+                .chain(self.paper.iter().flat_map(|p| p.authors.iter()))
+            {
+                topic.push(' ');
+                topic.push_str(text);
+            }
+            return Some(topic);
         }
         if self.set == DOCS_SET || self.is_site_page() {
             let mut topic = self.title.clone();
@@ -688,6 +779,10 @@ impl Page {
             {
                 topic.push(' ');
                 topic.push_str(text);
+            }
+            if let Some(search) = &self.search {
+                topic.push(' ');
+                topic.push_str(&search.text());
             }
             return Some(topic);
         }
@@ -796,7 +891,13 @@ impl Page {
     /// The language the page is in, when its set says: `en` for
     /// English Wikipedia, GitHub and Stack Exchange's questions.
     pub fn language(&self) -> Option<&str> {
-        if let Some(lang) = self.set.strip_prefix("wikipedia-") {
+        if let Some(lang) = self
+            .content_language
+            .as_deref()
+            .filter(|lang| plumb_core::language_code(lang).as_deref() == Some(*lang))
+        {
+            Some(lang)
+        } else if let Some(lang) = self.set.strip_prefix("wikipedia-") {
             Some(lang)
         } else if self.set == GITHUB_SET || self.is_question() || self.is_film_with_article() {
             Some("en")
@@ -859,6 +960,10 @@ pub const DOCS_SET: &str = "docs";
 /// dictionaries, recipes, how-tos, government (see
 /// `plumb_core::reference`).
 pub const REFERENCE_SET: &str = "reference";
+/// Opt-in staged reference pages with the stricter title relevance gate.
+/// Legacy `reference` remains readable until a complete, coverage-checked
+/// generation is explicitly selected. Older readers never request this id.
+pub const REFERENCE2_SET: &str = "reference2";
 /// The set of inner pages of other well-known sites: universities and
 /// labs, big companies, government agencies, entertainment and museums
 /// (see `plumb_core::subpages`). Found like reference pages, but listed
@@ -937,9 +1042,13 @@ pub enum LearnedPlace {
     Last,
 }
 
+#[derive(Clone, Copy)]
 struct Fields {
     words: Field,
     keys: Field,
+    /// Exact eligibility and docs identity terms, applied before TopDocs:
+    /// set, host and host suffixes; docs product, overview and symbols.
+    scope: Field,
     /// Stemmed words of a question's title and tags; empty for other pages.
     topic: Field,
     /// Stemmed words of a Wikipedia article's names and what it says of
@@ -955,6 +1064,9 @@ struct Fields {
     /// The registrable domain of the official website of what a Wikipedia
     /// article is about ([`Page::site`]), for [`PageSearcher::site_popularity`].
     site: Field,
+    language: Field,
+    paper_year: Field,
+    paper_day: Field,
     page: Field,
 }
 
@@ -976,6 +1088,7 @@ fn schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
+    let scope = builder.add_text_field("scope", STRING);
     let topic = builder.add_text_field(
         "topic",
         TextOptions::default().set_indexing_options(
@@ -1010,18 +1123,25 @@ fn schema() -> (Schema, Fields) {
     );
     let popularity = builder.add_u64_field("popularity", FAST | STORED);
     let site = builder.add_text_field("site", STRING);
+    let language = builder.add_text_field("language", STRING);
+    let paper_year = builder.add_u64_field("paper_year", INDEXED | FAST);
+    let paper_day = builder.add_u64_field("paper_day", INDEXED | FAST);
     let page = builder.add_text_field("page", STORED);
     (
         builder.build(),
         Fields {
             words,
             keys,
+            scope,
             topic,
             about,
             lead,
             word,
             popularity,
             site,
+            language,
+            paper_year,
+            paper_day,
             page,
         },
     )
@@ -1258,11 +1378,27 @@ fn may_be_borrowed(site: &crate::Hit) -> bool {
             .is_some_and(|title| !squash(title).contains(&label))
 }
 
+/// Actual indexed paper coverage, not provider-wide coverage.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaperCoverage {
+    pub total: u64,
+    pub publication_year: u64,
+    pub publication_day: u64,
+    pub earliest_day: Option<String>,
+    pub latest_day: Option<String>,
+}
+
 /// What [`build_page_index`] did.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageIndexStats {
+    #[serde(default)]
+    pub papers: PaperCoverage,
     pub pages: u64,
     pub most_views: u64,
+    /// Counts of declared/set-supported content languages. Missing in
+    /// old manifests; unknown pages are `pages - sum(languages)`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub languages: std::collections::BTreeMap<String, u64>,
 }
 
 /// Builds the page index of `pages` in `dir`, replacing any there.
@@ -1293,6 +1429,68 @@ pub fn build_page_index(
             ((page.views as f32).ln_1p() / (*most as f32).ln_1p()).min(1.0)
         };
         let mut document = TantivyDocument::default();
+        if let Some(language) = page.language() {
+            document.add_text(fields.language, language);
+            *stats.languages.entry(language.to_string()).or_default() += 1;
+        } else {
+            document.add_text(fields.language, "unknown");
+        }
+        document.add_text(fields.scope, format!("set:{}", page.set));
+        if page.set == PAPERS_SET {
+            stats.papers.total += 1;
+            if let Some(paper) = &page.paper {
+                if let Some(year) = publication_year(paper) {
+                    document.add_u64(fields.paper_year, year);
+                    stats.papers.publication_year += 1;
+                }
+                if let Some(date) = paper
+                    .publication_date
+                    .as_deref()
+                    .filter(|d| day_number(d).is_some())
+                {
+                    document.add_u64(fields.paper_day, day_number(date).unwrap());
+                    stats.papers.publication_day += 1;
+                    if stats
+                        .papers
+                        .earliest_day
+                        .as_deref()
+                        .is_none_or(|old| date < old)
+                    {
+                        stats.papers.earliest_day = Some(date.to_string());
+                    }
+                    if stats
+                        .papers
+                        .latest_day
+                        .as_deref()
+                        .is_none_or(|old| date > old)
+                    {
+                        stats.papers.latest_day = Some(date.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(host) = host_of(&page.url) {
+            document.add_text(fields.scope, format!("host:{host}"));
+            let mut suffix = host.as_str();
+            loop {
+                document.add_text(fields.scope, format!("under:{suffix}"));
+                let Some((_, rest)) = suffix.split_once('.') else {
+                    break;
+                };
+                suffix = rest;
+            }
+        }
+        if page.set == DOCS_SET {
+            for symbol in docs_symbols(&page) {
+                document.add_text(fields.scope, format!("symbol:{symbol}"));
+            }
+            if let Some(site) = plumb_core::docs::site_of_url(&page.url) {
+                document.add_text(fields.scope, format!("docs:{}", site.key));
+                if docs_overview(&page, site) {
+                    document.add_text(fields.scope, format!("overview:{}", site.key));
+                }
+            }
+        }
         document.add_u64(
             fields.popularity,
             (popularity * POPULARITY_SCALE).round() as u64,
@@ -1313,13 +1511,22 @@ pub fn build_page_index(
             document.add_text(fields.keys, name);
         }
         if let Some(topic) = page.topic() {
-            document.add_text(fields.topic, topic);
+            document.add_pre_tokenized_text(
+                fields.topic,
+                analysis::content_tokens(page.language(), &topic),
+            );
         }
         if let Some(about) = page.about() {
-            document.add_text(fields.about, about);
+            document.add_pre_tokenized_text(
+                fields.about,
+                analysis::content_tokens(page.language(), &about),
+            );
         }
         if let Some(lead) = page.lead.as_deref().filter(|_| page.is_article()) {
-            document.add_text(fields.lead, lead);
+            document.add_pre_tokenized_text(
+                fields.lead,
+                analysis::content_tokens(page.language(), lead),
+            );
         }
         // A docs page's title alone ("Introduction") names nothing: it is
         // named by its product's name and title ("python sorting
@@ -1367,6 +1574,7 @@ pub struct PageSearcher {
     joined: TextAnalyzer,
     stemmed: TextAnalyzer,
     stats: PageIndexStats,
+    requested_language: Option<String>,
 }
 
 impl PageSearcher {
@@ -1396,11 +1604,268 @@ impl PageSearcher {
             joined: analysis::joined_analyzer(),
             stemmed: analysis::stemmed_analyzer(),
             stats,
+            requested_language: None,
         })
     }
 
     pub fn num_pages(&self) -> u64 {
         self.stats.pages
+    }
+
+    pub fn paper_coverage(&self) -> &PaperCoverage {
+        &self.stats.papers
+    }
+
+    /// Paper eligibility, language and publication bounds apply before
+    /// both popularity and date candidate limits. Newest ordering stays
+    /// within relevance tiers: exact names, title matches, then bylines.
+    /// The extra date collector prevents older popular papers from
+    /// exhausting a newest request's candidate budget.
+    pub fn search_papers(&self, query: &PaperQuery, limit: usize) -> Result<Vec<PageHit>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let ops = Operators::parse(&query.query);
+        let words = hinted_name(&ops.words).map_or_else(|| ops.words.clone(), |(name, _)| name);
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> =
+            vec![(Occur::Must, self.scope_term("set:papers"))];
+        if let Some(scope) = self.page_scope(&ops, false) {
+            clauses.push((Occur::Must, scope));
+        }
+        for (bound, after) in [(query.after, true), (query.before, false)] {
+            if let Some(bound) = bound {
+                let (field, value) = bound
+                    .day
+                    .map_or((self.fields.paper_year, bound.year), |day| {
+                        (self.fields.paper_day, day)
+                    });
+                let low = if after { value } else { 1 };
+                let high = if after { u64::MAX } else { value };
+                clauses.push((
+                    Occur::Must,
+                    Box::new(RangeQuery::new(
+                        Bound::Included(Term::from_field_u64(field, low)),
+                        Bound::Included(Term::from_field_u64(field, high)),
+                    )),
+                ));
+            }
+        }
+        let stems = analysis::tokens(&self.stemmed, &words);
+        for stem in &stems {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.fields.topic, stem),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+        // A stop-word-only title remains an exact name query, while a
+        // date-only request intentionally lists the constrained corpus.
+        if stems.is_empty() && !words.trim().is_empty() {
+            if let Some(key) = analysis::tokens(&self.joined, &words).pop() {
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.fields.keys, &key),
+                        IndexRecordOption::Basic,
+                    )),
+                ));
+            }
+        }
+        let eligible = self.language_query(&BooleanQuery::new(clauses));
+        let searcher = self.reader.searcher();
+        let mut addresses: Vec<_> = searcher
+            .search(
+                eligible.as_ref(),
+                &TopDocs::with_limit(CANDIDATES)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+            )?
+            .into_iter()
+            .map(|(_, addr)| addr)
+            .collect();
+        if query.newest {
+            for field in ["paper_day", "paper_year"] {
+                for (_, addr) in searcher.search(
+                    eligible.as_ref(),
+                    &TopDocs::with_limit(CANDIDATES)
+                        .order_by_fast_field::<u64>(field, tantivy::Order::Desc),
+                )? {
+                    if !addresses.contains(&addr) {
+                        addresses.push(addr);
+                    }
+                }
+            }
+        }
+        let joined = analysis::tokens(&self.joined, &words)
+            .pop()
+            .unwrap_or_default();
+        // Exact identity/title candidates get a reserved collector, so
+        // popularity and recent topical matches cannot hide a named paper.
+        if !joined.is_empty() {
+            let named = BooleanQuery::new(vec![
+                (Occur::Must, eligible.box_clone()),
+                (
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.fields.keys, &joined),
+                        IndexRecordOption::Basic,
+                    )),
+                ),
+            ]);
+            for (_, address) in searcher.search(
+                &named,
+                &TopDocs::with_limit(CANDIDATES)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+            )? {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
+        let raw_words = analysis::tokens(&self.words, &words);
+        let word_set: HashSet<_> = raw_words.iter().map(String::as_str).collect();
+        let mut ranked = Vec::new();
+        for address in addresses {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if !query.allows(page.paper.as_ref()) || !operators_allow(&ops, &page) {
+                continue;
+            }
+            let popularity = document
+                .get_first(self.fields.popularity)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as f32
+                / POPULARITY_SCALE;
+            let (name, named) = self.name_match(&page, &words, &joined, &word_set);
+            let whole = named || self.book_match(&page, &raw_words);
+            let title_stems = analysis::tokens(&self.stemmed, &page.title);
+            let title_match = stems.iter().all(|s| title_stems.contains(s));
+            let tier = if whole {
+                2
+            } else if title_match {
+                1
+            } else {
+                0
+            };
+            let relevance = if named {
+                name
+            } else if title_match {
+                PARTIAL_MATCH
+            } else {
+                PARTIAL_MATCH * 0.8
+            };
+            ranked.push((
+                tier,
+                PageHit {
+                    page,
+                    score: relevance * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
+                    named,
+                    whole,
+                    popularity,
+                    learned: None,
+                },
+            ));
+        }
+        ranked.sort_by(|(ta, a), (tb, b)| {
+            tb.cmp(ta)
+                .then_with(|| {
+                    if query.newest {
+                        let date = |p: &Page| {
+                            p.paper.as_ref().and_then(|p| {
+                                publication_year(p).map(|y| {
+                                    (
+                                        y,
+                                        p.publication_date
+                                            .as_deref()
+                                            .and_then(day_number)
+                                            .unwrap_or(0),
+                                    )
+                                })
+                            })
+                        };
+                        date(&b.page).cmp(&date(&a.page))
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .then_with(|| b.score.total_cmp(&a.score))
+                .then_with(|| a.page.url.cmp(&b.page.url))
+        });
+        Ok(ranked.into_iter().take(limit).map(|(_, hit)| hit).collect())
+    }
+
+    /// A lightweight view restricted to declared/set-supported language
+    /// before each candidate collector's cap. The existing English path
+    /// retains old records with unknown language, still labeled unknown;
+    /// other languages require actual metadata. Invalid tags match nothing.
+    pub fn in_language(&self, language: Option<&str>) -> Self {
+        Self {
+            reader: self.reader.clone(),
+            fields: self.fields,
+            words: self.words.clone(),
+            joined: self.joined.clone(),
+            stemmed: analysis::content_analyzer(
+                language.and_then(plumb_core::language_code).as_deref(),
+            ),
+            stats: self.stats.clone(),
+            requested_language: language
+                .map(|tag| plumb_core::language_code(tag).unwrap_or_else(|| "invalid".to_string())),
+        }
+    }
+
+    /// Actual indexed language counts, for explaining empty constrained
+    /// results without claiming that the requested pages do not exist.
+    pub fn language_coverage(&self) -> (&std::collections::BTreeMap<String, u64>, u64) {
+        let known = self
+            .stats
+            .languages
+            .values()
+            .fold(0u64, |count, pages| count.saturating_add(*pages));
+        (
+            &self.stats.languages,
+            self.stats.pages.saturating_sub(known),
+        )
+    }
+
+    fn language_query(&self, query: &dyn Query) -> Box<dyn Query> {
+        match &self.requested_language {
+            None => query.box_clone(),
+            Some(language) => {
+                let mut allowed = vec![(
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.fields.language, language),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>,
+                )];
+                if language == "en" {
+                    allowed.push((
+                        Occur::Should,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.language, "unknown"),
+                            IndexRecordOption::Basic,
+                        )),
+                    ));
+                }
+                Box::new(BooleanQuery::new(vec![
+                    (Occur::Must, query.box_clone()),
+                    (
+                        Occur::Must,
+                        Box::new(ConstScoreQuery::new(
+                            Box::new(BooleanQuery::new(allowed)),
+                            0.0,
+                        )),
+                    ),
+                ]))
+            }
+        }
     }
 
     /// How much the most read Wikipedia article about what `domain` is the
@@ -1630,16 +2095,116 @@ impl PageSearcher {
         }))
     }
 
+    /// Named entity candidates before site blending or learned placement.
+    /// Wikipedia's `about` field is searched separately: reference pages
+    /// with the same title cannot consume its bounded candidate window.
+    /// Uses existing index fields, so an installed index needs no rebuild.
+    pub fn entities(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let stems = self.described_words(query);
+        let words = analysis::tokens(&self.words, query);
+        let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
+            return Ok(Vec::new());
+        };
+        let query_words: HashSet<&str> = words.iter().map(String::as_str).collect();
+        let mut hits = Vec::new();
+        if !stems.is_empty() {
+            let clauses = stems
+                .iter()
+                .map(|stem| {
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.about, stem),
+                            IndexRecordOption::Basic,
+                        )) as Box<dyn Query>,
+                    )
+                })
+                .collect();
+            let searcher = self.reader.searcher();
+            let found = searcher.search(
+                self.language_query(&BooleanQuery::new(clauses)).as_ref(),
+                &TopDocs::with_limit(CANDIDATES)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+            )?;
+            for (_, address) in found {
+                let document: TantivyDocument = searcher.doc(address)?;
+                let Some(stored) = document
+                    .get_first(self.fields.page)
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                let page: Page = serde_json::from_str(stored)?;
+                if !page.is_article() || !page.item.as_deref().is_some_and(is_item_id) {
+                    continue;
+                }
+                let (name, named) = self.name_match(&page, query, &joined, &query_words);
+                let described = self.described_match(&page, &stems);
+                if name <= 0.0 && described <= 0.0 {
+                    continue;
+                }
+                let popularity = document
+                    .get_first(self.fields.popularity)
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as f32
+                    / POPULARITY_SCALE;
+                hits.push(PageHit {
+                    page,
+                    named,
+                    whole: described > 0.0,
+                    score: name.max(described)
+                        * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
+                    popularity,
+                    learned: None,
+                });
+            }
+        }
+        // Keep exact stop-word names ("The Who"), films and Wikidata profiles.
+        for hit in self.search_once(query, CANDIDATES, None)? {
+            if (matches!(hit.page.set.as_str(), WIKIDATA_SET | FILMS_SET)
+                || hit.page.is_article() && hit.named)
+                && hit.page.item.as_deref().is_some_and(is_item_id)
+                && (hit.named || hit.whole)
+                && !hits.iter().any(|kept| kept.page.url == hit.page.url)
+            {
+                hits.push(hit);
+            }
+        }
+        hits.sort_by(|a, b| {
+            b.named
+                .cmp(&a.named)
+                .then_with(|| b.score.total_cmp(&a.score))
+        });
+        hits.truncate(limit.min(CANDIDATES));
+        Ok(hits)
+    }
+
     /// The best `limit` pages for `query`, best first.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
-        let mut hits = self.search_once(query, limit)?;
+        let paper = PaperQuery::parse(query)?;
+        if paper.constrained {
+            return self.search_papers(&paper, limit);
+        }
+        self.search_naming_docs(query, &Operators::default(), false, limit)
+    }
+
+    fn search_general(
+        &self,
+        query: &str,
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<Vec<PageHit>> {
+        let mut hits = self.search_once(query, limit, scope)?;
         // "lululemon wikipedia", "batch normalization paper", "who is
         // galileo": the words that say what is wanted are not part of the
         // name, so the name is searched for too.
         let Some((name, hint)) = hinted_name(query) else {
             return Ok(hits);
         };
-        let mut found = self.search_once(&name, limit)?;
+        let mut found = self.search_once(&name, limit, scope)?;
         match hint {
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             Hint::Paper => {
@@ -1679,11 +2244,11 @@ impl PageSearcher {
         Ok(hits)
     }
 
-    /// [`PageSearcher::search`] for `words`, with the docs pages of each
-    /// site [`docs_sites_wanted`] gives for the search's operators `ops`
-    /// and whether it wants docs pages alone (`docs`), found by `words`
-    /// with what its docs are of named: "asyncio site:docs.python.org"
-    /// finds what "python asyncio" does on docs.python.org. Best first.
+    /// Searches eligible pages before candidate caps. An explicit docs
+    /// request (`docs`) uses docs-only candidates and allows short topic
+    /// and symbol searches. A docs host or named product supplies the same
+    /// context in ordinary search; a bare identifier needs strong symbol
+    /// evidence. Exact operators still apply to the original page text.
     pub fn search_naming_docs(
         &self,
         words: &str,
@@ -1691,29 +2256,279 @@ impl PageSearcher {
         docs: bool,
         limit: usize,
     ) -> Result<Vec<PageHit>> {
-        let mut hits = self.search(words, limit)?;
-        let wanted = docs_sites_wanted(ops, words, docs, &hits);
-        if wanted.is_empty() {
-            return Ok(hits);
+        if limit == 0 {
+            return Ok(Vec::new());
         }
-        for site in wanted {
-            for hit in self.search(&naming_docs(site, words), limit)? {
-                // Its docs pages alone: the rest is not what was searched for.
-                let of_site = hit.page.set == DOCS_SET
-                    && plumb_core::docs::site_of_url(&hit.page.url)
-                        .is_some_and(|of| of.key == site.key);
-                if !of_site {
-                    continue;
+        let scope = self.page_scope(ops, docs);
+        let mut hits = self.search_general(words, limit, scope.as_deref())?;
+        for hit in self.search_docs(words, ops, docs, limit)? {
+            match hits.iter_mut().find(|h| h.page == hit.page) {
+                Some(kept) if kept.score >= hit.score => {}
+                Some(kept) => *kept = hit,
+                None => hits.push(hit),
+            }
+        }
+        hits.retain(|hit| {
+            operators_allow(ops, &hit.page) && docs_exact_query_allows(&hit.page, words)
+        });
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        truncate_keeping_inner_pages(&mut hits, limit);
+        Ok(hits)
+    }
+
+    fn scope_term(&self, text: &str) -> Box<dyn Query> {
+        Box::new(TermQuery::new(
+            Term::from_field_text(self.fields.scope, text),
+            IndexRecordOption::Basic,
+        ))
+    }
+
+    fn page_scope(&self, ops: &Operators, docs: bool) -> Option<Box<dyn Query>> {
+        let mut clauses = Vec::new();
+        if docs {
+            clauses.push((Occur::Must, self.scope_term("set:docs")));
+        }
+        if !ops.sites.is_empty() {
+            let mut hosts = Vec::new();
+            for site in &ops.sites {
+                hosts.push((Occur::Should, self.scope_term(&format!("under:{site}"))));
+                // Operators also allow a site's registrable domain for a
+                // subdomain that is not a separately counted site.
+                if let Some(domain) = registrable_domain(site) {
+                    hosts.push((Occur::Should, self.scope_term(&format!("host:{domain}"))));
                 }
-                match hits.iter_mut().find(|h| h.page == hit.page) {
-                    Some(kept) if kept.score >= hit.score => {}
-                    Some(kept) => *kept = hit,
-                    None => hits.push(hit),
+            }
+            clauses.push((
+                Occur::Must,
+                Box::new(BooleanQuery::new(hosts)) as Box<dyn Query>,
+            ));
+        }
+        for site in &ops.not_sites {
+            clauses.push((Occur::MustNot, self.scope_term(&format!("under:{site}"))));
+        }
+        // A BooleanQuery with only exclusions matches nothing.
+        if !clauses.is_empty() && clauses.iter().all(|(occur, _)| *occur == Occur::MustNot) {
+            clauses.push((Occur::Must, Box::new(tantivy::query::AllQuery)));
+        }
+        (!clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
+    }
+
+    fn search_docs(
+        &self,
+        query: &str,
+        ops: &Operators,
+        explicit: bool,
+        limit: usize,
+    ) -> Result<Vec<PageHit>> {
+        use plumb_core::docs::{asks_about, DOCS_SITES};
+        let requested: Vec<_> = DOCS_SITES
+            .iter()
+            .filter(|site| asks_about(site, query) || docs_product_only(site, query))
+            .collect();
+        let context = explicit || !requested.is_empty() || docs_intent(query);
+        let on_docs_host = DOCS_SITES.iter().any(|site| docs_host_requested(site, ops));
+        let product_only =
+            !requested.is_empty() && requested.iter().all(|site| docs_product_only(site, query));
+        let mut clauses = Vec::new();
+        let topic_stems = self.question_words(&docs_without_intent(query));
+        if !topic_stems.is_empty() && !product_only && (context || on_docs_host) {
+            let needed = if topic_stems.len() < QUESTION_QUERY_WORDS {
+                topic_stems.len()
+            } else {
+                (topic_stems.len() as f32 * QUESTION_SHARE).ceil() as usize
+            };
+            clauses.push((
+                Occur::Should,
+                Box::new(BooleanQuery::with_minimum_required_clauses(
+                    topic_stems
+                        .iter()
+                        .map(|stem| {
+                            (
+                                Occur::Should,
+                                Box::new(TermQuery::new(
+                                    Term::from_field_text(self.fields.topic, stem),
+                                    IndexRecordOption::Basic,
+                                )) as Box<dyn Query>,
+                            )
+                        })
+                        .collect(),
+                    needed,
+                )) as Box<dyn Query>,
+            ));
+        }
+        // Qualified names and short suffixes are indexed separately from
+        // broad topics, so popular questions cannot consume this window.
+        let mut identities = Vec::new();
+        let mut symbols = vec![canonical_docs_symbol(&docs_without_intent(query))];
+        symbols.extend(
+            requested
+                .iter()
+                .map(|site| canonical_docs_symbol(&docs_topic(site, query))),
+        );
+        for symbol in symbols.into_iter().flatten() {
+            identities.push((Occur::Should, self.scope_term(&format!("symbol:{symbol}"))));
+        }
+        for site in &requested {
+            let alias = naming_docs(site, &docs_topic(site, query));
+            if let Some(key) = analysis::tokens(&self.joined, &alias).pop() {
+                identities.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.fields.keys, &key),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>,
+                ));
+            }
+        }
+        for site in requested
+            .iter()
+            .filter(|site| docs_product_only(site, query))
+        {
+            if explicit || docs_intent(query) || !ops.sites.is_empty() {
+                identities.push((
+                    Occur::Should,
+                    self.scope_term(&format!("overview:{}", site.key)),
+                ));
+            }
+        }
+        if clauses.is_empty() && identities.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut filter = vec![(Occur::Must, self.page_scope(ops, true).expect("docs scope"))];
+        if !requested.is_empty() {
+            filter.push((
+                Occur::Must,
+                Box::new(BooleanQuery::new(
+                    requested
+                        .iter()
+                        .map(|site| {
+                            (
+                                Occur::Should,
+                                self.scope_term(&format!("docs:{}", site.key)),
+                            )
+                        })
+                        .collect(),
+                )) as Box<dyn Query>,
+            ));
+        }
+        let scope = BooleanQuery::new(filter);
+        let searcher = self.reader.searcher();
+        let top = TopDocs::with_limit(CANDIDATES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        let mut addresses = Vec::new();
+        for lane in [identities, clauses]
+            .into_iter()
+            .filter(|lane| !lane.is_empty())
+        {
+            let wanted = scoped_query(&BooleanQuery::new(lane), Some(&scope));
+            for (_, address) in
+                searcher.search(self.language_query(wanted.as_ref()).as_ref(), &top)?
+            {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
                 }
             }
         }
+        let mut hits = Vec::new();
+        for address in addresses {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if !operators_allow(ops, &page) {
+                continue;
+            }
+            let site = plumb_core::docs::site_of_url(&page.url);
+            let host_context = site.is_some_and(|site| docs_host_requested(site, ops));
+            let topic = site.map_or_else(
+                || docs_without_intent(query),
+                |site| docs_topic(site, query),
+            );
+            let product_only = site.is_some_and(|site| docs_product_only(site, query));
+            let allowed = context || host_context;
+            let (name, named, whole) = if product_only {
+                if !allowed
+                    || !(explicit || docs_intent(query) || host_context)
+                    || !site.is_some_and(|site| docs_overview(&page, site))
+                {
+                    continue;
+                }
+                (PARTIAL_MATCH, false, false)
+            } else if docs_symbols(&page)
+                .iter()
+                .any(|symbol| canonical_docs_symbol(&topic).as_ref() == Some(symbol))
+                && (allowed || strong_docs_symbol(&page, &topic))
+            {
+                // Short identifiers remain supporting pages in ordinary
+                // navigation; a product/host/typed request names them.
+                (ALIAS_MATCH, allowed, allowed)
+            } else {
+                if !allowed {
+                    continue;
+                }
+                // A different receiver/namespace cannot satisfy an exact
+                // qualified API symbol through ordinary word overlap.
+                if canonical_docs_symbol(&topic).is_some() && topic.contains(['.', ':', '_']) {
+                    continue;
+                }
+                let stems = self.question_words(&topic);
+                let Some(text) = page.topic() else { continue };
+                let words: HashSet<_> = self.question_words(&text).into_iter().collect();
+                if stems.is_empty() || !stems.iter().all(|stem| words.contains(stem)) {
+                    continue;
+                }
+                // A lone topic must occur in a title or heading, rather
+                // than a passing mention in the truncated description.
+                let rich = page.search.as_ref().and_then(SearchContent::bounded);
+                let headings = std::iter::once(&page.title)
+                    .chain(&page.sections)
+                    .map(String::as_str)
+                    .chain(rich.iter().flat_map(|search| {
+                        search
+                            .passages
+                            .iter()
+                            .map(|passage| passage.heading.as_str())
+                    }))
+                    .flat_map(|text| self.question_words(text))
+                    .collect::<HashSet<_>>();
+                // A case-shaped error literal in bounded source text is
+                // also evidence, unlike a generic word in a description.
+                let source_literal = rich.as_ref().is_some_and(|search| {
+                    search.passages.iter().any(|passage| {
+                        passage
+                            .text
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .any(|word| {
+                                word.chars().skip(1).any(char::is_uppercase)
+                                    && word.eq_ignore_ascii_case(&topic)
+                            })
+                    })
+                });
+                if stems.len() == 1 && !headings.contains(&stems[0]) && !source_literal {
+                    continue;
+                }
+                (PARTIAL_MATCH, false, false)
+            };
+            let popularity = document
+                .get_first(self.fields.popularity)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as f32
+                / POPULARITY_SCALE;
+            hits.push(PageHit {
+                score: name * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
+                page,
+                named,
+                popularity,
+                whole,
+                learned: None,
+            });
+        }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        truncate_keeping_inner_pages(&mut hits, limit);
+        hits.truncate(limit);
         Ok(hits)
     }
 
@@ -1838,7 +2653,12 @@ impl PageSearcher {
         .then_some(best))
     }
 
-    fn search_once(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
+    fn search_once(
+        &self,
+        query: &str,
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<Vec<PageHit>> {
         let words = analysis::tokens(&self.words, query);
         let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
             return Ok(Vec::new());
@@ -1910,11 +2730,19 @@ impl PageSearcher {
                 .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc)
         };
         let mut addresses: Vec<_> = searcher
-            .search(&named_by_query, &by_popularity())?
+            .search(
+                self.language_query(scoped_query(&named_by_query, scope).as_ref())
+                    .as_ref(),
+                &by_popularity(),
+            )?
             .into_iter()
             .map(|(_, address)| address)
             .collect();
-        for (_, address) in searcher.search(&BooleanQuery::new(clauses), &by_popularity())? {
+        for (_, address) in searcher.search(
+            self.language_query(scoped_query(&BooleanQuery::new(clauses), scope).as_ref())
+                .as_ref(),
+            &by_popularity(),
+        )? {
             if !addresses.contains(&address) {
                 addresses.push(address);
             }
@@ -1935,7 +2763,11 @@ impl PageSearcher {
                 Term::from_field_text(self.fields.keys, &key),
                 IndexRecordOption::Basic,
             );
-            for (_, address) in searcher.search(&named, &by_popularity())? {
+            for (_, address) in searcher.search(
+                self.language_query(scoped_query(&named, scope).as_ref())
+                    .as_ref(),
+                &by_popularity(),
+            )? {
                 if !addresses.contains(&address) {
                     addresses.push(address);
                     by_title_first.insert(address);
@@ -1956,7 +2788,11 @@ impl PageSearcher {
                 Term::from_field_text(self.fields.keys, key),
                 IndexRecordOption::Basic,
             );
-            for (_, address) in searcher.search(&named, &by_popularity())? {
+            for (_, address) in searcher.search(
+                self.language_query(scoped_query(&named, scope).as_ref())
+                    .as_ref(),
+                &by_popularity(),
+            )? {
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -1982,7 +2818,11 @@ impl PageSearcher {
                     .collect(),
                 needed,
             );
-            for (_, address) in searcher.search(&most_words, &by_popularity())? {
+            for (_, address) in searcher.search(
+                self.language_query(scoped_query(&most_words, scope).as_ref())
+                    .as_ref(),
+                &by_popularity(),
+            )? {
                 // Found by most of the query's words, not only by a title
                 // that starts it: "react usestate hook" is the docs page
                 // "React useState" and more of its words.
@@ -2018,7 +2858,11 @@ impl PageSearcher {
                         .collect(),
                     needed,
                 );
-                for (_, address) in searcher.search(&most_words, &by_popularity())? {
+                for (_, address) in searcher.search(
+                    self.language_query(scoped_query(&most_words, scope).as_ref())
+                        .as_ref(),
+                    &by_popularity(),
+                )? {
                     if !addresses.contains(&address) {
                         addresses.push(address);
                     }
@@ -2056,7 +2900,8 @@ impl PageSearcher {
                     .collect(),
             );
             for (score, address) in searcher.search(
-                &every_word,
+                self.language_query(scoped_query(&every_word, scope).as_ref())
+                    .as_ref(),
                 &TopDocs::with_limit(LEAD_CANDIDATES).order_by_score(),
             )? {
                 lead_scores.insert(address, score);
@@ -2114,7 +2959,11 @@ impl PageSearcher {
                 inside_keys.insert(key);
                 let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
                     .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
-                for (_, address) in searcher.search(&named, &most_read)? {
+                for (_, address) in searcher.search(
+                    self.language_query(scoped_query(&named, scope).as_ref())
+                        .as_ref(),
+                    &most_read,
+                )? {
                     if !addresses.contains(&address) {
                         addresses.push(address);
                         only_inside.insert(address);
@@ -2714,24 +3563,7 @@ pub fn add_named_site(
 /// with vinta/awesome-python under it, above python.org. Never crawled, it
 /// would otherwise be taken for a mere spelling of the query.
 pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
-    let shown = sites.len().min(LIFTED_FROM);
-    let lifted = |hit: &PageHit| {
-        let site = hit.page.site.as_deref()?;
-        let at = sites[..shown].iter().position(|s| s.domain == site)?;
-        let ok = if hit.page.item.is_some() {
-            sites[at].official
-        } else {
-            hit.page.set == GITHUB_SET && sites[at].named
-        };
-        ok.then_some(at)
-    };
-    let article = pages
-        .iter()
-        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET);
-    let repo = pages
-        .iter()
-        .find(|hit| hit.named && hit.page.set == GITHUB_SET);
-    let Some(at) = article.and_then(lifted).or_else(|| repo.and_then(lifted)) else {
+    let Some(at) = named_page_site(sites, pages.iter()) else {
         return;
     };
     // An official or well-known site named by all of the query stays
@@ -2751,6 +3583,32 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
         return;
     }
     sites[..=at].rotate_right(1);
+}
+
+/// The existing site corroborated by the best named entity page's
+/// official-site identity, or by a named repository of a named site.
+/// Used by both lifting and the learned relevance guard. Site titles,
+/// which may be borrowed, never supply this identity; films do not either.
+pub(crate) fn named_page_site<'a>(
+    sites: &[crate::Hit],
+    mut pages: impl Iterator<Item = &'a PageHit> + Clone,
+) -> Option<usize> {
+    let shown = sites.len().min(LIFTED_FROM);
+    let lifted = |hit: &PageHit| {
+        let site = hit.page.site.as_deref()?;
+        let at = sites[..shown].iter().position(|s| s.domain == site)?;
+        let ok = if hit.page.item.is_some() {
+            sites[at].official
+        } else {
+            hit.page.set == GITHUB_SET && sites[at].named
+        };
+        ok.then_some(at)
+    };
+    let article = pages
+        .clone()
+        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET);
+    let repo = pages.find(|hit| hit.named && hit.page.set == GITHUB_SET);
+    article.and_then(lifted).or_else(|| repo.and_then(lifted))
 }
 
 /// Where `pages` (best first) go among the site results `sites`:
@@ -2786,7 +3644,9 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
 /// stays where it put it: before the same site, or last, except that a
 /// docs page found by its words never comes before the best site.
 pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -> Vec<PlacedPage> {
-    pages.retain(|hit| subpage_asked(query, sites, hit));
+    pages.retain(|hit| {
+        crate::health::page_allowed(query, &hit.page) && subpage_asked(query, sites, hit)
+    });
     if !asks_for_podcasts(query) {
         // Podcasts it does not ask for take no other page's place
         // ([`keep_page_rules`]).
@@ -2818,10 +3678,11 @@ const SUBPAGE_TITLE_SHARE: f32 = 0.75;
 const SUBPAGE_HELD_SHARE: f32 = 0.5;
 /// Words a title shares with anything, left out of [`SUBPAGE_TITLE_SHARE`].
 const TITLE_STOP_WORDS: &[&str] = &[
-    "a", "an", "and", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with",
+    "a", "an", "and", "at", "by", "for", "from", "in", "my", "of", "on", "or", "the", "to", "with",
+    "you", "your",
 ];
 
-/// Whether `hit`, when it is a page of the subpages set, may be listed for
+/// Whether `hit`, when it is a subpage or staged reference page, may be listed for
 /// `query`: named by its whole title, on one of the query's best sites
 /// ("rotten tomatoes oppenheimer", "met museum hours"), or with most of
 /// its title's words, or of its title before a colon, in the query
@@ -2831,10 +3692,13 @@ const TITLE_STOP_WORDS: &[&str] = &[
 /// leadership summit at jnj.com, nor "mount everest" a film review at
 /// ign.com. Pages of other sets always may.
 fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
-    if hit.page.set != SUBPAGES_SET || hit.named {
+    if (hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET) || hit.named {
         return true;
     }
-    if in_other_language(&hit.page.url) {
+    // Retrieval/options already constrain known language. A locale-like
+    // path is only a fallback for older pages with no language metadata.
+    let language = hit.page.language();
+    if language.is_none() && in_other_language(&hit.page.url) {
         return false;
     }
     let domain = registrable_domain(&hit.page.url);
@@ -2846,24 +3710,36 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
     {
         return true;
     }
-    let words = |text: &str| -> HashSet<String> {
+    static STEMS: std::sync::LazyLock<TextAnalyzer> =
+        std::sync::LazyLock::new(analysis::stemmed_analyzer);
+    let content_analyzer = language
+        .filter(|language| *language != "en")
+        .map(|language| analysis::content_analyzer(Some(language)));
+    let words = |text: &str| -> Vec<String> {
+        if let Some(analyzer) = &content_analyzer {
+            return analysis::tokens(analyzer, text)
+                .into_iter()
+                .filter(|word| word.chars().count() > 1)
+                .collect();
+        }
         text.split(|c: char| !c.is_alphanumeric())
             // The "s" of "John's" says nothing.
             .filter(|word| word.chars().count() > 1)
-            .map(|word| {
-                let word = word.to_lowercase();
-                // "Sheets" is "sheet".
-                match word.strip_suffix('s') {
-                    Some(one) if one.len() > 2 => one.to_string(),
-                    _ => word,
-                }
+            .map(str::to_lowercase)
+            .filter(|word| {
+                !ASKING_WORDS.contains(&word.as_str()) && !TITLE_STOP_WORDS.contains(&word.as_str())
             })
-            .filter(|word| !TITLE_STOP_WORDS.contains(&word.as_str()))
+            .flat_map(|word| analysis::tokens(&STEMS, &word))
             .collect()
     };
-    let asked = words(query);
+    let asked: HashSet<String> = words(query).into_iter().collect();
+    let fewest = asked.len().min(2);
+    if fewest == 0 {
+        return false;
+    }
     let has_most = |title: &str| {
-        let title = words(title);
+        let in_order = words(title);
+        let title: HashSet<String> = in_order.iter().cloned().collect();
         // A year the query asks for and the title lacks is another page:
         // "nobel prize in physics 2025" is not "A Nobel prize for particle
         // physics".
@@ -2876,12 +3752,18 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
         let shared = title.intersection(&asked).count();
         // A query the title holds whole needs only half of it: "john
         // martinis" for "John Martinis - CHM".
-        let share = if asked.is_subset(&title) {
+        // The relaxed threshold requires the query's terms together:
+        // "seven summits" is not "The Seven Second Summits of the World".
+        let held = in_order.windows(asked.len()).any(|run| {
+            run.iter().all(|word| asked.contains(word))
+                && run.iter().collect::<HashSet<_>>().len() == asked.len()
+        });
+        let share = if held {
             SUBPAGE_HELD_SHARE
         } else {
             SUBPAGE_TITLE_SHARE
         };
-        shared >= 2 && shared as f32 >= share * title.len() as f32
+        shared >= fewest && shared as f32 >= share * title.len() as f32
     };
     // Or of its title before a subtitle, "Declaration of Independence" in
     // "Declaration of Independence: A Transcription", or before the site's
@@ -2935,6 +3817,7 @@ fn in_other_language(url: &str) -> bool {
 /// podcasts come after the best site and the other pages listed on their
 /// own ("better call saul" wants amc.com and the article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
+    placed.retain(|page| crate::health::page_allowed(query, &page.hit.page));
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
         if docs_kept_below(&page.hit, sites) {
             page.at = page.at.max(1).min(sites.len());
@@ -3180,11 +4063,12 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
 }
 
 /// Cuts `hits`, best first, to `limit`, keeping the best docs page and the
-/// best subpage among them: the many Stack Overflow questions with the
+/// best subpage/reference page among them: the many Stack Overflow questions with the
 /// words of "javascript array sort" are more read than MDN's page on it,
 /// and would crowd it out.
 fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
-    for set in [DOCS_SET, SUBPAGES_SET] {
+    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE2_SET];
+    for set in kept {
         if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
             continue;
         }
@@ -3194,7 +4078,7 @@ fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
         // In place of the last hit that is not one kept already.
         let Some(last) = (0..limit)
             .rev()
-            .find(|&i| hits[i].page.set != DOCS_SET && hits[i].page.set != SUBPAGES_SET)
+            .find(|&i| !kept.contains(&hits[i].page.set.as_str()))
         else {
             continue;
         };
@@ -3361,7 +4245,12 @@ pub fn operators_allow(ops: &Operators, page: &Page) -> bool {
     let texts = [page.title.as_str()]
         .into_iter()
         .chain(page.description.as_deref())
-        .chain(page.aliases.iter().map(String::as_str));
+        .chain(page.aliases.iter().map(String::as_str))
+        .chain(
+            page.paper
+                .iter()
+                .flat_map(|p| p.authors.iter().map(String::as_str)),
+        );
     ops.allows(&host, texts)
 }
 
@@ -3370,8 +4259,13 @@ pub fn operators_allow(ops: &Operators, page: &Page) -> bool {
 /// strict safe search leaves out pages whose title or description is
 /// suggestive.
 pub fn options_allow(options: &crate::SearchOptions, page: &Page) -> bool {
-    if let (Some(wanted), Some(language)) = (&options.language, page.language()) {
-        if wanted != language {
+    if let Some(wanted) = &options.language {
+        let Some(wanted) = plumb_core::language_code(wanted) else {
+            return false;
+        };
+        if Some(wanted.as_str()) != page.language()
+            && !(wanted == "en" && page.language().is_none())
+        {
             return false;
         }
     }
@@ -3416,6 +4310,212 @@ pub fn page_key(text: &str) -> String {
     normalize_text(text).replace(' ', "")
 }
 
+fn scoped_query(query: &dyn Query, scope: Option<&dyn Query>) -> Box<dyn Query> {
+    match scope {
+        Some(scope) => Box::new(BooleanQuery::new(vec![
+            (Occur::Must, query.box_clone()),
+            (Occur::Must, scope.box_clone()),
+        ])),
+        None => query.box_clone(),
+    }
+}
+
+const DOCS_INTENT_WORDS: &[&str] = &["doc", "docs", "documentation", "manual", "reference"];
+
+fn docs_intent(query: &str) -> bool {
+    query
+        .split_whitespace()
+        .any(|word| DOCS_INTENT_WORDS.contains(&word.to_lowercase().as_str()))
+}
+
+fn docs_without_intent(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|word| {
+            let word = word.to_lowercase();
+            !DOCS_INTENT_WORDS.contains(&word.as_str())
+                && !ASKING_WORDS.contains(&word.as_str())
+                && !plumb_core::is_function_word(&word)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn docs_topic(site: &plumb_core::docs::DocsSite, query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|word| {
+            let word = word.to_lowercase();
+            let word = word.trim_matches(|c: char| !c.is_alphanumeric() && !"._:+#".contains(c));
+            word != site.key
+                && word != site.product.to_lowercase()
+                && !site.asked_by.contains(&word)
+                && !DOCS_INTENT_WORDS.contains(&word)
+                && !ASKING_WORDS.contains(&word)
+                && !plumb_core::is_function_word(word)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Substantive docs terms for selecting source excerpts from a result.
+/// Uses the same product/intent rules as retrieval and removes operators.
+pub fn docs_query_topic(page: &Page, query: &str) -> String {
+    let words = Operators::parse(query).words;
+    plumb_core::docs::site_of_url(&page.url).map_or_else(
+        || docs_without_intent(&words),
+        |site| docs_topic(site, &words),
+    )
+}
+
+fn docs_exact_query_allows(page: &Page, query: &str) -> bool {
+    if page.set != DOCS_SET {
+        return true;
+    }
+    let topic = docs_query_topic(page, query);
+    let Some(symbol) = canonical_docs_symbol(&topic) else {
+        return true;
+    };
+    !topic.contains(['.', ':', '_']) || docs_symbols(page).contains(&symbol)
+}
+
+fn docs_product_only(site: &plumb_core::docs::DocsSite, query: &str) -> bool {
+    let without = docs_without_intent(query);
+    plumb_core::docs::named_site(&without).is_some_and(|named| named.key == site.key)
+}
+
+fn docs_host_requested(site: &plumb_core::docs::DocsSite, ops: &Operators) -> bool {
+    site.roots
+        .iter()
+        .filter_map(|root| host_of(root))
+        .any(|host| {
+            ops.sites.iter().any(|wanted| {
+                wanted.contains('.') && (host == *wanted || host.ends_with(&format!(".{wanted}")))
+            })
+        })
+}
+
+fn canonical_docs_symbol(text: &str) -> Option<String> {
+    let text = text.trim().trim_end_matches("()");
+    (!text.is_empty()
+        && text.len() < 256
+        && text.chars().any(char::is_alphabetic)
+        && text
+            .chars()
+            .all(|c| c.is_alphanumeric() || "_.:".contains(c)))
+    .then(|| text.to_lowercase())
+}
+
+fn docs_title_symbols(title: &str) -> Vec<String> {
+    let head = title.split(" — ").next().unwrap_or(title);
+    docs_identifier_symbols(head)
+}
+
+fn docs_identifier_symbols(identifier: &str) -> Vec<String> {
+    let Some(symbol) = canonical_docs_symbol(identifier) else {
+        return Vec::new();
+    };
+    let mut symbols = vec![symbol.clone()];
+    if let Some(short) = symbol
+        .rsplit(['.', ':'])
+        .next()
+        .filter(|short| !short.is_empty() && *short != symbol)
+    {
+        symbols.push(short.to_string());
+    }
+    symbols
+}
+
+/// Exact API identifier or its unqualified suffix. A qualified query
+/// never matches a different receiver through word overlap.
+pub fn docs_symbol_matches(query: &str, identifier: &str) -> bool {
+    canonical_docs_symbol(query)
+        .is_some_and(|wanted| docs_identifier_symbols(identifier).contains(&wanted))
+}
+
+fn docs_symbols(page: &Page) -> Vec<String> {
+    let mut symbols = docs_title_symbols(&page.title);
+    if let Some(search) = page.search.as_ref().and_then(SearchContent::bounded) {
+        for symbol in search.symbols {
+            symbols.extend(docs_identifier_symbols(&symbol.identifier));
+        }
+    }
+    symbols.sort();
+    symbols.dedup();
+    symbols
+}
+
+fn strong_docs_symbol(page: &Page, query: &str) -> bool {
+    let Some(symbol) = canonical_docs_symbol(query) else {
+        return false;
+    };
+    if page
+        .search
+        .as_ref()
+        .and_then(SearchContent::bounded)
+        .is_some_and(|search| {
+            search
+                .symbols
+                .iter()
+                .any(|symbol| docs_symbol_matches(query, &symbol.identifier))
+        })
+    {
+        return true;
+    }
+    let head = page.title.split(" — ").next().unwrap_or(&page.title);
+    // Code punctuation/case, or a module with a subtitle whose URL names
+    // the same identifier. Generic standalone titles such as Glossary
+    // and Introduction remain ordinary navigation.
+    head.contains(['.', ':', '_'])
+        || head.chars().skip(1).any(char::is_uppercase)
+        || (page.title.contains(" — ")
+            && symbol.len() >= 5
+            && page
+                .url
+                .split(['?', '#'])
+                .next()
+                .unwrap_or("")
+                .rsplit('/')
+                .next()
+                .and_then(|leaf| canonical_docs_symbol(leaf.trim_end_matches(".html")))
+                .as_ref()
+                == Some(&symbol))
+}
+
+fn docs_overview(page: &Page, site: &plumb_core::docs::DocsSite) -> bool {
+    let clean = |url: &str| {
+        url.split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim_end_matches("index.html")
+            .trim_end_matches('/')
+            .to_string()
+    };
+    let url = clean(&page.url);
+    if site
+        .roots
+        .iter()
+        .chain(site.index_pages)
+        .any(|root| clean(root) == url)
+    {
+        return true;
+    }
+    // Common reference/tutorial overviews immediately below a profile
+    // root. These are product entry points, rather than arbitrary deep
+    // pages that happen to repeat the product in their aliases.
+    page.url
+        .split(['?', '#'])
+        .next()
+        .is_some_and(|url| url.ends_with("/index.html"))
+        && site.roots.iter().any(|root| {
+            url.strip_prefix(&clean(root))
+                .and_then(|rest| rest.strip_prefix('/'))
+                .is_some_and(|rest| {
+                    ["tutorial", "reference", "library", "guide", "manual", "api"].contains(&rest)
+                })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3438,6 +4538,233 @@ mod tests {
         build_page_index(&path, pages.to_vec()).unwrap();
         let searcher = PageSearcher::open(&path).unwrap();
         (dir, searcher)
+    }
+
+    fn dated_paper(title: &str, date: Option<&str>, year: Option<i32>, count: u64) -> Page {
+        Page::from_paper(Article {
+            title: title.into(),
+            item: Some(format!("10.1234/{}", title.replace(' ', "-"))),
+            views: count,
+            paper: Some(PaperMetadata {
+                publication_date: date.map(str::to_string),
+                publication_year: year,
+                authors: vec!["Example Author".to_string()],
+                count_kind: plumb_core::papers::PaperCountKind::Citations,
+                count,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn paper_date_filter_precedes_candidate_limits_and_excludes_unknown_days() {
+        let mut pages: Vec<_> = (0..CANDIDATES + 25)
+            .map(|i| {
+                dated_paper(
+                    &format!("Transformer old {i}"),
+                    Some("2017-06-12"),
+                    Some(2017),
+                    10_000,
+                )
+            })
+            .collect();
+        pages.push(dated_paper(
+            "Transformer recent",
+            Some("2026-09-30"),
+            Some(2026),
+            0,
+        ));
+        pages.push(dated_paper("Transformer year only", None, Some(2026), 1));
+        pages.push(dated_paper("Transformer unknown", None, None, 5));
+        pages.push(page("Transformer wikipedia", 1_000_000, &[]));
+        let (_dir, index) = searcher(&pages);
+        let query = PaperQuery::parse("transformer after:2026-09-01 before:2026-09-30").unwrap();
+        let hits = index.search_papers(&query, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].page.title, "Transformer recent");
+        assert_eq!(hits[0].page.paper.as_ref().unwrap().count, 0);
+        assert_eq!(index.search("transformer after:2026", 10).unwrap().len(), 2);
+        assert_eq!(index.paper_coverage().total, (CANDIDATES + 28) as u64);
+        assert_eq!(
+            index.paper_coverage().publication_day,
+            (CANDIDATES + 26) as u64
+        );
+    }
+
+    #[test]
+    fn paper_newest_collects_recent_candidates_and_preserves_exact_relevance() {
+        let mut pages: Vec<_> = (0..CANDIDATES + 20)
+            .map(|i| {
+                dated_paper(
+                    &format!("Transformer old {i}"),
+                    Some("2017-06-12"),
+                    Some(2017),
+                    10_000,
+                )
+            })
+            .collect();
+        pages.push(dated_paper(
+            "Transformer recent",
+            Some("2026-09-30"),
+            Some(2026),
+            0,
+        ));
+        pages.push(dated_paper(
+            "Transformer",
+            Some("2010-01-01"),
+            Some(2010),
+            10_000,
+        ));
+        let (_dir, index) = searcher(&pages);
+        let hits = index
+            .search_papers(&PaperQuery::parse("transformer sort:newest").unwrap(), 2)
+            .unwrap();
+        assert_eq!(hits[0].page.title, "Transformer");
+        assert!(hits[0].named);
+        assert_eq!(hits[1].page.title, "Transformer recent");
+    }
+
+    #[test]
+    fn paper_metadata_round_trips_with_parent_language_and_search_fields() {
+        let mut source = Article {
+            title: "Research".into(),
+            item: Some("10.1234/research".into()),
+            language: Some("fr".into()),
+            paper: Some(PaperMetadata {
+                publication_date: Some("2026-01-02".into()),
+                preprint_date: Some("2025-01-01".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        source.search = Some(SearchContent::default());
+        let page = Page::from_paper(source);
+        let decoded: Page = serde_json::from_slice(&serde_json::to_vec(&page).unwrap()).unwrap();
+        assert_eq!(page, decoded);
+        assert_eq!(page.content_language.as_deref(), Some("fr"));
+        assert!(page.search.is_some());
+        let (_dir, index) = searcher(&[page]);
+        assert!(index
+            .in_language(Some("en"))
+            .search_papers(&PaperQuery::parse("after:2026").unwrap(), 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            index
+                .in_language(Some("fr"))
+                .search_papers(&PaperQuery::parse("after:2026").unwrap(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        let old: Page = serde_json::from_value(serde_json::json!({ "set": "papers", "url": "https://doi.org/10.1/x", "title": "Old", "views": 1 })).unwrap();
+        assert!(old.paper.is_none());
+    }
+
+    #[test]
+    fn entity_lookup_survives_competing_pages_and_keeps_item_identity() {
+        let japan = Page::from_article(
+            "en",
+            Article {
+                title: "Japan".into(),
+                item: Some("Q17".into()),
+                description: Some("country in East Asia".into()),
+                views: 1,
+                aliases: vec!["Nippon".into()],
+                facts: vec![plumb_core::facts::Fact {
+                    kind: plumb_core::facts::FactKind::Population,
+                    value: "123802000;2024".into(),
+                }],
+                ..Default::default()
+            },
+        );
+        let mut pages: Vec<_> = (0..250)
+            .map(|n| {
+                Page::from_set(
+                    SUBPAGES_SET,
+                    Article {
+                        title: "Japan".into(),
+                        item: Some(format!("https://www.who.int/japan/{n}")),
+                        views: 100_000,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        pages.push(japan);
+        let (_dir, index) = searcher(&pages);
+        for name in ["Japan", "Nippon"] {
+            let found = index.entities(name, 5).unwrap();
+            assert_eq!(found.len(), 1, "{name}: {found:?}");
+            assert_eq!(found[0].page.item.as_deref(), Some("Q17"));
+            assert_eq!(found[0].page.facts[0].observation_year(), Some(2024));
+            assert!(found[0].named);
+            assert!(found[0].learned.is_none());
+        }
+        assert!(index.entities("unrelated country", 5).unwrap().is_empty());
+        assert!(index.entities("Japan", 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn entity_language_is_filtered_before_name_and_description_caps() {
+        for by_description in [false, true] {
+            let entity = |language: &str, number: usize, views: u64| {
+                let mut page = Page::from_article(
+                    language,
+                    Article {
+                        title: if by_description {
+                            format!("Language entity {number}")
+                        } else {
+                            "Language control".into()
+                        },
+                        description: by_description.then(|| "Language control".into()),
+                        item: Some(format!("Q{}", 100_000 + number)),
+                        views,
+                        ..Article::default()
+                    },
+                );
+                page.url = format!("https://{language}.wikipedia.org/wiki/Entity_{number}");
+                page
+            };
+            let mut pages: Vec<_> = (0..CANDIDATES + 25)
+                .map(|number| entity("en", number, 100_000))
+                .collect();
+            let spanish = entity("es", CANDIDATES + 25, 1);
+            let german = entity("de", CANDIDATES + 26, 1);
+            pages.extend([spanish.clone(), german.clone()]);
+            let (_dir, index) = searcher(&pages);
+            // A post-cap filter would lose both requested-language entities.
+            let unscoped = index.entities("language control", CANDIDATES).unwrap();
+            assert_eq!(unscoped.len(), CANDIDATES);
+            assert!(unscoped.iter().all(|hit| hit.page.language() == Some("en")));
+            for (language, expected) in [("es", spanish), ("de", german)] {
+                let found = index
+                    .in_language(Some(language))
+                    .entities("language control", CANDIDATES)
+                    .unwrap();
+                assert_eq!(found.len(), 1, "{language}, description={by_description}");
+                assert_eq!(found[0].page.url, expected.url);
+                assert_eq!(found[0].named, !by_description);
+            }
+        }
+    }
+
+    #[test]
+    fn entities_keep_exact_stop_word_names() {
+        let who = Page::from_article(
+            "en",
+            Article {
+                title: "The Who".into(),
+                item: Some("Q93332".into()),
+                ..Default::default()
+            },
+        );
+        let (_dir, index) = searcher(&[who]);
+        let hits = index.entities("The Who", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].page.item.as_deref(), Some("Q93332"));
     }
 
     fn titles(hits: &[PageHit]) -> Vec<&str> {
@@ -3476,6 +4803,317 @@ mod tests {
             ..Article::default()
         })
         .unwrap()
+    }
+
+    // Verbatim rows (including aliases and section extensions) read from
+    // the HPC docs file on 2026-10-10 UTC. No crawl or enrichment is needed
+    // to recover these pages.
+    fn short_docs_fixture() -> Vec<Page> {
+        plumb_core::article::articles_of(
+            include_str!("../tests/fixtures/short-docs.tsv")
+                .lines()
+                .map(str::to_string),
+        )
+        .map(|(_, article)| Page::from_docs(article.unwrap()).unwrap())
+        .collect()
+    }
+
+    #[test]
+    fn short_typed_docs_recover_existing_records() {
+        let (_dir, searcher) = searcher(&short_docs_fixture());
+        for (query, expected) in [
+            ("tomllib", "https://docs.python.org/3/library/tomllib.html"),
+            ("python tomllib", "https://docs.python.org/3/library/tomllib.html"),
+            ("tomllib site:docs.python.org", "https://docs.python.org/3/library/tomllib.html"),
+            ("padStart", "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart"),
+            ("javascript padStart", "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart"),
+            ("react hooks", "https://react.dev/reference/react/hooks"),
+        ] {
+            let ops = Operators::parse(query);
+            let hits = searcher.search_naming_docs(&ops.words, &ops, true, 10).unwrap();
+            assert!(hits.iter().any(|hit| hit.page.url == expected), "{query}: {hits:?}");
+        }
+        let hits = searcher
+            .search_naming_docs("python", &Operators::default(), true, 10)
+            .unwrap();
+        assert!(
+            !hits.is_empty(),
+            "product-only docs must find existing overview pages"
+        );
+        assert!(
+            hits.iter().all(|hit| hit.page.url.ends_with("/index.html")),
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn docs_kind_host_and_exact_symbols_survive_candidate_caps() {
+        let mut pages = short_docs_fixture();
+        for i in 0..CANDIDATES + 20 {
+            let mut article = page(
+                &format!("Python tomllib {i}"),
+                1_000_000,
+                &["Python tomllib"],
+            );
+            // Other redirect names are indexed as exact keys; ordinary
+            // Wikipedia aliases only contribute to the words field.
+            article.names.push("Python tomllib".into());
+            pages.push(article);
+            pages.push(Page::from_question(Article {
+                title: format!("Python tomllib question {i}"),
+                description: Some("python, tomllib".into()),
+                item: Some(i.to_string()),
+                views: 1_000_000,
+                ..Article::default()
+            }));
+            let mut other_host = docs_page(
+                &format!("https://developer.mozilla.org/en-US/docs/tomllib/{i}"),
+                "tomllib — Other ecosystem",
+                &["MDN tomllib"],
+                "JavaScript tomllib",
+            );
+            other_host.views = 1_000_000;
+            pages.push(other_host);
+            let mut broad = docs_page(
+                &format!("https://developer.mozilla.org/en-US/docs/padding/{i}"),
+                &format!("padStart examples {i}"),
+                &[],
+                "JavaScript padding examples",
+            );
+            broad.views = 1_000_000;
+            pages.push(broad);
+        }
+        // Production files are ordered by views; put the deliberately
+        // popular distractors before the low-view docs fixture as well.
+        pages.sort_by_key(|page| std::cmp::Reverse(page.views));
+        let (_dir, searcher) = searcher(&pages);
+        // Legacy mixed-set retrieval loses the named docs to popular
+        // article aliases. Docs are eligible within their own cap now.
+        assert!(!searcher
+            .search_general("python tomllib", 10, None)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.page.url.ends_with("/library/tomllib.html")));
+        for (query, docs) in [
+            ("python tomllib", true),
+            ("tomllib site:docs.python.org", true),
+            ("tomllib site:docs.python.org", false),
+        ] {
+            let ops = Operators::parse(query);
+            let hits = searcher
+                .search_naming_docs(&ops.words, &ops, docs, 10)
+                .unwrap();
+            assert!(
+                hits.iter()
+                    .any(|hit| hit.page.url.ends_with("/library/tomllib.html")),
+                "{query}: {hits:?}"
+            );
+            assert!(hits
+                .iter()
+                .all(|hit| hit.page.set == DOCS_SET && operators_allow(&ops, &hit.page)));
+        }
+        let ops = Operators::parse("padStart site:developer.mozilla.org");
+        let hits = searcher
+            .search_naming_docs(&ops.words, &ops, true, 1)
+            .unwrap();
+        assert_eq!(hits[0].page.url, "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart");
+    }
+
+    #[test]
+    fn short_docs_preserve_operators_ecosystems_and_navigation() {
+        let mut pages = short_docs_fixture();
+        let mut structures = docs_page(
+            "https://docs.python.org/3/tutorial/datastructures.html",
+            "Data Structures",
+            &["Python Data Structures"],
+            "Lists and sequences",
+        );
+        structures.sections = vec!["List Comprehensions".into()];
+        pages.push(structures);
+        pages.push(docs_page(
+            "https://docs.python.org/3/glossary.html",
+            "Glossary",
+            &["Python Glossary"],
+            "Python words",
+        ));
+        let (_dir, searcher) = searcher(&pages);
+        for query in ["tomllib", "padStart"] {
+            let hits = searcher.search(query, 10).unwrap();
+            assert!(hits.iter().any(|hit| hit.page.set == DOCS_SET), "{query}");
+            assert!(hits
+                .iter()
+                .filter(|hit| hit.page.set == DOCS_SET)
+                .all(|hit| !hit.named && !hit.whole));
+        }
+        for query in ["python", "glossary", "list comprehensions"] {
+            assert!(
+                searcher
+                    .search(query, 10)
+                    .unwrap()
+                    .iter()
+                    .all(|hit| hit.page.set != DOCS_SET),
+                "{query}"
+            );
+        }
+        for query in [
+            "python list comprehension",
+            "list comprehension site:docs.python.org",
+            "python documentation",
+            "what is tomllib documentation",
+        ] {
+            let ops = Operators::parse(query);
+            assert!(
+                !searcher
+                    .search_naming_docs(&ops.words, &ops, true, 10)
+                    .unwrap()
+                    .is_empty(),
+                "{query}"
+            );
+        }
+        let kotlin = searcher
+            .search_naming_docs("kotlin padStart", &Operators::default(), true, 10)
+            .unwrap();
+        assert_eq!(kotlin.len(), 1);
+        assert_eq!(kotlin[0].page.set_name(), "kotlinlang.org");
+        let js = searcher
+            .search_naming_docs("javascript padStart", &Operators::default(), true, 10)
+            .unwrap();
+        assert_eq!(js.len(), 1);
+        assert_eq!(js[0].page.set_name(), "developer.mozilla.org");
+        assert!(searcher
+            .search_naming_docs(
+                "Array.prototype.padStart()",
+                &Operators::default(),
+                true,
+                10
+            )
+            .unwrap()
+            .is_empty());
+        for query in [
+            "tomllib -site:python.org",
+            "tomllib site:kotlinlang.org",
+            "tomllib -TOML",
+            "padStart -\"String.prototype.padStart\" site:developer.mozilla.org",
+            "\"react hooks\" -reference",
+            "\"react built-in hooks\"",
+        ] {
+            let ops = Operators::parse(query);
+            assert!(
+                searcher
+                    .search_naming_docs(&ops.words, &ops, true, 10)
+                    .unwrap()
+                    .is_empty(),
+                "{query}"
+            );
+        }
+        let ops = Operators::parse("\"react hooks\"");
+        assert_eq!(
+            searcher
+                .search_naming_docs(&ops.words, &ops, true, 10)
+                .unwrap()[0]
+                .page
+                .title,
+            "Built-in React Hooks"
+        );
+        assert!(searcher
+            .search_naming_docs("tomllib", &Operators::default(), true, 0)
+            .unwrap()
+            .is_empty());
+        let question = Page::from_question(Article {
+            title: "How do I parse configuration files?".into(),
+            description: Some("python, tomllib".into()),
+            item: Some("1".into()),
+            ..Article::default()
+        });
+        assert_eq!(
+            searcher.question_match(&question, &searcher.question_words("python tomllib"), None),
+            (0.0, false)
+        );
+        assert!(
+            searcher
+                .question_match(
+                    &question,
+                    &searcher.question_words("parse configuration python"),
+                    None
+                )
+                .0
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn staged_reference_gate_rejects_partial_topics_and_keeps_practical_pages() {
+        let allowed = |set: &str, query: &str, title: &str| {
+            let hit = PageHit {
+                page: Page::from_set(
+                    set,
+                    Article {
+                        title: title.into(),
+                        item: Some("https://reference.example/article".into()),
+                        views: 2_000,
+                        ..Article::default()
+                    },
+                )
+                .unwrap(),
+                score: 0.9,
+                named: false,
+                popularity: 0.5,
+                whole: false,
+                learned: None,
+            };
+            subpage_asked(query, &[], &hit)
+        };
+        for (query, title) in [
+            ("celiac disease", "Celiac disease"),
+            (
+                "how to renew a green card",
+                "How to renew or replace your green card",
+            ),
+            (
+                "symptoms of type 2 diabetes",
+                "Type 2 diabetes: Symptoms, diagnosis and treatment",
+            ),
+            ("define prioritize", "Prioritize Definition & Meaning"),
+            ("stool smell", "Foul-Smelling Stool: Causes and Treatment"),
+            ("how to fix a leaking faucet", "Fixing a leaking faucet"),
+        ] {
+            assert!(allowed(REFERENCE2_SET, query, title), "{query}: {title}");
+        }
+        for (query, title) in [
+            ("seven summits", "The Seven Second Summits of the World"),
+            (
+                "time in st john's",
+                "The Best Time to Visit the US Virgin Islands",
+            ),
+            (
+                "nobel prize in physics 2025",
+                "John F. Clauser: Nobel Prize-winning physicist",
+            ),
+            (
+                "the great gatsby f scott fitzgerald",
+                "The Great Gatsby Questions for Study and Discussion",
+            ),
+            ("leaking faucet repair", "Faucet installation cost"),
+        ] {
+            // Legacy coverage stays available until the new generation
+            // has passed the combined evaluation and is explicitly chosen.
+            assert!(allowed(REFERENCE_SET, query, title));
+            assert!(!allowed(REFERENCE2_SET, query, title), "{query}: {title}");
+        }
+        let page = Page::from_set(
+            REFERENCE2_SET,
+            Article {
+                title: "Celiac disease".into(),
+                item: Some("https://www.healthline.com/health/celiac".into()),
+                ..Article::default()
+            },
+        )
+        .unwrap();
+        assert!(Page::has_reader(REFERENCE2_SET));
+        assert!(Page::has_reader(REFERENCE_SET));
+        assert!(page.is_site_page());
+        assert_eq!(page.set_name(), "healthline.com");
+        assert_eq!(page.set_domain(), "healthline.com");
     }
 
     fn reference_page(url: &str, title: &str, description: &str) -> Page {
@@ -3646,6 +5284,152 @@ mod tests {
     }
 
     #[test]
+    fn rich_docs_symbols_passages_and_language_survive_indexing_together() {
+        use plumb_core::article::{SearchPassage, SearchSymbol};
+        let page = Page::from_docs(Article {
+            title: "Node — Godot documentation".into(),
+            item: Some("https://docs.godotengine.org/en/stable/classes/class_node.html".into()),
+            aliases: vec!["Godot Node".into()],
+            language: Some("en".into()),
+            search: Some(SearchContent {
+                symbols: vec![SearchSymbol {
+                    identifier: "set_multiplayer_authority".into(),
+                    anchor: Some("class-node-method-set-multiplayer-authority".into()),
+                }],
+                passages: vec![SearchPassage {
+                    heading: "Multiplayer authority".into(),
+                    text: "Sets the node's multiplayer authority to the given peer identifier."
+                        .into(),
+                    anchor: Some("class-node-method-set-multiplayer-authority".into()),
+                }],
+                ..SearchContent::default()
+            }),
+            ..Article::default()
+        })
+        .unwrap();
+        assert_eq!(page.language(), Some("en"));
+        assert!(page.topic().unwrap().contains("set_multiplayer_authority"));
+        let (_dir, index) = searcher(std::slice::from_ref(&page));
+        let found = index.search("godot set multiplayer authority", 5).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].page.search, page.search);
+        assert_eq!(found[0].page.content_language, page.content_language);
+        for query in [
+            "set_multiplayer_authority",
+            "godot set_multiplayer_authority()",
+        ] {
+            let ops = Operators::parse(query);
+            let found = index.search_naming_docs(&ops.words, &ops, true, 5).unwrap();
+            assert_eq!(found.len(), 1, "{query}: {found:?}");
+            assert!(found[0].named);
+        }
+        let plain = index.search("set_multiplayer_authority", 5).unwrap();
+        assert_eq!(plain.len(), 1);
+        assert!(!plain[0].named);
+        let mut legacy = serde_json::to_value(&page).unwrap();
+        legacy.as_object_mut().unwrap().remove("search");
+        assert!(serde_json::from_value::<Page>(legacy)
+            .unwrap()
+            .search
+            .is_none());
+    }
+
+    #[test]
+    fn rich_docs_qualified_symbols_survive_topic_candidate_caps() {
+        use plumb_core::article::SearchSymbol;
+        let mut method = docs_page(
+            "https://docs.godotengine.org/en/stable/classes/class_node.html",
+            "Node — Godot documentation",
+            &["Godot Node"],
+            "A scene tree node.",
+        );
+        method.views = 1;
+        method.search = Some(SearchContent {
+            symbols: vec![SearchSymbol {
+                identifier: "Node.set_multiplayer_authority".into(),
+                anchor: Some("class-node-method-set-multiplayer-authority".into()),
+            }],
+            ..SearchContent::default()
+        });
+        let mut pages = (0..220)
+            .map(|i| {
+                docs_page(
+                    &format!("https://docs.godotengine.org/en/stable/tutorials/authority-{i}.html"),
+                    &format!("Multiplayer authority examples {i}"),
+                    &[],
+                    "Godot node set multiplayer authority examples.",
+                )
+            })
+            .collect::<Vec<_>>();
+        pages.push(method.clone());
+        let (_dir, index) = searcher(&pages);
+        for query in [
+            "godot Node.set_multiplayer_authority()",
+            "set_multiplayer_authority site:docs.godotengine.org",
+        ] {
+            let ops = Operators::parse(query);
+            let found = index.search_naming_docs(&ops.words, &ops, true, 1).unwrap();
+            assert_eq!(found[0].page.url, method.url, "{query}: {found:?}");
+        }
+        for query in [
+            "godot Other.set_multiplayer_authority",
+            "set_multiplayer_authority -site:godotengine.org",
+            "set_multiplayer_authority site:docs.python.org",
+        ] {
+            let ops = Operators::parse(query);
+            assert!(
+                index
+                    .search_naming_docs(&ops.words, &ops, true, 5)
+                    .unwrap()
+                    .is_empty(),
+                "{query}"
+            );
+        }
+        assert!(docs_symbol_matches(
+            "set_multiplayer_authority()",
+            "Node.set_multiplayer_authority"
+        ));
+        assert!(!docs_symbol_matches(
+            "Other.set_multiplayer_authority",
+            "Node.set_multiplayer_authority"
+        ));
+    }
+
+    #[test]
+    fn rich_docs_short_topics_require_source_headings_or_error_literals() {
+        use plumb_core::article::SearchPassage;
+        let mut page = docs_page(
+            "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/",
+            "Pod Lifecycle",
+            &["Kubernetes Pod Lifecycle"],
+            "The lifecycle of a Pod.",
+        );
+        page.search = Some(SearchContent {
+            passages: vec![SearchPassage {
+                heading: "Container failures".into(),
+                text: "A container can enter CrashLoopBackOff when it repeatedly fails. Generic troubleshooting advice follows.".into(),
+                anchor: Some("container-restarts".into()),
+            }],
+            ..SearchContent::default()
+        });
+        let (_dir, index) = searcher(&[page]);
+        for query in [
+            "kubernetes CrashLoopBackOff",
+            "crashloopbackoff",
+            "failures",
+        ] {
+            let found = index
+                .search_naming_docs(query, &Operators::default(), true, 5)
+                .unwrap();
+            assert_eq!(found.len(), 1, "{query}: {found:?}");
+        }
+        assert!(index
+            .search_naming_docs("troubleshooting", &Operators::default(), true, 5)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn docs_pages_are_found_by_their_sections() {
         let mut structures = docs_page(
             "https://docs.python.org/3/tutorial/datastructures.html",
@@ -3689,6 +5473,7 @@ mod tests {
                 views: structures.views,
                 aliases: structures.aliases.clone(),
                 sections: structures.sections.clone(),
+                language: structures.content_language.clone(),
                 ..Article::default()
             },
         );
@@ -3747,7 +5532,10 @@ mod tests {
         assert!(found("asyncio", true).contains(&"asyncio".to_string()));
         // Another docs site, or a top-level domain, names other docs.
         assert!(found("asyncio site:developer.mozilla.org", false).is_empty());
-        assert!(!found("asyncio site:org", true).contains(&"asyncio".to_string()));
+        assert!(!found("asyncio site:org", false).contains(&"asyncio".to_string()));
+        // Explicit docs intent allows a short symbol while the TLD still
+        // filters its host. The TLD alone supplies no product context.
+        assert!(found("asyncio site:org", true).contains(&"asyncio".to_string()));
 
         let python = plumb_core::docs::site("python").unwrap();
         assert_eq!(naming_docs(python, "asyncio"), "Python asyncio");
@@ -3882,6 +5670,56 @@ mod tests {
         );
         // Part of a title names nothing.
         assert!(found("perft").is_empty());
+    }
+
+    #[test]
+    fn declared_subpage_language_survives_retrieval_and_placement() {
+        for (language, title, query) in [
+            ("es", "Receta fácil de galleta", "recetas fáciles galletas"),
+            (
+                "de",
+                "Gesunde Ernährung und Bewegung",
+                "gesunden ernährung bewegungen",
+            ),
+        ] {
+            // Exercise the URL heuristic and the title-word gate separately.
+            for path in [language, "guide"] {
+                let page = Page::from_set(
+                    SUBPAGES_SET,
+                    Article {
+                        title: title.into(),
+                        item: Some(format!("https://reference.example/{path}/article")),
+                        language: Some(language.into()),
+                        views: 2_000,
+                        ..Article::default()
+                    },
+                )
+                .unwrap();
+                let mut unknown = page.clone();
+                unknown.content_language = None;
+                unknown.url.push_str("-unknown");
+                let options = crate::SearchOptions {
+                    language: Some(language.into()),
+                    ..crate::SearchOptions::default()
+                };
+                assert_eq!(unknown.language(), None);
+                assert!(!options_allow(&options, &unknown));
+                let (_dir, searcher) = searcher(&[page.clone(), unknown]);
+                let hits = searcher
+                    .in_language(options.language.as_deref())
+                    .search(query, 5)
+                    .unwrap();
+                assert_eq!(hits.len(), 1, "{language} /{path}: {hits:?}");
+                assert!(
+                    !hits[0].named,
+                    "must exercise the title-word placement gate"
+                );
+                assert!(options_allow(&options, &hits[0].page));
+                let placed = place_pages(query, &[], hits);
+                assert_eq!(placed.len(), 1, "{language} /{path}");
+                assert_eq!(placed[0].hit.page.url, page.url);
+            }
+        }
     }
 
     #[test]
@@ -4198,6 +6036,113 @@ mod tests {
     }
 
     #[test]
+    fn language_is_filtered_before_popular_candidates_fill_the_cap() {
+        let mut pages: Vec<Page> = (0..CANDIDATES + 25)
+            .map(|i| {
+                let mut page = page("Language control", 10_000 - i as u64, &[]);
+                page.url = format!("https://en.wikipedia.org/wiki/Control_{i}");
+                page
+            })
+            .collect();
+        let mut spanish = page("Language control", 1, &[]);
+        spanish.set = "wikipedia-es".into();
+        spanish.url = "https://es.wikipedia.org/wiki/Control".into();
+        pages.push(spanish.clone());
+        let mut german = spanish.clone();
+        german.set = "wikipedia-de".into();
+        german.url = "https://de.wikipedia.org/wiki/Control".into();
+        pages.push(german.clone());
+        let (_dir, searcher) = searcher(&pages);
+        for (lang, expected) in [("es-MX", spanish), ("de", german)] {
+            let hits = searcher
+                .in_language(Some(lang))
+                .search("language control", 1)
+                .unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].page.url, expected.url);
+        }
+        assert!(searcher
+            .in_language(Some("fr"))
+            .search("language control", 1)
+            .unwrap()
+            .is_empty());
+        assert!(searcher
+            .in_language(Some("bogus"))
+            .search("language control", 1)
+            .unwrap()
+            .is_empty());
+        let (known, unknown) = searcher.language_coverage();
+        assert_eq!(known.get("es"), Some(&1));
+        assert_eq!(known.get("de"), Some(&1));
+        assert_eq!(unknown, 0);
+    }
+
+    #[test]
+    fn declared_reference_language_beats_host_country_and_unknown_is_reported() {
+        let spanish = Page::from_reference(Article {
+            title: "Receta fácil de galleta".into(),
+            item: Some("https://recipes.example.de/galletas".into()),
+            language: Some("es".into()),
+            ..Article::default()
+        })
+        .unwrap();
+        let german = Page::from_reference(Article {
+            title: "Gesunde Ernährung und Bewegung".into(),
+            item: Some("https://gesund.bund.de/ernaehrung".into()),
+            language: Some("de-DE".into()),
+            ..Article::default()
+        })
+        .unwrap();
+        let unknown = Page::from_reference(Article {
+            title: "Receta fácil de galleta".into(),
+            item: Some("https://unknown.example.es/recipe".into()),
+            ..Article::default()
+        })
+        .unwrap();
+        assert_eq!(spanish.language(), Some("es"));
+        assert_eq!(german.language(), Some("de"));
+        assert_eq!(unknown.language(), None);
+        let (_dir, searcher) = searcher(&[spanish.clone(), german.clone(), unknown]);
+        let es = searcher
+            .in_language(Some("es"))
+            .search("recetas fáciles galletas", 5)
+            .unwrap();
+        assert!(es.iter().any(|hit| hit.page.url == spanish.url), "{es:?}");
+        let de = searcher
+            .in_language(Some("de"))
+            .search("gesunde ernährung bewegung", 5)
+            .unwrap();
+        assert!(de.iter().any(|hit| hit.page.url == german.url), "{de:?}");
+        assert_eq!(searcher.language_coverage().1, 1);
+    }
+
+    #[test]
+    fn spanish_dni_appointment_filter_never_returns_english_us_intelligence() {
+        let spanish = Page::from_reference(Article {
+            title: "Cita previa DNI".into(),
+            item: Some("https://www.dnielectronico.es/PortalDNIe/ciudadanos".into()),
+            language: Some("es".into()),
+            ..Article::default()
+        })
+        .unwrap();
+        let english = Page::from_reference(Article {
+            title: "Cita previa DNI".into(),
+            item: Some("https://www.dni.gov/".into()),
+            views: 100_000,
+            language: Some("en".into()),
+            ..Article::default()
+        })
+        .unwrap();
+        let (_dir, searcher) = searcher(&[english, spanish.clone()]);
+        let found = searcher
+            .in_language(Some("es"))
+            .search("cita previa dni", 5)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].page.url, spanish.url);
+    }
+
+    #[test]
     fn pages_follow_the_language_and_strict_safe_search() {
         let article = page("Einstein", 1, &[]);
         let mut book = page("Sexy beasts", 1, &[]);
@@ -4207,7 +6152,10 @@ mod tests {
             ..crate::SearchOptions::default()
         };
         assert!(options_allow(&en, &article));
-        assert!(options_allow(&en, &book), "books do not say their language");
+        assert!(
+            options_allow(&en, &book),
+            "old English-filter behavior keeps identifiable unknown-language records"
+        );
         let de = crate::SearchOptions {
             language: Some("de".into()),
             ..crate::SearchOptions::default()
@@ -4660,6 +6608,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
             placing_text_score: None,
         }
     }

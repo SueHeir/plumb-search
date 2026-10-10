@@ -163,6 +163,9 @@ impl Listed {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            language: None,
+            paper: None,
         })
     }
 }

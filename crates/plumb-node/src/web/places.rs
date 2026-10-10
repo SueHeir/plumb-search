@@ -6,9 +6,9 @@
 
 use std::fmt::Write as _;
 
-use plumb_core::normalize_text;
 use plumb_core::place::{Place, OSM_COPYRIGHT_URL};
-use plumb_index::places::{PlaceHit, PlaceResults};
+use plumb_index::places::{LocationStatus, PlaceHit, PlaceResults};
+#[cfg(test)]
 use plumb_index::Hit;
 
 use super::{escape_html, http_url, Icons};
@@ -113,6 +113,24 @@ pub(super) fn render_places(
 ) -> String {
     let what = escape_html(&found.what);
     let Some(center) = &found.center else {
+        if let Some(location) = &found.location {
+            let requested = escape_html(&location.requested);
+            let message = match location.status {
+                LocationStatus::AmbiguousLocation => {
+                    let alternatives = location.candidates.iter()
+                        .map(|place| escape_html(&place_name(place)))
+                        .collect::<Vec<_>>().join("; ");
+                    format!("Several indexed places match <strong>{requested}</strong>: {alternatives}. Add a region or country.")
+                }
+                LocationStatus::UnknownLocation => format!("The places index cannot locate <strong>{requested}</strong>. Add a city, region or country; this does not establish that the place has no businesses."),
+                LocationStatus::MissingLocation if !location.requested.is_empty() => format!("Add a city or region within <strong>{requested}</strong> to search indexed places."),
+                LocationStatus::ConflictingConstraints => format!("<strong>{requested}</strong> conflicts with the requested country. Keep a matching city and country to search places."),
+                _ => String::new(),
+            };
+            if !message.is_empty() {
+                return format!("<section class=\"pl\" aria-label=\"Places\"><p class=\"m\">{message}</p></section>\n");
+            }
+        }
         // "Near me", and no town to go by.
         let how = if about {
             "To list places near you, tell Plumb your town on \
@@ -140,7 +158,7 @@ pub(super) fn render_places(
     if found.hits.is_empty() {
         let _ = writeln!(
             out,
-            "<p class=\"m\">No places found for <strong>{what}</strong> within {}.</p>",
+            "<p class=\"m\">No indexed places found for <strong>{what}</strong> within {}. The indexed collection may be incomplete.</p>",
             distance_words(found.radius_km, miles)
         );
     } else {
@@ -261,188 +279,12 @@ pub(super) fn website_domains(found: &PlaceResults) -> Vec<String> {
         .collect()
 }
 
-/// The places' own websites as results, each site once, in the order the
-/// places are listed: titled with the place's name, described by its kind
-/// and address.
-pub(super) fn local_sites(found: &PlaceResults) -> Vec<Hit> {
-    let mut sites: Vec<Hit> = Vec::new();
-    for hit in &found.hits {
-        let Some(url) = hit.place.website.as_deref().and_then(http_url) else {
-            continue;
-        };
-        let Some(domain) = url::Url::parse(&url).ok().and_then(|u| {
-            let host = u.host_str()?.to_string();
-            plumb_core::registrable_domain(&host).or(Some(host))
-        }) else {
-            continue;
-        };
-        if sites.iter().any(|s| s.domain == domain) {
-            continue;
-        }
-        let mut about = hit.place.label();
-        if let Some(address) = &hit.place.address {
-            about.push_str(" \u{b7} ");
-            about.push_str(address);
-        }
-        sites.push(Hit {
-            domain,
-            url,
-            title: Some(hit.place.name.clone()),
-            description: Some(about),
-            score: 0.0,
-            text_score: 0.0,
-            link_score: 0.0,
-            placing_text_score: None,
-            country: None,
-            named: false,
-            official: false,
-            key_pages: Vec::new(),
-            demand: None,
-            missing_words: false,
-        });
-    }
-    sites
-}
+#[cfg(test)]
+use crate::assembly::word_root;
 
-/// The places of `found` that give no website, at most
-/// [`MAX_NAME_LOOKUPS`] of them, for their sites to be looked up by name
-/// ([`site_named_for`]).
-pub(super) fn places_without_sites(found: &PlaceResults) -> Vec<Place> {
-    found
-        .hits
-        .iter()
-        .map(|hit| &hit.place)
-        .filter(|place| place.website.as_deref().and_then(http_url).is_none())
-        .take(MAX_NAME_LOOKUPS)
-        .cloned()
-        .collect()
-}
-
-/// How many places without a website are looked up by name.
-const MAX_NAME_LOOKUPS: usize = 6;
-
-/// Among `hits` found for a place's name, the place's own site: one whose
-/// domain spells the name or its first two words or more (elliottbaybook.com for
-/// "Elliott Bay Book Company"), and that is well known (a chain:
-/// starbucks.com) or says the place's town. Small places share names
-/// across towns; another town's Joe's Pizza is not this one.
-pub(super) fn site_named_for(place: &Place, hits: Vec<Hit>) -> Option<Hit> {
-    let squash = |text: &str| normalize_text(text).replace(' ', "");
-    let town = place.town.as_deref().map(normalize_text);
-    hits.into_iter().find(|hit| {
-        let label = squash(hit.domain.split('.').next().unwrap_or(""));
-        if label.len() < 5 {
-            return false;
-        }
-        // The whole name, or two words of it or more: elliott.com is not
-        // the Elliott Bay Book Company.
-        let name = normalize_text(&place.name);
-        let words: Vec<&str> = name.split(' ').collect();
-        let mut lead = String::new();
-        let spelled = words.iter().enumerate().any(|(n, word)| {
-            lead.push_str(word);
-            lead == label && (n >= 1 || words.len() == 1)
-        });
-        let local = town.as_deref().is_some_and(|town| {
-            !town.is_empty()
-                && [hit.title.as_deref(), hit.description.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .any(|text| {
-                        format!(" {} ", normalize_text(text)).contains(&format!(" {town} "))
-                    })
-        });
-        spelled && (hit.link_score >= plumb_index::WELL_KNOWN_LINK_SCORE || local)
-    })
-}
-
-/// The sites for a query that lists places around a town ("brewery in
-/// denver"): the places' own sites (`local`, from [`local_sites`])
-/// first, then the sites that say what was looked for, then the rest;
-/// sites named after the town (the city's own site, its football team)
-/// are left out when places have sites to show. At most `limit`, or as
-/// many as there were.
-pub(super) fn local_first(
-    found: &PlaceResults,
-    hits: &mut Vec<Hit>,
-    local: Vec<Hit>,
-    limit: usize,
-) {
-    if found.center.is_none() || found.near_me {
-        return;
-    }
-    let roots: Vec<String> = normalize_text(&found.what)
-        .split(' ')
-        .filter_map(word_root)
-        .collect();
-    if roots.is_empty() {
-        return;
-    }
-    let says_what = |hit: &Hit| {
-        let text = normalize_text(&format!(
-            "{} {}",
-            hit.title.as_deref().unwrap_or(""),
-            hit.description.as_deref().unwrap_or("")
-        ));
-        let words: Vec<&str> = text.split(' ').collect();
-        roots
-            .iter()
-            .all(|root| words.iter().any(|w| w.starts_with(root.as_str())))
-    };
-    let keep = hits.len().max(limit.min(hits.len() + local.len()));
-    let rest = std::mem::take(hits);
-    let mut sorted: Vec<Hit> = local;
-    let (what, town): (Vec<Hit>, Vec<Hit>) = rest
-        .into_iter()
-        .filter(|hit| !sorted.iter().any(|s| s.domain == hit.domain))
-        .partition(says_what);
-    let local = sorted.len();
-    sorted.extend(what);
-    // Sites named after the town (its government, university, football
-    // team) are not what was asked for; with the places' own sites to
-    // show, they are left out.
-    let town_name = found
-        .center
-        .as_ref()
-        .map(|center| normalize_text(&center.name).replace(' ', ""))
-        .unwrap_or_default();
-    let named_after_town = |hit: &Hit| {
-        town_name.len() >= 3
-            && (hit.domain.replace(['.', '-'], "").contains(&town_name)
-                || hit
-                    .title
-                    .as_deref()
-                    .is_some_and(|t| normalize_text(t).replace(' ', "").contains(&town_name)))
-    };
-    // Without any, they go last: Seattle's climbing gyms have no sites of
-    // their own, and seattle.gov is still not one.
-    let (named, other): (Vec<Hit>, Vec<Hit>) = town.into_iter().partition(named_after_town);
-    sorted.extend(other);
-    if local == 0 {
-        sorted.extend(named);
-    }
-    sorted.truncate(keep);
-    *hits = sorted;
-}
-
-/// What a word of a query starts with in its other forms: "brewer" for
-/// "brewery" and "breweries", "hotel" for "hotels". `None` for words too
-/// short to tell by.
-fn word_root(word: &str) -> Option<String> {
-    let root = if let Some(stem) = word.strip_suffix("ies") {
-        stem
-    } else if let Some(stem) = word.strip_suffix('y') {
-        stem
-    } else if let Some(stem) = word
-        .strip_suffix("es")
-        .filter(|w| w.ends_with(['s', 'x', 'h']))
-    {
-        stem
-    } else {
-        word.strip_suffix('s').unwrap_or(word)
-    };
-    (root.chars().count() >= 3).then(|| root.to_string())
-}
+pub(super) use crate::assembly::local_first;
+#[cfg(test)]
+use crate::assembly::site_named_for;
 
 /// openstreetmap.org around `center`, zoomed to show `km` around it.
 fn area_url(center: &Place, km: f64) -> String {
@@ -622,6 +464,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
         };
         let mut shop = place("Elliott Bay Book Company", "shop=books", 47.6, -122.3);
         shop.town = Some("Seattle".into());
@@ -677,6 +520,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
         };
         let mut hits = vec![
             site("denvergov.org", "City and County of Denver"),
@@ -715,6 +559,7 @@ mod tests {
 
     fn found() -> PlaceResults {
         PlaceResults {
+            location: None,
             what: "pizza".into(),
             center: Some(place("Denver", "place=city", 39.7392, -104.9903)),
             near_me: false,
@@ -788,6 +633,26 @@ mod tests {
         assert!(html.contains("href=\"/about\""));
         let html = render_places(&found, None, false, None, &Icons::default(), &same);
         assert!(html.contains("pizza in Denver"));
+    }
+
+    #[test]
+    fn unknown_and_ambiguous_locations_do_not_claim_to_be_near_me() {
+        let mut found = found();
+        found.center = None;
+        found.hits.clear();
+        found.location = Some(plumb_index::places::LocationResolution {
+            requested: "Portland <unknown>".into(),
+            status: LocationStatus::AmbiguousLocation,
+            candidates: vec![place("Portland", "place=city", 45.5, -122.6)],
+        });
+        let html = render_places(&found, None, true, None, &Icons::default(), &same);
+        assert!(html.contains("Several indexed places"));
+        assert!(html.contains("Portland &lt;unknown&gt;"));
+        assert!(!html.contains("About you"));
+        found.location.as_mut().unwrap().status = LocationStatus::UnknownLocation;
+        let html = render_places(&found, None, true, None, &Icons::default(), &same);
+        assert!(html.contains("cannot locate"));
+        assert!(!html.contains("About you"));
     }
 
     /// Finds pizza in Denver and nothing else.

@@ -113,7 +113,7 @@ pub mod features;
 mod fill;
 pub mod journal;
 mod network;
-mod newer;
+pub(crate) mod newer;
 mod news;
 mod pages;
 mod places;
@@ -689,6 +689,27 @@ pub struct Status {
     /// feature changes (the desktop app's node can).
     #[serde(default)]
     pub can_restart: bool,
+    /// Indexed page count/generation plus bounded source-file quality notes.
+    /// File generation may be newer than the index while a rebuild is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_coverage: Option<PageCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageCoverage {
+    pub indexed_pages: u64,
+    pub index_generation: Option<String>,
+    pub sets: Vec<SetCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetCoverage {
+    pub set: String,
+    pub enabled: bool,
+    pub stored_records: Option<u64>,
+    /// Receiving the whole file is independent of its enrichment quality.
+    pub transfer_complete: Option<bool>,
+    pub file_quality: Option<plumb_net::pages::SetQuality>,
 }
 
 /// Work going on beside the main step, for the panel.
@@ -984,6 +1005,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         warn!("{err:#}");
     }
     let worker = tokio::spawn(worker::run(inner.clone()));
+    tokio::spawn(release_memory_now_and_then(inner.clone()));
     let embedding = inner.config.search_by_meaning.then(|| {
         supervise(&inner, "search by meaning", |inner| {
             tokio::task::spawn_blocking(move || embedding::run(inner))
@@ -1025,6 +1047,25 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         news,
         adult,
     })
+}
+
+/// How often a running node hands the memory its threads freed back to the
+/// system, besides after each background job: a crawl round runs for most
+/// of an hour, and searches, the network and embedding free memory
+/// meanwhile, which would otherwise sit in the allocator until swapped out.
+const RELEASE_MEMORY_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// Hands freed memory back every [`RELEASE_MEMORY_EVERY`] until the node stops.
+async fn release_memory_now_and_then(inner: Arc<Inner>) {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(RELEASE_MEMORY_EVERY) => {}
+            () = inner.stopped() => return,
+        }
+        // Not on an async thread: right after a big job it takes up to a
+        // fifth of a second.
+        let _ = tokio::task::spawn_blocking(crate::release_freed_memory).await;
+    }
 }
 
 /// First wait before a background task that panicked is started again.
@@ -1537,6 +1578,7 @@ impl Inner {
             meaning_sites: self.meaning.get().map(|meaning| meaning.len() as u64),
             meaning_work: self.meaning_work(),
             can_restart: self.restart.can_restart(),
+            page_coverage: Some(pages::coverage(self)),
             background_updates: self.settings().background_updates,
             paused: pause.as_ref().map(|p| p.reason.clone()),
             paused_until: pause.and_then(|p| p.until),
@@ -2078,6 +2120,15 @@ impl SearchBackend for Inner {
         pages::definition(self, name)
     }
 
+    fn entities(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        pages::entities(self, query, limit, options)
+    }
+
     fn pages_of(
         &self,
         query: &str,
@@ -2087,6 +2138,19 @@ impl SearchBackend for Inner {
         keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
     ) -> Vec<plumb_index::pages::PageHit> {
         pages::pages_of(self, query, limit, options, docs, keep)
+    }
+
+    fn papers(
+        &self,
+        query: &plumb_core::paper_query::PaperQuery,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        pages::papers(self, query, limit, options)
+    }
+
+    fn paper_coverage(&self) -> Option<plumb_index::pages::PaperCoverage> {
+        pages::paper_coverage(self)
     }
 
     fn num_docs(&self) -> u64 {
@@ -2104,6 +2168,21 @@ impl Inner {
         options: &SearchOptions,
         rank: Option<&RankConfig>,
     ) -> Result<SearchResults> {
+        let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
+        if paper.constrained {
+            let found = pages::papers(self, &paper, limit, options)?;
+            return Ok(SearchResults {
+                pages: found
+                    .into_iter()
+                    .map(|hit| plumb_index::pages::PlacedPage {
+                        hit,
+                        under: None,
+                        at: 0,
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        }
         let Some(index) = self.current() else {
             bail!("the search index is not ready yet");
         };

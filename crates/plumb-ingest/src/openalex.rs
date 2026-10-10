@@ -22,12 +22,13 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{Article, MAX_ARTICLE_DESCRIPTION_CHARS};
+use plumb_core::papers::{valid_date, PaperCountKind, PaperMetadata, MAX_PAPER_AUTHORS};
 use serde::Deserialize;
 use tracing::{info, warn};
 
 const WORKS_URL: &str = "https://api.openalex.org/works";
-/// Works a request, OpenAlex's most.
-pub const PER_PAGE: usize = 200;
+/// Supported maximum; the legacy 200-row behavior is deprecated.
+pub const PER_PAGE: usize = 100;
 /// Fewest citations of a paper kept, unless asked otherwise.
 pub const DEFAULT_MIN_CITATIONS: u64 = 200;
 /// Most citations a year a paper is believed to have: the most cited
@@ -61,6 +62,8 @@ pub struct Work {
     #[serde(default)]
     pub publication_year: Option<i32>,
     #[serde(default)]
+    pub publication_date: Option<String>,
+    #[serde(default)]
     pub cited_by_count: u64,
     #[serde(default)]
     pub authorships: Vec<Authorship>,
@@ -72,6 +75,19 @@ pub struct Work {
     pub best_oa_location: Option<Location>,
     #[serde(default)]
     pub locations: Vec<Location>,
+    #[serde(default)]
+    pub primary_topic: Option<PrimaryTopic>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrimaryTopic {
+    #[serde(default)]
+    pub domain: Option<TopicDomain>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TopicDomain {
+    pub id: String,
 }
 
 /// Whether a work is free to read and where, from Unpaywall's data.
@@ -205,23 +221,52 @@ fn strip_tags(text: &str) -> String {
 
 impl Work {
     /// The work as an articles file line (see the module docs), `None`
-    /// without a title.
+    /// without a usable title or primary identity. Rejected provider
+    /// identities are reported; blank DOI values are missing metadata.
     pub fn to_article(&self) -> Option<Article> {
         let title = plumb_core::collapse_whitespace(&strip_tags(
             self.display_name.as_deref().unwrap_or(""),
         ));
-        if title.is_empty() {
+        if title.is_empty() || title.chars().count() > 2000 {
             return None;
         }
-        let item = match self.doi.as_deref() {
-            Some(doi) => doi
-                .trim_start_matches("https://doi.org/")
-                .trim_start_matches("http://doi.org/")
-                .to_string(),
-            None => self
-                .id
-                .trim_start_matches("https://openalex.org/")
-                .to_string(),
+        let doi = self
+            .doi
+            .as_deref()
+            .map(|value| {
+                value
+                    .trim()
+                    .trim_start_matches("https://doi.org/")
+                    .trim_start_matches("http://doi.org/")
+                    .trim()
+                    .to_ascii_lowercase()
+            })
+            .filter(|value| !value.is_empty());
+        if doi.as_deref().is_some_and(|id| {
+            id.contains(char::is_whitespace)
+                || !id
+                    .strip_prefix("10.")
+                    .and_then(|rest| rest.split_once('/'))
+                    .is_some_and(|(prefix, suffix)| {
+                        !prefix.is_empty()
+                            && prefix.bytes().all(|b| b.is_ascii_digit())
+                            && !suffix.is_empty()
+                    })
+        }) {
+            warn!("OpenAlex work has a malformed DOI; record rejected before caching");
+            return None;
+        }
+        let provider_id = self.id.trim().trim_start_matches("https://openalex.org/");
+        let openalex_id = provider_id
+            .strip_prefix('W')
+            .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+            .map(|_| provider_id.to_string());
+        if openalex_id.is_none() {
+            warn!("OpenAlex work has no valid OpenAlex identifier");
+        }
+        let Some(item) = doi.clone().or_else(|| openalex_id.clone()) else {
+            warn!("OpenAlex work has no usable primary identity; record rejected before caching");
+            return None;
         };
         let authors: Vec<&str> = self
             .authorships
@@ -271,6 +316,41 @@ impl Work {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
+            language: None,
+            paper: Some(PaperMetadata {
+                doi: doi.clone(),
+                openalex_id,
+                arxiv_id: doi
+                    .as_ref()
+                    .and_then(|doi| {
+                        doi.to_ascii_lowercase()
+                            .split_once(ARXIV_DOI)
+                            .map(|(_, id)| id.to_string())
+                    })
+                    .or_else(|| self.locations.iter().find_map(arxiv_id)),
+                authors: authors
+                    .iter()
+                    .take(MAX_PAPER_AUTHORS)
+                    .map(|a| a.to_string())
+                    .collect(),
+                publication_date: self
+                    .publication_date
+                    .as_ref()
+                    .filter(|date| valid_date(date))
+                    .cloned(),
+                publication_year: self.publication_year,
+                raw_publication_date: self.publication_date.clone(),
+                venue: self
+                    .primary_location
+                    .as_ref()
+                    .and_then(|l| l.source.as_ref()?.display_name.clone()),
+                source: "openalex".into(),
+                count: self.cited_by_count,
+                count_kind: PaperCountKind::Citations,
+                alternate_urls: free_copy(self).into_iter().collect(),
+                ..PaperMetadata::default()
+            }),
         })
     }
 }
@@ -281,6 +361,9 @@ pub const ARXIV_DOI: &str = "10.48550/arxiv.";
 /// The year of a paper written by [`Work::to_article`], from its
 /// description ("Paper by A et al., 2017, Venue").
 fn year_of(paper: &Article) -> Option<u64> {
+    if let Some(year) = paper.paper.as_ref().and_then(|m| m.publication_year) {
+        return u64::try_from(year).ok();
+    }
     paper
         .description
         .as_deref()?
@@ -411,7 +494,7 @@ pub async fn fetch_papers(
     );
     // What the progress folder is kept for: papers fetched before free
     // copies were kept are fetched again.
-    let key = format!("{filter};free-copies");
+    let key = format!("{filter};paper-metadata-v1;per-page={PER_PAGE}");
     let progress = progress.map(Progress::new).transpose()?;
     let (mut articles, mut cursor) = match &progress {
         Some(progress) => progress.resume(&key)?,
@@ -430,7 +513,7 @@ pub async fn fetch_papers(
             ("cursor", at),
             (
                 "select",
-                "id,doi,display_name,publication_year,cited_by_count,authorships,primary_location,\
+                "id,doi,display_name,publication_year,publication_date,cited_by_count,authorships,primary_location,\
                  open_access,best_oa_location,locations"
                     .to_string(),
             ),
@@ -571,6 +654,35 @@ mod tests {
         assert_eq!(articles[1].title, "Growth of E. coli");
         assert_eq!(articles[1].item.as_deref(), Some("W1"));
         assert_eq!(articles[1].description.as_deref(), Some("Paper"));
+    }
+
+    #[test]
+    fn provider_identities_keep_blank_dois_out_of_primary_and_metadata_fields() {
+        for doi in [None, Some(""), Some("  "), Some("https://doi.org/")] {
+            let work: Work = serde_json::from_value(serde_json::json!({
+                "id": "https://openalex.org/W987654", "doi": doi,
+                "display_name": "Unseen synthetic publication"
+            }))
+            .unwrap();
+            let article = work.to_article().unwrap();
+            assert_eq!(article.item.as_deref(), Some("W987654"));
+            let metadata = article.paper.as_ref().unwrap();
+            assert_eq!(metadata.doi, None);
+            assert_eq!(metadata.openalex_id.as_deref(), Some("W987654"));
+            crate::paper_validation::validate_consistency(&[article]).unwrap();
+        }
+        for doi in ["not-a-doi", "10./missing", "10.1234/", "10.1234/has space"] {
+            let work: Work = serde_json::from_value(serde_json::json!({
+                "id": "W987654", "doi": doi, "display_name": "Synthetic publication"
+            }))
+            .unwrap();
+            assert!(work.to_article().is_none(), "{doi}");
+        }
+        let work: Work = serde_json::from_value(serde_json::json!({
+            "id": "invalid-provider-id", "doi": "", "display_name": "Synthetic publication"
+        }))
+        .unwrap();
+        assert!(work.to_article().is_none());
     }
 
     #[test]

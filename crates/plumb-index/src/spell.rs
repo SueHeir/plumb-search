@@ -507,7 +507,7 @@ impl Speller<'_> {
 /// "perf1"), and a plural is not a slip of the word ("buffers").
 fn plausible_fix(word: &str, term: &str) -> bool {
     let digits = |w: &str| w.chars().any(|c| c.is_ascii_digit());
-    !(digits(term) && !digits(word)) && !crate::spell_model::plural_pair(word, term)
+    !(crate::spell_model::plural_pair(word, term) || digits(term) && !digits(word))
 }
 
 /// Whether `term` can be what the word `word` was meant as: as

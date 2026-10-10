@@ -135,7 +135,32 @@ fn page_line(out: &mut String, page: &Value) {
     if let Some(url) = text(page, "url") {
         let _ = write!(out, " {url}");
     }
+    if text(page, "set") == Some("papers") {
+        if let Some(paper) = page.get("paper").and_then(|value| {
+            serde_json::from_value::<plumb_core::papers::PaperMetadata>(value.clone()).ok()
+        }) {
+            for (label, date) in paper.date_labels() {
+                let _ = write!(out, "; {label} {date}");
+            }
+            let _ = write!(out, "; {} {}", paper.count, paper.count_label());
+        } else {
+            out.push_str("; Published unknown; count type unknown");
+        }
+    }
     out.push('\n');
+    if let Some(excerpt) = page.get("source_excerpt") {
+        if let Some(source) = text(excerpt, "text") {
+            out.push_str("  Source excerpt");
+            if let Some(heading) = text(excerpt, "heading") {
+                let _ = write!(out, " ({heading})");
+            }
+            let _ = write!(out, ": {source}");
+            if let Some(url) = text(excerpt, "url").filter(|url| Some(*url) != text(page, "url")) {
+                let _ = write!(out, " {url}");
+            }
+            out.push('\n');
+        }
+    }
 }
 
 /// "[crates.io] serde 1.0.228 (2025-09-27, MIT OR Apache-2.0): A generic
@@ -312,7 +337,12 @@ fn search(out: &mut String, answer: &Value) {
         numbered(out);
         page_line(out, page);
     }
-    if sites.is_empty() && pages.is_empty() {
+    if sites.is_empty()
+        && pages.is_empty()
+        && answer
+            .get("places")
+            .is_none_or(|places| list(places, "hits").is_empty())
+    {
         let query = text(answer, "query").unwrap_or("");
         match text(answer, "kind") {
             Some(kind) => {
@@ -323,6 +353,23 @@ fn search(out: &mut String, answer: &Value) {
             }
         }
     }
+    let related = list(answer, "related_packages");
+    if !related.is_empty() {
+        out.push_str("Related package information:\n");
+        for card in related {
+            package_line(out, card);
+        }
+    }
+    if let Some(message) = text(answer, "coverage_message") {
+        let _ = writeln!(out, "{message}");
+    }
+    if let Some(coverage) = answer.get("paper_coverage").filter(|p| p.is_object()) {
+        let _ = writeln!(
+            out,
+            "Indexed papers: {}; known publication year: {}; known publication day: {}.",
+            coverage["total"], coverage["publication_year"], coverage["publication_day"]
+        );
+    }
     if let Some(site_search) = answer.get("site_search").filter(|s| s.is_object()) {
         let _ = writeln!(
             out,
@@ -332,16 +379,54 @@ fn search(out: &mut String, answer: &Value) {
             text(site_search, "url").unwrap_or("")
         );
     }
+    if let Some(places) = answer.get("places") {
+        match text(places, "status") {
+            Some("missing_location") => out.push_str("Places: supply a town in the query (for example coffee in Denver); country alone cannot locate near me.\n"),
+            Some("location_unavailable") => out.push_str("Places: the requested location is unavailable in this index.\n"),
+            _ => {
+                let center = places.get("center").and_then(|p| text(p, "name")).unwrap_or("");
+                let _ = writeln!(out, "Places near {center} (distance in km):");
+                if list(places, "hits").is_empty() { out.push_str("No indexed matches within the searched radius.\n"); }
+                for hit in list(places, "hits") {
+                    let place = &hit["place"];
+                    let _ = writeln!(out, "- {}: {}; {} km; OSM {}{}",
+                        text(place, "name").unwrap_or(""), text(place, "address").unwrap_or(""),
+                        hit["km"], text(place, "osm").unwrap_or(""),
+                        text(place, "website").map(|url| format!("; {url}")).unwrap_or_default());
+                }
+            }
+        }
+        let _ = writeln!(
+            out,
+            "Places © OpenStreetMap contributors, ODbL: {}",
+            text(places, "attribution_url").unwrap_or("")
+        );
+    }
+    if answer
+        .get("news_status")
+        .is_some_and(|status| text(status, "status") == Some("source_unavailable"))
+    {
+        let status = &answer["news_status"];
+        let _ = writeln!(
+            out,
+            "No current indexed headlines available from {}'s feeds.",
+            text(status, "site").unwrap_or("the requested publisher")
+        );
+    }
     let recent = list(answer, "recent");
     if !recent.is_empty() {
         out.push_str("Recent headlines:\n");
         for headline in recent {
+            let date = text(headline, "published_date")
+                .map(|date| format!(", {date}"))
+                .unwrap_or_default();
             let _ = writeln!(
                 out,
-                "- {} ({}, {}) {}",
+                "- {} ({}, {}{}) {}",
                 text(headline, "title").unwrap_or(""),
                 text(headline, "site").unwrap_or(""),
                 text(headline, "published").unwrap_or(""),
+                date,
                 text(headline, "url").unwrap_or("")
             );
         }
@@ -372,9 +457,21 @@ fn search(out: &mut String, answer: &Value) {
 
 fn official_site(out: &mut String, answer: &Value) {
     let name = text(answer, "name").unwrap_or("");
+    if let Some(conflict) = answer.get("country_conflict").filter(|c| c.is_object()) {
+        let _ = writeln!(
+            out,
+            "Using the query's jurisdiction {} over country preference {}.",
+            text(conflict, "query").unwrap_or(""),
+            text(conflict, "preference").unwrap_or("")
+        );
+    }
     if !flag(answer, "found") {
-        let _ = writeln!(out, "Plumb knows no site called \"{name}\".");
+        let _ = writeln!(
+            out,
+            "Plumb could not establish an official destination for \"{name}\"."
+        );
         why(out, answer, "why");
+        other_candidates(out, answer);
         if let Some(fixed) = text(answer, "did_you_mean") {
             let _ = writeln!(out, "Did you mean \"{fixed}\"?");
         }
@@ -382,7 +479,12 @@ fn official_site(out: &mut String, answer: &Value) {
     }
     let _ = writeln!(
         out,
-        "Official site for \"{name}\": {} {} (confidence {})",
+        "{} for \"{name}\": {} {} (confidence {})",
+        if text(answer, "confidence") == Some("low") {
+            "Unverified candidate"
+        } else {
+            "Official site"
+        },
         text(answer, "domain").unwrap_or(""),
         text(answer, "url").unwrap_or(""),
         text(answer, "confidence").unwrap_or("low")
@@ -395,15 +497,19 @@ fn official_site(out: &mut String, answer: &Value) {
         out.push('\n');
     }
     why(out, answer, "why");
+    other_candidates(out, answer);
+    if let Some(fixed) = text(answer, "did_you_mean") {
+        let _ = writeln!(out, "Did you mean \"{fixed}\"?");
+    }
+}
+
+fn other_candidates(out: &mut String, answer: &Value) {
     let others: Vec<&str> = list(answer, "alternatives")
         .iter()
         .filter_map(|site| text(site, "domain"))
         .collect();
     if !others.is_empty() {
         let _ = writeln!(out, "Other candidates: {}", others.join(", "));
-    }
-    if let Some(fixed) = text(answer, "did_you_mean") {
-        let _ = writeln!(out, "Did you mean \"{fixed}\"?");
     }
 }
 
@@ -434,6 +540,7 @@ fn check_lookalike(out: &mut String, answer: &Value) {
                 "official" => "the official site",
                 "known_site" => "a well-known site",
                 "little_known" => "a little-known site, not a known look-alike",
+                "suspected" => "a possible look-alike with unverified affiliation",
                 _ => "not known to Plumb",
             };
             let _ = writeln!(out, "{input}: {said} (verdict {verdict}).");
@@ -510,7 +617,45 @@ fn facts(out: &mut String, answer: &Value) {
 fn subject_facts(out: &mut String, answer: &Value) {
     if !flag(answer, "found") {
         let subject = text(answer, "subject").unwrap_or("");
-        let _ = writeln!(out, "Plumb has no facts about {subject}.");
+        match text(answer, "status") {
+            Some("unsupported_property") => {
+                let about = text(answer, "about").unwrap_or("");
+                let supported: Vec<_> = list(answer, "supported")
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect();
+                let _ = writeln!(
+                    out,
+                    "Plumb keeps no facts of the kind {about:?}; it knows {}.",
+                    supported.join(", ")
+                );
+            }
+            Some("ambiguous_entity") => {
+                let _ = writeln!(out, "{subject} names several entities; specify one:");
+                for candidate in list(answer, "candidates") {
+                    let _ = writeln!(
+                        out,
+                        "{} [{}] {}",
+                        text(candidate, "title").unwrap_or(""),
+                        text(candidate, "item").unwrap_or(""),
+                        text(candidate, "url").unwrap_or("")
+                    );
+                }
+            }
+            Some("missing_enrichment") => {
+                let title = text(answer, "title").unwrap_or(subject);
+                let _ = writeln!(out, "Plumb resolved {subject} to {title}, but lacks the requested indexed facts. Freshness is unknown.");
+            }
+            Some("unresolved_entity") => {
+                let _ = writeln!(
+                    out,
+                    "Plumb could not resolve {subject} to an indexed entity."
+                );
+            }
+            _ => {
+                let _ = writeln!(out, "Plumb has no facts about {subject}.");
+            }
+        }
         return;
     }
     let title = text(answer, "title").unwrap_or("");

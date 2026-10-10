@@ -466,7 +466,14 @@ fn mcp_command_finds_official_sites_and_lookalikes_in_the_fixtures() {
     for (name, domain) in names {
         let answer = answers.next().unwrap();
         assert_eq!(answer["domain"], domain, "{name}: {answer}");
-        assert_eq!(answer["confidence"], "high", "{name}: {answer}");
+        // This legacy fixture has owner aliases but no Wikidata
+        // descriptions/page index, so Hit carries no owner reference.
+        // The agreeing title/domain identifies a candidate, not verified
+        // ownership. Unit fixtures separately cover explicit owner proof.
+        assert_eq!(answer["confidence"], "low", "{name}: {answer}");
+        assert!(answer["why"]
+            .to_string()
+            .contains("not independently verified"));
     }
     for url in real {
         let answer = answers.next().unwrap();

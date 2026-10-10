@@ -21,8 +21,8 @@ use tracing::{debug, info, warn};
 use url::{Origin, Url};
 
 use crate::{
-    dns, extract_page_meta, normalize_icon, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget,
-    CrawledPage, ROBOTS_TOKEN,
+    dns, normalize_icon, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, CrawledPage,
+    ROBOTS_TOKEN,
 };
 
 const ROBOTS_PATH: &str = "/robots.txt";
@@ -667,6 +667,7 @@ pub(crate) struct Visit<'a> {
     cfg: &'a CrawlConfig,
     robots: HashMap<Origin, Robots>,
     last_answer: HashMap<String, Instant>,
+    extraction: crate::InnerPageExtraction,
 }
 
 impl<'a> Visit<'a> {
@@ -681,7 +682,12 @@ impl<'a> Visit<'a> {
             cfg,
             robots: HashMap::new(),
             last_answer: HashMap::new(),
+            extraction: crate::InnerPageExtraction::Compact,
         }
+    }
+
+    pub(crate) fn set_inner_page_extraction(&mut self, extraction: crate::InnerPageExtraction) {
+        self.extraction = extraction;
     }
 
     /// Fetches the page at `start`, following redirects that stay on its
@@ -922,9 +928,11 @@ impl<'a> Visit<'a> {
         let fetched_at = now_unix();
         // Parsing is CPU work; keep it off the threads driving the other fetches.
         let base_url = final_url.clone();
-        let parsed =
-            tokio::task::spawn_blocking(move || extract_page_meta(&base_url, &decode_html(&body)))
-                .await;
+        let extraction = self.extraction;
+        let parsed = tokio::task::spawn_blocking(move || {
+            crate::extract_inner_page_meta(&base_url, &decode_html(&body), extraction)
+        })
+        .await;
         match parsed {
             Ok(meta)
                 if is_bot_check_page(

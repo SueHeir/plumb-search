@@ -160,6 +160,8 @@ impl Searcher {
                 country,
                 named: false,
                 closeness: None,
+                relevance_tier: 1,
+                query_evidence: None,
                 label_names_query: false,
                 tie_break: (addr.segment_ord, u64::from(addr.doc_id)),
             };

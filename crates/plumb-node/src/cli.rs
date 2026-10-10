@@ -24,6 +24,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Print the embedded version, Git revision and cleanliness as JSON.
+    BuildInfo,
     /// Run a node: set up an index from public seed data on first start,
     /// serve the search page, and keep crawling homepages to refresh the index.
     Run(RunArgs),
@@ -767,6 +769,19 @@ pub struct FetchFactsArgs {
     /// The articles file to add them to instead.
     #[arg(long, value_name = "PATH")]
     pub articles: Option<PathBuf>,
+    /// Repair just these Wikidata IDs, without scanning worldwide facts.
+    #[arg(long, value_name = "QID", num_args = 1.., conflicts_with = "retry_facts")]
+    pub items: Vec<String>,
+    /// Property keys for --items (default: every supported property).
+    #[arg(long, value_name = "KEY", num_args = 1.., requires = "items")]
+    pub properties: Vec<String>,
+    /// Retry the failed item/property pairs of a previous completion JSON.
+    #[arg(long, value_name = "PATH", conflicts_with = "items")]
+    pub retry_facts: Option<PathBuf>,
+    /// Save completion/provenance and retry pairs here (default: next to
+    /// the articles file, with .facts.json appended).
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
     /// Where to read on when Wikidata's query service stops answering a
     /// kind's deep pages (it times out on them): by default QLever's copy
     /// of Wikidata.
@@ -826,6 +841,35 @@ pub struct FetchPagesArgs {
     /// kept).
     #[arg(long, value_name = "DAYS", default_value_t = 20)]
     pub keep_days: u64,
+    /// Docs/reference/subpages: reuse compatible completed caches younger
+    /// than this many days (0 always refreshes).
+    #[arg(long, value_name = "DAYS", default_value_t = 7)]
+    pub cache_max_age_days: u64,
+    /// Docs/reference/subpages: fetch again even when a cache is fresh.
+    #[arg(long)]
+    pub force_refresh: bool,
+    /// Docs/reference/subpages: discard existing hosts intentionally.
+    /// By default successful selected hosts are merged into the old set.
+    #[arg(long)]
+    pub replace_set: bool,
+    /// Docs/reference/subpages: fewest useful pages needed to replace a host.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    pub min_useful_pages: usize,
+    /// Docs/reference/subpages/papers: write an immutable generation for evaluation
+    /// without publishing the set file.
+    #[arg(long, conflicts_with = "promote_generation")]
+    pub stage_only: bool,
+    /// Promote a previously staged generation after its canaries pass.
+    #[arg(long, value_name = "DIR")]
+    pub promote_generation: Option<PathBuf>,
+    /// Docs/reference/subpages/papers: explicitly permit growth beyond 125% of the
+    /// current compressed set (normally left staged for review).
+    #[arg(long)]
+    pub allow_set_growth: bool,
+    /// Docs/reference/subpages/papers: maximum compressed bytes in a candidate set;
+    /// 0 leaves the limit unset. Includes retained hosts in a targeted refresh.
+    #[arg(long, value_name = "BYTES", default_value_t = 0)]
+    pub max_set_bytes: u64,
     /// Wikidata's official websites (wikidata-official-sites.tsv from
     /// fetch-data), so an article about a site's organization is shown
     /// under that site.
@@ -876,6 +920,26 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Papers: opt in to bounded recent publication ingestion ending on this
+    /// inclusive ISO date (YYYY-MM-DD). Requires --work for resumable progress.
+    /// The recent lane stays off unless this option is supplied.
+    #[arg(long, value_name = "DATE", requires = "work")]
+    pub recent_papers_end: Option<String>,
+    /// Papers: inclusive recent publication window, 1..366 days.
+    #[arg(long, value_name = "DAYS", default_value_t = plumb_ingest::recent_papers::DEFAULT_WINDOW_DAYS, requires = "recent_papers_end")]
+    pub recent_papers_days: usize,
+    /// Papers: recent records reserved across date/domain partitions, 1..50000.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::recent_papers::DEFAULT_RECORD_BUDGET, requires = "recent_papers_end")]
+    pub recent_papers_records: usize,
+    /// Papers: most recent-provider requests this invocation, 1..1000. A
+    /// refused or unfinished run retains progress and keeps the previous set.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 1000,
+        requires = "recent_papers_end"
+    )]
+    pub recent_papers_requests: usize,
     /// Papers: most requests to CORE for free copies (fifty papers each),
     /// when CORE_API_KEY is set.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::core_ac::DEFAULT_MAX_REQUESTS)]
@@ -945,11 +1009,13 @@ pub struct FetchPagesArgs {
     /// plumb_core::reference), comma-separated; all when left out.
     #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
     pub reference_sites: Vec<String>,
-    /// Reference: most pages fetched of each site, the shallowest first.
-    /// Sites with a page for every word (dictionaries) take their own
-    /// number, more.
-    #[arg(long, value_name = "N", default_value_t = plumb_ingest::reference::DEFAULT_MAX_PER_SITE)]
-    pub max_reference_per_site: usize,
+    /// Reference: limit pages fetched per host, including hosts with their
+    /// own larger cap. When omitted, use the source cap or 5,000 pages.
+    #[arg(long, value_name = "N")]
+    pub max_reference_per_site: Option<usize>,
+    /// Subpages: limit pages fetched per host, including source-specific caps.
+    #[arg(long, value_name = "N")]
+    pub max_subpages_per_site: Option<usize>,
     /// Subpages: the subpage sites to fetch, by host without `www.`
     /// (nist.gov, chessprogramming.org and others; see
     /// plumb_core::subpages), comma-separated; all when left out.
@@ -1096,7 +1162,7 @@ pub struct SpellingArgs {
 
 #[derive(Debug, Args)]
 pub struct SearchArgs {
-    /// Index directory.
+    /// Site index directory, or a page index with --paper.
     #[arg(long, value_name = "DIR")]
     pub index: PathBuf,
     /// Number of results.
@@ -1109,6 +1175,18 @@ pub struct SearchArgs {
     /// Print the hits as JSON.
     #[arg(long)]
     pub json: bool,
+    /// Search only papers in a locally built page index.
+    #[arg(long)]
+    pub paper: bool,
+    /// Inclusive publication lower bound, YYYY or YYYY-MM-DD.
+    #[arg(long, requires = "paper")]
+    pub after: Option<String>,
+    /// Inclusive publication upper bound, YYYY or YYYY-MM-DD.
+    #[arg(long, requires = "paper")]
+    pub before: Option<String>,
+    /// Paper ordering; newest preserves relevance tiers.
+    #[arg(long, requires = "paper", value_parser = ["relevance", "newest"])]
+    pub order: Option<String>,
     /// Home country, a two-letter code such as US or DE: its sites rank a
     /// little higher, other countries' a little lower [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
@@ -1206,8 +1284,18 @@ pub struct EvalArgs {
     /// Queries file: `query<TAB>expected_domain[,another_ok_domain]` per line;
     /// blank lines and lines starting with `#` are skipped. Can be given
     /// more than once; each file is measured on its own.
-    #[arg(long, value_name = "TSV", required = true)]
+    #[arg(long, value_name = "TSV", required_unless_present = "acceptance")]
     pub queries: Vec<PathBuf>,
+    /// Family-based JSONL contracts, separate from training features.
+    #[arg(long, value_name = "JSONL", requires = "report")]
+    pub acceptance: Vec<PathBuf>,
+    /// Machine-readable manifest, complete responses, stages and summary.
+    /// Core offline mode: findings, personalization, plugins and peers are off.
+    #[arg(long, value_name = "JSONL", requires = "eval_time", conflicts_with_all = ["sweep", "features_out", "facts", "profiles", "follow_suggestions", "rerank_model"])]
+    pub report: Option<PathBuf>,
+    /// Fixed evaluation clock, Unix seconds. Required for reproducible reports.
+    #[arg(long, value_name = "UNIX", value_parser = clap::value_parser!(u64).range(0..=i64::MAX as u64))]
+    pub eval_time: Option<u64>,
     /// Try several rankings in one run: a file of `name<TAB>{"knob": value}`
     /// lines, each changing knobs of the ranking --rank gives. Prints one
     /// table of every queries file under every ranking, and which queries
@@ -1392,6 +1480,107 @@ mod tests {
     }
 
     #[test]
+    fn inner_page_refreshes_have_explicit_cache_stage_and_budget_controls() {
+        let cli = parse(&[
+            "fetch-pages",
+            "--set",
+            "reference",
+            "--out",
+            "scratch/reference.tsv.gz",
+            "--reference-sites",
+            "irs.gov,ssa.gov",
+            "--max-reference-per-site",
+            "12",
+            "--cache-max-age-days",
+            "1",
+            "--force-refresh",
+            "--stage-only",
+            "--max-set-bytes",
+            "1000000",
+        ])
+        .unwrap();
+        let Command::FetchPages(args) = cli.command else {
+            panic!("not fetch-pages")
+        };
+        assert_eq!(args.cache_max_age_days, 1);
+        assert!(args.force_refresh && args.stage_only);
+        assert_eq!(args.max_reference_per_site, Some(12));
+        assert_eq!(args.max_set_bytes, 1000000);
+        assert!(!args.replace_set);
+        assert!(parse(&[
+            "fetch-pages",
+            "--set",
+            "docs",
+            "--out",
+            "docs.tsv.gz",
+            "--stage-only",
+            "--promote-generation",
+            "generation"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn recent_paper_ingestion_is_explicit_and_requires_resumable_work() {
+        let Command::FetchPages(defaults) =
+            parse(&["fetch-pages", "--set", "papers", "--out", "papers.tsv.gz"])
+                .unwrap()
+                .command
+        else {
+            panic!("not fetch-pages")
+        };
+        assert!(defaults.recent_papers_end.is_none());
+        assert!(parse(&[
+            "fetch-pages",
+            "--set",
+            "papers",
+            "--out",
+            "papers.tsv.gz",
+            "--recent-papers-end",
+            "2026-10-09",
+        ])
+        .is_err());
+        assert!(parse(&[
+            "fetch-pages",
+            "--set",
+            "papers",
+            "--out",
+            "papers.tsv.gz",
+            "--recent-papers-requests",
+            "5",
+        ])
+        .is_err());
+        let Command::FetchPages(args) = parse(&[
+            "fetch-pages",
+            "--set",
+            "papers",
+            "--out",
+            "papers.tsv.gz",
+            "--work",
+            "scratch",
+            "--recent-papers-end",
+            "2026-10-09",
+            "--recent-papers-days",
+            "30",
+            "--recent-papers-records",
+            "100",
+            "--recent-papers-requests",
+            "4",
+            "--stage-only",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not fetch-pages")
+        };
+        assert_eq!(args.recent_papers_end.as_deref(), Some("2026-10-09"));
+        assert_eq!(args.recent_papers_days, 30);
+        assert_eq!(args.recent_papers_records, 100);
+        assert_eq!(args.recent_papers_requests, 4);
+        assert!(args.stage_only);
+    }
+
+    #[test]
     fn storage_requires_data_and_accepts_json() {
         assert!(parse(&["storage"]).is_err());
         let Command::Storage(args) = parse(&["storage", "--data", "/data", "--json"])
@@ -1462,6 +1651,107 @@ mod tests {
         assert!(parse(&["search", "--index", "idx"]).is_err());
         assert!(parse(&["search", "--index", "idx", "--limit", "0", "x"]).is_err());
         assert!(parse(&["search", "--index", "idx", "--alpha", "1.5", "x"]).is_err());
+    }
+
+    #[test]
+    fn paper_search_cli_takes_typed_dates_and_order() {
+        let cli = parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--paper",
+            "--after",
+            "2025",
+            "--before",
+            "2026-09-30",
+            "--order",
+            "newest",
+            "transformer",
+        ])
+        .unwrap();
+        let Command::Search(args) = cli.command else {
+            panic!("not search");
+        };
+        assert!(args.paper);
+        let query = plumb_core::paper_query::PaperQuery::with_options(
+            &args.query.join(" "),
+            args.after.as_deref(),
+            args.before.as_deref(),
+            args.order.as_deref(),
+        )
+        .unwrap();
+        assert!(query.newest);
+        assert_eq!(query.before.unwrap().day, Some(20260930));
+        assert!(parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--after",
+            "2025",
+            "transformer"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--paper",
+            "--order",
+            "bad",
+            "transformer"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn facts_targeted_flags_require_an_explicit_item_list() {
+        let cli = parse(&[
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--items",
+            "Q17",
+            "Q408",
+            "--properties",
+            "population",
+            "capital",
+        ])
+        .unwrap();
+        let Command::FetchFacts(args) = cli.command else {
+            panic!("expected fetch-facts");
+        };
+        assert_eq!(args.items, ["Q17", "Q408"]);
+        assert_eq!(args.properties, ["population", "capital"]);
+        assert!(parse(&[
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--properties",
+            "population"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--items",
+            "Q17",
+            "--retry-facts",
+            "report.json"
+        ])
+        .is_err());
+        let cli = parse(&[
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--retry-facts",
+            "report.json",
+        ])
+        .unwrap();
+        let Command::FetchFacts(args) = cli.command else {
+            panic!("expected fetch-facts");
+        };
+        assert_eq!(args.retry_facts, Some(PathBuf::from("report.json")));
     }
 
     #[test]

@@ -37,7 +37,7 @@ plumbsearch.org {
 	# search (the browser fetches buckets and ranks them itself), network
 	# search and the MCP server for AI assistants.
 	# Its dashboard (/app) stays private to the server.
-	@node path /search /api/search /mcp /api/status /opensearch.xml /about /welcome /welcome/* /private /private/* /api/buckets /api/buckets/* /network /api/network/search /api/oblivious/targets /api/oblivious/forward/*
+	@node path /search /api/search /api/recent /mcp /api/status /opensearch.xml /about /welcome /welcome/* /private /private/* /api/buckets /api/buckets/* /network /api/network/search /api/oblivious/targets /api/oblivious/forward/*
 	handle @node {
 		reverse_proxy 127.0.0.1:8080
 	}
