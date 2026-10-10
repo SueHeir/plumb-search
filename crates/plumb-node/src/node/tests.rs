@@ -3396,6 +3396,90 @@ async fn mcp_call(
     (result["structuredContent"].clone(), text)
 }
 
+/// Writes `articles` as the node's whole file of the page set `set`.
+fn write_set_file(dir: &Path, set: &str, articles: &[plumb_core::Article]) {
+    let set = crate::pages::SetInfo::find(set).unwrap();
+    let file = set.file(dir);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    plumb_ingest::articles::write_articles_file(&file, articles).unwrap();
+    let notes = crate::pages::SetFileNotes {
+        lines: articles.len() as u64,
+        complete: true,
+        source_modified: 1,
+        fetched_at: now_unix(),
+        near: 0,
+    };
+    std::fs::write(
+        crate::pages::notes_path(&file),
+        serde_json::to_vec(&notes).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_asks_for_one_kind_of_page() {
+    let dir = seeded_dir();
+    write_set_file(
+        dir.path(),
+        "wikipedia-en",
+        &[plumb_core::Article {
+            title: "Lighthouse".into(),
+            views: 900,
+            ..Default::default()
+        }],
+    );
+    write_set_file(
+        dir.path(),
+        "stackoverflow",
+        &[plumb_core::Article {
+            title: "How do I clean a lighthouse lens?".into(),
+            item: Some("42".into()),
+            views: 10,
+            ..Default::default()
+        }],
+    );
+    let mut config = test_config(dir.path());
+    config.settings.page_sets =
+        crate::pages::PageSets::parse("wikipedia-en=all,stackoverflow=all").unwrap();
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !get(addr, "/search?q=lighthouse")
+        .await
+        .2
+        .contains("wiki/Lighthouse")
+    {
+        assert!(Instant::now() < deadline, "no pages");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let (answer, text) = mcp_call(
+        addr,
+        "search",
+        serde_json::json!({ "query": "lighthouse", "kind": "question" }),
+    )
+    .await;
+    assert_eq!(answer["results"], serde_json::json!([]), "{answer}");
+    let pages = answer["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1, "{answer}");
+    assert_eq!(pages[0]["url"], "https://stackoverflow.com/questions/42");
+    assert!(
+        text.contains("[Stack Overflow] How do I clean a lighthouse lens?"),
+        "{text}"
+    );
+    let (answer, _) = mcp_call(
+        addr,
+        "search",
+        serde_json::json!({ "query": "lighthouse", "kind": "article" }),
+    )
+    .await;
+    let pages = answer["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1, "{answer}");
+    assert_eq!(pages[0]["title"], "Lighthouse");
+
+    node.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_finds_a_page_another_node_s_agent_shared_and_reads_it() {
     // The page both agents read, served here under a public name.

@@ -105,6 +105,46 @@ const MAX_GUESS_WORDS: usize = 4;
 /// of its registry, so "express delivery" is not about a package.
 const GUESSED_PACKAGE: f32 = 0.75;
 
+/// Most subjects `facts` answers in one call, `subject` and
+/// `more_subjects` together.
+const MAX_FACT_SUBJECTS: usize = 10;
+
+/// The kinds of result `search` can be asked for alone (`kind`), each with
+/// what it is: `site` for sites without pages, the others for the pages of
+/// one kind ([`kind_keeps`]).
+const KINDS: &[(&str, &str)] = &[
+    ("site", "sites, without pages"),
+    ("article", "Wikipedia articles"),
+    (
+        "question",
+        "Stack Overflow and other Stack Exchange questions",
+    ),
+    ("package", "packages, with their cards"),
+    ("repo", "GitHub repositories"),
+    ("book", "books, from Open Library"),
+    ("paper", "scholarly papers, from OpenAlex"),
+    (
+        "docs",
+        "pages of software docs (MDN, Python's docs and others)",
+    ),
+];
+
+/// Whether `page` is of the kind `kind` (one of [`KINDS`] other than
+/// `site`).
+fn kind_keeps(kind: &str, page: &Page) -> bool {
+    use plumb_index::pages::{BOOKS_SET, DOCS_SET, GITHUB_SET, PAPERS_SET};
+    match kind {
+        "article" => page.is_article(),
+        "question" => page.is_question(),
+        "package" => page.package.is_some(),
+        "repo" => page.set == GITHUB_SET,
+        "book" => page.set == BOOKS_SET,
+        "paper" => page.set == PAPERS_SET,
+        "docs" => page.set == DOCS_SET,
+        _ => false,
+    }
+}
+
 /// What the server tells a client about itself when it connects.
 const INSTRUCTIONS: &str = "Plumb Search finds official websites, Wikipedia articles, \
      Stack Overflow questions, packages, books, papers and places. Before opening a site you are \
@@ -421,7 +461,15 @@ impl Mcp {
                     language: search_language(args)?,
                     ..self.options(args)?
                 };
-                self.search(&query, limit, &options)
+                let query = match site_arg(args)? {
+                    Some(site) => format!("{query} site:{site}"),
+                    None => query,
+                };
+                match kind_arg(args)? {
+                    None => self.search(&query, limit, &options),
+                    Some("site") => self.search_sites(&query, limit, &options),
+                    Some(kind) => self.search_pages(&query, kind, limit, &options),
+                }
             }
             "site_info" => {
                 let domain = text_arg(args, "domain")?;
@@ -435,8 +483,19 @@ impl Mcp {
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|a| !a.is_empty());
+                let more = more_subjects_arg(args)?;
                 let options = self.options(args)?;
                 self.facts(&subject, about, &options)
+                    .and_then(|mut answer| {
+                        if !more.is_empty() {
+                            let more = more
+                                .iter()
+                                .map(|subject| self.facts(subject, about, &options))
+                                .collect::<Result<Vec<Value>>>()?;
+                            answer["more"] = json!(more);
+                        }
+                        Ok(answer)
+                    })
             }
             "package" => {
                 let name = text_arg(args, "name")?;
@@ -1081,8 +1140,73 @@ impl Mcp {
         limit: Option<usize>,
         options: &SearchOptions,
     ) -> Result<Value> {
+        self.search_with(query, limit, options, false)
+    }
+
+    /// `search` with `kind` `site`: the sites alone, without the pages
+    /// placed among them.
+    pub fn search_sites(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        let mut answer = self.search_with(query, limit, options, true)?;
+        answer["kind"] = json!("site");
+        Ok(answer)
+    }
+
+    /// `search` with another `kind`: the best pages of that kind alone
+    /// ([`kind_keeps`]), from more pages than a search places among sites,
+    /// and for a `site:` search the link into the site's own search.
+    pub fn search_pages(
+        &self,
+        query: &str,
+        kind: &str,
+        limit: Option<usize>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
+        let found = self
+            .backend
+            .pages_of(query, limit, options, kind == "docs", &|page| {
+                kind_keeps(kind, page)
+            });
+        // Pages Plumb lacks may still be on the site.
+        let site_search = if plumb_core::Operators::parse(query).sites.is_empty() {
+            None
+        } else {
+            self.lookup(query, 1, options)?.site_search
+        };
+        let pages: Vec<Value> = found
+            .iter()
+            .enumerate()
+            .map(|(i, hit)| page_entry(&hit.page, None, i + 1))
+            .collect();
+        Ok(json!({
+            "query": query,
+            "kind": kind,
+            "results": [],
+            "pages": pages,
+            "site_search": site_search,
+            "spelling": Value::Null,
+        }))
+    }
+
+    /// [`Mcp::search`], without any pages if `sites_only`.
+    fn search_with(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        options: &SearchOptions,
+        sites_only: bool,
+    ) -> Result<Value> {
         let mut results = self.lookup(query, limit.unwrap_or(DEFAULT_SEARCH_LIMIT), options)?;
+        if sites_only {
+            results.pages.clear();
+        }
         let guessed = match plumb_core::packages::install_command(query) {
+            _ if sites_only => None,
             // "cargo add serde" asks for serde's card, whatever else is found.
             Some((registry, name)) => self.installed_package(registry, &name, options),
             None if results.pages.iter().any(|p| p.hit.page.package.is_some()) => None,
@@ -1170,35 +1294,13 @@ impl Mcp {
             .collect();
         let mut pages: Vec<Value> = guessed
             .iter()
-            .map(|page| {
-                json!({
-                    "title": page.title,
-                    "url": page.url,
-                    "description": page.description.as_deref().map(short),
-                    "set": page.set,
-                    "about_site": Value::Null,
-                    "position": 1,
-                    "package": package_card(page),
-                })
-            })
+            .map(|page| page_entry(page, None, 1))
             .collect();
-        pages.extend(placed.iter().map(|placed| {
-            let mut page = json!({
-                "title": placed.hit.page.title,
-                "url": placed.hit.page.url,
-                "description": placed.hit.page.description.as_deref().map(short),
-                "set": placed.hit.page.set,
-                "about_site": placed.under,
-                "position": placed.at + 1,
-            });
-            if placed.hit.page.package.is_some() {
-                page["package"] = package_card(&placed.hit.page);
-            }
-            if let Some(free) = placed.hit.page.free_copy() {
-                page["free_copy"] = json!(free);
-            }
-            page
-        }));
+        pages.extend(
+            placed
+                .iter()
+                .map(|placed| page_entry(&placed.hit.page, placed.under.as_deref(), placed.at + 1)),
+        );
         let mut sites: Vec<Value> = results
             .hits
             .iter()
@@ -1589,31 +1691,59 @@ impl Mcp {
         options: &SearchOptions,
     ) -> Result<Value> {
         use plumb_core::facts::{fact_asked, FactKind, KINDS};
-        let kinds: Option<Vec<FactKind>> = match about {
-            None => None,
+        // The kinds asked for, and whether only the first of them a page
+        // has is wanted.
+        let (kinds, first_only): (Option<Vec<FactKind>>, bool) = match about {
+            None => (None, false),
             Some(about) => {
                 let key = about.to_lowercase().replace([' ', '_'], "-");
-                let kinds = FactKind::from_key(&key)
-                    .map(|kind| vec![kind])
-                    .or_else(|| fact_asked(&format!("{about} of {subject}")).map(|q| q.kinds))
-                    .or_else(|| fact_asked(&format!("{subject} {about}")).map(|q| q.kinds));
-                let Some(kinds) = kinds else {
+                let asked = |question: String| fact_asked(&question).map(|q| q.kinds);
+                let kinds = match FactKind::from_key(&key) {
+                    // Then the kinds the question asks for after it:
+                    // "height of mount everest" is its elevation, as a
+                    // mountain has no height.
+                    Some(kind) => Some((
+                        asked(format!("{about} of {subject}"))
+                            .filter(|kinds| kinds.first() == Some(&kind))
+                            .unwrap_or_else(|| vec![kind]),
+                        true,
+                    )),
+                    None => asked(format!("{about} of {subject}"))
+                        .or_else(|| asked(format!("{subject} {about}")))
+                        .map(|kinds| (kinds, false)),
+                };
+                let Some((kinds, first_only)) = kinds else {
                     bail!(
                         "Plumb keeps no facts of the kind {about:?}; it knows {}",
                         KINDS.iter().map(|k| k.key()).collect::<Vec<_>>().join(", ")
                     );
                 };
-                Some(kinds)
+                (Some(kinds), first_only)
             }
         };
-        let wanted = |kind: &FactKind| kinds.as_ref().is_none_or(|kinds| kinds.contains(kind));
         let found = self.lookup(subject, PROFILE_SEARCH_LIMIT, options)?;
         let page = answers::fact_pages(&found.pages)
             .map(|placed| &placed.hit.page)
-            .find(|page| page.facts.iter().any(|fact| wanted(&fact.kind)));
+            .find(|page| {
+                page.facts.iter().any(|fact| {
+                    kinds
+                        .as_ref()
+                        .is_none_or(|kinds| kinds.contains(&fact.kind))
+                })
+            });
         let Some(page) = page else {
             return Ok(json!({ "subject": subject, "found": false }));
         };
+        let kinds = kinds.map(|kinds| {
+            match kinds
+                .iter()
+                .find(|kind| page.facts.iter().any(|fact| fact.kind == **kind))
+            {
+                Some(&first) if first_only => vec![first],
+                _ => kinds,
+            }
+        });
+        let wanted = |kind: &FactKind| kinds.as_ref().is_none_or(|kinds| kinds.contains(kind));
         let item_url = page
             .item
             .as_deref()
@@ -2029,6 +2159,19 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
                     "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "description": "How many results to return (default 5, or 3 when the search has a direct answer such as a package card or an answer found before)." },
                     "country": country,
                     "language": { "type": "string", "description": "Optional language of the sites, a code such as en or de (default en); \"any\" for every language." },
+                    "site": { "type": "string", "description": "Optional: only results on this site, a domain such as docs.python.org or github.com (like site: in the query): the pages Plumb has there, and a link into the site's own search for the rest." },
+                    "kind": {
+                        "type": "string",
+                        "enum": KINDS.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+                        "description": format!(
+                            "Optional: only one kind of result, best first: {}.",
+                            KINDS
+                                .iter()
+                                .map(|(key, what)| format!("{key} ({what})"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -2085,6 +2228,12 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
                 "properties": {
                     "subject": { "type": "string", "description": "What the facts are about, by name." },
                     "about": { "type": "string", "description": "Optional: only one kind of fact (\"ceo\", \"population\", \"capital\")." },
+                    "more_subjects": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": MAX_FACT_SUBJECTS - 1,
+                        "description": "Optional: more names to answer in the same call, each like subject (\"Canada\", \"Japan\"), to compare several things without a call for each.",
+                    },
                     "country": country,
                 },
                 "required": ["subject"],
@@ -2255,6 +2404,114 @@ fn whole_number(args: &Map<String, Value>, name: &str) -> Result<Option<usize>, 
             .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
             .ok_or((INVALID_PARAMS, format!("{name} must be a whole number"))),
     }
+}
+
+/// A page among `search`'s results: listed under the site `under`, or
+/// alone at `position` (from 1) among the sites.
+fn page_entry(page: &Page, under: Option<&str>, position: usize) -> Value {
+    let mut entry = json!({
+        "title": page.title,
+        "url": page.url,
+        "description": page.description.as_deref().map(short),
+        "set": page.set,
+        "about_site": under,
+        "position": position,
+    });
+    if page.package.is_some() {
+        entry["package"] = package_card(page);
+    }
+    if let Some(free) = page.free_copy() {
+        entry["free_copy"] = json!(free);
+    }
+    entry
+}
+
+/// `search`'s optional `site`: one domain, or a URL on it, whose results
+/// alone are wanted.
+fn site_arg(args: &Map<String, Value>) -> Result<Option<String>, (i64, String)> {
+    let Some(site) = args
+        .get("site")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|site| !site.is_empty())
+    else {
+        return Ok(None);
+    };
+    let ops = plumb_core::Operators::parse(&format!("site:{site}"));
+    match ops.sites.as_slice() {
+        // "github" alone would be a top-level domain: a model means the site.
+        [host] if host.contains('.') && !site.contains(char::is_whitespace) => {
+            Ok(Some(host.clone()))
+        }
+        _ => Err((
+            INVALID_PARAMS,
+            format!("site must be one domain, such as docs.python.org; got {site:?}"),
+        )),
+    }
+}
+
+/// `search`'s optional `kind`: one of [`KINDS`].
+fn kind_arg(args: &Map<String, Value>) -> Result<Option<&'static str>, (i64, String)> {
+    let Some(kind) = args
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty() && !kind.eq_ignore_ascii_case("any"))
+    else {
+        return Ok(None);
+    };
+    let kind = kind.to_lowercase();
+    // "articles", "questions": as a model may write them.
+    let key = kind
+        .strip_suffix('s')
+        .filter(|k| *k != "doc")
+        .unwrap_or(&kind);
+    KINDS
+        .iter()
+        .map(|(key, _)| *key)
+        .find(|known| *known == key || *known == kind)
+        .map(Some)
+        .ok_or((
+            INVALID_PARAMS,
+            format!(
+                "kind must be one of {}; got {kind:?}",
+                KINDS
+                    .iter()
+                    .map(|(key, _)| *key)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ))
+}
+
+/// `facts`' optional `more_subjects`: names, each cut as `subject` is.
+fn more_subjects_arg(args: &Map<String, Value>) -> Result<Vec<String>, (i64, String)> {
+    let names = match args.get("more_subjects") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(names)) => names,
+        Some(_) => {
+            return Err((
+                INVALID_PARAMS,
+                "more_subjects must be a list of names".to_string(),
+            ))
+        }
+    };
+    let names: Vec<String> = names
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|name| truncate_chars(&plumb_core::collapse_whitespace(name), MAX_QUERY_CHARS))
+        .filter(|name| !name.is_empty())
+        .collect();
+    if names.len() >= MAX_FACT_SUBJECTS {
+        return Err((
+            INVALID_PARAMS,
+            format!(
+                "at most {} more_subjects in one call",
+                MAX_FACT_SUBJECTS - 1
+            ),
+        ));
+    }
+    Ok(names)
 }
 
 /// A package's card in a tool's answer.
