@@ -5239,13 +5239,14 @@ mod tests {
         assert!(used > 0);
         budget.set_limit(used);
         config.search_scope = SearchScope::Trusted;
+        let rejected_before_restart = budget.status().rejected_writes;
         let (handle, records) = start(config.clone(), source.clone()).await.unwrap();
         let recounted = handle.recount().await.unwrap();
         assert!(recounted.epochs.is_empty());
         assert_eq!(std::fs::read(&table_path).unwrap(), old_table);
         assert!(!table_path.with_extension("tmp").exists());
         assert_eq!(std::fs::read(dir.path().join(SCOPE_FILE)).unwrap(), old);
-        assert!(budget.status().rejected_writes > 0);
+        assert!(budget.status().rejected_writes > rejected_before_restart);
         assert_eq!(budget.status().reserved_bytes, 0);
         assert_eq!(
             budget.status().used_bytes,
