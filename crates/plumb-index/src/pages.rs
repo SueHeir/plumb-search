@@ -7878,16 +7878,77 @@ mod tests {
         );
         let mut album = page("Moonbridge (album)", 100, &[]);
         album.description = Some("A studio album with tour recordings.".into());
-        let (_dir, s) = searcher(&[village, protocol, rows, album]);
+        let (_dir, s) = searcher(&[village, protocol, rows.clone(), album]);
         for query in [
             "Please tell me about Moonbridge",
             "Please show me Moonbridge tour",
             "Show me how to find RowCompass duplicate rows",
-            "What is RowCompass duplicate rows definition?",
         ] {
             let hits = s.search(query, 10).unwrap();
             assert!(place_pages(query, &[], hits).is_empty(), "{query}");
         }
+
+        // The new subject score must retain and require trailing task
+        // words. Existing partial/hinted paths can still return a page;
+        // this score is not a veto of every other retrieval path.
+        let inside_keys = HashSet::from([analysis::tokens(&s.joined, &rows.title).pop().unwrap()]);
+        let mut supported = rows.clone();
+        supported.description = Some("Find duplicate rows in a database; their definition.".into());
+        for (query, task) in [
+            ("Show me how to find RowCompass duplicate rows", "find"),
+            (
+                "What is RowCompass duplicate rows definition?",
+                "definition",
+            ),
+        ] {
+            let words = analysis::tokens(&s.words, query);
+            let substantive = s.subject_words(&words);
+            let versions = version_evidence(query);
+            assert!(substantive.iter().any(|word| word == task), "{query}");
+            assert_eq!(
+                s.subject_match(&rows, &words, &substantive, &inside_keys, &versions),
+                0.0,
+                "unsupported {task} must not gain the subject score"
+            );
+            assert_eq!(
+                s.subject_match(&supported, &words, &substantive, &inside_keys, &versions),
+                PARTIAL_MATCH,
+                "supported {task} remains usable"
+            );
+        }
+
+        // Preserve the exact failed query and reference fixture. The
+        // pre-existing reference matcher covers three of its four stems,
+        // and the old name hint also searches without "definition".
+        let query = "What is RowCompass duplicate rows definition?";
+        let stems = s.question_words(query);
+        let topic: HashSet<_> = analysis::tokens(&s.stemmed, &rows.topic().unwrap())
+            .into_iter()
+            .collect();
+        assert_eq!(stems.len(), 4);
+        assert_eq!(stems.iter().filter(|stem| topic.contains(*stem)).count(), 3);
+        let (legacy_score, legacy_whole) = s.question_match(&rows, &stems, Some(&stems[0]));
+        assert!(legacy_score > 0.0 && !legacy_whole);
+        let raw = s.search_once(query, 10, None).unwrap();
+        let raw_hit = raw.iter().find(|hit| hit.page.url == rows.url).unwrap();
+        assert_eq!(raw_hit.popularity, 1.0);
+        assert_eq!(raw_hit.score, legacy_score, "{raw_hit:?}");
+        assert!(!raw_hit.named && !raw_hit.whole, "{raw_hit:?}");
+
+        let (hinted, _) = hinted_name(query).unwrap();
+        let hinted_hits = s.search_once(&hinted, 10, None).unwrap();
+        let hinted_hit = hinted_hits
+            .iter()
+            .find(|hit| hit.page.url == rows.url)
+            .unwrap();
+        assert!(hinted_hit.whole && !hinted_hit.named, "{hinted_hit:?}");
+        let hits = s.search(query, 10).unwrap();
+        let hit = hits.iter().find(|hit| hit.page.url == rows.url).unwrap();
+        assert_eq!(hit.score, raw_hit.score.max(hinted_hit.score), "{hit:?}");
+        assert!(!hit.named && hit.whole, "{hit:?}");
+        assert!(place_pages(query, &[], hits)
+            .iter()
+            .any(|page| page.hit.page.url == rows.url));
     }
 
     #[test]
