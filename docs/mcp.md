@@ -99,6 +99,8 @@ Found before (searched "tokio latest version", 2 days ago): 1.47.1 Source: https
 
 Searches say a lot about whoever makes them, so findings never leave the node unless an agent shares one (below). They are kept in `findings.jsonl` in its data folder (the newest 5,000), and only apps on the node's own computer can report them or see them, even on a node run with `--mcp-read-pages`. A node run with `--mcp-findings` lets every client report and see findings, for a node whose address only people you trust have; sharing a finding with other nodes stays with the node's own computer. A page that `check_lookalike` calls a look-alike is not kept. `plumb serve` keeps no findings. Delete the file to forget them all.
 
+To compare an agent's searches with and without findings, add `?findings=off` to the node's address (`http://127.0.0.1:7586/mcp?findings=off`): that client's searches list no findings or leads and it is not offered `report_finding`, whatever the node's flags. Other clients are unchanged.
+
 ### Sharing a finding with other nodes
 
 On a node in the network run with `plumb run --network --share-findings` (off by default), `report_finding` takes `share: true`, and the finding is also sent to other Plumb nodes as a **lead**: a page an agent found useful for a search, for agents searching other nodes for the same thing. Both have to say so, the node's owner with the flag and the agent with each finding; without the flag the finding is kept and the answer says why it was not shared.
