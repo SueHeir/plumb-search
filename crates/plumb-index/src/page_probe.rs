@@ -621,16 +621,22 @@ fn inspect(root: &Path, request: &Request, report: &mut Report) -> Result<(), Re
 
 /// Hash only a bounded diagnostic executable, never index/corpus files.
 pub fn executable_digest(path: &Path) -> io::Result<String> {
-    let mut file = fs::File::open(path)?;
+    let file = fs::File::open(path)?;
     if file.metadata()?.len() > MAX_READ_BYTES {
         return Err(denied());
     }
+    let mut file = file.take(MAX_READ_BYTES + 1);
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 8192];
+    let mut bytes_read = 0u64;
     loop {
         let n = file.read(&mut buffer)?;
         if n == 0 {
             break;
+        }
+        bytes_read += n as u64;
+        if bytes_read > MAX_READ_BYTES {
+            return Err(denied());
         }
         hash.update(&buffer[..n]);
     }
