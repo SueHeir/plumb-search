@@ -100,6 +100,7 @@ pub fn init_logging() {
 
 /// Runs one `plumb` subcommand.
 pub fn run(cli: Cli) -> Result<()> {
+    limit_allocator_arenas();
     limits::raise_open_file_limit();
     match cli.command {
         Command::Run(args) => run::run(args),
@@ -260,6 +261,38 @@ pub(crate) fn sync_parent_dir(path: &Path) {
     #[cfg(not(unix))]
     {
         let _ = path;
+    }
+}
+
+/// Arenas glibc's allocator keeps at most, unless `MALLOC_ARENA_MAX` or
+/// `GLIBC_TUNABLES` says otherwise. By default a thread may get an arena of
+/// its own, up to eight per CPU, and what a thread frees stays in its arena
+/// for that arena's threads: half an hour after starting, plumbsearch.org
+/// (2.8 million sites, 8 GB of memory) held about 3.5 GB in 75 arena heaps,
+/// and the system was swapping. Building an index of 2.8 million sites is
+/// as fast with four as with no limit, and slower with two.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MAX_ARENAS: std::os::raw::c_int = 4;
+
+/// Has glibc's allocator keep at most [`MAX_ARENAS`] arenas. Runs before
+/// the node starts its threads. Does nothing on other systems.
+pub(crate) fn limit_allocator_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        use std::os::raw::c_int;
+        const M_ARENA_MAX: c_int = -8;
+        extern "C" {
+            fn mallopt(param: c_int, value: c_int) -> c_int;
+        }
+        let tunables = std::env::var("GLIBC_TUNABLES").unwrap_or_default();
+        if std::env::var_os("MALLOC_ARENA_MAX").is_some() || tunables.contains("arena_max") {
+            return;
+        }
+        // SAFETY: mallopt only changes the allocator's settings, and glibc
+        // lets any thread call it at any time.
+        unsafe {
+            mallopt(M_ARENA_MAX, MAX_ARENAS);
+        }
     }
 }
 
