@@ -172,7 +172,7 @@ pub(crate) fn places(
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Row<'a> {
     Site {
-        site: std::borrow::Cow<'a, Hit>,
+        site: Box<std::borrow::Cow<'a, Hit>>,
         pages: Vec<&'a PlacedPage>,
         #[serde(skip_serializing_if = "Option::is_none")]
         navigation: Option<NavigationDestination>,
@@ -218,7 +218,7 @@ pub(crate) fn ordered_rows<'a>(
             .collect();
         let (site, navigation) = site_destination(query, site, navigation_pages);
         rows.push(Row::Site {
-            site,
+            site: Box::new(site),
             pages: supporting,
             navigation,
         });

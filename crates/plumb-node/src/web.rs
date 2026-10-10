@@ -1976,7 +1976,7 @@ async fn api_search(
             for row in &assembled.rows {
                 match row {
                     crate::assembly::Row::Site { site, pages, .. } => {
-                        limited.hits.push(site.as_ref().clone());
+                        limited.hits.push(Hit::clone(site));
                         limited.pages.extend(pages.iter().map(|p| (**p).clone()));
                     }
                     crate::assembly::Row::Page { page } => limited.pages.push((*page).clone()),
