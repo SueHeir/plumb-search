@@ -26,6 +26,9 @@
 //! the panel itself (no `Origin` of another site), so that neither another
 //! machine on the network nor a web page open in a browser can change them.
 
+mod forms;
+pub(super) use forms::{features_error, settings_error};
+
 use std::net::SocketAddr;
 use std::path::Path;
 
@@ -58,7 +61,7 @@ const IDLE_RELOAD_SECONDS: u32 = 60;
 pub(super) const PANEL_STYLE: &str = include_str!("panel.css");
 
 /// The settings form as posted. A checkbox that is not ticked is not sent.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub(super) struct SettingsForm {
     #[serde(default)]
     background_updates: Option<String>,
@@ -293,13 +296,15 @@ pub(super) async fn save_features(State(state): State<AppState>, request: Reques
         Ok(features) => features,
         Err(err) => return panel_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     };
-    let section = match apply_features_form(&form, &mut features) {
+    let section = match apply_features_form(&form, &mut features, "/app") {
         Ok(section) => section,
         Err(response) => return response,
     };
     if let Err(err) = node.change_features(features) {
-        return panel_error(
+        return features_error(
             StatusCode::INTERNAL_SERVER_ERROR,
+            &form,
+            "/app",
             &format!("Could not save feature settings: {err}"),
         );
     }
@@ -314,6 +319,7 @@ pub(super) async fn save_features(State(state): State<AppState>, request: Reques
 pub(super) fn apply_features_form(
     form: &FeaturesForm,
     features: &mut FeatureSettings,
+    base: &str,
 ) -> Result<&'static str, Response> {
     let section = if form.section == "search" {
         "search"
@@ -365,7 +371,12 @@ pub(super) fn apply_features_form(
         }
     }
     if let Err(err) = features.check() {
-        return Err(panel_error(StatusCode::BAD_REQUEST, &err.to_string()));
+        return Err(features_error(
+            StatusCode::BAD_REQUEST,
+            form,
+            base,
+            &err.to_string(),
+        ));
     }
     Ok(section)
 }
@@ -461,14 +472,16 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
         );
     };
     let current = node.settings().unwrap_or_default();
-    let settings = match settings_from_form(&form, &current) {
+    let settings = match settings_from_form(&form, &current, "/app") {
         Ok(settings) => settings,
         Err(response) => return response,
     };
     if let Err(err) = node.change_settings(settings) {
         warn!("could not save the settings: {err:#}");
-        return panel_error(
+        return settings_error(
             StatusCode::INTERNAL_SERVER_ERROR,
+            &form,
+            "/app",
             &format!("Could not save the settings: {err:#}"),
         );
     }
@@ -482,13 +495,16 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
 pub(super) fn settings_from_form(
     form: &SettingsForm,
     current: &NodeSettings,
+    base: &str,
 ) -> Result<NodeSettings, Response> {
     let (Some(download), Some(storage)) = (
         parse_limit(&form.download_limit_mb_per_day),
         parse_limit(&form.storage_limit_mb),
     ) else {
-        return Err(panel_error(
+        return Err(settings_error(
             StatusCode::BAD_REQUEST,
+            form,
+            base,
             "Limits are whole numbers of megabytes, or empty for none. Nothing was changed.",
         ));
     };
@@ -498,8 +514,10 @@ pub(super) fn settings_from_form(
         Some(_) => match (hour(&form.crawl_from), hour(&form.crawl_to)) {
             (Some(from), Some(to)) => Some(CrawlHours { from, to }),
             _ => {
-                return Err(panel_error(
+                return Err(settings_error(
                     StatusCode::BAD_REQUEST,
+                    form,
+                    base,
                     "Crawl hours are whole hours from 0 to 23. Nothing was changed.",
                 ))
             }
@@ -2874,7 +2892,7 @@ mod tests {
         let body = body_text(response).await;
         assert!(body.contains("Nothing was changed."), "{body}");
         assert!(
-            body.contains("<a class=\"btn\" href=\"/app\">Back to the panel</a>"),
+            body.contains("href=\"/app?section=resources\">Back to the panel</a>"),
             "{body}"
         );
         assert!(!node.settings.lock().unwrap().background_updates);

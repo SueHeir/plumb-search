@@ -31,9 +31,9 @@ use url::{Host, Url};
 
 use super::control::{ControlError, ControlView};
 use super::panel::{
-    apply_features_form, forbidden, panel_error, panel_page, paused, refusal, render_panel,
-    settings_from_form, FeaturesForm, PanelQuery, PanelView, PauseForm, RetryForm, SettingsForm,
-    LAYOUT_STYLE, PANEL_STYLE,
+    apply_features_form, features_error, forbidden, panel_error, panel_page, paused, refusal,
+    render_panel, settings_error, settings_from_form, FeaturesForm, PanelQuery, PanelView,
+    PauseForm, RetryForm, SettingsForm, LAYOUT_STYLE, PANEL_STYLE,
 };
 use super::{escape_html, page_with_head, AppState, StatusSource};
 use crate::node::control::{hex_encode, TOKEN_PREFIX};
@@ -724,14 +724,17 @@ async fn change_settings(
         Ok(view) => view.settings,
         Err(error) => return after_change(&remote, Err(error), ""),
     };
-    let settings = match settings_from_form(&form, &current) {
+    let settings = match settings_from_form(&form, &current, &format!("/app/nodes/{}", remote.id)) {
         Ok(settings) => settings,
         Err(response) => return response,
     };
     let body = serde_json::to_vec(&settings).expect("settings as JSON");
     let result = call(&remote, "/api/control/settings", Some(body)).await;
     let back = format!("/app/nodes/{}?section=resources&saved=settings", remote.id);
-    after_change(&remote, result, &back)
+    match result {
+        Ok(_) => Redirect::to(&back).into_response(),
+        Err(ClientError(error)) => settings_error(StatusCode::BAD_GATEWAY, &form, &format!("/app/nodes/{}", remote.id), &format!("Could not confirm the change on {}. Review its saved settings before retrying. {error}", remote.name)),
+    }
 }
 
 async fn change_features(
@@ -756,16 +759,27 @@ async fn change_features(
     // The form holds one section's features; the rest stay as saved there.
     let mut features = match fetch_view(&remote).await {
         Ok(view) => view.saved_features,
-        Err(error) => return after_change(&remote, Err(error), ""),
+        Err(ClientError(error)) => {
+            return features_error(
+                StatusCode::BAD_GATEWAY,
+                &form,
+                &format!("/app/nodes/{}", remote.id),
+                &format!("Could not read the saved features. No changes were sent. {error}"),
+            )
+        }
     };
-    let section = match apply_features_form(&form, &mut features) {
-        Ok(section) => section,
-        Err(response) => return response,
-    };
+    let section =
+        match apply_features_form(&form, &mut features, &format!("/app/nodes/{}", remote.id)) {
+            Ok(section) => section,
+            Err(response) => return response,
+        };
     let body = serde_json::to_vec(&features).expect("features as JSON");
     let result = call(&remote, "/api/control/features", Some(body)).await;
     let back = format!("/app/nodes/{}?section={section}&saved=features", remote.id);
-    after_change(&remote, result, &back)
+    match result {
+        Ok(_) => Redirect::to(&back).into_response(),
+        Err(ClientError(error)) => features_error(StatusCode::BAD_GATEWAY, &form, &format!("/app/nodes/{}", remote.id), &format!("Could not confirm the change on {}. Review its saved settings before retrying. {error}", remote.name)),
+    }
 }
 
 async fn refresh(
@@ -1384,6 +1398,38 @@ mod end_to_end {
         );
         assert!(!page.contains(&token), "the window never sees the token");
         assert!(!page.contains("section=remote"), "{page}");
+
+        // A rejected edit stays attached to the remote node, keeps the draft,
+        // and never forwards invalid settings or exposes its control token.
+        let invalid = form(&[
+            ("download_limit_mb_per_day", "250"),
+            ("storage_limit_mb", "oops"),
+        ]);
+        let (status, _, page) =
+            panel_request(app.clone(), "POST", &format!("{panel}/settings"), &invalid).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(page.contains("value=\"oops\""));
+        assert!(page.contains("value=\"250\""));
+        assert!(page.contains(&format!("action=\"{panel}/settings\"")));
+        assert!(page.contains(&format!("href=\"{panel}?section=resources\"")));
+        assert!(!page.contains(&token));
+        assert_eq!(*server.settings.lock().unwrap(), NodeSettings::default());
+        let invalid_features = form(&[
+            ("section", "network"),
+            ("network", "1"),
+            ("bootstrap", "bad-address"),
+        ]);
+        let (status, _, page) = panel_request(
+            app.clone(),
+            "POST",
+            &format!("{panel}/features"),
+            &invalid_features,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(page.contains(">bad-address</textarea>"));
+        assert!(page.contains(&format!("action=\"{panel}/features\"")));
+        assert_eq!(*server.features.lock().unwrap(), FeatureSettings::default());
 
         let settings = form(&[
             ("download_limit_mb_per_day", "42"),
