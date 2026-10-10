@@ -2264,6 +2264,15 @@ fn facts_resolve_identity_before_display_and_property_availability() {
                 value: "Namesake CEO".into(),
             }],
         ),
+        article(
+            "Pear Records",
+            "Q881",
+            "record label",
+            vec![Fact {
+                kind: FactKind::Ceo,
+                value: "Namesake CEO".into(),
+            }],
+        ),
         article("Mercury (planet)", "Q308", "planet", Vec::new()),
         article(
             "Mercury (element)",
@@ -2311,6 +2320,10 @@ fn facts_resolve_identity_before_display_and_property_availability() {
         assert_eq!(missing["status"], "missing_enrichment");
         assert_eq!(missing["found"], false);
     }
+    let partial = mcp
+        .facts("Pear", Some("ceo"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(partial["status"], "unresolved_entity", "{partial}");
     let ambiguous = mcp
         .facts("Mercury", Some("atomic-number"), &SearchOptions::default())
         .unwrap();
