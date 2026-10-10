@@ -241,8 +241,8 @@ def main():
         manifest["initialize_request"] = request
         manifest["initialize_response"] = reply
         build = reply.get("result", {}).get("_meta", {}).get("plumb.build", {})
-        if args.require_revision and build.get("revision") != args.require_revision:
-            ap.error("node embedded revision does not match --require-revision")
+        if args.require_revision and (build.get("revision") != args.require_revision or build.get("dirty") is not False):
+            ap.error("node must have a matching clean embedded revision for --require-revision")
     groups = defaultdict(list)
     start = time.monotonic()
     incomplete = False

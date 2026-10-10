@@ -609,7 +609,10 @@ fn observe(
         .iter()
         .map(|e| {
             let present = if e.contains("://") {
-                setup.page_urls.iter().any(|u| matches(e, u))
+                match e.strip_suffix('*') {
+                    Some(prefix) => setup.page_urls.iter().any(|u| u.starts_with(prefix)),
+                    None => setup.page_urls.contains(e),
+                }
             } else {
                 setup.searcher.has_domain(e)
             };
@@ -912,9 +915,9 @@ pub(super) fn run(args: &EvalArgs) -> Result<()> {
     }
     if let Some(min) = args.min_top1 {
         for (name, group) in &summaries {
-            let count = group["queries"].as_u64().unwrap_or(0);
+            let count = group["retrieval_queries"].as_u64().unwrap_or(0);
             let top1 = group["top1"].as_u64().unwrap_or(0);
-            if ratio(top1 as usize, count as usize) < min {
+            if count > 0 && ratio(top1 as usize, count as usize) < min {
                 bail!("{name} is below --min-top1 {min}");
             }
         }
