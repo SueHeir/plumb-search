@@ -5401,8 +5401,8 @@ mod tests {
     #[tokio::test]
     async fn invalid_limit_keeps_search_preferences_and_does_not_search() {
         let fake = backend(Vec::new());
-        for path in ["/search", "/network/search"] {
-            let (status, _, body) = get(fake.clone(), &format!("{path}?q=a%3Cb%3E&limit=lots&country=DE&only=1&safe=strict&lang=de&news=off&exact=1&debug=1")).await;
+        for path in ["/search", "/network"] {
+            let (status, _, body) = send(node_router(fake.clone(), node(node_status(Phase::Ready, Step::Idle))), &format!("{path}?q=a%3Cb%3E&limit=lots&country=DE&only=1&safe=strict&lang=de&news=off&exact=1&debug=1")).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert!(body.contains("value=\"a&lt;b&gt;\""));
             assert!(body.contains("<option value=\"DE\" selected>"));
