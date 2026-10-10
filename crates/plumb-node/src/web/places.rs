@@ -122,6 +122,7 @@ pub(super) fn render_places(
                     format!("Several indexed places match <strong>{requested}</strong>: {alternatives}. Add a region or country.")
                 }
                 LocationStatus::UnknownLocation => format!("The places index cannot locate <strong>{requested}</strong>. Add a city, region or country; this does not establish that the place has no businesses."),
+                LocationStatus::MissingLocation if !location.requested.is_empty() => format!("Add a city or region within <strong>{requested}</strong> to search indexed places."),
                 LocationStatus::ConflictingConstraints => format!("<strong>{requested}</strong> conflicts with the requested country. Keep a matching city and country to search places."),
                 _ => String::new(),
             };

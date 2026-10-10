@@ -213,6 +213,22 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
     }
     // "denver pizza", "pizza denver": a town on one side, kind words on the
     // other.
+    // A country after the kind still qualifies the city: "Rome museums
+    // Italy", rather than treating "Italy" as a town and "Rome" as part
+    // of the business name. Only country names, not ambiguous state codes.
+    for count in (1..=3.min(words.len().saturating_sub(2))).rev() {
+        let at = words.len() - count;
+        let country = words[at..].join(" ");
+        if country_of_name(&country).is_some() {
+            if let Some(mut asked) = parse_place_query(&words[..at].join(" ")) {
+                if let Near::Named(name) = &mut asked.near {
+                    name.push(' ');
+                    name.push_str(&country);
+                    return Some(asked);
+                }
+            }
+        }
+    }
     if words.len() >= 2 {
         for town_words in (1..=3.min(words.len() - 1)).rev() {
             let (what, town) = words.split_at(words.len() - town_words);
@@ -737,6 +753,10 @@ impl PlaceSearcher {
         preferred_country: Option<&str>,
         required_country: Option<&str>,
     ) -> Result<LocationResolution> {
+        // Country-only intent cannot select a foreign town of that name:
+        // Italy, Texas or Us, France. A city-state can still resolve to
+        // an actual town within that country (Singapore).
+        let named_country = country_of_name(text);
         let words: Vec<&str> = text
             .split(|c: char| c.is_whitespace() || c == ',')
             .collect();
@@ -755,7 +775,10 @@ impl PlaceSearcher {
             let matching: Vec<Place> = self
                 .named(&name)?
                 .into_iter()
-                .filter(|place| qualifier.is_empty() || place_is_in(place, &qualifier))
+                .filter(|place| {
+                    (qualifier.is_empty() || place_is_in(place, &qualifier))
+                        && named_country.is_none_or(|country| country_matches(place, country))
+                })
                 .collect();
             let mut candidates: Vec<Place> = matching
                 .iter()
@@ -777,6 +800,8 @@ impl PlaceSearcher {
             requested: text.to_string(),
             status: if conflict {
                 LocationStatus::ConflictingConstraints
+            } else if named_country.is_some() {
+                LocationStatus::MissingLocation
             } else {
                 LocationStatus::UnknownLocation
             },
@@ -1209,6 +1234,7 @@ mod tests {
             city("Rome", 37_000, "GA", "US", 34.26, -85.16),
             at("Capitoline Museum", "tourism=museum", 41.901, 12.501),
             at("Poilâne", "shop=bakery", 48.857, 2.352),
+            city("Italy", 2_000, "TX", "US", 32.18, -96.88),
         ]);
         let (_dir, searcher) = index(fixtures);
         let museums = searcher
@@ -1217,6 +1243,21 @@ mod tests {
             .unwrap();
         assert_eq!(museums.center.unwrap().country.as_deref(), Some("IT"));
         assert_eq!(museums.hits[0].place.name, "Capitoline Museum");
+        let qualified = searcher
+            .search("Rome museums Italy", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(qualified.center.unwrap().country.as_deref(), Some("IT"));
+        assert_eq!(qualified.hits[0].place.name, "Capitoline Museum");
+        let country_only = searcher
+            .search("museums in Italy", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert!(country_only.center.is_none());
+        assert_eq!(
+            country_only.location.unwrap().status,
+            LocationStatus::MissingLocation
+        );
         let bakery = searcher
             .search("Poilâne Paris", None, Some("US"), 5)
             .unwrap()
