@@ -89,8 +89,17 @@ def compare(baseline, candidate, mode="ranker"):
                     families[after["case"]["family"]].append(float(b) - float(a))
             metrics[metric] = bootstrap(families)
         groups[f"{status}:{category}"] = {"paired_queries": len(pairs), "metrics": metrics}
+    rank_before, rank_after = old_manifest["rank"], new_manifest["rank"]
+    rank_changes = {key: {"baseline": {"present": key in rank_before, "value": rank_before.get(key)},
+                           "candidate": {"present": key in rank_after, "value": rank_after.get(key)}}
+                    for key in sorted(rank_before.keys() | rank_after.keys())
+                    if key not in rank_before or key not in rank_after or rank_before[key] != rank_after[key]}
     old_p95, new_p95 = old_summary["latency_ms"]["p95"], new_summary["latency_ms"]["p95"]
     return {"schema": 1, "mode": mode, "baseline_build": old_manifest["build"], "candidate_build": new_manifest["build"],
+            "rank_settings": {"baseline": rank_before, "candidate": rank_after, "differences": rank_changes,
+                              "policy": "intentional changes allowed in ranker mode; original defaults preserved"},
+            "learned_models": {"baseline_sha256": old_manifest["learned_model_sha256"],
+                               "candidate_sha256": new_manifest["learned_model_sha256"]},
             "groups": groups, "changes": changes,
             "manual_regressions": [c for c in changes if c["label_status"] == "manual" and not c["after_passed"]],
             "latency_ms": {"baseline_p95": old_p95, "candidate_p95": new_p95,

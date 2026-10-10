@@ -356,3 +356,11 @@ Budgets: one Linux release build at a time, debug/incremental off; core evaluati
 suites, no LLM grading. Resource logs supply peak RSS and latency observations;
 use the coordinator's resource monitor for the 8 GiB RSS / 12 GiB scratch policy,
 which the Python runner does not pretend to enforce as a kernel memory limit.
+
+
+Comparison `--mode ranker` explicitly allows intentional rank-setting/default
+changes, including a new knob absent from the baseline. It retains both original
+serialized configurations and reports each difference with a `present` flag;
+missing baseline keys are never silently filled with candidate defaults. Model
+and corpus controls still hold. `--mode corpus` rejects any rank-setting or
+learned-model difference. The batch runner's `--compare` uses ranker mode.

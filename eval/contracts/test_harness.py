@@ -70,6 +70,12 @@ class HarnessTests(unittest.TestCase):
             save(new, dict(manifest, corpus=[{"sha256": "changed", "bytes": 100}]), query)
             with self.assertRaisesRegex(ValueError, "fixed-corpus"):
                 comparison.compare(old, new)
+            save(new, dict(manifest, rank={"whole_query_relevance": True}), query)
+            difference = comparison.compare(old, new)["rank_settings"]["differences"]["whole_query_relevance"]
+            self.assertEqual(difference["baseline"], {"present": False, "value": None})
+            self.assertEqual(difference["candidate"], {"present": True, "value": True})
+            with self.assertRaisesRegex(ValueError, "identical rank"):
+                comparison.compare(old, new, mode="corpus")
             changed = dict(query, score=dict(score, passed=False, violations=["wrong brand"]))
             save(new, manifest, changed)
             self.assertEqual(len(comparison.compare(old, new)["manual_regressions"]), 1)
