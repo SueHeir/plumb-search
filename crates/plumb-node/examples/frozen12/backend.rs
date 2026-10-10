@@ -10,6 +10,7 @@ pub(super) struct FrozenBackend {
     pub(super) sites: IndexBackend,
     pub(super) pages: PageSearcher,
     pub(super) rank: RankConfig,
+    pub(super) places: Option<plumb_index::places::PlaceSearcher>,
     pub(super) raw: std::sync::Mutex<Option<SearchResults>>,
     pub(super) errors: std::sync::Mutex<Vec<String>>,
 }
@@ -37,7 +38,9 @@ impl FrozenBackend {
 
 impl SearchBackend for FrozenBackend {
     fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        self.sites.search(query, limit)
+        Ok(self
+            .search_full(query, limit, &SearchOptions::default())?
+            .hits)
     }
 
     fn search_full(
@@ -46,20 +49,23 @@ impl SearchBackend for FrozenBackend {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
-        let mut results = self.sites.search_full(query, limit, options)?;
+        let mut results = self
+            .sites
+            .search_full_checked(query, limit, options, None)?;
         if let Some(spelling) = results.spelling.as_ref().filter(|s| s.applied) {
             if self
                 .pages
                 .check_spelling(query, spelling.clone())?
                 .is_none_or(|checked| checked.query != spelling.query)
             {
-                results = self.sites.search_full(
+                results = self.sites.search_full_checked(
                     query,
                     limit,
                     &SearchOptions {
                         exact: true,
                         ..options.clone()
                     },
+                    None,
                 )?;
             }
         }
@@ -75,7 +81,9 @@ impl SearchBackend for FrozenBackend {
         options: &SearchOptions,
         rank: &RankConfig,
     ) -> Result<SearchResults> {
-        let mut results = self.sites.search_ranked(query, limit, options, rank)?;
+        let mut results = self
+            .sites
+            .search_full_checked(query, limit, options, Some(rank))?;
         self.add_pages(query, options, rank, &mut results)?;
         Ok(results)
     }
@@ -85,7 +93,13 @@ impl SearchBackend for FrozenBackend {
     }
 
     fn site(&self, domain: &str) -> Option<Hit> {
-        SearchBackend::site(&self.sites, domain)
+        match self.sites.searcher().site(domain) {
+            Ok(site) => site,
+            Err(err) => {
+                self.errors.lock().unwrap().push(err.to_string());
+                None
+            }
+        }
     }
 
     fn places(
@@ -94,11 +108,23 @@ impl SearchBackend for FrozenBackend {
         home: Option<&str>,
         country: Option<&str>,
     ) -> Option<plumb_index::places::PlaceResults> {
-        self.sites.places(query, home, country)
+        match self.places.as_ref()?.search(query, home, country, 8) {
+            Ok(places) => places,
+            Err(err) => {
+                self.errors.lock().unwrap().push(err.to_string());
+                None
+            }
+        }
     }
 
     fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
-        self.sites.locate(text, country)
+        match self.places.as_ref()?.locate(text, country) {
+            Ok(place) => place,
+            Err(err) => {
+                self.errors.lock().unwrap().push(err.to_string());
+                None
+            }
+        }
     }
 
     fn known_song(&self, query: &str, options: &SearchOptions) -> Option<Page> {

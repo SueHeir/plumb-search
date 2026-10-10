@@ -69,6 +69,7 @@ fn synthetic_backend(root: &Path) -> Arc<backend::FrozenBackend> {
         ),
         pages: plumb_index::pages::PageSearcher::open_retained(&pages).unwrap(),
         rank: RankConfig::default(),
+        places: None,
         raw: Default::default(),
         errors: Default::default(),
     })

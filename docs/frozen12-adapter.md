@@ -112,6 +112,8 @@ copy. Production's partial-result warning behavior is preserved. This runner
 turns those lookup errors into an incomplete report. Raw backend results are
 retained before the router's display row budget, so stronger retrieved pages are
 not inferred absent from a limited response.
+Enabled-model embedding failures and place/auxiliary lookup failures are also
+recorded as incomplete; production's default fallback behavior stays unchanged.
 
 ## Observations and scoring boundary
 

@@ -1,5 +1,5 @@
 //! Shared production page retrieval and placement; no cache or node jobs.
-use crate::web::{IndexBackend, SearchBackend};
+use crate::web::IndexBackend;
 use plumb_core::Operators;
 use plumb_index::pages::{
     add_named_site, drop_namesakes_of_words, lift_named_sites, options_allow, place_operator_pages,
@@ -52,7 +52,19 @@ pub fn add_pages(
             }
             found.retain(|hit| options_allow(options, &hit.page));
             if let Some(index) = sites.filter(|_| rank.add_named_site) {
-                add_named_site(&mut results.hits, &found, |domain| index.site(domain));
+                let lookup_error = std::cell::RefCell::new(None);
+                add_named_site(&mut results.hits, &found, |domain| {
+                    match index.searcher().site(domain) {
+                        Ok(site) => site,
+                        Err(err) => {
+                            *lookup_error.borrow_mut() = Some(err.to_string());
+                            None
+                        }
+                    }
+                });
+                if let Some(error) = lookup_error.into_inner() {
+                    errors.push(error);
+                }
             }
             if rank.drop_namesakes {
                 drop_namesakes_of_words(&mut results.hits, &found);

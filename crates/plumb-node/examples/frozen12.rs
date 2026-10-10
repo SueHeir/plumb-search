@@ -339,15 +339,17 @@ fn run(args: Args) -> Result<()> {
             .map(|m| MeaningIndex::from_args(&m.args()?))
             .transpose()?
             .flatten();
-        let mut index =
+        let index =
             IndexBackend::new(searcher, manifest.rank).with_meaning(SharedMeaning::new(meaning));
-        if let Some(places) = &places {
-            index = index.with_places(plumb_index::places::PlaceSearcher::open_retained(places)?);
-        }
+        let place_searcher = places
+            .as_ref()
+            .map(plumb_index::places::PlaceSearcher::open_retained)
+            .transpose()?;
         let backend = Arc::new(backend::FrozenBackend {
             sites: index,
             pages: plumb_index::pages::PageSearcher::open_retained(&pages)?,
             rank: manifest.rank,
+            places: place_searcher,
             raw: Default::default(),
             errors: Default::default(),
         });
