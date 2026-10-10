@@ -537,6 +537,7 @@ pub(crate) fn build_index(
     index_dir: &Path,
     buckets: Option<&Path>,
     feeds: usize,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
     step: &mut dyn FnMut(Step) -> Result<()>,
 ) -> Result<Built> {
     outlines.retain(|outline| !outline.gone);
@@ -560,10 +561,10 @@ pub(crate) fn build_index(
     let sites = outlines.len();
     step(Step::Started { docs, sites })?;
 
-    let mut index = plumb_index::IndexBuild::new(index_dir)?;
+    let mut index = plumb_index::IndexBuild::new_with_budget(index_dir, budget.clone())?;
     let mut writer = match buckets {
         None => None,
-        Some(dir) => match plumb_net::BucketWriter::new(dir) {
+        Some(dir) => match plumb_net::BucketWriter::new_with_budget(dir, budget.clone()) {
             Ok(writer) => Some(writer),
             Err(err) => {
                 drop_buckets(dir, &err);

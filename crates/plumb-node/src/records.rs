@@ -269,6 +269,7 @@ pub(crate) struct RecordStore {
     /// The journal is folded in once it reaches this size, or a quarter of
     /// the file when that is more.
     min_compact_bytes: u64,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 }
 
 impl RecordStore {
@@ -284,7 +285,16 @@ impl RecordStore {
             journal_path,
             journal: None,
             min_compact_bytes: MIN_COMPACT_BYTES,
+            budget: None,
         }
+    }
+
+    pub(crate) fn with_budget(
+        mut self,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// The records file.
@@ -301,6 +311,49 @@ impl RecordStore {
         for change in changes {
             serde_json::to_writer(&mut lines, change).context("encoding a record change")?;
             lines.push(b'\n');
+        }
+        if let Some(budget) = self.budget.clone() {
+            use plumb_core::storage::{allocation_for, file_bytes};
+            let _mutation = budget.mutation();
+            let old = plumb_core::storage::existing_file_bytes(&self.journal_path)?;
+            let len = file_len(&self.journal_path);
+            let mut reserved = budget.reserve(
+                allocation_for(len.saturating_add(lines.len() as u64).saturating_add(1))
+                    .saturating_sub(old),
+                false,
+            )?;
+            let before_dir = self
+                .journal_path
+                .parent()
+                .map(file_bytes)
+                .transpose()?
+                .unwrap_or(0);
+            let written = (|| -> Result<()> {
+                if self.journal.is_none() {
+                    self.journal = Some(open_journal(&self.journal_path)?);
+                }
+                let journal = self.journal.as_mut().unwrap();
+                let written = journal.write_all(&lines).and_then(|()| journal.sync_data());
+                if written.is_err() {
+                    journal.set_len(len)?;
+                    journal.sync_data()?;
+                }
+                written?;
+                Ok(())
+            })();
+            let new = match (
+                file_bytes(&self.journal_path),
+                self.journal_path.parent().map(file_bytes).transpose(),
+            ) {
+                (Ok(bytes), Ok(parent)) => {
+                    bytes.saturating_add(parent.unwrap_or(0).saturating_sub(before_dir))
+                }
+                _ => old.saturating_add(reserved.bytes()),
+            };
+            reserved.commit(reserved.bytes(), old, new);
+            written?;
+            self.journal_bytes = file_len(&self.journal_path);
+            return Ok(());
         }
         if self.journal.is_none() {
             let journal = open_journal(&self.journal_path)?;
@@ -330,7 +383,21 @@ impl RecordStore {
     pub(crate) fn compact(&mut self, set: &RecordSet) -> Result<usize> {
         // Closed first: Windows cannot delete a file that is open.
         self.journal = None;
-        let written = replace_records(&self.path, sorted_by_link_score(set))?;
+        let written = if let Some(budget) = self.budget.clone() {
+            let mut size = plumb_core::storage::ByteCount {
+                bytes: 0,
+                limit: u64::MAX,
+            };
+            for record in set.iter() {
+                serde_json::to_writer(&mut size, record)?;
+                size.bytes = size.bytes.saturating_add(1);
+            }
+            self.admitted_rewrite(&budget, size.bytes, || {
+                replace_records(&self.path, sorted_by_link_score(set))
+            })?
+        } else {
+            replace_records(&self.path, sorted_by_link_score(set))?
+        };
         self.journal_bytes = 0;
         self.file_bytes = file_len(&self.path);
         Ok(written)
@@ -341,10 +408,35 @@ impl RecordStore {
     pub(crate) fn fold(&mut self) -> Result<crate::outline::Folded> {
         // Closed first: Windows cannot delete a file that is open.
         self.journal = None;
-        let written = crate::outline::fold_journal(&self.path)?;
+        let written = if let Some(budget) = self.budget.clone() {
+            let max = file_len(&self.path)
+                .saturating_add(file_len(&self.journal_path))
+                .saturating_mul(2);
+            self.admitted_rewrite(&budget, max, || crate::outline::fold_journal(&self.path))?
+        } else {
+            crate::outline::fold_journal(&self.path)?
+        };
         self.journal_bytes = file_len(&self.journal_path);
         self.file_bytes = file_len(&self.path);
         Ok(written)
+    }
+
+    fn admitted_rewrite<T>(
+        &self,
+        budget: &std::sync::Arc<plumb_core::storage::StorageBudget>,
+        max: u64,
+        rewrite: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let _mutation = budget.mutation();
+        let mut reserved = budget.reserve(plumb_core::storage::allocation_for(max), false)?;
+        // Raw compaction uses one temporary file beside records, not a corpus
+        // tree walk. Include failure leftovers before releasing the reservation.
+        let before = shallow_bytes(self.path.parent().unwrap())?;
+        let result = rewrite();
+        let after = shallow_bytes(self.path.parent().unwrap())
+            .unwrap_or_else(|_| before.saturating_add(reserved.bytes()));
+        reserved.commit(reserved.bytes(), before, after);
+        result
     }
 
     #[cfg(test)]
@@ -412,6 +504,17 @@ pub(crate) fn sorted_by_link_score(set: &RecordSet) -> Vec<&SiteRecord> {
             .then_with(|| a.1.domain.cmp(&b.1.domain))
     });
     scored.into_iter().map(|(_, r)| r).collect()
+}
+
+fn shallow_bytes(path: &Path) -> Result<u64> {
+    let mut bytes = plumb_core::storage::file_bytes(path)?;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            bytes = bytes.saturating_add(plumb_core::storage::file_bytes(&entry.path())?);
+        }
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]

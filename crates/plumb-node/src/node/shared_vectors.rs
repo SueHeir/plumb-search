@@ -77,7 +77,7 @@ pub(super) fn take(
             keep(inner, meaning, &part, model, dim, vectors_path, &peer).map(Taken::Kept)
         }
     });
-    let _ = std::fs::remove_file(&part);
+    let _ = plumb_core::storage::remove_file(&part, inner.storage.as_deref());
     result
 }
 
@@ -128,7 +128,8 @@ fn download(inner: &Inner, net: &NetHandle, set: &str, part: &Path) -> Result<Do
         first.size.div_ceil(1_000_000)
     ));
     let mut out = std::io::BufWriter::new(
-        std::fs::File::create(part).with_context(|| format!("creating {}", part.display()))?,
+        plumb_core::storage::BudgetFile::create(part, inner.storage.clone())
+            .with_context(|| format!("creating {}", part.display()))?,
     );
     let (size, modified) = (first.size, first.modified);
     let mut offset = 0u64;
@@ -169,7 +170,9 @@ fn download(inner: &Inner, net: &NetHandle, set: &str, part: &Path) -> Result<Do
     if offset != size {
         bail!("{from} sent {offset} of {size} bytes of vectors");
     }
-    out.into_inner()?.sync_all()?;
+    out.into_inner()
+        .map_err(|err| err.into_error())?
+        .sync_all()?;
     Ok(Download::From(from.to_string()))
 }
 
@@ -221,7 +224,7 @@ fn keep(
     })?;
     put_in(&mut taken)?;
     if kept > 0 {
-        Vectors::save_shared(meaning.vectors(), vectors_path)?;
+        Vectors::save_shared_with_budget(meaning.vectors(), vectors_path, inner.storage.clone())?;
     }
     info!(
         "search by meaning: kept {kept} site vectors from {from} ({} wanted)",

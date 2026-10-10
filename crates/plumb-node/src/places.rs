@@ -213,6 +213,14 @@ fn is_near(place: &Place, near: &[(f64, f64)]) -> bool {
 /// Opens the place index for `wanted`, building it first when there is
 /// none.
 pub fn open_or_build(data_dir: &Path, wanted: &WantedPlaces) -> Result<(String, PlaceSearcher)> {
+    open_or_build_with_budget(data_dir, wanted, None)
+}
+
+pub fn open_or_build_with_budget(
+    data_dir: &Path,
+    wanted: &WantedPlaces,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<(String, PlaceSearcher)> {
     let key = key(wanted);
     let dir = index_dir(data_dir, &key);
     if let Ok(searcher) = PlaceSearcher::open(&dir) {
@@ -220,8 +228,17 @@ pub fn open_or_build(data_dir: &Path, wanted: &WantedPlaces) -> Result<(String, 
     }
     let started = std::time::Instant::now();
     info!("indexing places from {}", wanted.file.display());
-    let places = read_places_near(&wanted.file, wanted.count, wanted.near.clone())?;
-    let stats = build_place_index(&dir, places)?;
+    let lease;
+    let places;
+    {
+        let _mutation = budget.as_ref().map(|budget| budget.mutation());
+        lease = budget
+            .as_ref()
+            .map(|budget| budget.read_lease(&wanted.file));
+        places = read_places_near(&wanted.file, wanted.count, wanted.near.clone())?;
+    }
+    let stats = plumb_index::places::build_place_index_with_budget(&dir, places, budget)?;
+    drop(lease);
     info!(
         "built the place index of {} places ({} towns) in {:.1}s",
         stats.places,
@@ -256,6 +273,15 @@ pub fn open_file(file: &Path) -> Result<PlaceSearcher> {
 
 /// Deletes place indexes other than `keep`.
 pub fn remove_other_indexes(data_dir: &Path, keep: Option<&str>) {
+    remove_other_indexes_with_budget(data_dir, keep, None);
+}
+
+pub fn remove_other_indexes_with_budget(
+    data_dir: &Path,
+    keep: Option<&str>,
+    budget: Option<&plumb_core::storage::StorageBudget>,
+) {
+    let _mutation = budget.map(plumb_core::storage::StorageBudget::mutation);
     let Ok(entries) = std::fs::read_dir(data_dir.join(PAGES_DIR)) else {
         return;
     };
@@ -265,7 +291,14 @@ pub fn remove_other_indexes(data_dir: &Path, keep: Option<&str>) {
             continue;
         };
         if Some(key) != keep {
-            let _ = std::fs::remove_dir_all(entry.path());
+            let path = entry.path();
+            if let Ok(bytes) = plumb_core::storage::directory_bytes(&path) {
+                if std::fs::remove_dir_all(&path).is_ok() {
+                    if let Some(budget) = budget {
+                        budget.removed(bytes);
+                    }
+                }
+            }
         }
     }
 }

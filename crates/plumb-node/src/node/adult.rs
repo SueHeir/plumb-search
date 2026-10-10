@@ -124,10 +124,10 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 // No trusted node has connected yet: give them time, so a
                 // node just started takes the network's copy.
                 Ok(Taken::NoPeer) if trusts_nodes(&inner) && started.elapsed() < PEER_WAIT => None,
-                Ok(_) => source(url.as_deref(), &data).await,
+                Ok(_) => source(url.as_deref(), &data, inner.storage.clone()).await,
                 Err(err) => {
                     warn!("adult blocklist from a trusted node: {err:#}");
-                    source(url.as_deref(), &data).await
+                    source(url.as_deref(), &data, inner.storage.clone()).await
                 }
             };
             match taken {
@@ -154,8 +154,12 @@ pub(super) async fn run(inner: Arc<Inner>) {
 }
 
 /// The list from its source, when the node has one to download it from.
-async fn source(url: Option<&str>, data: &Path) -> Option<Result<AdultList>> {
-    Some(refresh(url?, data).await)
+async fn source(
+    url: Option<&str>,
+    data: &Path,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
+) -> Option<Result<AdultList>> {
+    Some(refresh(url?, data, budget).await)
 }
 
 /// Whether the node is in the network and trusts nodes to send it the list.
@@ -247,30 +251,44 @@ async fn from_network(inner: &Inner, data: &Path) -> Result<Taken> {
         bytes.extend_from_slice(&next.bytes);
     }
     let file = list_path(data);
-    let list = tokio::task::spawn_blocking(move || save_shared(&file, &bytes, modified))
-        .await
-        .context("the list task failed")??;
+    let budget = inner.storage.clone();
+    let list = tokio::task::spawn_blocking(move || {
+        save_shared_with_budget(&file, &bytes, modified, budget)
+    })
+    .await
+    .context("the list task failed")??;
     info!("took the adult blocklist from trusted node {from}");
     Ok(Taken::List(list))
 }
 
 /// Saves a list another node sent, dated `modified` (Unix seconds) as its
 /// copy was. Only lines that are sites are kept.
+#[cfg(test)]
 fn save_shared(file: &Path, bytes: &[u8], modified: u64) -> Result<AdultList> {
+    save_shared_with_budget(file, bytes, modified, None)
+}
+
+fn save_shared_with_budget(
+    file: &Path,
+    bytes: &[u8],
+    modified: u64,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<AdultList> {
     let text = std::str::from_utf8(bytes).context("the list is not text")?;
     let domains = parse_adult_list(text);
     anyhow::ensure!(!domains.is_empty(), "the list names no sites");
     let dir = file.parent().context("the list has no folder")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    plumb_core::storage::create_directory(dir, budget.as_ref())
+        .with_context(|| format!("creating {}", dir.display()))?;
     let partial = file.with_extension("txt.tmp");
-    let written = std::fs::File::create(&partial).and_then(|mut out| {
-        use std::io::Write;
-        out.write_all((domains.join("\n") + "\n").as_bytes())?;
-        out.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(modified))?;
-        out.sync_all()
-    });
-    written.with_context(|| format!("writing {}", partial.display()))?;
-    std::fs::rename(&partial, file).with_context(|| format!("writing {}", file.display()))?;
+    plumb_core::storage::write_atomic(
+        file,
+        &partial,
+        (domains.join("\n") + "\n").as_bytes(),
+        budget.as_ref(),
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(modified)),
+    )
+    .with_context(|| format!("writing {}", file.display()))?;
     Ok(AdultList::new(&domains))
 }
 
@@ -289,22 +307,32 @@ fn is_fresh(data: &Path) -> bool {
 }
 
 /// Downloads the list from `url` and keeps its whole sites.
-async fn refresh(url: &str, data: &Path) -> Result<AdultList> {
+async fn refresh(
+    url: &str,
+    data: &Path,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<AdultList> {
     let dir = data.join(DIR);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    plumb_core::storage::create_directory(&dir, budget.as_ref())
+        .with_context(|| format!("creating {}", dir.display()))?;
     let download = dir.join("download.tmp");
     let client = download::http_client()?;
-    download::download_to_file(&client, url, &download).await?;
+    crate::meaning::download_file_with_budget(&client, url, &download, budget.clone()).await?;
     let file = list_path(data);
     tokio::task::spawn_blocking(move || {
         let text = std::fs::read_to_string(&download);
-        let _ = std::fs::remove_file(&download);
+        let _ = plumb_core::storage::remove_file(&download, budget.as_deref());
         let domains = parse_adult_list(&text.context("reading the downloaded list")?);
         anyhow::ensure!(!domains.is_empty(), "the list names no sites");
         let partial = file.with_extension("txt.tmp");
-        std::fs::write(&partial, domains.join("\n") + "\n")
-            .with_context(|| format!("writing {}", partial.display()))?;
-        std::fs::rename(&partial, &file).with_context(|| format!("writing {}", file.display()))?;
+        plumb_core::storage::write_atomic(
+            &file,
+            &partial,
+            (domains.join("\n") + "\n").as_bytes(),
+            budget.as_ref(),
+            None,
+        )
+        .with_context(|| format!("writing {}", file.display()))?;
         Ok(AdultList::new(&domains))
     })
     .await
@@ -327,6 +355,25 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn guarded_adult_replacement_keeps_prior_list_when_headroom_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = list_path(dir.path());
+        save_shared(&file, b"adult.example\n", 1_700_000_000).unwrap();
+        let prior = std::fs::read(&file).unwrap();
+        let budget = plumb_core::storage::StorageBudget::open(dir.path(), 1).unwrap();
+        assert!(save_shared_with_budget(
+            &file,
+            b"new-adult.example\n",
+            1_700_000_001,
+            Some(budget.clone())
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), prior);
+        assert!(!file.with_extension("txt.tmp").exists());
+        assert_eq!(budget.status().reserved_bytes, 0);
+    }
+
     use super::*;
 
     #[test]

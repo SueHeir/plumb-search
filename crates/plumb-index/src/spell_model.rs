@@ -243,7 +243,7 @@ impl Model {
         Ok(())
     }
 
-    fn write(&self, out: &mut impl Write) -> Result<()> {
+    pub(crate) fn write(&self, out: &mut impl Write) -> Result<()> {
         out.write_all(MAGIC)?;
         out.write_all(&self.sites.to_le_bytes())?;
         out.write_all(&(self.words.len() as u32).to_le_bytes())?;

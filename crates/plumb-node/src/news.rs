@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use plumb_core::news::{merge_headlines, NEWS_PUBLISHERS as PUBLISHERS, NEWS_WINDOW_SECS};
 use plumb_core::Headline;
@@ -147,6 +147,7 @@ struct State {
 pub struct NewsStore {
     dir: PathBuf,
     state: RwLock<State>,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
 }
 
 impl NewsStore {
@@ -157,6 +158,7 @@ impl NewsStore {
         let headlines = read_json(&dir.join(HEADLINES_FILE)).unwrap_or_default();
         NewsStore {
             dir,
+            budget: None,
             state: RwLock::new(State {
                 watched,
                 headlines,
@@ -164,6 +166,11 @@ impl NewsStore {
                 dirty: false,
             }),
         }
+    }
+
+    pub fn with_budget(mut self, budget: Option<Arc<plumb_core::storage::StorageBudget>>) -> Self {
+        self.budget = budget;
+        self
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, State> {
@@ -384,9 +391,27 @@ impl NewsStore {
         if !state.dirty {
             return Ok(());
         }
-        fs::create_dir_all(&self.dir)?;
-        write_json(&self.dir.join(FEEDS_FILE), &state.watched)?;
-        write_json(&self.dir.join(HEADLINES_FILE), &state.headlines)?;
+        if self.budget.is_some() {
+            plumb_core::storage::create_directory(&self.dir, self.budget.as_ref())
+                .map_err(io::Error::other)?;
+            for (name, bytes) in [
+                (FEEDS_FILE, serde_json::to_vec(&state.watched)?),
+                (HEADLINES_FILE, serde_json::to_vec(&state.headlines)?),
+            ] {
+                let path = self.dir.join(name);
+                plumb_core::storage::write_atomic(
+                    &path,
+                    &path.with_extension("json.tmp"),
+                    &bytes,
+                    self.budget.as_ref(),
+                    None,
+                )?;
+            }
+        } else {
+            fs::create_dir_all(&self.dir)?;
+            write_json(&self.dir.join(FEEDS_FILE), &state.watched)?;
+            write_json(&self.dir.join(HEADLINES_FILE), &state.headlines)?;
+        }
         state.dirty = false;
         Ok(())
     }

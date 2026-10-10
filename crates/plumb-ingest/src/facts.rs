@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result};
 use plumb_core::normalize_country;
 use serde::Deserialize;
+#[cfg(test)]
 use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 
@@ -181,7 +182,7 @@ pub async fn download_site_facts_with(
     })
     .await
     .context("reading the official websites")??;
-    tokio::fs::create_dir_all(dir)
+    crate::storage::create_dir_all(dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
     let partial = dir.join(FACTS_PARTIAL_NAME);
@@ -191,7 +192,7 @@ pub async fn download_site_facts_with(
         .filter(|item| !done.contains(item))
         .collect();
     if done.is_empty() {
-        tokio::fs::write(&partial, FACTS_HEADER)
+        crate::storage::write(&partial, FACTS_HEADER)
             .await
             .with_context(|| format!("writing {}", partial.display()))?;
     }
@@ -268,7 +269,7 @@ pub async fn download_site_facts_with(
     }
 
     let dest = dir.join(FACTS_FILE_NAME);
-    tokio::fs::rename(&partial, &dest)
+    crate::storage::rename(&partial, &dest)
         .await
         .with_context(|| format!("renaming {} to {}", partial.display(), dest.display()))?;
     info!(
@@ -311,9 +312,7 @@ fn saved_items(partial: &Path) -> Result<HashSet<String>> {
 async fn append_facts(partial: &Path, json: &[u8]) -> Result<()> {
     let mut rows = String::new();
     push_facts(&mut rows, json)?;
-    let mut file = tokio::fs::OpenOptions::new()
-        .append(true)
-        .open(partial)
+    let mut file = crate::storage::OutputFile::append(partial)
         .await
         .with_context(|| format!("opening {}", partial.display()))?;
     file.write_all(rows.as_bytes())

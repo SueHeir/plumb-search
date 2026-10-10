@@ -46,7 +46,7 @@
 //!   fill.json          how far filling free space got
 //! ```
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -152,6 +152,14 @@ impl BucketSource for ServedIndex {
         icons::to_shared(&IconStore::new(&self.0.paths.icons).get(domain)?)
     }
 
+    fn page_chunk(
+        &self,
+        request: &plumb_net::proto::PagesRequest,
+    ) -> plumb_net::proto::PagesResponse {
+        let _mutation = self.0.storage.as_ref().map(|budget| budget.mutation());
+        plumb_net::pages::answer(self.page_set_file(&request.set).as_deref(), request)
+    }
+
     fn page_set_file(&self, set: &str) -> Option<PathBuf> {
         if let Some(file) = super::shared_vectors::servable(&self.0.paths.data, set) {
             return Some(file);
@@ -212,7 +220,7 @@ pub(super) fn build_buckets<R: std::borrow::Borrow<SiteRecord>>(
         return;
     }
     let dir = index_dir.join(BUCKETS_DIR);
-    if let Err(err) = BucketTable::build(&dir, records) {
+    if let Err(err) = BucketTable::build_with_budget(&dir, records, inner.storage.clone()) {
         warn!(
             "cannot write the buckets of {}: {err:#}",
             index_dir.display()
@@ -237,6 +245,7 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         return Ok(());
     };
     config.dir = inner.paths.net.clone();
+    config.storage_budget = inner.storage.clone();
     // A node with a storage limit keeps the batches it holds for as long as
     // crawls are checked against each other, not the default five weeks:
     // other nodes take none older than a week, and the rest takes room
@@ -244,6 +253,7 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
     // or more, so they also get a share of the limit, oldest out first.
     let limit = inner.settings().storage_limit_mb.saturating_mul(MB);
     if limit > 0 {
+        config.storage_limit = Some((inner.paths.data.clone(), limit));
         if config.keep_batches_days == plumb_net::store::RETAIN_EPOCHS {
             config.keep_batches_days = plumb_net::agree::WINDOW_EPOCHS;
         }
@@ -281,7 +291,11 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
     }
     let receiver = inner.clone();
     tokio::spawn(async move {
-        while let Some(mut batch) = records.recv().await {
+        while let Some(delivery) = records.recv().await {
+            let plumb_net::node::RecordDelivery {
+                records: mut batch,
+                reservation,
+            } = delivery;
             // Crawling only, other nodes' crawls are not kept: they would
             // only grow the records this node crawls from.
             if receiver.config.crawl_only {
@@ -306,7 +320,7 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
             let inner = receiver.clone();
             let saved = tokio::task::spawn_blocking(move || {
                 let n = batch.len() as u64;
-                append_inbox(&inner, &batch).map(|()| {
+                append_inbox_reserved(&inner, &batch, reservation).map(|()| {
                     let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
                     if total >= REBUILD_AFTER_RECORDS {
                         inner.wake.notify_one();
@@ -541,22 +555,102 @@ fn crawl_facts(record: &SiteRecord) -> SiteRecord {
 }
 
 pub(super) fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
+    append_inbox_reserved(inner, records, None)
+}
+
+fn append_inbox_reserved(
+    inner: &Inner,
+    records: &[SiteRecord],
+    mut reservation: Option<plumb_net::storage::Reservation>,
+) -> Result<()> {
+    use plumb_net::storage::{allocation_for, file_bytes, LimitedBytes};
     let path = &inner.paths.inbox;
-    let mut lines = Vec::with_capacity(records.len() * 200);
+    let payload_limit = reservation.as_ref().map_or(64 * 1024 * 1024, |reserved| {
+        reserved.bytes().min(64 * 1024 * 1024) as usize
+    });
+    let mut lines = LimitedBytes {
+        bytes: Vec::new(),
+        limit: payload_limit,
+    };
     for record in records {
-        serde_json::to_writer(&mut lines, record).context("encoding a record")?;
-        lines.push(b'\n');
+        serde_json::to_writer(&mut lines, record).context("encoding a bounded inbox record")?;
+        lines.write_all(b"\n")?;
     }
     let _guard = inner
         .inbox_lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // A last line a crash cut short gets a line break first, so the next
-    // record is not lost with it.
-    let mut file = crate::records::open_journal(path)?;
-    file.write_all(&lines)
-        .and_then(|()| file.sync_data())
-        .with_context(|| format!("writing {}", path.display()))
+    let budget = inner.storage.as_ref();
+    let _mutation = budget.map(|budget| budget.mutation());
+    let old = plumb_core::storage::existing_file_bytes(path)?;
+    let old_len = fs::metadata(path).map_or(0, |metadata| metadata.len());
+    // Include the recovery newline and allocation rounding. This is an append,
+    // so only new allocation needs room; an existing inbox is already counted.
+    let needed = allocation_for(
+        old_len
+            .saturating_add(lines.bytes.len() as u64)
+            .saturating_add(1),
+    )
+    .saturating_sub(old);
+    if let Some(reserved) = &reservation {
+        anyhow::ensure!(
+            needed <= reserved.bytes(),
+            "inbox exceeds its admitted allocation"
+        );
+    } else if let Some(budget) = budget {
+        reservation = Some(budget.reserve(needed, false)?);
+    }
+    let directory_before = file_bytes(&inner.paths.net)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(path)?;
+    if old_len == 0 {
+        crate::sync_parent_dir(path);
+    }
+    let written = append_lines(&mut file, &lines.bytes, old_len, |file, bytes| {
+        use std::io::{Read, Seek, SeekFrom};
+        if old_len > 0 {
+            let mut last = [0];
+            file.seek(SeekFrom::Start(old_len - 1))?;
+            file.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                file.write_all(b"\n")?;
+            }
+        }
+        file.write_all(bytes)?;
+        file.sync_data()
+    });
+    let new = match (file_bytes(path), file_bytes(&inner.paths.net)) {
+        (Ok(bytes), Ok(dir)) => bytes.saturating_add(dir.saturating_sub(directory_before)),
+        _ => old.saturating_add(
+            reservation
+                .as_ref()
+                .map_or(needed, |reserved| reserved.bytes()),
+        ),
+    };
+    if let Some(reserved) = &mut reservation {
+        reserved.commit(reserved.bytes(), old, new);
+    }
+    written.with_context(|| format!("writing {}", path.display()))
+}
+
+// A failed write/sync restores the exact prior length, including a crash-cut
+// last line. Even a failed rollback is measured by the caller before releasing
+// its reservation, so partial allocation never becomes invisible to admission.
+fn append_lines(
+    file: &mut File,
+    lines: &[u8],
+    old_len: u64,
+    write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    let written = write(file, lines);
+    if written.is_err() {
+        file.set_len(old_len)?;
+        file.sync_data()?;
+    }
+    written
 }
 
 /// Folds the records other nodes sent into the records file (through its
@@ -575,6 +669,7 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
             .inbox_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _mutation = inner.storage.as_ref().map(|budget| budget.mutation());
         match fs::rename(&paths.inbox, &paths.absorbing) {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -586,8 +681,8 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     }
     let file = File::open(&paths.absorbing)
         .with_context(|| format!("opening {}", paths.absorbing.display()))?;
-    let icons = IconStore::new(&paths.icons);
-    let mut store = RecordStore::open(&paths.records);
+    let icons = IconStore::new(&paths.icons).with_budget(inner.storage.clone());
+    let mut store = RecordStore::open(&paths.records).with_budget(inner.storage.clone());
     // A full node only refreshes the sites it holds, but for those about
     // its topics and official websites (see super::trim).
     let topics = (!super::trim::takes_new_sites(inner)).then(|| inner.keep_topics());
@@ -620,7 +715,7 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
         let _records = inner.hold_records();
         store.fold()?;
     }
-    fs::remove_file(&paths.absorbing)
+    plumb_core::storage::remove_file(&paths.absorbing, inner.storage.as_deref())
         .with_context(|| format!("deleting {}", paths.absorbing.display()))?;
     if n > 0 {
         info!("folded {n} records from the network into the records file");
@@ -700,16 +795,15 @@ pub(super) fn keep_found(inner: &Inner, records: Vec<SiteRecord>) {
     if new.is_empty() {
         return;
     }
-    if kept.len() + new.len() > MAX_KEPT_FOUND {
-        kept.clear();
-    }
-    for record in &new {
-        kept.insert(record.domain.clone(), record.crawled_at.unwrap_or(0));
-    }
-    drop(kept);
     let n = new.len() as u64;
     match append_inbox(inner, &new) {
         Ok(()) => {
+            if kept.len() + new.len() > MAX_KEPT_FOUND {
+                kept.clear();
+            }
+            for record in &new {
+                kept.insert(record.domain.clone(), record.crawled_at.unwrap_or(0));
+            }
             debug!("kept {n} signed crawls a network search found");
             let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
             if total >= REBUILD_AFTER_RECORDS {
@@ -736,6 +830,45 @@ mod tests {
     use plumb_net::popularity::{Popular, MAX_POPULARITY_BONUS};
 
     use super::*;
+
+    #[test]
+    fn partial_inbox_write_preserves_raw_prefix_for_restart_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inbox.jsonl");
+        let raw = b"{complete}\n{crash cut";
+        fs::write(&path, raw).unwrap();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let result = append_lines(
+            &mut file,
+            b"new record\n",
+            raw.len() as u64,
+            |file, bytes| {
+                file.write_all(b"\n")?;
+                file.write_all(&bytes[..4])?;
+                Err(io::Error::other("injected partial write"))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), raw);
+        append_lines(
+            &mut file,
+            b"\nnew record\n",
+            raw.len() as u64,
+            |file, bytes| {
+                file.write_all(bytes)?;
+                file.sync_data()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(path).unwrap(),
+            b"{complete}\n{crash cut\nnew record\n"
+        );
+    }
 
     #[test]
     fn a_shared_icon_goes_to_the_icon_store_not_the_record() {

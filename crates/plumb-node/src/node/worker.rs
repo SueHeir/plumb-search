@@ -37,7 +37,7 @@ use plumb_core::{
     now_unix, parent_domain, RecordSet, SiteRecord, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
 };
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
-use plumb_index::build_index;
+use plumb_index::build_index_with_budget;
 use plumb_ingest::{
     attach_facts, attach_intros, download, facts, intros, kind_sites, load_cc_domain_ranks,
     load_intros, load_misread_official_sites, load_site_facts, load_tranco,
@@ -567,7 +567,9 @@ async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
         inner.check_stop()?;
         {
             let _records = inner.hold_records();
-            RecordStore::open(&inner.paths.records).save(&changes)?;
+            RecordStore::open(&inner.paths.records)
+                .with_budget(inner.storage.clone())
+                .save(&changes)?;
         }
         inner.update_saved(|saved| {
             saved.sites_version = SITES_VERSION;
@@ -1123,7 +1125,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     inner
         .round_sites
         .store(set.iter().len() as u64, Ordering::SeqCst);
-    let mut store = RecordStore::open(&inner.paths.records);
+    let mut store = RecordStore::open(&inner.paths.records).with_budget(inner.storage.clone());
     inner.check_stop()?;
     let titled = set
         .get(plumb_core::HOME_SITE)
@@ -1226,7 +1228,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     // Sites crawled before nodes kept icons or key pages are due again for
     // them, and so are sites read by an older crawler (see
     // plumb_crawl::CRAWL_VERSION).
-    let icons = IconStore::new(&inner.paths.icons);
+    let icons = IconStore::new(&inner.paths.icons).with_budget(inner.storage.clone());
     let noted = icons.noted();
     let rest = select_targets_with(
         candidates
@@ -1600,7 +1602,7 @@ pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Resu
     let steps = if buckets { 2 } else { 1 };
     inner.set_progress(0, steps, "steps");
     let started = Instant::now();
-    let stats = build_index(&dir, records)
+    let stats = build_index_with_budget(&dir, records, inner.storage.clone())
         .with_context(|| format!("building the index in {}", dir.display()))?;
     if buckets {
         inner.set_step(Step::Indexing, "Writing the buckets other nodes search");
@@ -1643,7 +1645,9 @@ pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
             inner.paths.records.display()
         );
         let set = load_records(&inner.paths.records)?;
-        RecordStore::open(&inner.paths.records).compact(&set)?;
+        RecordStore::open(&inner.paths.records)
+            .with_budget(inner.storage.clone())
+            .compact(&set)?;
         inner.check_stop()?;
         return build(inner, &sorted_by_link_score(&set));
     };
@@ -1663,6 +1667,7 @@ pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
         &dir,
         network::wants_buckets(inner).then_some(buckets_dir.as_path()),
         inner.config.news_feeds,
+        inner.storage.clone(),
         &mut |step| {
             match step {
                 crate::outline::Step::Started { docs, sites } => {
@@ -1796,6 +1801,11 @@ where
         .spawn(move || {
             let _runtime = runtime.enter();
             crate::lower_thread_priority();
+            if let Some(budget) = &inner.storage {
+                if let Err(err) = budget.recount_if_due(&inner.paths.data) {
+                    warn!("cannot reconcile storage admission: {err:#}");
+                }
+            }
             let _ = sender.send(work(&inner));
         })
         .context("cannot start the background work")?;

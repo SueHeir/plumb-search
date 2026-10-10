@@ -15,8 +15,8 @@ use plumb_core::now_unix;
 use super::shared_vectors::Taken;
 use super::{Inner, LastError, MeaningWork};
 use crate::meaning::{
-    embed_sites, ensure_gemma, ensure_model, load_embedder, load_vectors_for,
-    sites_to_embed_from_file, MeaningIndex, MeaningModel,
+    embed_sites, ensure_gemma_with_budget, ensure_model_with_budget, load_embedder,
+    load_vectors_for, sites_to_embed_from_file, MeaningIndex, MeaningModel,
 };
 
 /// Wait after a failure (no network for the model download, a bad file).
@@ -116,8 +116,8 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
                     downloaded = async {
                         let sources = &inner.config.sources;
                         match model {
-                            MeaningModel::Small => ensure_model(&model_dir, &sources.model_base_url).await,
-                            MeaningModel::Gemma => ensure_gemma(&model_dir, &sources.gemma_downloads).await,
+                            MeaningModel::Small => ensure_model_with_budget(&model_dir, &sources.model_base_url, inner.storage.clone()).await,
+                            MeaningModel::Gemma => ensure_gemma_with_budget(&model_dir, &sources.gemma_downloads, inner.storage.clone()).await,
                         }
                     } => Some(downloaded),
                     () = inner.stopped() => None,
@@ -198,7 +198,13 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             todo,
             threads,
             &|| inner.stopping(),
-            &mut |vectors| plumb_embed::Vectors::save_shared(vectors, &vectors_path),
+            &mut |vectors| {
+                plumb_embed::Vectors::save_shared_with_budget(
+                    vectors,
+                    &vectors_path,
+                    inner.storage.clone(),
+                )
+            },
             &mut |done, total| {
                 inner.set_meaning_work((done < total).then_some(MeaningWork::Embedding {
                     done: done as u64,

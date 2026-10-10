@@ -17,7 +17,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{self, AtomicU64};
-use std::sync::{PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use anyhow::{bail, Context, Result};
 use hashbrown::HashTable;
@@ -451,9 +451,17 @@ impl Vectors {
     /// while the file is written; when the vectors change meanwhile, they
     /// are read from the file at a later save.
     pub fn save_shared(vectors: &RwLock<Vectors>, path: &Path) -> Result<()> {
+        Self::save_shared_with_budget(vectors, path, None)
+    }
+
+    pub fn save_shared_with_budget(
+        vectors: &RwLock<Vectors>,
+        path: &Path,
+        budget: Option<Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Result<()> {
         let (written, rows, version) = {
             let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
-            let (written, rows) = held.write_file(path)?;
+            let (written, rows) = held.write_file_with_budget(path, budget)?;
             (written, rows, held.version)
         };
         #[cfg(unix)]
@@ -480,7 +488,44 @@ impl Vectors {
     /// Saves the vectors to `path`; gives the file, open, and where each
     /// row starts in it.
     fn write_file(&self, path: &Path) -> Result<(File, Vec<u64>)> {
+        self.write_file_with_budget(path, None)
+    }
+
+    fn write_file_with_budget(
+        &self,
+        path: &Path,
+        budget: Option<Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Result<(File, Vec<u64>)> {
+        use plumb_core::storage::{allocation_for, file_bytes, StageLifecycle};
+        let _mutation = budget.as_ref().map(|budget| budget.mutation());
+        let old = match file_bytes(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(err) => return Err(err.into()),
+        };
+        let size = HEADER_LEN as u64
+            + (0..self.len())
+                .map(|row| self.row(row).len() as u64)
+                .sum::<u64>();
+        let mut reserved = budget
+            .as_ref()
+            .map(|budget| budget.reserve(allocation_for(size), false))
+            .transpose()?;
+        let lifecycle = budget
+            .as_ref()
+            .map(|budget| StageLifecycle::new(budget.clone()));
+        let lease = lifecycle.as_ref().map(|lifecycle| lifecycle.lease(path));
         let part = path.with_extension("bin.part");
+        let prior_part = match file_bytes(&part) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(err) => return Err(err.into()),
+        };
+        if let Some(budget) = budget.as_ref().filter(|_| prior_part > 0) {
+            std::fs::remove_file(&part)?;
+            budget.removed(prior_part);
+        }
+        let directory_before = path.parent().map(file_bytes).transpose()?.unwrap_or(0);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -507,10 +552,51 @@ impl Vectors {
             file.sync_all()?;
             Ok(file)
         };
-        let written = write().with_context(|| format!("writing {}", part.display()))?;
-        std::fs::rename(&part, path)
-            .with_context(|| format!("renaming {} to {}", part.display(), path.display()))?;
-        Ok((written, rows))
+        let result = write()
+            .with_context(|| format!("writing {}", part.display()))
+            .and_then(|written| {
+                std::fs::rename(&part, path).with_context(|| {
+                    format!("renaming {} to {}", part.display(), path.display())
+                })?;
+                Ok(written)
+            });
+        match result {
+            Ok(written) => {
+                let detached = lease.is_some_and(|lease| self.file.attach_lease(lease));
+                if detached {
+                    lifecycle.as_ref().unwrap().detach(path, old);
+                }
+                let new = match (file_bytes(path), path.parent().map(file_bytes).transpose()) {
+                    (Ok(bytes), Ok(parent)) => {
+                        bytes.saturating_add(parent.unwrap_or(0).saturating_sub(directory_before))
+                    }
+                    _ => old.saturating_add(allocation_for(size)),
+                };
+                if let Some(reserved) = &mut reserved {
+                    reserved.commit(reserved.bytes(), if detached { 0 } else { old }, new);
+                }
+                Ok((written, rows))
+            }
+            Err(err) => {
+                if let Some(reserved) = &mut reserved {
+                    let _ = std::fs::remove_file(&part);
+                    let retained =
+                        match (file_bytes(&part), path.parent().map(file_bytes).transpose()) {
+                            (Ok(bytes), Ok(parent)) => bytes.saturating_add(
+                                parent.unwrap_or(0).saturating_sub(directory_before),
+                            ),
+                            (Err(err), Ok(parent))
+                                if err.kind() == std::io::ErrorKind::NotFound =>
+                            {
+                                parent.unwrap_or(0).saturating_sub(directory_before)
+                            }
+                            _ => allocation_for(size),
+                        };
+                    reserved.commit(reserved.bytes(), 0, retained);
+                }
+                Err(err)
+            }
+        }
     }
 }
 
@@ -549,11 +635,27 @@ enum FileBytes {
     /// The file mapped into memory, on Unix, where a file can be replaced
     /// while mapped.
     #[cfg(unix)]
-    Mapped(memmap2::Mmap),
+    Mapped {
+        map: memmap2::Mmap,
+        lease: Mutex<Option<Arc<plumb_core::storage::FileLease>>>,
+    },
     Held(Vec<u8>),
 }
 
 impl FileBytes {
+    fn attach_lease(&self, incoming: Arc<plumb_core::storage::FileLease>) -> bool {
+        #[cfg(unix)]
+        if let Self::Mapped { lease, .. } = self {
+            let mut lease = lease.lock().unwrap_or_else(PoisonError::into_inner);
+            if lease.is_none() {
+                *lease = Some(incoming);
+                return true;
+            }
+        }
+        #[cfg(not(unix))]
+        drop(incoming);
+        false
+    }
     #[cfg(unix)]
     fn read(file: &File) -> Result<Self> {
         // SAFETY: vectors files are replaced whole, by renaming a new file
@@ -561,7 +663,10 @@ impl FileBytes {
         // as they were read. Populated: read now, as a copy would be, not
         // while the first search waits.
         let map = unsafe { memmap2::MmapOptions::new().populate().map(file)? };
-        Ok(FileBytes::Mapped(map))
+        Ok(FileBytes::Mapped {
+            map,
+            lease: Mutex::new(None),
+        })
     }
 
     #[cfg(not(unix))]
@@ -578,7 +683,7 @@ impl Deref for FileBytes {
     fn deref(&self) -> &[u8] {
         match self {
             #[cfg(unix)]
-            FileBytes::Mapped(map) => map,
+            FileBytes::Mapped { map, .. } => map,
             FileBytes::Held(bytes) => bytes,
         }
     }
@@ -638,6 +743,78 @@ fn read_u32(input: &mut impl Read) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guarded_replacement_admits_the_peak_and_holds_old_mappings_until_drop() {
+        use plumb_core::storage::{allocation_for, directory_bytes, file_bytes, StorageBudget};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VECTORS_FILE_NAME);
+        let mut initial = Vectors::new([1; 32], 3);
+        initial
+            .insert("old.example", [2; 32], &[127, 0, 0])
+            .unwrap();
+        initial.save(&path).unwrap();
+        let prior = std::fs::read(&path).unwrap();
+        let old_bytes = file_bytes(&path).unwrap();
+        let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let mut mapped = Vectors::load(&path).unwrap();
+        mapped.insert("new.example", [3; 32], &[0, 127, 0]).unwrap();
+        let size = HEADER_LEN as u64
+            + (0..mapped.len())
+                .map(|row| mapped.row(row).len() as u64)
+                .sum::<u64>();
+        budget.set_limit(budget.status().used_bytes + allocation_for(size) - 1);
+        assert!(mapped
+            .write_file_with_budget(&path, Some(budget.clone()))
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), prior);
+        assert!(!path.with_extension("bin.part").exists());
+        assert_eq!(budget.status().reserved_bytes, 0);
+        budget.set_limit(u64::MAX);
+        let (written, _) = mapped
+            .write_file_with_budget(&path, Some(budget.clone()))
+            .unwrap();
+        assert_eq!(mapped.get("old.example").unwrap().1, &[127, 0, 0]);
+        assert_eq!(budget.status().reader_held_bytes, old_bytes);
+        budget.recount(dir.path()).unwrap();
+        assert_eq!(
+            budget.status().used_bytes,
+            directory_bytes(dir.path()).unwrap() + old_bytes
+        );
+        drop(written);
+        drop(mapped);
+        assert_eq!(budget.status().reader_held_bytes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            directory_bytes(dir.path()).unwrap()
+        );
+        let loaded = RwLock::new(Vectors::load(&path).unwrap());
+        Vectors::save_shared_with_budget(&loaded, &path, Some(budget.clone())).unwrap();
+        assert_eq!(budget.status().reader_held_bytes, 0);
+        assert_eq!(budget.status().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn guarded_vector_rename_failure_cleans_staging_without_recount() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("directory.bin");
+        std::fs::create_dir(&path).unwrap();
+        let budget = plumb_core::storage::StorageBudget::open(dir.path(), 1024 * 1024).unwrap();
+        let mut vectors = Vectors::new([1; 32], 3);
+        vectors
+            .insert("kept.example", [2; 32], &[127, 0, 0])
+            .unwrap();
+        assert!(vectors
+            .write_file_with_budget(&path, Some(budget.clone()))
+            .is_err());
+        assert!(path.is_dir());
+        assert!(!path.with_extension("bin.part").exists());
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(budget.status().reader_held_bytes, 0);
+        let physical = plumb_core::storage::directory_bytes(dir.path()).unwrap();
+        assert!(budget.status().used_bytes >= physical);
+        assert!(budget.status().used_bytes <= physical + 8192);
+    }
 
     #[test]
     fn nearest_sites_come_first_and_files_round_trip() {

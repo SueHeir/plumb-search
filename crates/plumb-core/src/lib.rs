@@ -35,6 +35,7 @@ pub mod safe;
 pub mod simhash;
 mod site_search;
 pub mod stack_exchange;
+pub mod storage;
 pub mod subpages;
 pub mod subsites;
 

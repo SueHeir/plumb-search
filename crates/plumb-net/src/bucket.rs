@@ -62,6 +62,10 @@ pub trait BucketSource: Send + Sync + 'static {
 
     /// The file of the page set `set` (`wikipedia-en`), for nodes asking
     /// for it (see [`crate::pages`]); `None` when this node has none.
+    fn page_chunk(&self, request: &crate::proto::PagesRequest) -> crate::proto::PagesResponse {
+        crate::pages::answer(self.page_set_file(&request.set).as_deref(), request)
+    }
+
     fn page_set_file(&self, set: &str) -> Option<std::path::PathBuf> {
         let _ = set;
         None
@@ -102,6 +106,14 @@ impl BucketTable {
     /// 12 bytes per key and 4 per bucket entry while it runs. `records` may
     /// be the records themselves or references to them.
     pub fn build<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<BucketTable> {
+        Self::build_with_budget(dir, records, None)
+    }
+
+    pub fn build_with_budget<R: Borrow<SiteRecord>>(
+        dir: &Path,
+        records: &[R],
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Result<BucketTable> {
         let records: Vec<&SiteRecord> = records.iter().map(Borrow::borrow).collect();
         let mut order: Vec<usize> = (0..records.len()).collect();
         order.sort_by(|&a, &b| {
@@ -110,7 +122,7 @@ impl BucketTable {
                 .total_cmp(&records[a].link_score())
                 .then_with(|| records[a].domain.cmp(&records[b].domain))
         });
-        let mut writer = BucketWriter::new(dir)?;
+        let mut writer = BucketWriter::new_with_budget(dir, budget)?;
         for i in order {
             writer.add(records[i])?;
         }
@@ -218,12 +230,18 @@ impl BucketSource for BucketTable {
     }
 }
 
-fn create(path: &Path) -> Result<File> {
-    File::create(path).with_context(|| format!("creating {}", path.display()))
+fn create(
+    path: &Path,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<plumb_core::storage::BudgetFile> {
+    plumb_core::storage::BudgetFile::create(path, budget)
+        .with_context(|| format!("creating {}", path.display()))
 }
-
-fn flush(writer: BufWriter<File>) -> Result<()> {
-    let file = writer.into_inner().context("writing the buckets")?;
+fn flush(writer: BufWriter<plumb_core::storage::BudgetFile>) -> Result<()> {
+    let mut file = writer
+        .into_inner()
+        .map_err(|err| err.into_error())
+        .context("writing the buckets")?;
     file.sync_all().context("writing the buckets")
 }
 
@@ -239,22 +257,19 @@ fn read_u64s(file: &mut File, first: u64, n: usize) -> Result<Vec<u64>> {
         .collect())
 }
 
-/// A [`BucketTable`] written a record at a time, for a caller that cannot
-/// hold every record at once. The records must come best
-/// [`SiteRecord::link_score`] first (ties by domain), as
-/// [`BucketTable::build`] orders them: each key keeps the first
-/// [`KEY_CAP`] that have it.
 pub struct BucketWriter {
     dir: PathBuf,
     staging: PathBuf,
-    data: BufWriter<fs::File>,
-    offsets: BufWriter<fs::File>,
+    data: BufWriter<plumb_core::storage::BudgetFile>,
+    offsets: BufWriter<plumb_core::storage::BudgetFile>,
     /// How many records each key has, by a hash of the key, up to KEY_CAP.
     per_key: HashMap<u64, u8>,
     buckets: Vec<Vec<u32>>,
     /// Bytes of records written.
     at: u64,
     records: usize,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    stage_guard: Option<plumb_core::storage::StageGuard>,
 }
 
 impl BucketWriter {
@@ -262,19 +277,36 @@ impl BucketWriter {
     /// a staging directory next to it and moved there by
     /// [`BucketWriter::finish`].
     pub fn new(dir: &Path) -> Result<BucketWriter> {
+        Self::new_with_budget(dir, None)
+    }
+
+    pub fn new_with_budget(
+        dir: &Path,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Result<BucketWriter> {
         ensure!(!dir.exists(), "{} already exists", dir.display());
         let staging = dir.with_extension("staging");
-        let _ = fs::remove_dir_all(&staging);
-        fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
+        plumb_core::storage::remove_directory(&staging, budget.as_deref())?;
+        let stage_guard = if let Some(budget) = &budget {
+            Some(plumb_core::storage::StageGuard::create(
+                &staging,
+                budget.clone(),
+            )?)
+        } else {
+            fs::create_dir_all(&staging)?;
+            None
+        };
         Ok(BucketWriter {
             dir: dir.to_path_buf(),
-            data: BufWriter::new(create(&staging.join("records.dat"))?),
-            offsets: BufWriter::new(create(&staging.join("records.idx"))?),
+            data: BufWriter::new(create(&staging.join("records.dat"), budget.clone())?),
+            offsets: BufWriter::new(create(&staging.join("records.idx"), budget.clone())?),
             staging,
             per_key: HashMap::new(),
             buckets: vec![Vec::new(); BUCKETS as usize],
             at: 0,
             records: 0,
+            budget,
+            stage_guard,
         })
     }
 
@@ -308,6 +340,8 @@ impl BucketWriter {
     /// Writes the bucket lists and moves the table into place.
     pub fn finish(self) -> Result<BucketTable> {
         let BucketWriter {
+            mut stage_guard,
+            budget,
             dir,
             staging,
             data,
@@ -322,8 +356,8 @@ impl BucketWriter {
         flush(offsets)?;
         drop(per_key);
 
-        let mut index = BufWriter::new(create(&staging.join("buckets.idx"))?);
-        let mut entries = BufWriter::new(create(&staging.join("buckets.dat"))?);
+        let mut index = BufWriter::new(create(&staging.join("buckets.idx"), budget.clone())?);
+        let mut entries = BufWriter::new(create(&staging.join("buckets.dat"), budget.clone())?);
         let mut start: u64 = 0;
         for bucket in &buckets {
             index.write_all(&start.to_le_bytes())?;
@@ -337,6 +371,9 @@ impl BucketWriter {
         flush(entries)?;
         fs::rename(&staging, &dir)
             .with_context(|| format!("moving the buckets to {}", dir.display()))?;
+        if let Some(guard) = &mut stage_guard {
+            guard.installed = true;
+        }
         Ok(BucketTable { dir, records })
     }
 }

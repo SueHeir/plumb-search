@@ -10,7 +10,7 @@ use plumb_core::{now_unix, SiteRecord};
 use plumb_net::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use plumb_net::{BucketSource, BucketTable, Multiaddr, NetConfig, NetHandle, PeerId, SearchScope};
 use tempfile::TempDir;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 
 /// Serves the buckets of the records it was given, as a node with an
 /// index of them would.
@@ -20,7 +20,7 @@ fn table(dir: &std::path::Path, records: &[SiteRecord]) -> Arc<dyn BucketSource>
 
 struct Node {
     handle: NetHandle,
-    records: UnboundedReceiver<Vec<SiteRecord>>,
+    records: Receiver<plumb_net::node::RecordDelivery>,
     _dir: TempDir,
 }
 
@@ -92,6 +92,7 @@ impl Node {
             .await
             .expect("records within 30 s")
             .expect("the node is running")
+            .records
     }
 }
 
@@ -1151,4 +1152,169 @@ async fn found_leads(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("gave up waiting for {want} leads");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catchup_resumes_after_slow_delivery_without_relisting_or_maintenance() {
+    let source = Node::start(false, vec![], vec![]).await;
+    let now = now_unix();
+    for i in 0..28 {
+        let mut record = SiteRecord::new(format!("burst-{i}.example"));
+        record.crawled_at = Some(now);
+        record.title = Some(format!("Catchup {i}"));
+        source.handle.publish(vec![record]).await.unwrap();
+    }
+    let addr = source
+        .addr()
+        .await
+        .with_p2p(source.handle.peer_id())
+        .unwrap();
+    let mut receiver = Node::start_config(
+        tempfile::tempdir().unwrap(),
+        false,
+        vec![addr],
+        vec![],
+        true,
+        |config| {
+            config.trusted_peers = vec![source.handle.peer_id()];
+        },
+    )
+    .await;
+    let started = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(500)).await; // let >16 fetches meet four slots
+    let mut delivered = std::collections::HashSet::new();
+    while delivered.len() < 28 {
+        let records = tokio::time::timeout(Duration::from_secs(20), receiver.records.recv())
+            .await
+            .unwrap_or_else(|err| {
+                panic!(
+                    "capacity must wake catchup after {} deliveries: {err}; {:?}",
+                    delivered.len(),
+                    receiver.handle.status()
+                )
+            })
+            .unwrap();
+        for record in records.records {
+            delivered.insert(record.domain);
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "catchup depended on a maintenance/relist tick"
+    );
+    assert_eq!(receiver.handle.status().batches_received, 28);
+    assert_eq!(receiver.handle.status().batches_held, 28);
+    source.handle.shutdown().await;
+    receiver.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_own_publication_stops_before_signing_when_protected_storage_is_full() {
+    let node = Node::start_config(
+        tempfile::tempdir().unwrap(),
+        false,
+        vec![],
+        vec![],
+        true,
+        |config| {
+            config.storage_limit = Some((config.dir.clone(), 1));
+        },
+    )
+    .await;
+    let mut record = SiteRecord::new("protected-own.example");
+    record.crawled_at = Some(now_unix());
+    assert!(node.handle.publish(vec![record]).await.is_err());
+    assert_eq!(node.handle.status().batches_published, 0);
+    assert_eq!(node.handle.status().batches_held, 0);
+    assert!(node.handle.storage_budget().unwrap().status().backpressure);
+    node.handle.shutdown().await;
+}
+
+#[test]
+fn multiple_clients_retry_a_temporarily_busy_source_without_relisting() {
+    // Occupy the blocking workers after all empty startup lists have arrived.
+    // Serving four Gets then fills the peer's slots; other clients receive the
+    // existing wire-level None reply until the workers are released.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let source = Node::start(false, vec![], vec![]).await;
+        let addr = source
+            .addr()
+            .await
+            .with_p2p(source.handle.peer_id())
+            .unwrap();
+        let mut clients = Vec::new();
+        for _ in 0..3 {
+            clients.push(
+                Node::start_config(
+                    tempfile::tempdir().unwrap(),
+                    false,
+                    vec![addr.clone()],
+                    vec![],
+                    true,
+                    |config| config.trusted_peers = vec![source.handle.peer_id()],
+                )
+                .await,
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        for _ in 0..4 {
+            let barrier = barrier.clone();
+            tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                barrier.wait();
+            });
+        }
+        barrier.wait();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            barrier.wait();
+        });
+        let now = now_unix();
+        for i in 0..28 {
+            let mut record = SiteRecord::new(format!("busy-{i}.example"));
+            record.crawled_at = Some(now);
+            record.title = Some(format!("Temporary busy {i}"));
+            source.handle.publish(vec![record]).await.unwrap();
+        }
+        async fn drain(mut client: Node) -> u64 {
+            let mut domains = std::collections::HashSet::new();
+            while domains.len() < 28 {
+                let delivery = tokio::time::timeout(Duration::from_secs(20), client.records.recv())
+                    .await
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "busy source did not recover after {}: {err}; {:?}",
+                            domains.len(),
+                            client.handle.status()
+                        )
+                    })
+                    .unwrap();
+                domains.extend(delivery.records.into_iter().map(|record| record.domain));
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(client.handle.status().batches_held, 28);
+            let retries = client.handle.status().batch_retries;
+            client.handle.shutdown().await;
+            retries
+        }
+        let c = clients.pop().unwrap();
+        let b = clients.pop().unwrap();
+        let a = clients.pop().unwrap();
+        let (a, b, c) = tokio::join!(drain(a), drain(b), drain(c));
+        assert!(
+            source.handle.status().batch_busy_replies > 0,
+            "source was never controlled busy"
+        );
+        assert!(a + b + c > 0, "busy replies did not retain known sources");
+        release.join().unwrap();
+        source.handle.shutdown().await;
+    });
 }

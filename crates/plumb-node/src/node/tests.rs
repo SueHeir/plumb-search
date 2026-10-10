@@ -3690,3 +3690,192 @@ async fn a_node_that_does_not_share_findings_keeps_them_local() {
     assert!(!dir.path().join("net/leads.jsonl").exists());
     node.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_complete_set_timestamp_precedes_the_first_key_and_builds_once() {
+    let dir = seeded_dir();
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    plumb_ingest::articles::write_articles_file(
+        &file,
+        &[plumb_core::Article {
+            title: "Legacy Curie".into(),
+            views: 10,
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let bytes = std::fs::read(&file).unwrap();
+    let source_modified = 1_700_000_000;
+    let notes = crate::pages::SetFileNotes {
+        lines: 1,
+        complete: true,
+        source_modified,
+        fetched_at: 0,
+        near: 0,
+    };
+    std::fs::write(
+        crate::pages::notes_path(&file),
+        serde_json::to_vec(&notes).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(super::newer::stamp(&file).unwrap().0, source_modified);
+    let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
+    let node = start(config).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while node.inner.page_key().is_none() {
+        assert!(Instant::now() < deadline, "page index never became ready");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let first = node.inner.page_key();
+    assert_eq!(super::newer::stamp(&file).unwrap().0, source_modified);
+    let wanted = crate::pages::Wanted::new(
+        dir.path(),
+        &node.inner.settings().page_sets,
+        node.inner.settings().storage_limit_mb,
+    );
+    assert_eq!(first, wanted.key());
+    // Several maintenance looks, with the downloader running, cannot produce
+    // a metadata-only replacement of this first index.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(node.inner.page_key(), first);
+    assert_eq!(
+        node.inner
+            .journal
+            .entries()
+            .iter()
+            .filter(|entry| entry.message.starts_with("Page sets ready:"))
+            .count(),
+        1
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    assert!(get(node.addr(), "/search?q=legacy+curie")
+        .await
+        .2
+        .contains("Legacy_Curie"));
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enabling_and_changing_quota_preserves_inflight_reservations_and_search() {
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.settings.storage_limit_mb = 0;
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let budget = node.inner.storage.clone().unwrap();
+    assert_eq!(budget.status().limit_bytes, u64::MAX);
+    // A direct owner edit is reconciled at the blocking checkpoint, never
+    // by an ingest/status invalidation. This distinguishes a cached ledger
+    // from a hidden full tree walk on every call.
+    let probe = dir.path().join("owner-recount-probe");
+    let counted = budget.status().used_bytes;
+    std::fs::write(&probe, vec![0; 64 * 1024]).unwrap();
+    for _ in 0..100 {
+        node.inner.recount_disk();
+        assert_eq!(node.inner.disk_used(), counted);
+        assert_eq!(node.inner.disk_used_shown(), counted);
+    }
+    budget.recount(dir.path()).unwrap();
+    assert!(node.inner.disk_used() > counted);
+    plumb_core::storage::remove_file(&probe, Some(&budget)).unwrap();
+    let pending = budget.reserve(1_500_000, false).unwrap();
+    let mut settings = node.inner.settings();
+    settings.storage_limit_mb = 1;
+    node.inner.change_settings(settings.clone()).unwrap();
+    assert_eq!(budget.status().limit_bytes, MB);
+    assert_eq!(budget.status().reserved_bytes, 1_500_000);
+    assert!(budget.status().backpressure);
+    assert!(budget.reserve(8192, false).is_err());
+    assert!(!search(node.addr(), "chase").await.is_empty());
+    settings.storage_limit_mb = 5;
+    node.inner.change_settings(settings.clone()).unwrap();
+    assert!(!budget.status().backpressure);
+    drop(budget.reserve(8192, false).unwrap());
+    settings.storage_limit_mb = 0;
+    node.inner.change_settings(settings).unwrap();
+    assert_eq!(budget.status().limit_bytes, u64::MAX);
+    drop(budget.reserve(8_000_000, false).unwrap());
+    drop(pending);
+    assert_eq!(budget.status().reserved_bytes, 0);
+    assert!(Arc::ptr_eq(&budget, node.inner.storage.as_ref().unwrap()));
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_quota_rejection_preserves_raw_prefix_credits_and_ready_search() {
+    let dir = seeded_dir();
+    let node = start(test_config(dir.path())).await.unwrap();
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let raw = std::fs::read(&node.inner.paths.records).unwrap();
+    std::fs::create_dir_all(&node.inner.paths.net).unwrap();
+    let prefix = b"{crash cut inbox";
+    std::fs::write(&node.inner.paths.inbox, prefix).unwrap();
+    let credits = node.inner.paths.net.join("credits-proof.json");
+    std::fs::write(&credits, b"preserve saved credits").unwrap();
+    let budget = node.inner.storage.as_ref().unwrap();
+    budget.recount(dir.path()).unwrap();
+    budget.set_limit(budget.status().used_bytes);
+    let record = SiteRecord::new("waiting.example");
+    assert!(super::network::append_inbox(&node.inner, &[record]).is_err());
+    assert_eq!(std::fs::read(&node.inner.paths.inbox).unwrap(), prefix);
+    assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
+    assert_eq!(std::fs::read(credits).unwrap(), b"preserve saved credits");
+    assert_eq!(budget.status().reserved_bytes, 0);
+    assert!(budget.status().backpressure);
+    assert!(!search(node.addr(), "chase").await.is_empty());
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replaced_page_index_stays_charged_and_searchable_until_held_reader_closes() {
+    let dir = seeded_dir();
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let article = |title: &str| plumb_core::Article {
+        title: title.into(),
+        views: 10,
+        ..Default::default()
+    };
+    plumb_ingest::articles::write_articles_file(&file, &[article("First Quota Page")]).unwrap();
+    super::newer::set_time(&file, 1_700_000_000).unwrap();
+    let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
+    let node = start(config).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while node.inner.page_key().is_none() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let (old_key, old_reader) = node.inner.pages.read().unwrap().as_ref().unwrap().clone();
+    let old_dir = crate::pages::index_dir(dir.path(), &old_key);
+    let old_bytes = plumb_core::storage::directory_bytes(&old_dir).unwrap();
+    plumb_ingest::articles::write_articles_file(&file, &[article("Second Quota Page")]).unwrap();
+    super::newer::set_time(&file, 1_700_000_001).unwrap();
+    while node.inner.page_key().as_deref() == Some(&old_key) {
+        assert!(Instant::now() < deadline, "replacement never became ready");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(old_dir.exists(), "held generation was deleted");
+    assert_eq!(old_reader.num_pages(), 1);
+    assert_eq!(old_reader.search("First", 10).unwrap().len(), 1);
+    let before = node.inner.storage.as_ref().unwrap().status().used_bytes;
+    drop(old_reader);
+    while old_dir.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "retired index was never collected"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let after = node.inner.storage.as_ref().unwrap().status().used_bytes;
+    assert!(
+        before.saturating_sub(after) >= old_bytes,
+        "old allocation was not released"
+    );
+    node.shutdown().await.unwrap();
+}

@@ -5930,6 +5930,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "unicode_categories",
  "url",
 ]
@@ -6010,11 +6011,13 @@ name = "plumb-index"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "idna",
  "levenshtein_automata",
  "plumb-core",
  "serde",
  "serde_json",
+ "stable_deref_trait",
  "tantivy",
  "tantivy-fst",
  "tempfile",

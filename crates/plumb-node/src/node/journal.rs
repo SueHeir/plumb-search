@@ -41,6 +41,7 @@ pub struct LogEntry {
 pub struct Journal {
     path: Option<PathBuf>,
     inner: Mutex<State>,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 }
 
 #[derive(Debug, Default)]
@@ -68,6 +69,7 @@ impl Journal {
         }
         Journal {
             path: Some(path),
+            budget: None,
             inner: Mutex::new(state),
         }
     }
@@ -76,8 +78,17 @@ impl Journal {
     pub fn in_memory() -> Journal {
         Journal {
             path: None,
+            budget: None,
             inner: Mutex::new(State::default()),
         }
+    }
+
+    pub fn with_budget(
+        mut self,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Self {
+        self.budget = budget;
+        self
     }
 
     pub fn info(&self, message: impl Into<String>) {
@@ -132,16 +143,36 @@ impl Journal {
                 .map(|line| line + "\n")
                 .collect();
             state.lines = state.entries.len();
-            super::store::write_atomically(path, text.as_bytes())
+            if let Some(budget) = &self.budget {
+                plumb_core::storage::write_atomic(
+                    path,
+                    &path.with_extension("quota.tmp"),
+                    text.as_bytes(),
+                    Some(budget),
+                    None,
+                )
+                .map_err(Into::into)
+            } else {
+                super::store::write_atomically(path, text.as_bytes())
+            }
         } else {
             state.lines += 1;
             let line = serde_json::to_string(&entry).expect("entries encode") + "\n";
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut file| file.write_all(line.as_bytes()))
-                .map_err(Into::into)
+            if let Some(budget) = &self.budget {
+                plumb_core::storage::BudgetFile::open_write(path, false, Some(budget.clone()))
+                    .and_then(|mut file| {
+                        file.seek(std::io::SeekFrom::End(0))?;
+                        file.write_all(line.as_bytes())
+                    })
+                    .map_err(Into::into)
+            } else {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut file| file.write_all(line.as_bytes()))
+                    .map_err(Into::into)
+            }
         };
         if let Err(err) = written {
             warn!("cannot write the activity log: {err:#}");

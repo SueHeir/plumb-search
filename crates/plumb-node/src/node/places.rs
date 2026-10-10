@@ -11,7 +11,7 @@ use tracing::warn;
 
 use super::Inner;
 use crate::pages::thousands;
-use crate::places::{open_or_build, remove_other_indexes, wanted};
+use crate::places::{open_or_build_with_budget, remove_other_indexes_with_budget, wanted};
 
 /// Wait after a failed build before trying the same places again.
 const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
@@ -25,6 +25,7 @@ pub(super) fn refresh(
     inner: &Inner,
     settings: &super::NodeSettings,
     failed: &mut Option<(String, Instant)>,
+    retired: &mut Vec<std::sync::Weak<PlaceSearcher>>,
 ) {
     let near = homes(inner);
     let wanted = wanted(
@@ -40,6 +41,14 @@ pub(super) fn refresh(
         .unwrap_or_else(PoisonError::into_inner)
         .as_ref()
         .map(|(key, _)| key.clone());
+    retired.retain(|reader| reader.strong_count() > 0);
+    if retired.is_empty() {
+        remove_other_indexes_with_budget(
+            &inner.paths.data,
+            current.as_deref(),
+            inner.storage.as_deref(),
+        );
+    }
     if key == current {
         return;
     }
@@ -51,23 +60,37 @@ pub(super) fn refresh(
     }
     let found = match &wanted {
         None => None,
-        Some(wanted) => match open_or_build(&inner.paths.data, wanted) {
-            Ok(found) => Some(found),
-            Err(err) => {
-                warn!("places: {err:#}");
-                inner
-                    .journal
-                    .warning(format!("Could not build the place index: {err:#}"));
-                *failed = key.map(|k| (k, Instant::now()));
-                return;
+        Some(wanted) => {
+            match open_or_build_with_budget(&inner.paths.data, wanted, inner.storage.clone()) {
+                Ok(found) => Some(found),
+                Err(err) => {
+                    warn!("places: {err:#}");
+                    inner
+                        .journal
+                        .warning(format!("Could not build the place index: {err:#}"));
+                    *failed = key.map(|k| (k, Instant::now()));
+                    return;
+                }
             }
-        },
+        }
     };
     let kept = found.as_ref().map(|(k, _)| k.clone());
     let places = found.as_ref().map_or(0, |(_, s)| s.num_places());
-    *inner.places.write().unwrap_or_else(PoisonError::into_inner) =
-        found.map(|(k, s)| (k, Arc::new(s)));
-    remove_other_indexes(&inner.paths.data, kept.as_deref());
+    let old = std::mem::replace(
+        &mut *inner.places.write().unwrap_or_else(PoisonError::into_inner),
+        found.map(|(k, s)| (k, Arc::new(s))),
+    );
+    if let Some((_, reader)) = old {
+        retired.push(Arc::downgrade(&reader));
+    }
+    retired.retain(|reader| reader.strong_count() > 0);
+    if retired.is_empty() {
+        remove_other_indexes_with_budget(
+            &inner.paths.data,
+            kept.as_deref(),
+            inner.storage.as_deref(),
+        );
+    }
     if kept.is_some() {
         inner.journal.info(format!(
             "Places ready: {} places from OpenStreetMap",

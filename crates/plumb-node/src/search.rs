@@ -30,8 +30,10 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         .with_context(|| format!("reading records {}", args.records.display()))?;
     if let Some((records, outlines)) = outlines {
         let built =
-            crate::outline::build_index(records, outlines, &args.index, None, 0, &mut |_| Ok(()))
-                .with_context(|| format!("building the index in {}", args.index.display()))?;
+            crate::outline::build_index(records, outlines, &args.index, None, 0, None, &mut |_| {
+                Ok(())
+            })
+            .with_context(|| format!("building the index in {}", args.index.display()))?;
         println!(
             "indexed {} sites from {} into {}",
             built.docs,

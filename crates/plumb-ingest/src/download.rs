@@ -17,7 +17,8 @@ use reqwest::header::{
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::error::Category;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+#[cfg(test)]
+use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 
 use crate::snippet;
@@ -102,7 +103,7 @@ const RESUME_PAUSE: Duration = Duration::from_secs(1);
 /// fails.
 pub async fn download_to_file(client: &reqwest::Client, url: &str, dest: &Path) -> Result<u64> {
     if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
-        tokio::fs::create_dir_all(parent)
+        crate::storage::create_dir_all(parent)
             .await
             .with_context(|| format!("creating {}", parent.display()))?;
     }
@@ -120,15 +121,15 @@ pub async fn download_to_file(client: &reqwest::Client, url: &str, dest: &Path) 
             }
             Err(failed) => {
                 if !failed.resumable {
-                    let _ = tokio::fs::remove_file(&part).await;
-                    let _ = tokio::fs::remove_file(&info).await;
+                    let _ = crate::storage::remove_file(&part).await;
+                    let _ = crate::storage::remove_file(&info).await;
                 }
                 return Err(failed.error.context(format!("downloading {url}")));
             }
         }
     };
-    let _ = tokio::fs::remove_file(&info).await;
-    tokio::fs::rename(&part, dest)
+    let _ = crate::storage::remove_file(&info).await;
+    crate::storage::rename(&part, dest)
         .await
         .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))?;
     info!("saved {} ({})", dest.display(), megabytes(written));
@@ -268,14 +269,14 @@ async fn download_attempt(
                 Some(info) => {
                     let bytes = serde_json::to_vec(&info).map_err(anyhow::Error::from);
                     match bytes {
-                        Ok(bytes) => tokio::fs::write(info_path, bytes).await.is_ok(),
+                        Ok(bytes) => crate::storage::write(info_path, bytes).await.is_ok(),
                         Err(_) => false,
                     }
                 }
                 None => false,
             };
             if !saved {
-                let _ = tokio::fs::remove_file(info_path).await;
+                let _ = crate::storage::remove_file(info_path).await;
             }
             (0, total)
         }
@@ -294,11 +295,7 @@ async fn stream_body(
     start: u64,
     total: Option<u64>,
 ) -> Result<u64> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(start == 0)
-        .open(part)
+    let mut file = crate::storage::OutputFile::open(part, start == 0)
         .await
         .with_context(|| format!("creating {}", part.display()))?;
     if start > 0 {
@@ -464,7 +461,7 @@ pub async fn download_cc_domain_ranks_top(
     if !status.is_success() {
         bail!("downloading {url} failed: HTTP {status}");
     }
-    tokio::fs::create_dir_all(dir)
+    crate::storage::create_dir_all(dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
     let part = part_path(&dest);
@@ -477,13 +474,13 @@ pub async fn download_cc_domain_ranks_top(
     let saved = match save_top_lines(&mut response, &part, rows).await {
         Ok(saved) => saved,
         Err(err) => {
-            let _ = tokio::fs::remove_file(&part).await;
+            let _ = crate::storage::remove_file(&part).await;
             return Err(err.context(format!("downloading {url}")));
         }
     };
     // Dropping the response closes the connection: the rest is never fetched.
     drop(response);
-    tokio::fs::rename(&part, &dest)
+    crate::storage::rename(&part, &dest)
         .await
         .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))?;
     info!(
@@ -511,7 +508,7 @@ async fn save_top_lines(
     part: &Path,
     rows: usize,
 ) -> Result<TopLinesSaved> {
-    let mut file = tokio::fs::File::create(part)
+    let mut file = crate::storage::OutputFile::create(part)
         .await
         .with_context(|| format!("creating {}", part.display()))?;
     let mut top = TopLines::new(rows);
@@ -988,18 +985,18 @@ pub async fn download_wikidata_official_sites_paced(
             .with_context(|| format!("reading {}", path.display()))?;
         tsv.add(saved_rows(&text));
     }
-    tokio::fs::create_dir_all(dir)
+    crate::storage::create_dir_all(dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
     let dest = dir.join(WIKIDATA_FILE_NAME);
     let part = part_path(&dest);
-    tokio::fs::write(&part, tsv.text.as_bytes())
+    crate::storage::write(&part, tsv.text.as_bytes())
         .await
         .with_context(|| format!("writing {}", part.display()))?;
-    tokio::fs::rename(&part, &dest)
+    crate::storage::rename(&part, &dest)
         .await
         .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))?;
-    if let Err(err) = tokio::fs::remove_dir_all(&bands_dir).await {
+    if let Err(err) = crate::storage::remove_dir_all(&bands_dir).await {
         if err.kind() != io::ErrorKind::NotFound {
             warn!("could not remove {}: {err}", bands_dir.display());
         }
@@ -1145,15 +1142,15 @@ pub async fn download_wikidata_official_sites_bulk(
     }
     let mut tsv = OfficialSitesTsv::new();
     tsv.add(rows);
-    tokio::fs::create_dir_all(dir)
+    crate::storage::create_dir_all(dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
     let dest = dir.join(WIKIDATA_FILE_NAME);
     let part = part_path(&dest);
-    tokio::fs::write(&part, tsv.text.as_bytes())
+    crate::storage::write(&part, tsv.text.as_bytes())
         .await
         .with_context(|| format!("writing {}", part.display()))?;
-    tokio::fs::rename(&part, &dest)
+    crate::storage::rename(&part, &dest)
         .await
         .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))?;
     info!(
@@ -1261,17 +1258,17 @@ fn missing_bands(wanted: &[SitelinkBand], saved: &[SitelinkBand]) -> Vec<Sitelin
 
 /// Saves the rows of `band` in `bands_dir`, through a `.part` file.
 async fn save_band(bands_dir: &Path, band: SitelinkBand, rows: Vec<WikidataRow>) -> Result<()> {
-    tokio::fs::create_dir_all(bands_dir)
+    crate::storage::create_dir_all(bands_dir)
         .await
         .with_context(|| format!("creating {}", bands_dir.display()))?;
     let mut tsv = OfficialSitesTsv::new();
     tsv.add(rows);
     let dest = bands_dir.join(band.file_name());
     let part = part_path(&dest);
-    tokio::fs::write(&part, tsv.text.as_bytes())
+    crate::storage::write(&part, tsv.text.as_bytes())
         .await
         .with_context(|| format!("writing {}", part.display()))?;
-    tokio::fs::rename(&part, &dest)
+    crate::storage::rename(&part, &dest)
         .await
         .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))
 }

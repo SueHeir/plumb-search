@@ -24,6 +24,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use tantivy::directory::Directory;
+
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{article_url, Article, SearchContent};
 use plumb_core::packages::PackageInfo;
@@ -1406,9 +1408,17 @@ pub fn build_page_index(
     dir: &Path,
     pages: impl IntoIterator<Item = Page>,
 ) -> Result<PageIndexStats> {
-    let staging = Staging::new(dir)?;
+    build_page_index_with_budget(dir, pages, None)
+}
+
+pub fn build_page_index_with_budget(
+    dir: &Path,
+    pages: impl IntoIterator<Item = Page>,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<PageIndexStats> {
+    let staging = Staging::new_with_budget(dir, budget.clone())?;
     let (schema, fields) = schema();
-    let index = Index::create_in_dir(staging.path(), schema)
+    let index = crate::storage::create_index(staging.path(), schema, budget, staging.lifecycle())
         .with_context(|| format!("creating the page index in {}", dir.display()))?;
     analysis::register(index.tokenizers());
     let mut writer = index
@@ -1558,10 +1568,16 @@ pub fn build_page_index(
     writer
         .wait_merging_threads()
         .context("finishing the page index merges")?;
-    std::fs::write(
-        staging.path().join("pages.json"),
-        serde_json::to_vec(&stats)?,
-    )?;
+    if staging.budget().is_some() {
+        index
+            .directory()
+            .atomic_write(Path::new("pages.json"), &serde_json::to_vec(&stats)?)?;
+    } else {
+        std::fs::write(
+            staging.path().join("pages.json"),
+            serde_json::to_vec(&stats)?,
+        )?;
+    }
     staging.install()?;
     Ok(stats)
 }

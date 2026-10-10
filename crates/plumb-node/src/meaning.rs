@@ -548,11 +548,16 @@ impl MeaningModel {
 
 /// Downloads EmbeddingGemma's files into `dir` from `downloads` (each file
 /// name with its address), those not there yet.
-pub(crate) async fn ensure_gemma(dir: &Path, downloads: &[(String, String)]) -> Result<()> {
+pub(crate) async fn ensure_gemma_with_budget(
+    dir: &Path,
+    downloads: &[(String, String)],
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<()> {
     if downloads.iter().all(|(name, _)| dir.join(name).is_file()) {
         return Ok(());
     }
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    plumb_core::storage::create_directory(dir, budget.as_ref())
+        .with_context(|| format!("creating {}", dir.display()))?;
     let client = plumb_ingest::download::http_client()?;
     info!("downloading the embedding model EmbeddingGemma 2");
     for (name, url) in downloads {
@@ -560,7 +565,7 @@ pub(crate) async fn ensure_gemma(dir: &Path, downloads: &[(String, String)]) -> 
         if dest.is_file() {
             continue;
         }
-        plumb_ingest::download::download_to_file(&client, url, &dest)
+        download_file_with_budget(&client, url, &dest, budget.clone())
             .await
             .with_context(|| format!("downloading {url}"))?;
     }
@@ -602,12 +607,21 @@ pub fn run_embed(args: EmbedArgs) -> Result<()> {
 /// [`MODEL_FILES`] appended), those not there yet; nothing when `dir`
 /// names an embedding server ([`plumb_embed::SERVER_FILE`]).
 pub(crate) async fn ensure_model(dir: &Path, base_url: &str) -> Result<()> {
+    ensure_model_with_budget(dir, base_url, None).await
+}
+
+pub(crate) async fn ensure_model_with_budget(
+    dir: &Path,
+    base_url: &str,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<()> {
     if MODEL_FILES.iter().all(|name| dir.join(name).is_file())
         || dir.join(plumb_embed::SERVER_FILE).is_file()
     {
         return Ok(());
     }
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    plumb_core::storage::create_directory(dir, budget.as_ref())
+        .with_context(|| format!("creating {}", dir.display()))?;
     let client = plumb_ingest::download::http_client()?;
     info!("downloading the embedding model {MODEL_NAME}");
     for name in MODEL_FILES {
@@ -616,11 +630,26 @@ pub(crate) async fn ensure_model(dir: &Path, base_url: &str) -> Result<()> {
             continue;
         }
         let url = format!("{base_url}{name}");
-        plumb_ingest::download::download_to_file(&client, &url, &dest)
+        download_file_with_budget(&client, &url, &dest, budget.clone())
             .await
             .with_context(|| format!("downloading {url}"))?;
     }
     Ok(())
+}
+
+// Keep the downloader's resumable policy while scoping every staged write,
+// sidecar, cleanup and replacement to this node's shared ledger.
+pub(crate) async fn download_file_with_budget(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<u64> {
+    plumb_ingest::storage::with_budget(
+        budget,
+        plumb_ingest::download::download_to_file(client, url, dest),
+    )
+    .await
 }
 
 #[cfg(test)]

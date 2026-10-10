@@ -12,12 +12,13 @@
 //! a node with little room deletes other crawlers' oldest batches sooner
 //! ([`BatchStore::prune_to_bytes`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use libp2p::identity::PublicKey;
 use plumb_core::SiteRecord;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,19 @@ use crate::agree::agree;
 use crate::assign::{epoch_of, is_assigned};
 use crate::batch::{Batch, RecordProof, SignedHeader};
 use crate::hash::Hash;
+use crate::storage::{allocation_for, file_bytes, LimitedBytes, Reservation, StorageBudget};
+
+// Signed record strings can double in size when escaped in the batch JSON.
+const MAX_STORED_BATCH_BYTES: usize = 2 * crate::batch::MAX_BATCH_BYTES + 4 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct StoreLimits {
+    pub own: Vec<u8>,
+    pub bytes: Option<u64>,
+    pub now: u64,
+    pub epochs: u64,
+    pub storage: Option<Arc<StorageBudget>>,
+}
 
 /// Batches are kept for this many epochs.
 pub const RETAIN_EPOCHS: u64 = 35;
@@ -75,6 +89,7 @@ struct Holding {
 pub struct BatchReader {
     dir: PathBuf,
     cache: HashMap<Hash, Option<(Batch, Vec<Hash>)>>,
+    budget: Option<Arc<StorageBudget>>,
 }
 
 /// Batches a [`BatchReader`] keeps read at once.
@@ -87,6 +102,7 @@ impl BatchReader {
             if self.cache.len() >= READER_CACHE {
                 self.cache.clear();
             }
+            let _mutation = self.budget.as_ref().map(|budget| budget.mutation());
             let read = match read_batch(&self.dir.join(format!("{id}.json"))) {
                 Ok(batch) => {
                     let leaves = batch.leaf_hashes();
@@ -150,6 +166,12 @@ pub struct BatchStore {
     crawler_ids: HashMap<Vec<u8>, u32>,
     /// Whether `crawls` is kept ([`crate::NetConfig::follow_crawls`]).
     following: bool,
+    sizes: HashMap<Hash, u64>,
+    oldest: BTreeSet<(u64, Hash)>,
+    foreign_oldest: BTreeSet<(u64, Hash)>,
+    allocated: u64,
+    foreign_allocated: u64,
+    limits: Option<StoreLimits>,
 }
 
 impl BatchStore {
@@ -163,7 +185,36 @@ impl BatchStore {
     /// when `following` ([`crate::NetConfig::follow_crawls`]): a store that
     /// does not has none to give.
     pub fn open_following(dir: &Path, following: bool) -> Result<BatchStore> {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        Self::open_inner(dir, following, None)
+    }
+
+    /// Apply retention before building per-homepage proof indexes or replaying
+    /// agreement. Only one bounded batch is read into memory at a time.
+    pub fn open_retained(dir: &Path, following: bool, limits: StoreLimits) -> Result<Self> {
+        Self::open_inner(dir, following, Some(limits))
+    }
+
+    fn open_inner(dir: &Path, following: bool, limits: Option<StoreLimits>) -> Result<Self> {
+        let storage = limits.as_ref().and_then(|limits| limits.storage.as_ref());
+        {
+            let _mutation = storage.map(|budget| budget.mutation());
+            let existed = dir.exists();
+            let parent_before = dir.parent().map(file_bytes).transpose()?.unwrap_or(0);
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            if !existed {
+                if let Some(budget) = storage {
+                    budget.added(
+                        file_bytes(dir)?.saturating_add(
+                            dir.parent()
+                                .map(file_bytes)
+                                .transpose()?
+                                .unwrap_or(0)
+                                .saturating_sub(parent_before),
+                        ),
+                    );
+                }
+            }
+        }
         let mut store = BatchStore {
             dir: dir.to_path_buf(),
             ids: HashSet::new(),
@@ -171,21 +222,59 @@ impl BatchStore {
             crawls: HashMap::new(),
             crawler_keys: Vec::new(),
             crawler_ids: HashMap::new(),
-            following,
+            following: following && limits.is_none(),
+            sizes: HashMap::new(),
+            oldest: BTreeSet::new(),
+            foreign_oldest: BTreeSet::new(),
+            allocated: 0,
+            foreign_allocated: 0,
+            limits: None,
         };
         for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
             let path = entry?.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                    let _ = fs::remove_file(&path);
+                    let _ = plumb_core::storage::remove_file(&path, storage.map(AsRef::as_ref));
                 }
                 continue;
             }
             match read_batch(&path) {
-                Ok(batch) => store.note(&batch),
+                Ok(batch) => {
+                    let size = file_bytes(&path)?;
+                    store.allocated = store.allocated.saturating_add(size);
+                    store.sizes.insert(batch.id(), size);
+                    store.note(&batch);
+                }
                 Err(err) => {
                     warn!("deleting the unreadable batch {}: {err:#}", path.display());
-                    let _ = fs::remove_file(&path);
+                    let _ = plumb_core::storage::remove_file(&path, storage.map(AsRef::as_ref));
+                }
+            }
+        }
+        if let Some(limits) = limits {
+            store.limits = Some(limits.clone());
+            store.foreign_oldest = store
+                .oldest
+                .iter()
+                .filter(|(_, id)| store.headers[id].header.crawler != limits.own)
+                .copied()
+                .collect();
+            store.foreign_allocated = store
+                .foreign_oldest
+                .iter()
+                .map(|(_, id)| store.sizes[id])
+                .sum();
+            store.prune_keeping(limits.now, limits.epochs);
+            if let Some(bytes) = limits.bytes {
+                store.prune_to_bytes(bytes, &limits.own);
+            }
+            store.make_room(0);
+            store.following = following;
+            if following {
+                for id in store.ids_oldest_first() {
+                    if let Some(batch) = store.get(&id)? {
+                        store.note(&batch);
+                    }
                 }
             }
         }
@@ -208,22 +297,129 @@ impl BatchStore {
     /// Saves a batch that has been checked. Saving one already held does
     /// nothing.
     pub fn insert(&mut self, batch: &Batch) -> Result<()> {
+        self.insert_for_delivery(batch, 0).map(|_| ())
+    }
+
+    /// Save and reserve the bounded downstream inbox before exposing this
+    /// batch to agreement/credits. A duplicate neither prunes nor reserves.
+    pub(crate) fn insert_for_delivery(
+        &mut self,
+        batch: &Batch,
+        delivery_bytes: u64,
+    ) -> Result<(bool, Option<Reservation>)> {
         let id = batch.id();
         if self.ids.contains(&id) {
-            return Ok(());
+            return Ok((false, None));
         }
+        let mut json = LimitedBytes {
+            bytes: Vec::new(),
+            limit: MAX_STORED_BATCH_BYTES,
+        };
+        serde_json::to_writer(&mut json, batch).context("encoding a bounded batch")?;
+        let staging = allocation_for(json.bytes.len() as u64);
+        let own = self
+            .limits
+            .as_ref()
+            .is_some_and(|limits| limits.own == batch.header.header.crawler);
+        if !own {
+            if let Some(limit) = self.limits.as_ref().and_then(|limits| limits.bytes) {
+                ensure!(
+                    self.allocated
+                        .saturating_sub(self.foreign_allocated)
+                        .saturating_add(staging)
+                        <= limit,
+                    "batch and protected own bytes exceed storage quota"
+                );
+            }
+            if let Some(budget) = self.storage() {
+                ensure!(
+                    staging.saturating_add(delivery_bytes) <= budget.status().limit_bytes,
+                    "batch and inbox exceed storage quota"
+                );
+            }
+            self.make_room(staging.saturating_add(delivery_bytes));
+            if let Some(limit) = self.limits.as_ref().and_then(|limits| limits.bytes) {
+                ensure!(
+                    self.allocated.saturating_add(staging) <= limit,
+                    "batch storage backpressure: own or retained bytes leave no room"
+                );
+            }
+        }
+        let budget = self.storage().cloned();
+        let _mutation = budget.as_ref().map(|budget| budget.mutation());
+        let mut reservation = budget
+            .as_ref()
+            .map(|budget| budget.reserve(staging.saturating_add(delivery_bytes), own))
+            .transpose()?;
+        let directory_before = file_bytes(&self.dir)?;
         let path = self.path(&id);
         let tmp = path.with_extension("tmp");
-        let json = serde_json::to_vec(batch).context("encoding a batch")?;
-        let mut file =
-            fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-        file.write_all(&json)
-            .and_then(|()| file.sync_data())
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        drop(file);
-        fs::rename(&tmp, &path).with_context(|| format!("renaming to {}", path.display()))?;
+        // A collision is not permission to overwrite someone else's file.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("creating {}", tmp.display()))?;
+        let result = (|| -> Result<()> {
+            file.write_all(&json.bytes)
+                .and_then(|()| file.sync_data())
+                .with_context(|| format!("writing {}", tmp.display()))?;
+            drop(file);
+            fs::rename(&tmp, &path).with_context(|| format!("renaming to {}", path.display()))?;
+            Ok(())
+        })();
+        if let Err(err) = result {
+            let _ = fs::remove_file(&tmp);
+            let retained = match file_bytes(&tmp) {
+                Ok(bytes) => bytes,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
+                Err(_) => staging,
+            };
+            let growth = file_bytes(&self.dir)
+                .unwrap_or(directory_before + 4096)
+                .saturating_sub(directory_before);
+            if let Some(reserved) = &mut reservation {
+                reserved.commit(staging, 0, retained.saturating_add(growth));
+            }
+            return Err(err);
+        }
+        let size = file_bytes(&path).unwrap_or(staging);
+        if let Some(reserved) = &mut reservation {
+            reserved.commit(
+                staging,
+                0,
+                size.saturating_add(
+                    file_bytes(&self.dir)
+                        .unwrap_or(directory_before + 4096)
+                        .saturating_sub(directory_before),
+                ),
+            );
+        }
+        self.allocated = self.allocated.saturating_add(size);
+        self.sizes.insert(id, size);
+        if !own && self.limits.is_some() {
+            self.foreign_allocated = self.foreign_allocated.saturating_add(size);
+        }
         self.note(batch);
-        Ok(())
+        Ok((true, reservation))
+    }
+
+    pub fn allocated_bytes(&self) -> u64 {
+        self.allocated
+    }
+
+    pub(crate) fn storage(&self) -> Option<&Arc<StorageBudget>> {
+        self.limits
+            .as_ref()
+            .and_then(|limits| limits.storage.as_ref())
+    }
+
+    fn make_room(&mut self, needed: u64) {
+        let Some(limits) = self.limits.clone() else {
+            return;
+        };
+        let local_target = limits.bytes.map(|limit| limit.saturating_sub(needed));
+        self.prune_until(local_target, &limits.own, needed);
     }
 
     /// The batch with id `id`, if held.
@@ -279,6 +475,7 @@ impl BatchStore {
         BatchReader {
             dir: self.dir.clone(),
             cache: HashMap::new(),
+            budget: self.storage().cloned(),
         }
     }
 
@@ -368,33 +565,74 @@ impl BatchStore {
     /// take no more than `bytes` on disk. The batches crawled with `own`, this
     /// node's key, stay: no other node may hold them yet.
     pub fn prune_to_bytes(&mut self, bytes: u64, own: &[u8]) {
-        let mut others = Vec::new();
-        let mut held = 0;
-        for id in self.ids_oldest_first() {
-            let size = fs::metadata(self.path(&id)).map_or(0, |m| m.len());
-            held += size;
-            if self.headers[&id].header.crawler != own {
-                others.push((id, size));
-            }
-        }
-        let mut old = HashSet::new();
-        for (id, size) in others {
-            if held <= bytes {
-                break;
-            }
-            held -= size;
-            old.insert(id);
-        }
-        self.remove(old);
+        self.prune_until(Some(bytes), own, 0);
     }
 
-    /// Deletes the batches `old` and forgets the crawls in them.
-    fn remove(&mut self, old: HashSet<Hash>) {
-        if old.is_empty() {
-            return;
+    fn prune_until(&mut self, target: Option<u64>, own: &[u8], needed: u64) {
+        // The ordered metadata is maintained on insert/remove: no directory
+        // scan or sort for each batch in a catch-up burst.
+        let configured = self.limits.as_ref().is_some_and(|limits| limits.own == own);
+        let fallback: BTreeSet<_> = if configured {
+            BTreeSet::new()
+        } else {
+            self.oldest
+                .iter()
+                .filter(|(_, id)| self.headers[id].header.crawler != own)
+                .copied()
+                .collect()
+        };
+        let mut failed = BTreeSet::new();
+        loop {
+            let fits_local = target.is_none_or(|bytes| self.allocated <= bytes);
+            let fits_total = self.storage().is_none_or(|budget| {
+                let status = budget.status();
+                status
+                    .used_bytes
+                    .saturating_add(status.reserved_bytes)
+                    .saturating_add(needed)
+                    <= status.limit_bytes
+            });
+            if fits_local && fits_total {
+                break;
+            }
+            let candidates = if configured {
+                &self.foreign_oldest
+            } else {
+                &fallback
+            };
+            let Some((_, id)) = candidates
+                .iter()
+                .find(|(_, id)| self.contains(id) && !failed.contains(id))
+                .copied()
+            else {
+                break;
+            };
+            self.remove(HashSet::from([id]));
+            if self.contains(&id) {
+                failed.insert(id);
+            }
         }
-        for id in &old {
-            match fs::remove_file(self.path(id)) {
+    }
+
+    /// Deletes only through retention; failed deletions retain their metadata
+    /// and allocation. Proof cleanup visits this batch's records, not all sites.
+    fn remove(&mut self, old: HashSet<Hash>) {
+        let budget = self.storage().cloned();
+        let _mutation = budget.as_ref().map(|budget| budget.mutation());
+        for id in old {
+            let domains: Vec<String> = if self.following {
+                self.get(&id)
+                    .ok()
+                    .flatten()
+                    .into_iter()
+                    .flat_map(|batch| batch.records)
+                    .filter_map(|line| serde_json::from_str::<SiteRecord>(&line).ok())
+                    .map(|record| record.domain)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            match fs::remove_file(self.path(&id)) {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => {
@@ -402,19 +640,31 @@ impl BatchStore {
                     continue;
                 }
             }
-            self.ids.remove(id);
-            self.headers.remove(id);
-        }
-        self.crawls.retain(|_, held| {
-            if held.iter().any(|holding| old.contains(&holding.batch)) {
-                *held = held
-                    .iter()
-                    .filter(|holding| !old.contains(&holding.batch))
-                    .copied()
-                    .collect();
+            let bytes = self.sizes.remove(&id).unwrap_or(0);
+            self.allocated = self.allocated.saturating_sub(bytes);
+            if let Some(budget) = &budget {
+                budget.removed(bytes);
             }
-            !held.is_empty()
-        });
+            self.ids.remove(&id);
+            if let Some(header) = self.headers.remove(&id) {
+                self.oldest.remove(&(header.header.created_at, id));
+                if self.foreign_oldest.remove(&(header.header.created_at, id)) {
+                    self.foreign_allocated = self.foreign_allocated.saturating_sub(bytes);
+                }
+            }
+            for domain in domains {
+                if let Some(held) = self.crawls.get_mut(domain.as_str()) {
+                    *held = held
+                        .iter()
+                        .filter(|holding| holding.batch != id)
+                        .copied()
+                        .collect();
+                    if held.is_empty() {
+                        self.crawls.remove(domain.as_str());
+                    }
+                }
+            }
+        }
     }
 
     /// Where `key` is in [`BatchStore::crawler_keys`], added if new.
@@ -436,6 +686,15 @@ impl BatchStore {
         let id = batch.id();
         self.ids.insert(id);
         self.headers.insert(id, batch.header.clone());
+        self.oldest.insert((batch.header.header.created_at, id));
+        if self
+            .limits
+            .as_ref()
+            .is_some_and(|limits| limits.own != batch.header.header.crawler)
+        {
+            self.foreign_oldest
+                .insert((batch.header.header.created_at, id));
+        }
         if !self.following {
             return;
         }
@@ -494,6 +753,11 @@ impl BatchStore {
 /// The batch at a path [`BatchStore::located`] gave; `None` when it was
 /// deleted meanwhile.
 pub fn read_held(path: &Path) -> Result<Option<Batch>> {
+    read_held_with_budget(path, None)
+}
+
+pub fn read_held_with_budget(path: &Path, budget: Option<&StorageBudget>) -> Result<Option<Batch>> {
+    let _mutation = budget.map(StorageBudget::mutation);
     match read_batch(path) {
         Ok(batch) => Ok(Some(batch)),
         Err(err) if is_not_found(&err) => Ok(None),
@@ -502,7 +766,15 @@ pub fn read_held(path: &Path) -> Result<Option<Batch>> {
 }
 
 fn read_batch(path: &Path) -> Result<Batch> {
-    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(MAX_STORED_BATCH_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading {}", path.display()))?;
+    ensure!(
+        bytes.len() <= MAX_STORED_BATCH_BYTES,
+        "oversized stored batch"
+    );
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -521,6 +793,176 @@ mod tests {
     use super::*;
     use crate::assign::{is_assigned, EPOCH_SECS, MAX_SHARE_PPM};
     use crate::batch::MAX_BATCH_AGE_EPOCHS;
+
+    fn quota_batch(key: &Keypair, now: u64, serial: u64) -> Batch {
+        let crawler = key.public().to_peer_id();
+        let domain = (0..)
+            .map(|i| format!("q{serial}-{i}.example"))
+            .find(|domain| is_assigned(epoch_of(now), &crawler, domain, MAX_SHARE_PPM))
+            .unwrap();
+        let mut record = SiteRecord::new(domain);
+        record.crawled_at = Some(now);
+        record.body_text = Some("Signed crawl retained verbatim".into());
+        Batch::sign(key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn limits(
+        own: &Keypair,
+        bytes: u64,
+        now: u64,
+        storage: Option<Arc<StorageBudget>>,
+    ) -> StoreLimits {
+        StoreLimits {
+            own: own.public().encode_protobuf(),
+            bytes: Some(bytes),
+            now,
+            epochs: RETAIN_EPOCHS,
+            storage,
+        }
+    }
+
+    #[test]
+    fn over_quota_startup_prunes_before_proof_indexing_and_preserves_raw_credits_inbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let batches = dir.path().join("batches");
+        let now = 1_790_000_000;
+        let own = Keypair::generate_ed25519();
+        let foreign = Keypair::generate_ed25519();
+        let mine = quota_batch(&own, now - 200, 0);
+        let mut store = BatchStore::open(&batches).unwrap();
+        store.insert(&mine).unwrap();
+        for i in 1..80 {
+            store
+                .insert(&quota_batch(&foreign, now - 100 + i, i))
+                .unwrap();
+        }
+        let size = file_bytes(&store.path(&mine.id())).unwrap();
+        drop(store);
+        for name in [
+            "records.jsonl",
+            "inbox.jsonl",
+            "inbox.absorbing",
+            "credits.json",
+        ] {
+            fs::write(dir.path().join(name), b"protected bytes").unwrap();
+        }
+        let budget = StorageBudget::open(dir.path(), 128 * 1024).unwrap();
+        let store = BatchStore::open_retained(
+            &batches,
+            true,
+            limits(&own, 3 * size, now, Some(budget.clone())),
+        )
+        .unwrap();
+        assert_eq!(store.len(), 3);
+        assert_eq!(
+            store.crawls.len(),
+            3,
+            "discarded batches must never enter the proof index"
+        );
+        assert_eq!(store.get(&mine.id()).unwrap().unwrap(), mine);
+        assert!(store.allocated_bytes() <= 3 * size);
+        assert!(
+            crate::storage::directory_bytes(dir.path()).unwrap() <= budget.status().limit_bytes
+        );
+        for name in [
+            "records.jsonl",
+            "inbox.jsonl",
+            "inbox.absorbing",
+            "credits.json",
+        ] {
+            assert_eq!(fs::read(dir.path().join(name)).unwrap(), b"protected bytes");
+        }
+    }
+
+    #[test]
+    fn catchup_admission_bounds_each_write_without_a_maintenance_tick_and_duplicates_are_noops() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_790_000_000;
+        let own = Keypair::generate_ed25519();
+        let foreign = Keypair::generate_ed25519();
+        let budget = StorageBudget::open(dir.path(), 128 * 1024).unwrap();
+        let mut store = BatchStore::open_retained(
+            &dir.path().join("batches"),
+            true,
+            limits(&own, 32 * 1024, now, Some(budget.clone())),
+        )
+        .unwrap();
+        let mine = quota_batch(&own, now - 200, 0);
+        store.insert(&mine).unwrap();
+        let mut last = mine.clone();
+        for i in 1..100 {
+            last = quota_batch(&foreign, now - 100 + i, i);
+            store.insert(&last).unwrap();
+            assert!(store.allocated_bytes() <= 32 * 1024);
+            assert!(store.len() <= 4 && store.crawls.len() <= 4);
+            assert!(store.contains(&mine.id()));
+            assert!(crate::storage::directory_bytes(dir.path()).unwrap() <= 128 * 1024);
+        }
+        let held = store.ids.clone();
+        let used = budget.status().used_bytes;
+        assert!(!store.insert_for_delivery(&last, u64::MAX).unwrap().0);
+        assert_eq!(store.ids, held);
+        assert_eq!(budget.status().used_bytes, used);
+        assert_eq!(budget.status().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn own_only_overage_survives_restart_and_blocks_foreign_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_790_000_000;
+        let own = Keypair::generate_ed25519();
+        let foreign = Keypair::generate_ed25519();
+        let mut store = BatchStore::open(dir.path()).unwrap();
+        for i in 0..4 {
+            store.insert(&quota_batch(&own, now - 20 + i, i)).unwrap();
+        }
+        drop(store);
+        let budget = StorageBudget::open(dir.path(), 16 * 1024).unwrap();
+        let mut store = BatchStore::open_retained(
+            dir.path(),
+            true,
+            limits(&own, 8192, now, Some(budget.clone())),
+        )
+        .unwrap();
+        assert_eq!(store.len(), 4);
+        assert!(store.insert(&quota_batch(&foreign, now, 10)).is_err());
+        store.insert(&quota_batch(&own, now, 11)).unwrap();
+        assert_eq!(store.len(), 5);
+        assert!(budget.status().backpressure);
+        assert_eq!(budget.status().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn oversized_and_failed_atomic_writes_do_not_leave_files_or_reservations() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_790_000_000;
+        let own = Keypair::generate_ed25519();
+        let foreign = Keypair::generate_ed25519();
+        let budget = StorageBudget::open(dir.path(), 128 * 1024).unwrap();
+        let mut store = BatchStore::open_retained(
+            dir.path(),
+            true,
+            limits(&own, 32 * 1024, now, Some(budget.clone())),
+        )
+        .unwrap();
+        let kept = quota_batch(&foreign, now - 1, 0);
+        store.insert(&kept).unwrap();
+        let mut oversized = quota_batch(&foreign, now, 1);
+        oversized.records = vec!["x".repeat(MAX_STORED_BATCH_BYTES + 1)];
+        assert!(store.insert(&oversized).is_err());
+        assert_eq!(store.len(), 1);
+        assert!(store.contains(&kept.id()));
+        let failed = quota_batch(&foreign, now, 2);
+        fs::create_dir(store.path(&failed.id())).unwrap(); // force rename failure after the write
+        let used = budget.status().used_bytes;
+        assert!(store.insert(&failed).is_err());
+        assert!(!store.contains(&failed.id()));
+        assert!(!store.path(&failed.id()).with_extension("tmp").exists());
+        assert_eq!(budget.status().used_bytes, used);
+        assert_eq!(budget.status().reserved_bytes, 0);
+    }
 
     #[test]
     fn batches_are_kept_across_reopening_proven_and_pruned() {
@@ -573,7 +1015,7 @@ mod tests {
         for batch in [&mine, &older, &newer] {
             store.insert(batch).unwrap();
         }
-        let size = |batch: &Batch| fs::metadata(store.path(&batch.id())).unwrap().len();
+        let size = |batch: &Batch| file_bytes(&store.path(&batch.id())).unwrap();
         let all = size(&mine) + size(&older) + size(&newer);
         let own = me.public().encode_protobuf();
 

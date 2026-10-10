@@ -23,13 +23,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::proto::BucketRecord;
+use crate::storage::{allocation_for, file_bytes, StorageBudget};
 
 /// How long a fetched bucket is used before it is asked for again: as long
 /// as the crawls that fill it take to come round (about twice a day).
@@ -68,12 +69,23 @@ pub struct BucketCache {
     dir: PathBuf,
     available: bool,
     fetched: Mutex<HashMap<u32, Entry>>,
+    storage: Option<Arc<StorageBudget>>,
 }
 
 impl BucketCache {
     /// Opens the cache, retaining stale answers and discarding corrupt files.
     /// If private storage cannot be prepared, the cache stays disabled.
     pub fn open(dir: &Path, _now: u64) -> BucketCache {
+        Self::open_with_budget(dir, _now, None)
+    }
+
+    pub(crate) fn open_with_budget(
+        dir: &Path,
+        _now: u64,
+        storage: Option<Arc<StorageBudget>>,
+    ) -> BucketCache {
+        let _mutation = storage.as_ref().map(|budget| budget.mutation());
+        let existed = dir.exists();
         let available = match secure_dir(dir) {
             Ok(()) => true,
             Err(err) => {
@@ -81,6 +93,11 @@ impl BucketCache {
                 false
             }
         };
+        if available && !existed {
+            if let Some(budget) = &storage {
+                budget.added(file_bytes(dir).unwrap_or(0));
+            }
+        }
         let mut fetched = HashMap::new();
         for entry in available
             .then(|| fs::read_dir(dir))
@@ -107,7 +124,7 @@ impl BucketCache {
                         b,
                         Entry {
                             fetched_at: s.fetched_at,
-                            bytes,
+                            bytes: file_bytes(&path).unwrap_or(bytes),
                         },
                     )
                 })
@@ -117,7 +134,12 @@ impl BucketCache {
                     fetched.insert(bucket, entry);
                 }
                 _ => {
-                    let _ = fs::remove_file(&path);
+                    let size = file_bytes(&path).unwrap_or(0);
+                    if fs::remove_file(&path).is_ok() {
+                        if let Some(budget) = &storage {
+                            budget.removed(size);
+                        }
+                    }
                 }
             }
         }
@@ -125,8 +147,10 @@ impl BucketCache {
             dir: dir.to_path_buf(),
             available,
             fetched: Mutex::new(fetched),
+            storage: storage.clone(),
         };
         cache.trim(&mut cache.lock());
+        cache.trim_for_room(&mut cache.lock(), 0);
         cache
     }
 
@@ -147,7 +171,7 @@ impl BucketCache {
                 bucket,
                 Entry {
                     fetched_at: saved.fetched_at,
-                    bytes,
+                    bytes: file_bytes(&self.path(bucket)).unwrap_or(bytes),
                 },
             );
             return Some(CachedBucket {
@@ -156,8 +180,8 @@ impl BucketCache {
                 answers: saved.answers,
             });
         }
-        fetched.remove(&bucket);
-        let _ = fs::remove_file(self.path(bucket));
+        let _mutation = self.storage.as_ref().map(|budget| budget.mutation());
+        self.remove(&mut fetched, bucket);
         None
     }
 
@@ -185,15 +209,61 @@ impl BucketCache {
             debug!("could not encode a bucket within the cache byte limit");
             return;
         }
-        if let Err(err) = self.write(bucket, &encoded.0) {
+        let _mutation = self.storage.as_ref().map(|budget| budget.mutation());
+        let needed = allocation_for(encoded.0.len() as u64);
+        // Reserve the full new file while the old replacement is still on disk.
+        if needed > MAX_CACHE_BYTES
+            || self
+                .storage
+                .as_ref()
+                .is_some_and(|budget| needed > budget.status().limit_bytes)
+        {
+            return;
+        }
+        self.trim_to(&mut fetched, MAX_CACHE_BYTES.saturating_sub(needed));
+        self.trim_for_room(&mut fetched, needed);
+        let directory_before = file_bytes(&self.dir).unwrap_or(0);
+        let old = file_bytes(&self.path(bucket)).unwrap_or(0);
+        let mut reservation = match self
+            .storage
+            .as_ref()
+            .map(|budget| budget.reserve(needed, false))
+            .transpose()
+        {
+            Ok(reserved) => reserved,
+            Err(err) => {
+                debug!("bucket cache: {err:#}");
+                return;
+            }
+        };
+        if let Err(err) = self.write(bucket, &encoded.0, &mut reservation) {
+            if let Some(budget) = &self.storage {
+                budget.added(
+                    file_bytes(&self.dir)
+                        .unwrap_or(directory_before + 4096)
+                        .saturating_sub(directory_before),
+                );
+            }
             debug!("could not retain a bucket: {err}");
             return;
+        }
+        let bytes = file_bytes(&self.path(bucket)).unwrap_or(needed);
+        if let Some(reserved) = &mut reservation {
+            reserved.commit(
+                needed,
+                old,
+                bytes.saturating_add(
+                    file_bytes(&self.dir)
+                        .unwrap_or(directory_before + 4096)
+                        .saturating_sub(directory_before),
+                ),
+            );
         }
         fetched.insert(
             bucket,
             Entry {
                 fetched_at: now,
-                bytes: encoded.0.len() as u64,
+                bytes,
             },
         );
         self.trim(&mut fetched);
@@ -211,22 +281,19 @@ impl BucketCache {
     /// Forgets every bucket.
     pub fn clear(&self) {
         let mut fetched = self.lock();
-        for bucket in fetched.drain().map(|(b, _)| b) {
-            let _ = fs::remove_file(self.path(bucket));
+        let _mutation = self.storage.as_ref().map(|budget| budget.mutation());
+        for bucket in fetched.keys().copied().collect::<Vec<_>>() {
+            self.remove(&mut fetched, bucket);
         }
     }
 
-    /// Drops the oldest fetches beyond count or total byte limits.
     fn trim(&self, fetched: &mut HashMap<u32, Entry>) {
         self.trim_to(fetched, MAX_CACHE_BYTES);
     }
 
     fn trim_to(&self, fetched: &mut HashMap<u32, Entry>, byte_limit: u64) {
         let mut bytes: u64 = fetched.values().map(|entry| entry.bytes).sum();
-        if fetched.len() <= MAX_BUCKETS && bytes <= byte_limit {
-            return;
-        }
-        let mut by_age: Vec<(u64, u32)> = fetched
+        let mut by_age: Vec<_> = fetched
             .iter()
             .map(|(&b, entry)| (entry.fetched_at, b))
             .collect();
@@ -235,18 +302,62 @@ impl BucketCache {
             if fetched.len() <= MAX_BUCKETS && bytes <= byte_limit {
                 break;
             }
-            if let Some(entry) = fetched.remove(&bucket) {
-                bytes -= entry.bytes;
+            if self.remove(fetched, bucket) {
+                bytes = fetched.values().map(|entry| entry.bytes).sum();
             }
-            let _ = fs::remove_file(self.path(bucket));
         }
+    }
+
+    fn trim_for_room(&self, fetched: &mut HashMap<u32, Entry>, needed: u64) {
+        let Some(budget) = &self.storage else {
+            return;
+        };
+        let mut by_age: Vec<_> = fetched
+            .iter()
+            .map(|(&b, entry)| (entry.fetched_at, b))
+            .collect();
+        by_age.sort_unstable();
+        for (_, bucket) in by_age {
+            let status = budget.status();
+            if status
+                .used_bytes
+                .saturating_add(status.reserved_bytes)
+                .saturating_add(needed)
+                <= status.limit_bytes
+            {
+                break;
+            }
+            self.remove(fetched, bucket);
+        }
+    }
+
+    fn remove(&self, fetched: &mut HashMap<u32, Entry>, bucket: u32) -> bool {
+        match fs::remove_file(self.path(bucket)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                debug!("cannot remove cached bucket: {err}");
+                return false;
+            }
+        }
+        if let Some(entry) = fetched.remove(&bucket) {
+            if let Some(budget) = &self.storage {
+                budget.removed(entry.bytes);
+            }
+        }
+        true
     }
 
     fn path(&self, bucket: u32) -> PathBuf {
         self.dir.join(format!("{bucket}.json"))
     }
 
-    fn write(&self, bucket: u32, bytes: &[u8]) -> io::Result<()> {
+    fn write(
+        &self,
+        bucket: u32,
+        bytes: &[u8],
+        reservation: &mut Option<crate::storage::Reservation>,
+    ) -> io::Result<()> {
         let mut random = [0u8; 16];
         OsRng
             .try_fill_bytes(&mut random)
@@ -269,7 +380,12 @@ impl BucketCache {
             fs::rename(&staging, self.path(bucket))
         })();
         if result.is_err() {
-            let _ = fs::remove_file(staging);
+            let _ = fs::remove_file(&staging);
+            let retained = plumb_core::storage::existing_file_bytes(&staging)
+                .unwrap_or_else(|_| allocation_for(bytes.len() as u64));
+            if let Some(reserved) = reservation {
+                reserved.commit(allocation_for(bytes.len() as u64), 0, retained);
+            }
         }
         result
     }
@@ -362,6 +478,31 @@ mod tests {
             proof: None,
             also: Vec::new(),
         }]
+    }
+
+    #[test]
+    fn cache_admits_staging_allocation_and_trims_at_startup_and_each_put() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        let cache = BucketCache::open(&cache_dir, 100);
+        for bucket in 0..20 {
+            cache.put(bucket, vec![answer("small")], 100 + bucket as u64);
+        }
+        drop(cache);
+        fs::write(dir.path().join("records.jsonl"), b"raw stays").unwrap();
+        let budget = StorageBudget::open(dir.path(), 48 * 1024).unwrap();
+        let cache = BucketCache::open_with_budget(&cache_dir, 100, Some(budget.clone()));
+        assert!(crate::storage::directory_bytes(dir.path()).unwrap() <= 48 * 1024);
+        for bucket in 20..60 {
+            cache.put(bucket, vec![answer("new")], 100 + bucket as u64);
+            assert!(crate::storage::directory_bytes(dir.path()).unwrap() <= 48 * 1024);
+            assert_eq!(budget.status().reserved_bytes, 0);
+        }
+        assert_eq!(
+            fs::read(dir.path().join("records.jsonl")).unwrap(),
+            b"raw stays"
+        );
+        assert!(cache.get_retained(59, 200).is_some());
     }
 
     #[test]
@@ -470,7 +611,7 @@ mod tests {
         let cache = BucketCache::open(dir.path(), now);
         cache.put(7, vec![answer("old")], now);
         cache.put(8, vec![answer("new")], now + 1);
-        let newest_size = fs::metadata(dir.path().join("8.json")).unwrap().len();
+        let newest_size = file_bytes(&dir.path().join("8.json")).unwrap();
         cache.trim_to(&mut cache.lock(), newest_size);
         assert_eq!(cache.len(), 1);
         assert!(!dir.path().join("7.json").exists());

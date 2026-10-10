@@ -135,6 +135,7 @@ pub struct Ledger {
     path: Option<PathBuf>,
     accounts: HashMap<PeerId, Account>,
     dirty: bool,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -177,7 +178,16 @@ impl Ledger {
             path: Some(path),
             accounts,
             dirty: false,
+            budget: None,
         })
+    }
+
+    pub fn with_budget(
+        mut self,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// Counts the crawls agreement scored.
@@ -273,7 +283,17 @@ impl Ledger {
                 .collect(),
         };
         let bytes = serde_json::to_vec(&file).context("encoding the ledger")?;
-        write_atomic(path, &bytes, false)?;
+        if let Some(budget) = &self.budget {
+            plumb_core::storage::write_atomic(
+                path,
+                &path.with_extension("quota.tmp"),
+                &bytes,
+                Some(budget),
+                None,
+            )?;
+        } else {
+            write_atomic(path, &bytes, false)?;
+        }
         self.dirty = false;
         Ok(())
     }
@@ -509,6 +529,7 @@ impl Pending {
 pub struct Wallet {
     path: Option<PathBuf>,
     issuers: BTreeMap<String, Held>,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -537,7 +558,16 @@ impl Wallet {
         Ok(Wallet {
             path: Some(path),
             issuers,
+            budget: None,
         })
+    }
+
+    pub fn with_budget(
+        mut self,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// Keeps tokens `issuer` signed with `key`. Refused when the issuer
@@ -579,7 +609,17 @@ impl Wallet {
             return Ok(());
         };
         let bytes = serde_json::to_vec(&self.issuers).context("encoding the wallet")?;
-        write_atomic(path, &bytes, true)
+        if let Some(budget) = &self.budget {
+            plumb_core::storage::write_atomic_private(
+                path,
+                &path.with_extension("quota.tmp"),
+                &bytes,
+                Some(budget),
+            )?;
+            Ok(())
+        } else {
+            write_atomic(path, &bytes, true)
+        }
     }
 }
 
@@ -670,6 +710,50 @@ mod tests {
             witnesses: 2,
             trusted: false,
         }
+    }
+
+    #[test]
+    fn guarded_credit_and_private_wallet_replacements_preserve_existing_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = Ledger::open(dir.path()).unwrap();
+        let peer = PeerId::random();
+        ledger.accounts.insert(
+            peer,
+            Account {
+                earned: 10,
+                ..Account::default()
+            },
+        );
+        ledger.dirty = true;
+        ledger.save().unwrap();
+        let prior = fs::read(dir.path().join(LEDGER_FILE)).unwrap();
+        let budget = plumb_core::storage::StorageBudget::open(dir.path(), 1).unwrap();
+        let mut ledger = ledger.with_budget(Some(budget.clone()));
+        ledger.accounts.get_mut(&peer).unwrap().earned = 20;
+        ledger.dirty = true;
+        assert!(ledger.save().is_err());
+        assert_eq!(fs::read(dir.path().join(LEDGER_FILE)).unwrap(), prior);
+        assert!(ledger.dirty);
+        budget.set_limit(1024 * 1024);
+        ledger.save().unwrap();
+        assert!(!ledger.dirty);
+        let wallet = Wallet::open(dir.path())
+            .unwrap()
+            .with_budget(Some(budget.clone()));
+        wallet.save().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(dir.path().join(WALLET_FILE))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(budget.status().reserved_bytes, 0);
     }
 
     #[test]

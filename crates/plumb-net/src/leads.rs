@@ -430,9 +430,18 @@ pub struct LeadStore {
     ids: HashSet<Hash>,
     /// Lines in the file, kept leads and replaced or dropped ones.
     lines: usize,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 }
 
 impl LeadStore {
+    pub fn with_budget(
+        mut self,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Self {
+        self.budget = budget;
+        self
+    }
+
     /// The leads kept in `path` that hold at `now`, none when there is no
     /// file yet. Lines that do not read are left out.
     pub fn open(path: &Path, now: u64) -> Result<LeadStore> {
@@ -641,16 +650,24 @@ impl LeadStore {
             return Ok(());
         };
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+            plumb_core::storage::create_directory(parent, self.budget.as_ref())
+                .with_context(|| format!("creating {}", parent.display()))?;
         }
         let mut line = serde_json::to_vec(&held.lead).context("encoding a lead")?;
         line.push(b'\n');
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut file| file.write_all(&line))
-            .with_context(|| format!("writing {}", path.display()))?;
+        if let Some(budget) = &self.budget {
+            let mut file =
+                plumb_core::storage::BudgetFile::open_write(path, false, Some(budget.clone()))?;
+            file.seek(std::io::SeekFrom::End(0))?;
+            file.write_all(&line)?;
+        } else {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut file| file.write_all(&line))
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
         self.lines += 1;
         Ok(())
     }
@@ -666,10 +683,14 @@ impl LeadStore {
             text.push(b'\n');
         }
         let part = path.with_extension("jsonl.part");
-        fs::write(&part, text)
-            .and_then(|()| fs::rename(&part, path))
-            .with_context(|| format!("writing {}", path.display()))
-            .inspect_err(|err| warn!("{err:#}"))?;
+        if self.budget.is_some() {
+            plumb_core::storage::write_atomic(path, &part, &text, self.budget.as_ref(), None)?;
+        } else {
+            fs::write(&part, text)
+                .and_then(|()| fs::rename(&part, path))
+                .with_context(|| format!("writing {}", path.display()))
+                .inspect_err(|err| warn!("{err:#}"))?;
+        }
         self.lines = self.held.len();
         Ok(())
     }

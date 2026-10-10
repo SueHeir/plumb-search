@@ -26,6 +26,7 @@ use plumb_core::place::{
 use plumb_core::{country_of_name, joined, normalize_text};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
+use tantivy::directory::Directory;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED, STRING,
@@ -426,9 +427,17 @@ pub fn build_place_index(
     dir: &Path,
     places: impl IntoIterator<Item = Place>,
 ) -> Result<PlaceIndexStats> {
-    let staging = Staging::new(dir)?;
+    build_place_index_with_budget(dir, places, None)
+}
+
+pub fn build_place_index_with_budget(
+    dir: &Path,
+    places: impl IntoIterator<Item = Place>,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<PlaceIndexStats> {
+    let staging = Staging::new_with_budget(dir, budget.clone())?;
     let (schema, fields) = schema();
-    let index = Index::create_in_dir(staging.path(), schema)
+    let index = crate::storage::create_index(staging.path(), schema, budget, staging.lifecycle())
         .with_context(|| format!("creating the place index in {}", dir.display()))?;
     analysis::register(index.tokenizers());
     let mut writer = index
@@ -465,10 +474,14 @@ pub fn build_place_index(
     writer
         .wait_merging_threads()
         .context("finishing the place index merges")?;
-    std::fs::write(
-        staging.path().join("places.json"),
-        serde_json::to_vec(&stats)?,
-    )?;
+    let stats_bytes = serde_json::to_vec(&stats)?;
+    if staging.budget().is_some() {
+        index
+            .directory()
+            .atomic_write(Path::new("places.json"), &stats_bytes)?;
+    } else {
+        std::fs::write(staging.path().join("places.json"), stats_bytes)?;
+    }
     staging.install()?;
     Ok(stats)
 }
