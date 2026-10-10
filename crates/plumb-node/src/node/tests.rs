@@ -4817,7 +4817,7 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
                     record
                 })
                 .collect();
-            let batch = Batch::sign(&key, &records, epoch, MAX_SHARE_PPM, made)
+            let batch = Batch::sign(key, &records, epoch, MAX_SHARE_PPM, made)
                 .unwrap()
                 .unwrap();
             assert_eq!(batch.records.len(), records.len());
