@@ -452,6 +452,12 @@ fn row_rank(rows: &[Row], case: &Case) -> Option<usize> {
         .map(|i| i + 1)
 }
 
+// Candidate-only follow-up: the frozen harness baseline predates this API.
+// Normal report builds always use production's early language view.
+fn language_view(pages: &PageSearcher, language: Option<&str>) -> PageSearcher {
+    pages.in_language(language)
+}
+
 fn observe(
     args: &EvalArgs,
     setup: &Setup,
@@ -470,6 +476,10 @@ fn observe(
         only_country: case.options.only_country,
         ..SearchOptions::default()
     };
+    let scoped_pages = setup
+        .pages
+        .as_ref()
+        .map(|pages| language_view(pages, options.language.as_deref()));
     let query = if let Some(site) = &case.options.site {
         format!("{} site:{site}", case.query)
     } else {
@@ -483,7 +493,7 @@ fn observe(
         .searcher
         .search_meaning(&query, args.limit, cfg, &options, semantic)?;
     let typed = case.options.kind.as_deref();
-    let mut raw_pages = if let Some(pages) = &setup.pages {
+    let mut raw_pages = if let Some(pages) = &scoped_pages {
         if typed == Some("site") {
             Vec::new()
         } else if typed.is_some() || ops.any() {
@@ -495,7 +505,7 @@ fn observe(
         Vec::new()
     };
     if typed.is_none() && !ops.any() {
-        if let Some(pages) = &setup.pages {
+        if let Some(pages) = &scoped_pages {
             pages.add_other_number(words, &found.hits, &mut raw_pages, 10)?;
         }
     }
@@ -533,7 +543,7 @@ fn observe(
             drop_namesakes_of_words(&mut found.hits, &filtered);
         }
         lift_named_sites(&mut found.hits, &filtered);
-        if let Some(pages) = &setup.pages {
+        if let Some(pages) = &scoped_pages {
             pages.note_demand(&mut found.hits)?;
         }
         placed = place_pages(words, &found.hits, filtered.clone());
@@ -558,7 +568,7 @@ fn observe(
     if answer.is_none() {
         if let (Some(asked), Some(pages)) = (
             plumb_core::facts::fact_asked(&case.query),
-            setup.pages.as_ref(),
+            scoped_pages.as_ref(),
         ) {
             let lookup_sites =
                 setup
@@ -568,7 +578,8 @@ fn observe(
             let lookup = place_pages(&asked.subject, &lookup_sites.hits, lookup_pages);
             answer = crate::web::answers::fact_answer(&asked, &lookup, now);
             fact_lookup = Some(
-                json!({"subject":asked.subject,"sites":lookup_sites.hits,"pages":lookup,"mode":"legacy_eval_subject_lookup"}),
+                json!({"subject":asked.subject,"sites":lookup_sites.hits,"pages":lookup,"mode":"legacy_eval_subject_lookup", "production_entity_lookup_observed":false,
+                    "language_filter_phase":"before_candidate_cap"}),
             );
         }
     }
@@ -592,8 +603,7 @@ fn observe(
     // Diagnostics are outside latency measurement: expensive collection must
     // not inflate the reported user-path latency.
     let expected: Vec<_> = case.relevant.iter().map(|r| r.identity.clone()).collect();
-    let diagnostic_pages = setup
-        .pages
+    let diagnostic_pages = scoped_pages
         .as_ref()
         .map(|pages| pages.search_naming_docs(words, &ops, typed == Some("docs"), 100))
         .transpose()?
@@ -658,9 +668,10 @@ fn observe(
             "record_present":present,
             "exact_identity_lookup":{"mode":"label_address_membership", "production_entity_lookup_observed":false},
             "fact_subject_lookup":fact_lookup,
-            "lexical_candidate":{"sites":lexical,"pages":identities(&raw_pages)},
+            "lexical_candidate":{"sites":lexical,"pages":identities(&raw_pages),"page_language_filter_phase":"before_candidate_cap"},
             "semantic_candidate":semantic.map(|m| m.nearest()),
-            "diagnostic_candidates":{"pages":identities(&diagnostic_pages),"depth":100,"used_by_search_pipeline":false},
+            "diagnostic_candidates":{"pages":identities(&diagnostic_pages),"depth":100,"used_by_search_pipeline":false,
+                "language_filter_phase":"before_candidate_cap"},
             "source_filtered_candidate":{"site_pool":{"words":pool.words,"popular":pool.popular,"named":pool.named,"kind":pool.kind,"meaning":pool.meaning},"pages":identities(&filtered)},
             "page_selection":selected,"blended_row":{"rows":blended,"rank":row_rank(&blended,case)},
             "learned_order":{"enabled":cfg.learned,"rows":learned,"rank":row_rank(&learned,case)},
@@ -842,6 +853,7 @@ pub(super) fn run(args: &EvalArgs) -> Result<()> {
         "sources":args.pages,"pages_top":args.pages_top,"limit":args.limit,
         "features":{"findings":false,"personalization":false,"plugins":false,"external_results":false,"peers":false},
         "skipped_tool_cases":tool_cases,"cases":cases.len(),"half":format!("{:?}",args.half),
+        "adapter":{"page_language_filter_phase":"before_candidate_cap","fact_answer_mode":"legacy_eval_subject_lookup_not_production_entity_contract"},
         "suite_fingerprints":args.queries.iter().chain(&args.acceptance).map(|p| fingerprint(p)).collect::<Result<Vec<_>>>()?
     });
     writeln!(out, "{manifest}")?;
@@ -1065,8 +1077,56 @@ mod tests {
         let before = read();
         run(&args).unwrap();
         assert_eq!(before, read());
-        assert_eq!(before[0]["stages"]["loss"], "source_filter");
+        assert_eq!(before[0]["stages"]["loss"], "retrieval");
+        assert_eq!(
+            before[0]["stages"]["lexical_candidate"]["page_language_filter_phase"],
+            "before_candidate_cap"
+        );
         assert_eq!(before[1]["stages"]["loss"], "record_missing");
+    }
+    #[test]
+    fn candidate_language_view_filters_before_raw_and_diagnostic_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pages: Vec<_> = (0..220)
+            .map(|i| {
+                let mut page = Page::from_article(
+                    "fr",
+                    plumb_core::Article {
+                        title: "Widget".into(),
+                        views: 100000,
+                        language: Some("fr".into()),
+                        ..Default::default()
+                    },
+                );
+                page.url = format!("https://fr.wikipedia.org/wiki/Widget_{i}");
+                page
+            })
+            .collect();
+        pages.push(Page::from_article(
+            "en",
+            plumb_core::Article {
+                title: "Widget".into(),
+                views: 1,
+                language: Some("en".into()),
+                ..Default::default()
+            },
+        ));
+        plumb_index::pages::build_page_index(dir.path(), pages).unwrap();
+        let searcher = PageSearcher::open(dir.path()).unwrap();
+        assert!(searcher
+            .search("Widget", 10)
+            .unwrap()
+            .iter()
+            .all(|h| h.page.language() == Some("fr")));
+        let view = language_view(&searcher, Some("en"));
+        let raw = view.search("Widget", 10).unwrap();
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].page.url, "https://en.wikipedia.org/wiki/Widget");
+        let diagnostics = view
+            .search_naming_docs("Widget", &Operators::default(), false, 100)
+            .unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].page.language(), Some("en"));
     }
     #[test]
     fn repository_contracts_have_separate_families() {
