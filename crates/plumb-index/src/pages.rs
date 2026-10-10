@@ -857,8 +857,12 @@ pub const FILMS_SET: &str = "films";
 pub const DOCS_SET: &str = "docs";
 /// The set of inner pages of well-known reference sites: health,
 /// dictionaries, recipes, how-tos, government (see
-/// `plumb_core::reference`).
-pub const REFERENCE_SET: &str = "reference";
+/// `plumb_core::reference`). Listed only when the search asks for them,
+/// as subpages are ([`subpage_asked`]).
+///
+/// Named "reference2", not "reference", for the reason
+/// [`SUBPAGES_SET`] is named "subpages2".
+pub const REFERENCE_SET: &str = "reference2";
 /// The set of inner pages of other well-known sites: universities and
 /// labs, big companies, government agencies, entertainment and museums
 /// (see `plumb_core::subpages`). Found like reference pages, but listed
@@ -868,9 +872,18 @@ pub const REFERENCE_SET: &str = "reference";
 /// "subpages" set with no such check, so it is never offered under that
 /// name again, and they never ask for this one, which they do not know.
 pub const SUBPAGES_SET: &str = "subpages2";
-/// The name [`SUBPAGES_SET`] had before v0.2.1, which a node's settings
-/// may still use.
-pub const OLD_SUBPAGES_SET: &str = "subpages";
+/// The names sets had before v0.2.1, and their names now, which a node's
+/// settings may still use.
+pub const OLD_SET_NAMES: &[(&str, &str)] =
+    &[("subpages", SUBPAGES_SET), ("reference", REFERENCE_SET)];
+
+/// The name now of the set named `old` before v0.2.1, if it was renamed.
+pub fn renamed_set(old: &str) -> Option<&'static str> {
+    OLD_SET_NAMES
+        .iter()
+        .find(|(name, _)| *name == old)
+        .map(|(_, now)| *now)
+}
 /// Fewest words (stemmed, without the most common ones) of a query that
 /// finds reference pages by their words: "define prioritize".
 pub const REFERENCE_QUERY_WORDS: usize = 2;
@@ -2780,10 +2793,11 @@ const SUBPAGE_TITLE_SHARE: f32 = 0.75;
 const SUBPAGE_HELD_SHARE: f32 = 0.5;
 /// Words a title shares with anything, left out of [`SUBPAGE_TITLE_SHARE`].
 const TITLE_STOP_WORDS: &[&str] = &[
-    "a", "an", "and", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with",
+    "a", "an", "and", "at", "by", "for", "from", "in", "my", "of", "on", "or", "the", "to", "with",
+    "you", "your",
 ];
 
-/// Whether `hit`, when it is a page of the subpages set, may be listed for
+/// Whether `hit`, when it is a page of the subpages or reference set, may be listed for
 /// `query`: named by its whole title, on one of the query's best sites
 /// ("rotten tomatoes oppenheimer", "met museum hours"), or with most of
 /// its title's words, or of its title before a colon, in the query
@@ -2793,7 +2807,7 @@ const TITLE_STOP_WORDS: &[&str] = &[
 /// leadership summit at jnj.com, nor "mount everest" a film review at
 /// ign.com. Pages of other sets always may.
 fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
-    if hit.page.set != SUBPAGES_SET || hit.named {
+    if !hit.page.is_site_page() || hit.named {
         return true;
     }
     if in_other_language(&hit.page.url) {
@@ -2808,24 +2822,30 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
     {
         return true;
     }
-    let words = |text: &str| -> HashSet<String> {
+    // Their stems in their order: "Foul-Smelling Stool" is "stool smell".
+    static STEMS: std::sync::LazyLock<TextAnalyzer> =
+        std::sync::LazyLock::new(analysis::stemmed_analyzer);
+    let words = |text: &str| -> Vec<String> {
         text.split(|c: char| !c.is_alphanumeric())
             // The "s" of "John's" says nothing.
             .filter(|word| word.chars().count() > 1)
-            .map(|word| {
-                let word = word.to_lowercase();
-                // "Sheets" is "sheet".
-                match word.strip_suffix('s') {
-                    Some(one) if one.len() > 2 => one.to_string(),
-                    _ => word,
-                }
+            .map(str::to_lowercase)
+            // "How", "define": the query only asks.
+            .filter(|word| {
+                !ASKING_WORDS.contains(&word.as_str()) && !TITLE_STOP_WORDS.contains(&word.as_str())
             })
-            .filter(|word| !TITLE_STOP_WORDS.contains(&word.as_str()))
+            .flat_map(|word| analysis::tokens(&STEMS, &word))
             .collect()
     };
-    let asked = words(query);
+    let asked: HashSet<String> = words(query).into_iter().collect();
+    // Two words, or the one a query such as "define prioritize" has.
+    let fewest = asked.len().min(2);
+    if fewest == 0 {
+        return false;
+    }
     let has_most = |title: &str| {
-        let title = words(title);
+        let in_order = words(title);
+        let title: HashSet<String> = in_order.iter().cloned().collect();
         // A year the query asks for and the title lacks is another page:
         // "nobel prize in physics 2025" is not "A Nobel prize for particle
         // physics".
@@ -2836,14 +2856,19 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
             return false;
         }
         let shared = title.intersection(&asked).count();
-        // A query the title holds whole needs only half of it: "john
-        // martinis" for "John Martinis - CHM".
-        let share = if asked.is_subset(&title) {
+        // A query the title holds whole, its words together, needs only
+        // half of it: "john martinis" for "John Martinis - CHM", but not
+        // "seven summits" for "The Seven Second Summits of the World".
+        let held = in_order.windows(asked.len()).any(|run| {
+            run.iter().all(|word| asked.contains(word))
+                && run.iter().collect::<HashSet<_>>().len() == asked.len()
+        });
+        let share = if held {
             SUBPAGE_HELD_SHARE
         } else {
             SUBPAGE_TITLE_SHARE
         };
-        shared >= 2 && shared as f32 >= share * title.len() as f32
+        shared >= fewest && shared as f32 >= share * title.len() as f32
     };
     // Or of its title before a subtitle, "Declaration of Independence" in
     // "Declaration of Independence: A Transcription", or before the site's
@@ -3863,6 +3888,82 @@ mod tests {
                 "Fundamental Physical Constants",
                 false
             )
+        ));
+    }
+
+    #[test]
+    fn reference_pages_are_listed_only_when_asked_for() {
+        let listed = |query: &str, sites: &[&str], url: &str, title: &str| {
+            let page = Page::from_set(
+                REFERENCE_SET,
+                Article {
+                    title: title.into(),
+                    item: Some(url.into()),
+                    views: 2_000,
+                    ..Article::default()
+                },
+            )
+            .unwrap();
+            let hit = PageHit {
+                page,
+                score: 0.9,
+                named: false,
+                popularity: 0.5,
+                whole: false,
+                learned: None,
+            };
+            let sites: Vec<crate::Hit> = sites.iter().map(|d| site(d, false)).collect();
+            !place_pages(query, &sites, vec![hit]).is_empty()
+        };
+        // What the search is about.
+        assert!(listed(
+            "celiac disease",
+            &["celiac.org"],
+            "https://www.health.harvard.edu/topics/celiac-disease",
+            "Celiac disease"
+        ));
+        assert!(listed(
+            "how to renew a green card",
+            &["uscis.gov"],
+            "https://www.usa.gov/renew-green-card",
+            "How to renew or replace your green card"
+        ));
+        assert!(listed(
+            "symptoms of type 2 diabetes",
+            &["diabetes.org"],
+            "https://www.livescience.com/40894-type-2-diabetes.html",
+            "Type 2 diabetes: Symptoms, diagnosis and treatment"
+        ));
+        assert!(listed(
+            "define prioritize",
+            &["merriam-webster.com"],
+            "https://www.merriam-webster.com/dictionary/prioritize",
+            "Prioritize Definition & Meaning"
+        ));
+        // Something else with some of its words.
+        assert!(!listed(
+            "seven summits",
+            &["7summits.com"],
+            "https://www.worldatlas.com/articles/the-seven-second-summits-of-the-world.html",
+            "The Seven Second Summits of the World"
+        ));
+        assert!(!listed(
+            "time in st john's",
+            &["stjohns.edu"],
+            "https://www.tripsavvy.com/the-best-time-to-visit-us-virgin-islands-5079957",
+            "The Best Time to Visit the US Virgin Islands"
+        ));
+        assert!(!listed(
+            "nobel prize in physics 2025",
+            &["nobelprize.org"],
+            "https://www.livescience.com/john-f-clauser-nobel-prize",
+            "John F. Clauser: Nobel Prize-winning physicist"
+        ));
+        assert!(!listed(
+            "the great gatsby f scott fitzgerald",
+            &["gatsbyjs.com"],
+            "https://www.thoughtco.com/the-great-gatsby-questions-study-discussion-739953",
+            "'The Great Gatsby' Questions for Study and Discussion"
         ));
     }
 
