@@ -328,6 +328,13 @@ fn search(out: &mut String, answer: &Value) {
             }
         }
     }
+    let related = list(answer, "related_packages");
+    if !related.is_empty() {
+        out.push_str("Related package information:\n");
+        for card in related {
+            package_line(out, card);
+        }
+    }
     if let Some(site_search) = answer.get("site_search").filter(|s| s.is_object()) {
         let _ = writeln!(
             out,

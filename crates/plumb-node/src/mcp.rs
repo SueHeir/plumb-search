@@ -1492,6 +1492,21 @@ impl Mcp {
             }
             (answer, _) => answer,
         };
+        // A task with no answer-bearing rows must not turn its related package into the answer.
+        let mut related_packages = Vec::new();
+        if !promote_package
+            && query.split_whitespace().count() > 1
+            && answer.is_none()
+            && results.hits.is_empty()
+            && placed.iter().all(|p| p.hit.page.package.is_some())
+        {
+            related_packages = placed
+                .iter()
+                .take(limit.unwrap_or(DEFAULT_SEARCH_LIMIT).min(MAX_PACKAGES))
+                .map(|p| package_card(&p.hit.page))
+                .collect();
+            placed.clear();
+        }
         let names_a_page = placed.iter().any(|placed| placed.hit.named);
         let profile = answers::profile_lookups(query).iter().find_map(|name| {
             let entities = self.backend.entities(name, 20, options).ok()?;
@@ -1641,6 +1656,9 @@ impl Mcp {
                 })
                 .collect::<Vec<_>>()),
         );
+        if !related_packages.is_empty() {
+            fields.insert("related_packages".into(), json!(related_packages));
+        }
         if let Some(places) = &assembled.places {
             fields.insert("places".into(), json!(places));
         }

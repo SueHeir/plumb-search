@@ -858,7 +858,10 @@ fn searches_about_a_well_known_package_get_its_card() {
     let mcp = Mcp::new(Arc::new(Packages), None);
     let reply = call(&mcp, "search", json!({ "query": "serde derive" }));
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.starts_with("1. [crates.io] serde 1.0.228"), "{text}");
+    assert!(
+        text.contains("Related package information:\n[crates.io] serde 1.0.228"),
+        "{text}"
+    );
     let reply = call(
         &mcp,
         "search",
@@ -2130,15 +2133,14 @@ fn check_lookalike_preserves_impersonation_and_unverified_tenant_controls() {
 fn troubleshooting_keeps_related_package_cards_after_main_results() {
     let mcp = scripted(|query| {
         if query == "kubernetes package" {
-            results(
-                Vec::new(),
-                vec![package_page(
-                    "go",
-                    "k8s.io/kubernetes",
-                    Some("https://kubernetes.io/"),
-                    None,
-                )],
-            )
+            let mut card = package_page(
+                "go",
+                "k8s.io/kubernetes",
+                Some("https://kubernetes.io/"),
+                None,
+            );
+            card.hit.popularity = 0.95;
+            results(Vec::new(), vec![card])
         } else {
             results(vec![hit("kubernetes.io", 1.0, 0.8, false)], Vec::new())
         }
@@ -2322,4 +2324,33 @@ fn facts_resolve_identity_before_display_and_property_availability() {
         )
         .unwrap();
     assert_eq!(specified["item"], "Q925");
+}
+
+#[test]
+fn missing_troubleshooting_results_do_not_promote_a_package_as_the_answer() {
+    let mcp = scripted(|query| {
+        if query == "kubernetes package" {
+            let mut card = package_page(
+                "go",
+                "k8s.io/kubernetes",
+                Some("https://kubernetes.io/"),
+                None,
+            );
+            card.hit.popularity = 0.95;
+            results(Vec::new(), vec![card])
+        } else {
+            results(Vec::new(), Vec::new())
+        }
+    });
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "kubernetes CrashLoopBackOff" }),
+    );
+    let answer = &reply["result"]["structuredContent"];
+    assert!(answer["pages"].as_array().unwrap().is_empty());
+    assert_eq!(answer["related_packages"][0]["name"], "k8s.io/kubernetes");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("No results for"), "{text}");
+    assert!(text.contains("Related package information:"), "{text}");
 }
