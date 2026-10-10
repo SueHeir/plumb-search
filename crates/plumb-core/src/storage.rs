@@ -238,21 +238,28 @@ impl StorageBudget {
 
     /// Invalidation checkpoints can be frequent; full reconciliation is not.
     pub fn recount_if_due(&self, root: &Path) -> Result<()> {
+        self.recount_if_due_at(root, std::time::Instant::now())
+    }
+
+    pub fn recount_if_due_at(&self, root: &Path, now: std::time::Instant) -> Result<()> {
         let mut counted = self
             .counted_at
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if counted.elapsed() >= std::time::Duration::from_secs(300) {
+        if now.saturating_duration_since(*counted) >= std::time::Duration::from_secs(300) {
             self.recount(root)?;
-            *counted = std::time::Instant::now();
+            *counted = now;
         }
         Ok(())
     }
 
     pub fn recount(&self, root: &Path) -> Result<()> {
         let _mutation = self.mutation();
+        // The filesystem stays quiescent while counting, but status and
+        // reservations must not wait on the tree walk's state mutex.
+        let linked = directory_bytes(root)?;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.used_bytes = directory_bytes(root)?.saturating_add(state.reader_held_bytes);
+        state.used_bytes = linked.saturating_add(state.reader_held_bytes);
         state.backpressure =
             state.used_bytes.saturating_add(state.reserved_bytes) >= state.limit_bytes;
         Ok(())

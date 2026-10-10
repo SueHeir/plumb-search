@@ -56,7 +56,9 @@ use crate::crawl::{
     Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
 };
 use crate::icons::IconStore;
-use crate::records::{load_records, replace_records, sorted_by_link_score, Change, RecordStore};
+use crate::records::{
+    load_records, replace_records_with_budget, sorted_by_link_score, Change, RecordStore,
+};
 use crate::web::{duration_words, group_thousands};
 
 /// A homepage fetched or answered this recently is not due for a crawl, as
@@ -193,7 +195,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
             let mut set = load_records(&inner.paths.records)?;
             inner.check_stop()?;
             if inner.prune_for_new_topics(&mut set)? > 0 {
-                replace_records(&inner.paths.records, sorted_by_link_score(&set))?;
+                replace_records_with_budget(
+                    &inner.paths.records,
+                    sorted_by_link_score(&set),
+                    inner.storage.as_ref(),
+                )?;
             }
             build(inner, &sorted_by_link_score(&set))
         })
@@ -493,7 +499,11 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
                 group_thousands(records.len() as u64)
             ),
         );
-        replace_records(&inner.paths.records, records.iter().copied())?;
+        replace_records_with_budget(
+            &inner.paths.records,
+            records.iter().copied(),
+            inner.storage.as_ref(),
+        )?;
         inner.update_saved(|saved| {
             saved.wikidata_missing = wikidata_missing;
             saved.quick_start = false;
@@ -940,7 +950,7 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
 }
 
 /// Saves the records of a setup as the records file.
-fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
+pub(super) fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
     inner.set_step(
         Step::Ingesting,
         format!(
@@ -948,7 +958,7 @@ fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
             group_thousands(records.len() as u64)
         ),
     );
-    replace_records(&inner.paths.records, records)?;
+    replace_records_with_budget(&inner.paths.records, records, inner.storage.as_ref())?;
     info!(
         "saved {} site records in {}",
         records.len(),
@@ -1120,7 +1130,12 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     let _records = inner.hold_records();
     inner.set_step(Step::Crawling, "Reading the site records");
     let topics = inner.focus_topics();
-    let mut set = RoundSites::load(&inner.paths.records, topics.clone(), Keep::of(inner))?;
+    let mut set = RoundSites::load_with_budget(
+        &inner.paths.records,
+        topics.clone(),
+        Keep::of(inner),
+        inner.storage.clone(),
+    )?;
     set.hold_new_sites(!inner.config.take_new_sites);
     inner
         .round_sites
@@ -1639,7 +1654,9 @@ pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Resu
 /// Call it holding the records ([`Inner::hold_records`]).
 pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
     inner.set_step(Step::Indexing, "Reading the site records");
-    let Some(outlines) = crate::outline::outline(&inner.paths.records)? else {
+    let Some(outlines) =
+        crate::outline::outline_with_budget(&inner.paths.records, inner.storage.clone())?
+    else {
         info!(
             "{} holds a site more than once: reading it whole to merge them",
             inner.paths.records.display()
@@ -1819,12 +1836,24 @@ where
 /// Deletes the directories of replaced indexes that no search has open any
 /// more.
 async fn sweep(inner: &Arc<Inner>) {
+    sweep_at(inner, Instant::now()).await;
+}
+
+pub(super) async fn sweep_at(inner: &Arc<Inner>, now: Instant) {
     inner.recount_disk();
-    if !inner.has_retired() {
+    if !inner.has_retired() && inner.storage.is_none() {
         return;
     }
     let inner = Arc::clone(inner);
-    let _ = tokio::task::spawn_blocking(move || inner.sweep()).await;
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Some(budget) = &inner.storage {
+            if let Err(err) = budget.recount_if_due_at(&inner.paths.data, now) {
+                warn!("cannot reconcile idle storage admission: {err:#}");
+            }
+        }
+        inner.sweep();
+    })
+    .await;
 }
 
 /// When a [`wait`] ends.

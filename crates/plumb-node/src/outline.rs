@@ -326,6 +326,21 @@ pub(crate) fn outline(path: &Path) -> Result<Option<Vec<Outline>>> {
     }
 }
 
+pub(crate) fn outline_with_budget(
+    path: &Path,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<Option<Vec<Outline>>> {
+    if let Some(budget) = budget {
+        let mut store = crate::records::RecordStore::open(path).with_budget(Some(budget));
+        if store.fold()? == Folded::NeedsSet {
+            return Ok(None);
+        }
+        scan(path)
+    } else {
+        outline(path)
+    }
+}
+
 /// What [`fold_journal`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Folded {

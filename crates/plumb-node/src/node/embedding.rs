@@ -170,6 +170,7 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
                 &inner.paths.records,
                 EMBED_AT_ONCE,
                 meaning.embedder().text_words(),
+                inner.storage.clone(),
             )
             .with_context(|| format!("reading {}", inner.paths.records.display()))?
         };

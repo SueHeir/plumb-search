@@ -784,7 +784,7 @@ fn remove_stale_parts(data: &std::path::Path, budget: Option<&plumb_core::storag
 /// With towns `near` (the places set), the places near them are kept past
 /// the first `pages`, from a whole file; one already cut around them is
 /// left as it is.
-fn cut_if_longer(
+pub(super) fn cut_if_longer(
     inner: &Inner,
     set: &SetInfo,
     pages: u64,
@@ -818,6 +818,12 @@ fn cut_if_longer(
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
+    // Declared before the reader/writer: those close before cleanup on every
+    // failure, including compression finish, admission rejection and cancel.
+    let _cleanup = CutPart {
+        path: part.clone(),
+        budget: inner.storage.clone(),
+    };
     let before = std::fs::metadata(&file).map_or(0, |m| m.len());
     let mut reader = plumb_ingest::open_maybe_gz(&file)?;
     let mut cutter = SetFileCutter::create_with_budget(&part, pages, inner.storage.clone())?;
@@ -830,8 +836,6 @@ fn cut_if_longer(
     let mut buf = vec![0u8; 1 << 16];
     while !cutter.full() {
         if inner.stopping() {
-            drop(cutter);
-            let _ = plumb_core::storage::remove_file(&part, inner.storage.as_deref());
             return Ok(());
         }
         let n = std::io::Read::read(&mut reader, &mut buf)
@@ -867,6 +871,19 @@ fn cut_if_longer(
         before.saturating_sub(after) / 1_000_000
     ));
     Ok(())
+}
+
+struct CutPart {
+    path: std::path::PathBuf,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
+}
+
+impl Drop for CutPart {
+    fn drop(&mut self) {
+        if let Err(err) = plumb_core::storage::remove_file(&self.path, self.budget.as_deref()) {
+            warn!("could not clean failed cut {}: {err}", self.path.display());
+        }
+    }
 }
 
 /// Whether a file with `notes` holds more than a node keeping its first

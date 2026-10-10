@@ -196,6 +196,7 @@ fn keep(
             meaning.vectors(),
             &inner.paths.records,
             meaning.embedder().text_words(),
+            inner.storage.clone(),
         )?
     };
     // Read a batch, then put it in: search by meaning waits on the lock,

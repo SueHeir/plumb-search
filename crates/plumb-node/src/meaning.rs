@@ -370,9 +370,12 @@ pub(crate) fn sites_to_embed_from_file(
     path: &Path,
     max: usize,
     words: usize,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
 ) -> Result<(Vec<ToEmbed>, bool)> {
     let max = max.max(1);
-    crate::outline::fold_journal(path)?;
+    crate::records::RecordStore::open(path)
+        .with_budget(budget)
+        .fold()?;
     let mut domains: HashSet<u64> = HashSet::new();
     let mut todo: Vec<ToEmbed> = Vec::new();
     let mut more = false;
@@ -426,8 +429,11 @@ pub(crate) fn wanted_texts(
     vectors: &RwLock<Vectors>,
     path: &Path,
     words: usize,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
 ) -> Result<std::collections::HashMap<String, plumb_embed::TextHash>> {
-    crate::outline::fold_journal(path)?;
+    crate::records::RecordStore::open(path)
+        .with_budget(budget)
+        .fold()?;
     let mut wanted = std::collections::HashMap::new();
     let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
     crate::outline::for_each_record(path, |record| {

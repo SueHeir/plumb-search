@@ -317,22 +317,7 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
                     continue;
                 }
             }
-            let inner = receiver.clone();
-            let saved = tokio::task::spawn_blocking(move || {
-                let n = batch.len() as u64;
-                append_inbox_reserved(&inner, &batch, reservation).map(|()| {
-                    let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
-                    if total >= REBUILD_AFTER_RECORDS {
-                        inner.wake.notify_one();
-                    }
-                })
-            })
-            .await;
-            match saved {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => warn!("cannot keep records from the network: {err:#}"),
-                Err(err) => warn!("keeping records from the network failed: {err}"),
-            }
+            persist_delivery(receiver.clone(), batch, reservation).await;
         }
     });
     Ok(())
@@ -490,7 +475,9 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
             };
             // Read a record at a time, the journal folded in first.
             let _records = inner.hold_records();
-            crate::outline::fold_journal(&path)?;
+            RecordStore::open(&path)
+                .with_budget(inner.storage.clone())
+                .fold()?;
             let mut crawled: Vec<SiteRecord> = Vec::new();
             crate::outline::for_each_record(&path, |record| {
                 if record
@@ -555,19 +542,75 @@ fn crawl_facts(record: &SiteRecord) -> SiteRecord {
 }
 
 pub(super) fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
-    append_inbox_reserved(inner, records, None)
+    append_inbox_reserved(inner, records, &mut None)
+}
+
+/// Keep one bounded delivery through temporary inbox failures. The upstream
+/// channel stays bounded while this waits; its signed batch is already durable
+/// for replay after shutdown. Retrying inbox I/O never reapplies net credits.
+pub(super) async fn persist_delivery(
+    inner: Arc<Inner>,
+    records: Vec<SiteRecord>,
+    mut reservation: Option<plumb_net::storage::Reservation>,
+) {
+    let records = Arc::new(records);
+    let mut delay = Duration::from_millis(100);
+    let mut warned = false;
+    loop {
+        if inner.stopping() {
+            return;
+        }
+        let writer = inner.clone();
+        let payload = records.clone();
+        let mut admitted = reservation.take();
+        let saved = tokio::task::spawn_blocking(move || {
+            let result = append_inbox_reserved(&writer, &payload, &mut admitted);
+            (admitted, result)
+        })
+        .await;
+        let failure = match saved {
+            Ok((admitted, Ok(()))) => {
+                drop(admitted);
+                let n = records.len() as u64;
+                let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
+                if total >= REBUILD_AFTER_RECORDS {
+                    inner.wake.notify_one();
+                }
+                return;
+            }
+            Ok((admitted, Err(err))) => {
+                reservation = admitted;
+                err
+            }
+            Err(err) => anyhow::anyhow!("keeping records from the network failed: {err}"),
+        };
+        if !warned {
+            warn!(
+                "cannot keep records from the network, retaining delivery for retry: {failure:#}"
+            );
+            warned = true;
+        }
+        tokio::select! {
+            () = inner.stopped() => return,
+            () = tokio::time::sleep(delay) => {}
+        }
+        delay = delay.saturating_mul(2).min(Duration::from_secs(5));
+    }
 }
 
 fn append_inbox_reserved(
     inner: &Inner,
     records: &[SiteRecord],
-    mut reservation: Option<plumb_net::storage::Reservation>,
+    reservation: &mut Option<plumb_net::storage::Reservation>,
 ) -> Result<()> {
     use plumb_net::storage::{allocation_for, file_bytes, LimitedBytes};
     let path = &inner.paths.inbox;
-    let payload_limit = reservation.as_ref().map_or(64 * 1024 * 1024, |reserved| {
-        reserved.bytes().min(64 * 1024 * 1024) as usize
-    });
+    let payload_limit = reservation
+        .as_ref()
+        .filter(|reserved| reserved.bytes() > 0)
+        .map_or(64 * 1024 * 1024, |reserved| {
+            reserved.bytes().min(64 * 1024 * 1024) as usize
+        });
     let mut lines = LimitedBytes {
         bytes: Vec::new(),
         limit: payload_limit,
@@ -592,13 +635,10 @@ fn append_inbox_reserved(
             .saturating_add(1),
     )
     .saturating_sub(old);
-    if let Some(reserved) = &reservation {
-        anyhow::ensure!(
-            needed <= reserved.bytes(),
-            "inbox exceeds its admitted allocation"
-        );
+    if let Some(reserved) = reservation.as_mut() {
+        reserved.ensure(needed)?;
     } else if let Some(budget) = budget {
-        reservation = Some(budget.reserve(needed, false)?);
+        *reservation = Some(budget.reserve(needed, false)?);
     }
     let directory_before = file_bytes(&inner.paths.net)?;
     let mut file = OpenOptions::new()
@@ -630,7 +670,7 @@ fn append_inbox_reserved(
                 .map_or(needed, |reserved| reserved.bytes()),
         ),
     };
-    if let Some(reserved) = &mut reservation {
+    if let Some(reserved) = reservation.as_mut() {
         reserved.commit(reserved.bytes(), old, new);
     }
     written.with_context(|| format!("writing {}", path.display()))

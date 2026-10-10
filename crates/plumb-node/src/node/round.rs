@@ -204,8 +204,18 @@ impl RoundSites {
     /// `keep` the ones it keeps whatever their crawls say. A file only a
     /// whole set can fold in (a site on two lines) is loaded and rewritten
     /// once first.
+    #[cfg(test)]
     pub(super) fn load(path: &Path, focus: Topics, keep: Keep) -> Result<RoundSites> {
-        let mut store = RecordStore::open(path);
+        Self::load_with_budget(path, focus, keep, None)
+    }
+
+    pub(super) fn load_with_budget(
+        path: &Path,
+        focus: Topics,
+        keep: Keep,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Result<RoundSites> {
+        let mut store = RecordStore::open(path).with_budget(budget.clone());
         if store.fold()? == Folded::NeedsSet {
             info!(
                 "{} holds a site more than once: reading it whole to merge them",
@@ -236,7 +246,7 @@ impl RoundSites {
             store.compact(&set)?;
             drop(set);
             let RoundSites { focus, keep, .. } = sites;
-            return Self::load(path, focus, keep);
+            return Self::load_with_budget(path, focus, keep, budget);
         }
         sites.sites.shrink_to_fit();
         Ok(sites)

@@ -408,6 +408,9 @@ impl RecordStore {
     pub(crate) fn fold(&mut self) -> Result<crate::outline::Folded> {
         // Closed first: Windows cannot delete a file that is open.
         self.journal = None;
+        if file_len(&self.journal_path) == 0 {
+            return Ok(crate::outline::Folded::Nothing);
+        }
         let written = if let Some(budget) = self.budget.clone() {
             let max = file_len(&self.path)
                 .saturating_add(file_len(&self.journal_path))
@@ -462,6 +465,31 @@ where
         }
     }
     Ok(written)
+}
+
+/// Node-managed full replacements hold peak room before creating their temp file.
+pub(crate) fn replace_records_with_budget<'a, I>(
+    path: &Path,
+    records: I,
+    budget: Option<&std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<usize>
+where
+    I: IntoIterator<Item = &'a SiteRecord>,
+    I::IntoIter: Clone,
+{
+    let records = records.into_iter();
+    let Some(budget) = budget else {
+        return replace_records(path, records);
+    };
+    let mut size = plumb_core::storage::ByteCount {
+        bytes: 0,
+        limit: u64::MAX,
+    };
+    for record in records.clone() {
+        serde_json::to_writer(&mut size, record)?;
+        size.bytes = size.bytes.saturating_add(1);
+    }
+    RecordStore::open(path).admitted_rewrite(budget, size.bytes, || replace_records(path, records))
 }
 
 /// Opens a journal for appending. The directory entry of a new journal is

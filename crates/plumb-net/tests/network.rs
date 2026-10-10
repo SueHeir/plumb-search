@@ -1338,3 +1338,134 @@ fn multiple_clients_retry_a_temporarily_busy_source_without_relisting() {
         source.handle.shutdown().await;
     });
 }
+
+#[test]
+fn startup_overload_retries_empty_headers_before_any_batch_ids_are_known() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plumb_net=debug")
+        .with_test_writer()
+        .try_init();
+    let source_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    let source = source_runtime.block_on(async {
+        let first = Node::start(false, vec![], vec![]).await;
+        for i in 0..28 {
+            let mut record = SiteRecord::new(format!("startup-busy-{i}.example"));
+            record.crawled_at = Some(now_unix());
+            first.handle.publish(vec![record]).await.unwrap();
+        }
+        first.handle.shutdown().await;
+        // Restart clears gossip announcements; all IDs must come from Lists.
+        let Node { _dir, .. } = first;
+        // The fixture rebuilds its empty bucket table; keep the durable
+        // identity, signed batches and ledger that exercise cold catch-up.
+        std::fs::remove_dir_all(_dir.path().join("buckets")).unwrap();
+        Node::start_config(_dir, false, vec![], vec![], true, |config| {
+            config.follow_crawls = false
+        })
+        .await
+    });
+    let addr = source_runtime
+        .block_on(source.addr())
+        .with_p2p(source.handle.peer_id())
+        .unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(5));
+    for _ in 0..4 {
+        let barrier = barrier.clone();
+        source_runtime.spawn_blocking(move || {
+            barrier.wait();
+            barrier.wait();
+        });
+    }
+    barrier.wait();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release = std::thread::spawn(move || {
+        let _ = release_rx.recv_timeout(Duration::from_secs(30));
+        barrier.wait();
+    });
+    let receiver_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    receiver_runtime.block_on(async {
+        let mut clients = Vec::new();
+        for _ in 0..8 {
+            clients.push(
+                Node::start_config(
+                    tempfile::tempdir().unwrap(),
+                    false,
+                    vec![addr.clone()],
+                    vec![],
+                    true,
+                    |config| config.trusted_peers = vec![source.handle.peer_id()],
+                )
+                .await,
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while source.handle.status().batch_busy_replies == 0
+            || clients
+                .iter()
+                .map(|client| client.handle.status().batch_list_retries)
+                .sum::<u64>()
+                == 0
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "startup Lists did not meet controlled overload: {:?}",
+                source.handle.status()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        release_tx.send(()).unwrap();
+        release.join().unwrap();
+        let started = std::time::Instant::now();
+        let mut drains = tokio::task::JoinSet::new();
+        for mut client in clients {
+            drains.spawn(async move {
+                // Explicitly capture the root: disjoint-field capture of only
+                // handle/records would drop TempDir before persistence starts.
+                let _keep_dir = client._dir;
+                let mut domains = std::collections::HashSet::new();
+                while domains.len() < 28 {
+                    let delivery =
+                        tokio::time::timeout(Duration::from_secs(20), client.records.recv())
+                            .await
+                            .unwrap_or_else(|err| {
+                                panic!(
+                                    "startup catchup stopped at {}: {err}; {:?}",
+                                    domains.len(),
+                                    client.handle.status()
+                                )
+                            })
+                            .unwrap();
+                    domains.extend(delivery.records.into_iter().map(|record| record.domain));
+                }
+                wait_for(|| (client.handle.status().batches_held == 28).then_some(())).await;
+                let status = client.handle.status();
+                assert_eq!(status.batches_held, 28);
+                assert!(
+                    status.batch_lists_received > 0,
+                    "caught up without a nonempty list"
+                );
+                client.handle.shutdown().await;
+                status.batch_list_retries
+            });
+        }
+        let mut retries = 0;
+        while let Some(result) = drains.join_next().await {
+            retries += result.unwrap();
+        }
+        assert!(retries > 0);
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "depended on maintenance/relist"
+        );
+        source.handle.shutdown().await;
+    });
+}

@@ -190,6 +190,7 @@ const MAX_LEAD_LISTS: usize = 2;
 /// Batch and report requests of other nodes answered at once: one can mean
 /// reading a 16 MB batch. More are answered with nothing for now.
 const MAX_LISTS_SERVING: usize = 4;
+const MAX_BATCH_LISTS: usize = 64;
 const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
 /// Nodes a report is offered to, one after the other, until one takes it.
 pub const REPORT_TRIES: usize = 3;
@@ -342,6 +343,10 @@ pub struct NetStatus {
     pub batch_busy_replies: u64,
     #[serde(default)]
     pub batch_retries: u64,
+    #[serde(default)]
+    pub batch_list_retries: u64,
+    #[serde(default)]
+    pub batch_lists_received: u64,
     pub peer_id: String,
     pub listening: Vec<String>,
     /// Addresses others can reach this node at, as far as it knows.
@@ -1252,6 +1257,8 @@ pub async fn start(
         refused: HashSet::new(),
         fetching: HashMap::new(),
         batch_retries: BatchRetries::default(),
+        batch_lists: HashMap::new(),
+        list_retries: BatchListRetries::default(),
         listing: HashSet::new(),
         unannounced: Vec::new(),
         answering: 0,
@@ -1740,6 +1747,57 @@ enum Relayed {
 struct BatchRetries {
     entries: HashMap<Hash, BatchRetry>,
 }
+
+// Empty headers also represent a busy source on the existing wire protocol.
+// Retry boundedly, even before any IDs are known; never wait for maintenance.
+#[derive(Default)]
+struct BatchListRetries {
+    entries: HashMap<PeerId, BatchListRetry>,
+}
+struct BatchListRetry {
+    since: u64,
+    at: Option<tokio::time::Instant>,
+    attempts: u8,
+}
+impl BatchListRetries {
+    fn defer(&mut self, peer: PeerId, since: u64, now: tokio::time::Instant) -> bool {
+        if self.entries.len() >= MAX_BATCH_LISTS && !self.entries.contains_key(&peer) {
+            return false;
+        }
+        let entry = self.entries.entry(peer).or_insert(BatchListRetry {
+            since,
+            at: None,
+            attempts: 0,
+        });
+        if entry.attempts >= 16 {
+            self.entries.remove(&peer);
+            return false;
+        }
+        entry.since = entry.since.min(since);
+        entry.at = Some(now + Duration::from_millis((100u64 << entry.attempts.min(5)).min(2000)));
+        entry.attempts += 1;
+        true
+    }
+    fn next(&self) -> Option<tokio::time::Instant> {
+        self.entries.values().filter_map(|entry| entry.at).min()
+    }
+    fn due(&mut self, now: tokio::time::Instant) -> Vec<(PeerId, u64)> {
+        self.entries
+            .iter_mut()
+            .filter_map(|(peer, entry)| {
+                if entry.at.is_some_and(|at| at <= now) {
+                    entry.at = None;
+                    Some((*peer, entry.since))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    fn forget(&mut self, peer: &PeerId) {
+        self.entries.remove(peer);
+    }
+}
 struct BatchRetry {
     sources: Vec<PeerId>,
     at: Option<tokio::time::Instant>,
@@ -1878,6 +1936,8 @@ struct Task {
     refused: HashSet<Hash>,
     fetching: HashMap<OutboundRequestId, (Hash, Vec<PeerId>, PeerId)>,
     batch_retries: BatchRetries,
+    batch_lists: HashMap<OutboundRequestId, (PeerId, u64)>,
+    list_retries: BatchListRetries,
     /// Nodes asked for their batch headers since they last connected.
     listing: HashSet<PeerId>,
     /// Our own headers not yet announced to anyone.
@@ -1941,6 +2001,7 @@ impl Task {
         loop {
             let ask_again_at = self.ask_again_at;
             let batch_retry_at = self.batch_retries.next();
+            let list_retry_at = self.list_retries.next();
             let can_fetch = !self.ingest_blocked
                 && !self.wanted.is_empty()
                 && self.pending_batches.len() < RECORD_DELIVERIES
@@ -1969,6 +2030,13 @@ impl Task {
                         else { self.wanted_ids.remove(&id); self.batch_retries.forget(&id); }
                     }
                     self.fetch_more();
+                },
+                () = async {
+                    match list_retry_at { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending::<()>().await }
+                } => {
+                    for (peer, since) in self.list_retries.due(tokio::time::Instant::now()) {
+                        self.ask_batch_list(peer, since);
+                    }
                 },
                 _ = maintenance.tick() => {
                     self.maintain(ticks);
@@ -2500,10 +2568,7 @@ impl Task {
             let since = epoch_of(now).saturating_sub(1);
             let peers: Vec<PeerId> = self.batch_peers.iter().copied().collect();
             for peer in peers {
-                self.swarm
-                    .behaviour_mut()
-                    .batches
-                    .send_request(&peer, BatchRequest::List { since_epoch: since });
+                self.ask_batch_list(peer, since);
             }
             // Leads whose gossip was missed, as when a node shares one
             // before the gossip mesh has formed.
@@ -2864,10 +2929,7 @@ impl Task {
             self.batch_peers.insert(peer);
             if self.listing.insert(peer) {
                 let since = epoch_of(now_unix()).saturating_sub(self.config.catch_up_epochs);
-                self.swarm
-                    .behaviour_mut()
-                    .batches
-                    .send_request(&peer, BatchRequest::List { since_epoch: since });
+                self.ask_batch_list(peer, since);
             }
         }
         if supports(RELAY_HOP_PROTOCOL)
@@ -3308,6 +3370,19 @@ impl Task {
                 ..
             } => match response {
                 BatchResponse::Headers(headers) => {
+                    let Some((_, since)) = self.batch_lists.remove(&request_id) else {
+                        if let Some((id, rest, source)) = self.fetching.remove(&request_id) {
+                            self.retry_known_batch(id, source, rest);
+                            self.fetch_more();
+                        }
+                        return;
+                    };
+                    if headers.is_empty() {
+                        self.retry_batch_list(peer, since);
+                        return;
+                    }
+                    self.list_retries.forget(&peer);
+                    self.with_status(|status| status.batch_lists_received += 1);
                     let now = now_unix();
                     for header in headers.into_iter().take(MAX_LISTED_BATCHES) {
                         if let Ok(crawler) = header.check(now) {
@@ -3316,6 +3391,10 @@ impl Task {
                     }
                 }
                 BatchResponse::Batch(batch) => {
+                    if let Some((peer, since)) = self.batch_lists.remove(&request_id) {
+                        self.retry_batch_list(peer, since);
+                        return;
+                    }
                     let Some((id, rest, source)) = self.fetching.remove(&request_id) else {
                         return;
                     };
@@ -3337,6 +3416,9 @@ impl Task {
                 ..
             } => {
                 debug!("batch request to {peer} failed: {error}");
+                if let Some((peer, since)) = self.batch_lists.remove(&request_id) {
+                    self.retry_batch_list(peer, since);
+                }
                 if let Some((id, rest, source)) = self.fetching.remove(&request_id) {
                     self.retry_known_batch(id, source, rest);
                     self.fetch_more();
@@ -3355,6 +3437,38 @@ impl Task {
             debug!("batch {id}: bounded retry attempts exhausted");
         } else {
             self.with_status(|status| status.batch_retries += 1);
+        }
+    }
+
+    fn ask_batch_list(&mut self, peer: PeerId, since: u64) {
+        if self
+            .batch_lists
+            .values()
+            .any(|(pending, _)| *pending == peer)
+        {
+            return;
+        }
+        if self.batch_lists.len() >= MAX_BATCH_LISTS {
+            self.retry_batch_list(peer, since);
+            return;
+        }
+        self.add_known_addresses(&peer);
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .batches
+            .send_request(&peer, BatchRequest::List { since_epoch: since });
+        self.batch_lists.insert(id, (peer, since));
+    }
+
+    fn retry_batch_list(&mut self, peer: PeerId, since: u64) {
+        if self
+            .list_retries
+            .defer(peer, since, tokio::time::Instant::now())
+        {
+            self.with_status(|status| status.batch_list_retries += 1);
+        } else {
+            debug!("batch headers from {peer}: bounded retry attempts exhausted");
         }
     }
 
@@ -4756,6 +4870,29 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_startup_lists_retry_with_bounded_peers_attempts_and_backoff() {
+        let mut retries = BatchListRetries::default();
+        let peer = PeerId::random();
+        let mut now = tokio::time::Instant::now();
+        for _ in 0..16 {
+            assert!(retries.defer(peer, 10, now));
+            let at = retries.next().unwrap();
+            assert!(at > now);
+            assert!(at - now <= Duration::from_secs(2));
+            assert!(retries.due(now).is_empty());
+            assert_eq!(retries.due(at), vec![(peer, 10)]);
+            now = at;
+        }
+        assert!(!retries.defer(peer, 10, now));
+        assert!(retries.next().is_none());
+        for _ in 0..MAX_BATCH_LISTS {
+            assert!(retries.defer(PeerId::random(), 20, now));
+        }
+        assert!(!retries.defer(PeerId::random(), 20, now));
+        assert_eq!(retries.entries.len(), MAX_BATCH_LISTS);
+    }
 
     #[test]
     fn temporary_busy_replies_keep_sources_and_wake_with_bounded_backoff() {
