@@ -685,7 +685,7 @@ fn observe(
             "semantic_candidate":semantic.map(|m| m.nearest()),
             "diagnostic_candidates":{"pages":identities(&diagnostic_pages),"depth":100,"used_by_search_pipeline":false,
                 "language_filter_phase":"before_candidate_cap"},
-            "source_filtered_candidate":{"site_pool":{"words":pool.words,"popular":pool.popular,"named":pool.named,"kind":pool.kind,"meaning":pool.meaning},"pages":identities(&filtered)},
+            "source_filtered_candidate":{"site_pool":{"words":pool.words,"popular":pool.popular,"named":pool.named,"kind":pool.kind,"meaning":pool.meaning},"site_evidence":pool.evidence,"pages":identities(&filtered)},
             "page_selection":selected,"blended_row":{"rows":blended,"rank":row_rank(&blended,case)},
             "learned_order":{"enabled":cfg.learned,"rows":learned,"rank":row_rank(&learned,case)},
             "serialized_output":{"rows":serialized,"rank":scored.rank},
