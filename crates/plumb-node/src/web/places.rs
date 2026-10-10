@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 
 use plumb_core::place::{Place, OSM_COPYRIGHT_URL};
 use plumb_index::places::{LocationStatus, PlaceHit, PlaceResults};
+#[cfg(test)]
 use plumb_index::Hit;
 
 use super::{escape_html, http_url, Icons};

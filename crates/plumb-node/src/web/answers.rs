@@ -1013,6 +1013,7 @@ mod tests {
                 names: Vec::new(),
                 sections: Vec::new(),
                 content_language: None,
+                search: None,
             },
             score: 1.0,
             named: true,

@@ -809,6 +809,7 @@ pub(crate) mod tests {
             names: Vec::new(),
             sections: Vec::new(),
             content_language: None,
+            search: None,
         }
     }
 
