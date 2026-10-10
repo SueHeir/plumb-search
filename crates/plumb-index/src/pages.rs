@@ -4762,7 +4762,7 @@ mod tests {
         .unwrap();
         assert_eq!(page.language(), Some("en"));
         assert!(page.topic().unwrap().contains("set_multiplayer_authority"));
-        let (_dir, index) = searcher(&[page.clone()]);
+        let (_dir, index) = searcher(std::slice::from_ref(&page));
         let found = index.search("godot set multiplayer authority", 5).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].page.search, page.search);
