@@ -210,7 +210,8 @@ output directory. First establish the tiny deterministic/offline baseline:
 
 ```sh
 CARGO_TARGET_DIR=/Users/suehr/.codex/cache/plumb-search-quality-20261009-batch-evaluation-target \
-  CARGO_BUILD_JOBS=4 cargo build --locked -p plumb-node
+  CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 cargo build --locked -p plumb-node
 python3 eval/contracts/run_batch.py \
   --plumb /Users/suehr/.codex/cache/plumb-search-quality-20261009-batch-evaluation-target/debug/plumb \
   --fixture-baseline --out-dir /tmp/plumb-search-offline-baseline --seconds 120
@@ -305,3 +306,53 @@ use an isolated target directory: shared worktree targets were observed reusing
 foreign schema/build-script artifacts during this batch. Worker checks use one
 job, incremental off, and dev/test debug info off; the final integrated checks
 can use four jobs after worker builds finish.
+
+
+The prepared coordinator snapshot is
+`/home/suehr/scratch/plumb-quality-20261009/baseline-snapshot`, with site index
+`indexes/000145`, sixteen gzip inputs in `pages/sets`, and `model`/`vectors.bin`.
+It is 3,964,584,112 bytes with a 30-file SHA256 manifest. The coordinator measured
+134.5 GiB root free after cleanup; later read-only inspection saw 131 GiB, so
+recheck disk before building. No live corpus/cache is written by this harness.
+
+From the harness-first baseline checkout, run the same command below with the
+baseline binary and output directory first; after integrating feature commits,
+run it once with the candidate binary and `--compare` as shown. The runner caps
+page ingestion at 200,000 records **per set** by default to avoid a 13-million-page
+reindex in this batch. The manifest records the cap and actual indexed counts;
+missing-record attribution describes this bounded evaluator corpus, not the
+complete production corpus. Raise the cap only in a separate budgeted run.
+
+```sh
+QUALITY_ROOT=/home/suehr/scratch/plumb-quality-20261009
+python3 eval/contracts/run_batch.py \
+  --plumb "$QUALITY_ROOT/candidate-target/release/plumb" \
+  --index "$QUALITY_ROOT/baseline-snapshot/indexes/000145" \
+  --pages "$QUALITY_ROOT/baseline-snapshot/pages/sets/docs.tsv.gz" \
+  --pages "$QUALITY_ROOT/baseline-snapshot/pages/sets/papers.tsv.gz" \
+  --pages "$QUALITY_ROOT/baseline-snapshot/pages/sets/wikipedia-en.tsv.gz" \
+  --pages "$QUALITY_ROOT/baseline-snapshot/pages/sets/packages.tsv.gz" \
+  --pages "$QUALITY_ROOT/baseline-snapshot/pages/sets/reference.tsv.gz" \
+  --pages "$QUALITY_ROOT/baseline-snapshot/pages/sets/subpages2.tsv.gz" \
+  --pages "$QUALITY_ROOT/baseline-snapshot/pages/sets/stackoverflow.tsv.gz" \
+  --pages "$QUALITY_ROOT/baseline-snapshot/pages/sets/github.tsv.gz" \
+  --pages-top 200000 --model "$QUALITY_ROOT/baseline-snapshot/model" \
+  --vectors "$QUALITY_ROOT/baseline-snapshot/vectors.bin" --query-instruction split \
+  --queries eval/brand_queries.tsv --queries eval/ai_queries.tsv \
+  --acceptance eval/contracts/audit.jsonl --acceptance eval/contracts/family_heldout.jsonl \
+  --rank '{}' --eval-time 1791586800 --seconds 1800 \
+  --compare "$QUALITY_ROOT/results/baseline/core.jsonl" \
+  --out-dir "$QUALITY_ROOT/results/candidate"
+```
+
+For the baseline use `baseline-target/release/plumb`, output
+`results/baseline`, and omit `--compare`; keep every other argument identical.
+The eight selected page inputs cover the indexed search contracts without the
+separate places index or optional privacy buckets. Places-backend/surface-parity
+contracts remain the integrated backend owner's in-process checks. The identity
+appendix uses the coordinator's full scratch page backend, not plain `serve`.
+Budgets: one Linux release build at a time, debug/incremental off; core evaluation
+30 minutes, identity at most 400 calls / 10 minutes; output capped by the bounded
+suites, no LLM grading. Resource logs supply peak RSS and latency observations;
+use the coordinator's resource monitor for the 8 GiB RSS / 12 GiB scratch policy,
+which the Python runner does not pretend to enforce as a kernel memory limit.

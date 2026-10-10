@@ -46,6 +46,7 @@ def main():
     ap.add_argument("--compare", type=Path, help="baseline core.jsonl; validate fixed-corpus pairing")
     ap.add_argument("--index", type=Path)
     ap.add_argument("--pages", type=Path, action="append", default=[])
+    ap.add_argument("--pages-top", type=int, default=200000, help="bounded records per input set; same for baseline/candidate")
     ap.add_argument("--queries", type=Path, action="append", default=[])
     ap.add_argument("--acceptance", type=Path, action="append", default=[])
     ap.add_argument("--rank", default="{}")
@@ -61,7 +62,7 @@ def main():
     args = ap.parse_args()
     if bool(args.model) != bool(args.vectors):
         ap.error("--model and --vectors must be supplied together")
-    if args.seconds <= 0 or args.identity_seconds <= 0 or args.identity_calls <= 0:
+    if args.pages_top <= 0 or args.seconds <= 0 or args.identity_seconds <= 0 or args.identity_calls <= 0:
         ap.error("budgets must be positive")
     if args.mcp and urllib.parse.urlsplit(args.mcp).hostname not in ("127.0.0.1", "localhost", "::1"):
         ap.error("--mcp must name a loopback scratch candidate, never production")
@@ -94,7 +95,7 @@ def main():
         elif not args.acceptance and not args.queries:
             args.acceptance = [ROOT / "eval/contracts/audit.jsonl", ROOT / "eval/contracts/family_heldout.jsonl"]
         core = [args.plumb, "eval", "--index", args.index, "--limit", "100", "--rank", args.rank,
-                "--eval-time", args.eval_time, "--report", args.out_dir / "core.jsonl"]
+                "--eval-time", args.eval_time, "--pages-top", args.pages_top, "--report", args.out_dir / "core.jsonl"]
         for flag, paths in (("--pages", args.pages), ("--queries", args.queries), ("--acceptance", args.acceptance)):
             for path in paths:
                 core.extend([flag, path.resolve()])

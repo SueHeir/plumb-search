@@ -15,6 +15,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 
 
 def rpc(mcp, method, params, timeout=10):
@@ -23,9 +24,18 @@ def rpc(mcp, method, params, timeout=10):
     req = urllib.request.Request(mcp, body, {"Content-Type": "application/json",
                                             "Accept": "application/json"})
     start = time.monotonic()
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
-    reply = json.loads(raw)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            status = resp.status
+    except urllib.error.HTTPError as err:
+        raw, status = err.read(), err.code
+    try:
+        reply = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        reply = {"error": {"http_status": status, "raw_body": raw.decode("utf-8", "replace")}}
+    if status >= 400 and "error" not in reply:
+        reply = {"error": {"http_status": status, "body": reply}}
     return request, reply, (time.monotonic() - start) * 1000, len(raw)
 
 
@@ -216,7 +226,11 @@ def main():
     if len({c["id"] for _, c in selected}) != len(selected):
         ap.error("duplicate case IDs")
     manifest = {"type": "manifest", "schema": 1, "mode": "offline-replay" if args.responses else "mcp",
-                "target": "local-mcp" if args.mcp else "saved-responses",
+                "target": {"scheme": urllib.parse.urlsplit(args.mcp).scheme,
+                           "hostname": urllib.parse.urlsplit(args.mcp).hostname,
+                           "port": urllib.parse.urlsplit(args.mcp).port,
+                           "path_sha256": hashlib.sha256(urllib.parse.urlsplit(args.mcp).path.encode()).hexdigest(),
+                           "transport": "mcp-http"} if args.mcp else "saved-responses",
                 "findings": "off requested; scratch serve required for isolation",
                 "suite_sha256": {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in args.files},
                 "budgets": {"calls": args.max_calls, "seconds": args.time_budget, "timeout": args.timeout}}
