@@ -214,6 +214,26 @@ fn rank_words(
     let text: Vec<f32> = docs.iter().map(|doc| query.text_match(doc)).collect();
     let max_text = text.iter().copied().fold(0.0, f32::max);
     let weights = query.evidence_weights(&docs);
+    let named_subject_words = names
+        .iter()
+        .zip(&docs)
+        .flat_map(|(name, doc)| {
+            [(true, name.alias), (false, name.label)]
+                .map(move |(established, words)| (doc, established, words))
+        })
+        .filter(|(doc, _, words)| {
+            *words > 0
+                && *words < query.len
+                && !query
+                    .tokens
+                    .get(*words)
+                    .is_some_and(|word| is_function_word(word))
+                && query.evidence(doc, &weights, *words).subject == Some(1.0)
+        })
+        .map(|(_, established, words)| (established, words))
+        .max()
+        .map(|(_, words)| words)
+        .unwrap_or(0);
     let home = options.country.as_deref().and_then(normalize_country);
     let words = query.len as f32;
 
@@ -246,13 +266,35 @@ fn rank_words(
         };
         let link_score = link_scores[i];
         let named = name.typed || name.words() >= query.len;
-        let protected = named || is_kind || navigation_names[i];
+        let protected = named && named_subject_words == 0
+            || name.typed
+            || name.alias >= query.len
+            || is_kind
+            || navigation_names[i];
         let evidence = query.evidence(&docs[i], &weights, name.words());
+        let subject_evidence = query.evidence(&docs[i], &weights, named_subject_words);
+        let subject = subject_evidence.subject;
+        let subject_share = if protected {
+            1.0
+        } else {
+            subject.unwrap_or(1.0)
+        };
         // There are no query vectors in private buckets. Missing semantic
         // evidence cannot promote a domain collision to a substantive match.
-        let convincing = protected || evidence.substantive >= 0.75;
-        let whole_share = if convincing { 1.0 } else { evidence.coverage };
-        let name_share = if convincing { 1.0 } else { evidence.remaining };
+        let convincing = protected
+            || subject_share >= 1.0 - f32::EPSILON
+                && (subject.is_none() || subject_evidence.task_supported)
+                && evidence.substantive >= 0.75;
+        let whole_share = if convincing {
+            1.0
+        } else {
+            evidence.coverage * subject_share
+        };
+        let name_share = if convincing {
+            1.0
+        } else {
+            evidence.remaining * subject_share
+        };
         let text_score = if is_kind || name.label >= query.len {
             1.0
         } else if max_text > 0.0 {
@@ -591,9 +633,14 @@ impl Query {
             .collect::<HashSet<_>>()
             .len();
         let total: f32 = weights.iter().sum();
+        let subject_total: f32 = weights.iter().take(prefix).sum();
         let remaining_total: f32 = weights.iter().skip(prefix).sum();
-        let mut evidence = LexicalEvidence::default();
+        let mut evidence = LexicalEvidence {
+            task_supported: !weights.iter().skip(prefix).any(|&weight| weight >= 1.0),
+            ..Default::default()
+        };
         let mut matched_words = 0;
+        let mut matched_subject = 0.0;
         for (i, &weight) in weights.iter().enumerate() {
             let word = &self.words[i];
             let other = self.others[i].as_deref();
@@ -610,8 +657,12 @@ impl Query {
                 field.holds(doc, word) || other.is_some_and(|other| field.holds(doc, other))
             }) {
                 evidence.substantive += weight;
+                if i < prefix {
+                    matched_subject += weight;
+                }
                 if i >= prefix {
                     evidence.remaining += weight;
+                    evidence.task_supported |= weight >= 1.0;
                 }
             }
         }
@@ -627,6 +678,7 @@ impl Query {
         } else {
             1.0
         };
+        evidence.subject = (subject_total > 0.0).then_some(matched_subject / subject_total);
         evidence
     }
 
@@ -740,6 +792,8 @@ struct LexicalEvidence {
     coverage: f32,
     substantive: f32,
     remaining: f32,
+    subject: Option<f32>,
+    task_supported: bool,
 }
 
 fn asked_as_question(query: &str) -> bool {

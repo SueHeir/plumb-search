@@ -19,9 +19,9 @@ pub struct CandidateEvidence {
     pub domain: String,
     /// Raw BM25, before normalization relative to this candidate pool.
     pub lexical_score: f32,
-    /// Absolute semantic similarity, including when name controls disable
-    /// score blending. Missing vectors remain unknown rather than becoming
-    /// zero relevance.
+    /// Query-relative semantic similarity, including when name controls
+    /// disable score blending. It is not an absolute relevance certificate;
+    /// missing vectors remain unknown rather than becoming zero relevance.
     pub semantic_closeness: Option<f32>,
     /// Weighted coverage in any searched field, ignoring question/filler words.
     pub query_coverage: f32,
@@ -29,6 +29,17 @@ pub struct CandidateEvidence {
     pub substantive_coverage: f32,
     /// Coverage of the substantive words after a leading partial name.
     pub remaining_coverage: f32,
+    /// Corroborated leading-name span used for every candidate, in query words.
+    #[serde(default)]
+    pub named_subject_words: usize,
+    /// Substantive coverage of that span; unknown when no subject was resolved.
+    #[serde(default)]
+    pub subject_coverage: Option<f32>,
+    /// Coverage of main task words after the subject, excluding light
+    /// navigation/presentation modifiers. None when there are no main task
+    /// words or no subject was resolved.
+    #[serde(default)]
+    pub subject_remaining_coverage: Option<f32>,
     pub full_name: bool,
     pub typed_domain: bool,
     pub partial_name_words: usize,
@@ -51,6 +62,40 @@ pub(crate) struct LexicalEvidence {
 }
 
 impl LexicalEvidence {
+    pub(crate) fn task_coverage(&self, prefix_words: usize) -> Option<f32> {
+        // Existing zero/light weights mark function, presentation and
+        // navigation modifiers. A substantive task needs evidence in at
+        // least one of its main words, not merely in those modifiers.
+        let total: f32 = self
+            .weights
+            .iter()
+            .skip(prefix_words)
+            .filter(|&&w| w >= 1.0)
+            .sum();
+        (total > 0.0).then(|| {
+            self.weights
+                .iter()
+                .zip(&self.matched)
+                .skip(prefix_words)
+                .filter_map(|(&w, &matched)| (w >= 1.0 && matched).then_some(w))
+                .sum::<f32>()
+                / total
+        })
+    }
+
+    pub(crate) fn subject(&self, prefix_words: usize) -> Option<f32> {
+        let total: f32 = self.weights.iter().take(prefix_words).sum();
+        (total > 0.0).then(|| {
+            self.weights
+                .iter()
+                .zip(&self.matched)
+                .take(prefix_words)
+                .filter_map(|(&weight, &matched)| matched.then_some(weight))
+                .sum::<f32>()
+                / total
+        })
+    }
+
     pub(crate) fn remaining(&self, prefix_words: usize) -> f32 {
         let total: f32 = self.weights.iter().skip(prefix_words).sum();
         if total <= 0.0 {

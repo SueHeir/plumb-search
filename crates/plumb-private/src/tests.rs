@@ -303,6 +303,101 @@ fn exact_domain_names_keep_the_native_language_exception() {
 }
 
 #[test]
+fn a_shared_named_subject_is_required_even_when_task_words_dominate() {
+    let mut owner = site(
+        "aster.example",
+        "Aster research organization",
+        Some(1),
+        90_000,
+    );
+    owner.aliases = vec!["Aster".into()];
+    let records = [
+        owner,
+        site(
+            "nimbus.example",
+            "Refund claim policy guidance status",
+            Some(2),
+            100_000,
+        ),
+    ];
+    let query = "aster refund claim policy guidance status";
+    let ranked = rank(query, &records, &Options::default(), 2);
+    assert_eq!(ranked[0].domain, "aster.example");
+    assert_eq!(ranked[1].text_score, 0.0);
+    assert_eq!(ranked[1].score, 0.0);
+    assert_eq!(
+        private_top(&records, query, &Options::default(), 1),
+        index_top(&records, query, &SearchOptions::default(), 1)
+    );
+    let subject = "Aster Nimbus Zephyr Lunar Observatory Institute Lab";
+    let mut owner = site("aster.example", subject, Some(1), 90_000);
+    owner.aliases = vec![subject.into()];
+    let records = [
+        owner,
+        site("nimbus.example", "Refund guidance", Some(2), 100_000),
+    ];
+    let query = format!("{subject} refund");
+    assert_eq!(
+        private_top(&records, &query, &Options::default(), 1),
+        ["aster.example"]
+    );
+    assert_eq!(
+        private_top(&records, &query, &Options::default(), 1),
+        index_top(&records, &query, &SearchOptions::default(), 1)
+    );
+}
+
+#[test]
+fn alias_subjects_precede_longer_domains_and_preserve_supported_qualifiers() {
+    let mut owner = site("aster.example", "Aster Labs", Some(1), 90_000);
+    owner.aliases = vec!["Aster Labs".into()];
+    owner.description = Some("Banking plans qz 7 API".into());
+    let mut decoy = site("aster-labs-online.example", "Aster Labs Online", None, 0);
+    decoy.aliases = vec!["Aster Labs".into()];
+    decoy.description = Some("Aster Labs online banking qz 7 API".into());
+    let records = [owner, decoy];
+    for query in [
+        "aster labs online banking",
+        "aster labs qz api",
+        "aster labs 7 api",
+    ] {
+        assert_eq!(
+            private_top(&records, query, &Options::default(), 1),
+            ["aster.example"]
+        );
+        assert_eq!(
+            private_top(&records, query, &Options::default(), 1),
+            index_top(&records, query, &SearchOptions::default(), 1),
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn a_bare_query_domain_needs_corroboration_except_when_typed() {
+    let mut owner = site(
+        "aster.example",
+        "Aster research organization",
+        Some(1),
+        90_000,
+    );
+    owner.aliases = vec!["Aster".into()];
+    let mut copier = SiteRecord::new("asterrefund.test");
+    copier.signals.tranco_rank = Some(500_000);
+    let records = [owner, copier];
+    let ranked = rank("aster refund", &records, &Options::default(), 2);
+    assert_eq!(ranked[0].domain, "aster.example");
+    assert_eq!(ranked[1].score, 0.0);
+    for query in ["aster refund", "asterrefund.test"] {
+        assert_eq!(
+            private_top(&records, query, &Options::default(), 1),
+            index_top(&records, query, &SearchOptions::default(), 1),
+            "{query}"
+        );
+    }
+}
+
+#[test]
 fn kinds_and_countries_rank_as_in_the_index() {
     let records = corpus();
     for country in ["US", "DE"] {
