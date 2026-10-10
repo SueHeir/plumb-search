@@ -149,6 +149,7 @@ fn content_key(doc: &FetchedDoc, article: &Article, address: &str) -> Option<[u8
         .collect();
     let evidence = serde_json::to_vec(&(
         &article.title,
+        &article.language,
         versions,
         &doc.description,
         &doc.text,

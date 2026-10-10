@@ -964,6 +964,7 @@ mod tests {
             item: Some("https://docs.godotengine.org/en/stable/classes/class_node.html".into()),
             sections: vec!["Method Descriptions".into()],
             search: Some(search.clone()),
+            language: Some("es".into()),
             ..Article::default()
         };
         let mut out = Vec::new();

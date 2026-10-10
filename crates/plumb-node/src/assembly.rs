@@ -3,7 +3,7 @@
 use plumb_core::place::{Place, OSM_COPYRIGHT_URL};
 use plumb_core::{normalize_text, SafeSearch};
 use plumb_index::pages::PlacedPage;
-use plumb_index::places::{parse_place_query, Near, PlaceResults};
+use plumb_index::places::{parse_place_query, LocationStatus, Near, PlaceResults};
 use plumb_index::{Hit, SearchOptions};
 use serde::Serialize;
 
@@ -55,6 +55,7 @@ pub(crate) fn places(
             guessed: false,
             radius_km: 0.0,
             hits: Vec::new(),
+            location: None,
         })
     })?;
     for hit in &mut found.hits {
@@ -76,7 +77,16 @@ pub(crate) fn places(
                 || options.country.as_deref() == hit.place.country.as_deref())
     });
     found.hits.truncate(MAX_PLACES);
-    let status = if found.center.is_none() {
+    let status = if let Some(location) = &found.location {
+        match location.status {
+            LocationStatus::AmbiguousLocation => "ambiguous_location",
+            LocationStatus::ConflictingConstraints => "conflicting_constraints",
+            LocationStatus::MissingLocation => "missing_location",
+            LocationStatus::UnknownLocation => "location_unavailable",
+            LocationStatus::Resolved if found.hits.is_empty() => "no_indexed_matches",
+            LocationStatus::Resolved => "available",
+        }
+    } else if found.center.is_none() {
         if found.near_me {
             "missing_location"
         } else {
@@ -450,6 +460,7 @@ mod tests {
                     },
                 })
                 .collect(),
+            location: None,
         };
         found.hits[0].place.kind = "shop=erotic".into();
         found.hits[1].place.country = Some("CA".into());

@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::article::{article_url, Article};
+use plumb_core::article::{article_url, Article, SearchContent};
 use plumb_core::packages::PackageInfo;
 use plumb_core::{
     adult_level, host_of, normalize_text, registrable_domain, AdultLevel, Operators, SafeSearch,
@@ -175,6 +175,9 @@ pub struct Page {
     /// pages with no declaration; `language()` can also use set evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_language: Option<String>,
+    /// Bounded source symbols and passages, when an inner-page rebuild supplied them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<SearchContent>,
 }
 
 impl Page {
@@ -196,6 +199,7 @@ impl Page {
             lead: article.lead,
             names: article.names,
             sections: Vec::new(),
+            search: None,
             content_language: article
                 .language
                 .as_deref()
@@ -222,6 +226,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: repo.language.as_deref().and_then(plumb_core::language_code),
         }
     }
@@ -248,6 +253,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: question
                 .language
                 .as_deref()
@@ -278,6 +284,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: question
                 .language
                 .as_deref()
@@ -327,6 +334,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: book.language.as_deref().and_then(plumb_core::language_code),
         }
     }
@@ -354,6 +362,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: podcast
                 .language
                 .as_deref()
@@ -387,6 +396,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: music
                 .language
                 .as_deref()
@@ -436,6 +446,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: film.language.as_deref().and_then(plumb_core::language_code),
         })
     }
@@ -465,6 +476,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: doc.sections,
+            search: doc.search.as_ref().and_then(SearchContent::bounded),
             content_language: doc.language.as_deref().and_then(plumb_core::language_code),
         })
     }
@@ -499,6 +511,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: page.search.as_ref().and_then(SearchContent::bounded),
             content_language: page.language.as_deref().and_then(plumb_core::language_code),
         })
     }
@@ -580,6 +593,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: paper
                 .language
                 .as_deref()
@@ -609,6 +623,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: item.language.as_deref().and_then(plumb_core::language_code),
         }
     }
@@ -637,6 +652,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: word.language.as_deref().and_then(plumb_core::language_code),
         }
     }
@@ -665,6 +681,7 @@ impl Page {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
             content_language: package
                 .language
                 .as_deref()
@@ -727,6 +744,10 @@ impl Page {
             {
                 topic.push(' ');
                 topic.push_str(text);
+            }
+            if let Some(search) = &self.search {
+                topic.push(' ');
+                topic.push_str(&search.text());
             }
             return Some(topic);
         }
@@ -3949,6 +3970,45 @@ mod tests {
         assert_eq!(placed_at("python.org"), 0);
         assert_eq!(placed_at("docs.python.org"), 0);
         assert_eq!(placed_at("cpython.org"), 1);
+    }
+
+    #[test]
+    fn rich_docs_symbols_passages_and_language_survive_indexing_together() {
+        use plumb_core::article::{SearchPassage, SearchSymbol};
+        let page = Page::from_docs(Article {
+            title: "Node — Godot documentation".into(),
+            item: Some("https://docs.godotengine.org/en/stable/classes/class_node.html".into()),
+            aliases: vec!["Godot Node".into()],
+            language: Some("en".into()),
+            search: Some(SearchContent {
+                symbols: vec![SearchSymbol {
+                    identifier: "set_multiplayer_authority".into(),
+                    anchor: Some("class-node-method-set-multiplayer-authority".into()),
+                }],
+                passages: vec![SearchPassage {
+                    heading: "Multiplayer authority".into(),
+                    text: "Sets the node's multiplayer authority to the given peer identifier."
+                        .into(),
+                    anchor: Some("class-node-method-set-multiplayer-authority".into()),
+                }],
+                ..SearchContent::default()
+            }),
+            ..Article::default()
+        })
+        .unwrap();
+        assert_eq!(page.language(), Some("en"));
+        assert!(page.topic().unwrap().contains("set_multiplayer_authority"));
+        let (_dir, index) = searcher(&[page.clone()]);
+        let found = index.search("godot set multiplayer authority", 5).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].page.search, page.search);
+        assert_eq!(found[0].page.content_language, page.content_language);
+        let mut legacy = serde_json::to_value(&page).unwrap();
+        legacy.as_object_mut().unwrap().remove("search");
+        assert!(serde_json::from_value::<Page>(legacy)
+            .unwrap()
+            .search
+            .is_none());
     }
 
     #[test]
