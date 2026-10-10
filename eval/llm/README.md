@@ -23,6 +23,11 @@ up in Plumb, and how much context does that cost?
    modes leave out, so comparing it with `plumb` shows what reading a
    page's outline first saves.
 
+A model that is still calling tools after `--rounds` turns (6), or whose
+reply comes back empty, gets one more turn without tools asking it to answer
+(`forced` in the results). Models that think before answering need a larger
+`--max-tokens` than the default 512, such as 2048.
+
 Each run prints how many answers were right, the prompt tokens a question
 took, right answers per 1,000 tokens, tool calls and time. Results files are
 appended to, so a stopped run picks up where it left off.
