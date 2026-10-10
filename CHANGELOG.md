@@ -1,21 +1,46 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
+
+Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.2.1), and the Docker image is `ghcr.io/sueheir/plumb-search:0.2.1` (also `:0.2` and `:latest`).
+
+### Upgrading from 0.2.0
+
+- Docker: `docker compose pull`, then `docker compose up -d`. Desktop: install the new version over the old one. Nothing else needs doing: the index, page sets, site vectors and settings of 0.2.0 are used as they are, nothing is rebuilt for the upgrade, and 0.2.0 and 0.2.1 nodes work together in the network.
+- On its first start the node removes page and place index builds an earlier run left half-done (about 4.8 GB on plumbsearch.org).
+- plumbsearch.org now serves the new `subpages2` page set, so a 0.2.1 node that trusts it downloads it by itself and searches it once it is indexed: all of it, or the 100,000 most read pages under a storage limit of 1 GB. 0.2.0 nodes never ask for it, since they would list its pages without the check below. A node that fetched the old `subpages` set no longer reads `subpages.tsv.gz`: rename it to `subpages2.tsv.gz` to keep it, or delete it. The `reference` set is not shared yet and follows in a later release.
 
 ### Search
 
+- Inner pages of well-known sites, from the new `subpages2` set of about 235 universities and labs, companies, government agencies, sports and entertainment sites and museums: a search for one page, like "amazon leadership principles" or "declaration of independence transcript", can find that page and not only the site's homepage. A page of the set is listed only when the search asks for it: it names the page by its whole title, the page is on one of the search's three best sites, or the search has at least two and three quarters of the words of its title, or of its title before a colon or " -- " (half, when the title holds all of the search's words), and no year the title lacks. So pages of big sites (CERN, Oracle, the WHO) don't come up on unrelated searches that share a word or two with them, and pages in a language other than English are left out. A page found by most of its words is kept even when the search for articles inside the query found it too.
+- `plumb fetch-pages --set docs` keeps the headings of each page's sections, and a node searches docs pages by them too: with such a set, "python list comprehension" reaches Python's "Data Structures" page. A heading alone still names nothing; the search has to name the docs' product. The docs set plumbsearch.org shares does not have headings yet, so nodes search docs pages as before until it does.
+- Articles whose title is only part of a search are found: "titanic sinking", "radium discovery marie curie" and "catholic homily" now reach their Wikipedia articles.
+- Search by meaning reads a search after the model's instruction for search queries, and the learned ranking is retrained for it: on the half of the test searches never tuned on, the described site comes first for 49.5% of described searches instead of 47.3%, and the expected result for 76.6% of all searches instead of 76.1%. Only the default English model takes the instruction; EmbeddingGemma and embedding servers keep their own.
 - Rare words and names are no longer rewritten by spelling: "perft" stays "perft" rather than becoming perf1.com's name, "Kiwipete" is not "kimipet" and "Inkala" is not "ikala". A word is now only corrected to a word that many sites or pages use and that starts with the same letter ("perft" is not "erft"), and only when the slip is likelier than the word typed as meant, counting a word no site or page has as if one did ("perft" is not "perf"), and never to one with a digit in it, whether a word or a site's name.
+- A `site:` search on a docs site also finds the docs pages that match only with the product named: "asyncio site:docs.python.org" searches "Python asyncio" on docs.python.org too, so it can list the asyncio pages it missed before.
+- Question pages need the word a search is about: "how to get rid of aphids" no longer lists a Skyrim question about getting rid of a bounty.
 - With "Use the Plumb network" on, "weather in denver" no longer puts Spain's social security site first. Network searches no longer ask for the bucket of a small joining word ("in", "of", "the") in a longer query, and a site only the network found that lacks some of the query's words comes after the node's own results: its score was measured against the few sites the network sent, where the best partial match looks like a full one.
+- A brand's sites under a country's second-level ending such as `.com.co` count as that country's, like its other country sites: pizzahut.com.co and kayak.com.co are no longer listed next to the brand's own site as if they were sites of their own.
+- A small site that is a company's official one is named by the company's name, not by its address alone: "elephant valley" no longer lists Valley National Bank's valley.com.
+- Site names: a site whose only Wikidata link is an inner page of it now gets its name ("Perplexity AI" for perplexity.ai), and an article no longer stands for a site on another host that it links an inner page of (the film Rocky's bit.ly link). They need the records ingested again with `--wikidata`, and the article fix needs the articles set made again.
 
-### Nodes
+### For AI apps
 
+- `plumb mcp --text-answers` and `/mcp?answers=text` give each tool's answer as text alone, leaving out the same answer as JSON, which Claude Code hands the model at about twice the size. Answers are unchanged unless asked. [docs/mcp.md](docs/mcp.md) says which form each app reads, and lists Claude Code setups with `read_page` first.
+- `search` takes an optional `kind` and `site`. `kind` lists one kind of result alone, best first: sites without pages, Wikipedia articles, questions, package cards, GitHub repositories, books, papers or docs pages, picked from the 200 best pages for the query rather than the 10 a search places among the sites. `site` is the same as `site:` in the query. `facts` takes an optional `more_subjects`, up to 9 more names answered in the same call, so a table of facts about several things (the Seven Summits) takes one call instead of one per row. Answers without them are unchanged, and a 0.2.0 node ignores them.
+- `facts` with `about` set to `height` gives a mountain's elevation when it has no height, as search already did for "height of mount everest".
+- `official_site` keeps a project's own site when its package gives only docs (pandas is pandas.pydata.org, not pandas.readthedocs.io), gives the docs when asked for them ("Pillow docs" is pillow.readthedocs.io), and keeps a well-known site's own docs ("Anthropic API docs" is anthropic.com).
+- `official_site` is less often sure of a wrong answer: a site named by a name it shows nothing of, or one of two official sites of a name ("Elixir"), is no longer high confidence. A low-confidence guess gives way to a site that shows the whole name ("outlook email" is outlook.live.com, not office.com) or whose address is a word of it ("cube20 God's number" is cube20.org).
 - `--mcp-findings` lets every client of a node's `/mcp` keep findings with `report_finding` and see them with search results, not only AI apps on the node's own computer. It is off by default and meant for a node whose address only trusted people have; `read_page` and sharing findings with other nodes are unchanged.
 
-### Fixes
+### Running a node
 
 - Search by meaning reads the vectors file in place, mapped into memory, instead of holding a copy: a node with 2.8 million sites' vectors holds about 50 MB for them instead of 1.6 GB, and the system can drop the file's pages when memory runs short instead of swapping. Searches by meaning also take about a third less time on CPUs with AVX2, with the same results.
-- `plumb run --set-updates off` no longer downloads a page set the node has no file of, as plumbsearch.org would have done with the reference and subpages sets once a trusted node had them. A list such as `films,map` still takes the sets it names when the node has none. A node with `all` (the default) takes missing sets as before.
-- The subpages set is now named `subpages2` (file `subpages2.tsv.gz`, `fetch-pages --set subpages2`). Its pages now only show for searches that ask for them, a check 0.2.0 nodes lack, so nodes no longer serve it under the old name and 0.2.0 nodes, which do not know the new one, never download it. `subpages` still works in settings, `--set-updates` and `fetch-pages --set`.
+- Page and place index builds cut short by a crash or a restart no longer stay on disk: the node removes them when it starts. In a container, where the node has the same process id on every start, it no longer takes an earlier run's leftovers for its own.
+- `plumb run --set-updates off` no longer downloads a page set the node has no file of, as it would have done with a new set such as `subpages2` once a trusted node had it. A list such as `films,map` still takes the sets it names when the node has none. A node with `all` (the default) takes missing sets as before.
+- `plumb fetch-facts` reads a kind again from its start when it moves to QLever's endpoint, which lists statements in another order: facts made before lost about a third of areas, elevations and heights.
+- `plumb eval --recall` shows where each test search's answer is lost before ranking: not in the index or a page set at all, too far down the sites matching its words or nearest in meaning, or never looked at by the ranking.
+- The subpages set's file is `subpages2.tsv.gz`, made with `fetch-pages --set subpages2`. `subpages` still names it in settings, `--set-updates` and `fetch-pages --set`, and a size chosen for it under that name still holds.
 
 ## 0.2.0
 
