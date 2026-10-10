@@ -19,8 +19,9 @@ pub struct CandidateEvidence {
     pub domain: String,
     /// Raw BM25, before normalization relative to this candidate pool.
     pub lexical_score: f32,
-    /// Absolute semantic similarity. Missing or deliberately unused
-    /// vectors remain unknown rather than becoming zero relevance.
+    /// Absolute semantic similarity, including when name controls disable
+    /// score blending. Missing vectors remain unknown rather than becoming
+    /// zero relevance.
     pub semantic_closeness: Option<f32>,
     /// Weighted coverage in any searched field, ignoring question/filler words.
     pub query_coverage: f32,
