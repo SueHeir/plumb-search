@@ -63,27 +63,41 @@ backup facility for sensitive state. A persistent Docker volume is not a backup.
 The page-index schema contributes to the derived index key. After successfully
 opening/building an index, `remove_other_indexes` deletes other `pages/index-*`
 directories. Therefore a previous schema key does not retain the old index.
-Put recovery copies outside the entire live data directory and outside startup's
-index cleanup paths. Use actual copies or a verified snapshot facility, never
-hard links to mutable files. Preserve required source sets and generation
-metadata as well as derived indexes; preserve source mtimes when restoring,
-because size and mtime contribute to index selection.
+Do not keep a full duplicate corpus or derived index on the Droplet: its
+user-approved Plumb storage budget is 64 GB, independently of filesystem free
+space. Retain the prior image and a small protected configuration manifest
+locally. Existing source sets plus their counts, generation metadata and mtimes
+can rebuild a compatible old page index; old image rollback alone does not
+restore an index that startup removed. Keep a reserve for temporary index builds,
+Docker images and normal corpus growth within the allocation.
 
-For mutable data on ext4, a running recursive copy alone is not a consistent
-snapshot. Pre-copy nonsensitive data if useful, then let the deployment owner
-stop the node gracefully and perform the final sync and hash verification while
-quiescent. Respect the configured five-minute stop allowance. Preserve any
-independent reference-generation job and the production tunnel; do not stop
-unrelated services. If writes cannot be quiesced or a verified consistent backup
-cannot be obtained, hold rollout. Keep the recovery directory private. Do not
-leave a completed backup under a name that startup removes as staging debris.
+For this serving-only release, prefer in-place executable rollback with unchanged
+compatible source data, followed by an old-schema index rebuild if needed.
+Verify old/new readers against the retained source records and settings before
+rollout. Measure rebuild time, peak memory and temporary disk in a bounded
+scratch experiment; until measured, recovery time is unknown and search may be
+unavailable throughout rebuilding. Do not require a full duplicate when this
+recovery tradeoff is accepted. Block incompatible destructive source migrations
+until their affected irreplaceable records have a verified recovery path.
 
-Verify in scratch, without a networked node, that old and new readers accept the
-required legacy and staged records, that original hashes remain unchanged, and
-that the old executable can use the preserved old indexes/settings. Rebuilding
-an old index is a separate recovery option only after measuring its time, memory
-and availability impact. Invalid staged corpus publication remains blocked;
-scoped quarantine proof does not authorize promoting an ineligible full corpus.
+For a recovery copy where needed, use existing HPC capacity for nonsensitive
+source records and generation metadata, outside live startup cleanup paths.
+Do not transfer identity keys, tokens, credit state or private configuration as
+an ad hoc corpus copy. Sensitive state is the nine-file built-in backup scope
+in `node/backup.rs`; preserve existing local protections or use an explicitly
+approved private backup destination. Corpus, downloaded seed sets and derived
+indexes are excluded from that built-in scope. Signed crawl evidence may need
+preservation if it cannot be fetched again; do not assume every record is
+reproducible merely because its search index is derived.
+
+A running recursive pre-copy alone is not consistent. Where preservation is
+necessary, the deployment owner must gracefully stop the node and finalize sync
+and verification while quiescent, respecting the five-minute stop allowance.
+Preserve independent reference jobs and the production tunnel. Use actual
+copies or verified snapshots, never hard links to mutable files; preserve source
+mtimes. An authorized HPC pre-copy is preparation, not proof of recoverability.
+Invalid staged corpus publication remains blocked; scoped quarantine proof does
+not authorize promoting an ineligible full corpus.
 
 ## Existing fleet and storage checks
 
@@ -96,7 +110,10 @@ Recheck immediately before any copy or rollout.
 | LA and NY | Docker `plumb`, `/opt/plumb/docker-compose.yml`; same volume path; `--crawl-only` | LA 20 GiB / 12 GiB; NY 22 GiB / 11 GiB |
 | HPC | User `plumb.service`; checkout `/home/suehr/projects/plumb-search`; data `plumb-data`; separate tunnel service | 49 GiB / 126 GiB |
 
-Full same-host crawler backups do not fit the observed free space. Do not assume
+The 81 GiB Droplet free-space observation is physical capacity, not permission
+to exceed the 64 GB Plumb allocation. HPC is the intended home for larger corpus
+experiments, subject to measured disk and memory limits and no new paid
+provisioning. Full same-host crawler backups do not fit the observed free space. Do not assume
 compression will solve this or copy until the destination and remaining reserve
 are checked. Establish a compatible bounded recovery scope or an approved
 existing storage destination first. Crawl-only nodes skip serving page-index
