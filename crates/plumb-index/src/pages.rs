@@ -7917,34 +7917,51 @@ mod tests {
             );
         }
 
-        // Preserve the exact failed query and reference fixture. The
-        // pre-existing reference matcher covers three of its four stems,
-        // and the old name hint also searches without "definition".
+        // Preserve the exact failed query and reference fixture. English
+        // stop words remove "is" but retain "what". The raw topic share
+        // is below QUESTION_SHARE; the old name hint searches without
+        // both "what is" and "definition" and supplies the result.
         let query = "What is RowCompass duplicate rows definition?";
         let stems = s.question_words(query);
         let topic: HashSet<_> = analysis::tokens(&s.stemmed, &rows.topic().unwrap())
             .into_iter()
             .collect();
-        assert_eq!(stems.len(), 4);
-        assert_eq!(stems.iter().filter(|stem| topic.contains(*stem)).count(), 3);
-        let (legacy_score, legacy_whole) = s.question_match(&rows, &stems, Some(&stems[0]));
-        assert!(legacy_score > 0.0 && !legacy_whole);
+        assert_eq!(
+            stems.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["what", "rowcompass", "duplic", "row", "definit"]
+        );
+        let missing: Vec<_> = stems
+            .iter()
+            .filter(|stem| !topic.contains(*stem))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(missing, ["what", "definit"]);
+        let share =
+            stems.iter().filter(|stem| topic.contains(*stem)).count() as f32 / stems.len() as f32;
+        assert!(share < QUESTION_SHARE, "{stems:?}: {share}");
+        // Even without a rare-topic predicate the old raw matcher fails;
+        // the first stem is not a stand-in for the selected topic word.
+        assert_eq!(s.question_match(&rows, &stems, None), (0.0, false));
         let raw = s.search_once(query, 10, None).unwrap();
-        let raw_hit = raw.iter().find(|hit| hit.page.url == rows.url).unwrap();
-        assert_eq!(raw_hit.popularity, 1.0);
-        assert_eq!(raw_hit.score, legacy_score, "{raw_hit:?}");
-        assert!(!raw_hit.named && !raw_hit.whole, "{raw_hit:?}");
+        assert!(raw.iter().all(|hit| hit.page.url != rows.url), "{raw:?}");
 
         let (hinted, _) = hinted_name(query).unwrap();
+        let hinted_stems = s.question_words(&hinted);
+        assert!(hinted_stems.iter().all(|stem| topic.contains(stem)));
+        let (hinted_score, hinted_whole) = s.question_match(&rows, &hinted_stems, None);
+        assert_eq!(hinted_score, PARTIAL_MATCH);
+        assert!(hinted_whole);
         let hinted_hits = s.search_once(&hinted, 10, None).unwrap();
         let hinted_hit = hinted_hits
             .iter()
             .find(|hit| hit.page.url == rows.url)
             .unwrap();
+        assert_eq!(hinted_hit.popularity, 1.0);
+        assert_eq!(hinted_hit.score, hinted_score, "{hinted_hit:?}");
         assert!(hinted_hit.whole && !hinted_hit.named, "{hinted_hit:?}");
         let hits = s.search(query, 10).unwrap();
         let hit = hits.iter().find(|hit| hit.page.url == rows.url).unwrap();
-        assert_eq!(hit.score, raw_hit.score.max(hinted_hit.score), "{hit:?}");
+        assert_eq!(hit.score, hinted_hit.score, "{hit:?}");
         assert!(!hit.named && hit.whole, "{hit:?}");
         assert!(place_pages(query, &[], hits)
             .iter()
