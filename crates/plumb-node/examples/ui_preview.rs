@@ -74,6 +74,7 @@ impl StatusSource for PreviewNode {
             network: None,
             fill: None,
             crawl_left: 0,
+            page_coverage: None,
             background_updates: settings.background_updates,
             paused: None,
             paused_until: None,

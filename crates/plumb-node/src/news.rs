@@ -794,6 +794,12 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     fs::rename(&temporary, path)
 }
 
+/// Absolute UTC publication time alongside Unix seconds and relative display age.
+pub(crate) fn published_date(at: u64) -> Option<String> {
+    chrono::DateTime::from_timestamp(i64::try_from(at).ok()?, 0)
+        .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1110,10 +1116,4 @@ mod tests {
         again.prune(NOW + 8 * 24 * HOUR);
         assert_eq!(again.headline_count(), 0);
     }
-}
-
-/// Absolute UTC publication time alongside Unix seconds and relative display age.
-pub(crate) fn published_date(at: u64) -> Option<String> {
-    chrono::DateTime::from_timestamp(i64::try_from(at).ok()?, 0)
-        .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
