@@ -87,6 +87,13 @@ fn private_top(records: &[SiteRecord], query: &str, options: &Options, n: usize)
 fn constants_match_the_index_defaults() {
     let cfg = RankConfig::default();
     assert_eq!(rank::ALPHA, cfg.alpha);
+    assert_eq!(Some(rank::DESCRIBED_ALPHA), cfg.described_alpha);
+    assert_eq!(Some(rank::DESCRIBED_RELEVANCE), cfg.described_relevance);
+    assert_eq!(
+        Some(rank::NAVIGATIONAL_RELEVANCE),
+        cfg.navigational_relevance
+    );
+    assert_eq!(Some(rank::QUESTION_RELEVANCE), cfg.question_relevance);
     assert_eq!(rank::EXACT_LABEL_BONUS, cfg.exact_label_bonus);
     assert_eq!(rank::EXACT_ALIAS_BONUS, cfg.exact_alias_bonus);
     assert_eq!(rank::TRUSTED_LINK_SCORE, cfg.trusted_link_score);
@@ -117,6 +124,181 @@ fn first_results_agree_with_the_index() {
         let index = index_top(&records, query, &SearchOptions::default(), 1);
         let private = private_top(&records, query, &Options::default(), 1);
         assert_eq!(private, index, "{query:?}");
+    }
+}
+
+#[test]
+fn unsupported_qualifiers_do_not_inherit_a_partial_names_popularity() {
+    for qualifier in [
+        "refund",
+        "qz",
+        "7",
+        "api",
+        "manual",
+        "government",
+        "agency",
+        "project",
+        "benefits",
+        "baggage policy",
+        "website address",
+        "student login",
+    ] {
+        let query = format!("aster {qualifier}");
+        let popular = site("aster.example", "Aster Observatory", Some(1), 90_000);
+        let relevant = site("nimbus.example", &format!("{query} information"), None, 0);
+        let records = [popular, relevant];
+        let expected = ["nimbus.example"];
+        assert_eq!(
+            index_top(&records, &query, &SearchOptions::default(), 1),
+            expected,
+            "native {query}"
+        );
+        assert_eq!(
+            private_top(&records, &query, &Options::default(), 1),
+            expected,
+            "private {query}"
+        );
+        let ranked = rank(&query, &records, &Options::default(), 2);
+        assert!(ranked.windows(2).all(|pair| pair[0].score > pair[1].score));
+    }
+}
+
+#[test]
+fn every_substantive_field_can_support_a_partial_names_task() {
+    for field in [
+        "title",
+        "description",
+        "intro",
+        "summary",
+        "about",
+        "headings",
+        "terms",
+        "aliases",
+    ] {
+        let mut popular = site("aster.example", "Aster Observatory", Some(1), 90_000);
+        let text = "Aster Observatory refund information";
+        match field {
+            "title" => popular.title = Some(text.into()),
+            "description" => popular.description = Some(text.into()),
+            "intro" => popular.intro = Some(text.into()),
+            "summary" => popular.summary = Some(text.into()),
+            "about" => popular.about = Some(text.into()),
+            "headings" => popular.headings = vec![text.into()],
+            "terms" => popular.terms = vec![text.into()],
+            "aliases" => popular.aliases = vec![text.into()],
+            _ => unreachable!(),
+        }
+        let records = [
+            popular,
+            site("nimbus.example", "Aster refund information", None, 0),
+        ];
+        let expected = ["aster.example"];
+        assert_eq!(
+            index_top(&records, "aster refund", &SearchOptions::default(), 1),
+            expected,
+            "native {field}"
+        );
+        assert_eq!(
+            private_top(&records, "aster refund", &Options::default(), 1),
+            expected,
+            "private {field}"
+        );
+        // Bucket trimming preserves this evidence for browser searches.
+        let records: Vec<_> = records
+            .into_iter()
+            .map(plumb_core::keys::slim_record)
+            .collect();
+        let hits = search(
+            "aster refund",
+            &query_keys("aster refund"),
+            vec![records],
+            &Options::default(),
+            1,
+        );
+        assert_eq!(hits[0].domain, "aster.example", "bucket {field}");
+    }
+}
+
+#[test]
+fn navigation_preserves_the_entire_subject() {
+    for (query, title, expected) in [
+        ("aster login", "Aster login information", "aster.example"),
+        (
+            "where can i find aster login",
+            "Aster login information",
+            "aster.example",
+        ),
+        (
+            "aster qz login",
+            "Aster qz login information",
+            "nimbus.example",
+        ),
+        (
+            "aster government website",
+            "Aster government website",
+            "nimbus.example",
+        ),
+        ("aster agency docs", "Aster agency docs", "nimbus.example"),
+    ] {
+        let records = [
+            site("aster.example", "Aster Observatory", Some(1), 90_000),
+            site("nimbus.example", title, None, 0),
+        ];
+        assert_eq!(
+            index_top(&records, query, &SearchOptions::default(), 1),
+            [expected],
+            "native {query}"
+        );
+        assert_eq!(
+            private_top(&records, query, &Options::default(), 1),
+            [expected],
+            "private {query}"
+        );
+    }
+}
+
+#[test]
+fn a_redirected_homepages_words_do_not_establish_the_original_sites_task() {
+    let mut popular = site("aster.example", "Aster refund information", Some(1), 90_000);
+    popular.description = Some("Aster refunds".into());
+    popular.url = Some("https://nimbus.example/".into());
+    let records = [
+        popular,
+        site("nimbus.example", "Aster refund information", None, 0),
+    ];
+    assert_eq!(
+        private_top(&records, "aster refund", &Options::default(), 1),
+        ["nimbus.example"]
+    );
+    assert_eq!(
+        private_top(&records, "aster refund", &Options::default(), 1),
+        index_top(&records, "aster refund", &SearchOptions::default(), 1)
+    );
+}
+
+#[test]
+fn exact_domain_names_keep_the_native_language_exception() {
+    let mut german = site("aster.de", "Aster Observatory", Some(1), 90_000);
+    german.language = Some("de".into());
+    let records = [german, site("nimbus.example", "Aster lab", None, 0)];
+    let private_options = Options {
+        language: Some("en".into()),
+        ..Options::default()
+    };
+    let index_options = SearchOptions {
+        language: Some("en".into()),
+        ..SearchOptions::default()
+    };
+    for query in ["aster", "aster.de", "https://aster.de/"] {
+        assert_eq!(
+            private_top(&records, query, &private_options, 1),
+            ["aster.de"]
+        );
+        assert_eq!(
+            private_top(&records, query, &private_options, 1),
+            index_top(&records, query, &index_options, 1),
+            "{query}"
+        );
     }
 }
 
