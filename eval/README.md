@@ -364,3 +364,7 @@ serialized configurations and reports each difference with a `present` flag;
 missing baseline keys are never silently filled with candidate defaults. Model
 and corpus controls still hold. `--mode corpus` rejects any rank-setting or
 learned-model difference. The batch runner's `--compare` uses ranker mode.
+
+The candidate-only [scratch MCP example](contracts/scratch-mcp.md) opens the
+retained bounded page cache and frozen site index through production MCP/web
+routes for a separate surface-contract appendix after the core comparison.
