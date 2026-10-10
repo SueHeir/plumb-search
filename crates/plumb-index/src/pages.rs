@@ -861,8 +861,16 @@ pub const DOCS_SET: &str = "docs";
 pub const REFERENCE_SET: &str = "reference";
 /// The set of inner pages of other well-known sites: universities and
 /// labs, big companies, government agencies, entertainment and museums
-/// (see `plumb_core::subpages`). Found like reference pages.
-pub const SUBPAGES_SET: &str = "subpages";
+/// (see `plumb_core::subpages`). Found like reference pages, but listed
+/// only when the search asks for them (`subpage_asked`).
+///
+/// Named "subpages2", not "subpages": nodes before v0.2.1 list the
+/// "subpages" set with no such check, so it is never offered under that
+/// name again, and they never ask for this one, which they do not know.
+pub const SUBPAGES_SET: &str = "subpages2";
+/// The name [`SUBPAGES_SET`] had before v0.2.1, which a node's settings
+/// may still use.
+pub const OLD_SUBPAGES_SET: &str = "subpages";
 /// Fewest words (stemmed, without the most common ones) of a query that
 /// finds reference pages by their words: "define prioritize".
 pub const REFERENCE_QUERY_WORDS: usize = 2;
@@ -2806,6 +2814,8 @@ const SUBPAGE_SITES: usize = 3;
 /// Least share of a subpage's title words a query found it by must have,
 /// when it does not name the page's site.
 const SUBPAGE_TITLE_SHARE: f32 = 0.75;
+/// The same share when the title holds every word of the query.
+const SUBPAGE_HELD_SHARE: f32 = 0.5;
 /// Words a title shares with anything, left out of [`SUBPAGE_TITLE_SHARE`].
 const TITLE_STOP_WORDS: &[&str] = &[
     "a", "an", "and", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with",
@@ -2814,8 +2824,9 @@ const TITLE_STOP_WORDS: &[&str] = &[
 /// Whether `hit`, when it is a page of the subpages set, may be listed for
 /// `query`: named by its whole title, on one of the query's best sites
 /// ("rotten tomatoes oppenheimer", "met museum hours"), or with most of
-/// its title's words in the query ("amazon leadership principles" for
-/// "Leadership Principles"). A big site's news, press releases and reviews
+/// its title's words, or of its title before a colon, in the query
+/// ("amazon leadership principles" for "Amazon Leadership Principles:
+/// Values and company culture"). A big site's news, press releases and reviews
 /// share words with all sorts of searches: "seven summits" is not a
 /// leadership summit at jnj.com, nor "mount everest" a film review at
 /// ign.com. Pages of other sets always may.
@@ -2850,10 +2861,46 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
             .filter(|word| !TITLE_STOP_WORDS.contains(&word.as_str()))
             .collect()
     };
-    let title = words(&hit.page.title);
     let asked = words(query);
-    let shared = title.intersection(&asked).count();
-    shared >= 2 && shared as f32 >= SUBPAGE_TITLE_SHARE * title.len() as f32
+    let has_most = |title: &str| {
+        let title = words(title);
+        // A year the query asks for and the title lacks is another page:
+        // "nobel prize in physics 2025" is not "A Nobel prize for particle
+        // physics".
+        if asked
+            .iter()
+            .any(|word| is_year(word) && !title.contains(word))
+        {
+            return false;
+        }
+        let shared = title.intersection(&asked).count();
+        // A query the title holds whole needs only half of it: "john
+        // martinis" for "John Martinis - CHM".
+        let share = if asked.is_subset(&title) {
+            SUBPAGE_HELD_SHARE
+        } else {
+            SUBPAGE_TITLE_SHARE
+        };
+        shared >= 2 && shared as f32 >= share * title.len() as f32
+    };
+    // Or of its title before a subtitle, "Declaration of Independence" in
+    // "Declaration of Independence: A Transcription", or before the site's
+    // name, "Rule 30" in "Rule 30 -- from Wolfram MathWorld". Not before a
+    // dash: "The Great Gatsby - On Broadway" is the show.
+    let title = hit.page.title.as_str();
+    has_most(title)
+        || [":", " -- "].iter().any(|mark| {
+            title
+                .split_once(mark)
+                .is_some_and(|(head, _)| has_most(head))
+        })
+}
+
+/// Whether `word` is a year: four digits from 1000 to 2999.
+fn is_year(word: &str) -> bool {
+    word.len() == 4
+        && word.bytes().all(|b| b.is_ascii_digit())
+        && matches!(word.as_bytes()[0], b'1' | b'2')
 }
 
 /// Languages a site's pages in another language than English are under
@@ -3941,6 +3988,79 @@ mod tests {
             "planetary fact sheet",
             &["planetary.org"],
             fact_sheet()
+        ));
+        // Or of its title before a subtitle, not before a dash.
+        let culture = || {
+            hit(
+                "https://www.aboutamazon.com/about-us/leadership-principles",
+                "Amazon Leadership Principles: Values and company culture",
+                false,
+            )
+        };
+        assert!(listed(
+            "amazon leadership principles",
+            &["amazon.jobs"],
+            culture()
+        ));
+        let transcript = || {
+            hit(
+                "https://www.archives.gov/founding-docs/declaration-transcript",
+                "Declaration of Independence: A Transcription",
+                false,
+            )
+        };
+        assert!(listed(
+            "declaration of independence transcript",
+            &["wikipedia.org"],
+            transcript()
+        ));
+        // The site's name after " -- " is left out.
+        let rule30 = || {
+            hit(
+                "https://mathworld.wolfram.com/Rule30.html",
+                "Rule 30 -- from Wolfram MathWorld",
+                false,
+            )
+        };
+        assert!(listed(
+            "rule 30 cellular automaton",
+            &["automattic.com"],
+            rule30()
+        ));
+        // A query the title holds whole needs only half of the title.
+        let martinis = || {
+            hit(
+                "https://computerhistory.org/profile/john-martinis/",
+                "John Martinis - CHM",
+                false,
+            )
+        };
+        assert!(listed("john martinis", &["martinis.com"], martinis()));
+        let climate = || {
+            hit(
+                "https://www.who.int/news/item/climate-change-and-health-statement",
+                "WHO statement on climate change and health at the summit",
+                false,
+            )
+        };
+        assert!(!listed("climate change", &["climate.gov"], climate()));
+        // Not for a year its title does not have.
+        let nobel = || {
+            hit(
+                "https://home.cern/nobel-prize-particle-physics/",
+                "A Nobel prize for particle physics",
+                false,
+            )
+        };
+        assert!(!listed(
+            "nobel prize in physics 2025",
+            &["nobelprize.org"],
+            nobel()
+        ));
+        assert!(listed(
+            "nobel prize particle physics",
+            &["nobelprize.org"],
+            nobel()
         ));
         // Named by its whole title, or on a subdomain of a best site.
         assert!(listed(

@@ -163,6 +163,18 @@ impl SetInfo {
         SETS.iter().find(|set| set.id == id)
     }
 
+    /// The set a person names, by its id or by a name it had before
+    /// ("subpages" for [`plumb_index::pages::SUBPAGES_SET`]). Only for what
+    /// people type: a set is never served or asked for by an old name.
+    pub fn named(name: &str) -> Option<&'static SetInfo> {
+        let id = if name == plumb_index::pages::OLD_SUBPAGES_SET {
+            plumb_index::pages::SUBPAGES_SET
+        } else {
+            name
+        };
+        SetInfo::find(id)
+    }
+
     /// The set's file in `data_dir`.
     pub fn file(&self, data_dir: &Path) -> PathBuf {
         let name = match self.id.strip_prefix("wikipedia-") {
@@ -530,7 +542,11 @@ pub struct PageSets(pub BTreeMap<String, PageSetSize>);
 
 impl PageSets {
     pub fn size(&self, set: &str) -> PageSetSize {
-        self.0.get(set).copied().unwrap_or_default()
+        let old = (set == plumb_index::pages::SUBPAGES_SET)
+            .then(|| self.0.get(plumb_index::pages::OLD_SUBPAGES_SET))
+            .flatten();
+        // A size chosen for the set under its old name still holds.
+        self.0.get(set).or(old).copied().unwrap_or_default()
     }
 
     pub fn set(&mut self, set: &str, size: PageSetSize) {
@@ -561,13 +577,13 @@ impl PageSets {
             let (set, size) = part
                 .split_once('=')
                 .with_context(|| format!("expected SET=SIZE, got {part:?}"))?;
-            if SetInfo::find(set.trim()).is_none() {
+            let Some(info) = SetInfo::named(set.trim()) else {
                 bail!(
                     "unknown page set {set:?}; there are: {}",
                     SETS.iter().map(|s| s.id).collect::<Vec<_>>().join(", ")
                 );
-            }
-            sets.set(set.trim(), size.parse()?);
+            };
+            sets.set(info.id, size.parse()?);
         }
         Ok(sets)
     }
@@ -611,12 +627,14 @@ impl FromStr for SetUpdates {
             list => {
                 let mut sets = Vec::new();
                 for set in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                    if set != "map" && SetInfo::find(set).is_none() {
-                        bail!(
+                    let set = match SetInfo::named(set) {
+                        Some(info) => info.id,
+                        None if set == "map" => set,
+                        None => bail!(
                             "unknown page set {set:?}; there are: map, {}",
                             SETS.iter().map(|s| s.id).collect::<Vec<_>>().join(", ")
-                        );
-                    }
+                        ),
+                    };
                     sets.push(set.to_string());
                 }
                 SetUpdates::Only(sets)
@@ -843,6 +861,20 @@ mod tests {
         let sets = PageSets::parse("wikipedia-en=off").unwrap();
         assert_eq!(sets.size("wikipedia-en"), PageSetSize::Off);
         assert!(PageSets::parse("nope=all").is_err());
+        // The subpages set's old name still names it, and a size saved
+        // under it still holds.
+        let subpages = plumb_index::pages::SUBPAGES_SET;
+        let old = PageSets::parse("subpages=off").unwrap();
+        assert_eq!(old.size(subpages), PageSetSize::Off);
+        let saved: PageSets = serde_json::from_str(r#"{"subpages":"off"}"#).unwrap();
+        assert_eq!(saved.size(subpages), PageSetSize::Off);
+        assert_eq!(
+            "subpages".parse::<SetUpdates>().unwrap(),
+            SetUpdates::Only(vec![subpages.to_string()])
+        );
+        // Never under the old name otherwise.
+        assert!(SetInfo::find("subpages").is_none());
+        assert_eq!(SetInfo::named("subpages").unwrap().id, subpages);
         let json = serde_json::to_string(&sets).unwrap();
         assert_eq!(json, r#"{"wikipedia-en":"off"}"#);
         assert_eq!(serde_json::from_str::<PageSets>(&json).unwrap(), sets);

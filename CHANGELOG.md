@@ -11,6 +11,7 @@
 
 - Search by meaning reads the vectors file in place, mapped into memory, instead of holding a copy: a node with 2.8 million sites' vectors holds about 50 MB for them instead of 1.6 GB, and the system can drop the file's pages when memory runs short instead of swapping. Searches by meaning also take about a third less time on CPUs with AVX2, with the same results.
 - `plumb run --set-updates off` no longer downloads a page set the node has no file of, as plumbsearch.org would have done with the reference and subpages sets once a trusted node had them. A list such as `films,map` still takes the sets it names when the node has none. A node with `all` (the default) takes missing sets as before.
+- The subpages set is now named `subpages2` (file `subpages2.tsv.gz`, `fetch-pages --set subpages2`). Its pages now only show for searches that ask for them, a check 0.2.0 nodes lack, so nodes no longer serve it under the old name and 0.2.0 nodes, which do not know the new one, never download it. `subpages` still works in settings, `--set-updates` and `fetch-pages --set`.
 
 ## 0.2.0
 
