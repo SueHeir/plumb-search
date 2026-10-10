@@ -2354,3 +2354,75 @@ fn missing_troubleshooting_results_do_not_promote_a_package_as_the_answer() {
     assert!(text.starts_with("No results for"), "{text}");
     assert!(text.contains("Related package information:"), "{text}");
 }
+
+struct LyricsWithEntity;
+
+impl SearchBackend for LyricsWithEntity {
+    fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+    fn num_docs(&self) -> u64 {
+        0
+    }
+    fn entities(
+        &self,
+        _: &str,
+        _: usize,
+        _: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        let mut hit = shelved(Page::from_article(
+            "en",
+            plumb_core::article::Article {
+                title: "Hey Jude".into(),
+                description: Some("song by The Beatles".into()),
+                item: Some("Q210179".into()),
+                ..Default::default()
+            },
+        ));
+        hit.named = true;
+        Ok(vec![hit])
+    }
+    fn search_full(&self, query: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
+        let pages = if query.ends_with(" song") {
+            let page = Page::from_music(plumb_core::article::Article {
+                title: "Hey Jude".into(),
+                description: Some("Song by The Beatles, 1968".into()),
+                aliases: vec!["Hey Jude The Beatles".into()],
+                item: Some("recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into()),
+                ..Default::default()
+            })
+            .unwrap();
+            vec![PlacedPage {
+                hit: plumb_index::pages::PageHit {
+                    named: true,
+                    ..shelved(page)
+                },
+                under: None,
+                at: 0,
+            }]
+        } else {
+            Vec::new()
+        };
+        Ok(SearchResults {
+            hits: Vec::new(),
+            pages,
+            spelling: None,
+            site_search: None,
+        })
+    }
+}
+
+#[test]
+fn facts_entity_profiles_keep_the_existing_music_fallback() {
+    let mcp = Mcp::new(Arc::new(LyricsWithEntity), None);
+    let answer = mcp
+        .search("Hey Jude lyrics", None, &SearchOptions::default())
+        .unwrap();
+    assert_eq!(answer["profile"]["of"], "Hey Jude");
+    assert_eq!(answer["profile"]["source"], "MusicBrainz");
+    assert_eq!(answer["profile"]["search"], true);
+    assert!(answer["profile"]["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://genius.com/search?"));
+}

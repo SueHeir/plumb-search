@@ -1516,29 +1516,33 @@ impl Mcp {
                         .iter()
                         .find(|hit| hit.page.item == page.item)?
                         .clone();
-                    answers::profile_answer(
+                    let profile = answers::profile_answer(
                         query,
                         &[plumb_index::pages::PlacedPage {
                             hit: plumb_index::pages::PageHit { named: true, ..hit },
                             under: None,
                             at: 0,
                         }],
-                    )
+                    );
+                    if profile.is_some() || !name.ends_with(" song") {
+                        return profile;
+                    }
+                    // An article on a song may have no Genius link while
+                    // its explicitly requested MusicBrainz song has one.
                 }
-                answers::EntityResolution::Ambiguous(_) => None,
-                answers::EntityResolution::Unresolved => self
-                    .lookup(name, PROFILE_SEARCH_LIMIT, options)
-                    .ok()
-                    .and_then(|found| {
-                        // MusicBrainz songs are outside the Wikidata entity lane.
-                        let songs: Vec<_> = found
-                            .pages
-                            .into_iter()
-                            .filter(|placed| placed.hit.page.set == plumb_index::pages::MUSIC_SET)
-                            .collect();
-                        answers::profile_answer(query, &songs)
-                    }),
+                answers::EntityResolution::Ambiguous(_) => return None,
+                answers::EntityResolution::Unresolved => {}
             }
+            self.lookup(name, PROFILE_SEARCH_LIMIT, options)
+                .ok()
+                .and_then(|found| {
+                    let songs: Vec<_> = found
+                        .pages
+                        .into_iter()
+                        .filter(|placed| placed.hit.page.set == plumb_index::pages::MUSIC_SET)
+                        .collect();
+                    answers::profile_answer(query, &songs)
+                })
         });
         let info = match &profile {
             Some(profile) => answers::info_from_page(&profile.page, &results.hits),
