@@ -389,6 +389,7 @@ fn profile_items(
                 sections: Vec::new(),
                 search: None,
                 language: None,
+                paper: None,
             })
         })
         .collect();

@@ -77,6 +77,7 @@ impl Question {
             sections: Vec::new(),
             search: None,
             language: None,
+            paper: None,
         }
     }
 }

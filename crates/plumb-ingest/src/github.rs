@@ -106,6 +106,7 @@ impl Repo {
             sections: Vec::new(),
             search: None,
             language: None,
+            paper: None,
         }
     }
 }

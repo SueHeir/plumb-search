@@ -22,12 +22,13 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{Article, MAX_ARTICLE_DESCRIPTION_CHARS};
+use plumb_core::papers::{valid_date, PaperCountKind, PaperMetadata, MAX_PAPER_AUTHORS};
 use serde::Deserialize;
 use tracing::{info, warn};
 
 const WORKS_URL: &str = "https://api.openalex.org/works";
-/// Works a request, OpenAlex's most.
-pub const PER_PAGE: usize = 200;
+/// Supported maximum; the legacy 200-row behavior is deprecated.
+pub const PER_PAGE: usize = 100;
 /// Fewest citations of a paper kept, unless asked otherwise.
 pub const DEFAULT_MIN_CITATIONS: u64 = 200;
 /// Most citations a year a paper is believed to have: the most cited
@@ -61,6 +62,8 @@ pub struct Work {
     #[serde(default)]
     pub publication_year: Option<i32>,
     #[serde(default)]
+    pub publication_date: Option<String>,
+    #[serde(default)]
     pub cited_by_count: u64,
     #[serde(default)]
     pub authorships: Vec<Authorship>,
@@ -72,6 +75,19 @@ pub struct Work {
     pub best_oa_location: Option<Location>,
     #[serde(default)]
     pub locations: Vec<Location>,
+    #[serde(default)]
+    pub primary_topic: Option<PrimaryTopic>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrimaryTopic {
+    #[serde(default)]
+    pub domain: Option<TopicDomain>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TopicDomain {
+    pub id: String,
 }
 
 /// Whether a work is free to read and where, from Unpaywall's data.
@@ -210,7 +226,7 @@ impl Work {
         let title = plumb_core::collapse_whitespace(&strip_tags(
             self.display_name.as_deref().unwrap_or(""),
         ));
-        if title.is_empty() {
+        if title.is_empty() || title.chars().count() > 2000 {
             return None;
         }
         let item = match self.doi.as_deref() {
@@ -273,6 +289,48 @@ impl Work {
             sections: Vec::new(),
             search: None,
             language: None,
+            paper: Some(PaperMetadata {
+                doi: self.doi.as_ref().map(|doi| {
+                    doi.trim_start_matches("https://doi.org/")
+                        .trim_start_matches("http://doi.org/")
+                        .to_ascii_lowercase()
+                }),
+                openalex_id: Some(
+                    self.id
+                        .trim_start_matches("https://openalex.org/")
+                        .to_string(),
+                ),
+                arxiv_id: self
+                    .doi
+                    .as_ref()
+                    .and_then(|doi| {
+                        doi.to_ascii_lowercase()
+                            .split_once(ARXIV_DOI)
+                            .map(|(_, id)| id.to_string())
+                    })
+                    .or_else(|| self.locations.iter().find_map(arxiv_id)),
+                authors: authors
+                    .iter()
+                    .take(MAX_PAPER_AUTHORS)
+                    .map(|a| a.to_string())
+                    .collect(),
+                publication_date: self
+                    .publication_date
+                    .as_ref()
+                    .filter(|date| valid_date(date))
+                    .cloned(),
+                publication_year: self.publication_year,
+                raw_publication_date: self.publication_date.clone(),
+                venue: self
+                    .primary_location
+                    .as_ref()
+                    .and_then(|l| l.source.as_ref()?.display_name.clone()),
+                source: "openalex".into(),
+                count: self.cited_by_count,
+                count_kind: PaperCountKind::Citations,
+                alternate_urls: free_copy(self).into_iter().collect(),
+                ..PaperMetadata::default()
+            }),
         })
     }
 }
@@ -283,6 +341,9 @@ pub const ARXIV_DOI: &str = "10.48550/arxiv.";
 /// The year of a paper written by [`Work::to_article`], from its
 /// description ("Paper by A et al., 2017, Venue").
 fn year_of(paper: &Article) -> Option<u64> {
+    if let Some(year) = paper.paper.as_ref().and_then(|m| m.publication_year) {
+        return u64::try_from(year).ok();
+    }
     paper
         .description
         .as_deref()?
@@ -413,7 +474,7 @@ pub async fn fetch_papers(
     );
     // What the progress folder is kept for: papers fetched before free
     // copies were kept are fetched again.
-    let key = format!("{filter};free-copies");
+    let key = format!("{filter};paper-metadata-v1;per-page={PER_PAGE}");
     let progress = progress.map(Progress::new).transpose()?;
     let (mut articles, mut cursor) = match &progress {
         Some(progress) => progress.resume(&key)?,
@@ -432,7 +493,7 @@ pub async fn fetch_papers(
             ("cursor", at),
             (
                 "select",
-                "id,doi,display_name,publication_year,cited_by_count,authorships,primary_location,\
+                "id,doi,display_name,publication_year,publication_date,cited_by_count,authorships,primary_location,\
                  open_access,best_oa_location,locations"
                     .to_string(),
             ),

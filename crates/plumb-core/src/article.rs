@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::facts::{parse_facts, write_facts, Fact};
 use crate::packages::{PackageInfo, PACKAGE_LINE};
+use crate::papers::PaperMetadata;
 use crate::profiles::{parse_profiles, write_profiles, Profile};
 
 /// The articles file's first line.
@@ -334,6 +335,9 @@ pub struct Article {
     /// stays absent; a host's country is not evidence of content language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Structured scholarly identity, version dates and correction evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<PaperMetadata>,
 }
 
 /// The key of an official website on a line of profiles.
@@ -346,6 +350,8 @@ pub const NAME_KEY: &str = "name";
 pub const SECTION_KEY: &str = "section";
 /// The declared page language on the existing optional extension line.
 pub const LANGUAGE_KEY: &str = "language";
+/// Optional scholarly JSON, percent encoded to fit the profiles line.
+pub const PAPER_KEY: &str = "paper";
 
 /// What starts a line of profiles in an articles file.
 pub const PROFILES_LINE: &str = "profiles\t";
@@ -368,6 +374,7 @@ pub struct ProfilesLine<'a> {
     pub sections: Vec<String>,
     pub search: Option<SearchContent>,
     pub language: Option<String>,
+    pub paper: Option<PaperMetadata>,
 }
 
 /// The item, profiles, official website and facts of a line of profiles,
@@ -407,6 +414,12 @@ pub fn parse_profiles_line(line: &str) -> Option<ProfilesLine<'_>> {
             let (key, tag) = pair.split_once('=')?;
             (key.trim() == LANGUAGE_KEY)
                 .then(|| crate::language_code(tag))
+                .flatten()
+        }),
+        paper: profiles.split('|').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == PAPER_KEY)
+                .then(|| PaperMetadata::parse(value))
                 .flatten()
         }),
     })
@@ -459,6 +472,18 @@ fn field(text: &str) -> String {
 
 /// Writes `article` as one line of an articles file.
 pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result<()> {
+    let paper_extension = article
+        .paper
+        .as_ref()
+        .map(|metadata| {
+            metadata.write().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid or oversized scholarly metadata",
+                )
+            })
+        })
+        .transpose()?;
     let aliases: Vec<String> = article.aliases.iter().map(|a| field(a)).collect();
     writeln!(
         out,
@@ -471,6 +496,14 @@ pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result
         aliases.join("|"),
     )?;
     let mut profiles = write_profiles(&article.profiles);
+    if let Some(paper) = paper_extension {
+        if !profiles.is_empty() {
+            profiles.push('|');
+        }
+        profiles.push_str(PAPER_KEY);
+        profiles.push('=');
+        profiles.push_str(&paper);
+    }
     if let Some(website) = article.website.as_deref().filter(|url| is_web_address(url)) {
         if !profiles.is_empty() {
             profiles.push('|');
@@ -579,6 +612,7 @@ impl<I: Iterator<Item = String>> Iterator for ArticleLines<I> {
                         article.sections = found.sections;
                         article.search = found.search;
                         article.language = found.language;
+                        article.paper = found.paper;
                     }
                 }
                 continue;
@@ -652,6 +686,7 @@ pub fn parse_article(line: &str) -> Result<Article> {
         sections: Vec::new(),
         search: None,
         language: None,
+        paper: None,
     })
 }
 
@@ -765,6 +800,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn paper_extension_keeps_six_columns_and_rejects_invalid_metadata() {
+        let paper = Article {
+            title: "Attention Is All You Need".into(),
+            item: Some("10.48550/arxiv.1706.03762".into()),
+            paper: Some(PaperMetadata {
+                doi: Some("10.48550/arxiv.1706.03762".into()),
+                authors: vec!["Ashish Vaswani".into()],
+                publication_date: Some("2017-06-12".into()),
+                ..PaperMetadata::default()
+            }),
+            ..Article::default()
+        };
+        let mut bytes = Vec::new();
+        write_article(&mut bytes, &paper).unwrap();
+        assert_eq!(
+            read_articles(&bytes[..], 1).unwrap().as_slice(),
+            std::slice::from_ref(&paper)
+        );
+        let text = String::from_utf8(bytes).unwrap();
+        let primary = parse_article(text.lines().next().unwrap()).unwrap();
+        assert_eq!(text.lines().next().unwrap().split('\t').count(), 6);
+        assert_eq!(primary.paper, None); // reader with only the original row
+        let old = format!("{}\n", text.lines().next().unwrap());
+        assert_eq!(read_articles(old.as_bytes(), 1).unwrap(), [primary]);
+        let malformed = format!("{old}profiles\t10.48550/arxiv.1706.03762\tpaper=%XX\n");
+        assert_eq!(
+            read_articles(malformed.as_bytes(), 1).unwrap()[0].paper,
+            None
+        );
+        let mut invalid = paper;
+        invalid.paper.as_mut().unwrap().publication_date = Some("2025-02-29".into());
+        let mut bytes = Vec::new();
+        assert!(write_article(&mut bytes, &invalid).is_err());
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
     fn urls_match_wikipedia_links() {
         assert_eq!(
             article_url("en", "Python (programming language)"),
@@ -798,6 +870,7 @@ mod tests {
             sections: Vec::new(),
             search: None,
             language: None,
+            paper: None,
         };
         let mut out = Vec::new();
         out.extend_from_slice(ARTICLES_HEADER.as_bytes());

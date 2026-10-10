@@ -17,12 +17,10 @@
 //!
 //! The papers those methods come from that the set lacks (OpenAlex has no
 //! arXiv record of "Proximal Policy Optimization Algorithms") are added
-//! from arXiv's API (its metadata is CC0), with the papers using the
-//! method as their citations, the only count at hand and a low one. A
-//! paper the set has under the same title, dated years after its arXiv
-//! copy (OpenAlex dates "Attention Is All You Need" 2025, under a DOI
-//! that leads nowhere), is a mis-dated copy: it takes the arXiv paper's
-//! DOI and year. Only titles, authors and years are kept.
+//! from arXiv's API (its metadata is CC0). Method-use counts remain
+//! explicitly distinct from citations. Landmark identities are checked
+//! even when present; title-only matches need author corroboration and
+//! cannot replace a legitimate later publication's DOI or date.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -32,6 +30,10 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{Article, MAX_ARTICLE_DESCRIPTION_CHARS};
 use plumb_core::normalize_text;
+use plumb_core::papers::{
+    valid_date, PaperCorrection, PaperCountKind, PaperMetadata, MAX_PAPER_AUTHORS,
+    MAX_PAPER_CORRECTIONS,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -61,9 +63,6 @@ const METHODS_FILE: &str = "pwc-methods.jsonl";
 const ARXIV_URL: &str = "https://export.arxiv.org/api/query";
 const ARXIV_IDS_A_REQUEST: usize = 100;
 const ARXIV_PAUSE: Duration = Duration::from_secs(3);
-/// Years an arXiv paper's copy in the set may be dated after it before
-/// the copy is taken for a mis-dated one.
-const MISDATED_AFTER_YEARS: i32 = 2;
 
 /// One method of Papers with Code, the fields used.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,16 +235,42 @@ pub fn title_name(title: &str) -> Option<&str> {
 }
 
 /// One paper as arXiv gives it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArxivPaper {
     /// Without a version: `1707.06347`.
     pub id: String,
     pub title: String,
     pub year: Option<i32>,
     pub authors: Vec<String>,
+    pub published: Option<String>,
+    pub updated: Option<String>,
 }
 
 impl ArxivPaper {
+    pub fn metadata(&self, count: u64, count_kind: PaperCountKind) -> PaperMetadata {
+        PaperMetadata {
+            doi: Some(self.doi()),
+            arxiv_id: Some(self.id.clone()),
+            authors: self
+                .authors
+                .iter()
+                .take(MAX_PAPER_AUTHORS)
+                .cloned()
+                .collect(),
+            publication_date: self.published.clone(),
+            raw_publication_date: self.published.clone(),
+            publication_year: self.year,
+            preprint_date: self.published.clone(),
+            version_date: self.updated.clone(),
+            preprint_version_date: self.updated.clone(),
+            venue: Some("arXiv".into()),
+            source: "arxiv".into(),
+            count,
+            count_kind,
+            alternate_urls: vec![format!("https://arxiv.org/abs/{}", self.id)],
+            ..PaperMetadata::default()
+        }
+    }
     /// The paper's DOI as OpenAlex writes arXiv's, lowercased.
     pub fn doi(&self) -> String {
         format!("{ARXIV_DOI}{}", self.id)
@@ -297,7 +322,14 @@ pub fn parse_arxiv_feed(xml: &str) -> Vec<ArxivPaper> {
             let entry = entry.split("</entry>").next()?;
             let id = arxiv_id_of(&element(entry, "id")?)?;
             let title = element(entry, "title").filter(|t| !t.is_empty())?;
-            let year = element(entry, "published").and_then(|p| p.get(..4)?.parse().ok());
+            let date = |tag| {
+                element(entry, tag)
+                    .and_then(|p| p.get(..10).map(str::to_string))
+                    .filter(|p| valid_date(p))
+            };
+            let published = date("published");
+            let updated = date("updated");
+            let year = published.as_deref().and_then(|p| p[..4].parse().ok());
             let authors = entry
                 .split("<author>")
                 .skip(1)
@@ -309,6 +341,8 @@ pub fn parse_arxiv_feed(xml: &str) -> Vec<ArxivPaper> {
                 title,
                 year,
                 authors,
+                published,
+                updated,
             })
         })
         .collect()
@@ -317,6 +351,9 @@ pub fn parse_arxiv_feed(xml: &str) -> Vec<ArxivPaper> {
 /// The year of a paper of the set, from its description ("Paper by A et
 /// al., 2017, Venue").
 fn year_of(paper: &Article) -> Option<i32> {
+    if let Some(year) = paper.paper.as_ref().and_then(|m| m.publication_year) {
+        return Some(year);
+    }
     paper
         .description
         .as_deref()?
@@ -329,12 +366,17 @@ fn year_of(paper: &Article) -> Option<i32> {
 
 /// The arXiv id of a paper of the set: from its arXiv DOI, or its free
 /// copy on arXiv.
-fn paper_arxiv_id(paper: &Article) -> Option<String> {
-    let item = paper.item.as_deref()?.to_ascii_lowercase();
-    if let Some(id) = item.strip_prefix(ARXIV_DOI) {
-        return Some(id.to_string());
+pub(crate) fn paper_arxiv_id(paper: &Article) -> Option<String> {
+    if let Some(item) = paper.item.as_deref() {
+        if let Some(id) = item.to_ascii_lowercase().strip_prefix(ARXIV_DOI) {
+            return Some(id.to_string());
+        }
     }
-    paper.website.as_deref().and_then(arxiv_id_of)
+    paper
+        .paper
+        .as_ref()
+        .and_then(|m| m.arxiv_id.clone())
+        .or_else(|| paper.website.as_deref().and_then(arxiv_id_of))
 }
 
 /// What [`name_papers`] and [`add_arxiv_papers`] did.
@@ -348,6 +390,8 @@ pub struct Named {
     pub added: usize,
     /// Mis-dated copies given their arXiv DOI.
     pub redated: usize,
+    /// Existing primary arXiv identities with corrected metadata.
+    pub corrected: usize,
 }
 
 /// Where papers are, by arXiv id and by title.
@@ -438,6 +482,10 @@ pub fn name_papers(papers: &mut [Article], methods: &[Method]) -> Named {
         let Some(i) = found.of_method(method, title) else {
             continue;
         };
+        // A source ID cannot license a method's unrelated archived title.
+        if normalize_text(title) != normalize_text(&papers[i].title) {
+            continue;
+        }
         for name in method.names(&papers[i].title) {
             give(&name, i, papers[i].views, method.num_papers.unwrap_or(0));
         }
@@ -459,7 +507,7 @@ pub fn name_papers(papers: &mut [Article], methods: &[Method]) -> Named {
             if said.contains(&key) || given.get(&key).is_some_and(|&(to, _)| to != i) {
                 continue;
             }
-            if paper.aliases.len() >= before + MAX_NAMES {
+            if paper.aliases.len() >= (before + MAX_NAMES).min(plumb_core::article::MAX_ALIASES) {
                 break;
             }
             said.push(key);
@@ -499,6 +547,198 @@ pub fn missing_arxiv_ids(papers: &[Article], methods: &[Method]) -> Vec<(String,
     missing
 }
 
+/// Legacy six-column rows are migrated once; all newly fetched rows carry
+/// structured authors and dates. Unknown days are left unknown.
+pub(crate) fn metadata_of(paper: &Article) -> PaperMetadata {
+    paper.paper.clone().unwrap_or_else(|| PaperMetadata {
+        doi: paper
+            .item
+            .as_ref()
+            .filter(|item| item.starts_with("10."))
+            .cloned(),
+        openalex_id: paper
+            .item
+            .as_ref()
+            .filter(|item| item.starts_with('W'))
+            .cloned(),
+        arxiv_id: paper_arxiv_id(paper),
+        authors: paper
+            .description
+            .as_deref()
+            .and_then(|d| d.strip_prefix("Paper by "))
+            .map(|d| {
+                d.split(" et al.")
+                    .next()
+                    .unwrap_or(d)
+                    .split(", ")
+                    .next()
+                    .unwrap_or(d)
+                    .to_string()
+            })
+            .into_iter()
+            .collect(),
+        publication_year: year_of(paper),
+        source: "legacy-paper-row".into(),
+        count: paper.views,
+        ..PaperMetadata::default()
+    })
+}
+
+pub(crate) fn same_author(a: &str, b: &str) -> bool {
+    let a = normalize_text(a);
+    let b = normalize_text(b);
+    if a == b && !a.is_empty() {
+        return true;
+    }
+    let a: Vec<&str> = a.split_whitespace().collect();
+    let b: Vec<&str> = b.split_whitespace().collect();
+    a.len() >= 2
+        && b.len() >= 2
+        && a.last() == b.last()
+        && a[0].chars().next() == b[0].chars().next()
+}
+
+fn corroborated(paper: &Article, arxiv: &ArxivPaper) -> bool {
+    metadata_of(paper)
+        .authors
+        .first()
+        .zip(arxiv.authors.first())
+        .is_some_and(|(a, b)| same_author(a, b))
+}
+
+fn correction(paper: &Article, reason: &str, arxiv: &ArxivPaper) -> PaperCorrection {
+    let old = metadata_of(paper);
+    PaperCorrection {
+        reason: reason.into(),
+        source_url: format!("https://arxiv.org/abs/{}", arxiv.id),
+        previous_item: paper.item.clone(),
+        previous_title: paper.title.clone(),
+        previous_description: paper.description.clone(),
+        previous_authors: old.authors,
+        previous_publication_date: old.publication_date,
+        previous_raw_publication_date: old.raw_publication_date,
+        previous_publication_year: old.publication_year,
+    }
+}
+
+/// Stable identifiers use the existing exact-name index, without making
+/// an unrelated former title searchable. Reserve at most three aliases.
+fn add_identifiers(paper: &mut Article, arxiv: &ArxivPaper) {
+    let mut identifiers = vec![arxiv.id.clone(), format!("arXiv:{}", arxiv.id), arxiv.doi()];
+    let keys: Vec<String> = identifiers.iter().map(|id| normalize_text(id)).collect();
+    identifiers.extend(
+        paper
+            .aliases
+            .iter()
+            .filter(|a| !keys.contains(&normalize_text(a)))
+            .take(plumb_core::article::MAX_ALIASES - identifiers.len())
+            .cloned(),
+    );
+    paper.aliases = identifiers;
+}
+
+fn canonicalize(paper: &mut Article, arxiv: &ArxivPaper, reason: &str) -> bool {
+    let old = metadata_of(paper);
+    let canonical_authors: Vec<String> = arxiv
+        .authors
+        .iter()
+        .take(MAX_PAPER_AUTHORS)
+        .cloned()
+        .collect();
+    let changed = paper.title != arxiv.title
+        || old.authors != canonical_authors
+        || old.publication_date != arxiv.published
+        || old.publication_year != arxiv.year
+        || paper.item.as_deref() != Some(arxiv.doi().as_str());
+    let mut metadata = arxiv.metadata(old.count, old.count_kind.clone());
+    metadata.openalex_id = old.openalex_id;
+    metadata.corrections = old.corrections.clone();
+    if changed && metadata.corrections.len() < MAX_PAPER_CORRECTIONS {
+        metadata.corrections.push(correction(paper, reason, arxiv));
+    }
+    if normalize_text(&paper.title) != normalize_text(&arxiv.title) {
+        // Names attached to an unrelated title are not evidence for this work.
+        paper.aliases.clear();
+        paper.names.clear();
+    }
+    paper.title = arxiv.title.clone();
+    paper.item = Some(arxiv.doi());
+    paper.description = Some(arxiv.description());
+    paper.website = None;
+    paper.paper = Some(metadata);
+    add_identifiers(paper, arxiv);
+    changed
+}
+
+/// Updates every primary record of a confirmed arXiv identity, including
+/// duplicates with a corrupt title. Journal rows linked to a preprint keep
+/// their independent publication metadata and require corroboration.
+pub fn verify_existing(papers: &mut [Article], found: &[ArxivPaper]) -> Named {
+    let by_id: HashMap<&str, &ArxivPaper> = found
+        .iter()
+        .filter(|p| {
+            !p.title.is_empty()
+                && !p.authors.is_empty()
+                && p.published.as_deref().is_some_and(valid_date)
+        })
+        .map(|p| (p.id.as_str(), p))
+        .collect();
+    let mut done = Named::default();
+    for paper in papers {
+        // Verify the audited bad copy even when a separate canonical row
+        // is already present in this generation.
+        if paper.item.as_deref() == Some("10.65215/2q58a426") {
+            if let Some(arxiv) = by_id.get("1706.03762") {
+                if normalize_text(&paper.title) == normalize_text(&arxiv.title)
+                    && corroborated(paper, arxiv)
+                {
+                    canonicalize(paper, arxiv, "verified-misdated-transformer-copy");
+                    done.redated += 1;
+                    continue;
+                }
+            }
+        }
+        let Some(id) = paper_arxiv_id(paper) else {
+            continue;
+        };
+        let Some(arxiv) = by_id.get(id.as_str()) else {
+            continue;
+        };
+        if paper
+            .item
+            .as_deref()
+            .is_some_and(|item| item.eq_ignore_ascii_case(&arxiv.doi()))
+        {
+            done.corrected += usize::from(canonicalize(
+                paper,
+                arxiv,
+                "verified-arxiv-identity-conflict",
+            ));
+        } else if normalize_text(&paper.title) == normalize_text(&arxiv.title)
+            && corroborated(paper, arxiv)
+        {
+            link_preprint(paper, arxiv);
+        }
+    }
+    done
+}
+
+fn link_preprint(paper: &mut Article, arxiv: &ArxivPaper) {
+    let abs = format!("https://arxiv.org/abs/{}", arxiv.id);
+    if paper.website.is_none() {
+        paper.website = Some(abs.clone());
+    }
+    let mut metadata = metadata_of(paper);
+    metadata.arxiv_id = Some(arxiv.id.clone());
+    metadata.preprint_date = arxiv.published.clone();
+    metadata.preprint_version_date = arxiv.updated.clone();
+    if !metadata.alternate_urls.contains(&abs) && metadata.alternate_urls.len() < 8 {
+        metadata.alternate_urls.push(abs);
+    }
+    paper.paper = Some(metadata);
+    add_identifiers(paper, arxiv);
+}
+
 /// Adds the arXiv papers `found` (with the papers using their methods,
 /// `uses`) that `papers` lack, or gives a mis-dated copy of one its DOI
 /// and year (see the module docs). A copy under the same title that is
@@ -509,36 +749,51 @@ pub fn add_arxiv_papers(
     found: &[ArxivPaper],
     uses: &HashMap<String, u64>,
 ) -> Named {
-    let mut named = Named::default();
+    let mut named = verify_existing(papers, found);
     let at = Found::of(papers);
+    let mut by_title: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, paper) in papers.iter().enumerate() {
+        by_title
+            .entry(normalize_text(&paper.title))
+            .or_default()
+            .push(i);
+    }
+    let mut present: HashSet<String> = at.by_arxiv.keys().cloned().collect();
     for arxiv in found {
-        if at.by_arxiv.contains_key(&arxiv.id) {
+        if present.contains(&arxiv.id) {
             continue;
         }
-        let abs = format!("https://arxiv.org/abs/{}", arxiv.id);
-        if let Some(&i) = at.by_title.get(&normalize_text(&arxiv.title)) {
+        let matched = by_title
+            .get(&normalize_text(&arxiv.title))
+            .and_then(|indices| {
+                indices
+                    .iter()
+                    .copied()
+                    .find(|&i| corroborated(&papers[i], arxiv))
+            });
+        if let Some(i) = matched {
             let paper = &mut papers[i];
-            let misdated = match (year_of(paper), arxiv.year) {
-                (Some(copy), Some(year)) => copy - year >= MISDATED_AFTER_YEARS,
-                _ => false,
-            };
-            if misdated {
-                paper.item = Some(arxiv.doi());
-                paper.description = Some(arxiv.description());
-                paper.website = None;
-                named.redated += 1;
-            } else if paper.website.is_none() {
-                paper.website = Some(abs);
-            }
+            // Matching a preprint does not falsify a journal's later date.
+            link_preprint(paper, arxiv);
+            present.insert(arxiv.id.clone());
             continue;
         }
+        let count = uses.get(&arxiv.id).copied().unwrap_or(0);
+        let count_kind = if uses.contains_key(&arxiv.id) {
+            PaperCountKind::MethodUses
+        } else {
+            PaperCountKind::Unknown
+        };
         papers.push(Article {
             title: arxiv.title.clone(),
             description: Some(arxiv.description()),
             item: Some(arxiv.doi()),
-            views: uses.get(&arxiv.id).copied().unwrap_or(0),
+            views: count,
+            paper: Some(arxiv.metadata(count, count_kind)),
             ..Article::default()
         });
+        add_identifiers(papers.last_mut().expect("added paper"), arxiv);
+        present.insert(arxiv.id.clone());
         named.added += 1;
     }
     if named.added > 0 {
@@ -662,15 +917,32 @@ pub async fn improve(
     papers: &mut Vec<Article>,
     cache_dir: Option<&Path>,
 ) -> Result<Named> {
-    let methods = fetch_methods(client, cache_dir).await?;
+    let required = fetch_arxiv(client, &crate::paper_validation::required_arxiv_ids())
+        .await
+        .context("required canonical paper verification; retain the previous generation")?;
+    let mut done = crate::paper_validation::repair_landmarks(papers, &required)?;
+    let methods = match fetch_methods(client, cache_dir).await {
+        Ok(methods) => methods,
+        Err(err) => {
+            warn!("{err:#}; supplementary method names unavailable");
+            Vec::new()
+        }
+    };
     let missing = missing_arxiv_ids(papers, &methods);
-    let mut done = Named::default();
     if !missing.is_empty() {
-        let ids: Vec<String> = missing.iter().map(|(id, _)| id.clone()).collect();
+        // Supplementary enrichment is bounded separately from required anchors.
+        let ids: Vec<String> = missing
+            .iter()
+            .take(1000)
+            .map(|(id, _)| id.clone())
+            .collect();
         match fetch_arxiv(client, &ids).await {
             Ok(found) => {
                 let uses: HashMap<String, u64> = missing.into_iter().collect();
-                done = add_arxiv_papers(papers, &found, &uses);
+                let added = add_arxiv_papers(papers, &found, &uses);
+                done.added += added.added;
+                done.redated += added.redated;
+                done.corrected += added.corrected;
             }
             Err(err) => warn!("{err:#}; no arXiv papers added"),
         }
@@ -877,6 +1149,8 @@ mod tests {
                 2014,
             ),
         ];
+        papers[0].description = Some("Paper by Ashish Vaswani et al., 2025, Venue".into());
+        papers[1].description = Some("Paper by Jacob Devlin et al., 2019, Venue".into());
         let methods = vec![
             method(
                 "PPO",
@@ -930,21 +1204,214 @@ mod tests {
             bert.website.as_deref(),
             Some("https://arxiv.org/abs/1810.04805")
         );
-        // PPO is added, with the papers using it as its citations, in
-        // order.
+        // Method usage is a popularity signal with its own count type.
         let ppo = papers.last().unwrap();
         assert_eq!(ppo.title, "Proximal Policy Optimization Algorithms");
         assert_eq!(ppo.item.as_deref(), Some("10.48550/arxiv.1707.06347"));
         assert_eq!(ppo.views, 949);
+        assert_eq!(
+            ppo.paper.as_ref().unwrap().count_kind,
+            PaperCountKind::MethodUses
+        );
         // And everything is named after.
         name_papers(&mut papers, &methods);
         let ppo = papers.last().unwrap();
-        assert_eq!(ppo.aliases, ["PPO"]);
+        assert!(ppo.aliases.iter().any(|a| a == "PPO"));
         // "Transformer" names too much to be an alias.
         let attention = papers
             .iter()
             .find(|p| p.title == "Attention Is All You Need")
             .unwrap();
-        assert!(attention.aliases.is_empty());
+        assert!(!attention.aliases.iter().any(|a| a == "Transformer"));
+    }
+
+    pub(crate) const LANDMARK_FEED: &str = r#"<feed xmlns="http://www.w3.org/2005/Atom">
+      <entry><id>https://arxiv.org/abs/1706.03762v7</id>
+        <title>Attention Is All You Need</title><published>2017-06-12T17:57:34Z</published><updated>2023-08-02T00:41:18Z</updated>
+        <author><name>Ashish Vaswani</name></author><author><name>Noam Shazeer</name></author>
+        <author><name>Niki Parmar</name></author><author><name>Jakob Uszkoreit</name></author>
+        <author><name>Llion Jones</name></author><author><name>Aidan N. Gomez</name></author>
+        <author><name>Lukasz Kaiser</name></author><author><name>Illia Polosukhin</name></author>
+      </entry>
+      <entry><id>https://arxiv.org/abs/2005.11401v4</id>
+        <title>Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</title>
+        <published>2020-05-22T21:34:34Z</published><updated>2021-04-12T15:42:18Z</updated>
+        <author><name>Patrick Lewis</name></author><author><name>Ethan Perez</name></author>
+        <author><name>Aleksandra Piktus</name></author><author><name>Fabio Petroni</name></author>
+        <author><name>Vladimir Karpukhin</name></author><author><name>Naman Goyal</name></author>
+        <author><name>Heinrich Küttler</name></author><author><name>Mike Lewis</name></author>
+        <author><name>Wen-tau Yih</name></author><author><name>Tim Rocktäschel</name></author>
+        <author><name>Sebastian Riedel</name></author><author><name>Douwe Kiela</name></author>
+      </entry></feed>"#;
+
+    #[test]
+    fn present_rag_id_with_unrelated_title_is_verified_and_corrected() {
+        let wrong = "Affordance-Compiled Intelligence: Observable-Only Cognitive Impedance Matching for No-Meta LLM-Integrated Systems";
+        let mut papers = vec![paper(wrong, "10.48550/arxiv.2005.11401", 5000, 2020)];
+        papers[0].description = Some("Paper by Patrick Lewis et al., 2020".into());
+        papers[0].aliases = vec![wrong.into(), "Affordance Intelligence".into()];
+        let found = parse_arxiv_feed(LANDMARK_FEED);
+        let rag_method = method(
+            "RAG",
+            &found[1].title,
+            "https://arxiv.org/abs/2005.11401",
+            100,
+        );
+        assert!(missing_arxiv_ids(&papers, std::slice::from_ref(&rag_method)).is_empty());
+        let done = crate::paper_validation::repair_landmarks(&mut papers, &found).unwrap();
+        assert_eq!(done.corrected, 1);
+        let false_name = method(
+            "AffordanceMagic",
+            wrong,
+            "https://arxiv.org/abs/2005.11401",
+            1000,
+        );
+        name_papers(&mut papers, &[rag_method, false_name]);
+        let rag = papers
+            .iter()
+            .find(|p| p.item.as_deref() == Some("10.48550/arxiv.2005.11401"))
+            .unwrap();
+        assert_eq!(rag.title, found[1].title);
+        assert!(rag.aliases.iter().any(|a| a == "RAG"));
+        assert!(rag.aliases.iter().any(|a| a == "2005.11401"));
+        assert!(rag.aliases.iter().any(|a| a == "10.48550/arxiv.2005.11401"));
+        assert!(!rag.aliases.iter().any(|a| a.contains("Affordance")));
+        assert_eq!(rag.views, 5000);
+        let metadata = rag.paper.as_ref().unwrap();
+        assert_eq!(metadata.authors.len(), 12);
+        assert_eq!(metadata.publication_date.as_deref(), Some("2020-05-22"));
+        assert_eq!(metadata.version_date.as_deref(), Some("2021-04-12"));
+        assert_eq!(metadata.corrections[0].previous_title, wrong);
+        let mut written = Vec::new();
+        for paper in &papers {
+            plumb_core::article::write_article(&mut written, paper).unwrap();
+        }
+        assert_eq!(
+            plumb_core::article::read_articles(&written[..], 10).unwrap(),
+            papers
+        );
+        assert_eq!(
+            crate::paper_validation::repair_landmarks(&mut papers, &found)
+                .unwrap()
+                .corrected,
+            0
+        );
+    }
+
+    #[test]
+    fn transformer_repair_needs_authors_and_keeps_the_original_source() {
+        let found = parse_arxiv_feed(LANDMARK_FEED);
+        let mut bad = paper(
+            "Attention Is All You Need",
+            "10.65215/2q58a426",
+            26807,
+            2025,
+        );
+        bad.description = Some("Paper by Ashish Vaswani et al., 2025".into());
+        let mut papers = vec![bad];
+        let done = crate::paper_validation::repair_landmarks(&mut papers, &found).unwrap();
+        assert_eq!(done.redated, 1);
+        let transformer = papers.iter().find(|p| p.title == found[0].title).unwrap();
+        assert_eq!(
+            transformer.item.as_deref(),
+            Some("10.48550/arxiv.1706.03762")
+        );
+        let metadata = transformer.paper.as_ref().unwrap();
+        assert_eq!(metadata.authors.len(), 8);
+        assert_eq!(metadata.publication_date.as_deref(), Some("2017-06-12"));
+        assert_eq!(metadata.version_date.as_deref(), Some("2023-08-02"));
+        assert_eq!(
+            metadata.corrections[0].previous_item.as_deref(),
+            Some("10.65215/2q58a426")
+        );
+        assert_eq!(
+            metadata.corrections[0].previous_publication_year,
+            Some(2025)
+        );
+    }
+
+    #[test]
+    fn same_titles_need_authors_and_later_publications_keep_their_dates() {
+        let found = parse_arxiv_feed(LANDMARK_FEED);
+        let unrelated = paper("Attention Is All You Need", "10.1/unrelated", 90000, 2025);
+        let mut journal = paper("Attention Is All You Need", "10.1/legitimate", 5000, 2025);
+        journal.description = Some("Paper by A. Vaswani et al., 2025, Journal".into());
+        let mut metadata = metadata_of(&journal);
+        metadata.publication_date = Some("2025-05-04".into());
+        metadata.version_date = Some("2025-06-01".into());
+        journal.paper = Some(metadata);
+        let mut papers = vec![unrelated.clone(), journal.clone()];
+        let done = add_arxiv_papers(&mut papers, &found[..1], &HashMap::new());
+        assert_eq!(done.redated, 0);
+        assert_eq!(papers.len(), 2);
+        assert_eq!(papers[0], unrelated);
+        assert_eq!(papers[1].item, journal.item);
+        assert_eq!(papers[1].description, journal.description);
+        let metadata = papers[1].paper.as_ref().unwrap();
+        assert_eq!(metadata.publication_year, Some(2025));
+        assert_eq!(metadata.publication_date.as_deref(), Some("2025-05-04"));
+        assert_eq!(metadata.version_date.as_deref(), Some("2025-06-01"));
+        assert_eq!(
+            metadata.preprint_version_date.as_deref(),
+            Some("2023-08-02")
+        );
+        assert_eq!(metadata.preprint_date.as_deref(), Some("2017-06-12"));
+        let mut only_unrelated = vec![unrelated.clone()];
+        assert_eq!(
+            add_arxiv_papers(&mut only_unrelated, &found[..1], &HashMap::new()).added,
+            1
+        );
+        assert!(only_unrelated.contains(&unrelated));
+    }
+
+    #[test]
+    fn stable_ids_correct_authors_and_dates_on_every_duplicate() {
+        let found = parse_arxiv_feed(LANDMARK_FEED);
+        let mut bad = paper("Unrelated title", "10.48550/arxiv.2005.11401", 100, 2025);
+        bad.description = Some("Paper by Wrong Scientist et al., 2025".into());
+        let mut papers = vec![bad.clone(), bad];
+        let done = verify_existing(&mut papers, &found);
+        assert_eq!(done.corrected, 2);
+        for row in &papers {
+            let metadata = row.paper.as_ref().unwrap();
+            assert_eq!(metadata.authors[0], "Patrick Lewis");
+            assert_eq!(metadata.publication_year, Some(2020));
+            assert_eq!(
+                metadata.corrections[0].previous_authors,
+                ["Wrong Scientist"]
+            );
+            assert_eq!(
+                metadata.corrections[0].previous_publication_year,
+                Some(2025)
+            );
+        }
+    }
+
+    #[test]
+    fn a_present_canonical_transformer_does_not_hide_its_audited_bad_copy() {
+        let found = parse_arxiv_feed(LANDMARK_FEED);
+        let canonical = Article {
+            title: found[0].title.clone(),
+            item: Some(found[0].doi()),
+            description: Some(found[0].description()),
+            paper: Some(found[0].metadata(100, PaperCountKind::Citations)),
+            ..Article::default()
+        };
+        let mut bad = paper(
+            "Attention Is All You Need",
+            "10.65215/2q58a426",
+            26807,
+            2025,
+        );
+        bad.description = Some("Paper by Ashish Vaswani et al., 2025".into());
+        let mut papers = vec![canonical.clone(), bad];
+        let done = crate::paper_validation::repair_landmarks(&mut papers, &found).unwrap();
+        assert_eq!(done.redated, 1);
+        assert!(papers
+            .iter()
+            .all(|p| p.item.as_deref() != Some("10.65215/2q58a426")));
+        let uncorroborated = paper("Attention Is All You Need", "10.65215/2q58a426", 100, 2025);
+        let mut papers = vec![canonical, uncorroborated];
+        assert!(crate::paper_validation::repair_landmarks(&mut papers, &found).is_err());
     }
 }
