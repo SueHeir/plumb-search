@@ -1273,8 +1273,12 @@ fn multiple_clients_retry_a_temporarily_busy_source_without_relisting() {
             });
         }
         barrier.wait();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(1));
+            // A watchdog releases the pool even when an assertion fails.
+            // The normal release follows observed busy replies and retries,
+            // rather than a duration dependent on runner scheduling.
+            let _ = release_rx.recv_timeout(Duration::from_secs(30));
             barrier.wait();
         });
         let now = now_unix();
@@ -1284,6 +1288,23 @@ fn multiple_clients_retry_a_temporarily_busy_source_without_relisting() {
             record.title = Some(format!("Temporary busy {i}"));
             source.handle.publish(vec![record]).await.unwrap();
         }
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while source.handle.status().batch_busy_replies == 0
+            || clients
+                .iter()
+                .map(|client| client.handle.status().batch_retries)
+                .sum::<u64>()
+                == 0
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "controlled busy response/retry was never observed: {:?}",
+                source.handle.status()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        release_tx.send(()).unwrap();
+        release.join().unwrap();
         async fn drain(mut client: Node) -> u64 {
             let mut domains = std::collections::HashSet::new();
             while domains.len() < 28 {
@@ -1314,7 +1335,6 @@ fn multiple_clients_retry_a_temporarily_busy_source_without_relisting() {
             "source was never controlled busy"
         );
         assert!(a + b + c > 0, "busy replies did not retain known sources");
-        release.join().unwrap();
         source.handle.shutdown().await;
     });
 }

@@ -289,29 +289,162 @@ pub(crate) fn prev_path(file: &Path) -> PathBuf {
 /// Puts the downloaded `part` in place of `file`, keeping the file it
 /// replaces as `<file>.prev`, and gives it its maker's time `modified`.
 pub(crate) fn install(part: &Path, file: &Path, modified: u64) -> Result<()> {
+    install_using(
+        part,
+        file,
+        modified,
+        None,
+        |a, b| std::fs::hard_link(a, b),
+        |a, b| std::fs::rename(a, b),
+    )
+}
+
+pub(crate) fn install_with_budget(
+    part: &Path,
+    file: &Path,
+    modified: u64,
+    budget: Option<&std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<()> {
+    if budget.is_none() {
+        return install(part, file, modified);
+    }
+    install_using(
+        part,
+        file,
+        modified,
+        budget,
+        |a, b| std::fs::hard_link(a, b),
+        |a, b| std::fs::rename(a, b),
+    )
+}
+
+fn install_using(
+    part: &Path,
+    file: &Path,
+    modified: u64,
+    budget: Option<&std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    use plumb_core::storage::{allocation_for, directory_bytes, existing_file_bytes, file_bytes};
+    let _mutation = budget.map(|budget| budget.mutation());
     // Finish potentially failing metadata work before touching the current file.
     set_time(part, modified)?;
-    if file.is_file() {
-        let parent = file
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let backup = tempfile::tempdir_in(parent)?;
-        let previous = backup.path().join("previous");
-        // Same-filesystem hard links keep large maps/sets reversible without
-        // another full copy. Fall back when the filesystem cannot link files.
-        if std::fs::hard_link(file, &previous).is_err() {
-            std::fs::copy(file, &previous)?;
+    let parent = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent_before = file_bytes(parent)?;
+    let retained = prev_path(file);
+    let old = existing_file_bytes(file)?;
+    let old_previous = existing_file_bytes(&retained)?;
+    let copy_bound = if file.is_file() {
+        allocation_for(std::fs::metadata(file)?.len()).max(old)
+    } else {
+        0
+    };
+    // Count hard links per pathname, as directory_bytes does. Admit the link
+    // and temporary directory first; a fallback copy needs full peak room.
+    let mut reservation = budget
+        .map(|budget| {
+            budget.reserve(
+                old.saturating_add(if copy_bound > 0 {
+                    allocation_for(4096)
+                } else {
+                    0
+                }),
+                false,
+            )
+        })
+        .transpose()?;
+    let mut backup = None;
+    let mut linked = false;
+    let mut previous_installed = false;
+    let mut installed = false;
+    let mut result = (|| {
+        if file.is_file() {
+            backup = Some(tempfile::tempdir_in(parent)?);
+            let previous = backup.as_ref().unwrap().path().join("previous");
+            // Same-filesystem hard links keep large maps/sets reversible.
+            linked = link(file, &previous).is_ok();
+            if !linked {
+                if let Some(reservation) = reservation.as_mut() {
+                    reservation.ensure(copy_bound.saturating_add(allocation_for(4096)))?;
+                }
+                std::fs::copy(file, &previous)?;
+            }
+            std::fs::File::open(&previous)?.sync_all()?;
+            std::fs::rename(&previous, &retained)
+                .with_context(|| format!("keeping {} as .prev", file.display()))?;
+            previous_installed = true;
         }
-        std::fs::File::open(&previous)?.sync_all()?;
-        std::fs::rename(&previous, prev_path(file))
-            .with_context(|| format!("keeping {} as .prev", file.display()))?;
+        replace(part, file)
+            .with_context(|| format!("renaming {} to {}", part.display(), file.display()))?;
+        installed = true;
+        Ok(())
+    })();
+    // Close the temporary directory before measuring. A cleanup failure is
+    // charged conservatively rather than releasing an allocation still there.
+    let temporary_bytes = if let Some(backup) = backup {
+        let path = backup.path().to_owned();
+        if let Err(err) = backup.close() {
+            if result.is_ok() {
+                result = Err(err.into());
+            }
+        }
+        match directory_bytes(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(_) => copy_bound.saturating_add(allocation_for(4096)),
+        }
+    } else {
+        0
+    };
+    if let Some(budget) = budget {
+        if previous_installed {
+            budget.retire_file(&retained, old_previous);
+        }
+        if installed {
+            if previous_installed && linked {
+                // The old current inode is still linked at .prev. Its reader
+                // lease follows that name; only the replaced current entry ends.
+                budget.move_read_lease(file, &retained);
+                budget.removed(old);
+            } else {
+                budget.retire_file(file, old);
+            }
+            budget.move_read_lease(part, file);
+        }
+        let previous_bytes = if previous_installed {
+            file_bytes(&retained).unwrap_or(copy_bound)
+        } else {
+            0
+        };
+        let parent_growth = file_bytes(parent)
+            .unwrap_or(parent_before.saturating_add(4096))
+            .saturating_sub(parent_before);
+        let reservation = reservation.as_mut().unwrap();
+        reservation.commit(
+            reservation.bytes(),
+            0,
+            previous_bytes
+                .saturating_add(temporary_bytes)
+                .saturating_add(parent_growth),
+        );
     }
-    std::fs::rename(part, file)
-        .with_context(|| format!("renaming {} to {}", part.display(), file.display()))?;
-    let _ = std::fs::remove_file(layers_path(file));
-    let _ = std::fs::remove_file(quality_path(file));
-    Ok(())
+    if installed {
+        for note in [layers_path(file), quality_path(file)] {
+            let bytes = existing_file_bytes(&note);
+            if let Ok(bytes) = bytes {
+                if std::fs::remove_file(&note).is_ok() {
+                    if let Some(budget) = budget {
+                        budget.retire_file(&note, bytes);
+                    }
+                }
+            }
+        }
+    }
+    result
 }
 
 /// Verify the offered generation after a whole transfer, before installation.
@@ -435,6 +568,194 @@ mod tests {
         std::fs::write(&file, b"old").unwrap();
         assert!(install(&dir.path().join("missing.part"), &file, 123).is_err());
         assert_eq!(std::fs::read(&file).unwrap(), b"old");
+    }
+
+    #[test]
+    fn admitted_replacements_keep_previous_bytes_and_both_reader_generations() {
+        use plumb_core::storage::{directory_bytes, file_bytes, BudgetFile, StorageBudget};
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("map.pmtiles");
+        let previous = prev_path(&file);
+        let part = dir.path().join("map.part");
+        std::fs::write(&file, vec![b'a'; 64 * 1024]).unwrap();
+        std::fs::write(&previous, vec![b'p'; 32 * 1024]).unwrap();
+        std::fs::write(&part, vec![b'b'; 128 * 1024]).unwrap();
+        let old_bytes = file_bytes(&file).unwrap();
+        let previous_bytes = file_bytes(&previous).unwrap();
+        let budget = StorageBudget::open(dir.path(), 4 * 1024 * 1024).unwrap();
+        let (old_lease, previous_lease, mut old_fd, mut previous_fd) = {
+            let _mutation = budget.mutation();
+            (
+                budget.read_lease(&file),
+                budget.read_lease(&previous),
+                std::fs::File::open(&file).unwrap(),
+                std::fs::File::open(&previous).unwrap(),
+            )
+        };
+        install_with_budget(&part, &file, 123, Some(&budget)).unwrap();
+        assert_eq!(budget.status().reader_held_bytes, previous_bytes);
+        assert_eq!(std::fs::read(&previous).unwrap(), vec![b'a'; 64 * 1024]);
+        assert!(std::sync::Arc::ptr_eq(
+            &budget.read_lease(&previous),
+            &old_lease
+        ));
+        {
+            let mut out = BudgetFile::create(&part, Some(budget.clone())).unwrap();
+            out.write_all(&vec![b'c'; 256 * 1024]).unwrap();
+            out.sync_all().unwrap();
+        }
+        install_with_budget(&part, &file, 124, Some(&budget)).unwrap();
+        assert_eq!(std::fs::read(&previous).unwrap(), vec![b'b'; 128 * 1024]);
+        assert_eq!(
+            budget.status().reader_held_bytes,
+            previous_bytes + old_bytes
+        );
+        assert!(
+            budget.status().used_bytes
+                >= directory_bytes(dir.path()).unwrap() + previous_bytes + old_bytes
+        );
+        assert_eq!(budget.status().reserved_bytes, 0);
+        budget.recount(dir.path()).unwrap();
+        assert_eq!(
+            budget.status().used_bytes,
+            directory_bytes(dir.path()).unwrap() + previous_bytes + old_bytes
+        );
+        let mut bytes = Vec::new();
+        old_fd.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, vec![b'a'; 64 * 1024]);
+        bytes.clear();
+        previous_fd.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, vec![b'p'; 32 * 1024]);
+        drop((old_fd, previous_fd));
+        let held = budget.status().used_bytes;
+        drop((old_lease, previous_lease));
+        assert_eq!(
+            held - budget.status().used_bytes,
+            previous_bytes + old_bytes
+        );
+        assert_eq!(budget.status().reader_held_bytes, 0);
+        assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap());
+        budget.set_limit(budget.status().used_bytes + 8192);
+        assert!(budget.reserve(16384, false).is_err());
+    }
+
+    #[test]
+    fn insufficient_backup_headroom_preserves_all_generations() {
+        use plumb_core::storage::{directory_bytes, StorageBudget};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("set.gz");
+        let previous = prev_path(&file);
+        let part = dir.path().join("set.part");
+        std::fs::write(&file, vec![b'a'; 64 * 1024]).unwrap();
+        std::fs::write(&previous, b"previous").unwrap();
+        std::fs::write(&part, b"new").unwrap();
+        let used = directory_bytes(dir.path()).unwrap();
+        let budget = StorageBudget::open(dir.path(), used + 4096).unwrap();
+        assert!(install_with_budget(&part, &file, 123, Some(&budget)).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), vec![b'a'; 64 * 1024]);
+        assert_eq!(std::fs::read(&previous).unwrap(), b"previous");
+        assert_eq!(std::fs::read(&part).unwrap(), b"new");
+        assert_eq!(budget.status().used_bytes, used);
+        assert_eq!(budget.status().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn admitted_copy_fallback_keeps_the_unlinked_current_reader_charged() {
+        use plumb_core::storage::{directory_bytes, file_bytes, StorageBudget};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("set.gz");
+        let part = dir.path().join("set.part");
+        std::fs::write(&file, vec![b'a'; 64 * 1024]).unwrap();
+        std::fs::write(&part, b"new").unwrap();
+        let old = file_bytes(&file).unwrap();
+        let budget = StorageBudget::open(dir.path(), 1024 * 1024).unwrap();
+        let lease = budget.read_lease(&file);
+        let fd = std::fs::File::open(&file).unwrap();
+        install_using(
+            &part,
+            &file,
+            123,
+            Some(&budget),
+            |_, _| Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+            |a, b| std::fs::rename(a, b),
+        )
+        .unwrap();
+        assert_eq!(budget.status().reader_held_bytes, old);
+        assert_eq!(
+            std::fs::read(prev_path(&file)).unwrap(),
+            vec![b'a'; 64 * 1024]
+        );
+        assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap() + old);
+        drop(fd);
+        drop(lease);
+        assert_eq!(budget.status().reader_held_bytes, 0);
+        assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn admitted_failure_between_renames_charges_the_updated_previous_file() {
+        use plumb_core::storage::{directory_bytes, file_bytes, StorageBudget};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("set.gz");
+        let previous = prev_path(&file);
+        let part = dir.path().join("set.part");
+        std::fs::write(&file, vec![b'a'; 64 * 1024]).unwrap();
+        std::fs::write(&previous, vec![b'p'; 32 * 1024]).unwrap();
+        std::fs::write(&part, b"new").unwrap();
+        let budget = StorageBudget::open(dir.path(), 1024 * 1024).unwrap();
+        let lease = budget.read_lease(&previous);
+        let fd = std::fs::File::open(&previous).unwrap();
+        let held = file_bytes(&previous).unwrap();
+        assert!(install_using(
+            &part,
+            &file,
+            123,
+            Some(&budget),
+            |a, b| std::fs::hard_link(a, b),
+            |_, _| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), vec![b'a'; 64 * 1024]);
+        assert_eq!(std::fs::read(&previous).unwrap(), vec![b'a'; 64 * 1024]);
+        assert_eq!(std::fs::read(&part).unwrap(), b"new");
+        assert_eq!(budget.status().reader_held_bytes, held);
+        assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap() + held);
+        assert_eq!(budget.status().reserved_bytes, 0);
+        drop(fd);
+        drop(lease);
+        assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_fallback_is_rejected_before_copying_a_sparse_source_over_quota() {
+        use plumb_core::storage::{directory_bytes, file_bytes, StorageBudget};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("map.pmtiles");
+        let part = dir.path().join("map.part");
+        std::fs::File::create(&file)
+            .unwrap()
+            .set_len(32 * 1024 * 1024)
+            .unwrap();
+        std::fs::write(&part, b"new").unwrap();
+        let used = directory_bytes(dir.path()).unwrap();
+        let budget =
+            StorageBudget::open(dir.path(), used + file_bytes(&file).unwrap() + 16384).unwrap();
+        assert!(install_using(
+            &part,
+            &file,
+            123,
+            Some(&budget),
+            |_, _| Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+            |a, b| std::fs::rename(a, b)
+        )
+        .is_err());
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 32 * 1024 * 1024);
+        assert_eq!(std::fs::read(&part).unwrap(), b"new");
+        assert!(!prev_path(&file).exists());
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap());
     }
 
     #[test]

@@ -447,7 +447,10 @@ fn fetch_if_needed(
         return Ok(());
     };
     let file = set.file(data);
-    std::fs::create_dir_all(file.parent().context("a set file has a folder")?)?;
+    plumb_core::storage::create_directory(
+        file.parent().context("a set file has a folder")?,
+        inner.storage.as_ref(),
+    )?;
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
@@ -596,25 +599,20 @@ fn take(
 /// The name the map file goes by between nodes.
 pub(super) const MAP_SET: &str = "map";
 
-/// Gives each whole set file taken from another node its maker's time, as
-/// [`super::newer::install`] does, for files taken before it did: a node
-/// hands a file on with its time, and must not pass off a taken file as a
-/// newer one.
+/// Install a downloaded generation while admitting its retained rollback file.
 fn install_admitted(
     inner: &Inner,
     part: &std::path::Path,
     file: &std::path::Path,
     modified: u64,
 ) -> Result<()> {
-    let _mutation = inner.storage.as_ref().map(|budget| budget.mutation());
-    let old = plumb_core::storage::existing_file_bytes(file)?;
-    super::newer::install(part, file, modified)?;
-    if let Some(budget) = &inner.storage {
-        budget.retire_file(file, old);
-    }
-    Ok(())
+    super::newer::install_with_budget(part, file, modified, inner.storage.as_ref())
 }
 
+/// Gives each whole set file taken from another node its maker's time, as
+/// [`super::newer::install`] does, for files taken before it did: a node
+/// hands a file on with its time, and must not pass off a taken file as a
+/// newer one.
 fn date_taken_files(data: &std::path::Path) {
     for set in crate::pages::SETS {
         let Some(notes) = set.file_notes(data) else {
@@ -685,7 +683,10 @@ fn keep_map(
     inner
         .journal
         .info("Downloading the map file from a node you trust");
-    std::fs::create_dir_all(crate::pages::sets_dir(&inner.paths.data))?;
+    plumb_core::storage::create_directory(
+        &crate::pages::sets_dir(&inner.paths.data),
+        inner.storage.as_ref(),
+    )?;
     let part = super::newer::prev_path(&file).with_extension("part");
     let taken = take_whole(inner, net, MAP_SET, &offer, &part);
     if !matches!(taken, Ok(true)) {
@@ -694,7 +695,7 @@ fn keep_map(
     if !taken? {
         return Ok(());
     }
-    super::newer::install(&part, &file, offer.modified)?;
+    install_admitted(inner, &part, &file, offer.modified)?;
     inner.journal.info(format!(
         "Map file taken ({} MB downloaded)",
         offer.size.div_ceil(1_000_000)
@@ -843,7 +844,10 @@ fn cut_if_longer(
     let lines = cutter.pages();
     cutter.finish()?;
     drop(reader);
-    install_admitted(inner, &part, &file, notes.source_modified)?;
+    // A quota cut must release the full source rather than retain it as .prev.
+    // Existing build readers retain its allocation until their leases close.
+    super::newer::set_time(&part, notes.source_modified)?;
+    plumb_core::storage::replace_file(&part, &file, inner.storage.as_deref())?;
     write_notes(
         &file,
         &SetFileNotes {

@@ -1944,6 +1944,13 @@ async fn crawling_waits_for_the_next_day_once_the_download_limit_is_reached() {
     settings.storage_limit_mb = 1;
     node.inner.change_settings(settings).unwrap();
     std::fs::write(dir.path().join("filler"), vec![0u8; 2 * MB as usize]).unwrap();
+    // Direct owner writes are reconciled explicitly at blocking checkpoints.
+    node.inner
+        .storage
+        .as_ref()
+        .unwrap()
+        .recount(dir.path())
+        .unwrap();
     node.inner.recount_disk();
     assert!(node.inner.pause().is_some());
     assert!(node.inner.download_pause().is_none());
@@ -2813,6 +2820,15 @@ async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
     .map(|(title, views)| plumb_core::Article {
         title: title.to_string(),
         views: *views,
+        description: (*views == 10).then(|| {
+            let mut state = 17u64;
+            (0..65_536)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (b'a' + ((state >> 32) % 26) as u8) as char
+                })
+                .collect()
+        }),
         ..Default::default()
     })
     .collect();
@@ -2829,6 +2845,8 @@ async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
         serde_json::to_vec(&notes).unwrap(),
     )
     .unwrap();
+    let original_bytes = plumb_core::storage::file_bytes(&file).unwrap();
+    assert!(original_bytes > 8192);
     let mut config = test_config(dir.path());
     config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=2").unwrap();
     config.settings.storage_limit_mb = 500;
@@ -2845,6 +2863,14 @@ async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(set.file_notes(dir.path()).unwrap().lines, 2);
+    assert!(
+        !super::newer::prev_path(&file).exists(),
+        "a quota cut kept the full source"
+    );
+    assert!(
+        plumb_core::storage::file_bytes(&file).unwrap() < original_bytes,
+        "a quota cut did not reduce allocation"
+    );
     // One index, of the pages kept: none of the whole file first.
     let built: Vec<String> = node
         .inner

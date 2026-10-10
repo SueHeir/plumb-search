@@ -208,6 +208,18 @@ impl StorageBudget {
         }
     }
 
+    /// Move a still-linked generation's readers with its retained pathname.
+    /// The caller holds mutation and has retired any overwritten destination.
+    pub fn move_read_lease(&self, from: &Path, to: &Path) {
+        let mut readers = self
+            .input_readers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(lease) = readers.remove(from) {
+            readers.insert(to.to_owned(), lease);
+        }
+    }
+
     pub fn removed(&self, bytes: u64) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.used_bytes = state.used_bytes.saturating_sub(bytes);
