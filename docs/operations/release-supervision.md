@@ -120,6 +120,17 @@ existing storage destination first. Crawl-only nodes skip serving page-index
 workers, but their signed crawl and credit persistence still need compatibility
 review. Do not delete retained crawl data to make an unverified backup fit.
 
+Observed rebuild evidence (read-only service logs, October 10): the Droplet
+rebuilt 13,304,410 pages in 762.9 seconds (12m43s). Recent approximately
+2.814-million-site builds took 1044.3–1411.8 seconds (17m24s–23m32s). Its current
+page index occupies approximately 2.5 GiB. These are historical production
+measurements, not a bound for a different schema, restored dataset or future
+load. Current node RSS/usage of 3.12 GiB is not rebuild peak memory. Peak temporary
+disk and peak memory for old/new rebuilds remain unmeasured. A recovery plan must
+allow at least the observed reconstruction interval when that index is missing;
+network redownload or remote transfer adds time. Avoid treating HPC timings
+(158.6 seconds for 13.727-million pages) as Droplet timings.
+
 ## Publish, deploy and verify
 
 Main pushes already publish Docker images through the repository workflow. Use
