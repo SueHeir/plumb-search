@@ -1515,18 +1515,7 @@ impl Mcp {
             let entities = self.backend.entities(name, 20, options).ok()?;
             match answers::resolve_entity(name, &entities, None) {
                 answers::EntityResolution::Resolved(page) => {
-                    let hit = entities
-                        .iter()
-                        .find(|hit| hit.page.item == page.item)?
-                        .clone();
-                    let profile = answers::profile_answer(
-                        query,
-                        &[plumb_index::pages::PlacedPage {
-                            hit: plumb_index::pages::PageHit { named: true, ..hit },
-                            under: None,
-                            at: 0,
-                        }],
-                    );
+                    let profile = answers::profile_answer_from_page(query, page);
                     if profile.is_some() || !name.ends_with(" song") {
                         return profile;
                     }

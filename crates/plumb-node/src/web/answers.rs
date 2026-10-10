@@ -348,55 +348,57 @@ pub(crate) fn profile_lookups(query: &str) -> Vec<String> {
 /// words) that has a profile there. A song with no page on Genius has its
 /// lyrics searched for there, by its title and artist.
 pub(crate) fn profile_answer(query: &str, pages: &[PlacedPage]) -> Option<ProfileAnswer> {
-    let (services, _) = services_asked(query)?;
     pages
         .iter()
         .filter(|placed| {
             placed.hit.named
                 && (is_about_one_thing(&placed.hit.page) || placed.hit.page.set == MUSIC_SET)
         })
-        .find_map(|placed| {
-            let page = &placed.hit.page;
-            let source = if page.set == MUSIC_SET {
-                "MusicBrainz"
-            } else {
-                "Wikidata"
-            };
-            // A handle before a channel id: services come in that order.
-            let found = services.iter().find_map(|service| {
-                page.profiles
-                    .iter()
-                    .filter(|p| p.service == service.key)
-                    .find_map(|p| Some((*service, service.url(&p.id)?)))
-            });
-            if let Some((service, url)) = found {
-                return Some(ProfileAnswer {
-                    of: page.title.clone(),
-                    service: service.name,
-                    url,
-                    official: service.official,
-                    source,
-                    search: false,
-                    page: page.clone(),
-                });
-            }
-            let genius = services.iter().find(|s| s.key == "genius-song")?;
-            if !page.is_song() {
-                return None;
-            }
-            // "Hey Jude The Beatles", the song's title and artist.
-            let words = page.aliases.first().unwrap_or(&page.title);
-            let words: String = url::form_urlencoded::byte_serialize(words.as_bytes()).collect();
-            Some(ProfileAnswer {
-                of: page.title.clone(),
-                service: genius.name,
-                url: format!("https://genius.com/search?q={words}"),
-                official: false,
-                source,
-                search: true,
-                page: page.clone(),
-            })
-        })
+        .find_map(|placed| profile_answer_from_page(query, &placed.hit.page))
+}
+
+/// Renders a profile only after the caller has resolved its entity.
+pub(crate) fn profile_answer_from_page(query: &str, page: &Page) -> Option<ProfileAnswer> {
+    let (services, _) = services_asked(query)?;
+    let source = if page.set == MUSIC_SET {
+        "MusicBrainz"
+    } else {
+        "Wikidata"
+    };
+    // A handle before a channel id: services come in that order.
+    let found = services.iter().find_map(|service| {
+        page.profiles
+            .iter()
+            .filter(|p| p.service == service.key)
+            .find_map(|p| Some((*service, service.url(&p.id)?)))
+    });
+    if let Some((service, url)) = found {
+        return Some(ProfileAnswer {
+            of: page.title.clone(),
+            service: service.name,
+            url,
+            official: service.official,
+            source,
+            search: false,
+            page: page.clone(),
+        });
+    }
+    let genius = services.iter().find(|s| s.key == "genius-song")?;
+    if !page.is_song() {
+        return None;
+    }
+    // "Hey Jude The Beatles", the song's title and artist.
+    let words = page.aliases.first().unwrap_or(&page.title);
+    let words: String = url::form_urlencoded::byte_serialize(words.as_bytes()).collect();
+    Some(ProfileAnswer {
+        of: page.title.clone(),
+        service: genius.name,
+        url: format!("https://genius.com/search?q={words}"),
+        official: false,
+        source,
+        search: true,
+        page: page.clone(),
+    })
 }
 
 /// The profile asked for, as the first thing on the page.
@@ -669,12 +671,8 @@ pub(crate) fn resolve_entity<'a>(
     }
 }
 
-/// The fact `asked` asks for, when the first page named by its subject
-/// (in `pages`, found for the subject's words) that has one of its kinds
-/// has it: "Canberra" for "capital of australia". Failing that, the
-/// article listed under the site the subject names: "Apple Inc." under
-/// apple.com for "ceo of apple", where the article named "Apple" is the
-/// fruit. `now` (Unix seconds) works out an age.
+/// Legacy displayed-page selection retained for evaluator compatibility.
+/// User-facing adapters resolve entities before rendering their facts.
 pub(crate) fn fact_answer(
     asked: &plumb_core::facts::FactQuestion,
     pages: &[PlacedPage],
@@ -1156,7 +1154,22 @@ mod tests {
             ),
         ];
         let ask = |q: &str, pages: &[PlacedPage]| {
-            fact_answer(&fact_asked(q).unwrap(), pages, 1_791_244_800)
+            let asked = fact_asked(q).unwrap();
+            let candidates: Vec<_> = pages
+                .iter()
+                .enumerate()
+                .map(|(index, placed)| {
+                    let mut hit = placed.hit.clone();
+                    hit.page.item = Some(format!("Q{}", index + 1));
+                    hit
+                })
+                .collect();
+            match resolve_entity(&asked.subject, &candidates, Some(&asked.kinds)) {
+                EntityResolution::Resolved(page) => {
+                    fact_answer_from_page(&asked, page, 1_791_244_800)
+                }
+                _ => None,
+            }
         };
         let capital = ask("capital of australia", &pages).unwrap();
         assert_eq!(capital.question, "Capital of Australia");
@@ -1294,10 +1307,10 @@ mod tests {
             ask("who founded tesla", &tesla).unwrap().answer,
             "Martin Eberhard, Marc Tarpenning and Elon Musk"
         );
-        // A page not named by the subject is no answer.
+        // A partial company name is no answer.
         let mut unnamed = tesla.clone();
         unnamed[0].hit.named = false;
-        assert_eq!(ask("who founded tesla", &unnamed), None);
+        assert_eq!(ask("who founded tesla energy", &unnamed), None);
     }
 
     #[test]

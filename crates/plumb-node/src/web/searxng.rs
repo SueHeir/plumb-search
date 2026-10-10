@@ -229,7 +229,7 @@ async fn collect(
             .collect();
         crate::assembly::local_first(&places.found, &mut results.hits, local, limit);
     }
-    let extras = extras(state, query, &results, options, None).await;
+    let extras = extras(state, query, options, None).await;
     super::route_sources(
         state,
         query,

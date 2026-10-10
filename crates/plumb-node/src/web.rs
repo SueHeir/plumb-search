@@ -1281,7 +1281,7 @@ async fn search_page(
         None => settings.browser_about.as_ref().and_then(About::town),
     };
     let mut extras = match &local {
-        Ok(results) => extras(&state, &query, results, &settings.options, town).await,
+        Ok(_) => extras(&state, &query, &settings.options, town).await,
         Err(_) => answers::Extras::default(),
     };
     // Plugins run once the node knows what the search is about, so that
@@ -1630,7 +1630,7 @@ async fn api_search(
                     .collect();
                 places::local_first(&found.found, &mut results.hits, local, params.limit());
             }
-            let extras = extras(&state, &query, &results, &options, None).await;
+            let extras = extras(&state, &query, &options, None).await;
             route_sources(
                 &state,
                 &query,
@@ -1805,13 +1805,11 @@ struct FullResults<'a> {
 }
 
 /// The instant answer and the official profile asked for, for `query`
-/// whose own results are `results`. The profile is looked up by searching
-/// again for the words before the service ("mrbeast" of "mrbeast
-/// youtube"), unless the whole query already names a page.
+/// by resolving the subject's stable entity before inspecting its facts
+/// or profiles. Displayed results cannot select a different namesake.
 async fn extras(
     state: &AppState,
     query: &str,
-    results: &SearchResults,
     options: &SearchOptions,
     town: Option<&str>,
 ) -> answers::Extras {
@@ -1819,26 +1817,55 @@ async fn extras(
         Some(answer) => Some(answer),
         None => weather::answer(state, query, town, options.country.as_deref()).await,
     };
-    let names_a_page = results.pages.iter().any(|placed| placed.hit.named);
     let mut profile = None;
-    if !names_a_page {
-        for name in answers::profile_lookups(query) {
-            profile = run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
-                .await
-                .ok()
-                .and_then(|found| answers::profile_answer(query, &found.pages));
-            if profile.is_some() {
-                break;
+    for name in answers::profile_lookups(query) {
+        let Ok(entities) = run_entities(state, &name, options).await else {
+            continue;
+        };
+        match answers::resolve_entity(&name, &entities, None) {
+            answers::EntityResolution::Resolved(page) => {
+                profile = answers::profile_answer_from_page(query, page);
+                if profile.is_some() {
+                    break;
+                }
+                if !name.ends_with(" song") {
+                    continue;
+                }
             }
+            answers::EntityResolution::Ambiguous(_) => continue,
+            answers::EntityResolution::Unresolved => {}
+        }
+        // MusicBrainz songs have no Wikidata ID. Keep the lyrics fallback
+        // when no entity resolved, or a requested song lacks its profile.
+        profile = run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
+            .await
+            .ok()
+            .and_then(|found| {
+                let songs: Vec<_> = found
+                    .pages
+                    .into_iter()
+                    .filter(|placed| placed.hit.page.set == plumb_index::pages::MUSIC_SET)
+                    .collect();
+                answers::profile_answer(query, &songs)
+            });
+        if profile.is_some() {
+            break;
         }
     }
     // A fact the query asks about something ("capital of australia"),
     // looked up by searching for that something.
     let answer = match (answer, plumb_core::facts::fact_asked(query)) {
-        (None, Some(asked)) => run_search(state, &asked.subject, PROFILE_SEARCH_LIMIT, options)
+        (None, Some(asked)) => run_entities(state, &asked.subject, options)
             .await
             .ok()
-            .and_then(|found| answers::fact_answer(&asked, &found.pages, now_unix())),
+            .and_then(|found| {
+                match answers::resolve_entity(&asked.subject, &found, Some(&asked.kinds)) {
+                    answers::EntityResolution::Resolved(page) => {
+                        answers::fact_answer_from_page(&asked, page, now_unix())
+                    }
+                    _ => None,
+                }
+            }),
         (answer, _) => answer,
     };
     // What something is ("what is a manatee"): the first sentence of the
@@ -1892,6 +1919,22 @@ fn route_sources(
 
 /// Results asked for when looking up whose profile a query asks for.
 const PROFILE_SEARCH_LIMIT: usize = 5;
+
+/// Direct entity candidates, before displayed-result limits and placement.
+const ENTITY_SEARCH_LIMIT: usize = 20;
+
+async fn run_entities(
+    state: &AppState,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<Vec<PageHit>> {
+    let backend = Arc::clone(&state.backend);
+    let query = query.to_string();
+    let options = options.clone();
+    tokio::task::spawn_blocking(move || backend.entities(&query, ENTITY_SEARCH_LIMIT, &options))
+        .await
+        .context("the entity lookup task failed")?
+}
 
 /// The instant answer to `query`, with currency rates when it needs them.
 /// "What time is it" is the time in `town`, the searcher's own, when they
@@ -6450,6 +6493,204 @@ mod tests {
         assert!(json["hits"].is_array());
     }
 
+    struct EntityAnswersBackend {
+        displayed: Vec<plumb_index::pages::PlacedPage>,
+        candidates: Vec<PageHit>,
+        music: Vec<plumb_index::pages::PlacedPage>,
+        lookups: Mutex<Vec<String>>,
+    }
+
+    impl EntityAnswersBackend {
+        fn new(displayed: Vec<PageHit>, candidates: Vec<PageHit>) -> Self {
+            Self {
+                displayed: displayed
+                    .into_iter()
+                    .enumerate()
+                    .map(|(at, hit)| plumb_index::pages::PlacedPage {
+                        hit,
+                        under: None,
+                        at,
+                    })
+                    .collect(),
+                candidates,
+                music: Vec::new(),
+                lookups: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SearchBackend for EntityAnswersBackend {
+        fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+            Ok(Vec::new())
+        }
+
+        fn num_docs(&self) -> u64 {
+            self.displayed.len() as u64
+        }
+
+        fn search_full(&self, query: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
+            Ok(SearchResults {
+                pages: if query.ends_with(" song") {
+                    self.music.clone()
+                } else {
+                    self.displayed.clone()
+                },
+                ..Default::default()
+            })
+        }
+
+        fn entities(&self, query: &str, limit: usize, _: &SearchOptions) -> Result<Vec<PageHit>> {
+            self.lookups.lock().unwrap().push(query.to_string());
+            Ok(self.candidates.iter().take(limit).cloned().collect())
+        }
+    }
+
+    fn answer_entity(title: &str, item: &str, description: &str) -> PageHit {
+        PageHit {
+            page: plumb_index::pages::Page::from_article(
+                "en",
+                plumb_core::Article {
+                    title: title.into(),
+                    item: Some(item.into()),
+                    description: Some(description.into()),
+                    ..Default::default()
+                },
+            ),
+            named: true,
+            whole: true,
+            score: 1.0,
+            popularity: 0.9,
+            learned: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn facts_resolve_japan_when_who_takes_the_displayed_result() {
+        let mut who = answer_entity("Japan", "Q7817", "WHO country page");
+        who.page.set = "reference".into();
+        who.page.url = "https://www.who.int/countries/jpn/".into();
+        let mut japan = answer_entity("Japan", "Q17", "country in East Asia");
+        japan.page.facts.push(plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Population,
+            value: "123802000;2024".into(),
+        });
+        // Japan's article is a direct entity candidate but was discarded
+        // from the display lane, whose one available row belongs to WHO.
+        let backend = Arc::new(EntityAnswersBackend::new(vec![who], vec![japan]));
+        let app = router_with(backend.clone(), HomeCountry::Off);
+        let (status, _, body) =
+            send(app.clone(), "/api/search?q=japan+population&full=1&limit=1").await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["answer"]["question"], "Population of Japan");
+        assert_eq!(json["answer"]["answer"], "123,802,000");
+        assert_eq!(json["answer"]["note"], "Counted in 2024, from Wikidata");
+        assert_eq!(json["assembled"]["answer"], json["answer"]);
+        assert_eq!(
+            json["pages"][0]["page"]["url"],
+            "https://www.who.int/countries/jpn/"
+        );
+        let (status, _, body) = send(app, "/search?q=japan+population&limit=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<p class=\"iaq\">Population of Japan</p>"));
+        assert!(body.contains("<p class=\"iaa\">123,802,000</p>"));
+        assert!(body.contains("Counted in 2024, from Wikidata"));
+        assert!(body.contains("https://www.who.int/countries/jpn/"));
+        assert_eq!(*backend.lookups.lock().unwrap(), ["japan", "japan"]);
+    }
+
+    #[tokio::test]
+    async fn profiles_resolve_identity_even_when_the_display_names_another_page() {
+        let mut beast = answer_entity("MrBeast", "Q19897578", "American YouTuber");
+        beast.page.profiles.push(plumb_core::profiles::Profile {
+            service: "youtube-handle".into(),
+            id: "MrBeast".into(),
+        });
+        let unrelated = answer_entity("MrBeast (song)", "Q999", "song");
+        let backend = Arc::new(EntityAnswersBackend::new(vec![unrelated], vec![beast]));
+        let app = router_with(backend.clone(), HomeCountry::Off);
+        let (_, _, body) = send(app.clone(), "/search?q=mrbeast+youtube").await;
+        assert!(body.contains("<section class=\"pf\""));
+        assert!(body.contains("href=\"https://www.youtube.com/@MrBeast\""));
+        let (_, _, body) = send(app, "/api/search?q=mrbeast+youtube&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["profile"]["of"], "MrBeast");
+        assert_eq!(json["profile"]["url"], "https://www.youtube.com/@MrBeast");
+        assert_eq!(json["assembled"]["profile"], json["profile"]);
+        assert_eq!(*backend.lookups.lock().unwrap(), ["mrbeast", "mrbeast"]);
+    }
+
+    #[tokio::test]
+    async fn facts_and_profiles_do_not_resolve_by_enrichment_availability() {
+        let main = answer_entity("Japan", "Q17", "country in East Asia");
+        let mut namesake = answer_entity("Japan (band)", "Q127814", "English band");
+        namesake.page.facts.push(plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Population,
+            value: "5".into(),
+        });
+        namesake.page.profiles.push(plumb_core::profiles::Profile {
+            service: "youtube-handle".into(),
+            id: "namesake".into(),
+        });
+        let missing =
+            EntityAnswersBackend::new(vec![namesake.clone()], vec![namesake.clone(), main]);
+        let mut first = answer_entity("Springfield (Illinois)", "Q28515", "city");
+        first.page.facts = namesake.page.facts;
+        first.page.profiles = namesake.page.profiles;
+        let second = answer_entity("Springfield (Massachusetts)", "Q49158", "city");
+        let ambiguous = EntityAnswersBackend::new(vec![first.clone()], vec![first, second]);
+        for (backend, subject) in [(missing, "japan"), (ambiguous, "springfield")] {
+            let app = router_with(Arc::new(backend), HomeCountry::Off);
+            for property in ["population", "youtube"] {
+                let (_, _, body) = send(
+                    app.clone(),
+                    &format!("/api/search?q={subject}+{property}&full=1"),
+                )
+                .await;
+                let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert!(json.get("answer").is_none(), "{body}");
+                assert!(json.get("profile").is_none(), "{body}");
+                let (_, _, body) =
+                    send(app.clone(), &format!("/search?q={subject}+{property}")).await;
+                assert!(!body.contains("<section class=\"ia\""), "{body}");
+                assert!(!body.contains("<section class=\"pf\""), "{body}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn entity_profiles_keep_the_musicbrainz_lyrics_fallback() {
+        let entity = answer_entity("Hey Jude", "Q210179", "song by The Beatles");
+        let mut song = entity.clone();
+        song.page = plumb_index::pages::Page::from_music(plumb_core::Article {
+            title: "Hey Jude".into(),
+            description: Some("Song by The Beatles, 1968".into()),
+            aliases: vec!["Hey Jude The Beatles".into()],
+            item: Some("recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut backend = EntityAnswersBackend::new(vec![entity.clone()], vec![entity]);
+        backend.music.push(plumb_index::pages::PlacedPage {
+            hit: song,
+            at: 0,
+            under: None,
+        });
+        let app = router_with(Arc::new(backend), HomeCountry::Off);
+        let (_, _, body) = send(app.clone(), "/api/search?q=hey+jude+lyrics&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["profile"]["of"], "Hey Jude");
+        assert_eq!(json["profile"]["source"], "MusicBrainz");
+        assert_eq!(json["profile"]["search"], true);
+        assert_eq!(
+            json["profile"]["url"],
+            "https://genius.com/search?q=Hey+Jude+The+Beatles"
+        );
+        let (_, _, body) = send(app, "/search?q=hey+jude+lyrics").await;
+        assert!(body.contains("<section class=\"pf\""));
+        assert!(body.contains("https://genius.com/search?q=Hey+Jude+The+Beatles"));
+    }
+
     /// Finds the article on MrBeast, named by "mrbeast", with his profiles.
     struct BeastBackend;
 
@@ -6507,6 +6748,20 @@ mod tests {
 
         fn num_docs(&self) -> u64 {
             1
+        }
+
+        fn entities(
+            &self,
+            query: &str,
+            limit: usize,
+            options: &SearchOptions,
+        ) -> Result<Vec<PageHit>> {
+            Ok(self
+                .search_full(query, limit, options)?
+                .pages
+                .into_iter()
+                .map(|placed| placed.hit)
+                .collect())
         }
     }
 
