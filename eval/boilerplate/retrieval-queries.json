@@ -1,0 +1,203 @@
+[
+  {
+    "id": "retail-menu",
+    "domain": "fixture00.test",
+    "queries": [
+      "Everything you need"
+    ]
+  },
+  {
+    "id": "repeated-promo",
+    "domain": "fixture01.test",
+    "queries": [
+      "Free delivery"
+    ]
+  },
+  {
+    "id": "short-business",
+    "domain": "fixture02.test",
+    "queries": [
+      "Joe’s Pizza"
+    ]
+  },
+  {
+    "id": "privacy-product",
+    "domain": "fixture03.test",
+    "queries": [
+      "privacy policy"
+    ]
+  },
+  {
+    "id": "javascript-product",
+    "domain": "fixture04.test",
+    "queries": [
+      "JavaScript tools"
+    ]
+  },
+  {
+    "id": "javascript-warning",
+    "domain": "fixture05.test",
+    "queries": [
+      "platform helps"
+    ]
+  },
+  {
+    "id": "math-product",
+    "domain": "fixture06.test",
+    "queries": [
+      "mathematics lessons"
+    ]
+  },
+  {
+    "id": "copyright-product",
+    "domain": "fixture07.test",
+    "queries": [
+      "art you create"
+    ]
+  },
+  {
+    "id": "policy-notice",
+    "domain": "fixture08.test",
+    "queries": [
+      "science lessons"
+    ]
+  },
+  {
+    "id": "cjk",
+    "domain": "fixture09.test",
+    "queries": [
+      "我们为全世界"
+    ]
+  },
+  {
+    "id": "thai",
+    "domain": "fixture10.test",
+    "queries": [
+      "ค้นหา"
+    ]
+  },
+  {
+    "id": "arabic",
+    "domain": "fixture11.test",
+    "queries": [
+      "نقدم"
+    ]
+  },
+  {
+    "id": "link-article",
+    "domain": "fixture12.test",
+    "queries": [
+      "expert guidance"
+    ]
+  },
+  {
+    "id": "section-heading",
+    "domain": "fixture13.test",
+    "queries": [
+      "Install our package"
+    ]
+  },
+  {
+    "id": "inline-format",
+    "domain": "fixture14.test",
+    "queries": [
+      "Build reliable software"
+    ]
+  },
+  {
+    "id": "semantic-nav",
+    "domain": "fixture15.test",
+    "queries": [
+      "compare insurance"
+    ]
+  },
+  {
+    "id": "structured-name",
+    "domain": "fixture16.test",
+    "queries": [
+      "savings accounts"
+    ]
+  },
+  {
+    "id": "cta-only",
+    "domain": "fixture17.test",
+    "queries": [
+      "get started"
+    ]
+  },
+  {
+    "id": "policy-product-heading",
+    "domain": "fixture18.test",
+    "queries": [
+      "Privacy policy generator"
+    ]
+  },
+  {
+    "id": "copyright-subject",
+    "domain": "fixture19.test",
+    "queries": [
+      "Copyright law explained"
+    ]
+  },
+  {
+    "id": "business-statistic",
+    "domain": "fixture20.test",
+    "queries": [
+      "1800+"
+    ]
+  },
+  {
+    "id": "https://www.rust-lang.org/",
+    "domain": "rust-lang.org",
+    "queries": [
+      "rust programming language",
+      "reliable efficient software"
+    ]
+  },
+  {
+    "id": "https://www.python.org/",
+    "domain": "python.org",
+    "queries": [
+      "python programming",
+      "python community"
+    ]
+  },
+  {
+    "id": "https://www.wikipedia.org/",
+    "domain": "wikipedia.org",
+    "queries": [
+      "wikipedia free encyclopedia"
+    ]
+  },
+  {
+    "id": "https://developer.mozilla.org/en-US/docs/Web/JavaScript",
+    "domain": "mozilla.org",
+    "queries": [
+      "javascript reference",
+      "array prototype"
+    ]
+  },
+  {
+    "id": "https://termly.io/",
+    "domain": "termly.io",
+    "queries": [
+      "privacy policy generator",
+      "cookie consent"
+    ]
+  },
+  {
+    "id": "https://www.khanacademy.org/",
+    "domain": "khanacademy.org",
+    "queries": [
+      "khan academy",
+      "free education"
+    ]
+  },
+  {
+    "id": "https://www.dominos.com/",
+    "domain": "dominos.com",
+    "queries": [
+      "dominos pizza"
+    ]
+  }
+]
