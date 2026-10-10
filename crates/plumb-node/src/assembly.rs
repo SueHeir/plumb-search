@@ -238,6 +238,7 @@ pub(crate) fn local_sites(found: &PlaceResults) -> Vec<Hit> {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
         });
     }
     sites

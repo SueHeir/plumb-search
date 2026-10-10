@@ -738,8 +738,9 @@ impl Wanted {
         if self.sets.is_empty() {
             return None;
         }
-        // v3: declared content language is indexed before candidate caps.
-        let mut text = String::from("v3");
+        // Keep schema generations separate; the indexed scope fields used
+        // by typed docs retrieval require a fresh index, not a new crawl.
+        let mut text = String::from(plumb_index::pages::PAGE_INDEX_VERSION);
         for (set, file, pages) in &self.sets {
             let meta = std::fs::metadata(file).ok();
             let modified = meta

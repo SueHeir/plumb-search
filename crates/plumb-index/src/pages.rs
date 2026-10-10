@@ -94,6 +94,8 @@ pub const LEAD_MATCH: f32 = 0.55;
 const TITLE_INSIDE_CANDIDATES: usize = 20;
 /// Most articles found by their leads looked at for one query.
 const LEAD_CANDIDATES: usize = 20;
+/// Changes whenever the page index schema or indexed search fields change.
+pub const PAGE_INDEX_VERSION: &str = "v4-language-rich-docs-scope";
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
 const ASKING_WORDS: &[&str] = &[
@@ -1007,6 +1009,9 @@ pub enum LearnedPlace {
 struct Fields {
     words: Field,
     keys: Field,
+    /// Exact eligibility and docs identity terms, applied before TopDocs:
+    /// set, host and host suffixes; docs product, overview and symbols.
+    scope: Field,
     /// Stemmed words of a question's title and tags; empty for other pages.
     topic: Field,
     /// Stemmed words of a Wikipedia article's names and what it says of
@@ -1044,6 +1049,7 @@ fn schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
+    let scope = builder.add_text_field("scope", STRING);
     let topic = builder.add_text_field(
         "topic",
         TextOptions::default().set_indexing_options(
@@ -1085,6 +1091,7 @@ fn schema() -> (Schema, Fields) {
         Fields {
             words,
             keys,
+            scope,
             topic,
             about,
             lead,
@@ -1372,6 +1379,29 @@ pub fn build_page_index(
             *stats.languages.entry(language.to_string()).or_default() += 1;
         } else {
             document.add_text(fields.language, "unknown");
+        }
+        document.add_text(fields.scope, format!("set:{}", page.set));
+        if let Some(host) = host_of(&page.url) {
+            document.add_text(fields.scope, format!("host:{host}"));
+            let mut suffix = host.as_str();
+            loop {
+                document.add_text(fields.scope, format!("under:{suffix}"));
+                let Some((_, rest)) = suffix.split_once('.') else {
+                    break;
+                };
+                suffix = rest;
+            }
+        }
+        if page.set == DOCS_SET {
+            for symbol in docs_title_symbols(&page.title) {
+                document.add_text(fields.scope, format!("symbol:{symbol}"));
+            }
+            if let Some(site) = plumb_core::docs::site_of_url(&page.url) {
+                document.add_text(fields.scope, format!("docs:{}", site.key));
+                if docs_overview(&page, site) {
+                    document.add_text(fields.scope, format!("overview:{}", site.key));
+                }
+            }
         }
         document.add_u64(
             fields.popularity,
@@ -1877,14 +1907,23 @@ impl PageSearcher {
 
     /// The best `limit` pages for `query`, best first.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
-        let mut hits = self.search_once(query, limit)?;
+        self.search_naming_docs(query, &Operators::default(), false, limit)
+    }
+
+    fn search_general(
+        &self,
+        query: &str,
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<Vec<PageHit>> {
+        let mut hits = self.search_once(query, limit, scope)?;
         // "lululemon wikipedia", "batch normalization paper", "who is
         // galileo": the words that say what is wanted are not part of the
         // name, so the name is searched for too.
         let Some((name, hint)) = hinted_name(query) else {
             return Ok(hits);
         };
-        let mut found = self.search_once(&name, limit)?;
+        let mut found = self.search_once(&name, limit, scope)?;
         match hint {
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             Hint::Paper => {
@@ -1924,11 +1963,11 @@ impl PageSearcher {
         Ok(hits)
     }
 
-    /// [`PageSearcher::search`] for `words`, with the docs pages of each
-    /// site [`docs_sites_wanted`] gives for the search's operators `ops`
-    /// and whether it wants docs pages alone (`docs`), found by `words`
-    /// with what its docs are of named: "asyncio site:docs.python.org"
-    /// finds what "python asyncio" does on docs.python.org. Best first.
+    /// Searches eligible pages before candidate caps. An explicit docs
+    /// request (`docs`) uses docs-only candidates and allows short topic
+    /// and symbol searches. A docs host or named product supplies the same
+    /// context in ordinary search; a bare identifier needs strong symbol
+    /// evidence. Exact operators still apply to the original page text.
     pub fn search_naming_docs(
         &self,
         words: &str,
@@ -1936,29 +1975,256 @@ impl PageSearcher {
         docs: bool,
         limit: usize,
     ) -> Result<Vec<PageHit>> {
-        let mut hits = self.search(words, limit)?;
-        let wanted = docs_sites_wanted(ops, words, docs, &hits);
-        if wanted.is_empty() {
-            return Ok(hits);
+        if limit == 0 {
+            return Ok(Vec::new());
         }
-        for site in wanted {
-            for hit in self.search(&naming_docs(site, words), limit)? {
-                // Its docs pages alone: the rest is not what was searched for.
-                let of_site = hit.page.set == DOCS_SET
-                    && plumb_core::docs::site_of_url(&hit.page.url)
-                        .is_some_and(|of| of.key == site.key);
-                if !of_site {
-                    continue;
+        let scope = self.page_scope(ops, docs);
+        let mut hits = self.search_general(words, limit, scope.as_deref())?;
+        for hit in self.search_docs(words, ops, docs, limit)? {
+            match hits.iter_mut().find(|h| h.page == hit.page) {
+                Some(kept) if kept.score >= hit.score => {}
+                Some(kept) => *kept = hit,
+                None => hits.push(hit),
+            }
+        }
+        hits.retain(|hit| operators_allow(ops, &hit.page));
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        truncate_keeping_inner_pages(&mut hits, limit);
+        Ok(hits)
+    }
+
+    fn scope_term(&self, text: &str) -> Box<dyn Query> {
+        Box::new(TermQuery::new(
+            Term::from_field_text(self.fields.scope, text),
+            IndexRecordOption::Basic,
+        ))
+    }
+
+    fn page_scope(&self, ops: &Operators, docs: bool) -> Option<Box<dyn Query>> {
+        let mut clauses = Vec::new();
+        if docs {
+            clauses.push((Occur::Must, self.scope_term("set:docs")));
+        }
+        if !ops.sites.is_empty() {
+            let mut hosts = Vec::new();
+            for site in &ops.sites {
+                hosts.push((Occur::Should, self.scope_term(&format!("under:{site}"))));
+                // Operators also allow a site's registrable domain for a
+                // subdomain that is not a separately counted site.
+                if let Some(domain) = registrable_domain(site) {
+                    hosts.push((Occur::Should, self.scope_term(&format!("host:{domain}"))));
                 }
-                match hits.iter_mut().find(|h| h.page == hit.page) {
-                    Some(kept) if kept.score >= hit.score => {}
-                    Some(kept) => *kept = hit,
-                    None => hits.push(hit),
+            }
+            clauses.push((
+                Occur::Must,
+                Box::new(BooleanQuery::new(hosts)) as Box<dyn Query>,
+            ));
+        }
+        for site in &ops.not_sites {
+            clauses.push((Occur::MustNot, self.scope_term(&format!("under:{site}"))));
+        }
+        // A BooleanQuery with only exclusions matches nothing.
+        if !clauses.is_empty() && clauses.iter().all(|(occur, _)| *occur == Occur::MustNot) {
+            clauses.push((Occur::Must, Box::new(tantivy::query::AllQuery)));
+        }
+        (!clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
+    }
+
+    fn search_docs(
+        &self,
+        query: &str,
+        ops: &Operators,
+        explicit: bool,
+        limit: usize,
+    ) -> Result<Vec<PageHit>> {
+        use plumb_core::docs::{asks_about, DOCS_SITES};
+        let requested: Vec<_> = DOCS_SITES
+            .iter()
+            .filter(|site| asks_about(site, query) || docs_product_only(site, query))
+            .collect();
+        let context = explicit || !requested.is_empty() || docs_intent(query);
+        let on_docs_host = DOCS_SITES.iter().any(|site| docs_host_requested(site, ops));
+        let product_only =
+            !requested.is_empty() && requested.iter().all(|site| docs_product_only(site, query));
+        let mut clauses = Vec::new();
+        let topic_stems = self.question_words(&docs_without_intent(query));
+        if !topic_stems.is_empty() && !product_only && (context || on_docs_host) {
+            let needed = if topic_stems.len() < QUESTION_QUERY_WORDS {
+                topic_stems.len()
+            } else {
+                (topic_stems.len() as f32 * QUESTION_SHARE).ceil() as usize
+            };
+            clauses.push((
+                Occur::Should,
+                Box::new(BooleanQuery::with_minimum_required_clauses(
+                    topic_stems
+                        .iter()
+                        .map(|stem| {
+                            (
+                                Occur::Should,
+                                Box::new(TermQuery::new(
+                                    Term::from_field_text(self.fields.topic, stem),
+                                    IndexRecordOption::Basic,
+                                )) as Box<dyn Query>,
+                            )
+                        })
+                        .collect(),
+                    needed,
+                )) as Box<dyn Query>,
+            ));
+        }
+        // Qualified names and short suffixes are indexed separately from
+        // broad topics, so popular questions cannot consume this window.
+        let mut identities = Vec::new();
+        let mut symbols = vec![canonical_docs_symbol(&docs_without_intent(query))];
+        symbols.extend(
+            requested
+                .iter()
+                .map(|site| canonical_docs_symbol(&docs_topic(site, query))),
+        );
+        for symbol in symbols.into_iter().flatten() {
+            identities.push((Occur::Should, self.scope_term(&format!("symbol:{symbol}"))));
+        }
+        for site in &requested {
+            let alias = naming_docs(site, &docs_topic(site, query));
+            if let Some(key) = analysis::tokens(&self.joined, &alias).pop() {
+                identities.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.fields.keys, &key),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>,
+                ));
+            }
+        }
+        for site in requested
+            .iter()
+            .filter(|site| docs_product_only(site, query))
+        {
+            if explicit || docs_intent(query) || !ops.sites.is_empty() {
+                identities.push((
+                    Occur::Should,
+                    self.scope_term(&format!("overview:{}", site.key)),
+                ));
+            }
+        }
+        if clauses.is_empty() && identities.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut filter = vec![(Occur::Must, self.page_scope(ops, true).expect("docs scope"))];
+        if !requested.is_empty() {
+            filter.push((
+                Occur::Must,
+                Box::new(BooleanQuery::new(
+                    requested
+                        .iter()
+                        .map(|site| {
+                            (
+                                Occur::Should,
+                                self.scope_term(&format!("docs:{}", site.key)),
+                            )
+                        })
+                        .collect(),
+                )) as Box<dyn Query>,
+            ));
+        }
+        let scope = BooleanQuery::new(filter);
+        let searcher = self.reader.searcher();
+        let top = TopDocs::with_limit(CANDIDATES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        let mut addresses = Vec::new();
+        for lane in [identities, clauses]
+            .into_iter()
+            .filter(|lane| !lane.is_empty())
+        {
+            let wanted = scoped_query(&BooleanQuery::new(lane), Some(&scope));
+            for (_, address) in
+                searcher.search(self.language_query(wanted.as_ref()).as_ref(), &top)?
+            {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
                 }
             }
         }
+        let mut hits = Vec::new();
+        for address in addresses {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if !operators_allow(ops, &page) {
+                continue;
+            }
+            let site = plumb_core::docs::site_of_url(&page.url);
+            let host_context = site.is_some_and(|site| docs_host_requested(site, ops));
+            let topic = site.map_or_else(
+                || docs_without_intent(query),
+                |site| docs_topic(site, query),
+            );
+            let product_only = site.is_some_and(|site| docs_product_only(site, query));
+            let allowed = context || host_context;
+            let (name, named, whole) = if product_only {
+                if !allowed
+                    || !(explicit || docs_intent(query) || host_context)
+                    || !site.is_some_and(|site| docs_overview(&page, site))
+                {
+                    continue;
+                }
+                (PARTIAL_MATCH, false, false)
+            } else if docs_title_symbols(&page.title)
+                .iter()
+                .any(|symbol| canonical_docs_symbol(&topic).as_ref() == Some(symbol))
+                && (allowed || strong_docs_symbol(&page, &topic))
+            {
+                // Short identifiers remain supporting pages in ordinary
+                // navigation; a product/host/typed request names them.
+                (ALIAS_MATCH, allowed, allowed)
+            } else {
+                if !allowed {
+                    continue;
+                }
+                // A different receiver/namespace cannot satisfy an exact
+                // qualified API symbol through ordinary word overlap.
+                if canonical_docs_symbol(&topic).is_some() && topic.contains(['.', ':']) {
+                    continue;
+                }
+                let stems = self.question_words(&topic);
+                let Some(text) = page.topic() else { continue };
+                let words: HashSet<_> = self.question_words(&text).into_iter().collect();
+                if stems.is_empty() || !stems.iter().all(|stem| words.contains(stem)) {
+                    continue;
+                }
+                // A lone topic must occur in a title or heading, rather
+                // than a passing mention in the truncated description.
+                let headings = std::iter::once(&page.title)
+                    .chain(&page.sections)
+                    .flat_map(|text| self.question_words(text))
+                    .collect::<HashSet<_>>();
+                if stems.len() == 1 && !headings.contains(&stems[0]) {
+                    continue;
+                }
+                (PARTIAL_MATCH, false, false)
+            };
+            let popularity = document
+                .get_first(self.fields.popularity)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as f32
+                / POPULARITY_SCALE;
+            hits.push(PageHit {
+                score: name * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
+                page,
+                named,
+                popularity,
+                whole,
+                learned: None,
+            });
+        }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        truncate_keeping_inner_pages(&mut hits, limit);
+        hits.truncate(limit);
         Ok(hits)
     }
 
@@ -2083,7 +2349,12 @@ impl PageSearcher {
         .then_some(best))
     }
 
-    fn search_once(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
+    fn search_once(
+        &self,
+        query: &str,
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<Vec<PageHit>> {
         let words = analysis::tokens(&self.words, query);
         let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
             return Ok(Vec::new());
@@ -2156,14 +2427,16 @@ impl PageSearcher {
         };
         let mut addresses: Vec<_> = searcher
             .search(
-                self.language_query(&named_by_query).as_ref(),
-                &by_popularity(),
-            )?
+                self.language_query(scoped_query(&named_by_query, scope), &by_popularity())
+                    .as_ref(),
+            )
+            .as_ref()?
             .into_iter()
             .map(|(_, address)| address)
             .collect();
         for (_, address) in searcher.search(
-            self.language_query(&BooleanQuery::new(clauses)).as_ref(),
+            self.language_query(scoped_query(&BooleanQuery::new(clauses), scope).as_ref())
+                .as_ref(),
             &by_popularity(),
         )? {
             if !addresses.contains(&address) {
@@ -2186,8 +2459,12 @@ impl PageSearcher {
                 Term::from_field_text(self.fields.keys, &key),
                 IndexRecordOption::Basic,
             );
-            for (_, address) in
-                searcher.search(self.language_query(&named).as_ref(), &by_popularity())?
+            for (_, address) in searcher
+                .search(
+                    self.language_query(scoped_query(&named, scope), &by_popularity())
+                        .as_ref(),
+                )
+                .as_ref()?
             {
                 if !addresses.contains(&address) {
                     addresses.push(address);
@@ -2209,8 +2486,12 @@ impl PageSearcher {
                 Term::from_field_text(self.fields.keys, key),
                 IndexRecordOption::Basic,
             );
-            for (_, address) in
-                searcher.search(self.language_query(&named).as_ref(), &by_popularity())?
+            for (_, address) in searcher
+                .search(
+                    self.language_query(scoped_query(&named, scope), &by_popularity())
+                        .as_ref(),
+                )
+                .as_ref()?
             {
                 if !addresses.contains(&address) {
                     addresses.push(address);
@@ -2237,8 +2518,12 @@ impl PageSearcher {
                     .collect(),
                 needed,
             );
-            for (_, address) in
-                searcher.search(self.language_query(&most_words).as_ref(), &by_popularity())?
+            for (_, address) in searcher
+                .search(
+                    self.language_query(scoped_query(&most_words, scope), &by_popularity())
+                        .as_ref(),
+                )
+                .as_ref()?
             {
                 // Found by most of the query's words, not only by a title
                 // that starts it: "react usestate hook" is the docs page
@@ -2275,8 +2560,12 @@ impl PageSearcher {
                         .collect(),
                     needed,
                 );
-                for (_, address) in
-                    searcher.search(self.language_query(&most_words).as_ref(), &by_popularity())?
+                for (_, address) in searcher
+                    .search(
+                        self.language_query(scoped_query(&most_words, scope), &by_popularity())
+                            .as_ref(),
+                    )
+                    .as_ref()?
                 {
                     if !addresses.contains(&address) {
                         addresses.push(address);
@@ -2315,7 +2604,8 @@ impl PageSearcher {
                     .collect(),
             );
             for (score, address) in searcher.search(
-                self.language_query(&every_word).as_ref(),
+                self.language_query(scoped_query(&every_word, scope).as_ref())
+                    .as_ref(),
                 &TopDocs::with_limit(LEAD_CANDIDATES).order_by_score(),
             )? {
                 lead_scores.insert(address, score);
@@ -2373,8 +2663,12 @@ impl PageSearcher {
                 inside_keys.insert(key);
                 let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
                     .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
-                for (_, address) in
-                    searcher.search(self.language_query(&named).as_ref(), &most_read)?
+                for (_, address) in searcher
+                    .search(
+                        self.language_query(scoped_query(&named, scope), &most_read)
+                            .as_ref(),
+                    )
+                    .as_ref()?
                 {
                     if !addresses.contains(&address) {
                         addresses.push(address);
@@ -3685,6 +3979,148 @@ pub fn page_key(text: &str) -> String {
     normalize_text(text).replace(' ', "")
 }
 
+fn scoped_query(query: &dyn Query, scope: Option<&dyn Query>) -> Box<dyn Query> {
+    match scope {
+        Some(scope) => Box::new(BooleanQuery::new(vec![
+            (Occur::Must, query.box_clone()),
+            (Occur::Must, scope.box_clone()),
+        ])),
+        None => query.box_clone(),
+    }
+}
+
+const DOCS_INTENT_WORDS: &[&str] = &["doc", "docs", "documentation", "manual", "reference"];
+
+fn docs_intent(query: &str) -> bool {
+    query
+        .split_whitespace()
+        .any(|word| DOCS_INTENT_WORDS.contains(&word.to_lowercase().as_str()))
+}
+
+fn docs_without_intent(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|word| !DOCS_INTENT_WORDS.contains(&word.to_lowercase().as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn docs_topic(site: &plumb_core::docs::DocsSite, query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|word| {
+            let word = word.to_lowercase();
+            let word = word.trim_matches(|c: char| !c.is_alphanumeric() && !"._:+#".contains(c));
+            word != site.key
+                && word != site.product.to_lowercase()
+                && !site.asked_by.contains(&word)
+                && !DOCS_INTENT_WORDS.contains(&word)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn docs_product_only(site: &plumb_core::docs::DocsSite, query: &str) -> bool {
+    let without = docs_without_intent(query);
+    plumb_core::docs::named_site(&without).is_some_and(|named| named.key == site.key)
+}
+
+fn docs_host_requested(site: &plumb_core::docs::DocsSite, ops: &Operators) -> bool {
+    site.roots
+        .iter()
+        .filter_map(|root| host_of(root))
+        .any(|host| {
+            ops.sites.iter().any(|wanted| {
+                wanted.contains('.') && (host == *wanted || host.ends_with(&format!(".{wanted}")))
+            })
+        })
+}
+
+fn canonical_docs_symbol(text: &str) -> Option<String> {
+    let text = text.trim().trim_end_matches("()");
+    (!text.is_empty()
+        && text.len() < 256
+        && text.chars().any(char::is_alphabetic)
+        && text
+            .chars()
+            .all(|c| c.is_alphanumeric() || "_.:".contains(c)))
+    .then(|| text.to_lowercase())
+}
+
+fn docs_title_symbols(title: &str) -> Vec<String> {
+    let head = title.split(" — ").next().unwrap_or(title);
+    let Some(symbol) = canonical_docs_symbol(head) else {
+        return Vec::new();
+    };
+    let mut symbols = vec![symbol.clone()];
+    if let Some(short) = symbol
+        .rsplit(['.', ':'])
+        .next()
+        .filter(|short| !short.is_empty() && *short != symbol)
+    {
+        symbols.push(short.to_string());
+    }
+    symbols
+}
+
+fn strong_docs_symbol(page: &Page, query: &str) -> bool {
+    let Some(symbol) = canonical_docs_symbol(query) else {
+        return false;
+    };
+    let head = page.title.split(" — ").next().unwrap_or(&page.title);
+    // Code punctuation/case, or a module with a subtitle whose URL names
+    // the same identifier. Generic standalone titles such as Glossary
+    // and Introduction remain ordinary navigation.
+    head.contains(['.', ':', '_'])
+        || head.chars().skip(1).any(char::is_uppercase)
+        || (page.title.contains(" — ")
+            && symbol.len() >= 5
+            && page
+                .url
+                .split(['?', '#'])
+                .next()
+                .unwrap_or("")
+                .rsplit('/')
+                .next()
+                .and_then(|leaf| canonical_docs_symbol(leaf.trim_end_matches(".html")))
+                .as_ref()
+                == Some(&symbol))
+}
+
+fn docs_overview(page: &Page, site: &plumb_core::docs::DocsSite) -> bool {
+    let clean = |url: &str| {
+        url.split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim_end_matches("index.html")
+            .trim_end_matches('/')
+            .to_string()
+    };
+    let url = clean(&page.url);
+    if site
+        .roots
+        .iter()
+        .chain(site.index_pages)
+        .any(|root| clean(root) == url)
+    {
+        return true;
+    }
+    // Common reference/tutorial overviews immediately below a profile
+    // root. These are product entry points, rather than arbitrary deep
+    // pages that happen to repeat the product in their aliases.
+    page.url
+        .split(['?', '#'])
+        .next()
+        .is_some_and(|url| url.ends_with("/index.html"))
+        && site.roots.iter().any(|root| {
+            url.strip_prefix(&clean(root))
+                .and_then(|rest| rest.strip_prefix('/'))
+                .is_some_and(|rest| {
+                    ["tutorial", "reference", "library", "guide", "manual", "api"].contains(&rest)
+                })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3806,6 +4242,211 @@ mod tests {
             ..Article::default()
         })
         .unwrap()
+    }
+
+    // Verbatim rows (including aliases and section extensions) read from
+    // the HPC docs file on 2026-10-10 UTC. No crawl or enrichment is needed
+    // to recover these pages.
+    fn short_docs_fixture() -> Vec<Page> {
+        plumb_core::article::articles_of(
+            include_str!("../tests/fixtures/short-docs.tsv")
+                .lines()
+                .map(str::to_string),
+        )
+        .map(|(_, article)| Page::from_docs(article.unwrap()).unwrap())
+        .collect()
+    }
+
+    #[test]
+    fn short_typed_docs_recover_existing_records() {
+        let (_dir, searcher) = searcher(&short_docs_fixture());
+        for (query, expected) in [
+            ("tomllib", "https://docs.python.org/3/library/tomllib.html"),
+            ("python tomllib", "https://docs.python.org/3/library/tomllib.html"),
+            ("tomllib site:docs.python.org", "https://docs.python.org/3/library/tomllib.html"),
+            ("padStart", "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart"),
+            ("javascript padStart", "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart"),
+            ("react hooks", "https://react.dev/reference/react/hooks"),
+        ] {
+            let ops = Operators::parse(query);
+            let hits = searcher.search_naming_docs(&ops.words, &ops, true, 10).unwrap();
+            assert!(hits.iter().any(|hit| hit.page.url == expected), "{query}: {hits:?}");
+        }
+        let hits = searcher
+            .search_naming_docs("python", &Operators::default(), true, 10)
+            .unwrap();
+        assert!(
+            !hits.is_empty(),
+            "product-only docs must find existing overview pages"
+        );
+        assert!(
+            hits.iter().all(|hit| hit.page.url.ends_with("/index.html")),
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn docs_kind_host_and_exact_symbols_survive_candidate_caps() {
+        let mut pages = short_docs_fixture();
+        for i in 0..CANDIDATES + 20 {
+            pages.push(page(
+                &format!("Python tomllib {i}"),
+                1_000_000,
+                &["Python tomllib"],
+            ));
+            pages.push(Page::from_question(Article {
+                title: format!("Python tomllib question {i}"),
+                description: Some("python, tomllib".into()),
+                item: Some(i.to_string()),
+                views: 1_000_000,
+                ..Article::default()
+            }));
+            let mut other_host = docs_page(
+                &format!("https://developer.mozilla.org/en-US/docs/tomllib/{i}"),
+                "tomllib — Other ecosystem",
+                &["MDN tomllib"],
+                "JavaScript tomllib",
+            );
+            other_host.views = 1_000_000;
+            pages.push(other_host);
+            let mut broad = docs_page(
+                &format!("https://developer.mozilla.org/en-US/docs/padding/{i}"),
+                &format!("padStart examples {i}"),
+                &[],
+                "JavaScript padding examples",
+            );
+            broad.views = 1_000_000;
+            pages.push(broad);
+        }
+        let (_dir, searcher) = searcher(&pages);
+        // Legacy mixed-set retrieval loses the named docs to popular
+        // article aliases. Docs are eligible within their own cap now.
+        assert!(!searcher
+            .search_general("python tomllib", 10, None)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.page.url.ends_with("/library/tomllib.html")));
+        for query in ["python tomllib", "tomllib site:docs.python.org"] {
+            let ops = Operators::parse(query);
+            let hits = searcher
+                .search_naming_docs(&ops.words, &ops, true, 10)
+                .unwrap();
+            assert!(
+                hits.iter()
+                    .any(|hit| hit.page.url.ends_with("/library/tomllib.html")),
+                "{query}: {hits:?}"
+            );
+            assert!(hits
+                .iter()
+                .all(|hit| hit.page.set == DOCS_SET && operators_allow(&ops, &hit.page)));
+        }
+        let ops = Operators::parse("padStart site:developer.mozilla.org");
+        let hits = searcher
+            .search_naming_docs(&ops.words, &ops, true, 1)
+            .unwrap();
+        assert_eq!(hits[0].page.url, "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart");
+    }
+
+    #[test]
+    fn short_docs_preserve_operators_ecosystems_and_navigation() {
+        let mut pages = short_docs_fixture();
+        let mut structures = docs_page(
+            "https://docs.python.org/3/tutorial/datastructures.html",
+            "Data Structures",
+            &["Python Data Structures"],
+            "Lists and sequences",
+        );
+        structures.sections = vec!["List Comprehensions".into()];
+        pages.push(structures);
+        pages.push(docs_page(
+            "https://docs.python.org/3/glossary.html",
+            "Glossary",
+            &["Python Glossary"],
+            "Python words",
+        ));
+        let (_dir, searcher) = searcher(&pages);
+        for query in ["tomllib", "padStart"] {
+            let hits = searcher.search(query, 10).unwrap();
+            assert!(hits.iter().any(|hit| hit.page.set == DOCS_SET), "{query}");
+            assert!(hits
+                .iter()
+                .filter(|hit| hit.page.set == DOCS_SET)
+                .all(|hit| !hit.named && !hit.whole));
+        }
+        for query in ["python", "glossary", "list comprehensions"] {
+            assert!(
+                searcher
+                    .search(query, 10)
+                    .unwrap()
+                    .iter()
+                    .all(|hit| hit.page.set != DOCS_SET),
+                "{query}"
+            );
+        }
+        for query in [
+            "python list comprehension",
+            "list comprehension site:docs.python.org",
+            "python documentation",
+        ] {
+            let ops = Operators::parse(query);
+            assert!(
+                !searcher
+                    .search_naming_docs(&ops.words, &ops, true, 10)
+                    .unwrap()
+                    .is_empty(),
+                "{query}"
+            );
+        }
+        let kotlin = searcher
+            .search_naming_docs("kotlin padStart", &Operators::default(), true, 10)
+            .unwrap();
+        assert_eq!(kotlin.len(), 1);
+        assert_eq!(kotlin[0].page.set_name(), "kotlinlang.org");
+        let js = searcher
+            .search_naming_docs("javascript padStart", &Operators::default(), true, 10)
+            .unwrap();
+        assert_eq!(js.len(), 1);
+        assert_eq!(js[0].page.set_name(), "developer.mozilla.org");
+        assert!(searcher
+            .search_naming_docs(
+                "Array.prototype.padStart()",
+                &Operators::default(),
+                true,
+                10
+            )
+            .unwrap()
+            .is_empty());
+        for query in [
+            "tomllib -site:python.org",
+            "tomllib site:kotlinlang.org",
+            "tomllib -TOML",
+            "padStart -\"String.prototype.padStart\" site:developer.mozilla.org",
+            "\"react hooks\" -reference",
+            "\"react built-in hooks\"",
+        ] {
+            let ops = Operators::parse(query);
+            assert!(
+                searcher
+                    .search_naming_docs(&ops.words, &ops, true, 10)
+                    .unwrap()
+                    .is_empty(),
+                "{query}"
+            );
+        }
+        let ops = Operators::parse("\"react hooks\"");
+        assert_eq!(
+            searcher
+                .search_naming_docs(&ops.words, &ops, true, 10)
+                .unwrap()[0]
+                .page
+                .title,
+            "Built-in React Hooks"
+        );
+        assert!(searcher
+            .search_naming_docs("tomllib", &Operators::default(), true, 0)
+            .unwrap()
+            .is_empty());
+        assert_eq!(QUESTION_QUERY_WORDS, 3);
     }
 
     fn reference_page(url: &str, title: &str, description: &str) -> Page {
@@ -4117,7 +4758,10 @@ mod tests {
         assert!(found("asyncio", true).contains(&"asyncio".to_string()));
         // Another docs site, or a top-level domain, names other docs.
         assert!(found("asyncio site:developer.mozilla.org", false).is_empty());
-        assert!(!found("asyncio site:org", true).contains(&"asyncio".to_string()));
+        assert!(!found("asyncio site:org", false).contains(&"asyncio".to_string()));
+        // Explicit docs intent allows a short symbol while the TLD still
+        // filters its host. The TLD alone supplies no product context.
+        assert!(found("asyncio site:org", true).contains(&"asyncio".to_string()));
 
         let python = plumb_core::docs::site("python").unwrap();
         assert_eq!(naming_docs(python, "asyncio"), "Python asyncio");
