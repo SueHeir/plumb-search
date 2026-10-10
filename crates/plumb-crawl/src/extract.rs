@@ -38,7 +38,7 @@ use rich::RichText;
 
 /// Changes to rich extraction invalidate docs caches independently of
 /// homepage metadata. Include this and the configuration in cache identity.
-pub const DOCS_EXTRACTOR_VERSION: u32 = 1;
+pub const DOCS_EXTRACTOR_VERSION: u32 = 2;
 
 /// Rich content is explicitly enabled for inner docs pages. Homepage
 /// callers retain their compact text and heading budgets.
@@ -1161,6 +1161,53 @@ mod tests {
             definition.anchor.as_deref(),
             Some("class-node-method-set-multiplayer-authority")
         );
+    }
+
+    #[test]
+    fn rich_docs_favor_definitions_over_repeated_long_references() {
+        let mut html = String::new();
+        // Incidental long names and repeated cross-references must not use
+        // the budget needed by distinct definitions later on the page.
+        for section in 0..20 {
+            html.push_str(&format!("<h2 id='part-{section}'>Part {section}</h2><p>"));
+            for reference in 0..80 {
+                html.push_str(&format!(
+                    "<code>ExternalObject.REPEATED_EXTREMELY_LONG_REFERENCE_{reference}</code> "
+                ));
+            }
+            html.push_str("<a href='#mention'>update_peer</a></p>");
+        }
+        html.push_str("<h2 id='methods'>Methods</h2>");
+        for method in 0..32 {
+            html.push_str(&format!(
+                "<p class='classref-method' id='method-{method}'><strong>method_{method}</strong>(value: int)</p><p>Updates the associated state.</p>"
+            ));
+        }
+        html.push_str(
+            "<dt class='sig' id='update-peer'><span class='sig-name descname'>update_peer</span>(value)</dt><dd>Updates the owning peer.</dd>"
+        );
+        let base = Url::parse("https://example.com/api").unwrap();
+        let search = extract_inner_page_meta(&base, &html, InnerPageExtraction::Docs)
+            .search
+            .unwrap();
+        for method in 0..32 {
+            let symbol = search
+                .symbols
+                .iter()
+                .find(|s| s.identifier == format!("method_{method}"))
+                .unwrap();
+            assert_eq!(symbol.anchor, Some(format!("method-{method}")));
+        }
+        let update: Vec<_> = search
+            .symbols
+            .iter()
+            .filter(|s| s.identifier == "update_peer")
+            .collect();
+        assert_eq!(update.len(), 1);
+        assert_eq!(update[0].anchor.as_deref(), Some("update-peer"));
+        let identifiers: std::collections::HashSet<_> =
+            search.symbols.iter().map(|s| &s.identifier).collect();
+        assert_eq!(identifiers.len(), search.symbols.len());
     }
 
     #[test]

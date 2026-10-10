@@ -21,6 +21,7 @@ struct Frame {
     name: String,
     hidden: bool,
     code: bool,
+    definition_name: bool,
     foreign: bool,
     anchor: Option<String>,
 }
@@ -82,7 +83,7 @@ impl RichText {
             return;
         }
         if WORD_BREAK_ELEMENTS.contains(&name)
-            || matches!(name, "a" | "code" | "samp" | "kbd")
+            || matches!(name, "a" | "code" | "samp" | "kbd" | "strong")
             || attr(tag, "id").is_some()
         {
             self.close_word();
@@ -138,10 +139,21 @@ impl RichText {
             }
             let code = matches!(name, "code" | "pre" | "samp" | "kbd")
                 || self.frames.last().is_some_and(|f| f.code);
+            let definition_name = self.block.as_ref().is_some_and(|block| block.definition)
+                && (matches!(name, "strong" | "code")
+                    || attr(tag, "class").is_some_and(|classes| {
+                        classes
+                            .split_whitespace()
+                            .any(|class| matches!(class, "sig-name" | "descname"))
+                    }));
+            if definition_name {
+                self.close_word();
+            }
             self.frames.push(Frame {
                 name: name.chars().take(64).collect(),
                 hidden,
                 code,
+                definition_name,
                 foreign,
                 anchor: anchor.clone(),
             });
@@ -152,7 +164,7 @@ impl RichText {
         if let Some(anchor) = &anchor {
             // Some generators put the qualified name directly in the ID.
             if distinctive(anchor) {
-                self.add_symbol(anchor, false);
+                self.add_symbol(anchor, false, false);
             }
         }
         if BLOCKS.contains(&name) {
@@ -194,7 +206,10 @@ impl RichText {
         let Some(at) = self.frames.iter().rposition(|f| f.name == name) else {
             return;
         };
-        if WORD_BREAK_ELEMENTS.contains(&name) || matches!(name, "a" | "code" | "samp" | "kbd") {
+        if WORD_BREAK_ELEMENTS.contains(&name)
+            || matches!(name, "a" | "code" | "samp" | "kbd" | "strong")
+            || self.frames[at].definition_name
+        {
             self.close_word();
         }
         if self.block.as_ref().is_some_and(|block| block.name == name) {
@@ -256,12 +271,13 @@ impl RichText {
         }
         let word = word.trim_end_matches(['.', ':']);
         let code = self.frames.last().is_some_and(|f| f.code);
-        if distinctive(word) || code {
-            self.add_symbol(word, code);
+        let definition = self.frames.iter().any(|f| f.definition_name);
+        if distinctive(word) || code || definition {
+            self.add_symbol(word, code, definition);
         }
     }
 
-    fn add_symbol(&mut self, identifier: &str, code: bool) {
+    fn add_symbol(&mut self, identifier: &str, code: bool, definition: bool) {
         if !valid_identifier(identifier) || identifier.len() < 3 {
             return;
         }
@@ -273,21 +289,36 @@ impl RichText {
             identifier: identifier.to_string(),
             anchor: self.anchor(),
         };
-        if self.symbols.iter().any(|(_, s)| *s == symbol) {
-            return;
-        }
-        // Exact qualified/snake/camel names outrank incidental code words.
-        // A stable hash samples ties across the page rather than retaining
-        // only its first sections. Long compound names get extra weight.
-        let priority = if distinctive {
+        // Explicit signature names outrank incidental references. Length
+        // is not evidence of importance: long constants must not crowd out
+        // shorter API names. Stable hashing samples peers across the page.
+        let priority = if definition && distinctive {
             4
+        } else if definition {
+            3
+        } else if distinctive {
+            2
         } else if code {
             1
         } else {
             0
         };
-        let weight = priority * 256 + identifier.len().min(64) as u64;
-        let rank = (weight << 48) | (stable_hash(identifier) & ((1 << 48) - 1));
+        let rank = (priority << 48) | (stable_hash(identifier) & ((1 << 48) - 1));
+        if let Some((prior_rank, prior)) = self
+            .symbols
+            .iter_mut()
+            .find(|(_, s)| s.identifier == identifier)
+        {
+            // A later definition replaces an earlier mention's destination.
+            // Other mentions share one slot, retaining the first known anchor.
+            if rank > *prior_rank {
+                *prior_rank = rank;
+                *prior = symbol;
+            } else if prior.anchor.is_none() {
+                prior.anchor = symbol.anchor;
+            }
+            return;
+        }
         keep_best(&mut self.symbols, (rank, symbol), MAX_SEARCH_SYMBOLS);
     }
 
