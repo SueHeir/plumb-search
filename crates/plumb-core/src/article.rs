@@ -209,7 +209,20 @@ impl SearchContent {
                 .split(|c: char| !c.is_alphanumeric())
                 .filter(|s| !s.is_empty())
             {
-                text.push_str(word);
+                let letters: Vec<char> = word.chars().collect();
+                for (at, &letter) in letters.iter().enumerate() {
+                    if at > 0
+                        && letter.is_ascii_uppercase()
+                        && (letters[at - 1].is_ascii_lowercase()
+                            || letters[at - 1].is_ascii_digit()
+                            || letters
+                                .get(at + 1)
+                                .is_some_and(|next| next.is_ascii_lowercase()))
+                    {
+                        text.push(' ');
+                    }
+                    text.push(letter);
+                }
                 text.push(' ');
             }
         }
@@ -1084,6 +1097,39 @@ mod tests {
             read_articles(mismatched.as_bytes(), 1).unwrap()[0].language,
             None
         );
+    }
+
+    #[test]
+    fn lexical_search_text_preserves_exact_names_and_splits_qualified_and_camel_symbols() {
+        let search = SearchContent {
+            symbols: [
+                "set_multiplayer_authority",
+                "Array.prototype.sort",
+                "std::vector",
+                "CrashLoopBackOff",
+                "HTTPResponse",
+            ]
+            .into_iter()
+            .map(|identifier| SearchSymbol {
+                identifier: identifier.into(),
+                anchor: None,
+            })
+            .collect(),
+            ..SearchContent::default()
+        };
+        let text = search.text();
+        for identifier in &search.symbols {
+            assert!(text.contains(&identifier.identifier));
+        }
+        for words in [
+            "set multiplayer authority",
+            "Array prototype sort",
+            "std vector",
+            "Crash Loop Back Off",
+            "HTTP Response",
+        ] {
+            assert!(text.contains(words), "{words}: {text}");
+        }
     }
 
     #[test]
