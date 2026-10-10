@@ -1163,6 +1163,50 @@ fn base_title(title: &str) -> &str {
     }
 }
 
+#[derive(Hash, PartialEq, Eq)]
+struct VersionEvidence {
+    literal: String,
+    labelled: bool,
+}
+
+/// Version literals retain dots, suffixes and numeric boundaries. A v/V
+/// prefix is case folded but retained: v3.2 and 3.2 are distinct evidence.
+/// An explicit "version" request also requires labelled evidence, so a
+/// decimal in a step count cannot stand in for the requested version.
+fn version_evidence(text: &str) -> HashSet<VersionEvidence> {
+    let mut evidence = HashSet::new();
+    let mut after_label = false;
+    for atom in text.split(|c: char| !c.is_alphanumeric() && !matches!(c, '.' | '-' | '+' | '_')) {
+        let atom = atom.trim_end_matches('.').to_ascii_lowercase();
+        if atom.is_empty() {
+            continue;
+        }
+        let prefixed = atom.starts_with('v');
+        let numeric = atom.strip_prefix('v').unwrap_or(&atom);
+        let release = numeric.split(['-', '+']).next().unwrap_or("");
+        let components: Vec<_> = release.split('.').collect();
+        let valid = components
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+        if valid {
+            if components.len() > 1 || prefixed {
+                evidence.insert(VersionEvidence {
+                    literal: atom.clone(),
+                    labelled: false,
+                });
+            }
+            if after_label || prefixed {
+                evidence.insert(VersionEvidence {
+                    literal: atom.clone(),
+                    labelled: true,
+                });
+            }
+        }
+        after_label = matches!(atom.as_str(), "version" | "versions");
+    }
+    evidence
+}
+
 /// What kind of page words around a name ask for ([`hinted_name`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hint {
@@ -2988,6 +3032,40 @@ impl PageSearcher {
                 }
             }
         }
+        // Most aliases have words in the index, but no exact key. Look
+        // separately for the rarest substantive word in a name; a page
+        // found only here must pass the full subject and task check below.
+        // Keep the existing exact-title collectors and their limits intact.
+        let subject_words = self.subject_words(&words);
+        let versions = version_evidence(query);
+        let mut subject_word = None;
+        if subject_words.len() >= 2 && subject_words.len() < words.len() {
+            for word in &subject_words {
+                let found = searcher.doc_freq(&Term::from_field_text(self.fields.words, word))?;
+                if found > 0 && subject_word.is_none_or(|(least, _)| found < least) {
+                    subject_word = Some((found, word));
+                }
+            }
+        }
+        let mut only_subject_word = HashSet::new();
+        if let Some((_, word)) = subject_word {
+            let named_word = TermQuery::new(
+                Term::from_field_text(self.fields.words, word),
+                IndexRecordOption::Basic,
+            );
+            let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
+                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+            for (_, address) in searcher.search(
+                self.language_query(scoped_query(&named_word, scope).as_ref())
+                    .as_ref(),
+                &most_read,
+            )? {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                    only_subject_word.insert(address);
+                }
+            }
+        }
         let mut hits = Vec::new();
         for address in addresses {
             let document: TantivyDocument = searcher.doc(address)?;
@@ -3029,6 +3107,11 @@ impl PageSearcher {
             if page.set == MUSIC_SET && !asked_by_title {
                 continue;
             }
+            let subject =
+                self.subject_match(&page, &words, &subject_words, &inside_keys, &versions);
+            if only_subject_word.contains(&address) && subject <= 0.0 {
+                continue;
+            }
             // Its title in full, or another name: "queen tour" is not
             // about Queen (album).
             let article_inside = page.is_article()
@@ -3041,12 +3124,17 @@ impl PageSearcher {
                             .is_some_and(|key| inside_keys.contains(&key))
                     });
             if !article_inside
+                && subject <= 0.0
                 && (by_title_first.contains(&address) && !asked_by_title
                     || film_title_first.contains(&address) && !asked_as_film)
             {
                 continue;
             }
-            if only_inside.contains(&address) && !article_inside && !asked_by_title {
+            if only_inside.contains(&address)
+                && !article_inside
+                && !asked_by_title
+                && subject <= 0.0
+            {
                 continue;
             }
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
@@ -3059,6 +3147,7 @@ impl PageSearcher {
                 whole = asked;
             }
             if !named && !whole {
+                name = name.max(subject);
                 name = name.max(self.described_match(&page, &described));
                 if let Some(&lead) = lead_scores.get(&address).filter(|_| page.is_article()) {
                     name = name
@@ -3167,6 +3256,138 @@ impl PageSearcher {
             .filter(|word| !ASKING_WORDS.contains(&word.as_str()))
             .collect();
         self.question_words(&asked.join(" "))
+    }
+
+    /// Substantive words of a conversational query. Request verbs are
+    /// removed only in the opening request, so "show me how to find
+    /// duplicate rows" still requires "find". Negation is retained even
+    /// though the stemmer normally treats "no" and "not" as stop words.
+    fn subject_words(&self, words: &[String]) -> Vec<String> {
+        let mut opening = usize::from(words.first().is_some_and(|word| word == "please"));
+        if matches!(words.get(opening).map(String::as_str), Some("find")) {
+            opening += 1;
+        } else if matches!(
+            words.get(opening).map(String::as_str),
+            Some("can" | "could" | "would")
+        ) && words.get(opening + 1).is_some_and(|word| word == "you")
+        {
+            opening += 2;
+        }
+        if matches!(
+            words.get(opening).map(String::as_str),
+            Some("show" | "tell")
+        ) && words.get(opening + 1).is_some_and(|word| word == "me")
+        {
+            opening += 2;
+        }
+        let mut asking = opening > 0
+            || words
+                .first()
+                .is_some_and(|word| ASKING_WORDS.contains(&word.as_str()));
+        let mut substantive = Vec::new();
+        for (i, word) in words.iter().enumerate().skip(opening) {
+            if matches!(
+                word.as_str(),
+                "how" | "what" | "who" | "when" | "where" | "which" | "why"
+            ) {
+                asking = true;
+            }
+            let pronoun = matches!(word.as_str(), "i" | "we" | "you")
+                && i.checked_sub(1).is_some_and(|previous| {
+                    matches!(
+                        words[previous].as_str(),
+                        "do" | "did" | "can" | "could" | "should" | "would"
+                    )
+                });
+            let modal = matches!(word.as_str(), "can" | "could" | "should" | "would")
+                && words
+                    .get(i + 1)
+                    .is_some_and(|next| matches!(next.as_str(), "i" | "we" | "you"));
+            if asking && (ASKING_WORDS.contains(&word.as_str()) || pronoun || modal) {
+                continue;
+            }
+            if crate::is_function_word(word)
+                || !matches!(word.as_str(), "no" | "not")
+                    && analysis::tokens(&self.stemmed, word).is_empty()
+            {
+                continue;
+            }
+            asking = false;
+            substantive.push(word.clone());
+        }
+        substantive
+    }
+
+    /// A title or alias in full anchors the subject. Every substantive
+    /// query word must also be supported by the stored indexed text,
+    /// including a task word beyond that name. Asking words cannot dilute
+    /// the subject's score. Client/task words and intact version literals
+    /// need lexical evidence; mentions in negative or unrelated passages
+    /// do not establish compatibility. This does not mark the page as
+    /// named or as answering the whole question.
+    fn subject_match(
+        &self,
+        page: &Page,
+        words: &[String],
+        substantive: &[String],
+        inside_keys: &HashSet<String>,
+        versions: &HashSet<VersionEvidence>,
+    ) -> f32 {
+        if substantive.len() == words.len()
+            || !(page.is_article() || page.is_site_page() || page.set == GITHUB_SET)
+        {
+            return 0.0;
+        }
+        let anchored = std::iter::once(&page.title)
+            .chain(&page.aliases)
+            .any(|name| {
+                let name_words = analysis::tokens(&self.words, name);
+                let Some(key) = analysis::tokens(&self.joined, name).pop() else {
+                    return false;
+                };
+                !name_words.is_empty()
+                    && inside_keys.contains(&key)
+                    && words
+                        .windows(name_words.len())
+                        .any(|span| span == name_words.as_slice())
+                    && substantive.iter().any(|word| !name_words.contains(word))
+            });
+        if !anchored {
+            return 0.0;
+        }
+        let mut context = page.about().or_else(|| page.topic()).unwrap_or_else(|| {
+            std::iter::once(&page.title)
+                .chain(&page.aliases)
+                .chain(&page.description)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+        if let Some(lead) = &page.lead {
+            context.push(' ');
+            context.push_str(lead);
+        }
+        if !versions.is_subset(&version_evidence(&context)) {
+            return 0.0;
+        }
+        let said: HashSet<_> = analysis::tokens(&self.words, &context)
+            .into_iter()
+            .collect();
+        let stems: HashSet<_> = analysis::tokens(&self.stemmed, &context)
+            .into_iter()
+            .collect();
+        if substantive.is_empty()
+            || substantive.iter().any(|word| {
+                if said.contains(word) {
+                    return false;
+                }
+                let word_stems = analysis::tokens(&self.stemmed, word);
+                word_stems.is_empty() || word_stems.iter().any(|stem| !stems.contains(stem))
+            })
+        {
+            return 0.0;
+        }
+        PARTIAL_MATCH
     }
 
     /// How well a Wikipedia article covers the query's words `stems`
@@ -7526,6 +7747,314 @@ mod tests {
         // is part of the query too.
         let hits = s.search("homily sermon outline example", 5).unwrap();
         assert!(hits.iter().any(|hit| hit.page.is_question()), "{hits:?}");
+    }
+
+    #[test]
+    fn subject_tasks_survive_conversational_wrappers_across_page_sets() {
+        let mut station = page("Helios Station", 0, &[]);
+        station.lead =
+            Some("Helios Station has battery storage capacity of eight megawatt hours.".into());
+        let loom = reference_page(
+            "https://widgets.example/copper-loom",
+            "Copper Loom",
+            "Enable alerts in Copper Loom client v3.",
+        );
+        let repo = Page::from_repo(Article {
+            title: "example/ridge-watch".into(),
+            aliases: vec!["RidgeWatch".into()],
+            description: Some("Module supports raid warnings in Legacy client version 3.2.".into()),
+            views: 100,
+            ..Article::default()
+        });
+        for (page, query) in [
+            (station, "What is Helios Station battery storage capacity?"),
+            (
+                loom,
+                "Please show me how to enable Copper Loom client v3 alerts.",
+            ),
+            (
+                repo,
+                "Find RidgeWatch module that supports raid warnings in Legacy client version 3.2.",
+            ),
+        ] {
+            let (_dir, s) = searcher(std::slice::from_ref(&page));
+            let hits = s.search(query, 10).unwrap();
+            let hit = hits.iter().find(|hit| hit.page.url == page.url).unwrap();
+            assert!(hit.score >= MIN_PARTIAL_SCORE, "{query}: {hits:?}");
+            assert!(!hit.named && !hit.whole, "{query}: {hit:?}");
+            let placed = place_pages(query, &[site("other.example", false)], hits);
+            assert!(
+                placed.iter().any(|p| p.hit.page.url == page.url),
+                "{query}: {placed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn subject_tasks_keep_entity_client_version_and_negation_constraints() {
+        let mut legacy = page("HarborKit", 0, &[]);
+        legacy.description = Some("Enable tracking in Legacy client version 3.2.".into());
+        let mut modern = page("HarborKit (enterprise)", 1_000_000, &["HarborKit"]);
+        modern.description = Some("Enable tracking in Modern client version 4.0.".into());
+        let (_dir, s) = searcher(&[modern.clone(), legacy.clone()]);
+        let query = "How do I enable HarborKit tracking in Legacy client version 3.2?";
+        let hits = s.search(query, 10).unwrap();
+        let placed = place_pages(query, &[], hits);
+        assert_eq!(placed.len(), 1, "{placed:?}");
+        assert_eq!(placed[0].hit.page.url, legacy.url);
+        for query in [
+            "How do I enable HarborKit tracking in Modern client version 3.2?",
+            "How do I enable HarborKit tracking in Legacy client version 2.3?",
+            "How do I enable HarborKit tracking in Legacy client version 3.3?",
+            "How do I enable HarborKit tracking in Legacy client version 3.2 AstraDB?",
+            "How do I enable HarborKit without tracking in Legacy client version 3.2?",
+            "How do I enable HarborKit with no tracking in Legacy client version 3.2?",
+            "How do I enable HarborKit not tracking in Legacy client version 3.2?",
+        ] {
+            let hits = s.search(query, 10).unwrap();
+            assert!(place_pages(query, &[], hits).is_empty(), "{query}");
+        }
+    }
+
+    #[test]
+    fn subject_versions_require_intact_labelled_literals_and_numeric_boundaries() {
+        let descriptions = [
+            "Enable tracking in Legacy client version 4.0; step 3:2 attempts.",
+            "Enable tracking in Legacy client version 4.0; step 3.2 attempts.",
+            "Enable tracking in Legacy client version 13.2; step 3:2 attempts.",
+            "Enable tracking in Legacy client version 3.20; step 3:2 attempts.",
+            "Enable tracking in Legacy client version 3.2.1; step 3:2 attempts.",
+            "Enable tracking in Legacy client version 3.2-beta; step 3:2 attempts.",
+            "Enable tracking in Legacy client version client3.2; step 3:2 attempts.",
+            "Enable tracking in Legacy client version v3.2; step 3:2 attempts.",
+        ];
+        let pages: Vec<_> = descriptions
+            .iter()
+            .enumerate()
+            .map(|(i, description)| {
+                let mut page = page("HarborKit", 0, &[]);
+                page.url = format!("https://en.wikipedia.org/wiki/HarborKit_fixture_{i}");
+                page.description = Some((*description).into());
+                page
+            })
+            .collect();
+        let (_dir, s) = searcher(&pages);
+        let query = "How do I enable HarborKit tracking in Legacy client version 3.2?";
+        let hits = s.search(query, 20).unwrap();
+        assert!(place_pages(query, &[], hits).is_empty());
+
+        // Full literals remain usable, including case-folded v/V prefixes,
+        // suffixes and explicitly labelled major versions.
+        for version in ["3.2", "V3.2", "3.2-rc.1", "3.2+build5", "3"] {
+            let mut page = page("HarborKit", 0, &[]);
+            page.description = Some(format!(
+                "Enable tracking in Legacy client version {}.",
+                version.to_ascii_lowercase()
+            ));
+            let (_dir, s) = searcher(std::slice::from_ref(&page));
+            let query =
+                format!("How do I enable HarborKit tracking in Legacy client version {version}?");
+            let hits = s.search(&query, 10).unwrap();
+            assert_eq!(place_pages(&query, &[], hits).len(), 1, "{version}");
+        }
+        let mut page = page("HarborKit", 0, &[]);
+        page.description =
+            Some("Enable tracking in Legacy client version 4; step 3 attempts.".into());
+        let (_dir, s) = searcher(&[page]);
+        let query = "How do I enable HarborKit tracking in Legacy client version 3?";
+        assert!(place_pages(query, &[], s.search(query, 10).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn subject_tasks_do_not_guess_ambiguous_names_or_remove_task_verbs() {
+        let mut village = page("Moonbridge (village)", 100, &["Moonbridge"]);
+        village.description = Some("A coastal settlement.".into());
+        let mut protocol = page("Moonbridge (protocol)", 100, &["Moonbridge"]);
+        protocol.description = Some("A network protocol.".into());
+        let rows = reference_page(
+            "https://database.example/row-compass",
+            "RowCompass",
+            "Duplicate rows in a database.",
+        );
+        let mut album = page("Moonbridge (album)", 100, &[]);
+        album.description = Some("A studio album with tour recordings.".into());
+        let (_dir, s) = searcher(&[village, protocol, rows.clone(), album]);
+        for query in [
+            "Please tell me about Moonbridge",
+            "Please show me Moonbridge tour",
+            "Show me how to find RowCompass duplicate rows",
+        ] {
+            let hits = s.search(query, 10).unwrap();
+            assert!(place_pages(query, &[], hits).is_empty(), "{query}");
+        }
+
+        // The new subject score must retain and require trailing task
+        // words. Existing partial/hinted paths can still return a page;
+        // this score is not a veto of every other retrieval path.
+        let inside_keys = HashSet::from([analysis::tokens(&s.joined, &rows.title).pop().unwrap()]);
+        let mut supported = rows.clone();
+        supported.description = Some("Find duplicate rows in a database; their definition.".into());
+        for (query, task) in [
+            ("Show me how to find RowCompass duplicate rows", "find"),
+            (
+                "What is RowCompass duplicate rows definition?",
+                "definition",
+            ),
+        ] {
+            let words = analysis::tokens(&s.words, query);
+            let substantive = s.subject_words(&words);
+            let versions = version_evidence(query);
+            assert!(substantive.iter().any(|word| word == task), "{query}");
+            assert_eq!(
+                s.subject_match(&rows, &words, &substantive, &inside_keys, &versions),
+                0.0,
+                "unsupported {task} must not gain the subject score"
+            );
+            assert_eq!(
+                s.subject_match(&supported, &words, &substantive, &inside_keys, &versions),
+                PARTIAL_MATCH,
+                "supported {task} remains usable"
+            );
+        }
+
+        // Preserve the exact failed query and reference fixture. English
+        // stop words remove "is" but retain "what". The raw topic share
+        // is below QUESTION_SHARE; the old name hint searches without
+        // both "what is" and "definition" and supplies the result.
+        let query = "What is RowCompass duplicate rows definition?";
+        let stems = s.question_words(query);
+        let topic: HashSet<_> = analysis::tokens(&s.stemmed, &rows.topic().unwrap())
+            .into_iter()
+            .collect();
+        assert_eq!(
+            stems.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["what", "rowcompass", "duplic", "row", "definit"]
+        );
+        let missing: Vec<_> = stems
+            .iter()
+            .filter(|stem| !topic.contains(*stem))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(missing, ["what", "definit"]);
+        let share =
+            stems.iter().filter(|stem| topic.contains(*stem)).count() as f32 / stems.len() as f32;
+        assert!(share < QUESTION_SHARE, "{stems:?}: {share}");
+        // Even without a rare-topic predicate the old raw matcher fails;
+        // the first stem is not a stand-in for the selected topic word.
+        assert_eq!(s.question_match(&rows, &stems, None), (0.0, false));
+        let raw = s.search_once(query, 10, None).unwrap();
+        assert!(raw.iter().all(|hit| hit.page.url != rows.url), "{raw:?}");
+
+        let (hinted, _) = hinted_name(query).unwrap();
+        let hinted_stems = s.question_words(&hinted);
+        assert!(hinted_stems.iter().all(|stem| topic.contains(stem)));
+        let (hinted_score, hinted_whole) = s.question_match(&rows, &hinted_stems, None);
+        assert_eq!(hinted_score, PARTIAL_MATCH);
+        assert!(hinted_whole);
+        let hinted_hits = s.search_once(&hinted, 10, None).unwrap();
+        let hinted_hit = hinted_hits
+            .iter()
+            .find(|hit| hit.page.url == rows.url)
+            .unwrap();
+        assert_eq!(hinted_hit.popularity, 1.0);
+        assert_eq!(hinted_hit.score, hinted_score, "{hinted_hit:?}");
+        assert!(hinted_hit.whole && !hinted_hit.named, "{hinted_hit:?}");
+        let hits = s.search(query, 10).unwrap();
+        let hit = hits.iter().find(|hit| hit.page.url == rows.url).unwrap();
+        assert_eq!(hit.score, hinted_hit.score, "{hit:?}");
+        assert!(!hit.named && hit.whole, "{hit:?}");
+        assert!(place_pages(query, &[], hits)
+            .iter()
+            .any(|page| page.hit.page.url == rows.url));
+    }
+
+    #[test]
+    fn subject_alias_collection_applies_operator_scope_before_its_limit() {
+        let mut pages: Vec<_> = (0..TITLE_INSIDE_CANDIDATES + 5)
+            .map(|i| {
+                let mut page = reference_page(
+                    &format!("https://archive.example/{i}"),
+                    &format!("Archived setup {i}"),
+                    "Enable alerts in Copper Loom client v3.",
+                );
+                page.aliases = vec!["Copper Loom".into()];
+                page.views = 10_000;
+                page
+            })
+            .collect();
+        let mut setup = reference_page(
+            "https://widgets.example/setup",
+            "Setup",
+            "Enable alerts in Copper Loom client v3.",
+        );
+        setup.aliases = vec!["Copper Loom".into()];
+        pages.push(setup.clone());
+        let (_dir, s) = searcher(&pages);
+        let query = "Please show me how to enable Copper Loom client v3 alerts. site:widgets.example -archive \"client v3\"";
+        let ops = Operators::parse(query);
+        let hits = s.search_naming_docs(&ops.words, &ops, false, 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].page.url, setup.url);
+        assert!(hits[0].score >= MIN_PARTIAL_SCORE);
+        for query in [
+            "Please show me how to enable Copper Loom client v3 alerts. -site:widgets.example site:widgets.example",
+            "Please show me how to enable Copper Loom client v3 alerts. site:widgets.example -alerts",
+            "Please show me how to enable Copper Loom client v3 alerts. site:widgets.example \"client v4\"",
+        ] {
+            let ops = Operators::parse(query);
+            assert!(s.search_naming_docs(&ops.words, &ops, false, 10).unwrap().is_empty(), "{query}");
+        }
+    }
+
+    #[test]
+    fn subject_tasks_preserve_whole_query_pages_and_official_navigation() {
+        let query = "Please show me how to enable Copper Loom client v3 alerts.";
+        let loom = reference_page(
+            "https://widgets.example/copper-loom",
+            "Copper Loom",
+            "Enable alerts in Copper Loom client v3.",
+        );
+        let answer = reference_page(
+            "https://guide.example/copper-loom-alerts",
+            query,
+            "Enable alerts in Copper Loom client v3.",
+        );
+        let (_dir, s) = searcher(&[answer.clone(), loom.clone()]);
+        let hits = s.search(query, 1).unwrap();
+        assert_eq!(hits[0].page.url, answer.url);
+        assert!(hits[0].named);
+        let mut official = known_site("widgets.example", true, 1.0);
+        official.official = true;
+        let mut sites = vec![official, site("other.example", false)];
+        let hits = s.search(query, 10).unwrap();
+        let subject = hits
+            .into_iter()
+            .filter(|hit| hit.page.url == loom.url)
+            .collect::<Vec<_>>();
+        assert!(!subject[0].named && !subject[0].whole);
+        lift_named_sites(&mut sites, &subject);
+        assert_eq!(sites[0].domain, "widgets.example");
+        let placed = place_pages(query, &sites, subject);
+        assert_eq!(placed.len(), 1);
+        assert!(placed[0].at >= 1);
+        let exact = s.search("Copper Loom", 1).unwrap();
+        assert_eq!(exact[0].page.url, loom.url);
+        assert!(exact[0].named);
+
+        let query = "What is Helios Station battery storage capacity?";
+        let mut station = page("Helios Station", 0, &[]);
+        station.lead =
+            Some("Helios Station has battery storage capacity of eight megawatt hours.".into());
+        let answer = Page::from_question(Article {
+            title: "What is Helios Station battery storage capacity in megawatt hours?".into(),
+            item: Some("1".into()),
+            views: 100,
+            ..Article::default()
+        });
+        let (_dir, s) = searcher(&[answer.clone(), station]);
+        let hits = s.search(query, 1).unwrap();
+        assert_eq!(hits[0].page.url, answer.url);
+        assert!(hits[0].whole && !hits[0].named);
     }
 
     #[test]
