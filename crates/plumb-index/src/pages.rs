@@ -95,7 +95,7 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 /// Most articles found by their leads looked at for one query.
 const LEAD_CANDIDATES: usize = 20;
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v4-language-rich-docs-scope";
+pub const PAGE_INDEX_VERSION: &str = "v5-rich-symbol-docs-scope";
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
 const ASKING_WORDS: &[&str] = &[
@@ -1399,7 +1399,7 @@ pub fn build_page_index(
             }
         }
         if page.set == DOCS_SET {
-            for symbol in docs_title_symbols(&page.title) {
+            for symbol in docs_symbols(&page) {
                 document.add_text(fields.scope, format!("symbol:{symbol}"));
             }
             if let Some(site) = plumb_core::docs::site_of_url(&page.url) {
@@ -1993,7 +1993,9 @@ impl PageSearcher {
                 None => hits.push(hit),
             }
         }
-        hits.retain(|hit| operators_allow(ops, &hit.page));
+        hits.retain(|hit| {
+            operators_allow(ops, &hit.page) && docs_exact_query_allows(&hit.page, words)
+        });
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
         Ok(hits)
@@ -2181,7 +2183,7 @@ impl PageSearcher {
                     continue;
                 }
                 (PARTIAL_MATCH, false, false)
-            } else if docs_title_symbols(&page.title)
+            } else if docs_symbols(&page)
                 .iter()
                 .any(|symbol| canonical_docs_symbol(&topic).as_ref() == Some(symbol))
                 && (allowed || strong_docs_symbol(&page, &topic))
@@ -2206,11 +2208,32 @@ impl PageSearcher {
                 }
                 // A lone topic must occur in a title or heading, rather
                 // than a passing mention in the truncated description.
+                let rich = page.search.as_ref().and_then(SearchContent::bounded);
                 let headings = std::iter::once(&page.title)
                     .chain(&page.sections)
+                    .map(String::as_str)
+                    .chain(rich.iter().flat_map(|search| {
+                        search
+                            .passages
+                            .iter()
+                            .map(|passage| passage.heading.as_str())
+                    }))
                     .flat_map(|text| self.question_words(text))
                     .collect::<HashSet<_>>();
-                if stems.len() == 1 && !headings.contains(&stems[0]) {
+                // A case-shaped error literal in bounded source text is
+                // also evidence, unlike a generic word in a description.
+                let source_literal = rich.as_ref().is_some_and(|search| {
+                    search.passages.iter().any(|passage| {
+                        passage
+                            .text
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .any(|word| {
+                                word.chars().skip(1).any(char::is_uppercase)
+                                    && word.eq_ignore_ascii_case(&topic)
+                            })
+                    })
+                });
+                if stems.len() == 1 && !headings.contains(&stems[0]) && !source_literal {
                     continue;
                 }
                 (PARTIAL_MATCH, false, false)
@@ -4055,6 +4078,27 @@ fn docs_topic(site: &plumb_core::docs::DocsSite, query: &str) -> String {
         .join(" ")
 }
 
+/// Substantive docs terms for selecting source excerpts from a result.
+/// Uses the same product/intent rules as retrieval and removes operators.
+pub fn docs_query_topic(page: &Page, query: &str) -> String {
+    let words = Operators::parse(query).words;
+    plumb_core::docs::site_of_url(&page.url).map_or_else(
+        || docs_without_intent(&words),
+        |site| docs_topic(site, &words),
+    )
+}
+
+fn docs_exact_query_allows(page: &Page, query: &str) -> bool {
+    if page.set != DOCS_SET {
+        return true;
+    }
+    let topic = docs_query_topic(page, query);
+    let Some(symbol) = canonical_docs_symbol(&topic) else {
+        return true;
+    };
+    !topic.contains(['.', ':', '_']) || docs_symbols(page).contains(&symbol)
+}
+
 fn docs_product_only(site: &plumb_core::docs::DocsSite, query: &str) -> bool {
     let without = docs_without_intent(query);
     plumb_core::docs::named_site(&without).is_some_and(|named| named.key == site.key)
@@ -4084,7 +4128,11 @@ fn canonical_docs_symbol(text: &str) -> Option<String> {
 
 fn docs_title_symbols(title: &str) -> Vec<String> {
     let head = title.split(" — ").next().unwrap_or(title);
-    let Some(symbol) = canonical_docs_symbol(head) else {
+    docs_identifier_symbols(head)
+}
+
+fn docs_identifier_symbols(identifier: &str) -> Vec<String> {
+    let Some(symbol) = canonical_docs_symbol(identifier) else {
         return Vec::new();
     };
     let mut symbols = vec![symbol.clone()];
@@ -4098,10 +4146,42 @@ fn docs_title_symbols(title: &str) -> Vec<String> {
     symbols
 }
 
+/// Exact API identifier or its unqualified suffix. A qualified query
+/// never matches a different receiver through word overlap.
+pub fn docs_symbol_matches(query: &str, identifier: &str) -> bool {
+    canonical_docs_symbol(query)
+        .is_some_and(|wanted| docs_identifier_symbols(identifier).contains(&wanted))
+}
+
+fn docs_symbols(page: &Page) -> Vec<String> {
+    let mut symbols = docs_title_symbols(&page.title);
+    if let Some(search) = page.search.as_ref().and_then(SearchContent::bounded) {
+        for symbol in search.symbols {
+            symbols.extend(docs_identifier_symbols(&symbol.identifier));
+        }
+    }
+    symbols.sort();
+    symbols.dedup();
+    symbols
+}
+
 fn strong_docs_symbol(page: &Page, query: &str) -> bool {
     let Some(symbol) = canonical_docs_symbol(query) else {
         return false;
     };
+    if page
+        .search
+        .as_ref()
+        .and_then(SearchContent::bounded)
+        .is_some_and(|search| {
+            search
+                .symbols
+                .iter()
+                .any(|symbol| docs_symbol_matches(query, &symbol.identifier))
+        })
+    {
+        return true;
+    }
     let head = page.title.split(" — ").next().unwrap_or(&page.title);
     // Code punctuation/case, or a module with a subtitle whose URL names
     // the same identifier. Generic standalone titles such as Glossary
@@ -4832,12 +4912,119 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].page.search, page.search);
         assert_eq!(found[0].page.content_language, page.content_language);
+        for query in [
+            "set_multiplayer_authority",
+            "godot set_multiplayer_authority()",
+        ] {
+            let ops = Operators::parse(query);
+            let found = index.search_naming_docs(&ops.words, &ops, true, 5).unwrap();
+            assert_eq!(found.len(), 1, "{query}: {found:?}");
+            assert!(found[0].named);
+        }
+        let plain = index.search("set_multiplayer_authority", 5).unwrap();
+        assert_eq!(plain.len(), 1);
+        assert!(!plain[0].named);
         let mut legacy = serde_json::to_value(&page).unwrap();
         legacy.as_object_mut().unwrap().remove("search");
         assert!(serde_json::from_value::<Page>(legacy)
             .unwrap()
             .search
             .is_none());
+    }
+
+    #[test]
+    fn rich_docs_qualified_symbols_survive_topic_candidate_caps() {
+        use plumb_core::article::SearchSymbol;
+        let mut method = docs_page(
+            "https://docs.godotengine.org/en/stable/classes/class_node.html",
+            "Node — Godot documentation",
+            &["Godot Node"],
+            "A scene tree node.",
+        );
+        method.views = 1;
+        method.search = Some(SearchContent {
+            symbols: vec![SearchSymbol {
+                identifier: "Node.set_multiplayer_authority".into(),
+                anchor: Some("class-node-method-set-multiplayer-authority".into()),
+            }],
+            ..SearchContent::default()
+        });
+        let mut pages = (0..220)
+            .map(|i| {
+                docs_page(
+                    &format!("https://docs.godotengine.org/en/stable/tutorials/authority-{i}.html"),
+                    &format!("Multiplayer authority examples {i}"),
+                    &[],
+                    "Godot node set multiplayer authority examples.",
+                )
+            })
+            .collect::<Vec<_>>();
+        pages.push(method.clone());
+        let (_dir, index) = searcher(&pages);
+        for query in [
+            "godot Node.set_multiplayer_authority()",
+            "set_multiplayer_authority site:docs.godotengine.org",
+        ] {
+            let ops = Operators::parse(query);
+            let found = index.search_naming_docs(&ops.words, &ops, true, 1).unwrap();
+            assert_eq!(found[0].page.url, method.url, "{query}: {found:?}");
+        }
+        for query in [
+            "godot Other.set_multiplayer_authority",
+            "set_multiplayer_authority -site:godotengine.org",
+            "set_multiplayer_authority site:docs.python.org",
+        ] {
+            let ops = Operators::parse(query);
+            assert!(
+                index
+                    .search_naming_docs(&ops.words, &ops, true, 5)
+                    .unwrap()
+                    .is_empty(),
+                "{query}"
+            );
+        }
+        assert!(docs_symbol_matches(
+            "set_multiplayer_authority()",
+            "Node.set_multiplayer_authority"
+        ));
+        assert!(!docs_symbol_matches(
+            "Other.set_multiplayer_authority",
+            "Node.set_multiplayer_authority"
+        ));
+    }
+
+    #[test]
+    fn rich_docs_short_topics_require_source_headings_or_error_literals() {
+        use plumb_core::article::SearchPassage;
+        let mut page = docs_page(
+            "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/",
+            "Pod Lifecycle",
+            &["Kubernetes Pod Lifecycle"],
+            "The lifecycle of a Pod.",
+        );
+        page.search = Some(SearchContent {
+            passages: vec![SearchPassage {
+                heading: "Container failures".into(),
+                text: "A container can enter CrashLoopBackOff when it repeatedly fails. Generic troubleshooting advice follows.".into(),
+                anchor: Some("container-restarts".into()),
+            }],
+            ..SearchContent::default()
+        });
+        let (_dir, index) = searcher(&[page]);
+        for query in [
+            "kubernetes CrashLoopBackOff",
+            "crashloopbackoff",
+            "failures",
+        ] {
+            let found = index
+                .search_naming_docs(query, &Operators::default(), true, 5)
+                .unwrap();
+            assert_eq!(found.len(), 1, "{query}: {found:?}");
+        }
+        assert!(index
+            .search_naming_docs("troubleshooting", &Operators::default(), true, 5)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

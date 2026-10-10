@@ -45,7 +45,10 @@ use anyhow::{bail, Context, Result};
 use plumb_answer::Rates;
 use plumb_core::{domain_label, host_of, registrable_domain, search_template_for, truncate_chars};
 use plumb_crawl::{PageReader, ReadConfig};
-use plumb_index::pages::{place_operator_pages, place_pages, Page, PlacedPage, WIKIDATA_SET};
+use plumb_index::pages::{
+    docs_query_topic, docs_symbol_matches, place_operator_pages, place_pages, Page, PlacedPage,
+    WIKIDATA_SET,
+};
 use plumb_index::{
     without_intent_words, Hit, SearchOptions, SearchResults, Searcher, WELL_KNOWN_LINK_SCORE,
 };
@@ -1311,7 +1314,7 @@ impl Mcp {
         let pages: Vec<Value> = found
             .iter()
             .enumerate()
-            .map(|(i, hit)| page_entry(&hit.page, None, i + 1))
+            .map(|(i, hit)| page_entry(&hit.page, query, None, i + 1))
             .collect();
         Ok(json!({
             "query": query,
@@ -1629,16 +1632,35 @@ impl Mcp {
                 } => {
                     sites.push(brief_with(site, &results.pages));
                     pages.extend(supporting.iter().map(|page| {
-                        page_entry(&page.hit.page, page.under.as_deref(), page.at + 1)
+                        page_entry(&page.hit.page, query, page.under.as_deref(), page.at + 1)
                     }));
                 }
                 crate::assembly::Row::Page { page } => pages.push(page_entry(
                     &page.hit.page,
+                    query,
                     page.under.as_deref(),
                     page.at + 1,
                 )),
             }
         }
+        let ordered_results: Vec<_> = assembled
+            .rows
+            .iter()
+            .map(|row| match row {
+                crate::assembly::Row::Site { site, .. } => json!({"kind": "site", "url": site.url}),
+                crate::assembly::Row::Page { page } => {
+                    let url = pages
+                        .iter()
+                        .find(|entry| {
+                            entry["page_url"].as_str().or_else(|| entry["url"].as_str())
+                                == Some(page.hit.page.url.as_str())
+                        })
+                        .and_then(|entry| entry["url"].as_str())
+                        .unwrap_or(&page.hit.page.url);
+                    json!({"kind": "page", "url": url})
+                }
+            })
+            .collect();
         let mut answer_json = json!({
             "query": query,
             "results": sites,
@@ -1647,19 +1669,7 @@ impl Mcp {
             "spelling": results.spelling,
         });
         let fields = answer_json.as_object_mut().expect("an object");
-        fields.insert(
-            "ordered_results".into(),
-            json!(assembled
-                .rows
-                .iter()
-                .map(|row| match row {
-                    crate::assembly::Row::Site { site, .. } =>
-                        json!({ "kind": "site", "url": site.url }),
-                    crate::assembly::Row::Page { page } =>
-                        json!({ "kind": "page", "url": page.hit.page.url }),
-                })
-                .collect::<Vec<_>>()),
-        );
+        fields.insert("ordered_results".into(), json!(ordered_results));
         if !related_packages.is_empty() {
             fields.insert("related_packages".into(), json!(related_packages));
         }
@@ -2779,7 +2789,7 @@ fn whole_number(args: &Map<String, Value>, name: &str) -> Result<Option<usize>, 
 
 /// A page among `search`'s results: listed under the site `under`, or
 /// alone at `position` (from 1) among the sites.
-fn page_entry(page: &Page, under: Option<&str>, position: usize) -> Value {
+fn page_entry(page: &Page, query: &str, under: Option<&str>, position: usize) -> Value {
     let mut entry = json!({
         "title": page.title,
         "url": page.url,
@@ -2794,7 +2804,128 @@ fn page_entry(page: &Page, under: Option<&str>, position: usize) -> Value {
     if let Some(free) = page.free_copy() {
         entry["free_copy"] = json!(free);
     }
+    if let Some(language) = &page.content_language {
+        entry["language"] = json!(language);
+    }
+    add_source_excerpt(&mut entry, page, query);
     entry
+}
+
+/// One bounded, query-matched source passage and at most one exact API
+/// symbol. Metadata is source evidence, not a generated answer.
+fn add_source_excerpt(entry: &mut Value, page: &Page, query: &str) {
+    let Some(search) = page
+        .search
+        .as_ref()
+        .and_then(plumb_core::article::SearchContent::bounded)
+    else {
+        return;
+    };
+    let ops = plumb_core::Operators::parse(query);
+    let topic = docs_query_topic(page, query);
+    if topic.is_empty() {
+        return;
+    }
+    let symbol = search
+        .symbols
+        .iter()
+        .filter(|symbol| docs_symbol_matches(&topic, &symbol.identifier))
+        .min_by_key(|symbol| symbol.anchor.is_none());
+    // Do not turn an unmatched qualified identifier into a loose prose
+    // match for a different receiver or namespace.
+    if symbol.is_none() && topic.contains(['.', ':', '_']) && docs_symbol_matches(&topic, &topic) {
+        return;
+    }
+    let terms: HashSet<_> = plumb_core::normalize_text(&topic)
+        .split_whitespace()
+        .filter(|word| !plumb_core::is_function_word(word))
+        .map(str::to_string)
+        .collect();
+    let passage = search
+        .passages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, passage)| {
+            if !ops.allows_text([passage.heading.as_str(), passage.text.as_str()]) {
+                return None;
+            }
+            let source = format!("{} {}", passage.heading, passage.text);
+            let exact = symbol.map_or(0, |symbol| {
+                if symbol.anchor.is_some() && symbol.anchor == passage.anchor {
+                    2
+                } else if source
+                    .split(|c: char| !c.is_ascii_alphanumeric() && !"_.:".contains(c))
+                    .any(|word| {
+                        docs_symbol_matches(word.trim_matches(['.', ':']), &symbol.identifier)
+                    })
+                {
+                    1
+                } else {
+                    0
+                }
+            });
+            let normalized = plumb_core::normalize_text(&source);
+            let words: HashSet<_> = normalized.split_whitespace().collect();
+            let matched = terms
+                .iter()
+                .filter(|term| {
+                    words.contains(term.as_str())
+                        || plumb_core::other_number(term)
+                            .is_some_and(|other| words.contains(other.as_str()))
+                })
+                .count();
+            let needed = if terms.len() <= 3 {
+                terms.len()
+            } else {
+                (terms.len() * 3).div_ceil(4)
+            };
+            // With an exact symbol, require its own section or literal. The
+            // same query words in another method's prose are weaker evidence.
+            ((symbol.is_some() && exact > 0)
+                || (symbol.is_none() && !terms.is_empty() && matched >= needed))
+                .then_some(((exact, matched, std::cmp::Reverse(i)), passage))
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, passage)| passage);
+    let fragment = symbol
+        .and_then(|symbol| symbol.anchor.as_deref())
+        .or_else(|| passage.and_then(|passage| passage.anchor.as_deref()));
+    if let Some(url) = fragment.and_then(|anchor| source_fragment_url(&page.url, anchor)) {
+        entry["page_url"] = json!(page.url);
+        entry["url"] = json!(url);
+    }
+    if let Some(symbol) = symbol {
+        let url = symbol
+            .anchor
+            .as_deref()
+            .and_then(|anchor| source_fragment_url(&page.url, anchor))
+            .unwrap_or_else(|| page.url.clone());
+        entry["matched_symbol"] = json!({"identifier": symbol.identifier, "url": url});
+    }
+    if let Some(passage) = passage {
+        let url = passage
+            .anchor
+            .as_deref()
+            .and_then(|anchor| source_fragment_url(&page.url, anchor))
+            .unwrap_or_else(|| page.url.clone());
+        entry["source_excerpt"] = json!({
+            "heading": passage.heading,
+            "text": passage.text,
+            "url": url,
+        });
+    }
+}
+
+/// A fragment always stays on the original HTTP(S) source. URL parsing
+/// encodes fragment punctuation; whitespace/control IDs are discarded.
+fn source_fragment_url(source: &str, anchor: &str) -> Option<String> {
+    let anchor = plumb_core::article::search_anchor(anchor)?;
+    let mut url = url::Url::parse(source).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    url.set_fragment(Some(&anchor));
+    Some(url.into())
 }
 
 /// `search`'s optional `site`: one domain, or a URL on it, whose results

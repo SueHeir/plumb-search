@@ -60,6 +60,262 @@ fn call(mcp: &Mcp, tool: &str, arguments: Value) -> Value {
     .expect("a call gets an answer")
 }
 
+fn rich_source_page() -> Page {
+    use plumb_core::article::{Article, SearchContent, SearchPassage, SearchSymbol};
+    Page::from_docs(Article {
+        title: "Node — Godot documentation".into(),
+        item: Some("https://docs.godotengine.org/en/stable/classes/class_node.html".into()),
+        language: Some("en".into()),
+        search: Some(SearchContent {
+            symbols: vec![SearchSymbol {
+                identifier: "Node.set_multiplayer_authority".into(),
+                anchor: Some("class-node-method-set-multiplayer-authority".into()),
+            }],
+            passages: vec![
+                SearchPassage {
+                    heading: "Scene tree".into(),
+                    text: "Unrelated scene tree overview.".into(),
+                    anchor: Some("scene-tree".into()),
+                },
+                SearchPassage {
+                    heading: "set_multiplayer_authority".into(),
+                    text: "Sets the node's multiplayer authority to the given peer identifier."
+                        .into(),
+                    anchor: Some("class-node-method-set-multiplayer-authority".into()),
+                },
+                SearchPassage {
+                    heading: "Example".into(),
+                    text: "Node.set_multiplayer_authority also appears in an unrelated example."
+                        .into(),
+                    anchor: Some("example".into()),
+                },
+            ],
+            ..SearchContent::default()
+        }),
+        ..Article::default()
+    })
+    .unwrap()
+}
+
+#[test]
+fn rich_source_exact_symbol_selects_its_own_excerpt_and_fragment() {
+    let page = rich_source_page();
+    for query in [
+        "godot Node.set_multiplayer_authority()",
+        "set_multiplayer_authority site:docs.godotengine.org",
+    ] {
+        let entry = page_entry(&page, query, Some("godotengine.org"), 2);
+        assert_eq!(
+            entry["url"],
+            format!("{}#class-node-method-set-multiplayer-authority", page.url)
+        );
+        assert_eq!(entry["page_url"], page.url);
+        assert_eq!(
+            entry["matched_symbol"]["identifier"],
+            "Node.set_multiplayer_authority"
+        );
+        assert_eq!(
+            entry["source_excerpt"]["text"],
+            "Sets the node's multiplayer authority to the given peer identifier."
+        );
+        assert_eq!(entry["source_excerpt"]["url"], entry["url"]);
+        assert_eq!(entry["language"], "en");
+        assert_eq!(entry["position"], 2);
+        assert_eq!(entry["about_site"], "godotengine.org");
+        assert!(entry.get("search").is_none());
+        assert!(!entry.to_string().contains("Unrelated scene tree overview"));
+    }
+    for query in [
+        "godot Other.set_multiplayer_authority",
+        "godot",
+        "unmatched topic",
+    ] {
+        let entry = page_entry(&page, query, None, 1);
+        assert!(entry.get("source_excerpt").is_none(), "{query}: {entry}");
+        assert!(entry.get("matched_symbol").is_none(), "{query}: {entry}");
+        assert_eq!(entry["url"], page.url);
+    }
+}
+
+#[test]
+fn rich_source_prose_match_is_bounded_and_honors_phrases_and_exclusions() {
+    let mut page = rich_source_page();
+    page.search.as_mut().unwrap().symbols.clear();
+    let entry = page_entry(&page, "godot multiplayer authority", None, 1);
+    assert_eq!(
+        entry["source_excerpt"]["heading"],
+        "set_multiplayer_authority"
+    );
+    assert!(entry.get("matched_symbol").is_none());
+    for query in [
+        "godot multiplayer authority -authority",
+        "godot \"multiplayer authority\" \"missing phrase\"",
+    ] {
+        assert!(page_entry(&page, query, None, 1)
+            .get("source_excerpt")
+            .is_none());
+    }
+    let excluded = page_entry(&page, "godot multiplayer authority -peer", None, 1);
+    assert!(!excluded["source_excerpt"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("peer"));
+    page.search.as_mut().unwrap().passages[1].text =
+        format!("Multiplayer authority {}", "é".repeat(800));
+    let entry = page_entry(&page, "multiplayer authority", None, 1);
+    assert!(
+        entry["source_excerpt"]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= plumb_core::article::MAX_SEARCH_PASSAGE_CHARS
+    );
+    page.search.as_mut().unwrap().version = 99;
+    assert!(page_entry(&page, "multiplayer authority", None, 1)
+        .get("source_excerpt")
+        .is_none());
+    page.search = None;
+    assert!(page_entry(&page, "multiplayer authority", None, 1)
+        .get("source_excerpt")
+        .is_none());
+}
+
+#[test]
+fn rich_source_fragment_links_keep_the_source_and_reject_invalid_ids() {
+    let source = "https://docs.godotengine.org/page?version=4#old";
+    let link = source_fragment_url(source, "method-\"<authority>é").unwrap();
+    let parsed = url::Url::parse(&link).unwrap();
+    assert_eq!(parsed.host_str(), Some("docs.godotengine.org"));
+    assert_eq!(parsed.path(), "/page");
+    assert_eq!(parsed.query(), Some("version=4"));
+    assert!(link.contains("%22%3Cauthority%3E%C3%A9"), "{link}");
+    for anchor in ["", "bad id", "bad\nid"] {
+        assert!(source_fragment_url(source, anchor).is_none());
+    }
+    assert!(source_fragment_url("javascript:alert(1)", "method").is_none());
+    assert!(source_fragment_url("file:///tmp/page", "method").is_none());
+    let mut page = rich_source_page();
+    let search = page.search.as_mut().unwrap();
+    search.symbols[0].anchor = Some("bad id".into());
+    search.passages[1].anchor = Some("bad id".into());
+    let entry = page_entry(&page, "set_multiplayer_authority", None, 1);
+    assert_eq!(entry["url"], page.url);
+    assert_eq!(entry["source_excerpt"]["url"], page.url);
+    assert!(entry.get("page_url").is_none());
+}
+
+#[test]
+fn rich_source_error_query_selects_the_matching_source_passage() {
+    let mut page = rich_source_page();
+    page.url = "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/".into();
+    page.title = "Pod Lifecycle".into();
+    let search = page.search.as_mut().unwrap();
+    search.symbols.clear();
+    search.passages[1].heading = "Container failures".into();
+    search.passages[1].text =
+        "A container can enter CrashLoopBackOff when it repeatedly fails.".into();
+    search.passages[1].anchor = Some("container-restarts".into());
+    for query in ["k8s CrashLoopBackOff", "crashloopbackoff"] {
+        let entry = page_entry(&page, query, None, 1);
+        assert_eq!(
+            entry["source_excerpt"]["text"],
+            "A container can enter CrashLoopBackOff when it repeatedly fails."
+        );
+        assert_eq!(entry["url"], format!("{}#container-restarts", page.url));
+        assert!(entry.get("matched_symbol").is_none());
+    }
+}
+
+struct RichSource {
+    supporting: bool,
+}
+
+impl SearchBackend for RichSource {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+    fn num_docs(&self) -> u64 {
+        1
+    }
+    fn search_full(
+        &self,
+        _query: &str,
+        _limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let mut page = shelved(rich_source_page());
+        page.named = !self.supporting;
+        page.whole = true;
+        Ok(SearchResults {
+            hits: if self.supporting {
+                vec![hit("godotengine.org", 1.0, 0.5, true)]
+            } else {
+                Vec::new()
+            },
+            pages: vec![PlacedPage {
+                hit: page,
+                under: self.supporting.then(|| "godotengine.org".into()),
+                at: 0,
+            }],
+            site_search: None,
+            spelling: None,
+        })
+    }
+    fn pages_of(
+        &self,
+        _query: &str,
+        limit: usize,
+        _options: &SearchOptions,
+        _docs: bool,
+        keep: &dyn Fn(&Page) -> bool,
+    ) -> Vec<plumb_index::pages::PageHit> {
+        [rich_source_page()]
+            .into_iter()
+            .filter(keep)
+            .take(limit)
+            .map(shelved)
+            .collect()
+    }
+}
+
+#[test]
+fn rich_source_excerpts_reach_ordinary_typed_and_text_only_mcp_search() {
+    for supporting in [false, true] {
+        let mcp = Mcp::new(Arc::new(RichSource { supporting }), None);
+        for kind in [None, Some("docs")] {
+            let mut args = json!({"query": "godot set_multiplayer_authority"});
+            if let Some(kind) = kind {
+                args["kind"] = json!(kind);
+            }
+            let mut reply = call(&mcp, "search", args);
+            let page = &reply["result"]["structuredContent"]["pages"][0];
+            assert_eq!(
+                page["source_excerpt"]["heading"], "set_multiplayer_authority",
+                "{reply}"
+            );
+            if kind.is_none() && !supporting {
+                assert_eq!(
+                    reply["result"]["structuredContent"]["ordered_results"][0]["url"],
+                    page["url"]
+                );
+            }
+            assert!(reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(
+                "Source excerpt (set_multiplayer_authority): Sets the node's multiplayer authority"
+            ));
+            text_only(&mut reply);
+            assert!(reply["result"].get("structuredContent").is_none());
+            assert!(reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("#class-node-method-set-multiplayer-authority"));
+        }
+    }
+}
+
 #[test]
 fn initialize_agrees_on_a_protocol_version() {
     let mcp = server(Vec::new());

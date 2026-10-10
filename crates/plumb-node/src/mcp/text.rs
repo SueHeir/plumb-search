@@ -136,6 +136,19 @@ fn page_line(out: &mut String, page: &Value) {
         let _ = write!(out, " {url}");
     }
     out.push('\n');
+    if let Some(excerpt) = page.get("source_excerpt") {
+        if let Some(source) = text(excerpt, "text") {
+            out.push_str("  Source excerpt");
+            if let Some(heading) = text(excerpt, "heading") {
+                let _ = write!(out, " ({heading})");
+            }
+            let _ = write!(out, ": {source}");
+            if let Some(url) = text(excerpt, "url").filter(|url| Some(*url) != text(page, "url")) {
+                let _ = write!(out, " {url}");
+            }
+            out.push('\n');
+        }
+    }
 }
 
 /// "[crates.io] serde 1.0.228 (2025-09-27, MIT OR Apache-2.0): A generic
