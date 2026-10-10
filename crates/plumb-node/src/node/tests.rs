@@ -4086,6 +4086,7 @@ async fn a_pending_network_delivery_survives_inbox_io_failure_without_restart() 
         node.inner.clone(),
         vec![SiteRecord::new("retry-inbox.example")],
         None,
+        None,
     ));
     let deadline = Instant::now() + Duration::from_secs(10);
     while budget.status().reserved_bytes == 0 {
@@ -4115,4 +4116,185 @@ async fn a_pending_network_delivery_survives_inbox_io_failure_without_restart() 
     assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
     assert!(!search(node.addr(), "chase").await.is_empty());
     node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publishing_an_external_corpus_fold_cannot_free_node_storage_room() {
+    let dir = seeded_dir();
+    let external = tempfile::tempdir().unwrap();
+    let path = external.path().join("records.jsonl");
+    write_jsonl(&path, &[SiteRecord::new("external-publish.example")]).unwrap();
+    let mut store = crate::records::RecordStore::open(&path);
+    for n in 0..100 {
+        store
+            .save(&[crate::records::Change::Mark {
+                domain: "external-publish.example".into(),
+                attempted_at: Some(n),
+                failures: 1,
+            }])
+            .unwrap();
+    }
+    drop(store);
+    let journal = crate::records::journal_path(&path);
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers.clear();
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let budget = node.inner.storage.as_ref().unwrap();
+    let raw = std::fs::read(&node.inner.paths.records).unwrap();
+    let before = budget.status();
+    assert_eq!(
+        super::network::publish_new_records(&node.inner, &path)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(!journal.exists());
+    assert_eq!(budget.status(), before);
+    assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_twice() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let mut source_config = plumb_net::NetConfig::new(source_dir.path().to_owned());
+    source_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    source_config.upnp = false;
+    source_config.local_discovery = false;
+    source_config.round_every = None;
+    let table =
+        plumb_net::BucketTable::build::<SiteRecord>(&source_dir.path().join("buckets"), &[])
+            .unwrap();
+    let (source, _source_records) = plumb_net::start(source_config, Arc::new(table))
+        .await
+        .unwrap();
+    let source_id = source.peer_id();
+    let source_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = source.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.take_new_sites = true;
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![source_id];
+    net.bootstrap = vec![source_addr.with_p2p(source_id).unwrap()];
+    config.network = Some(net);
+    let receiver = start(config.clone()).await.unwrap();
+    wait_for(receiver.addr(), "initial index", ready_and_idle).await;
+    let budget = receiver.inner.storage.as_ref().unwrap();
+    let raw = std::fs::read(&receiver.inner.paths.records).unwrap();
+    let inbox_path = receiver.inner.paths.inbox.clone();
+    plumb_core::storage::create_directory(&inbox_path, Some(budget)).unwrap();
+    let mut record = SiteRecord::new("restart-inbox.example");
+    record.url = Some("https://restart-inbox.example/".into());
+    record.title = Some("Durable receiver restart".into());
+    record.crawled_at = Some(now_unix());
+    let id = source.publish(vec![record]).await.unwrap().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while receiver
+        .inner
+        .net
+        .get()
+        .is_none_or(|n| n.status().batches_received != 1)
+        || budget.status().reserved_bytes == 0
+    {
+        assert!(
+            Instant::now() < deadline,
+            "receiver did not retain the failed inbox delivery: {:?}, {:?}",
+            receiver.inner.net.get().map(|n| n.status()),
+            budget.status()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read(&receiver.inner.paths.records).unwrap(), raw);
+    let batches = dir.path().join("net/batches");
+    let signed = std::fs::read(batches.join(format!("{id}.json"))).unwrap();
+    let marker = batches.join(format!("{id}.delivered-trusted"));
+    assert!(!marker.exists());
+    receiver.shutdown().await.unwrap();
+    source.shutdown().await;
+    let credit_dir = dir.path().join("net/credits");
+    let credited = plumb_net::credits::Ledger::open(&credit_dir)
+        .unwrap()
+        .account(&source_id);
+    assert_eq!(credited.confirmed, 1);
+    assert!(credited.earned > 0);
+    std::fs::remove_dir(&inbox_path).unwrap();
+    std::fs::create_dir(&marker).unwrap(); // Inbox can persist; marker I/O still fails.
+    config.network.as_mut().unwrap().bootstrap.clear(); // Source is offline: replay is local.
+    let receiver = start(config.clone()).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while receiver.inner.inbox_records.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "restart did not persist its pending inbox"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(marker.is_dir());
+    {
+        let budget = receiver.inner.storage.as_ref().unwrap();
+        let _mutation = budget.mutation();
+        let bytes = plumb_core::storage::file_bytes(&marker).unwrap();
+        std::fs::remove_dir(&marker).unwrap();
+        budget.removed(bytes);
+    }
+    while !marker.is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "restart did not persist and acknowledge the held batch"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let inbox: Vec<SiteRecord> = read_jsonl(&inbox_path).unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].domain, "restart-inbox.example");
+    assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
+        signed
+    );
+    receiver.shutdown().await.unwrap();
+    let after = plumb_net::credits::Ledger::open(&credit_dir)
+        .unwrap()
+        .account(&source_id);
+    assert_eq!(
+        (after.confirmed, after.earned),
+        (credited.confirmed, credited.earned)
+    );
+    // A second restart respects the durable acknowledgment; old-format signed
+    // bytes remain readable and the inbox is not delivered a second time.
+    let receiver = start(config).await.unwrap();
+    wait_for(receiver.addr(), "restarted index", ready_and_idle).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
+        signed
+    );
+    receiver.shutdown().await.unwrap();
+    let after = plumb_net::credits::Ledger::open(&credit_dir)
+        .unwrap()
+        .account(&source_id);
+    assert_eq!(
+        (after.confirmed, after.earned),
+        (credited.confirmed, credited.earned)
+    );
 }

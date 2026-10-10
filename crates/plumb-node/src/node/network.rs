@@ -291,15 +291,26 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
     }
     let receiver = inner.clone();
     tokio::spawn(async move {
-        while let Some(delivery) = records.recv().await {
+        loop {
+            if receiver.stopping() {
+                break;
+            }
+            let delivery = tokio::select! {
+                () = receiver.stopped() => break,
+                delivery = records.recv() => match delivery {
+                    Some(delivery) => delivery,
+                    None => break,
+                }
+            };
             let plumb_net::node::RecordDelivery {
                 records: mut batch,
                 reservation,
+                acknowledgment,
             } = delivery;
             // Crawling only, other nodes' crawls are not kept: they would
             // only grow the records this node crawls from.
             if receiver.config.crawl_only {
-                continue;
+                batch.clear();
             }
             // Trusted nodes' feed checks go to the headline store, not the
             // records (see plumb_net::start).
@@ -307,17 +318,11 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
                 let (news, rest) = batch.into_iter().partition(|r| !r.news.is_empty());
                 receiver.news.put_shared(news, now_unix());
                 batch = rest;
-                if batch.is_empty() {
-                    continue;
-                }
             }
             if !receiver.config.take_new_sites {
                 held_only(&receiver, &mut batch);
-                if batch.is_empty() {
-                    continue;
-                }
             }
-            persist_delivery(receiver.clone(), batch, reservation).await;
+            persist_delivery(receiver.clone(), batch, reservation, Some(acknowledgment)).await;
         }
     });
     Ok(())
@@ -475,9 +480,8 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
             };
             // Read a record at a time, the journal folded in first.
             let _records = inner.hold_records();
-            RecordStore::open(&path)
-                .with_budget(inner.storage.clone())
-                .fold()?;
+            let budget = crate::records::records_budget(&path, inner.storage.as_ref())?;
+            RecordStore::open(&path).with_budget(budget).fold()?;
             let mut crawled: Vec<SiteRecord> = Vec::new();
             crate::outline::for_each_record(&path, |record| {
                 if record
@@ -552,8 +556,11 @@ pub(super) async fn persist_delivery(
     inner: Arc<Inner>,
     records: Vec<SiteRecord>,
     mut reservation: Option<plumb_net::storage::Reservation>,
+    acknowledgment: Option<plumb_net::store::DeliveryAck>,
 ) {
     let records = Arc::new(records);
+    let acknowledgment = acknowledgment.map(Arc::new);
+    let mut persisted = false;
     let mut delay = Duration::from_millis(100);
     let mut warned = false;
     loop {
@@ -562,23 +569,37 @@ pub(super) async fn persist_delivery(
         }
         let writer = inner.clone();
         let payload = records.clone();
+        let acknowledgment = acknowledgment.clone();
         let mut admitted = reservation.take();
         let saved = tokio::task::spawn_blocking(move || {
-            let result = append_inbox_reserved(&writer, &payload, &mut admitted);
-            (admitted, result)
+            if !persisted && !payload.is_empty() {
+                if let Err(err) = append_inbox_reserved(&writer, &payload, &mut admitted) {
+                    return (false, admitted, Err(err));
+                }
+            }
+            // An acknowledgment failure retries only the marker, not the
+            // already durable inbox append. Release the inbox's peak room first.
+            drop(admitted);
+            let result = acknowledgment
+                .as_ref()
+                .map_or(Ok(()), |ack| ack.acknowledge());
+            (true, None, result)
         })
         .await;
+        if saved.as_ref().is_ok_and(|(durable, _, _)| *durable) && !persisted {
+            persisted = true;
+            let n = records.len() as u64;
+            let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
+            if total >= REBUILD_AFTER_RECORDS {
+                inner.wake.notify_one();
+            }
+        }
         let failure = match saved {
-            Ok((admitted, Ok(()))) => {
+            Ok((_, admitted, Ok(()))) => {
                 drop(admitted);
-                let n = records.len() as u64;
-                let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
-                if total >= REBUILD_AFTER_RECORDS {
-                    inner.wake.notify_one();
-                }
                 return;
             }
-            Ok((admitted, Err(err))) => {
+            Ok((_, admitted, Err(err))) => {
                 reservation = admitted;
                 err
             }

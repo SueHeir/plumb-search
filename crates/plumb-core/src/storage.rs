@@ -92,9 +92,10 @@ pub struct StorageBudget {
 impl StorageBudget {
     pub fn open(root: &Path, limit: u64) -> Result<Arc<Self>> {
         ensure!(limit > 0, "storage admission needs a positive byte limit");
-        let used = directory_bytes(root)?;
+        let root = fs::canonicalize(root)?;
+        let used = directory_bytes(&root)?;
         Ok(Arc::new(Self {
-            root: root.to_owned(),
+            root,
             mutation: Mutex::new(()),
             counted_at: Mutex::new(std::time::Instant::now()),
             input_readers: Mutex::default(),
@@ -109,6 +110,34 @@ impl StorageBudget {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Resolve aliases before deciding which owner's ledger a file belongs to.
+    /// A missing file is scoped by its existing parent (also where staging runs).
+    pub fn contains_file(&self, path: &Path) -> io::Result<bool> {
+        let resolved = match fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "cannot scope a dangling storage symlink",
+                    ));
+                }
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+                fs::canonicalize(parent)?.join(path.file_name().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "storage path needs a file name",
+                    )
+                })?)
+            }
+            Err(err) => return Err(err),
+        };
+        Ok(resolved.starts_with(&self.root))
     }
 
     pub fn mutation(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -257,7 +286,11 @@ impl StorageBudget {
         let _mutation = self.mutation();
         // The filesystem stays quiescent while counting, but status and
         // reservations must not wait on the tree walk's state mutex.
-        let linked = directory_bytes(root)?;
+        ensure!(
+            fs::canonicalize(root)? == self.root,
+            "recount root differs from storage owner"
+        );
+        let linked = directory_bytes(&self.root)?;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.used_bytes = linked.saturating_add(state.reader_held_bytes);
         state.backpressure =

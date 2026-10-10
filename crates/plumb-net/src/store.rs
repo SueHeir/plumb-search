@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{ensure, Context, Result};
 use libp2p::identity::PublicKey;
@@ -32,6 +32,50 @@ use crate::storage::{allocation_for, file_bytes, LimitedBytes, Reservation, Stor
 
 // Signed record strings can double in size when escaped in the batch JSON.
 const MAX_STORED_BATCH_BYTES: usize = 2 * crate::batch::MAX_BATCH_BYTES + 4 * 1024 * 1024;
+
+/// A receiver acknowledges only after its durable destination has accepted the
+/// delivery. Dropping this token leaves the signed batch eligible for replay.
+#[derive(Debug)]
+pub struct DeliveryAck {
+    path: PathBuf,
+    batch: PathBuf,
+    budget: Option<Arc<StorageBudget>>,
+    retirement: Arc<Mutex<()>>,
+}
+
+impl DeliveryAck {
+    pub(crate) fn acknowledged(&self) -> bool {
+        let mut bytes = Vec::with_capacity(10);
+        fs::File::open(&self.path).is_ok_and(|file| {
+            file.take(10).read_to_end(&mut bytes).is_ok() && bytes == b"persisted\n"
+        })
+    }
+
+    pub fn acknowledge(&self) -> Result<()> {
+        let _retirement = self
+            .retirement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Retention may have retired the source while its receiver was busy.
+        if !self.batch.try_exists()? {
+            return Ok(());
+        }
+        if !self.acknowledged() {
+            let part = self.path.with_extension("tmp");
+            plumb_core::storage::write_atomic(
+                &self.path,
+                &part,
+                b"persisted\n",
+                self.budget.as_ref(),
+                None,
+            )?;
+        }
+        // The rename and its directory entry must survive receiver restart.
+        #[cfg(unix)]
+        fs::File::open(self.path.parent().unwrap())?.sync_all()?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct StoreLimits {
@@ -172,6 +216,8 @@ pub struct BatchStore {
     allocated: u64,
     foreign_allocated: u64,
     limits: Option<StoreLimits>,
+    /// Serialize acknowledgment creation with source/marker retirement.
+    delivery_retirement: Arc<Mutex<()>>,
 }
 
 impl BatchStore {
@@ -229,6 +275,7 @@ impl BatchStore {
             allocated: 0,
             foreign_allocated: 0,
             limits: None,
+            delivery_retirement: Arc::default(),
         };
         for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
             let path = entry?.path();
@@ -292,6 +339,16 @@ impl BatchStore {
 
     pub fn contains(&self, id: &Hash) -> bool {
         self.ids.contains(id)
+    }
+
+    pub(crate) fn delivery_ack(&self, id: &Hash, trusted: bool) -> DeliveryAck {
+        let mode = if trusted { "trusted" } else { "agreed" };
+        DeliveryAck {
+            path: self.dir.join(format!("{id}.delivered-{mode}")),
+            batch: self.path(id),
+            budget: self.storage().cloned(),
+            retirement: self.delivery_retirement.clone(),
+        }
     }
 
     /// Saves a batch that has been checked. Saving one already held does
@@ -617,6 +674,10 @@ impl BatchStore {
     /// Deletes only through retention; failed deletions retain their metadata
     /// and allocation. Proof cleanup visits this batch's records, not all sites.
     fn remove(&mut self, old: HashSet<Hash>) {
+        let retirement = self.delivery_retirement.clone();
+        let _retirement = retirement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let budget = self.storage().cloned();
         let _mutation = budget.as_ref().map(|budget| budget.mutation());
         for id in old {
@@ -644,6 +705,15 @@ impl BatchStore {
             self.allocated = self.allocated.saturating_sub(bytes);
             if let Some(budget) = &budget {
                 budget.removed(bytes);
+            }
+            for trusted in [false, true] {
+                let path = self.delivery_ack(&id, trusted).path;
+                let bytes = file_bytes(&path).unwrap_or(0);
+                if fs::remove_file(path).is_ok() {
+                    if let Some(budget) = &budget {
+                        budget.removed(bytes);
+                    }
+                }
             }
             self.ids.remove(&id);
             if let Some(header) = self.headers.remove(&id) {

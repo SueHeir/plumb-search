@@ -49,7 +49,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -202,8 +202,6 @@ const POPULARITY_FILE: &str = "popularity.json";
 const FRIENDS_FILE: &str = "friends.json";
 /// Pending disk writes and downstream record deliveries, at most.
 const RECORD_DELIVERIES: usize = 4;
-/// The trusted nodes whose held batches were taken in as trusted.
-const TRUST_APPLIED_FILE: &str = "trusted-applied";
 /// The scope the bucket cache was filled under.
 const SCOPE_FILE: &str = "search-scope";
 
@@ -443,6 +441,7 @@ pub struct NetHandle {
     /// [`crate::cache`]).
     cache: Arc<crate::cache::BucketCache>,
     storage: Option<Arc<StorageBudget>>,
+    replay_stopped: Arc<std::sync::atomic::AtomicBool>,
     /// When background rounds go (see [`crate::rounds`]).
     pace: Arc<Pace>,
     pending_buckets: Arc<Mutex<PendingBuckets>>,
@@ -945,6 +944,8 @@ impl NetHandle {
 
     /// Stops the swarm and waits for it. Later calls do nothing.
     pub async fn shutdown(&self) {
+        self.replay_stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(rounds) = self
             .rounds
             .lock()
@@ -1046,10 +1047,13 @@ struct Behaviour {
 /// carry headlines ([`SiteRecord::news`]) carry nothing else: they are
 /// trusted crawlers' feed checks, for the node's headline store.
 /// One bounded delivery with disk room held until the receiver has saved it.
+/// Call `acknowledgment.acknowledge()` after durable persistence. Unacknowledged
+/// held batches replay after restart; replay never awards credits again.
 #[derive(Debug)]
 pub struct RecordDelivery {
     pub records: Vec<SiteRecord>,
     pub reservation: Option<Reservation>,
+    pub acknowledgment: crate::store::DeliveryAck,
 }
 
 fn delivery_bytes(records: usize) -> u64 {
@@ -1085,8 +1089,6 @@ pub async fn start(
         .bootstrap
         .retain(|addr| peer_of(addr) != Some(peer_id));
     let gateway = Gateway::new(&key, now_unix())?;
-    // Crawlers trusted since the last start: the batches held from them
-    // were taken in without their text, so they are sent again whole.
     let (ledger, issuer, wallet) = {
         let dir = config.dir.join("credits");
         tokio::task::spawn_blocking(move || -> Result<_> {
@@ -1120,12 +1122,9 @@ pub async fn start(
         now_unix(),
         storage.clone(),
     ));
-    let trust_file = config.dir.join(TRUST_APPLIED_FILE);
-    let newly_trusted = newly_trusted(&trust_file, peer_id, &config.trusted_peers);
     let (store, agreement, replay) = {
         let dir = config.dir.join("batches");
         let trusted = config.trusted_peers.clone();
-        let newly = newly_trusted.clone();
         let follow = config.follow_crawls;
         let limits = StoreLimits {
             own: key.public().encode_protobuf(),
@@ -1137,7 +1136,7 @@ pub async fn start(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let store = BatchStore::open_retained(&dir, follow, limits)?;
             let (agreement, replay) = if follow {
-                replay_agreement(&store, peer_id, &trusted, &newly)
+                replay_agreement(&store, peer_id, &trusted)
             } else {
                 // Nothing is passed on, so nothing is sent again either:
                 // the node takes them in once it follows crawls again.
@@ -1193,6 +1192,7 @@ pub async fn start(
     let popularity = Arc::new(RwLock::new(Arc::new(table)));
     let (commands, commands_rx) = mpsc::unbounded_channel();
     let (records_tx, records_rx) = mpsc::channel(RECORD_DELIVERIES);
+    let replay_stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let store = Arc::new(Mutex::new(store));
     {
         let (store, records, trusted) = (
@@ -1200,8 +1200,9 @@ pub async fn start(
             records_tx.clone(),
             config.trusted_peers.clone(),
         );
+        let stopped = replay_stopped.clone();
         tokio::task::spawn_blocking(move || {
-            resend_trusted(&store, &replay, &records, &trust_file, &trusted)
+            resend_pending(&store, &replay, &records, peer_id, &trusted, &stopped)
         });
     }
     let (answers_tx, answers_rx) = mpsc::unbounded_channel();
@@ -1229,6 +1230,7 @@ pub async fn start(
         source,
         status: status.clone(),
         records: records_tx,
+        replay_stopped: replay_stopped.clone(),
         pending_batches: HashSet::new(),
         ingest_blocked: false,
         agreement,
@@ -1341,6 +1343,7 @@ pub async fn start(
             tokens_spent,
             cache,
             storage,
+            replay_stopped,
             pace,
             pending_buckets,
             round_updates,
@@ -1855,6 +1858,7 @@ impl BatchRetries {
 }
 
 struct Task {
+    replay_stopped: Arc<std::sync::atomic::AtomicBool>,
     swarm: Swarm<Behaviour>,
     key: Keypair,
     config: NetConfig,
@@ -2054,6 +2058,8 @@ impl Task {
             }
             self.update_status();
         }
+        self.replay_stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Err(err) = self.ledger.save() {
             warn!("cannot save the credits ledger: {err:#}");
         }
@@ -2385,6 +2391,10 @@ impl Task {
                                 permit.send(RecordDelivery {
                                     records: confirmed,
                                     reservation,
+                                    acknowledgment: self.lock_store().delivery_ack(
+                                        &id,
+                                        self.config.trusted_peers.contains(&crawler),
+                                    ),
                                 });
                             }
                         }
@@ -4637,18 +4647,14 @@ fn crawler_views(store: &BatchStore, me: PeerId, trusted: &[PeerId], now: u64) -
     crawlers
 }
 
-/// Also returns the batches of `newly_trusted` crawlers, oldest first.
-fn replay_agreement(
-    store: &BatchStore,
-    me: PeerId,
-    trusted: &[PeerId],
-    newly_trusted: &[PeerId],
-) -> (Agreement, Vec<Hash>) {
+/// Rebuild agreement without awarding its already-counted credits again.
+/// Preserve the startup order for a second, bounded pass recovering deliveries.
+fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> (Agreement, Vec<Hash>) {
     let now = now_unix();
-    let mut replay = Vec::new();
+    let replay = store.ids_oldest_first();
     let mut agreement = Agreement::new(me, trusted.iter().copied());
-    for id in store.ids_oldest_first() {
-        let batch = match store.get(&id) {
+    for id in &replay {
+        let batch = match store.get(id) {
             Ok(Some(batch)) => batch,
             Ok(None) => continue,
             Err(err) => {
@@ -4656,7 +4662,6 @@ fn replay_agreement(
                 continue;
             }
         };
-        // Checked as of when it was made, as it was when it came in.
         let made = batch.header.header.created_at;
         let Ok(crawler) = batch.check(made) else {
             continue;
@@ -4668,47 +4673,36 @@ fn replay_agreement(
         } else {
             accept_batch(&batch, &crawler, made)
         };
-        if newly_trusted.contains(&crawler) {
-            replay.push(id);
-        }
         agreement.observe(crawler, records, made);
     }
     agreement.prune(now);
-    // These were credited when the batches first came in.
     agreement.take_verdicts();
     (agreement, replay)
 }
 
-/// The nodes in `trusted` that were not when [`TRUST_APPLIED_FILE`] was
-/// last written: all of them on a node that never wrote it.
-fn newly_trusted(file: &Path, me: PeerId, trusted: &[PeerId]) -> Vec<PeerId> {
-    let applied: HashSet<PeerId> = std::fs::read_to_string(file)
-        .unwrap_or_default()
-        .split_whitespace()
-        .filter_map(|id| id.parse().ok())
-        .collect();
-    trusted
-        .iter()
-        .filter(|peer| **peer != me && !applied.contains(peer))
-        .copied()
-        .collect()
-}
-
-/// Sends the homepages of the held batches `ids`, as a trusted crawler's
-/// count (text included), to `records`, one batch at a time; then notes
-/// `trusted` as applied in `file`. Agreement has seen them already: a
-/// homepage taken in before without its text is filled in, and a newer
-/// crawl of the same site still wins.
-fn resend_trusted(
+/// Reconstruct one batch's downstream output at a time. Per-batch durable
+/// acknowledgments distinguish an applied agreement from a persisted inbox.
+/// Trusted and quorum deliveries have different markers, so newly trusting a
+/// crawler still upgrades previously accepted records with their full text.
+fn resend_pending(
     store: &Mutex<BatchStore>,
     ids: &[Hash],
     records: &mpsc::Sender<RecordDelivery>,
-    file: &Path,
+    me: PeerId,
     trusted: &[PeerId],
+    stopped: &std::sync::atomic::AtomicBool,
 ) {
-    let mut sent = 0;
+    let stopping = || records.is_closed() || stopped.load(std::sync::atomic::Ordering::SeqCst);
+    let mut agreement = Agreement::new(me, trusted.iter().copied());
     for id in ids {
-        let batch = match store.lock().unwrap_or_else(PoisonError::into_inner).get(id) {
+        if stopping() {
+            return;
+        }
+        let (batch, budget) = {
+            let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+            (store.get(id), store.storage().cloned())
+        };
+        let batch = match batch {
             Ok(Some(batch)) => batch,
             Ok(None) => continue,
             Err(err) => {
@@ -4720,50 +4714,67 @@ fn resend_trusted(
         let Ok(crawler) = batch.check(made) else {
             continue;
         };
-        let homepages: Vec<SiteRecord> = accept_trusted_batch(&batch, &crawler, made)
-            .into_iter()
-            .filter(|record| record.crawled_at.is_some())
-            .collect();
-        if homepages.is_empty() {
+        let is_trusted = trusted.contains(&crawler);
+        let accepted = if crawler == me {
+            accept_own_batch(&batch, &crawler, made)
+        } else if is_trusted {
+            accept_trusted_batch(&batch, &crawler, made)
+        } else {
+            accept_batch(&batch, &crawler, made)
+        };
+        let mut confirmed = agreement.observe(crawler, accepted, made);
+        agreement.take_verdicts(); // Recovery must never award credits.
+        if crawler == me {
             continue;
         }
-        sent += homepages.len();
-        let budget = store
+        if is_trusted {
+            confirmed.extend(accept_news(&batch, made));
+        }
+        let acknowledgment = store
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .storage()
-            .cloned();
-        let reservation = match budget
-            .as_ref()
-            .map(|budget| budget.reserve(delivery_bytes(homepages.len()), false))
-            .transpose()
-        {
-            Ok(reservation) => reservation,
-            Err(err) => {
-                warn!("trusted replay waits for storage: {err:#}");
+            .delivery_ack(id, is_trusted);
+        if confirmed.is_empty() || acknowledgment.acknowledged() {
+            continue;
+        }
+        let mut delay = std::time::Duration::from_millis(100);
+        let reservation = loop {
+            if stopping() {
                 return;
             }
+            match budget
+                .as_ref()
+                .map(|b| b.reserve(delivery_bytes(confirmed.len()), false))
+                .transpose()
+            {
+                Ok(reservation) => break reservation,
+                Err(err) => {
+                    debug!("pending delivery waits for storage: {err:#}");
+                    std::thread::sleep(delay);
+                    delay = delay
+                        .saturating_mul(2)
+                        .min(std::time::Duration::from_secs(5));
+                }
+            }
         };
-        if records
-            .blocking_send(RecordDelivery {
-                records: homepages,
-                reservation,
-            })
-            .is_err()
-        {
-            return;
+        let mut delivery = RecordDelivery {
+            records: confirmed,
+            reservation,
+            acknowledgment,
+        };
+        loop {
+            if stopping() {
+                return;
+            }
+            match records.try_send(delivery) {
+                Ok(()) => break,
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+                Err(mpsc::error::TrySendError::Full(pending)) => {
+                    delivery = pending;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
         }
-        // blocking_send caps startup replay memory even when the receiver is slow.
-    }
-    if !ids.is_empty() {
-        info!(
-            "took in {sent} homepages again, with their text, from {} batches of newly trusted nodes",
-            ids.len()
-        );
-    }
-    let list: Vec<String> = trusted.iter().map(ToString::to_string).collect();
-    if let Err(err) = std::fs::write(file, list.join("\n")) {
-        warn!("writing {}: {err}", file.display());
     }
 }
 
@@ -4935,8 +4946,189 @@ mod tests {
         assert_eq!(retry.entries.len(), MAX_WANTED);
     }
 
+    #[tokio::test]
+    async fn startup_replay_shutdown_cancels_both_quota_and_receiver_waits() {
+        for full_quota in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let now = now_unix();
+            let key = Keypair::generate_ed25519();
+            let crawler = key.public().to_peer_id();
+            let batches = dir.path().join("batches");
+            let mut legacy = BatchStore::open(&batches).unwrap();
+            for n in 0..6 {
+                let mut record = SiteRecord::new(format!("shutdown-replay-{n}.example"));
+                record.title = Some("Pending legacy delivery".into());
+                record.crawled_at = Some(now);
+                legacy
+                    .insert(
+                        &Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+                            .unwrap()
+                            .unwrap(),
+                    )
+                    .unwrap();
+            }
+            drop(legacy);
+            let source = Arc::new(
+                crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
+            );
+            let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+            let mut config = NetConfig::new(dir.path().to_owned());
+            config.listen.clear();
+            config.upnp = false;
+            config.local_discovery = false;
+            config.round_every = None;
+            config.trusted_peers = vec![crawler];
+            config.storage_budget = Some(budget.clone());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            if full_quota {
+                // Tighten after retention: an initially full legacy store is
+                // correctly pruned before replay and cannot exercise this wait.
+                let store = Mutex::new(
+                    BatchStore::open_retained(
+                        &batches,
+                        true,
+                        StoreLimits {
+                            own: Vec::new(),
+                            bytes: None,
+                            now,
+                            epochs: crate::store::RETAIN_EPOCHS,
+                            storage: Some(budget.clone()),
+                        },
+                    )
+                    .unwrap(),
+                );
+                let ids = store.lock().unwrap().ids_oldest_first();
+                budget.set_limit(1);
+                let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancelled = stopped.clone();
+                let (tx, rx) = mpsc::channel(RECORD_DELIVERIES);
+                let producer = tokio::task::spawn_blocking(move || {
+                    resend_pending(&store, &ids, &tx, PeerId::random(), &[crawler], &cancelled)
+                });
+                while budget.status().rejected_writes == 0 {
+                    assert!(std::time::Instant::now() < deadline);
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::timeout(std::time::Duration::from_secs(2), producer)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(rx.is_empty());
+            } else {
+                let (handle, records) = start(config, source).await.unwrap();
+                while records.len() != RECORD_DELIVERIES {
+                    assert!(std::time::Instant::now() < deadline);
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(2), handle.shutdown())
+                    .await
+                    .unwrap();
+                assert!(handle
+                    .replay_stopped
+                    .load(std::sync::atomic::Ordering::SeqCst));
+                drop(records);
+            }
+            while budget.status().reserved_bytes != 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cancelled replay retained its reservation"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(BatchStore::open(&batches).unwrap().len(), 6);
+        }
+    }
+
     #[test]
-    fn held_batches_of_a_newly_trusted_crawler_are_taken_in_again_with_their_text() {
+    fn legacy_no_ack_replay_is_bounded_and_preserves_signed_batch_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_unix();
+        let key = Keypair::generate_ed25519();
+        let crawler = key.public().to_peer_id();
+        let me = PeerId::random();
+        let batches = dir.path().join("batches");
+        let mut legacy = BatchStore::open(&batches).unwrap();
+        let mut signed = Vec::new();
+        for n in 0..12 {
+            let mut record = SiteRecord::new(format!("legacy-{n}.example"));
+            record.title = Some(format!("Legacy batch {n}"));
+            record.body_text = Some("An old-format batch without a delivery marker".into());
+            record.crawled_at = Some(now - 12 + n);
+            let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now - 12 + n)
+                .unwrap()
+                .unwrap();
+            legacy.insert(&batch).unwrap();
+            signed.push((
+                batch.id(),
+                std::fs::read(batches.join(format!("{}.json", batch.id()))).unwrap(),
+            ));
+        }
+        drop(legacy);
+        std::fs::write(dir.path().join("trusted-applied"), crawler.to_string()).unwrap();
+        let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let store = BatchStore::open_retained(
+            &batches,
+            true,
+            StoreLimits {
+                own: Vec::new(),
+                bytes: None,
+                now,
+                epochs: crate::store::RETAIN_EPOCHS,
+                storage: Some(budget.clone()),
+            },
+        )
+        .unwrap();
+        let (mut agreement, replay) = replay_agreement(&store, me, &[crawler]);
+        assert!(agreement.take_verdicts().is_empty());
+        let store = Arc::new(Mutex::new(store));
+        let (tx, mut rx) = mpsc::channel(RECORD_DELIVERIES);
+        let producer_store = store.clone();
+        let producer = std::thread::spawn(move || {
+            resend_pending(
+                &producer_store,
+                &replay,
+                &tx,
+                me,
+                &[crawler],
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while rx.len() != RECORD_DELIVERIES {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!producer.is_finished());
+        // Four channel slots plus the producer's single bounded batch.
+        assert!(
+            budget.status().reserved_bytes <= delivery_bytes(1) * (RECORD_DELIVERIES as u64 + 1)
+        );
+        let mut received = HashSet::new();
+        while let Some(delivery) = rx.blocking_recv() {
+            assert_eq!(delivery.records.len(), 1);
+            received.insert(delivery.records[0].domain.clone());
+            drop(delivery.reservation);
+            delivery.acknowledgment.acknowledge().unwrap();
+        }
+        producer.join().unwrap();
+        assert_eq!(received.len(), 12);
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            crate::storage::directory_bytes(dir.path()).unwrap()
+        );
+        for (id, bytes) in signed {
+            assert_eq!(
+                std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
+                bytes
+            );
+            assert!(store.lock().unwrap().get(&id).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn pending_trusted_delivery_is_replayed_until_durably_acknowledged() {
         let dir = tempfile::tempdir().unwrap();
         let now = now_unix();
         let key = Keypair::generate_ed25519();
@@ -4951,26 +5143,52 @@ mod tests {
             .unwrap();
         let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
         store.insert(&batch).unwrap();
-        let file = dir.path().join(TRUST_APPLIED_FILE);
-
-        // Trusted since the last start (or never noted): sent again whole.
-        let newly = newly_trusted(&file, me, &[me, crawler]);
-        assert_eq!(newly, [crawler]);
-        let (_, replay) = replay_agreement(&store, me, &[crawler], &newly);
-        assert_eq!(replay, [batch.id()]);
+        // Legacy stores have signed batches and only a crawler-wide marker.
+        // That marker cannot prove this particular delivery reached the inbox.
+        std::fs::write(dir.path().join("trusted-applied"), crawler.to_string()).unwrap();
+        store
+            .delivery_ack(&batch.id(), false)
+            .acknowledge()
+            .unwrap();
+        let (_, replay) = replay_agreement(&store, me, &[crawler]);
         let store = Mutex::new(store);
         let (tx, mut rx) = mpsc::channel(RECORD_DELIVERIES);
-        resend_trusted(&store, &replay, &tx, &file, &[crawler]);
-        let sent = rx.try_recv().unwrap().records;
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].body_text.as_deref(), Some("Handmade leather shoes"));
-
-        // Noted: the next start sends nothing again.
-        let newly = newly_trusted(&file, me, &[crawler]);
-        assert!(newly.is_empty());
-        let store = store.into_inner().unwrap();
-        let (_, replay) = replay_agreement(&store, me, &[crawler], &newly);
-        assert!(replay.is_empty());
+        resend_pending(
+            &store,
+            &replay,
+            &tx,
+            me,
+            &[crawler],
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        let sent = rx.try_recv().unwrap();
+        assert_eq!(
+            sent.records[0].body_text.as_deref(),
+            Some("Handmade leather shoes")
+        );
+        drop(sent); // Sending is not an acknowledgment.
+        resend_pending(
+            &store,
+            &replay,
+            &tx,
+            me,
+            &[crawler],
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        rx.try_recv().unwrap().acknowledgment.acknowledge().unwrap();
+        resend_pending(
+            &store,
+            &replay,
+            &tx,
+            me,
+            &[crawler],
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(rx.try_recv().is_err());
+        // A previous quorum-mode acknowledgment cannot suppress a trust upgrade.
+        let store = store.lock().unwrap();
+        assert!(store.delivery_ack(&batch.id(), true).acknowledged());
+        assert!(store.delivery_ack(&batch.id(), false).acknowledged());
     }
 
     #[test]
