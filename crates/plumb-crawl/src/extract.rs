@@ -171,8 +171,8 @@ const WORD_BREAK_ELEMENTS: &[&str] = &[
 /// - The visible text is read a block at a time (the text between two
 ///   elements that start a new line on screen), and blocks that are
 ///   boilerplate are left out (`boilerplate.rs`): notices, menus of links,
-///   and blocks of fewer than five words unless the page has nothing
-///   longer. A block repeated on the page is kept once.
+///   and generic action labels unless the page has no substantive text.
+///   Brief factual text stays. A block repeated on the page is kept once.
 /// - The search terms ([`PageMeta::terms`]) are picked from the title,
 ///   description, headings and page text with [`pick_terms`].
 pub fn extract_page_meta(base_url: &Url, html: &str) -> PageMeta {
@@ -625,8 +625,8 @@ impl<'a> Page<'a> {
 
     /// Ends the block of body text being read: it goes in the body text
     /// unless [`boilerplate::judge`] finds it boilerplate or it repeats a
-    /// block already kept; a short block is put aside, for a page with no
-    /// longer one.
+    /// block already kept; a short generic action label is put aside, for a page with no
+    /// substantive block.
     fn close_block(&mut self) {
         let block = collapse_whitespace(&self.block);
         let all_links = self.block_link_bytes * 10 >= visible_bytes(&self.block) * 9;
@@ -1504,6 +1504,36 @@ mod tests {
                 <div>Joe's Pizza</div><div>&copy; 2026</div></body></html>"#,
         );
         assert_eq!(meta.body_text.as_deref(), Some("Joe's Pizza Open daily"));
+    }
+
+    #[test]
+    fn boilerplate_fixtures_preserve_useful_text_and_remove_notices() {
+        let fixtures: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../../eval/boilerplate/fixtures.json")).unwrap();
+        for fixture in fixtures {
+            let meta = extract(
+                fixture["url"].as_str().unwrap(),
+                fixture["html"].as_str().unwrap(),
+            );
+            for phrase in fixture["must_keep"].as_array().unwrap() {
+                assert!(
+                    meta.page_text.contains(phrase.as_str().unwrap()),
+                    "{} lost {}: {}",
+                    fixture["id"],
+                    phrase,
+                    meta.page_text
+                );
+            }
+            for phrase in fixture["must_drop"].as_array().unwrap() {
+                assert!(
+                    !meta.page_text.contains(phrase.as_str().unwrap()),
+                    "{} retained {}: {}",
+                    fixture["id"],
+                    phrase,
+                    meta.page_text
+                );
+            }
+        }
     }
 
     #[test]

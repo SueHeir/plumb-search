@@ -1,7 +1,7 @@
 //! Telling a homepage's boilerplate from what it says, a block of text at a
 //! time, after the rules T5's authors used to clean the web for the C4
-//! corpus (Raffel et al. 2020, section 2.2): keep lines of at least five
-//! words, and drop lines with policy notices, JavaScript warnings or code.
+//! corpus (Raffel et al. 2020, section 2.2), with conservative rules that
+//! retain brief factual text and prose about policies and programming.
 //!
 //! A block is the text between two elements that start a new line on
 //! screen ([`crate::extract`]'s word breaks), the closest a page comes to
@@ -11,7 +11,7 @@
 //! between the sentences. C4 also requires a line to end in punctuation;
 //! headlines and product blurbs rarely do, so that rule is not used.
 
-/// Fewer words than this make a block short ([`Verdict::Short`]).
+/// Most words in a generic action label eligible for [`Verdict::Short`].
 const MIN_WORDS: usize = 5;
 
 /// Links in a block, nearly all of whose text is link text, that make it a
@@ -43,25 +43,11 @@ const NOTICE_PHRASES: &[&str] = &[
     "lorem ipsum",
 ];
 
-/// Words that, next to "javascript", make a block a warning that it should
-/// be turned on (C4 drops every line naming JavaScript; a developer site's
-/// "supercharge your JavaScript" is kept here).
-const JAVASCRIPT_WARNING_WORDS: &[&str] = &[
-    "enable",
-    "disabled",
-    "turn on",
-    "turned off",
-    "browser",
-    "required",
-    "requires",
-    "support",
-];
-
 /// What to do with a block of a page's text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verdict {
     Keep,
-    /// Fewer than [`MIN_WORDS`] words: a button, a label, a date. Used only
+    /// A short generic action label or read-time badge. Used only
     /// when the page has no longer block.
     Short,
     Drop,
@@ -71,21 +57,86 @@ pub(crate) enum Verdict {
 /// links begin in it, and `all_links` whether nearly all its text is link
 /// text.
 pub(crate) fn judge(block: &str, links: usize, all_links: bool) -> Verdict {
-    if !block.chars().any(char::is_alphabetic) || block.contains('{') || block.contains('©') {
+    // Braces and copyright signs also occur in useful prose. Only reject
+    // obvious code and standalone copyright notices.
+    let lower = block.to_lowercase();
+    let phone = block.chars().filter(char::is_ascii_digit).count() >= 7
+        && block
+            .chars()
+            .all(|c| c.is_ascii_digit() || "+-(). ".contains(c));
+    let statistic = block.chars().any(|c| c.is_ascii_digit())
+        && (block.ends_with('+') || block.starts_with(['$', '€', '£']))
+        && block
+            .chars()
+            .all(|c| c.is_ascii_digit() || "+$€£., ".contains(c));
+    if !block.chars().any(char::is_alphabetic) && !phone && !statistic {
         return Verdict::Drop;
     }
     if all_links && links >= MENU_LINKS {
         return Verdict::Drop;
     }
-    let lower = block.to_lowercase();
-    let notice = NOTICE_PHRASES.iter().any(|p| lower.contains(p))
-        || lower.starts_with("copyright ")
-        || (lower.contains("javascript")
-            && JAVASCRIPT_WARNING_WORDS.iter().any(|w| lower.contains(w)));
-    if notice {
+    let notice = NOTICE_PHRASES.iter().any(|p| lower == *p)
+        || [
+            "skip to main content",
+            "skip to content",
+            "skip navigation",
+            "your browser does not support",
+            "video not supported",
+            "upgrade your browser",
+            "lorem ipsum",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
+        || lower
+            .strip_prefix("copyright ")
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        || lower.starts_with('©')
+        || ([
+            "by continuing",
+            "we use cookies",
+            "this site",
+            "this website",
+            "our website",
+            "you agree",
+            "we and our partners",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
+            && NOTICE_PHRASES.iter().any(|p| lower.contains(p)))
+        || [
+            "enable javascript",
+            "javascript is disabled",
+            "javascript disabled",
+            "turn on javascript",
+            "javascript must be enabled",
+            "you need to enable javascript",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
+        || (lower.starts_with("please ")
+            && lower.contains("browser")
+            && lower.contains("javascript"));
+    let code = ["function ", "const ", "let ", "var ", "import ", "export "]
+        .iter()
+        .any(|p| lower.starts_with(p))
+        && (block.contains('{') || block.contains(';'));
+    if notice || code {
         return Verdict::Drop;
     }
-    if words(block) < MIN_WORDS {
+    // Brief business names, opening hours, contact details and product names
+    // remain useful beside longer paragraphs. Only generic action labels and
+    // read-time badges use the fallback for pages with no substantive text.
+    if words(block) < MIN_WORDS
+        && ([
+            "learn more",
+            "shop now",
+            "read more",
+            "find out more",
+            "click here",
+        ]
+        .contains(&lower.as_str())
+            || (lower.ends_with(" min read") && lower.starts_with(|c: char| c.is_ascii_digit())))
+    {
         return Verdict::Short;
     }
     Verdict::Keep
@@ -127,8 +178,26 @@ mod tests {
 
     #[test]
     fn buttons_labels_and_dates_are_short() {
-        for block in ["Learn more", "Shop now", "3 min read", "Motherboards"] {
+        for block in ["Learn more", "Shop now", "3 min read"] {
             assert_eq!(judge(block, 1, true), Verdict::Short, "{block}");
+        }
+    }
+
+    #[test]
+    fn brief_facts_and_prose_about_policies_code_and_copyright_are_kept() {
+        for block in [
+            "Motherboards",
+            "1800+",
+            "Privacy policy generator for small businesses and growing teams.",
+            "Copyright law explained with practical examples for artists.",
+            "Open daily",
+            "555-0100",
+            "We help businesses write a privacy policy that customers understand.",
+            "Our JavaScript tools support browser applications with accessible user interfaces.",
+            "Explore sets {a, b, c} using interactive mathematics lessons.",
+            "Learn how copyright © protects the art you create.",
+        ] {
+            assert_eq!(judge(block, 0, false), Verdict::Keep, "{block}");
         }
     }
 
@@ -162,6 +231,6 @@ mod tests {
     fn spaceless_scripts_count_by_characters() {
         let chinese = "我们为全世界的用户提供安全可靠的搜索服务。";
         assert_eq!(judge(chinese, 0, false), Verdict::Keep);
-        assert_eq!(judge("登录", 0, false), Verdict::Short);
+        assert_eq!(judge("登录", 0, false), Verdict::Keep);
     }
 }

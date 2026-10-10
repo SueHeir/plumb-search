@@ -6,6 +6,10 @@
 
 - A node hands the memory its threads free back to the system every five minutes instead of only after background work: a crawl round runs for most of an hour, and searches, the network and embedding free memory meanwhile, which sat unused until the system swapped it out. On Linux the node also keeps glibc's allocator to four arenas instead of up to eight per CPU, each keeping what its own threads freed (half an hour after a restart, plumbsearch.org held about 3.5 GB in 75 arena heaps), and gives buffers of 4 MB or more back as soon as they are freed. Building an index of 2.8 million sites then peaks at 1.17 GB instead of 1.31 GB and takes no longer. `MALLOC_ARENA_MAX` and `MALLOC_MMAP_THRESHOLD_` still override these.
 
+### Crawling
+
+- Homepage text is read in blocks. Cookie notices, browser warnings, obvious code and link menus are left out, and repeated blocks are kept once. Brief business details, mathematical prose and descriptions of policy or JavaScript products remain. Generic action labels are used only when no substantive text is available. Crawl version 2 makes nodes read older homepages again, best-known first.
+
 ## 0.2.1
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.2.1), and the Docker image is `ghcr.io/sueheir/plumb-search:0.2.1` (also `:0.2` and `:latest`).
@@ -154,7 +158,6 @@ Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/relea
 
 ### Crawling
 
-- Less boilerplate in homepage text: crawlers read a homepage's text a block at a time and leave out what the T5 authors' rules for cleaning C4 (Google's "Exploring the Limits of Transfer Learning") would: cookie and policy notices, copyright lines, "enable JavaScript" warnings, code, menus made of links in plain `<div>`s, and buttons, labels and dates under five words ("Learn more", "3 min read") unless the page has nothing longer. A block repeated on the page is kept once. The text left is what gets indexed and embedded. The crawl version goes up to 2, so nodes read the best-known sites anew first.
 - New sites are held back: crawls refresh the sites a node holds and no longer add the domains they find linked, and records other nodes share only refresh sites already held, while the network makes the sites it has searchable first. Filling free space from trusted nodes, the seed and searches still add sites the network knows. `plumb run --take-new-sites` adds new sites as before.
 - Each crawl round first fetches up to 500 well-known or official sites that no crawl has reached yet, whether or not they are in the node's share, so sites like weather.com and state.gov are read sooner. They come out of the round's usual budget.
 - Words from the whole homepage: each crawl picks the 30 words that best describe a site from up to 1,000 words of its homepage, and searches match them, so "team chat" can find a site whose homepage says so but whose name does not.
