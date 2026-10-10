@@ -607,6 +607,9 @@ fn inspect(root: &Path, request: &Request, report: &mut Report) -> Result<(), Re
     }
     guard.check(&mut report.counts)?;
     check_hashes(&directory, &request.binding)?;
+    #[cfg(test)]
+    let guard = tests::simulate_final_verification_elapsed(guard);
+    guard.check(&mut report.counts)?;
     for target in &mut report.targets {
         target.claim = if !target.matches.is_empty() {
             Claim::IndexedTargetPresent
@@ -648,7 +651,24 @@ mod tests {
     use super::*;
     use crate::pages::{build_page_index, Page};
     use plumb_core::article::Article;
+    use std::cell::Cell;
+    use std::time::Duration;
     use tantivy::merge_policy::NoMergePolicy;
+
+    thread_local! {
+        static FINAL_VERIFICATION_ELAPSED_MS: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    // Advance only this test thread's clock after successful final metadata
+    // verification. No sleep, slow filesystem or production hook is needed.
+    pub(super) fn simulate_final_verification_elapsed(mut guard: Guard) -> Guard {
+        FINAL_VERIFICATION_ELAPSED_MS.with(|elapsed| {
+            if let Some(ms) = elapsed.take() {
+                guard.started = Instant::now() - Duration::from_millis(ms);
+            }
+        });
+        guard
+    }
 
     fn public_page(title: &str, url: &str) -> Page {
         Page::from_reference(Article {
@@ -833,6 +853,31 @@ mod tests {
         assert_eq!(report.reason, Some(Reason::BindingChanged));
         assert_eq!(report.targets[0].claim, Claim::Inconclusive);
         assert!(report.targets[0].matches.is_empty());
+    }
+
+    #[test]
+    fn final_metadata_verification_over_budget_clears_a_live_target_match() {
+        let url = "https://public.example/page";
+        let (_dir, root) = fixture(vec![public_page("Public title", url)]);
+        let req = request(&root, url, "Public title");
+        let before = fingerprint(&root);
+        let control = run(&root, &req);
+        assert!(control.complete, "{:?}", control.reason);
+        assert_eq!(control.targets[0].claim, Claim::IndexedTargetPresent);
+
+        // Simulate metadata verification pushing an otherwise successful
+        // lookup past the wall budget, without spending 15 seconds in a test.
+        FINAL_VERIFICATION_ELAPSED_MS.with(|elapsed| elapsed.set(Some(MAX_WALL_MS as u64 + 1)));
+        let report = run(&root, &req);
+        FINAL_VERIFICATION_ELAPSED_MS.with(|elapsed| elapsed.set(None));
+        assert_eq!(report.counts.stored_documents_read, 1);
+        assert!(report.counts.elapsed_ms > MAX_WALL_MS);
+        assert!(!report.complete);
+        assert_eq!(report.reason, Some(Reason::ResourceStop));
+        assert_eq!(report.targets[0].claim, Claim::Inconclusive);
+        assert!(report.targets[0].matches.is_empty());
+        assert!(!report.global_url_absence_proven);
+        assert_eq!(before, fingerprint(&root));
     }
 
     #[test]
