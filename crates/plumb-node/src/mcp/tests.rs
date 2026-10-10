@@ -122,6 +122,14 @@ fn lists_six_read_only_tools_with_schemas() {
         assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
         assert!(tool["description"].as_str().unwrap().len() > 40, "{tool}");
     }
+    // What a v0.2.0 node takes is still all that is required.
+    let search = &tools[2]["inputSchema"];
+    assert_eq!(search["required"], json!(["query"]));
+    assert_eq!(search["properties"]["kind"]["enum"][0], "site");
+    assert_eq!(search["properties"]["site"]["type"], "string");
+    let facts = &tools[5]["inputSchema"];
+    assert_eq!(facts["required"], json!(["subject"]));
+    assert_eq!(facts["properties"]["more_subjects"]["type"], "array");
 }
 
 #[test]
@@ -902,7 +910,7 @@ fn search_is_in_english_unless_asked() {
 }
 
 /// Finds Wikipedia's article on Australia, with its facts, for any query
-/// naming it.
+/// naming it, and Mount Everest's for any naming that.
 struct Australia;
 
 impl SearchBackend for Australia {
@@ -918,26 +926,37 @@ impl SearchBackend for Australia {
     ) -> Result<SearchResults> {
         use plumb_core::facts::{Fact, FactKind};
         let mut pages = Vec::new();
-        if query.to_lowercase().contains("australia") {
-            let page = plumb_index::pages::Page::from_article(
-                "en",
-                plumb_core::article::Article {
-                    title: "Australia".into(),
-                    description: Some("country in Oceania".into()),
-                    item: Some("Q408".into()),
-                    facts: vec![
-                        Fact {
-                            kind: FactKind::Capital,
-                            value: "Canberra".into(),
-                        },
-                        Fact {
-                            kind: FactKind::Population,
-                            value: "27204809;2024".into(),
-                        },
-                    ],
-                    ..Default::default()
-                },
-            );
+        let article = match query.to_lowercase() {
+            query if query.contains("australia") => Some(plumb_core::article::Article {
+                title: "Australia".into(),
+                description: Some("country in Oceania".into()),
+                item: Some("Q408".into()),
+                facts: vec![
+                    Fact {
+                        kind: FactKind::Capital,
+                        value: "Canberra".into(),
+                    },
+                    Fact {
+                        kind: FactKind::Population,
+                        value: "27204809;2024".into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            query if query.contains("everest") => Some(plumb_core::article::Article {
+                title: "Mount Everest".into(),
+                description: Some("highest mountain on Earth".into()),
+                item: Some("Q513".into()),
+                facts: vec![Fact {
+                    kind: FactKind::Elevation,
+                    value: "8848.86".into(),
+                }],
+                ..Default::default()
+            }),
+            _ => None,
+        };
+        if let Some(article) = article {
+            let page = plumb_index::pages::Page::from_article("en", article);
             pages.push(plumb_index::pages::PlacedPage {
                 hit: plumb_index::pages::PageHit {
                     page,
@@ -1000,6 +1019,24 @@ fn facts_come_with_the_wikidata_item_and_property_they_are_from() {
         assert_eq!(facts.len(), 1, "{about}: {answer}");
         assert_eq!(facts[0]["kind"], "capital");
     }
+    // A mountain's height is its elevation; a country has neither.
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "Mount Everest", "about": "height" }),
+    );
+    let facts = answer["result"]["structuredContent"]["facts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(facts.len(), 1, "{answer}");
+    assert_eq!(facts[0]["kind"], "elevation");
+    assert_eq!(facts[0]["property"], "P2044");
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "australia", "about": "height" }),
+    );
+    assert_eq!(answer["result"]["structuredContent"]["found"], false);
     // A kind it has no fact of, a kind it never keeps, a subject it lacks.
     let answer = call(
         &mcp,
@@ -1020,6 +1057,215 @@ fn facts_come_with_the_wikidata_item_and_property_they_are_from() {
         answer["result"]["content"][0]["text"],
         "Plumb has no facts about Atlantis."
     );
+
+    // Several subjects in one call, each answered as alone.
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "Australia", "about": "capital", "more_subjects": ["Atlantis", "australia"] }),
+    );
+    let data = &answer["result"]["structuredContent"];
+    assert_eq!(data["facts"][0]["value"], "Canberra", "{answer}");
+    assert_eq!(data["more"][0]["found"], false);
+    assert_eq!(data["more"][1]["facts"][0]["value"], "Canberra");
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        "Australia, country in Oceania https://en.wikipedia.org/wiki/Australia\n\
+         Capital of Australia: Canberra [Wikidata Q408 P36]\n\
+         Source: https://www.wikidata.org/wiki/Q408\n\
+         Plumb has no facts about Atlantis.\n\
+         Australia, country in Oceania https://en.wikipedia.org/wiki/Australia\n\
+         Capital of Australia: Canberra [Wikidata Q408 P36]\n\
+         Source: https://www.wikidata.org/wiki/Q408"
+    );
+    // Without more_subjects the answer has no "more".
+    let answer = call(&mcp, "facts", json!({ "subject": "Australia" }));
+    assert!(answer["result"]["structuredContent"].get("more").is_none());
+    let many: Vec<String> = (0..MAX_FACT_SUBJECTS)
+        .map(|n| format!("place {n}"))
+        .collect();
+    for more in [json!(many), json!("Canada")] {
+        let answer = call(
+            &mcp,
+            "facts",
+            json!({ "subject": "Australia", "more_subjects": more }),
+        );
+        assert_eq!(answer["error"]["code"], INVALID_PARAMS, "{answer}");
+    }
+}
+
+/// Keeps an article, a question and a repository about tokio, and notes
+/// each query it is asked.
+#[derive(Default)]
+struct Shelves(std::sync::Mutex<Vec<String>>);
+
+fn shelf() -> Vec<Page> {
+    use plumb_core::article::Article;
+    vec![
+        Page::from_article(
+            "en",
+            Article {
+                title: "Tokio (software)".into(),
+                ..Default::default()
+            },
+        ),
+        Page::from_question(Article {
+            title: "How do I spawn a task in tokio?".into(),
+            item: Some("123".into()),
+            ..Default::default()
+        }),
+        Page::from_repo(Article {
+            title: "tokio-rs/tokio".into(),
+            ..Default::default()
+        }),
+    ]
+}
+
+fn shelved(page: Page) -> plumb_index::pages::PageHit {
+    plumb_index::pages::PageHit {
+        page,
+        score: 0.5,
+        named: false,
+        popularity: 0.5,
+        whole: false,
+        learned: None,
+    }
+}
+
+impl SearchBackend for Shelves {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok(vec![hit("tokio.rs", 1.0, 0.5, false)])
+    }
+
+    fn search_full(
+        &self,
+        query: &str,
+        _limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        self.0.lock().unwrap().push(query.to_string());
+        let ops = plumb_core::Operators::parse(query);
+        let pages = shelf()
+            .into_iter()
+            .map(|page| PlacedPage {
+                hit: shelved(page),
+                under: None,
+                at: 1,
+            })
+            .collect();
+        Ok(SearchResults {
+            hits: vec![hit("tokio.rs", 1.0, 0.5, false)],
+            pages,
+            site_search: ops.sites.first().map(|site| plumb_index::SiteSearch {
+                domain: site.clone(),
+                terms: ops.site_terms.clone(),
+                url: format!("https://{site}/search?q={}", ops.site_terms),
+            }),
+            spelling: None,
+        })
+    }
+
+    fn pages_of(
+        &self,
+        query: &str,
+        limit: usize,
+        _options: &SearchOptions,
+        docs: bool,
+        keep: &dyn Fn(&Page) -> bool,
+    ) -> Vec<plumb_index::pages::PageHit> {
+        self.0.lock().unwrap().push(query.to_string());
+        if docs {
+            self.0.lock().unwrap().push(format!("docs: {query}"));
+        }
+        shelf()
+            .into_iter()
+            .filter(|page| keep(page))
+            .take(limit)
+            .map(shelved)
+            .collect()
+    }
+
+    fn num_docs(&self) -> u64 {
+        1
+    }
+}
+
+#[test]
+fn search_lists_one_kind_of_result_alone() {
+    let shelves = Arc::new(Shelves::default());
+    let mcp = Mcp::new(Arc::clone(&shelves) as Arc<dyn SearchBackend>, None);
+    let search = |args: Value| call(&mcp, "search", args)["result"].clone();
+
+    let result = search(json!({ "query": "tokio spawn", "kind": "question" }));
+    let data = &result["structuredContent"];
+    assert_eq!(data["kind"], "question", "{result}");
+    assert_eq!(data["results"], json!([]));
+    assert_eq!(data["pages"].as_array().unwrap().len(), 1, "{data}");
+    assert_eq!(data["pages"][0]["set"], "stackoverflow");
+    assert_eq!(
+        result["content"][0]["text"],
+        "1. [Stack Overflow] How do I spawn a task in tokio? https://stackoverflow.com/questions/123"
+    );
+    // As a model may write it.
+    let data = &search(json!({ "query": "tokio", "kind": "Repos" }))["structuredContent"];
+    assert_eq!(data["pages"][0]["url"], "https://github.com/tokio-rs/tokio");
+    let result = search(json!({ "query": "tokio", "kind": "paper" }));
+    assert_eq!(
+        result["content"][0]["text"],
+        "No results of kind paper for \"tokio\"."
+    );
+
+    // Sites alone: no pages among them.
+    let data = &search(json!({ "query": "tokio", "kind": "site" }))["structuredContent"];
+    assert_eq!(data["results"][0]["domain"], "tokio.rs", "{data}");
+    assert_eq!(data["pages"], json!([]));
+    // With neither, as before.
+    let data = &search(json!({ "query": "tokio" }))["structuredContent"];
+    assert!(!data["pages"].as_array().unwrap().is_empty(), "{data}");
+    assert!(data.get("kind").is_none());
+}
+
+#[test]
+fn search_keeps_to_the_site_asked_for() {
+    let shelves = Arc::new(Shelves::default());
+    let mcp = Mcp::new(Arc::clone(&shelves) as Arc<dyn SearchBackend>, None);
+    let search = |args: Value| call(&mcp, "search", args);
+
+    let answer = search(json!({ "query": "spawn", "site": "github.com" }));
+    assert_eq!(
+        answer["result"]["structuredContent"]["query"],
+        "spawn site:github.com"
+    );
+    // A URL names its host; a kind keeps to the site too, with the link
+    // into the site's own search for pages Plumb lacks.
+    let answer =
+        search(json!({ "query": "spawn", "site": "https://docs.rs/tokio", "kind": "docs" }));
+    let data = &answer["result"]["structuredContent"];
+    assert_eq!(data["query"], "spawn site:docs.rs", "{answer}");
+    assert_eq!(data["site_search"]["domain"], "docs.rs");
+    assert!(answer["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Search docs.rs itself for \"spawn\""));
+    let asked = shelves.0.lock().unwrap().clone();
+    assert!(
+        asked.contains(&"spawn site:docs.rs".to_string()),
+        "{asked:?}"
+    );
+    // Docs pages are searched for as such.
+    assert!(
+        asked.contains(&"docs: spawn site:docs.rs".to_string()),
+        "{asked:?}"
+    );
+
+    for args in [
+        json!({ "query": "tokio", "kind": "video" }),
+        json!({ "query": "tokio", "site": "docs.rs github.com" }),
+        json!({ "query": "tokio", "site": "github" }),
+    ] {
+        let answer = search(args.clone());
+        assert_eq!(answer["error"]["code"], INVALID_PARAMS, "{args}: {answer}");
+    }
 }
 
 #[test]
