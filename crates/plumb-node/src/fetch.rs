@@ -901,18 +901,91 @@ pub fn run_facts(args: FetchFactsArgs) -> Result<()> {
             path.display()
         );
     }
+    let report = args.report.unwrap_or_else(|| {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".facts.json");
+        std::path::PathBuf::from(name)
+    });
+    anyhow::ensure!(
+        report != path
+            && std::fs::canonicalize(&report).ok() != Some(std::fs::canonicalize(&path)?),
+        "the facts report must not replace the articles file"
+    );
+    use plumb_ingest::item_facts::{self, FactRetry, FactsCompletion};
     let wanted = plumb_ingest::profiles::items_in_order(&path)?;
     info!("{} articles have a Wikidata item", wanted.len());
+    let pairs = if let Some(retry) = &args.retry_facts {
+        let completion: FactsCompletion = serde_json::from_slice(&std::fs::read(retry)?)
+            .context("reading the facts completion report")?;
+        Some(completion.retry)
+    } else if !args.items.is_empty() {
+        let kinds = if args.properties.is_empty() {
+            plumb_core::facts::KINDS.to_vec()
+        } else {
+            args.properties
+                .iter()
+                .map(|key| {
+                    plumb_core::facts::FactKind::from_key(key)
+                        .with_context(|| format!("unsupported fact property {key:?}"))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        Some(
+            args.items
+                .iter()
+                .flat_map(|item| {
+                    kinds.iter().map(|&kind| FactRetry {
+                        item: item.clone(),
+                        kind,
+                    })
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
+    if let Some(pairs) = &pairs {
+        let known: std::collections::HashSet<_> = wanted.iter().collect();
+        anyhow::ensure!(
+            pairs.iter().all(|pair| known.contains(&pair.item)),
+            "targeted facts include an item absent from the articles file"
+        );
+    }
     let client = download::http_client()?;
-    let deep = (!args.wikidata_only).then_some(args.deep_endpoint.as_str());
-    let facts = block_on(plumb_ingest::item_facts::fetch_facts(
-        &client,
-        download::WIKIDATA_SPARQL_URL,
-        deep,
-        download::WikidataPacing::default(),
-        &wanted,
-    ))??;
-    let added = plumb_ingest::item_facts::add_facts_to_file(&path, &facts)?;
+    let fetched = match pairs {
+        Some(pairs) => block_on(item_facts::fetch_targeted_facts(
+            &client,
+            download::WIKIDATA_SPARQL_URL,
+            download::WikidataPacing::default(),
+            &pairs,
+        ))??,
+        None => {
+            let deep = (!args.wikidata_only).then_some(args.deep_endpoint.as_str());
+            block_on(item_facts::fetch_facts_reported(
+                &client,
+                download::WIKIDATA_SPARQL_URL,
+                deep,
+                download::WikidataPacing::default(),
+                &wanted,
+            ))??
+        }
+    };
+    let report_dir = report
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut report_part = tempfile::NamedTempFile::new_in(report_dir)?;
+    serde_json::to_writer_pretty(report_part.as_file_mut(), &fetched.completion)?;
+    report_part.as_file().sync_all()?;
+    report_part
+        .persist(&report)
+        .with_context(|| format!("saving {}", report.display()))?;
+    let added = item_facts::apply_fetched_facts(&path, &fetched)?;
+    info!(
+        "facts completion: {} failed item/property pairs; report {}",
+        fetched.completion.retry.len(),
+        report.display()
+    );
     info!(
         "{}: {} of {} articles have facts, {} in all",
         path.display(),

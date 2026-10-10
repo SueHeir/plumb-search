@@ -769,6 +769,19 @@ pub struct FetchFactsArgs {
     /// The articles file to add them to instead.
     #[arg(long, value_name = "PATH")]
     pub articles: Option<PathBuf>,
+    /// Repair just these Wikidata IDs, without scanning worldwide facts.
+    #[arg(long, value_name = "QID", num_args = 1.., conflicts_with = "retry_facts")]
+    pub items: Vec<String>,
+    /// Property keys for --items (default: every supported property).
+    #[arg(long, value_name = "KEY", num_args = 1.., requires = "items")]
+    pub properties: Vec<String>,
+    /// Retry the failed item/property pairs of a previous completion JSON.
+    #[arg(long, value_name = "PATH", conflicts_with = "items")]
+    pub retry_facts: Option<PathBuf>,
+    /// Save completion/provenance and retry pairs here (default: next to
+    /// the articles file, with .facts.json appended).
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
     /// Where to read on when Wikidata's query service stops answering a
     /// kind's deep pages (it times out on them): by default QLever's copy
     /// of Wikidata.
@@ -1474,6 +1487,61 @@ mod tests {
         assert!(parse(&["search", "--index", "idx"]).is_err());
         assert!(parse(&["search", "--index", "idx", "--limit", "0", "x"]).is_err());
         assert!(parse(&["search", "--index", "idx", "--alpha", "1.5", "x"]).is_err());
+    }
+
+    #[test]
+    fn facts_targeted_flags_require_an_explicit_item_list() {
+        let cli = parse(&[
+            "plumb",
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--items",
+            "Q17",
+            "Q408",
+            "--properties",
+            "population",
+            "capital",
+        ])
+        .unwrap();
+        let Command::FetchFacts(args) = cli.command else {
+            panic!("expected fetch-facts");
+        };
+        assert_eq!(args.items, ["Q17", "Q408"]);
+        assert_eq!(args.properties, ["population", "capital"]);
+        assert!(parse(&[
+            "plumb",
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--properties",
+            "population"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "plumb",
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--items",
+            "Q17",
+            "--retry-facts",
+            "report.json"
+        ])
+        .is_err());
+        let cli = parse(&[
+            "plumb",
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--retry-facts",
+            "report.json",
+        ])
+        .unwrap();
+        let Command::FetchFacts(args) = cli.command else {
+            panic!("expected fetch-facts");
+        };
+        assert_eq!(args.retry_facts, Some(PathBuf::from("report.json")));
     }
 
     #[test]
