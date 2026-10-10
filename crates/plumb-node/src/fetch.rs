@@ -496,6 +496,11 @@ fn fetch_sites<S: Copy + Send + std::fmt::Debug + 'static>(
     let policy = cache::Policy {
         max_age: args.cache_max_age_days.saturating_mul(86_400),
         force: args.force_refresh,
+        extraction: if matches!(prefix, "docs" | "reference") {
+            plumb_crawl::InnerPageExtraction::Docs
+        } else {
+            plumb_crawl::InnerPageExtraction::Compact
+        },
     };
     let sites: Vec<_> = sites
         .into_iter()

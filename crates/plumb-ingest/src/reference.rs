@@ -98,6 +98,10 @@ pub fn reference_articles(site: &ReferenceSite, docs: &[FetchedDoc]) -> Vec<Arti
             item: Some(doc.url.clone()),
             views: site.weight * VIEWS_PER_WEIGHT / depth.max(1) as u64,
             sections: useful_sections(&doc.sections),
+            search: doc
+                .search
+                .as_ref()
+                .and_then(plumb_core::article::SearchContent::bounded),
             ..Article::default()
         });
     }

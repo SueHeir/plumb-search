@@ -12,7 +12,7 @@ use tracing::{info, warn};
 const SCHEMA: u32 = 1;
 /// Bump when extraction, passage/symbol limits or title policies change.
 /// Kept here so richer FetchedDoc fields can be added independently.
-pub(super) const EXTRACTOR_VERSION: &str = "inner-pages-2";
+pub(super) const EXTRACTOR_VERSION: &str = "inner-pages-3-rich-language";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Envelope {
@@ -35,6 +35,7 @@ pub(super) struct Envelope {
 pub(super) struct Policy {
     pub max_age: u64,
     pub force: bool,
+    pub extraction: plumb_crawl::InnerPageExtraction,
 }
 
 pub(super) struct Cached {
@@ -58,7 +59,12 @@ pub(super) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn fingerprint(target: &SitePagesTarget, profile: &str, cfg: &CrawlConfig) -> String {
+fn fingerprint(
+    target: &SitePagesTarget,
+    profile: &str,
+    cfg: &CrawlConfig,
+    extraction: plumb_crawl::InnerPageExtraction,
+) -> String {
     // Debug of a static profile is deterministic and includes roots, title
     // cleaning names, aliases, weights and caps. Avoid environment/proxy secrets.
     digest(
@@ -66,6 +72,8 @@ fn fingerprint(target: &SitePagesTarget, profile: &str, cfg: &CrawlConfig) -> St
             target,
             profile,
             EXTRACTOR_VERSION,
+            plumb_crawl::DOCS_EXTRACTOR_VERSION,
+            extraction,
             &cfg.user_agent,
             cfg.max_bytes,
             cfg.max_redirects,
@@ -129,7 +137,7 @@ pub(super) async fn fetch(
     path: Option<&Path>,
     policy: Policy,
 ) -> Cached {
-    let fingerprint = fingerprint(target, profile, cfg);
+    let fingerprint = fingerprint(target, profile, cfg, policy.extraction);
     if let Some(envelope) = path
         .and_then(read)
         .filter(|e| fresh(e, key, &fingerprint, policy, now()))
@@ -143,7 +151,8 @@ pub(super) async fn fetch(
             reused: true,
         };
     }
-    let result = plumb_crawl::fetch_site_pages(target, cfg).await;
+    let result =
+        plumb_crawl::fetch_site_pages_with_extraction(target, cfg, policy.extraction).await;
     // Allowed skips (robots, non-HTML and duplicates) are recorded but do not
     // mean an interrupted run. Network/bot/HTTP failures cannot replace a host.
     let failed = result.outcomes.iter().any(|o| {
@@ -175,6 +184,8 @@ pub(super) async fn fetch(
                 description: page.meta.description,
                 text: page.meta.body_text,
                 sections: page.meta.sections,
+                search: page.meta.search,
+                language: page.meta.language,
             })
             .collect(),
     };
@@ -220,7 +231,7 @@ mod tests {
                 async move {
                     count.fetch_add(1, Ordering::SeqCst);
                     let status = if fail.load(Ordering::SeqCst) { axum::http::StatusCode::SERVICE_UNAVAILABLE } else { axum::http::StatusCode::OK };
-                    (status, Html("<html><head><title>Testing guide</title></head><body><p>How to test a package with fixtures.</p></body></html>"))
+                    (status, Html("<html lang=\"en\"><head><title>Testing guide</title></head><body><main><h2 id=\"test-fixtures\">set_multiplayer_authority</h2><p>How to test a package with fixtures and verify multiplayer authority.</p></main></body></html>"))
                 }
             }));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -241,9 +252,15 @@ mod tests {
         let policy = Policy {
             max_age: 100,
             force: false,
+            extraction: plumb_crawl::InnerPageExtraction::Docs,
         };
         let first = fetch("test", &target, "policy-v1", &cfg, Some(&path), policy).await;
         assert!(first.envelope.complete && !first.reused);
+        assert_eq!(first.envelope.docs[0].language.as_deref(), Some("en"));
+        assert!(first.envelope.docs[0].search.as_ref().is_some_and(|s| s
+            .symbols
+            .iter()
+            .any(|s| s.identifier == "set_multiplayer_authority")));
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         let second = fetch("test", &target, "policy-v1", &cfg, Some(&path), policy).await;
         assert!(second.reused);
@@ -276,6 +293,7 @@ mod tests {
         let policy = Policy {
             max_age: 100,
             force: false,
+            extraction: plumb_crawl::InnerPageExtraction::Docs,
         };
         assert!(!fresh(&e, "python", "config", policy, 1000));
         e.schema = SCHEMA;
@@ -314,13 +332,56 @@ mod tests {
             ..Default::default()
         };
         let mut cfg = CrawlConfig::default();
-        let first = fingerprint(&target, "title-cleaning-v1", &cfg);
+        assert_ne!(
+            fingerprint(
+                &target,
+                "title-cleaning-v1",
+                &cfg,
+                plumb_crawl::InnerPageExtraction::Compact
+            ),
+            fingerprint(
+                &target,
+                "title-cleaning-v1",
+                &cfg,
+                plumb_crawl::InnerPageExtraction::Docs
+            )
+        );
+        let first = fingerprint(
+            &target,
+            "title-cleaning-v1",
+            &cfg,
+            plumb_crawl::InnerPageExtraction::Docs,
+        );
         target.max_pages = 11;
-        assert_ne!(first, fingerprint(&target, "title-cleaning-v1", &cfg));
+        assert_ne!(
+            first,
+            fingerprint(
+                &target,
+                "title-cleaning-v1",
+                &cfg,
+                plumb_crawl::InnerPageExtraction::Docs
+            )
+        );
         target.max_pages = 10;
         cfg.max_bytes += 1;
-        assert_ne!(first, fingerprint(&target, "title-cleaning-v1", &cfg));
+        assert_ne!(
+            first,
+            fingerprint(
+                &target,
+                "title-cleaning-v1",
+                &cfg,
+                plumb_crawl::InnerPageExtraction::Docs
+            )
+        );
         cfg.max_bytes -= 1;
-        assert_ne!(first, fingerprint(&target, "title-cleaning-v2", &cfg));
+        assert_ne!(
+            first,
+            fingerprint(
+                &target,
+                "title-cleaning-v2",
+                &cfg,
+                plumb_crawl::InnerPageExtraction::Docs
+            )
+        );
     }
 }
