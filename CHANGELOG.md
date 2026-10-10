@@ -6,6 +6,10 @@
 
 - A node hands the memory its threads free back to the system every five minutes instead of only after background work: a crawl round runs for most of an hour, and searches, the network and embedding free memory meanwhile, which sat unused until the system swapped it out. On Linux the node also keeps glibc's allocator to four arenas instead of up to eight per CPU, each keeping what its own threads freed (half an hour after a restart, plumbsearch.org held about 3.5 GB in 75 arena heaps), and gives buffers of 4 MB or more back as soon as they are freed. Building an index of 2.8 million sites then peaks at 1.17 GB instead of 1.31 GB and takes no longer. `MALLOC_ARENA_MAX` and `MALLOC_MMAP_THRESHOLD_` still override these.
 
+### Crawling
+
+- Homepage text is read in blocks. Cookie notices, browser warnings, obvious code and link menus are left out, and repeated blocks are kept once. Brief business details, mathematical prose and descriptions of policy or JavaScript products remain. Generic action labels are used only when no substantive text is available. Crawl version 2 makes nodes read older homepages again, best-known first. Inner-page fetch caches also become stale so the next fetch uses the changed text extraction.
+
 ## 0.2.1
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.2.1), and the Docker image is `ghcr.io/sueheir/plumb-search:0.2.1` (also `:0.2` and `:latest`).

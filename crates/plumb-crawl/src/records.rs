@@ -23,8 +23,10 @@ use crate::{CrawlOutcome, CrawlResult};
 /// 0 is how crawlers read homepages up to 2026-10-06 (title, description,
 /// headings, the first 100 words of visible text, key pages, links); 1
 /// adds the search terms picked from the whole page
-/// ([`crate::pick_terms`]).
-pub const CRAWL_VERSION: u32 = 1;
+/// ([`crate::pick_terms`]); 2 leaves boilerplate (cookie notices, menus
+/// made of links, "Learn more" buttons) out of the visible text
+/// (`boilerplate.rs`).
+pub const CRAWL_VERSION: u32 = 2;
 
 /// Turns crawl results into records to merge into a
 /// [`plumb_core::RecordSet`]: one record per fetched homepage (url, title,
