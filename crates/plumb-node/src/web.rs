@@ -5245,7 +5245,7 @@ mod tests {
         let output: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(output["assembled"]["rows"][3]["site"]["url"], site.url);
         assert!(output["assembled"]["rows"][3].get("navigation").is_none());
-        assert!(output["pages"].as_array().unwrap().is_empty());
+        assert!(output.get("pages").is_none());
         let mcp = crate::mcp::Mcp::new(backend, None);
         let output = mcp
             .search(&query, Some(10), &SearchOptions::default())
