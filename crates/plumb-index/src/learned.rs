@@ -380,7 +380,11 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
     let mut order = model.order(query, &signals);
     // The model may reorder within a relevance tier, but an unsupported
     // domain word cannot regain top placement because it is popular.
+    // A named page's corroborated official-site identity is also query
+    // evidence. Account for it without rewriting the original site-query
+    // diagnostics or adding learned input features.
     // Pages keep their model positions; only the site slots change.
+    let page_site = crate::pages::named_page_site(hits, placed.iter().map(|page| &page.hit));
     let mut sites: Vec<_> = order
         .iter()
         .copied()
@@ -388,10 +392,13 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
         .collect();
     sites.sort_by_key(|&row| {
         std::cmp::Reverse(match rows[row] {
-            Listed::Site(i) => hits[i]
-                .query_evidence
-                .as_ref()
-                .map_or(1, |evidence| evidence.relevance_tier),
+            Listed::Site(i) => {
+                let tier = hits[i]
+                    .query_evidence
+                    .as_ref()
+                    .map_or(1, |evidence| evidence.relevance_tier);
+                tier.max(u8::from(page_site == Some(i)))
+            }
             Listed::Page(_) => unreachable!(),
         })
     });
@@ -919,6 +926,103 @@ mod tests {
             popularity: 0.9,
             whole: false,
             learned: None,
+        }
+    }
+
+    fn evidence(domain: &str, relevance_tier: u8) -> crate::CandidateEvidence {
+        crate::CandidateEvidence {
+            domain: domain.into(),
+            lexical_score: 0.3,
+            semantic_closeness: None,
+            query_coverage: 0.3,
+            substantive_coverage: 0.3,
+            remaining_coverage: 0.3,
+            full_name: false,
+            typed_domain: false,
+            partial_name_words: 1,
+            relevance_tier,
+            source_quality: None,
+        }
+    }
+
+    // A constant model preserves the input order, isolating the guard's
+    // effective tier from whatever the learned model happens to favor.
+    fn tied_model() -> Model {
+        Model {
+            features: FEATURES.iter().map(|name| (*name).into()).collect(),
+            trees: Vec::new(),
+            net: None,
+        }
+    }
+
+    #[test]
+    fn named_page_identity_contributes_to_the_effective_relevance_tier() {
+        for repository in [false, true] {
+            let mut rival = site("music.example", 1.0, false);
+            rival.query_evidence = Some(evidence(&rival.domain, 1));
+            let mut official = site("youtube.com", 0.9, repository);
+            official.official = !repository;
+            official.query_evidence = Some(evidence(&official.domain, 0));
+            let original = official.query_evidence.clone();
+            let mut named = article("YouTube Music", true);
+            named.page.site = Some(official.domain.clone());
+            if repository {
+                named.page.set = crate::pages::GITHUB_SET.into();
+            } else {
+                named.page.item = Some("Q28404534".into());
+            }
+            let mut hits = vec![rival, official];
+            crate::pages::lift_named_sites(&mut hits, &[named.clone()]);
+            assert_eq!(hits[0].domain, "youtube.com");
+            let mut placed = place_pages("youtube music", &hits, vec![named]);
+            reorder(&tied_model(), "youtube music", &mut hits, &mut placed);
+            assert_eq!(hits[0].domain, "youtube.com", "repository={repository}");
+            // Page identity changes guard eligibility, not the original
+            // site-query diagnostics or the learned feature contract.
+            assert_eq!(hits[0].query_evidence, original);
+            assert_eq!(placed[0].under.as_deref(), Some("youtube.com"));
+        }
+    }
+
+    #[test]
+    fn unconfirmed_page_identity_does_not_raise_the_relevance_tier() {
+        for control in [
+            "partial",
+            "unofficial",
+            "namesake",
+            "film",
+            "borrowed",
+            "repo",
+        ] {
+            let mut weak = site("youtube.com", 1.0, false);
+            weak.official = true;
+            weak.query_evidence = Some(evidence(&weak.domain, 0));
+            let original = weak.query_evidence.clone();
+            let mut supported = site("music.example", 0.9, false);
+            supported.query_evidence = Some(evidence(&supported.domain, 1));
+            let mut named = article("YouTube Music", true);
+            named.page.item = Some("Q28404534".into());
+            named.page.site = Some(weak.domain.clone());
+            match control {
+                "partial" => named.named = false,
+                "unofficial" => weak.official = false,
+                "namesake" => named.page.site = Some("youtube-music.example".into()),
+                "film" => named.page.set = crate::pages::FILMS_SET.into(),
+                "borrowed" => {
+                    weak.title = Some(named.page.title.clone());
+                    named.page.site = None;
+                }
+                "repo" => {
+                    named.page.set = crate::pages::GITHUB_SET.into();
+                    named.page.item = None;
+                }
+                _ => unreachable!(),
+            }
+            let mut hits = vec![weak, supported];
+            let mut placed = place_pages("youtube music", &hits, vec![named]);
+            reorder(&tied_model(), "youtube music", &mut hits, &mut placed);
+            assert_eq!(hits[0].domain, "music.example", "{control}");
+            assert_eq!(hits[1].query_evidence, original, "{control}");
         }
     }
 

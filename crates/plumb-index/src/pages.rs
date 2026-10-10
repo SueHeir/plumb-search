@@ -3265,24 +3265,7 @@ pub fn add_named_site(
 /// with vinta/awesome-python under it, above python.org. Never crawled, it
 /// would otherwise be taken for a mere spelling of the query.
 pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
-    let shown = sites.len().min(LIFTED_FROM);
-    let lifted = |hit: &PageHit| {
-        let site = hit.page.site.as_deref()?;
-        let at = sites[..shown].iter().position(|s| s.domain == site)?;
-        let ok = if hit.page.item.is_some() {
-            sites[at].official
-        } else {
-            hit.page.set == GITHUB_SET && sites[at].named
-        };
-        ok.then_some(at)
-    };
-    let article = pages
-        .iter()
-        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET);
-    let repo = pages
-        .iter()
-        .find(|hit| hit.named && hit.page.set == GITHUB_SET);
-    let Some(at) = article.and_then(lifted).or_else(|| repo.and_then(lifted)) else {
+    let Some(at) = named_page_site(sites, pages.iter()) else {
         return;
     };
     // An official or well-known site named by all of the query stays
@@ -3302,6 +3285,32 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
         return;
     }
     sites[..=at].rotate_right(1);
+}
+
+/// The existing site corroborated by the best named entity page's
+/// official-site identity, or by a named repository of a named site.
+/// Used by both lifting and the learned relevance guard. Site titles,
+/// which may be borrowed, never supply this identity; films do not either.
+pub(crate) fn named_page_site<'a>(
+    sites: &[crate::Hit],
+    mut pages: impl Iterator<Item = &'a PageHit> + Clone,
+) -> Option<usize> {
+    let shown = sites.len().min(LIFTED_FROM);
+    let lifted = |hit: &PageHit| {
+        let site = hit.page.site.as_deref()?;
+        let at = sites[..shown].iter().position(|s| s.domain == site)?;
+        let ok = if hit.page.item.is_some() {
+            sites[at].official
+        } else {
+            hit.page.set == GITHUB_SET && sites[at].named
+        };
+        ok.then_some(at)
+    };
+    let article = pages
+        .clone()
+        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET);
+    let repo = pages.find(|hit| hit.named && hit.page.set == GITHUB_SET);
+    article.and_then(lifted).or_else(|| repo.and_then(lifted))
 }
 
 /// Where `pages` (best first) go among the site results `sites`:
