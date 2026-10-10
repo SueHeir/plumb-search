@@ -2796,6 +2796,15 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
     let asked = words(query);
     let has_most = |title: &str| {
         let title = words(title);
+        // A year the query asks for and the title lacks is another page:
+        // "nobel prize in physics 2025" is not "A Nobel prize for particle
+        // physics".
+        if asked
+            .iter()
+            .any(|word| is_year(word) && !title.contains(word))
+        {
+            return false;
+        }
         let shared = title.intersection(&asked).count();
         // A query the title holds whole needs only half of it: "john
         // martinis" for "John Martinis - CHM".
@@ -2817,6 +2826,13 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
                 .split_once(mark)
                 .is_some_and(|(head, _)| has_most(head))
         })
+}
+
+/// Whether `word` is a year: four digits from 1000 to 2999.
+fn is_year(word: &str) -> bool {
+    word.len() == 4
+        && word.bytes().all(|b| b.is_ascii_digit())
+        && matches!(word.as_bytes()[0], b'1' | b'2')
 }
 
 /// Languages a site's pages in another language than English are under
@@ -3731,6 +3747,24 @@ mod tests {
             )
         };
         assert!(!listed("climate change", &["climate.gov"], climate()));
+        // Not for a year its title does not have.
+        let nobel = || {
+            hit(
+                "https://home.cern/nobel-prize-particle-physics/",
+                "A Nobel prize for particle physics",
+                false,
+            )
+        };
+        assert!(!listed(
+            "nobel prize in physics 2025",
+            &["nobelprize.org"],
+            nobel()
+        ));
+        assert!(listed(
+            "nobel prize particle physics",
+            &["nobelprize.org"],
+            nobel()
+        ));
         // Named by its whole title, or on a subdomain of a best site.
         assert!(listed(
             "perft results",
