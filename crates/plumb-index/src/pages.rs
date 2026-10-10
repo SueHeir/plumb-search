@@ -1892,7 +1892,7 @@ impl PageSearcher {
             }
         }
         // Keep exact stop-word names ("The Who"), films and Wikidata profiles.
-        for hit in self.search_once(query, CANDIDATES)? {
+        for hit in self.search_once(query, CANDIDATES, None)? {
             if (matches!(hit.page.set.as_str(), WIKIDATA_SET | FILMS_SET)
                 || hit.page.is_article() && hit.named)
                 && hit.page.item.as_deref().is_some_and(is_item_id)
@@ -2433,10 +2433,10 @@ impl PageSearcher {
         };
         let mut addresses: Vec<_> = searcher
             .search(
-                self.language_query(scoped_query(&named_by_query, scope), &by_popularity())
+                self.language_query(scoped_query(&named_by_query, scope).as_ref())
                     .as_ref(),
-            )
-            .as_ref()?
+                &by_popularity(),
+            )?
             .into_iter()
             .map(|(_, address)| address)
             .collect();
@@ -2465,13 +2465,11 @@ impl PageSearcher {
                 Term::from_field_text(self.fields.keys, &key),
                 IndexRecordOption::Basic,
             );
-            for (_, address) in searcher
-                .search(
-                    self.language_query(scoped_query(&named, scope), &by_popularity())
-                        .as_ref(),
-                )
-                .as_ref()?
-            {
+            for (_, address) in searcher.search(
+                self.language_query(scoped_query(&named, scope).as_ref())
+                    .as_ref(),
+                &by_popularity(),
+            )? {
                 if !addresses.contains(&address) {
                     addresses.push(address);
                     by_title_first.insert(address);
@@ -2492,13 +2490,11 @@ impl PageSearcher {
                 Term::from_field_text(self.fields.keys, key),
                 IndexRecordOption::Basic,
             );
-            for (_, address) in searcher
-                .search(
-                    self.language_query(scoped_query(&named, scope), &by_popularity())
-                        .as_ref(),
-                )
-                .as_ref()?
-            {
+            for (_, address) in searcher.search(
+                self.language_query(scoped_query(&named, scope).as_ref())
+                    .as_ref(),
+                &by_popularity(),
+            )? {
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -2524,13 +2520,11 @@ impl PageSearcher {
                     .collect(),
                 needed,
             );
-            for (_, address) in searcher
-                .search(
-                    self.language_query(scoped_query(&most_words, scope), &by_popularity())
-                        .as_ref(),
-                )
-                .as_ref()?
-            {
+            for (_, address) in searcher.search(
+                self.language_query(scoped_query(&most_words, scope).as_ref())
+                    .as_ref(),
+                &by_popularity(),
+            )? {
                 // Found by most of the query's words, not only by a title
                 // that starts it: "react usestate hook" is the docs page
                 // "React useState" and more of its words.
@@ -2566,13 +2560,11 @@ impl PageSearcher {
                         .collect(),
                     needed,
                 );
-                for (_, address) in searcher
-                    .search(
-                        self.language_query(scoped_query(&most_words, scope), &by_popularity())
-                            .as_ref(),
-                    )
-                    .as_ref()?
-                {
+                for (_, address) in searcher.search(
+                    self.language_query(scoped_query(&most_words, scope).as_ref())
+                        .as_ref(),
+                    &by_popularity(),
+                )? {
                     if !addresses.contains(&address) {
                         addresses.push(address);
                     }
@@ -2669,13 +2661,11 @@ impl PageSearcher {
                 inside_keys.insert(key);
                 let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
                     .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
-                for (_, address) in searcher
-                    .search(
-                        self.language_query(scoped_query(&named, scope), &most_read)
-                            .as_ref(),
-                    )
-                    .as_ref()?
-                {
+                for (_, address) in searcher.search(
+                    self.language_query(scoped_query(&named, scope).as_ref())
+                        .as_ref(),
+                    &most_read,
+                )? {
                     if !addresses.contains(&address) {
                         addresses.push(address);
                         only_inside.insert(address);
