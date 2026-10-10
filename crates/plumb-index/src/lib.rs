@@ -68,6 +68,8 @@
 //! [`plumb_core::normalize_text`] and is then ASCII-folded, so `U.S. Bank`,
 //! `us bank` and `US BANK` are the same query and `nestle` finds `Nestlé`.
 
+use tantivy::directory::Directory;
+
 mod analysis;
 pub mod health;
 pub mod learned;
@@ -78,6 +80,7 @@ mod replace;
 mod schema;
 mod spell;
 pub mod spell_model;
+mod storage;
 mod topics;
 
 use std::borrow::Borrow;
@@ -700,11 +703,19 @@ pub struct Spelling {
 /// `records` may be the records themselves or references to them, so a
 /// caller holding a [`plumb_core::RecordSet`] need not copy it into a list.
 pub fn build_index<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<IndexStats> {
+    build_index_with_budget(dir, records, None)
+}
+
+pub fn build_index_with_budget<R: Borrow<SiteRecord>>(
+    dir: &Path,
+    records: &[R],
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<IndexStats> {
     let (sites, mut stats) = merge_by_domain(records);
     let (sites, redirect_names) = fold_redirects(sites);
     stats.redirected = stats.docs - sites.len() as u64;
     stats.docs = sites.len() as u64;
-    let mut build = IndexBuild::new(dir)?;
+    let mut build = IndexBuild::new_with_budget(dir, budget)?;
     for (i, site) in sites.iter().enumerate() {
         let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
         build.add(site, names)?;
@@ -722,20 +733,28 @@ pub fn build_index<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<I
 /// The index is built in a hidden directory next to `dir`, and replaces
 /// what is there only on [`IndexBuild::finish`], as [`build_index`] says.
 pub struct IndexBuild {
-    staging: Staging,
-    index: Index,
     writer: IndexWriter,
+    index: Index,
     fields: Fields,
     spelling: spell_model::ModelBuilder,
+    // Close indexing workers before deleting and releasing a failed stage.
+    staging: Staging,
 }
 
 impl IndexBuild {
     /// Starts a build that replaces the index in `dir` when finished.
     pub fn new(dir: &Path) -> Result<IndexBuild> {
-        let staging = Staging::new(dir)?;
+        Self::new_with_budget(dir, None)
+    }
+
+    pub fn new_with_budget(
+        dir: &Path,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Result<IndexBuild> {
+        let staging = Staging::new_with_budget(dir, budget.clone())?;
         let schema = schema::schema();
         let fields = Fields::new(&schema)?;
-        let index = Index::create_in_dir(staging.path(), schema)
+        let index = storage::create_index(staging.path(), schema, budget, staging.lifecycle())
             .with_context(|| format!("creating index in {}", staging.path().display()))?;
         analysis::register(index.tokenizers());
         let writer: IndexWriter = index
@@ -788,7 +807,16 @@ impl IndexBuild {
             .spelling
             .finish(&reader.searcher(), &spell::word_fields(&self.fields))?;
         drop(reader);
-        model.save(&self.staging.path().join(spell_model::MODEL_FILE))?;
+        if self.staging.budget().is_some() {
+            let mut out = self
+                .index
+                .directory()
+                .open_write(Path::new(spell_model::MODEL_FILE))?;
+            model.write(&mut out)?;
+            tantivy::directory::TerminatingWrite::terminate(out)?;
+        } else {
+            model.save(&self.staging.path().join(spell_model::MODEL_FILE))?;
+        }
         self.staging.install()
     }
 }

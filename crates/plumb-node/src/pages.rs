@@ -21,7 +21,7 @@ use std::str::FromStr;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{articles_file_name, articles_of, is_profiles_line, PROFILES_LINE};
-use plumb_index::pages::{build_page_index, Page, PageSearcher};
+use plumb_index::pages::{Page, PageSearcher};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -320,7 +320,7 @@ pub struct SetFileCutter {
     header_done: bool,
     /// Whether lines past the limit were dropped.
     cut: bool,
-    out: Option<flate2::write::GzEncoder<std::io::BufWriter<std::fs::File>>>,
+    out: Option<flate2::write::GzEncoder<std::io::BufWriter<plumb_core::storage::BudgetFile>>>,
     /// Past the limit, the lines to keep still ([`SetFileCutter::keep_past`]).
     keep_past: Option<LineFilter>,
     /// The line past the limit being read, whole lines being needed to
@@ -336,8 +336,16 @@ pub type LineFilter = Box<dyn Fn(&[u8]) -> bool + Send>;
 
 impl SetFileCutter {
     pub fn create(path: &Path, limit: u64) -> Result<Self> {
-        let file =
-            std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+        Self::create_with_budget(path, limit, None)
+    }
+
+    pub fn create_with_budget(
+        path: &Path,
+        limit: u64,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Result<Self> {
+        let file = plumb_core::storage::BudgetFile::create(path, budget)
+            .with_context(|| format!("creating {}", path.display()))?;
         Ok(SetFileCutter {
             limit,
             lines: 0,
@@ -814,6 +822,14 @@ pub fn index_dir(data_dir: &Path, key: &str) -> PathBuf {
 /// Opens the page index for `wanted`, building it first when there is
 /// none. `None` when nothing is wanted.
 pub fn open_or_build(data_dir: &Path, wanted: &Wanted) -> Result<Option<(String, PageSearcher)>> {
+    open_or_build_with_budget(data_dir, wanted, None)
+}
+
+pub fn open_or_build_with_budget(
+    data_dir: &Path,
+    wanted: &Wanted,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<Option<(String, PageSearcher)>> {
     let Some(key) = wanted.key() else {
         return Ok(None);
     };
@@ -825,9 +841,15 @@ pub fn open_or_build(data_dir: &Path, wanted: &Wanted) -> Result<Option<(String,
     let mut pages: Box<dyn Iterator<Item = Page>> = Box::new(std::iter::empty());
     for (set, file, count) in &wanted.sets {
         info!("indexing page set {} from {}", set.id, file.display());
-        pages = Box::new(pages.chain(set.read(file, *count)?));
+        let _mutation = budget.as_ref().map(|budget| budget.mutation());
+        let lease = budget.as_ref().map(|budget| budget.read_lease(file));
+        let read = HoldingPages {
+            pages: Box::new(set.read(file, *count)?),
+            _lease: lease,
+        };
+        pages = Box::new(pages.chain(read));
     }
-    let stats = build_page_index(&dir, pages)?;
+    let stats = plumb_index::pages::build_page_index_with_budget(&dir, pages, budget)?;
     info!(
         "built the page index of {} pages in {:.1}s",
         stats.pages,
@@ -836,9 +858,29 @@ pub fn open_or_build(data_dir: &Path, wanted: &Wanted) -> Result<Option<(String,
     Ok(Some((key, PageSearcher::open(&dir)?)))
 }
 
+struct HoldingPages {
+    pages: Box<dyn Iterator<Item = Page>>,
+    // Drop the input fd before releasing its physical allocation lease.
+    _lease: Option<std::sync::Arc<plumb_core::storage::FileLease>>,
+}
+impl Iterator for HoldingPages {
+    type Item = Page;
+    fn next(&mut self) -> Option<Page> {
+        self.pages.next()
+    }
+}
+
 /// Deletes page indexes other than `keep`; ones still open (Windows) stay
 /// until a later try.
 pub fn remove_other_indexes(data_dir: &Path, keep: Option<&str>) {
+    remove_other_indexes_with_budget(data_dir, keep, None);
+}
+
+pub fn remove_other_indexes_with_budget(
+    data_dir: &Path,
+    keep: Option<&str>,
+    budget: Option<&plumb_core::storage::StorageBudget>,
+) {
     let Ok(entries) = std::fs::read_dir(data_dir.join(PAGES_DIR)) else {
         return;
     };
@@ -849,7 +891,13 @@ pub fn remove_other_indexes(data_dir: &Path, keep: Option<&str>) {
             continue;
         };
         if Some(key) != keep {
-            let _ = std::fs::remove_dir_all(entry.path());
+            let _mutation = budget.map(|budget| budget.mutation());
+            let bytes = plumb_core::storage::directory_bytes(&entry.path()).unwrap_or(0);
+            if std::fs::remove_dir_all(entry.path()).is_ok() {
+                if let Some(budget) = budget {
+                    budget.removed(bytes);
+                }
+            }
         }
     }
 }

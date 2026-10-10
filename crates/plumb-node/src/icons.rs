@@ -27,12 +27,24 @@ const MAX_ICON_BYTES: u64 = 16 * 1024;
 #[derive(Debug, Clone)]
 pub struct IconStore {
     dir: PathBuf,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 }
 
 impl IconStore {
     /// The icons kept in `dir`, which is made on the first [`IconStore::put`].
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        IconStore { dir: dir.into() }
+        IconStore {
+            dir: dir.into(),
+            budget: None,
+        }
+    }
+
+    pub fn with_budget(
+        mut self,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// `dir/3f/example.com.png`: spread over 256 folders so none grows huge.
@@ -71,6 +83,18 @@ impl IconStore {
         };
         let icon = icon.filter(|icon| icon.len() as u64 <= MAX_ICON_BYTES);
         let folder = path.parent().unwrap_or(&self.dir);
+        if self.budget.is_some() {
+            plumb_core::storage::create_directory(folder, self.budget.as_ref())
+                .map_err(io::Error::other)?;
+            let temporary = folder.join(format!(".{domain}.tmp"));
+            return plumb_core::storage::write_atomic(
+                &path,
+                &temporary,
+                icon.unwrap_or_default(),
+                self.budget.as_ref(),
+                None,
+            );
+        }
         fs::create_dir_all(folder)?;
         let temporary = folder.join(format!(".{domain}.tmp"));
         let mut file = fs::File::create(&temporary)?;
@@ -157,6 +181,35 @@ fn shard(domain: &str) -> u8 {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn guarded_icon_burst_preserves_existing_bytes_and_never_exceeds_quota() {
+        use plumb_core::storage::{allocation_for, directory_bytes, StorageBudget};
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::IconStore::new(dir.path().join("icons"));
+        store.put("kept.example", Some(&[1; 1024])).unwrap();
+        let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let store = store.with_budget(Some(budget.clone()));
+        budget.set_limit(budget.status().used_bytes + allocation_for(1024) - 1);
+        assert!(store.put("kept.example", Some(&[2; 1024])).is_err());
+        assert_eq!(store.get("kept.example").unwrap(), vec![1; 1024]);
+        assert_eq!(budget.status().reserved_bytes, 0);
+        budget.set_limit(128 * 1024);
+        let mut blocked = false;
+        for i in 0..100 {
+            if store
+                .put(&format!("burst-{i}.example"), Some(&[3; 1024]))
+                .is_err()
+            {
+                blocked = true;
+            }
+            assert!(directory_bytes(dir.path()).unwrap() <= budget.status().limit_bytes);
+            assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap());
+        }
+        assert!(blocked);
+        assert_eq!(store.get("kept.example").unwrap(), vec![1; 1024]);
+        assert_eq!(budget.status().reserved_bytes, 0);
+    }
+
     use super::*;
 
     /// An 8 by 8 red BMP, the smallest image an icon can be made from.

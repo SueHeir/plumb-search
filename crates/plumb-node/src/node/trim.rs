@@ -36,7 +36,9 @@ use super::fill::FILL_UP_TO_PERCENT;
 use super::store;
 use super::{Inner, Step, MB};
 use crate::about::Topics;
-use crate::records::{journal_path, load_records, replace_records, sorted_by_link_score};
+use crate::records::{
+    journal_path, load_records, replace_records_with_budget, sorted_by_link_score,
+};
 use crate::web::group_thousands;
 
 /// Trimming starts once the data folder is over this share of the storage
@@ -213,7 +215,11 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
     let drop: HashSet<&str> = drops.iter().map(String::as_str).collect();
     set.retain(|record| !drop.contains(record.domain.as_str()));
     let sorted = sorted_by_link_score(&set);
-    replace_records(&inner.paths.records, sorted.iter().copied())?;
+    replace_records_with_budget(
+        &inner.paths.records,
+        sorted.iter().copied(),
+        inner.storage.as_ref(),
+    )?;
     info!(
         "over the storage limit ({} MB of {} MB): dropped {} sites",
         used / MB,

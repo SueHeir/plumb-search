@@ -9,6 +9,8 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
+async-trait = "0.1.89"
+stable_deref_trait = "1.2.1"
 idna = "1.1.0"
 levenshtein_automata = "0.2.1"
 plumb-core = { version = "0.2.1", path = "../plumb-core" }

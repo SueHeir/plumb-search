@@ -28,8 +28,8 @@ use tracing::{debug, info, warn};
 
 use super::{Inner, NodeSettings};
 use crate::pages::{
-    notes_path, open_or_build, remove_other_indexes, thousands, wanted_counts, SetFileCutter,
-    SetFileNotes, SetInfo, Wanted,
+    notes_path, open_or_build_with_budget, remove_other_indexes_with_budget, thousands,
+    wanted_counts, SetFileCutter, SetFileNotes, SetInfo, Wanted,
 };
 
 /// How often the job looks for changed settings or set files.
@@ -88,7 +88,10 @@ pub(super) fn coverage(inner: &Inner) -> super::PageCoverage {
 
 /// Runs until the node stops, on a blocking thread.
 pub(super) fn run(inner: Arc<Inner>) {
-    remove_stale_parts(&inner.paths.data);
+    remove_stale_parts(&inner.paths.data, inner.storage.as_deref());
+    // Legacy complete transfers must have their source timestamp before the
+    // first Wanted key is computed, including when downloads start slowly.
+    date_taken_files(&inner.paths.data);
     // Downloads run beside the index: one can take hours (a big file, a
     // busy or slow trusted node), and the pages already here are searched
     // meanwhile. A file taken is indexed at the next look.
@@ -115,7 +118,9 @@ pub(super) fn run(inner: Arc<Inner>) {
     };
     let mut failed: Option<(String, Instant)> = None;
     let mut places_failed: Option<(String, Instant)> = None;
+    let mut retired_places = Vec::new();
     let mut kept_whole = HashSet::new();
+    let mut retired_readers: Vec<std::sync::Weak<plumb_index::pages::PageSearcher>> = Vec::new();
     while !inner.stopping() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
@@ -147,13 +152,18 @@ pub(super) fn run(inner: Arc<Inner>) {
             .as_ref()
             .is_some_and(|(k, at)| Some(k) == key.as_ref() && at.elapsed() < RETRY_WAIT);
         if key != current && !retry_later {
-            match open_or_build(&inner.paths.data, &wanted) {
+            match open_or_build_with_budget(&inner.paths.data, &wanted, inner.storage.clone()) {
                 Ok(found) => {
                     let pages = found.as_ref().map_or(0, |(_, s)| s.num_pages());
                     let kept = found.as_ref().map(|(k, _)| k.clone());
-                    *inner.pages.write().unwrap_or_else(PoisonError::into_inner) =
-                        found.map(|(k, s)| (k, Arc::new(s)));
-                    remove_other_indexes(&inner.paths.data, kept.as_deref());
+                    let replacement = found.map(|(k, s)| (k, Arc::new(s)));
+                    let old = std::mem::replace(
+                        &mut *inner.pages.write().unwrap_or_else(PoisonError::into_inner),
+                        replacement,
+                    );
+                    if let Some((_, reader)) = old {
+                        retired_readers.push(Arc::downgrade(&reader));
+                    }
                     if kept.is_some() {
                         inner.journal.info(format!(
                             "Page sets ready: {} pages searched next to the sites",
@@ -173,7 +183,15 @@ pub(super) fn run(inner: Arc<Inner>) {
                 }
             }
         }
-        super::places::refresh(&inner, &settings, &mut places_failed);
+        retired_readers.retain(|reader| reader.strong_count() > 0);
+        if retired_readers.is_empty() {
+            remove_other_indexes_with_budget(
+                &inner.paths.data,
+                inner.page_key().as_deref(),
+                inner.storage.as_deref(),
+            );
+        }
+        super::places::refresh(&inner, &settings, &mut places_failed, &mut retired_places);
         let until = Instant::now() + LOOK_EVERY;
         while !inner.stopping() && Instant::now() < until {
             std::thread::sleep(TICK);
@@ -203,7 +221,6 @@ fn keep_files(inner: &Inner, done: &AtomicBool) {
     // When each set was last checked for a newer file.
     let mut checked: HashMap<&'static str, Instant> = HashMap::new();
     let ended = || inner.stopping() || done.load(Ordering::Relaxed);
-    date_taken_files(&inner.paths.data);
     while !ended() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
@@ -430,7 +447,10 @@ fn fetch_if_needed(
         return Ok(());
     };
     let file = set.file(data);
-    std::fs::create_dir_all(file.parent().context("a set file has a folder")?)?;
+    plumb_core::storage::create_directory(
+        file.parent().context("a set file has a folder")?,
+        inner.storage.as_ref(),
+    )?;
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
@@ -445,7 +465,7 @@ fn fetch_if_needed(
     let taken = take(inner, net, set, &part, first, pages, near);
     if !matches!(taken, Ok(Some(_))) {
         // Stopped, or failed: the part is of no use to a later try.
-        let _ = std::fs::remove_file(&part);
+        let _ = plumb_core::storage::remove_file(&part, inner.storage.as_deref());
     }
     let Some((lines, complete, modified, offset)) = taken? else {
         return Ok(());
@@ -457,7 +477,7 @@ fn fetch_if_needed(
             quality.sha256 = super::newer::file_checksum(&part)?;
         }
     }
-    super::newer::install(&part, &file, modified)?;
+    install_admitted(inner, &part, &file, modified)?;
     if complete {
         if let Some(quality) = quality {
             let size = std::fs::metadata(&file)?.len();
@@ -508,7 +528,7 @@ fn take(
     let quality = first.quality.clone();
     use sha2::{Digest, Sha256};
     let mut wire_hash = Sha256::new();
-    let mut cutter = SetFileCutter::create(part, pages)?;
+    let mut cutter = SetFileCutter::create_with_budget(part, pages, inner.storage.clone())?;
     if !near.is_empty() {
         cutter = cutter.keep_past(crate::places::near_lines(near.to_vec()));
     }
@@ -578,6 +598,16 @@ fn take(
 
 /// The name the map file goes by between nodes.
 pub(super) const MAP_SET: &str = "map";
+
+/// Install a downloaded generation while admitting its retained rollback file.
+fn install_admitted(
+    inner: &Inner,
+    part: &std::path::Path,
+    file: &std::path::Path,
+    modified: u64,
+) -> Result<()> {
+    super::newer::install_with_budget(part, file, modified, inner.storage.as_ref())
+}
 
 /// Gives each whole set file taken from another node its maker's time, as
 /// [`super::newer::install`] does, for files taken before it did: a node
@@ -653,16 +683,19 @@ fn keep_map(
     inner
         .journal
         .info("Downloading the map file from a node you trust");
-    std::fs::create_dir_all(crate::pages::sets_dir(&inner.paths.data))?;
+    plumb_core::storage::create_directory(
+        &crate::pages::sets_dir(&inner.paths.data),
+        inner.storage.as_ref(),
+    )?;
     let part = super::newer::prev_path(&file).with_extension("part");
     let taken = take_whole(inner, net, MAP_SET, &offer, &part);
     if !matches!(taken, Ok(true)) {
-        let _ = std::fs::remove_file(&part);
+        let _ = plumb_core::storage::remove_file(&part, inner.storage.as_deref());
     }
     if !taken? {
         return Ok(());
     }
-    super::newer::install(&part, &file, offer.modified)?;
+    install_admitted(inner, &part, &file, offer.modified)?;
     inner.journal.info(format!(
         "Map file taken ({} MB downloaded)",
         offer.size.div_ceil(1_000_000)
@@ -681,7 +714,8 @@ fn take_whole(
 ) -> Result<bool> {
     let runtime = tokio::runtime::Handle::current();
     let mut out = std::io::BufWriter::new(
-        std::fs::File::create(part).with_context(|| format!("creating {}", part.display()))?,
+        plumb_core::storage::BudgetFile::create(part, inner.storage.clone())
+            .with_context(|| format!("creating {}", part.display()))?,
     );
     let mut offset = 0u64;
     while offset < offer.size {
@@ -717,20 +751,20 @@ fn take_whole(
         }
     }
     out.flush()?;
-    out.get_ref().sync_all()?;
+    out.get_mut().sync_all()?;
     Ok(true)
 }
 
 /// Removes the `.part` files a download left when the node stopped hard
 /// (a crash, a kill): downloads run only in this job, so none is under
 /// way when it starts.
-fn remove_stale_parts(data: &std::path::Path) {
+fn remove_stale_parts(data: &std::path::Path, budget: Option<&plumb_core::storage::StorageBudget>) {
     let Ok(entries) = std::fs::read_dir(crate::pages::sets_dir(data)) else {
         return;
     };
     for path in entries.flatten().map(|e| e.path()) {
         if path.extension().is_some_and(|e| e == "part") {
-            match std::fs::remove_file(&path) {
+            match plumb_core::storage::remove_file(&path, budget) {
                 Ok(()) => info!("removed {}, left by an unfinished download", path.display()),
                 Err(err) => warn!("could not remove {}: {err}", path.display()),
             }
@@ -750,7 +784,7 @@ fn remove_stale_parts(data: &std::path::Path) {
 /// With towns `near` (the places set), the places near them are kept past
 /// the first `pages`, from a whole file; one already cut around them is
 /// left as it is.
-fn cut_if_longer(
+pub(super) fn cut_if_longer(
     inner: &Inner,
     set: &SetInfo,
     pages: u64,
@@ -784,9 +818,15 @@ fn cut_if_longer(
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
+    // Declared before the reader/writer: those close before cleanup on every
+    // failure, including compression finish, admission rejection and cancel.
+    let _cleanup = CutPart {
+        path: part.clone(),
+        budget: inner.storage.clone(),
+    };
     let before = std::fs::metadata(&file).map_or(0, |m| m.len());
     let mut reader = plumb_ingest::open_maybe_gz(&file)?;
-    let mut cutter = SetFileCutter::create(&part, pages)?;
+    let mut cutter = SetFileCutter::create_with_budget(&part, pages, inner.storage.clone())?;
     // The places past the first: near the towns, and the specialties
     // (brewpubs, climbing gyms) anywhere. Read from disk, so the whole
     // file is cheap to go through.
@@ -796,8 +836,6 @@ fn cut_if_longer(
     let mut buf = vec![0u8; 1 << 16];
     while !cutter.full() {
         if inner.stopping() {
-            drop(cutter);
-            let _ = std::fs::remove_file(&part);
             return Ok(());
         }
         let n = std::io::Read::read(&mut reader, &mut buf)
@@ -810,8 +848,10 @@ fn cut_if_longer(
     let lines = cutter.pages();
     cutter.finish()?;
     drop(reader);
-    std::fs::rename(&part, &file)
-        .with_context(|| format!("renaming {} to {}", part.display(), file.display()))?;
+    // A quota cut must release the full source rather than retain it as .prev.
+    // Existing build readers retain its allocation until their leases close.
+    super::newer::set_time(&part, notes.source_modified)?;
+    plumb_core::storage::replace_file(&part, &file, inner.storage.as_deref())?;
     write_notes(
         &file,
         &SetFileNotes {
@@ -831,6 +871,19 @@ fn cut_if_longer(
         before.saturating_sub(after) / 1_000_000
     ));
     Ok(())
+}
+
+struct CutPart {
+    path: std::path::PathBuf,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
+}
+
+impl Drop for CutPart {
+    fn drop(&mut self) {
+        if let Err(err) = plumb_core::storage::remove_file(&self.path, self.budget.as_deref()) {
+            warn!("could not clean failed cut {}: {err}", self.path.display());
+        }
+    }
 }
 
 /// Whether a file with `notes` holds more than a node keeping its first
@@ -877,7 +930,7 @@ pub(super) fn wait(inner: &Inner, wait: Duration) -> bool {
 }
 
 impl Inner {
-    fn page_key(&self) -> Option<String> {
+    pub(super) fn page_key(&self) -> Option<String> {
         self.pages
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1203,6 +1256,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_timestamp_canonicalization_preserves_partial_undated_and_own_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let sets = [
+            &crate::pages::SETS[0],
+            &crate::pages::SETS[1],
+            &crate::pages::SETS[2],
+        ];
+        for (i, set) in sets.iter().enumerate() {
+            let file = set.file(dir.path());
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"unchanged corpus").unwrap();
+            super::super::newer::set_time(&file, 1_700_000_000).unwrap();
+            if i < 2 {
+                write_notes(
+                    &file,
+                    &SetFileNotes {
+                        source_modified: if i == 0 { 1_600_000_000 } else { 0 },
+                        ..notes(1, i != 0, 0)
+                    },
+                )
+                .unwrap();
+            }
+        }
+        date_taken_files(dir.path());
+        for set in sets {
+            let file = set.file(dir.path());
+            assert_eq!(super::super::newer::stamp(&file).unwrap().0, 1_700_000_000);
+            assert_eq!(std::fs::read(file).unwrap(), b"unchanged corpus");
+        }
+    }
+
+    #[test]
     fn typed_paper_date_search_keeps_structural_metadata() {
         use plumb_index::pages::{build_page_index, Page, PageSearcher, PAPERS_SET};
         let source = plumb_core::article::Article {
@@ -1373,10 +1458,10 @@ mod tests {
         let file = sets.join("stackexchange.tsv.gz");
         std::fs::write(&part, b"half").unwrap();
         std::fs::write(&file, b"whole").unwrap();
-        remove_stale_parts(dir.path());
+        remove_stale_parts(dir.path(), None);
         assert!(!part.exists());
         assert!(file.exists());
         // No sets folder yet: nothing to do.
-        remove_stale_parts(&dir.path().join("none"));
+        remove_stale_parts(&dir.path().join("none"), None);
     }
 }

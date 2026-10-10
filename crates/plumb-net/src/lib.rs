@@ -48,6 +48,7 @@ pub mod reports;
 pub mod rounds;
 pub mod scope;
 pub mod search;
+pub mod storage;
 pub mod store;
 pub mod throwaway;
 

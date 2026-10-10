@@ -305,3 +305,5 @@ mod tests {
         assert_eq!(text, "hello world\n");
     }
 }
+
+pub mod storage;

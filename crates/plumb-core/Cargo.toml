@@ -24,3 +24,6 @@ url = "2.5.8"
 # The client half of sealed bucket requests (see `oblivious`), for nodes and
 # for the browser's WASM client.
 oblivious = ["dep:ohttp", "dep:libp2p-identity", "dep:serde_bytes", "dep:cbor4ii"]
+
+[dev-dependencies]
+tempfile = "3.27.0"

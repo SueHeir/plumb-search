@@ -116,7 +116,7 @@ pub async fn download_kind_sites(
         bail!("every Wikidata query for official websites by kind failed");
     }
 
-    tokio::fs::create_dir_all(dir)
+    crate::storage::create_dir_all(dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
     let dest = dir.join(KIND_SITES_FILE_NAME);
@@ -132,10 +132,10 @@ pub async fn download_kind_sites(
         }
     }
     let part = part_path(&dest);
-    tokio::fs::write(&part, tsv.as_bytes())
+    crate::storage::write(&part, tsv.as_bytes())
         .await
         .with_context(|| format!("writing {}", part.display()))?;
-    tokio::fs::rename(&part, &dest)
+    crate::storage::rename(&part, &dest)
         .await
         .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))?;
     info!(

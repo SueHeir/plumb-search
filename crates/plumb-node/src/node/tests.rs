@@ -1944,6 +1944,13 @@ async fn crawling_waits_for_the_next_day_once_the_download_limit_is_reached() {
     settings.storage_limit_mb = 1;
     node.inner.change_settings(settings).unwrap();
     std::fs::write(dir.path().join("filler"), vec![0u8; 2 * MB as usize]).unwrap();
+    // Direct owner writes are reconciled explicitly at blocking checkpoints.
+    node.inner
+        .storage
+        .as_ref()
+        .unwrap()
+        .recount(dir.path())
+        .unwrap();
     node.inner.recount_disk();
     assert!(node.inner.pause().is_some());
     assert!(node.inner.download_pause().is_none());
@@ -2813,6 +2820,15 @@ async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
     .map(|(title, views)| plumb_core::Article {
         title: title.to_string(),
         views: *views,
+        description: (*views == 10).then(|| {
+            let mut state = 17u64;
+            (0..65_536)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (b'a' + ((state >> 32) % 26) as u8) as char
+                })
+                .collect()
+        }),
         ..Default::default()
     })
     .collect();
@@ -2829,6 +2845,8 @@ async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
         serde_json::to_vec(&notes).unwrap(),
     )
     .unwrap();
+    let original_bytes = plumb_core::storage::file_bytes(&file).unwrap();
+    assert!(original_bytes > 8192);
     let mut config = test_config(dir.path());
     config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=2").unwrap();
     config.settings.storage_limit_mb = 500;
@@ -2845,6 +2863,14 @@ async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(set.file_notes(dir.path()).unwrap().lines, 2);
+    assert!(
+        !super::newer::prev_path(&file).exists(),
+        "a quota cut kept the full source"
+    );
+    assert!(
+        plumb_core::storage::file_bytes(&file).unwrap() < original_bytes,
+        "a quota cut did not reduce allocation"
+    );
     // One index, of the pages kept: none of the whole file first.
     let built: Vec<String> = node
         .inner
@@ -3689,4 +3715,737 @@ async fn a_node_that_does_not_share_findings_keeps_them_local() {
     assert_eq!(status.network.unwrap().leads_held, 0);
     assert!(!dir.path().join("net/leads.jsonl").exists());
     node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_complete_set_timestamp_precedes_the_first_key_and_builds_once() {
+    let dir = seeded_dir();
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    plumb_ingest::articles::write_articles_file(
+        &file,
+        &[plumb_core::Article {
+            title: "Legacy Curie".into(),
+            views: 10,
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let bytes = std::fs::read(&file).unwrap();
+    let source_modified = 1_700_000_000;
+    let notes = crate::pages::SetFileNotes {
+        lines: 1,
+        complete: true,
+        source_modified,
+        fetched_at: 0,
+        near: 0,
+    };
+    std::fs::write(
+        crate::pages::notes_path(&file),
+        serde_json::to_vec(&notes).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(super::newer::stamp(&file).unwrap().0, source_modified);
+    let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
+    let node = start(config).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while node.inner.page_key().is_none() {
+        assert!(Instant::now() < deadline, "page index never became ready");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let first = node.inner.page_key();
+    assert_eq!(super::newer::stamp(&file).unwrap().0, source_modified);
+    let wanted = crate::pages::Wanted::new(
+        dir.path(),
+        &node.inner.settings().page_sets,
+        node.inner.settings().storage_limit_mb,
+    );
+    assert_eq!(first, wanted.key());
+    // Several maintenance looks, with the downloader running, cannot produce
+    // a metadata-only replacement of this first index.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(node.inner.page_key(), first);
+    assert_eq!(
+        node.inner
+            .journal
+            .entries()
+            .iter()
+            .filter(|entry| entry.message.starts_with("Page sets ready:"))
+            .count(),
+        1
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    assert!(get(node.addr(), "/search?q=legacy+curie")
+        .await
+        .2
+        .contains("Legacy_Curie"));
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enabling_and_changing_quota_preserves_inflight_reservations_and_search() {
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.settings.storage_limit_mb = 0;
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let budget = node.inner.storage.clone().unwrap();
+    assert_eq!(budget.status().limit_bytes, u64::MAX);
+    // A direct owner edit is reconciled at the blocking checkpoint, never
+    // by an ingest/status invalidation. This distinguishes a cached ledger
+    // from a hidden full tree walk on every call.
+    let probe = dir.path().join("owner-recount-probe");
+    let counted = budget.status().used_bytes;
+    std::fs::write(&probe, vec![0; 64 * 1024]).unwrap();
+    for _ in 0..100 {
+        node.inner.recount_disk();
+        assert_eq!(node.inner.disk_used(), counted);
+        assert_eq!(node.inner.disk_used_shown(), counted);
+    }
+    budget.recount(dir.path()).unwrap();
+    assert!(node.inner.disk_used() > counted);
+    plumb_core::storage::remove_file(&probe, Some(&budget)).unwrap();
+    let pending = budget.reserve(1_500_000, false).unwrap();
+    let mut settings = node.inner.settings();
+    settings.storage_limit_mb = 1;
+    node.inner.change_settings(settings.clone()).unwrap();
+    assert_eq!(budget.status().limit_bytes, MB);
+    assert_eq!(budget.status().reserved_bytes, 1_500_000);
+    assert!(budget.status().backpressure);
+    assert!(budget.reserve(8192, false).is_err());
+    assert!(!search(node.addr(), "chase").await.is_empty());
+    settings.storage_limit_mb = 5;
+    node.inner.change_settings(settings.clone()).unwrap();
+    assert!(!budget.status().backpressure);
+    drop(budget.reserve(8192, false).unwrap());
+    settings.storage_limit_mb = 0;
+    node.inner.change_settings(settings).unwrap();
+    assert_eq!(budget.status().limit_bytes, u64::MAX);
+    drop(budget.reserve(8_000_000, false).unwrap());
+    drop(pending);
+    assert_eq!(budget.status().reserved_bytes, 0);
+    assert!(Arc::ptr_eq(&budget, node.inner.storage.as_ref().unwrap()));
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_quota_rejection_preserves_raw_prefix_credits_and_ready_search() {
+    let dir = seeded_dir();
+    let node = start(test_config(dir.path())).await.unwrap();
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let raw = std::fs::read(&node.inner.paths.records).unwrap();
+    std::fs::create_dir_all(&node.inner.paths.net).unwrap();
+    let prefix = b"{crash cut inbox";
+    std::fs::write(&node.inner.paths.inbox, prefix).unwrap();
+    let credits = node.inner.paths.net.join("credits-proof.json");
+    std::fs::write(&credits, b"preserve saved credits").unwrap();
+    let budget = node.inner.storage.as_ref().unwrap();
+    budget.recount(dir.path()).unwrap();
+    budget.set_limit(budget.status().used_bytes);
+    let record = SiteRecord::new("waiting.example");
+    assert!(super::network::append_inbox(&node.inner, &[record]).is_err());
+    assert_eq!(std::fs::read(&node.inner.paths.inbox).unwrap(), prefix);
+    assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
+    assert_eq!(std::fs::read(credits).unwrap(), b"preserve saved credits");
+    assert_eq!(budget.status().reserved_bytes, 0);
+    assert!(budget.status().backpressure);
+    assert!(!search(node.addr(), "chase").await.is_empty());
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replaced_page_index_stays_charged_and_searchable_until_held_reader_closes() {
+    let dir = seeded_dir();
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let article = |title: &str| plumb_core::Article {
+        title: title.into(),
+        views: 10,
+        ..Default::default()
+    };
+    plumb_ingest::articles::write_articles_file(&file, &[article("First Quota Page")]).unwrap();
+    super::newer::set_time(&file, 1_700_000_000).unwrap();
+    let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
+    let node = start(config).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while node.inner.page_key().is_none() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let (old_key, old_reader) = node.inner.pages.read().unwrap().as_ref().unwrap().clone();
+    let old_dir = crate::pages::index_dir(dir.path(), &old_key);
+    let old_bytes = plumb_core::storage::directory_bytes(&old_dir).unwrap();
+    plumb_ingest::articles::write_articles_file(&file, &[article("Second Quota Page")]).unwrap();
+    super::newer::set_time(&file, 1_700_000_001).unwrap();
+    while node.inner.page_key().as_deref() == Some(&old_key) {
+        assert!(Instant::now() < deadline, "replacement never became ready");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(old_dir.exists(), "held generation was deleted");
+    assert_eq!(old_reader.num_pages(), 1);
+    assert_eq!(old_reader.search("First", 10).unwrap().len(), 1);
+    let before = node.inner.storage.as_ref().unwrap().status().used_bytes;
+    drop(old_reader);
+    while old_dir.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "retired index was never collected"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let after = node.inner.storage.as_ref().unwrap().status().used_bytes;
+    assert!(
+        before.saturating_sub(after) >= old_bytes,
+        "old allocation was not released"
+    );
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_replacements_and_implicit_folds_admit_peak_room_before_mutation() {
+    let dir = seeded_dir();
+    let node = start(test_config(dir.path())).await.unwrap();
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let budget = node.inner.storage.clone().unwrap();
+    let raw = std::fs::read(&node.inner.paths.records).unwrap();
+    let mut large = SiteRecord::new("quota-fold.example");
+    large.description = Some("large protected journal ".repeat(50_000));
+    crate::records::RecordStore::open(&node.inner.paths.records)
+        .save(&[crate::records::Change::Merge {
+            record: large.clone(),
+        }])
+        .unwrap();
+    let journal = crate::records::journal_path(&node.inner.paths.records);
+    let journal_bytes = std::fs::read(&journal).unwrap();
+    plumb_core::storage::create_directory(&node.inner.paths.net, Some(&budget)).unwrap();
+    super::network::append_inbox(&node.inner, &[SiteRecord::new("protected-inbox.example")])
+        .unwrap();
+    let inbox = std::fs::read(&node.inner.paths.inbox).unwrap();
+    budget.recount(dir.path()).unwrap();
+    let used = budget.status().used_bytes;
+    budget.set_limit(used + 8192);
+    assert!(super::worker::save_seed_records(&node.inner, std::slice::from_ref(&large)).is_err());
+    assert!(super::round::RoundSites::load_with_budget(
+        &node.inner.paths.records,
+        crate::about::Topics::default(),
+        super::trim::Keep::default(),
+        Some(budget.clone())
+    )
+    .is_err());
+    assert!(
+        crate::outline::outline_with_budget(&node.inner.paths.records, Some(budget.clone()))
+            .is_err()
+    );
+    let vectors = std::sync::RwLock::new(plumb_embed::Vectors::new([0; 32], 4));
+    assert!(crate::meaning::sites_to_embed_from_file(
+        &vectors,
+        &node.inner.paths.records,
+        1,
+        32,
+        Some(budget.clone())
+    )
+    .is_err());
+    assert!(crate::meaning::wanted_texts(
+        &vectors,
+        &node.inner.paths.records,
+        32,
+        Some(budget.clone())
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
+    assert_eq!(std::fs::read(&journal).unwrap(), journal_bytes);
+    assert_eq!(std::fs::read(&node.inner.paths.inbox).unwrap(), inbox);
+    assert_eq!(budget.status().used_bytes, used);
+    assert_eq!(budget.status().reserved_bytes, 0);
+    assert!(!search(node.addr(), "chase").await.is_empty());
+    budget.set_limit(used + 8 * MB);
+    assert!(
+        crate::outline::outline_with_budget(&node.inner.paths.records, Some(budget.clone()))
+            .unwrap()
+            .is_some()
+    );
+    assert!(!journal.exists());
+    assert_eq!(std::fs::read(&node.inner.paths.inbox).unwrap(), inbox);
+    assert_eq!(budget.status().reserved_bytes, 0);
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_quota_cut_cleans_staging_and_retries_without_restart() {
+    let dir = seeded_dir();
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let mut random = 31u64;
+    let articles: Vec<_> = (0..3)
+        .map(|i| plumb_core::Article {
+            title: format!("Retry Cut Page {i}"),
+            views: 3 - i,
+            description: Some(
+                (0..65_536)
+                    .map(|_| {
+                        random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        (b'a' + ((random >> 32) % 26) as u8) as char
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        })
+        .collect();
+    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    let notes = crate::pages::SetFileNotes {
+        lines: 3,
+        complete: true,
+        source_modified: 1_700_000_000,
+        fetched_at: now_unix(),
+        near: 0,
+    };
+    std::fs::write(
+        crate::pages::notes_path(&file),
+        serde_json::to_vec(&notes).unwrap(),
+    )
+    .unwrap();
+    let original = std::fs::read(&file).unwrap();
+    let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while node.inner.page_key().is_none() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let budget = node.inner.storage.clone().unwrap();
+    budget.set_limit(budget.status().used_bytes + 8192);
+    let mut kept = std::collections::HashSet::new();
+    assert!(super::pages::cut_if_longer(&node.inner, set, 2, &[], &mut kept).is_err());
+    let part = PathBuf::from(format!("{}.part", file.display()));
+    assert!(
+        !part.exists(),
+        "failed cut left a part that blocks create_new"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), original);
+    assert_eq!(set.file_notes(dir.path()).unwrap().lines, 3);
+    assert_eq!(budget.status().reserved_bytes, 0);
+    budget.set_limit(budget.status().used_bytes + 4 * MB);
+    super::pages::cut_if_longer(&node.inner, set, 2, &[], &mut kept).unwrap();
+    assert!(!part.exists());
+    assert!(!super::newer::prev_path(&file).exists());
+    assert_eq!(set.file_notes(dir.path()).unwrap().lines, 2);
+    assert!(std::fs::read(&file).unwrap().len() < original.len());
+    assert!(!search(node.addr(), "chase").await.is_empty());
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_maintenance_reconciles_owner_bytes_only_at_the_bounded_checkpoint() {
+    let dir = seeded_dir();
+    let node = start(test_config(dir.path())).await.unwrap();
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let budget = node.inner.storage.clone().unwrap();
+    let raw = std::fs::read(&node.inner.paths.records).unwrap();
+    let used = budget.status().used_bytes;
+    budget.set_limit(MB);
+    std::fs::write(
+        dir.path().join("owner-idle-probe"),
+        vec![1; 2 * MB as usize],
+    )
+    .unwrap();
+    let at = Instant::now();
+    super::worker::sweep_at(&node.inner, at).await;
+    assert_eq!(budget.status().used_bytes, used);
+    super::worker::sweep_at(&node.inner, at + Duration::from_secs(301)).await;
+    assert!(budget.status().used_bytes >= used + 2 * MB);
+    assert!(budget.status().backpressure);
+    let counted = budget.status().used_bytes;
+    std::fs::write(dir.path().join("owner-second-probe"), vec![1; 64 * 1024]).unwrap();
+    for _ in 0..10 {
+        node.inner.recount_disk();
+        super::worker::sweep_at(&node.inner, at + Duration::from_secs(302)).await;
+        assert_eq!(budget.status().used_bytes, counted);
+    }
+    assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
+    assert!(!search(node.addr(), "chase").await.is_empty());
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_network_delivery_survives_inbox_io_failure_without_restart() {
+    let dir = seeded_dir();
+    let node = start(test_config(dir.path())).await.unwrap();
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let budget = node.inner.storage.clone().unwrap();
+    let raw = std::fs::read(&node.inner.paths.records).unwrap();
+    plumb_core::storage::create_directory(&node.inner.paths.inbox, Some(&budget)).unwrap();
+    let delivery = tokio::spawn(super::network::persist_delivery(
+        node.inner.clone(),
+        vec![SiteRecord::new("retry-inbox.example")],
+        Vec::new(),
+        None,
+        None,
+    ));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while budget.status().reserved_bytes == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "delivery was not retained for retry"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!delivery.is_finished());
+    assert_eq!(node.inner.inbox_records.load(Ordering::SeqCst), 0);
+    {
+        let _mutation = budget.mutation();
+        let bytes = plumb_core::storage::file_bytes(&node.inner.paths.inbox).unwrap();
+        std::fs::remove_dir(&node.inner.paths.inbox).unwrap();
+        budget.removed(bytes);
+    }
+    tokio::time::timeout(Duration::from_secs(10), delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    let inbox: Vec<SiteRecord> = read_jsonl(&node.inner.paths.inbox).unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].domain, "retry-inbox.example");
+    assert_eq!(node.inner.inbox_records.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.status().reserved_bytes, 0);
+    assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
+    assert!(!search(node.addr(), "chase").await.is_empty());
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publishing_an_external_corpus_fold_cannot_free_node_storage_room() {
+    let dir = seeded_dir();
+    let external = tempfile::tempdir().unwrap();
+    let path = external.path().join("records.jsonl");
+    write_jsonl(&path, &[SiteRecord::new("external-publish.example")]).unwrap();
+    let mut store = crate::records::RecordStore::open(&path);
+    for n in 0..100 {
+        store
+            .save(&[crate::records::Change::Mark {
+                domain: "external-publish.example".into(),
+                attempted_at: Some(n),
+                failures: 1,
+            }])
+            .unwrap();
+    }
+    drop(store);
+    let journal = crate::records::journal_path(&path);
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers.clear();
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "initial index", ready_and_idle).await;
+    let budget = node.inner.storage.as_ref().unwrap();
+    let raw = std::fs::read(&node.inner.paths.records).unwrap();
+    let before = budget.status();
+    assert_eq!(
+        super::network::publish_new_records(&node.inner, &path)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(!journal.exists());
+    assert_eq!(budget.status(), before);
+    assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_twice() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let mut source_config = plumb_net::NetConfig::new(source_dir.path().to_owned());
+    source_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    source_config.upnp = false;
+    source_config.local_discovery = false;
+    source_config.round_every = None;
+    let table =
+        plumb_net::BucketTable::build::<SiteRecord>(&source_dir.path().join("buckets"), &[])
+            .unwrap();
+    let (source, _source_records) = plumb_net::start(source_config, Arc::new(table))
+        .await
+        .unwrap();
+    let source_id = source.peer_id();
+    let source_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = source.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.take_new_sites = true;
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![source_id];
+    net.bootstrap = vec![source_addr.with_p2p(source_id).unwrap()];
+    config.network = Some(net);
+    let receiver = start(config.clone()).await.unwrap();
+    wait_for(receiver.addr(), "initial index", ready_and_idle).await;
+    let budget = receiver.inner.storage.as_ref().unwrap();
+    let raw = std::fs::read(&receiver.inner.paths.records).unwrap();
+    let inbox_path = receiver.inner.paths.inbox.clone();
+    plumb_core::storage::create_directory(&inbox_path, Some(budget)).unwrap();
+    let mut record = SiteRecord::new("restart-inbox.example");
+    record.url = Some("https://restart-inbox.example/".into());
+    record.title = Some("Durable receiver restart".into());
+    record.crawled_at = Some(now_unix());
+    record.news = vec![plumb_core::Headline {
+        title: "A headline that survives receiver restart".into(),
+        url: "https://restart-inbox.example/receiver-restart".into(),
+        at: now_unix(),
+    }];
+    let id = source.publish(vec![record]).await.unwrap().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while receiver
+        .inner
+        .net
+        .get()
+        .is_none_or(|n| n.status().batches_received != 1)
+        || budget.status().reserved_bytes == 0
+        || crate::news::NewsStore::open(&receiver.inner.paths.news).headline_count() != 1
+    {
+        assert!(
+            Instant::now() < deadline,
+            "receiver did not retain the failed inbox delivery: {:?}, {:?}",
+            receiver.inner.net.get().map(|n| n.status()),
+            budget.status()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read(&receiver.inner.paths.records).unwrap(), raw);
+    let batches = dir.path().join("net/batches");
+    let signed = std::fs::read(batches.join(format!("{id}.json"))).unwrap();
+    let marker = batches.join(format!("{id}.delivered-trusted"));
+    assert!(!marker.exists());
+    receiver.shutdown().await.unwrap();
+    source.shutdown().await;
+    let credit_dir = dir.path().join("net/credits");
+    let credited = plumb_net::credits::Ledger::open(&credit_dir)
+        .unwrap()
+        .account(&source_id);
+    assert_eq!(credited.confirmed, 1);
+    assert!(credited.earned > 0);
+    std::fs::remove_dir(&inbox_path).unwrap();
+    std::fs::create_dir(&marker).unwrap(); // Inbox can persist; marker I/O still fails.
+    config.network.as_mut().unwrap().bootstrap.clear(); // Source is offline: replay is local.
+    let receiver = start(config.clone()).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while receiver.inner.inbox_records.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "restart did not persist its pending inbox"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(marker.is_dir());
+    {
+        let budget = receiver.inner.storage.as_ref().unwrap();
+        let _mutation = budget.mutation();
+        let bytes = plumb_core::storage::file_bytes(&marker).unwrap();
+        std::fs::remove_dir(&marker).unwrap();
+        budget.removed(bytes);
+    }
+    while !marker.is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "restart did not persist and acknowledge the held batch"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let inbox: Vec<SiteRecord> = read_jsonl(&inbox_path).unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].domain, "restart-inbox.example");
+    assert_eq!(
+        crate::news::NewsStore::open(&receiver.inner.paths.news).headline_count(),
+        1
+    );
+    assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
+        signed
+    );
+    receiver.shutdown().await.unwrap();
+    let after = plumb_net::credits::Ledger::open(&credit_dir)
+        .unwrap()
+        .account(&source_id);
+    assert_eq!(
+        (after.confirmed, after.earned),
+        (credited.confirmed, credited.earned)
+    );
+    // A second restart respects the durable acknowledgment; old-format signed
+    // bytes remain readable and the inbox is not delivered a second time.
+    let receiver = start(config).await.unwrap();
+    wait_for(receiver.addr(), "restarted index", ready_and_idle).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 0);
+    assert_eq!(receiver.inner.news.headline_count(), 1);
+    assert_eq!(
+        crate::news::NewsStore::open(&receiver.inner.paths.news).headline_count(),
+        1
+    );
+    assert_eq!(
+        std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
+        signed
+    );
+    receiver.shutdown().await.unwrap();
+    let after = plumb_net::credits::Ledger::open(&credit_dir)
+        .unwrap()
+        .account(&source_id);
+    assert_eq!(
+        (after.confirmed, after.earned),
+        (credited.confirmed, credited.earned)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart() {
+    for with_raw in [false, true] {
+        let source_dir = tempfile::tempdir().unwrap();
+        let mut source_config = plumb_net::NetConfig::new(source_dir.path().to_owned());
+        source_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        source_config.upnp = false;
+        source_config.local_discovery = false;
+        source_config.round_every = None;
+        let table =
+            plumb_net::BucketTable::build::<SiteRecord>(&source_dir.path().join("buckets"), &[])
+                .unwrap();
+        let (source, _source_records) = plumb_net::start(source_config, Arc::new(table))
+            .await
+            .unwrap();
+        let source_id = source.peer_id();
+        let source_addr: plumb_net::Multiaddr = loop {
+            if let Some(addr) = source.status().listening.first() {
+                break addr.parse().unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let dir = seeded_dir();
+        let mut config = test_config(dir.path());
+        config.take_new_sites = true;
+        let mut net = plumb_net::NetConfig::new(PathBuf::new());
+        net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        net.upnp = false;
+        net.local_discovery = false;
+        net.round_every = None;
+        net.fill = false;
+        net.trusted_peers = vec![source_id];
+        net.bootstrap = vec![source_addr.with_p2p(source_id).unwrap()];
+        config.network = Some(net);
+        let receiver = start(config.clone()).await.unwrap();
+        wait_for(receiver.addr(), "initial index", ready_and_idle).await;
+        let raw = std::fs::read(&receiver.inner.paths.records).unwrap();
+        let news_dir = receiver.inner.paths.news.clone();
+        let budget = receiver.inner.storage.as_ref().unwrap();
+        plumb_core::storage::create_directory(&news_dir, Some(budget)).unwrap();
+        let blocked = news_dir.join("headlines.json");
+        plumb_core::storage::create_directory(&blocked, Some(budget)).unwrap();
+        let mut record = SiteRecord::new("headline-persist.example");
+        record.news = vec![plumb_core::Headline {
+            title: "News survives a failed durable write".into(),
+            url: "https://headline-persist.example/story".into(),
+            at: now_unix(),
+        }];
+        if with_raw {
+            record.url = Some("https://headline-persist.example/".into());
+            record.title = Some("A raw crawl with its headline".into());
+            record.crawled_at = Some(now_unix());
+        }
+        let id = source.publish(vec![record]).await.unwrap().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while receiver
+            .inner
+            .net
+            .get()
+            .is_none_or(|n| n.status().batches_received != 1)
+            || receiver.inner.news.headline_count() != 1
+        {
+            assert!(
+                Instant::now() < deadline,
+                "headline delivery did not reach the receiver"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(receiver.inner.news.save().is_err());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let batches = dir.path().join("net/batches");
+        let marker = batches.join(format!("{id}.delivered-trusted"));
+        let signed = std::fs::read(batches.join(format!("{id}.json"))).unwrap();
+        assert!(!marker.exists(), "failed headline save was acknowledged");
+        assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 0);
+        assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 0);
+        assert!(!receiver.inner.paths.inbox.exists());
+        assert_eq!(std::fs::read(&receiver.inner.paths.records).unwrap(), raw);
+        receiver.shutdown().await.unwrap();
+        source.shutdown().await;
+        let credits = dir.path().join("net/credits");
+        let before = plumb_net::credits::Ledger::open(&credits)
+            .unwrap()
+            .account(&source_id);
+        assert_eq!(before.confirmed, u64::from(with_raw));
+        assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 0);
+        std::fs::remove_dir(&blocked).unwrap();
+        config.network.as_mut().unwrap().bootstrap.clear();
+        let receiver = start(config.clone()).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !marker.is_file() {
+            assert!(
+                Instant::now() < deadline,
+                "restart did not persist both destinations before acknowledging"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 1);
+        let inbox: Vec<SiteRecord> = read_jsonl(&receiver.inner.paths.inbox).unwrap_or_default();
+        let held = crate::records::load_records(&receiver.inner.paths.records).unwrap();
+        let durable_raw = inbox
+            .iter()
+            .filter(|r| r.domain == "headline-persist.example")
+            .count()
+            + usize::from(held.get("headline-persist.example").is_some());
+        assert_eq!(durable_raw, usize::from(with_raw));
+        assert_eq!(
+            std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
+            signed
+        );
+        receiver.shutdown().await.unwrap();
+        let after = plumb_net::credits::Ledger::open(&credits)
+            .unwrap()
+            .account(&source_id);
+        assert_eq!(
+            (after.confirmed, after.earned),
+            (before.confirmed, before.earned)
+        );
+        let receiver = start(config).await.unwrap();
+        wait_for(receiver.addr(), "acknowledged restart", ready_and_idle).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(receiver.inner.news.headline_count(), 1);
+        assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 1);
+        assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 0);
+        receiver.shutdown().await.unwrap();
+        let after = plumb_net::credits::Ledger::open(&credits)
+            .unwrap()
+            .account(&source_id);
+        assert_eq!(
+            (after.confirmed, after.earned),
+            (before.confirmed, before.earned)
+        );
+    }
 }

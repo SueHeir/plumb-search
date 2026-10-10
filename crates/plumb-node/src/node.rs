@@ -938,7 +938,18 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         .context("reading the address listened on")?;
 
     let (stop, stopped) = watch::channel(false);
-    let inner = Arc::new(Inner::new(config, rank, opened, stopped.clone()));
+    // Keep one shared ledger even without a cap, so enabling/lowering a
+    // limit takes effect for jobs already running and their reservations.
+    let path = opened.paths.data.clone();
+    let limit = match opened.settings.storage_limit_mb.saturating_mul(MB) {
+        0 => u64::MAX,
+        limit => limit,
+    };
+    let storage = Some(
+        tokio::task::spawn_blocking(move || plumb_core::storage::StorageBudget::open(&path, limit))
+            .await??,
+    );
+    let inner = Arc::new(Inner::new(config, rank, opened, stopped.clone(), storage));
     inner.journal.info(format!(
         "Plumb Search {} started",
         env!("CARGO_PKG_VERSION")
@@ -1004,7 +1015,10 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         // The node still searches and crawls on its own.
         warn!("{err:#}");
     }
-    let worker = tokio::spawn(worker::run(inner.clone()));
+    let worker = tokio::spawn(plumb_ingest::storage::with_budget(
+        inner.storage.clone(),
+        worker::run(inner.clone()),
+    ));
     tokio::spawn(release_memory_now_and_then(inner.clone()));
     let embedding = inner.config.search_by_meaning.then(|| {
         supervise(&inner, "search by meaning", |inner| {
@@ -1247,6 +1261,7 @@ struct Inner {
     config: NodeConfig,
     paths: Paths,
     rank: RankConfig,
+    storage: Option<Arc<plumb_core::storage::StorageBudget>>,
     activity: Mutex<Activity>,
     saved: Mutex<SavedState>,
     /// The index searched; `None` until the first one is ready.
@@ -1485,16 +1500,18 @@ impl Inner {
         rank: RankConfig,
         opened: Opened,
         stopped: watch::Receiver<bool>,
+        storage: Option<Arc<plumb_core::storage::StorageBudget>>,
     ) -> Self {
         let backoff = worker::Backoff::new(config.retry_wait, config.max_retry_wait);
-        let journal = journal::Journal::open(&opened.paths.data);
+        let journal = journal::Journal::open(&opened.paths.data).with_budget(storage.clone());
         let map_data = opened.paths.data.clone();
         let fill_state = fill::FillState::load(&opened.paths.net);
-        let news = crate::news::NewsStore::open(&opened.paths.news);
+        let news = crate::news::NewsStore::open(&opened.paths.news).with_budget(storage.clone());
         Inner {
             config,
             paths: opened.paths,
             rank,
+            storage,
             activity: Mutex::new(Activity {
                 step: Step::Starting,
                 detail: "Starting".to_string(),
@@ -1611,8 +1628,13 @@ impl Inner {
     fn pause_given(&self, disk_used: impl FnOnce() -> u64) -> Option<Pause> {
         self.download_pause().or_else(|| {
             let limit = self.settings().storage_limit_mb;
-            (limit > 0 && disk_used() >= limit.saturating_mul(MB))
-                .then(|| Pause::new("Paused: the storage limit is reached", None))
+            (limit > 0
+                && (disk_used() >= limit.saturating_mul(MB)
+                    || self
+                        .storage
+                        .as_ref()
+                        .is_some_and(|budget| budget.status().backpressure)))
+            .then(|| Pause::new("Paused: the storage limit is reached", None))
         })
     }
 
@@ -1719,17 +1741,22 @@ impl Inner {
         self.update_saved(|saved| saved.add_downloaded(bytes, now))
     }
 
-    /// The size of the data folder, counted again when the last count is
+    /// The admitted allocated bytes, without a tree walk on status/ingest.
+    /// Legacy callers without a ledger count again when the last count is
     /// more than [`DISK_COUNT_MAX_AGE`] old or [`Inner::recount_disk`]
     /// asked for it. The count is made without holding the lock, so a
     /// status page does not wait on it.
     fn disk_used(&self) -> u64 {
+        if let Some(budget) = &self.storage {
+            return budget.status().used_bytes;
+        }
         if let Some((at, bytes)) = *self.disk.lock().unwrap_or_else(PoisonError::into_inner) {
             if at.elapsed() < DISK_COUNT_MAX_AGE {
                 return bytes;
             }
         }
-        let bytes = store::dir_size(&self.paths.data);
+        let bytes = plumb_net::storage::directory_bytes(&self.paths.data)
+            .unwrap_or_else(|_| store::dir_size(&self.paths.data));
         *self.disk.lock().unwrap_or_else(PoisonError::into_inner) =
             Some((std::time::Instant::now(), bytes));
         bytes
@@ -1739,6 +1766,9 @@ impl Inner {
     /// the background work counts again often enough. Counts only when
     /// there is none yet.
     fn disk_used_shown(&self) -> u64 {
+        if let Some(budget) = &self.storage {
+            return budget.status().used_bytes;
+        }
         let last = *self.disk.lock().unwrap_or_else(PoisonError::into_inner);
         match last {
             Some((_, bytes)) => bytes,
@@ -1748,6 +1778,11 @@ impl Inner {
 
     /// Has the next [`Inner::disk_used`] count the data folder again.
     fn recount_disk(&self) {
+        if let Some(budget) = &self.storage {
+            *self.disk.lock().unwrap_or_else(PoisonError::into_inner) =
+                Some((std::time::Instant::now(), budget.status().used_bytes));
+            return;
+        }
         let mut count = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
         // Kept for showing until then.
         *count = count.and_then(|(_, bytes)| {
@@ -1804,6 +1839,9 @@ impl Inner {
                 store::save_settings(&self.paths, &new)?;
                 info!("settings changed: {new:?}");
                 self.journal.info(settings_change_words(&settings, &new));
+                if let Some(budget) = &self.storage {
+                    budget.set_limit(new.storage_limit_mb.saturating_mul(MB));
+                }
                 *settings = new;
             }
         }
@@ -2028,8 +2066,13 @@ impl Inner {
             if !retired.closed.load(Ordering::Acquire) {
                 return true;
             }
+            let _mutation = self.storage.as_ref().map(|budget| budget.mutation());
+            let bytes = plumb_core::storage::directory_bytes(&retired.dir).unwrap_or(0);
             match store::remove_index(&retired.dir) {
                 Ok(()) => {
+                    if let Some(budget) = &self.storage {
+                        budget.removed(bytes);
+                    }
                     info!("deleted the old index {}", retired.dir.display());
                     false
                 }

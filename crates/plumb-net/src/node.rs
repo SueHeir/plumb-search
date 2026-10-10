@@ -49,7 +49,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -100,7 +100,8 @@ use crate::reports::ReportStore;
 use crate::rounds::{Pace, PendingBuckets, RoundStatus, ROUND_EVERY};
 use crate::scope::{Friends, SearchScope, MAX_SHARED_TRUST};
 use crate::search::{BucketPeer, NetSearch};
-use crate::store::{read_held, BatchStore, CrawlerView, RETAIN_EPOCHS};
+use crate::storage::{allocation_for, Reservation, StorageBudget, StorageStatus};
+use crate::store::{read_held_with_budget, BatchStore, CrawlerView, StoreLimits, RETAIN_EPOCHS};
 
 /// Relays a node behind NAT takes reservations on.
 pub const MAX_RELAYS: usize = 2;
@@ -131,6 +132,8 @@ const CIRCUIT_BURST: NonZeroU32 = NonZeroU32::new(600).unwrap();
 const CIRCUIT_REFILL: Duration = Duration::from_millis(100);
 /// Batch fetches in flight at once.
 const MAX_FETCHES: usize = 16;
+// Leave each peer's four serving slots room for startup/report requests.
+const MAX_FETCHES_PER_PEER: usize = 2;
 
 /// Network searches run at once by one node ([`NetHandle::search`]).
 pub const MAX_SEARCHES: usize = 4;
@@ -187,6 +190,7 @@ const MAX_LEAD_LISTS: usize = 2;
 /// Batch and report requests of other nodes answered at once: one can mean
 /// reading a 16 MB batch. More are answered with nothing for now.
 const MAX_LISTS_SERVING: usize = 4;
+const MAX_BATCH_LISTS: usize = 64;
 const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
 /// Nodes a report is offered to, one after the other, until one takes it.
 pub const REPORT_TRIES: usize = 3;
@@ -196,10 +200,8 @@ pub const RECOUNT_MINUTES: u64 = 10;
 const POPULARITY_FILE: &str = "popularity.json";
 /// Where what the trusted nodes trust is kept (see [`crate::scope`]).
 const FRIENDS_FILE: &str = "friends.json";
-/// Between two batches sent again by [`resend_trusted`].
-const RESEND_PAUSE: Duration = Duration::from_millis(10);
-/// The trusted nodes whose held batches were taken in as trusted.
-const TRUST_APPLIED_FILE: &str = "trusted-applied";
+/// Pending disk writes and downstream record deliveries, at most.
+const RECORD_DELIVERIES: usize = 4;
 /// The scope the bucket cache was filled under.
 const SCOPE_FILE: &str = "search-scope";
 
@@ -271,6 +273,11 @@ pub struct NetConfig {
     /// Most bytes of other crawlers' batches kept, the oldest deleted
     /// first; `None` for no limit but [`NetConfig::keep_batches_days`].
     pub keep_batches_bytes: Option<u64>,
+    /// Whole data-directory allocation budget for foreign batches, cached
+    /// buckets and their inbox. Own signed batches retain their exemption.
+    pub storage_limit: Option<(PathBuf, u64)>,
+    /// A node can share admission with its native/page/vector builders.
+    pub storage_budget: Option<Arc<StorageBudget>>,
     /// Fixed interval between independently scheduled bucket rounds (see
     /// [`crate::rounds`]). Enabled searches read retained local data. `None`
     /// preserves legacy immediate-fetch behavior; default is [`ROUND_EVERY`].
@@ -314,6 +321,8 @@ impl NetConfig {
             answer_per_day: None,
             keep_batches_days: RETAIN_EPOCHS,
             keep_batches_bytes: None,
+            storage_limit: None,
+            storage_budget: None,
             round_every: Some(ROUND_EVERY),
             fill: true,
             catch_up_epochs: CATCH_UP_EPOCHS,
@@ -324,6 +333,18 @@ impl NetConfig {
 /// What the network side of a node is doing, for `GET /api/status`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetStatus {
+    #[serde(default)]
+    pub storage: Option<StorageStatus>,
+    #[serde(default)]
+    pub ingest_backpressure: bool,
+    #[serde(default)]
+    pub batch_busy_replies: u64,
+    #[serde(default)]
+    pub batch_retries: u64,
+    #[serde(default)]
+    pub batch_list_retries: u64,
+    #[serde(default)]
+    pub batch_lists_received: u64,
     pub peer_id: String,
     pub listening: Vec<String>,
     /// Addresses others can reach this node at, as far as it knows.
@@ -419,6 +440,8 @@ pub struct NetHandle {
     /// Buckets retained from scheduled rounds or legacy immediate searches (see
     /// [`crate::cache`]).
     cache: Arc<crate::cache::BucketCache>,
+    storage: Option<Arc<StorageBudget>>,
+    replay_stopped: Arc<std::sync::atomic::AtomicBool>,
     /// When background rounds go (see [`crate::rounds`]).
     pace: Arc<Pace>,
     pending_buckets: Arc<Mutex<PendingBuckets>>,
@@ -537,6 +560,10 @@ impl NetHandle {
     /// [`crate::assign::slice_owner`]).
     pub fn owns_slice(&self, group: &[PeerId], domain: &str) -> bool {
         crate::assign::slice_owner(group, domain) == Some(&self.peer_id)
+    }
+
+    pub fn storage_budget(&self) -> Option<&Arc<StorageBudget>> {
+        self.storage.as_ref()
     }
 
     pub fn status(&self) -> NetStatus {
@@ -917,6 +944,8 @@ impl NetHandle {
 
     /// Stops the swarm and waits for it. Later calls do nothing.
     pub async fn shutdown(&self) {
+        self.replay_stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(rounds) = self
             .rounds
             .lock()
@@ -1017,10 +1046,28 @@ struct Behaviour {
 /// accepted from other nodes' batches, one batch at a time. Records that
 /// carry headlines ([`SiteRecord::news`]) carry nothing else: they are
 /// trusted crawlers' feed checks, for the node's headline store.
+/// One bounded delivery with disk room held until the receiver has saved it.
+/// Call `acknowledgment.acknowledge()` after durable persistence. Unacknowledged
+/// held batches replay after restart; replay never awards credits again.
+#[derive(Debug)]
+pub struct RecordDelivery {
+    pub records: Vec<SiteRecord>,
+    pub reservation: Option<Reservation>,
+    pub acknowledgment: crate::store::DeliveryAck,
+}
+
+fn delivery_bytes(records: usize) -> u64 {
+    // Agreement can release a crawl and a mention per input record. Leave
+    // room for merged metadata as well as a full protocol-sized record.
+    allocation_for(
+        (records as u64).saturating_mul(2 * (crate::batch::MAX_RECORD_BYTES as u64 + 4096)),
+    )
+}
+
 pub async fn start(
     config: NetConfig,
     source: Arc<dyn BucketSource>,
-) -> Result<(NetHandle, mpsc::UnboundedReceiver<Vec<SiteRecord>>)> {
+) -> Result<(NetHandle, mpsc::Receiver<RecordDelivery>)> {
     let key = load_or_create_key(&config.dir.join("node.key"))?;
     let (reports, table, leads) = {
         let dir = config.dir.clone();
@@ -1042,29 +1089,6 @@ pub async fn start(
         .bootstrap
         .retain(|addr| peer_of(addr) != Some(peer_id));
     let gateway = Gateway::new(&key, now_unix())?;
-    // Crawlers trusted since the last start: the batches held from them
-    // were taken in without their text, so they are sent again whole.
-    let trust_file = config.dir.join(TRUST_APPLIED_FILE);
-    let newly_trusted = newly_trusted(&trust_file, peer_id, &config.trusted_peers);
-    let (store, agreement, replay) = {
-        let dir = config.dir.join("batches");
-        let trusted = config.trusted_peers.clone();
-        let newly = newly_trusted.clone();
-        let follow = config.follow_crawls;
-        tokio::task::spawn_blocking(move || -> Result<_> {
-            let store = BatchStore::open_following(&dir, follow)?;
-            let (agreement, replay) = if follow {
-                replay_agreement(&store, peer_id, &trusted, &newly)
-            } else {
-                // Nothing is passed on, so nothing is sent again either:
-                // the node takes them in once it follows crawls again.
-                (Agreement::new(peer_id, trusted.iter().copied()), Vec::new())
-            };
-            Ok((store, agreement, replay))
-        })
-        .await
-        .context("opening the batch store")??
-    };
     let (ledger, issuer, wallet) = {
         let dir = config.dir.join("credits");
         tokio::task::spawn_blocking(move || -> Result<_> {
@@ -1076,6 +1100,52 @@ pub async fn start(
         })
         .await
         .context("opening the credits")??
+    };
+    let storage = match (&config.storage_budget, &config.storage_limit) {
+        (Some(budget), _) => Some(budget.clone()),
+        (None, Some((root, limit))) => {
+            let (root, limit) = (root.clone(), *limit);
+            Some(tokio::task::spawn_blocking(move || StorageBudget::open(&root, limit)).await??)
+        }
+        (None, None) => None,
+    };
+    if config.storage_budget.is_some() {
+        let budget = storage.clone().expect("shared startup ledger");
+        tokio::task::spawn_blocking(move || budget.recount(budget.root())).await??;
+    }
+    let reports = reports.with_budget(storage.clone());
+    let leads = leads.with_budget(storage.clone());
+    let ledger = ledger.with_budget(storage.clone());
+    let wallet = wallet.with_budget(storage.clone());
+    let cache = Arc::new(crate::cache::BucketCache::open_with_budget(
+        &config.dir.join("bucket-cache"),
+        now_unix(),
+        storage.clone(),
+    ));
+    let (store, agreement, replay) = {
+        let dir = config.dir.join("batches");
+        let trusted = config.trusted_peers.clone();
+        let follow = config.follow_crawls;
+        let limits = StoreLimits {
+            own: key.public().encode_protobuf(),
+            bytes: config.keep_batches_bytes,
+            now: now_unix(),
+            epochs: config.keep_batches_days,
+            storage: storage.clone(),
+        };
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let store = BatchStore::open_retained(&dir, follow, limits)?;
+            let (agreement, replay) = if follow {
+                replay_agreement(&store, peer_id, &trusted)
+            } else {
+                // Nothing is passed on, so nothing is sent again either:
+                // the node takes them in once it follows crawls again.
+                (Agreement::new(peer_id, trusted.iter().copied()), Vec::new())
+            };
+            Ok((store, agreement, replay))
+        })
+        .await
+        .context("opening the batch store")??
     };
     let wallet = Arc::new(Mutex::new(wallet));
     let tokens_spent = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1121,7 +1191,8 @@ pub async fn start(
     }));
     let popularity = Arc::new(RwLock::new(Arc::new(table)));
     let (commands, commands_rx) = mpsc::unbounded_channel();
-    let (records_tx, records_rx) = mpsc::unbounded_channel();
+    let (records_tx, records_rx) = mpsc::channel(RECORD_DELIVERIES);
+    let replay_stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let store = Arc::new(Mutex::new(store));
     {
         let (store, records, trusted) = (
@@ -1129,8 +1200,9 @@ pub async fn start(
             records_tx.clone(),
             config.trusted_peers.clone(),
         );
+        let stopped = replay_stopped.clone();
         tokio::task::spawn_blocking(move || {
-            resend_trusted(&store, &replay, &records, &trust_file, &trusted)
+            resend_pending(&store, &replay, &records, peer_id, &trusted, &stopped)
         });
     }
     let (answers_tx, answers_rx) = mpsc::unbounded_channel();
@@ -1158,6 +1230,9 @@ pub async fn start(
         source,
         status: status.clone(),
         records: records_tx,
+        replay_stopped: replay_stopped.clone(),
+        pending_batches: HashSet::new(),
+        ingest_blocked: false,
         agreement,
         ledger,
         issuer,
@@ -1183,6 +1258,9 @@ pub async fn start(
         wanted_ids: HashSet::new(),
         refused: HashSet::new(),
         fetching: HashMap::new(),
+        batch_retries: BatchRetries::default(),
+        batch_lists: HashMap::new(),
+        list_retries: BatchListRetries::default(),
         listing: HashSet::new(),
         unannounced: Vec::new(),
         answering: 0,
@@ -1212,10 +1290,7 @@ pub async fn start(
         task.dial(addr.clone());
     }
     let handle = tokio::spawn(task.run(commands_rx, answers_rx));
-    let cache = Arc::new(crate::cache::BucketCache::open(
-        &config.dir.join("bucket-cache"),
-        now_unix(),
-    ));
+
     // Buckets kept from nodes a narrower scope no longer asks would still
     // answer searches, so a change of scope starts the cache afresh.
     let scope_file = config.dir.join(SCOPE_FILE);
@@ -1267,6 +1342,8 @@ pub async fn start(
             wallet,
             tokens_spent,
             cache,
+            storage,
+            replay_stopped,
             pace,
             pending_buckets,
             round_updates,
@@ -1610,6 +1687,17 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
 
 /// Work done off the swarm task whose result goes back to a remote node.
 enum Answer {
+    StoredBatch {
+        id: Hash,
+        crawler: PeerId,
+        from: PeerId,
+        made: u64,
+        lines: usize,
+        accepted: Vec<SiteRecord>,
+        news: Vec<SiteRecord>,
+        permit: Option<mpsc::OwnedPermit<RecordDelivery>>,
+        saved: Result<(bool, Option<Reservation>)>,
+    },
     Bucket(ResponseChannel<BucketResponse>, BucketResponse),
     Batch(ResponseChannel<BatchResponse>, BatchResponse),
     Report(ResponseChannel<ReportResponse>, ReportResponse),
@@ -1655,7 +1743,122 @@ enum Relayed {
     Forward(Reply),
 }
 
+// A missing reply can also mean the peer's serving slots are busy. Retain
+// its source and wake separately from channel capacity/maintenance. Both the
+// number of IDs and attempts per ID are bounded; invalid batches are refused.
+#[derive(Default)]
+struct BatchRetries {
+    entries: HashMap<Hash, BatchRetry>,
+}
+
+// Empty headers also represent a busy source on the existing wire protocol.
+// Retry boundedly, even before any IDs are known; never wait for maintenance.
+#[derive(Default)]
+struct BatchListRetries {
+    entries: HashMap<PeerId, BatchListRetry>,
+}
+struct BatchListRetry {
+    since: u64,
+    at: Option<tokio::time::Instant>,
+    attempts: u8,
+}
+impl BatchListRetries {
+    fn defer(&mut self, peer: PeerId, since: u64, now: tokio::time::Instant) -> bool {
+        if self.entries.len() >= MAX_BATCH_LISTS && !self.entries.contains_key(&peer) {
+            return false;
+        }
+        let entry = self.entries.entry(peer).or_insert(BatchListRetry {
+            since,
+            at: None,
+            attempts: 0,
+        });
+        if entry.attempts >= 16 {
+            self.entries.remove(&peer);
+            return false;
+        }
+        entry.since = entry.since.min(since);
+        entry.at = Some(now + Duration::from_millis((100u64 << entry.attempts.min(5)).min(2000)));
+        entry.attempts += 1;
+        true
+    }
+    fn next(&self) -> Option<tokio::time::Instant> {
+        self.entries.values().filter_map(|entry| entry.at).min()
+    }
+    fn due(&mut self, now: tokio::time::Instant) -> Vec<(PeerId, u64)> {
+        self.entries
+            .iter_mut()
+            .filter_map(|(peer, entry)| {
+                if entry.at.is_some_and(|at| at <= now) {
+                    entry.at = None;
+                    Some((*peer, entry.since))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    fn forget(&mut self, peer: &PeerId) {
+        self.entries.remove(peer);
+    }
+}
+struct BatchRetry {
+    sources: Vec<PeerId>,
+    at: Option<tokio::time::Instant>,
+    attempts: u8,
+}
+impl BatchRetries {
+    fn defer(
+        &mut self,
+        id: Hash,
+        source: PeerId,
+        mut rest: Vec<PeerId>,
+        now: tokio::time::Instant,
+    ) -> bool {
+        if self.entries.len() >= MAX_WANTED && !self.entries.contains_key(&id) {
+            return false;
+        }
+        let entry = self.entries.entry(id).or_insert(BatchRetry {
+            sources: Vec::new(),
+            at: None,
+            attempts: 0,
+        });
+        if entry.attempts >= 16 {
+            self.entries.remove(&id);
+            return false;
+        }
+        if !rest.contains(&source) {
+            rest.push(source);
+        }
+        rest.sort();
+        rest.dedup();
+        entry.sources = rest;
+        entry.at = Some(now + Duration::from_millis((100u64 << entry.attempts.min(5)).min(2000)));
+        entry.attempts += 1;
+        true
+    }
+    fn next(&self) -> Option<tokio::time::Instant> {
+        self.entries.values().filter_map(|entry| entry.at).min()
+    }
+    fn due(&mut self, now: tokio::time::Instant) -> Vec<(Hash, Vec<PeerId>)> {
+        self.entries
+            .iter_mut()
+            .filter_map(|(id, entry)| {
+                if entry.at.is_some_and(|at| at <= now) {
+                    entry.at = None;
+                    Some((*id, std::mem::take(&mut entry.sources)))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    fn forget(&mut self, id: &Hash) {
+        self.entries.remove(id);
+    }
+}
+
 struct Task {
+    replay_stopped: Arc<std::sync::atomic::AtomicBool>,
     swarm: Swarm<Behaviour>,
     key: Keypair,
     config: NetConfig,
@@ -1687,7 +1890,9 @@ struct Task {
     unannounced_leads: Vec<Lead>,
     source: Arc<dyn BucketSource>,
     status: Arc<Mutex<NetStatus>>,
-    records: mpsc::UnboundedSender<Vec<SiteRecord>>,
+    records: mpsc::Sender<RecordDelivery>,
+    pending_batches: HashSet<Hash>,
+    ingest_blocked: bool,
     /// Crawls held until a second crawler agrees.
     agreement: Agreement,
     /// Every crawler's credits, as this node counts them.
@@ -1733,7 +1938,10 @@ struct Task {
     wanted_ids: HashSet<Hash>,
     /// Batches fetched and found useless or bad, so not fetched again.
     refused: HashSet<Hash>,
-    fetching: HashMap<OutboundRequestId, (Hash, Vec<PeerId>)>,
+    fetching: HashMap<OutboundRequestId, (Hash, Vec<PeerId>, PeerId)>,
+    batch_retries: BatchRetries,
+    batch_lists: HashMap<OutboundRequestId, (PeerId, u64)>,
+    list_retries: BatchListRetries,
     /// Nodes asked for their batch headers since they last connected.
     listing: HashSet<PeerId>,
     /// Our own headers not yet announced to anyone.
@@ -1796,6 +2004,13 @@ impl Task {
         let mut ticks: u64 = 0;
         loop {
             let ask_again_at = self.ask_again_at;
+            let batch_retry_at = self.batch_retries.next();
+            let list_retry_at = self.list_retries.next();
+            let can_fetch = !self.ingest_blocked
+                && !self.wanted.is_empty()
+                && self.pending_batches.len() < RECORD_DELIVERIES
+                && self.fetching.len() + self.pending_batches.len() < MAX_FETCHES
+                && self.has_fetchable_batch();
             tokio::select! {
                 event = self.swarm.select_next_some() => self.on_event(event),
                 command = commands.recv() => match command {
@@ -1803,6 +2018,30 @@ impl Task {
                     Some(command) => self.on_command(command),
                 },
                 Some(answer) = answers.recv() => self.on_answer(answer),
+                () = async {
+                    if can_fetch {
+                        match self.records.reserve().await {
+                            Ok(permit) => drop(permit),
+                            Err(_) => std::future::pending::<()>().await,
+                        }
+                    } else { std::future::pending::<()>().await; }
+                } => self.fetch_more(),
+                () = async {
+                    match batch_retry_at { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending::<()>().await }
+                } => {
+                    for (id, sources) in self.batch_retries.due(tokio::time::Instant::now()) {
+                        if self.wanted.len() < MAX_WANTED { self.wanted.push_back((id, sources)); }
+                        else { self.wanted_ids.remove(&id); self.batch_retries.forget(&id); }
+                    }
+                    self.fetch_more();
+                },
+                () = async {
+                    match list_retry_at { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending::<()>().await }
+                } => {
+                    for (peer, since) in self.list_retries.due(tokio::time::Instant::now()) {
+                        self.ask_batch_list(peer, since);
+                    }
+                },
                 _ = maintenance.tick() => {
                     self.maintain(ticks);
                     ticks += 1;
@@ -1819,6 +2058,8 @@ impl Task {
             }
             self.update_status();
         }
+        self.replay_stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Err(err) = self.ledger.save() {
             warn!("cannot save the credits ledger: {err:#}");
         }
@@ -2059,6 +2300,23 @@ impl Task {
         epoch: u64,
         now: u64,
     ) -> Result<Option<Hash>> {
+        // Already signed Own batches must remain durable, but fresh crawls
+        // acquire headroom before signing. This reservation remains held while
+        // the store writes, so other producers cannot consume it meanwhile.
+        let budget = self.lock_store().storage().cloned();
+        let _headroom = if let Some(budget) = budget {
+            let mut size = crate::storage::ByteCount {
+                bytes: 0,
+                limit: crate::batch::MAX_BATCH_BYTES as u64,
+            };
+            serde_json::to_writer(&mut size, records)?;
+            Some(budget.reserve(
+                allocation_for(size.bytes.saturating_mul(2).saturating_add(4096)),
+                false,
+            )?)
+        } else {
+            None
+        };
         let share = self.config.share_ppm.min(MAX_SHARE_PPM);
         let Some(batch) = Batch::sign(&self.key, records, epoch, share, now)? else {
             return Ok(None);
@@ -2108,6 +2366,59 @@ impl Task {
 
     fn on_answer(&mut self, answer: Answer) {
         match answer {
+            Answer::StoredBatch {
+                id,
+                crawler,
+                from,
+                made,
+                lines,
+                accepted,
+                news,
+                permit,
+                saved,
+            } => {
+                self.pending_batches.remove(&id);
+                match saved {
+                    Ok((true, reservation)) => {
+                        self.batch_retries.forget(&id);
+                        self.ingest_blocked = false;
+                        let kept = accepted.len();
+                        if self.config.follow_crawls {
+                            let mut confirmed = self.agreement.observe(crawler, accepted, made);
+                            self.count_credits();
+                            confirmed.extend(news);
+                            if let Some(permit) = permit.filter(|_| !confirmed.is_empty()) {
+                                permit.send(RecordDelivery {
+                                    records: confirmed,
+                                    reservation,
+                                    acknowledgment: self.lock_store().delivery_ack(
+                                        &id,
+                                        self.config.trusted_peers.contains(&crawler),
+                                    ),
+                                });
+                            }
+                        }
+                        let agreement = self.agreement.status();
+                        self.with_status(|s| {
+                            s.batches_received += 1;
+                            s.agreement = agreement;
+                        });
+                        debug!(
+                            "received batch {id}: kept {kept} of {lines} records from {crawler}"
+                        );
+                    }
+                    Ok((false, _)) => {
+                        self.batch_retries.forget(&id);
+                    } // Duplicate: no credits, delivery or quota churn.
+                    Err(err) => {
+                        self.wanted_ids.insert(id);
+                        self.retry_known_batch(id, from, Vec::new());
+                        self.ingest_blocked = true;
+                        warn!("cannot keep batch {id}: {err:#}");
+                    }
+                }
+                self.fetch_more();
+            }
             Answer::Bucket(channel, response) => {
                 self.answering = self.answering.saturating_sub(1);
                 let _ = self
@@ -2182,6 +2493,7 @@ impl Task {
     /// Once a minute: keep enough connections, look for more nodes, retry
     /// announcements and fetches, prune old batches.
     fn maintain(&mut self, ticks: u64) {
+        self.ingest_blocked = false; // Retry temporary quota pressure each minute.
         let now = now_unix();
         let crawlers = crawler_views(
             &self.lock_store(),
@@ -2266,10 +2578,7 @@ impl Task {
             let since = epoch_of(now).saturating_sub(1);
             let peers: Vec<PeerId> = self.batch_peers.iter().copied().collect();
             for peer in peers {
-                self.swarm
-                    .behaviour_mut()
-                    .batches
-                    .send_request(&peer, BatchRequest::List { since_epoch: since });
+                self.ask_batch_list(peer, since);
             }
             // Leads whose gossip was missed, as when a node shares one
             // before the gossip mesh has formed.
@@ -2630,10 +2939,7 @@ impl Task {
             self.batch_peers.insert(peer);
             if self.listing.insert(peer) {
                 let since = epoch_of(now_unix()).saturating_sub(self.config.catch_up_epochs);
-                self.swarm
-                    .behaviour_mut()
-                    .batches
-                    .send_request(&peer, BatchRequest::List { since_epoch: since });
+                self.ask_batch_list(peer, since);
             }
         }
         if supports(RELAY_HOP_PROTOCOL)
@@ -2675,6 +2981,7 @@ impl Task {
 
     /// Remembers not to fetch batch `id` again.
     fn refuse(&mut self, id: Hash) {
+        self.batch_retries.forget(&id);
         if self.refused.len() >= MAX_REFUSED {
             self.refused.clear();
         }
@@ -2684,7 +2991,8 @@ impl Task {
     fn want(&mut self, id: Hash, sources: Vec<PeerId>) {
         // A full queue drops the newcomer: a real batch is heard of again
         // (gossip, catch-up), and fresh keys can't grow the queue forever.
-        if self.wanted.len() >= MAX_WANTED
+        if self.wanted_ids.len() >= MAX_WANTED
+            || self.pending_batches.contains(&id)
             || self.refused.contains(&id)
             || self.lock_store().contains(&id)
             || !self.wanted_ids.insert(id)
@@ -2695,24 +3003,60 @@ impl Task {
         self.fetch_more();
     }
 
+    fn peer_has_fetch_room(&self, peer: &PeerId) -> bool {
+        self.fetching
+            .values()
+            .filter(|(_, _, source)| source == peer)
+            .count()
+            < MAX_FETCHES_PER_PEER
+    }
+
+    fn has_fetchable_batch(&self) -> bool {
+        self.wanted.iter().any(|(_, sources)| {
+            sources.iter().any(|peer| {
+                *peer != self.key.public().to_peer_id() && self.peer_has_fetch_room(peer)
+            })
+        })
+    }
+
     fn fetch_more(&mut self) {
-        while self.fetching.len() < MAX_FETCHES {
+        let mut remaining = self.wanted.len();
+        while remaining > 0
+            && !self.ingest_blocked
+            && self.fetching.len() + self.pending_batches.len() < MAX_FETCHES
+            && self.pending_batches.len() < RECORD_DELIVERIES
+            && (!self.config.follow_crawls || self.records.capacity() > 0)
+        {
+            remaining -= 1;
             let Some((id, mut sources)) = self.wanted.pop_front() else {
                 return;
             };
-            sources.retain(|p| self.swarm.is_connected(p) && *p != self.key.public().to_peer_id());
-            let Some(source) = sources.first().copied() else {
+            sources.retain(|p| *p != self.key.public().to_peer_id());
+            if sources.is_empty() {
+                self.wanted_ids.remove(&id);
+                self.batch_retries.forget(&id);
+                continue;
+            }
+            let Some(source_at) = sources
+                .iter()
+                .position(|peer| self.peer_has_fetch_room(peer))
+            else {
+                self.wanted.push_back((id, sources));
+                continue;
+            };
+            let Some(source) = sources.get(source_at).copied() else {
                 // Nobody connected has it; forget it until it is heard of again.
                 self.wanted_ids.remove(&id);
                 continue;
             };
+            self.add_known_addresses(&source);
             let request = self
                 .swarm
                 .behaviour_mut()
                 .batches
                 .send_request(&source, BatchRequest::Get(id));
-            sources.remove(0);
-            self.fetching.insert(request, (id, sources));
+            sources.remove(source_at);
+            self.fetching.insert(request, (id, sources, source));
         }
     }
 
@@ -2984,6 +3328,7 @@ impl Task {
                 ..
             } => {
                 if self.lists_serving >= MAX_LISTS_SERVING {
+                    self.with_status(|status| status.batch_busy_replies += 1);
                     let response = match request {
                         BatchRequest::Get(_) => BatchResponse::Batch(None),
                         BatchRequest::List { .. } => BatchResponse::Headers(Vec::new()),
@@ -3003,11 +3348,13 @@ impl Task {
                         // Read and parsed with the store let go: a batch
                         // can be 16 MB.
                         BatchRequest::Get(id) => {
-                            let held = store
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner)
-                                .located(&id);
-                            let batch = held.map_or(Ok(None), |path| read_held(&path));
+                            let (held, budget) = {
+                                let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+                                (store.located(&id), store.storage().cloned())
+                            };
+                            let batch = held.map_or(Ok(None), |path| {
+                                read_held_with_budget(&path, budget.as_deref())
+                            });
                             BatchResponse::Batch(batch.unwrap_or_else(|err| {
                                 warn!("cannot read a batch: {err:#}");
                                 None
@@ -3033,6 +3380,19 @@ impl Task {
                 ..
             } => match response {
                 BatchResponse::Headers(headers) => {
+                    let Some((_, since)) = self.batch_lists.remove(&request_id) else {
+                        if let Some((id, rest, source)) = self.fetching.remove(&request_id) {
+                            self.retry_known_batch(id, source, rest);
+                            self.fetch_more();
+                        }
+                        return;
+                    };
+                    if headers.is_empty() {
+                        self.retry_batch_list(peer, since);
+                        return;
+                    }
+                    self.list_retries.forget(&peer);
+                    self.with_status(|status| status.batch_lists_received += 1);
                     let now = now_unix();
                     for header in headers.into_iter().take(MAX_LISTED_BATCHES) {
                         if let Ok(crawler) = header.check(now) {
@@ -3041,16 +3401,20 @@ impl Task {
                     }
                 }
                 BatchResponse::Batch(batch) => {
-                    let Some((id, rest)) = self.fetching.remove(&request_id) else {
+                    if let Some((peer, since)) = self.batch_lists.remove(&request_id) {
+                        self.retry_batch_list(peer, since);
+                        return;
+                    }
+                    let Some((id, rest, source)) = self.fetching.remove(&request_id) else {
                         return;
                     };
                     match batch {
                         Some(batch) if batch.id() == id => self.on_batch(peer, batch),
                         Some(_) => {
                             warn!("{peer} sent a different batch than asked for");
-                            self.retry_fetch(id, rest);
+                            self.retry_known_batch(id, source, rest);
                         }
-                        None => self.retry_fetch(id, rest),
+                        None => self.retry_known_batch(id, source, rest),
                     }
                     self.fetch_more();
                 }
@@ -3062,8 +3426,11 @@ impl Task {
                 ..
             } => {
                 debug!("batch request to {peer} failed: {error}");
-                if let Some((id, rest)) = self.fetching.remove(&request_id) {
-                    self.retry_fetch(id, rest);
+                if let Some((peer, since)) = self.batch_lists.remove(&request_id) {
+                    self.retry_batch_list(peer, since);
+                }
+                if let Some((id, rest, source)) = self.fetching.remove(&request_id) {
+                    self.retry_known_batch(id, source, rest);
                     self.fetch_more();
                 }
             }
@@ -3071,17 +3438,62 @@ impl Task {
         }
     }
 
-    fn retry_fetch(&mut self, id: Hash, rest: Vec<PeerId>) {
-        if rest.is_empty() {
+    fn retry_known_batch(&mut self, id: Hash, source: PeerId, rest: Vec<PeerId>) {
+        if !self
+            .batch_retries
+            .defer(id, source, rest, tokio::time::Instant::now())
+        {
             self.wanted_ids.remove(&id);
+            debug!("batch {id}: bounded retry attempts exhausted");
         } else {
-            self.wanted.push_back((id, rest));
+            self.with_status(|status| status.batch_retries += 1);
+        }
+    }
+
+    fn ask_batch_list(&mut self, peer: PeerId, since: u64) {
+        if self
+            .batch_lists
+            .values()
+            .any(|(pending, _)| *pending == peer)
+        {
+            return;
+        }
+        if self.batch_lists.len() >= MAX_BATCH_LISTS {
+            self.retry_batch_list(peer, since);
+            return;
+        }
+        self.add_known_addresses(&peer);
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .batches
+            .send_request(&peer, BatchRequest::List { since_epoch: since });
+        self.batch_lists.insert(id, (peer, since));
+    }
+
+    fn retry_batch_list(&mut self, peer: PeerId, since: u64) {
+        if self
+            .list_retries
+            .defer(peer, since, tokio::time::Instant::now())
+        {
+            self.with_status(|status| status.batch_list_retries += 1);
+        } else {
+            debug!("batch headers from {peer}: bounded retry attempts exhausted");
+        }
+    }
+
+    fn defer_batch(&mut self, id: Hash, from: PeerId) {
+        if self.wanted.len() < MAX_WANTED && self.wanted_ids.insert(id) {
+            self.wanted.push_back((id, vec![from]));
         }
     }
 
     fn on_batch(&mut self, from: PeerId, batch: Batch) {
         let id = batch.id();
         self.wanted_ids.remove(&id);
+        if self.pending_batches.contains(&id) || self.lock_store().contains(&id) {
+            return;
+        }
         let now = now_unix();
         let crawler = match batch.check(now) {
             Ok(crawler) => crawler,
@@ -3118,46 +3530,50 @@ impl Task {
         };
         let lines = batch.records.len();
         let made = batch.header.header.created_at;
-        // Written and synced off the swarm task.
-        let store = self.store.clone();
-        let status = self.status.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
-            match store.insert(&batch) {
-                Ok(()) => {
-                    let held = store.len();
-                    drop(store);
-                    status
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .batches_held = held;
+        // Reserve a bounded delivery slot before spawning disk work. Capacity
+        // exhaustion is temporary: do not add the id to the permanent refusals.
+        let permit = if self.config.follow_crawls {
+            match self.records.clone().try_reserve_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    self.defer_batch(id, from);
+                    return;
                 }
-                Err(err) => warn!("cannot keep batch {id}: {err:#}"),
             }
-        });
-        let kept = accepted.len();
-        if !self.config.follow_crawls {
-            debug!("received batch {id} from {from}: {lines} records crawled by {crawler}");
-            self.with_status(|s| s.batches_received += 1);
+        } else {
+            None
+        };
+        if self.pending_batches.len() >= RECORD_DELIVERIES {
+            self.defer_batch(id, from);
             return;
         }
-        let confirmed = self.agreement.observe(crawler, accepted, made);
-        self.count_credits();
-        info!(
-            "received batch {id} from {from}: kept {kept} of {lines} records crawled by {crawler}, {} now confirmed by a second crawler",
-            confirmed.len()
-        );
-        let agreement = self.agreement.status();
-        self.with_status(|s| {
-            s.batches_received += 1;
-            s.agreement = agreement;
+        if !self.pending_batches.insert(id) {
+            return;
+        }
+        let delivery = if permit.is_some() {
+            delivery_bytes(accepted.len() + news.len())
+        } else {
+            0
+        };
+        let store = self.store.clone();
+        let answers = self.answers_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let saved = store
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert_for_delivery(&batch, delivery);
+            let _ = answers.send(Answer::StoredBatch {
+                id,
+                crawler,
+                from,
+                made,
+                lines,
+                accepted,
+                news,
+                permit,
+                saved,
+            });
         });
-        if !confirmed.is_empty() {
-            let _ = self.records.send(confirmed);
-        }
-        if !news.is_empty() {
-            let _ = self.records.send(news);
-        }
     }
 
     fn lock_store(&self) -> std::sync::MutexGuard<'_, BatchStore> {
@@ -3783,8 +4199,7 @@ impl Task {
                 let source = self.source.clone();
                 let tx = self.answers_tx.clone();
                 tokio::task::spawn_blocking(move || {
-                    let file = source.page_set_file(&request.set);
-                    let response = crate::pages::answer(file.as_deref(), &request);
+                    let response = source.page_chunk(&request);
                     let _ = tx.send(Answer::Pages(channel, response));
                 });
             }
@@ -4105,7 +4520,13 @@ impl Task {
             tokens_spent: self.tokens_spent.load(std::sync::atomic::Ordering::Relaxed),
             tokens_held: 0,
         };
+        let storage = self.lock_store().storage().map(|budget| budget.status());
+        let ingest_backpressure = self.ingest_blocked
+            || self.records.capacity() == 0
+            || storage.is_some_and(|s| s.backpressure);
         self.with_status(|s| {
+            s.storage = storage;
+            s.ingest_backpressure = ingest_backpressure;
             s.peers = peers;
             s.nearby_peers = nearby_peers;
             s.search_peers = search_peers;
@@ -4226,18 +4647,14 @@ fn crawler_views(store: &BatchStore, me: PeerId, trusted: &[PeerId], now: u64) -
     crawlers
 }
 
-/// Also returns the batches of `newly_trusted` crawlers, oldest first.
-fn replay_agreement(
-    store: &BatchStore,
-    me: PeerId,
-    trusted: &[PeerId],
-    newly_trusted: &[PeerId],
-) -> (Agreement, Vec<Hash>) {
+/// Rebuild agreement without awarding its already-counted credits again.
+/// Preserve the startup order for a second, bounded pass recovering deliveries.
+fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> (Agreement, Vec<Hash>) {
     let now = now_unix();
-    let mut replay = Vec::new();
+    let replay = store.ids_oldest_first();
     let mut agreement = Agreement::new(me, trusted.iter().copied());
-    for id in store.ids_oldest_first() {
-        let batch = match store.get(&id) {
+    for id in &replay {
+        let batch = match store.get(id) {
             Ok(Some(batch)) => batch,
             Ok(None) => continue,
             Err(err) => {
@@ -4245,7 +4662,6 @@ fn replay_agreement(
                 continue;
             }
         };
-        // Checked as of when it was made, as it was when it came in.
         let made = batch.header.header.created_at;
         let Ok(crawler) = batch.check(made) else {
             continue;
@@ -4257,47 +4673,36 @@ fn replay_agreement(
         } else {
             accept_batch(&batch, &crawler, made)
         };
-        if newly_trusted.contains(&crawler) {
-            replay.push(id);
-        }
         agreement.observe(crawler, records, made);
     }
     agreement.prune(now);
-    // These were credited when the batches first came in.
     agreement.take_verdicts();
     (agreement, replay)
 }
 
-/// The nodes in `trusted` that were not when [`TRUST_APPLIED_FILE`] was
-/// last written: all of them on a node that never wrote it.
-fn newly_trusted(file: &Path, me: PeerId, trusted: &[PeerId]) -> Vec<PeerId> {
-    let applied: HashSet<PeerId> = std::fs::read_to_string(file)
-        .unwrap_or_default()
-        .split_whitespace()
-        .filter_map(|id| id.parse().ok())
-        .collect();
-    trusted
-        .iter()
-        .filter(|peer| **peer != me && !applied.contains(peer))
-        .copied()
-        .collect()
-}
-
-/// Sends the homepages of the held batches `ids`, as a trusted crawler's
-/// count (text included), to `records`, one batch at a time; then notes
-/// `trusted` as applied in `file`. Agreement has seen them already: a
-/// homepage taken in before without its text is filled in, and a newer
-/// crawl of the same site still wins.
-fn resend_trusted(
+/// Reconstruct one batch's downstream output at a time. Per-batch durable
+/// acknowledgments distinguish an applied agreement from a persisted inbox.
+/// Trusted and quorum deliveries have different markers, so newly trusting a
+/// crawler still upgrades previously accepted records with their full text.
+fn resend_pending(
     store: &Mutex<BatchStore>,
     ids: &[Hash],
-    records: &mpsc::UnboundedSender<Vec<SiteRecord>>,
-    file: &Path,
+    records: &mpsc::Sender<RecordDelivery>,
+    me: PeerId,
     trusted: &[PeerId],
+    stopped: &std::sync::atomic::AtomicBool,
 ) {
-    let mut sent = 0;
+    let stopping = || records.is_closed() || stopped.load(std::sync::atomic::Ordering::SeqCst);
+    let mut agreement = Agreement::new(me, trusted.iter().copied());
     for id in ids {
-        let batch = match store.lock().unwrap_or_else(PoisonError::into_inner).get(id) {
+        if stopping() {
+            return;
+        }
+        let (batch, budget) = {
+            let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+            (store.get(id), store.storage().cloned())
+        };
+        let batch = match batch {
             Ok(Some(batch)) => batch,
             Ok(None) => continue,
             Err(err) => {
@@ -4309,32 +4714,67 @@ fn resend_trusted(
         let Ok(crawler) = batch.check(made) else {
             continue;
         };
-        let homepages: Vec<SiteRecord> = accept_trusted_batch(&batch, &crawler, made)
-            .into_iter()
-            .filter(|record| record.crawled_at.is_some())
-            .collect();
-        if homepages.is_empty() {
+        let is_trusted = trusted.contains(&crawler);
+        let accepted = if crawler == me {
+            accept_own_batch(&batch, &crawler, made)
+        } else if is_trusted {
+            accept_trusted_batch(&batch, &crawler, made)
+        } else {
+            accept_batch(&batch, &crawler, made)
+        };
+        let mut confirmed = agreement.observe(crawler, accepted, made);
+        agreement.take_verdicts(); // Recovery must never award credits.
+        if crawler == me {
             continue;
         }
-        sent += homepages.len();
-        if records.send(homepages).is_err() {
-            return;
+        if is_trusted {
+            confirmed.extend(accept_news(&batch, made));
         }
-        // The channel is unbounded: a node with weeks of batches would
-        // otherwise read them into memory faster than they are folded in.
-        if ids.len() > 1 {
-            std::thread::sleep(RESEND_PAUSE);
+        let acknowledgment = store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .delivery_ack(id, is_trusted);
+        if confirmed.is_empty() || acknowledgment.acknowledged() {
+            continue;
         }
-    }
-    if !ids.is_empty() {
-        info!(
-            "took in {sent} homepages again, with their text, from {} batches of newly trusted nodes",
-            ids.len()
-        );
-    }
-    let list: Vec<String> = trusted.iter().map(ToString::to_string).collect();
-    if let Err(err) = std::fs::write(file, list.join("\n")) {
-        warn!("writing {}: {err}", file.display());
+        let mut delay = std::time::Duration::from_millis(100);
+        let reservation = loop {
+            if stopping() {
+                return;
+            }
+            match budget
+                .as_ref()
+                .map(|b| b.reserve(delivery_bytes(confirmed.len()), false))
+                .transpose()
+            {
+                Ok(reservation) => break reservation,
+                Err(err) => {
+                    debug!("pending delivery waits for storage: {err:#}");
+                    std::thread::sleep(delay);
+                    delay = delay
+                        .saturating_mul(2)
+                        .min(std::time::Duration::from_secs(5));
+                }
+            }
+        };
+        let mut delivery = RecordDelivery {
+            records: confirmed,
+            reservation,
+            acknowledgment,
+        };
+        loop {
+            if stopping() {
+                return;
+            }
+            match records.try_send(delivery) {
+                Ok(()) => break,
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+                Err(mpsc::error::TrySendError::Full(pending)) => {
+                    delivery = pending;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
     }
 }
 
@@ -4443,7 +4883,252 @@ mod tests {
     use super::*;
 
     #[test]
-    fn held_batches_of_a_newly_trusted_crawler_are_taken_in_again_with_their_text() {
+    fn empty_startup_lists_retry_with_bounded_peers_attempts_and_backoff() {
+        let mut retries = BatchListRetries::default();
+        let peer = PeerId::random();
+        let mut now = tokio::time::Instant::now();
+        for _ in 0..16 {
+            assert!(retries.defer(peer, 10, now));
+            let at = retries.next().unwrap();
+            assert!(at > now);
+            assert!(at - now <= Duration::from_secs(2));
+            assert!(retries.due(now).is_empty());
+            assert_eq!(retries.due(at), vec![(peer, 10)]);
+            now = at;
+        }
+        assert!(!retries.defer(peer, 10, now));
+        assert!(retries.next().is_none());
+        for _ in 0..MAX_BATCH_LISTS {
+            assert!(retries.defer(PeerId::random(), 20, now));
+        }
+        assert!(!retries.defer(PeerId::random(), 20, now));
+        assert_eq!(retries.entries.len(), MAX_BATCH_LISTS);
+    }
+
+    #[test]
+    fn temporary_busy_replies_keep_sources_and_wake_with_bounded_backoff() {
+        let mut retry = BatchRetries::default();
+        let id = Hash::of(&[b"temporary busy"]);
+        let source = PeerId::random();
+        let other = PeerId::random();
+        let mut now = tokio::time::Instant::now();
+        for attempt in 0..16 {
+            assert!(retry.defer(id, source, vec![other], now));
+            let at = retry.next().unwrap();
+            assert!(at > now, "retry could hot-loop");
+            assert!(retry.due(now).is_empty());
+            let due = retry.due(at);
+            assert_eq!(due.len(), 1);
+            assert_eq!(due[0].0, id);
+            assert!(due[0].1.contains(&source));
+            assert!(due[0].1.contains(&other));
+            assert_eq!(retry.entries[&id].attempts, attempt + 1);
+            now = at;
+        }
+        assert!(!retry.defer(id, source, Vec::new(), now));
+        assert!(retry.entries.is_empty());
+        // A later successful response ends the wait without a maintenance or
+        // relist tick; the task does this when the admitted write completes.
+        assert!(retry.defer(id, source, Vec::new(), now));
+        retry.forget(&id);
+        assert!(retry.next().is_none());
+    }
+
+    #[test]
+    fn retry_ids_cannot_exceed_the_wanted_id_bound() {
+        let mut retry = BatchRetries::default();
+        let source = PeerId::random();
+        let now = tokio::time::Instant::now();
+        for n in 0..MAX_WANTED {
+            assert!(retry.defer(Hash::of(&[&n.to_le_bytes()]), source, Vec::new(), now));
+        }
+        assert!(!retry.defer(Hash::of(&[b"overflow"]), source, Vec::new(), now));
+        assert_eq!(retry.entries.len(), MAX_WANTED);
+    }
+
+    #[tokio::test]
+    async fn startup_replay_shutdown_cancels_both_quota_and_receiver_waits() {
+        for full_quota in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let now = now_unix();
+            let key = Keypair::generate_ed25519();
+            let crawler = key.public().to_peer_id();
+            let batches = dir.path().join("batches");
+            let mut legacy = BatchStore::open(&batches).unwrap();
+            for n in 0..6 {
+                let mut record = SiteRecord::new(format!("shutdown-replay-{n}.example"));
+                record.title = Some("Pending legacy delivery".into());
+                record.crawled_at = Some(now);
+                legacy
+                    .insert(
+                        &Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+                            .unwrap()
+                            .unwrap(),
+                    )
+                    .unwrap();
+            }
+            drop(legacy);
+            let source = Arc::new(
+                crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
+            );
+            let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+            let mut config = NetConfig::new(dir.path().to_owned());
+            config.listen.clear();
+            config.upnp = false;
+            config.local_discovery = false;
+            config.round_every = None;
+            config.trusted_peers = vec![crawler];
+            config.storage_budget = Some(budget.clone());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            if full_quota {
+                // Tighten after retention: an initially full legacy store is
+                // correctly pruned before replay and cannot exercise this wait.
+                let store = Mutex::new(
+                    BatchStore::open_retained(
+                        &batches,
+                        true,
+                        StoreLimits {
+                            own: Vec::new(),
+                            bytes: None,
+                            now,
+                            epochs: crate::store::RETAIN_EPOCHS,
+                            storage: Some(budget.clone()),
+                        },
+                    )
+                    .unwrap(),
+                );
+                let ids = store.lock().unwrap().ids_oldest_first();
+                budget.set_limit(1);
+                let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancelled = stopped.clone();
+                let (tx, rx) = mpsc::channel(RECORD_DELIVERIES);
+                let producer = tokio::task::spawn_blocking(move || {
+                    resend_pending(&store, &ids, &tx, PeerId::random(), &[crawler], &cancelled)
+                });
+                while budget.status().rejected_writes == 0 {
+                    assert!(std::time::Instant::now() < deadline);
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::timeout(std::time::Duration::from_secs(2), producer)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(rx.is_empty());
+            } else {
+                let (handle, records) = start(config, source).await.unwrap();
+                while records.len() != RECORD_DELIVERIES {
+                    assert!(std::time::Instant::now() < deadline);
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(2), handle.shutdown())
+                    .await
+                    .unwrap();
+                assert!(handle
+                    .replay_stopped
+                    .load(std::sync::atomic::Ordering::SeqCst));
+                drop(records);
+            }
+            while budget.status().reserved_bytes != 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cancelled replay retained its reservation"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(BatchStore::open(&batches).unwrap().len(), 6);
+        }
+    }
+
+    #[test]
+    fn legacy_no_ack_replay_is_bounded_and_preserves_signed_batch_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_unix();
+        let key = Keypair::generate_ed25519();
+        let crawler = key.public().to_peer_id();
+        let me = PeerId::random();
+        let batches = dir.path().join("batches");
+        let mut legacy = BatchStore::open(&batches).unwrap();
+        let mut signed = Vec::new();
+        for n in 0..12 {
+            let mut record = SiteRecord::new(format!("legacy-{n}.example"));
+            record.title = Some(format!("Legacy batch {n}"));
+            record.body_text = Some("An old-format batch without a delivery marker".into());
+            record.crawled_at = Some(now - 12 + n);
+            let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now - 12 + n)
+                .unwrap()
+                .unwrap();
+            legacy.insert(&batch).unwrap();
+            signed.push((
+                batch.id(),
+                std::fs::read(batches.join(format!("{}.json", batch.id()))).unwrap(),
+            ));
+        }
+        drop(legacy);
+        std::fs::write(dir.path().join("trusted-applied"), crawler.to_string()).unwrap();
+        let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let store = BatchStore::open_retained(
+            &batches,
+            true,
+            StoreLimits {
+                own: Vec::new(),
+                bytes: None,
+                now,
+                epochs: crate::store::RETAIN_EPOCHS,
+                storage: Some(budget.clone()),
+            },
+        )
+        .unwrap();
+        let (mut agreement, replay) = replay_agreement(&store, me, &[crawler]);
+        assert!(agreement.take_verdicts().is_empty());
+        let store = Arc::new(Mutex::new(store));
+        let (tx, mut rx) = mpsc::channel(RECORD_DELIVERIES);
+        let producer_store = store.clone();
+        let producer = std::thread::spawn(move || {
+            resend_pending(
+                &producer_store,
+                &replay,
+                &tx,
+                me,
+                &[crawler],
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while rx.len() != RECORD_DELIVERIES {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!producer.is_finished());
+        // Four channel slots plus the producer's single bounded batch.
+        assert!(
+            budget.status().reserved_bytes <= delivery_bytes(1) * (RECORD_DELIVERIES as u64 + 1)
+        );
+        let mut received = HashSet::new();
+        while let Some(delivery) = rx.blocking_recv() {
+            assert_eq!(delivery.records.len(), 1);
+            received.insert(delivery.records[0].domain.clone());
+            drop(delivery.reservation);
+            delivery.acknowledgment.acknowledge().unwrap();
+        }
+        producer.join().unwrap();
+        assert_eq!(received.len(), 12);
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            crate::storage::directory_bytes(dir.path()).unwrap()
+        );
+        for (id, bytes) in signed {
+            assert_eq!(
+                std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
+                bytes
+            );
+            assert!(store.lock().unwrap().get(&id).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn pending_trusted_delivery_is_replayed_until_durably_acknowledged() {
         let dir = tempfile::tempdir().unwrap();
         let now = now_unix();
         let key = Keypair::generate_ed25519();
@@ -4458,26 +5143,52 @@ mod tests {
             .unwrap();
         let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
         store.insert(&batch).unwrap();
-        let file = dir.path().join(TRUST_APPLIED_FILE);
-
-        // Trusted since the last start (or never noted): sent again whole.
-        let newly = newly_trusted(&file, me, &[me, crawler]);
-        assert_eq!(newly, [crawler]);
-        let (_, replay) = replay_agreement(&store, me, &[crawler], &newly);
-        assert_eq!(replay, [batch.id()]);
+        // Legacy stores have signed batches and only a crawler-wide marker.
+        // That marker cannot prove this particular delivery reached the inbox.
+        std::fs::write(dir.path().join("trusted-applied"), crawler.to_string()).unwrap();
+        store
+            .delivery_ack(&batch.id(), false)
+            .acknowledge()
+            .unwrap();
+        let (_, replay) = replay_agreement(&store, me, &[crawler]);
         let store = Mutex::new(store);
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        resend_trusted(&store, &replay, &tx, &file, &[crawler]);
+        let (tx, mut rx) = mpsc::channel(RECORD_DELIVERIES);
+        resend_pending(
+            &store,
+            &replay,
+            &tx,
+            me,
+            &[crawler],
+            &std::sync::atomic::AtomicBool::new(false),
+        );
         let sent = rx.try_recv().unwrap();
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].body_text.as_deref(), Some("Handmade leather shoes"));
-
-        // Noted: the next start sends nothing again.
-        let newly = newly_trusted(&file, me, &[crawler]);
-        assert!(newly.is_empty());
-        let store = store.into_inner().unwrap();
-        let (_, replay) = replay_agreement(&store, me, &[crawler], &newly);
-        assert!(replay.is_empty());
+        assert_eq!(
+            sent.records[0].body_text.as_deref(),
+            Some("Handmade leather shoes")
+        );
+        drop(sent); // Sending is not an acknowledgment.
+        resend_pending(
+            &store,
+            &replay,
+            &tx,
+            me,
+            &[crawler],
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        rx.try_recv().unwrap().acknowledgment.acknowledge().unwrap();
+        resend_pending(
+            &store,
+            &replay,
+            &tx,
+            me,
+            &[crawler],
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(rx.try_recv().is_err());
+        // A previous quorum-mode acknowledgment cannot suppress a trust upgrade.
+        let store = store.lock().unwrap();
+        assert!(store.delivery_ack(&batch.id(), true).acknowledged());
+        assert!(store.delivery_ack(&batch.id(), false).acknowledged());
     }
 
     #[test]

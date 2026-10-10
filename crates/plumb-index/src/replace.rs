@@ -64,6 +64,8 @@ pub(crate) struct Staging {
     /// Where it goes once complete.
     target: PathBuf,
     installed: bool,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    lifecycle: Option<std::sync::Arc<plumb_core::storage::StageLifecycle>>,
     /// Keeps tidying from taking it for a leftover. Dropped after the
     /// directory is deleted or installed.
     _claim: Claim,
@@ -76,24 +78,57 @@ impl Staging {
     /// `dir` may be replaced when it is missing, empty or holds an index
     /// (see the module docs); a symlink is followed, so the directory it
     /// points to gets replaced.
+    #[cfg(test)]
     pub(crate) fn new(dir: &Path) -> Result<Staging> {
+        Self::new_with_budget(dir, None)
+    }
+
+    pub(crate) fn new_with_budget(
+        dir: &Path,
+        budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    ) -> Result<Staging> {
+        let held = budget.clone();
+        let _mutation = held.as_ref().map(|budget| budget.mutation());
         let target = resolve(dir)?;
         dir_name(&target)?;
-        tidy(&target)?;
+        tidy_with_budget(&target, budget.as_deref())?;
         check_replaceable(&target)?;
         let parent = parent_of(&target);
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        plumb_core::storage::create_directory_locked(parent, budget.as_ref())
+            .with_context(|| format!("creating {}", parent.display()))?;
+        let mut reservation = budget
+            .as_ref()
+            .map(|budget| budget.reserve(plumb_core::storage::allocation_for(4096), false))
+            .transpose()?;
+        let parent_before = plumb_core::storage::file_bytes(parent)?;
         loop {
             let path = sibling(&target, "new")?;
             let claim = Claim::new(&path);
             match fs::create_dir(&path) {
                 Ok(()) => {
+                    if let Some(reserved) = &mut reservation {
+                        reserved.commit(
+                            reserved.bytes(),
+                            0,
+                            plumb_core::storage::file_bytes(&path)
+                                .unwrap_or(plumb_core::storage::allocation_for(0))
+                                .saturating_add(
+                                    plumb_core::storage::file_bytes(parent)
+                                        .unwrap_or(parent_before + 4096)
+                                        .saturating_sub(parent_before),
+                                ),
+                        );
+                    }
                     return Ok(Staging {
                         path,
                         target,
                         installed: false,
+                        lifecycle: budget
+                            .as_ref()
+                            .map(|budget| plumb_core::storage::StageLifecycle::new(budget.clone())),
+                        budget,
                         _claim: claim,
-                    })
+                    });
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(err) => {
@@ -104,6 +139,14 @@ impl Staging {
     }
 
     /// The directory to build in.
+    pub(crate) fn budget(&self) -> Option<&std::sync::Arc<plumb_core::storage::StorageBudget>> {
+        self.budget.as_ref()
+    }
+
+    pub(crate) fn lifecycle(&self) -> Option<std::sync::Arc<plumb_core::storage::StageLifecycle>> {
+        self.lifecycle.clone()
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -111,8 +154,30 @@ impl Staging {
     /// Marks the staging directory as an index ([`MARKER`]) and moves it
     /// into place, replacing what was there.
     pub(crate) fn install(mut self) -> Result<()> {
-        write_marker(&self.path)?;
-        swap(&self.path, &self.target)?;
+        if let Some(budget) = &self.budget {
+            let path = self.path.join(MARKER);
+            let mut file = plumb_core::storage::BudgetFile::create(&path, Some(budget.clone()))?;
+            file.write_all(MARKER_TEXT.as_bytes())?;
+            file.sync_all()?;
+        } else {
+            write_marker(&self.path)?;
+        }
+        {
+            let held = self.budget.clone();
+            let _mutation = held.as_ref().map(|budget| budget.mutation());
+            let old = match plumb_core::storage::directory_bytes(&self.target) {
+                Ok(bytes) => bytes,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
+                Err(err) => return Err(err.into()),
+            };
+            if let Some(lifecycle) = &self.lifecycle {
+                lifecycle.closed.store(true, Ordering::Release);
+            }
+            swap(&self.path, &self.target)?;
+            if let Some(budget) = &self.budget {
+                budget.removed(old);
+            }
+        }
         self.installed = true;
         Ok(())
     }
@@ -122,7 +187,11 @@ impl Drop for Staging {
     fn drop(&mut self) {
         if !self.installed {
             // Best effort: a leftover only wastes space, the old index is intact.
-            let _ = fs::remove_dir_all(&self.path);
+            if let Some(lifecycle) = &self.lifecycle {
+                lifecycle.remove_stage(&self.path);
+            } else {
+                let _ = fs::remove_dir_all(&self.path);
+            }
         }
     }
 }
@@ -190,11 +259,13 @@ const LEFTOVER_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Cleans up after builds of `dir` that crashed: puts an old index back
 /// when a crash between [`swap`]'s renames left nothing at `dir`, then
 /// deletes staging and old directories that no running build still uses.
-fn tidy(dir: &Path) -> Result<()> {
+fn tidy_with_budget(dir: &Path, budget: Option<&plumb_core::storage::StorageBudget>) -> Result<()> {
     let name = dir_name(dir)?;
-    clean_up(parent_of(dir), |target, pid, path| {
-        target == name && !may_be_in_use(pid, path)
-    })?;
+    clean_up(
+        parent_of(dir),
+        |target, pid, path| target == name && !may_be_in_use(pid, path),
+        budget,
+    )?;
     Ok(())
 }
 
@@ -210,7 +281,7 @@ fn tidy(dir: &Path) -> Result<()> {
 /// build does, it does not need to tell whether another process still runs,
 /// which a process id alone cannot (see the module docs).
 pub fn remove_build_leftovers(parent: &Path) -> Result<Vec<PathBuf>> {
-    clean_up(parent, |_, _, path| !Claim::held(path))
+    clean_up(parent, |_, _, path| !Claim::held(path), None)
 }
 
 /// The staging and old directories in `parent` that `abandoned` picks, given
@@ -219,7 +290,11 @@ pub fn remove_build_leftovers(parent: &Path) -> Result<Vec<PathBuf>> {
 /// its directory is missing, and deletes the others. Returns the
 /// directories deleted; ones that cannot be deleted are left, as a leftover
 /// only wastes space.
-fn clean_up(parent: &Path, abandoned: impl Fn(&OsStr, u32, &Path) -> bool) -> Result<Vec<PathBuf>> {
+fn clean_up(
+    parent: &Path,
+    abandoned: impl Fn(&OsStr, u32, &Path) -> bool,
+    budget: Option<&plumb_core::storage::StorageBudget>,
+) -> Result<Vec<PathBuf>> {
     let mut leftovers: BTreeMap<OsString, Vec<(Tag, PathBuf)>> = BTreeMap::new();
     match fs::read_dir(parent) {
         Ok(entries) => {
@@ -258,8 +333,20 @@ fn clean_up(parent: &Path, abandoned: impl Fn(&OsStr, u32, &Path) -> bool) -> Re
         }
         for (_, path) in paths {
             // Best effort, like dropping a [`Staging`].
-            if fs::symlink_metadata(&path).is_ok() && fs::remove_dir_all(&path).is_ok() {
-                removed.push(path);
+            if fs::symlink_metadata(&path).is_ok() {
+                let before = plumb_core::storage::directory_bytes(&path).ok();
+                let result = fs::remove_dir_all(&path);
+                if let (Some(budget), Some(before)) = (budget, before) {
+                    let after = match plumb_core::storage::directory_bytes(&path) {
+                        Ok(bytes) => bytes,
+                        Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
+                        Err(_) => before,
+                    };
+                    budget.removed(before.saturating_sub(after));
+                }
+                if result.is_ok() {
+                    removed.push(path);
+                }
             }
         }
     }

@@ -37,7 +37,7 @@ use plumb_core::{
     now_unix, parent_domain, RecordSet, SiteRecord, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
 };
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
-use plumb_index::build_index;
+use plumb_index::build_index_with_budget;
 use plumb_ingest::{
     attach_facts, attach_intros, download, facts, intros, kind_sites, load_cc_domain_ranks,
     load_intros, load_misread_official_sites, load_site_facts, load_tranco,
@@ -56,7 +56,9 @@ use crate::crawl::{
     Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
 };
 use crate::icons::IconStore;
-use crate::records::{load_records, replace_records, sorted_by_link_score, Change, RecordStore};
+use crate::records::{
+    load_records, replace_records_with_budget, sorted_by_link_score, Change, RecordStore,
+};
 use crate::web::{duration_words, group_thousands};
 
 /// A homepage fetched or answered this recently is not due for a crawl, as
@@ -193,7 +195,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
             let mut set = load_records(&inner.paths.records)?;
             inner.check_stop()?;
             if inner.prune_for_new_topics(&mut set)? > 0 {
-                replace_records(&inner.paths.records, sorted_by_link_score(&set))?;
+                replace_records_with_budget(
+                    &inner.paths.records,
+                    sorted_by_link_score(&set),
+                    inner.storage.as_ref(),
+                )?;
             }
             build(inner, &sorted_by_link_score(&set))
         })
@@ -493,7 +499,11 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
                 group_thousands(records.len() as u64)
             ),
         );
-        replace_records(&inner.paths.records, records.iter().copied())?;
+        replace_records_with_budget(
+            &inner.paths.records,
+            records.iter().copied(),
+            inner.storage.as_ref(),
+        )?;
         inner.update_saved(|saved| {
             saved.wikidata_missing = wikidata_missing;
             saved.quick_start = false;
@@ -567,7 +577,9 @@ async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
         inner.check_stop()?;
         {
             let _records = inner.hold_records();
-            RecordStore::open(&inner.paths.records).save(&changes)?;
+            RecordStore::open(&inner.paths.records)
+                .with_budget(inner.storage.clone())
+                .save(&changes)?;
         }
         inner.update_saved(|saved| {
             saved.sites_version = SITES_VERSION;
@@ -938,7 +950,7 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
 }
 
 /// Saves the records of a setup as the records file.
-fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
+pub(super) fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
     inner.set_step(
         Step::Ingesting,
         format!(
@@ -946,7 +958,7 @@ fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
             group_thousands(records.len() as u64)
         ),
     );
-    replace_records(&inner.paths.records, records)?;
+    replace_records_with_budget(&inner.paths.records, records, inner.storage.as_ref())?;
     info!(
         "saved {} site records in {}",
         records.len(),
@@ -1118,12 +1130,17 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     let _records = inner.hold_records();
     inner.set_step(Step::Crawling, "Reading the site records");
     let topics = inner.focus_topics();
-    let mut set = RoundSites::load(&inner.paths.records, topics.clone(), Keep::of(inner))?;
+    let mut set = RoundSites::load_with_budget(
+        &inner.paths.records,
+        topics.clone(),
+        Keep::of(inner),
+        inner.storage.clone(),
+    )?;
     set.hold_new_sites(!inner.config.take_new_sites);
     inner
         .round_sites
         .store(set.iter().len() as u64, Ordering::SeqCst);
-    let mut store = RecordStore::open(&inner.paths.records);
+    let mut store = RecordStore::open(&inner.paths.records).with_budget(inner.storage.clone());
     inner.check_stop()?;
     let titled = set
         .get(plumb_core::HOME_SITE)
@@ -1226,7 +1243,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     // Sites crawled before nodes kept icons or key pages are due again for
     // them, and so are sites read by an older crawler (see
     // plumb_crawl::CRAWL_VERSION).
-    let icons = IconStore::new(&inner.paths.icons);
+    let icons = IconStore::new(&inner.paths.icons).with_budget(inner.storage.clone());
     let noted = icons.noted();
     let rest = select_targets_with(
         candidates
@@ -1600,7 +1617,7 @@ pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Resu
     let steps = if buckets { 2 } else { 1 };
     inner.set_progress(0, steps, "steps");
     let started = Instant::now();
-    let stats = build_index(&dir, records)
+    let stats = build_index_with_budget(&dir, records, inner.storage.clone())
         .with_context(|| format!("building the index in {}", dir.display()))?;
     if buckets {
         inner.set_step(Step::Indexing, "Writing the buckets other nodes search");
@@ -1637,13 +1654,17 @@ pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Resu
 /// Call it holding the records ([`Inner::hold_records`]).
 pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
     inner.set_step(Step::Indexing, "Reading the site records");
-    let Some(outlines) = crate::outline::outline(&inner.paths.records)? else {
+    let Some(outlines) =
+        crate::outline::outline_with_budget(&inner.paths.records, inner.storage.clone())?
+    else {
         info!(
             "{} holds a site more than once: reading it whole to merge them",
             inner.paths.records.display()
         );
         let set = load_records(&inner.paths.records)?;
-        RecordStore::open(&inner.paths.records).compact(&set)?;
+        RecordStore::open(&inner.paths.records)
+            .with_budget(inner.storage.clone())
+            .compact(&set)?;
         inner.check_stop()?;
         return build(inner, &sorted_by_link_score(&set));
     };
@@ -1663,6 +1684,7 @@ pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
         &dir,
         network::wants_buckets(inner).then_some(buckets_dir.as_path()),
         inner.config.news_feeds,
+        inner.storage.clone(),
         &mut |step| {
             match step {
                 crate::outline::Step::Started { docs, sites } => {
@@ -1796,6 +1818,11 @@ where
         .spawn(move || {
             let _runtime = runtime.enter();
             crate::lower_thread_priority();
+            if let Some(budget) = &inner.storage {
+                if let Err(err) = budget.recount_if_due(&inner.paths.data) {
+                    warn!("cannot reconcile storage admission: {err:#}");
+                }
+            }
             let _ = sender.send(work(&inner));
         })
         .context("cannot start the background work")?;
@@ -1809,12 +1836,24 @@ where
 /// Deletes the directories of replaced indexes that no search has open any
 /// more.
 async fn sweep(inner: &Arc<Inner>) {
+    sweep_at(inner, Instant::now()).await;
+}
+
+pub(super) async fn sweep_at(inner: &Arc<Inner>, now: Instant) {
     inner.recount_disk();
-    if !inner.has_retired() {
+    if !inner.has_retired() && inner.storage.is_none() {
         return;
     }
     let inner = Arc::clone(inner);
-    let _ = tokio::task::spawn_blocking(move || inner.sweep()).await;
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Some(budget) = &inner.storage {
+            if let Err(err) = budget.recount_if_due_at(&inner.paths.data, now) {
+                warn!("cannot reconcile idle storage admission: {err:#}");
+            }
+        }
+        inner.sweep();
+    })
+    .await;
 }
 
 /// When a [`wait`] ends.

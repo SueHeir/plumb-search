@@ -21,6 +21,7 @@ use crate::popularity::{report_epoch, tally, PopularityTable, Report, MAX_REPORT
 #[derive(Debug)]
 pub struct ReportStore {
     dir: PathBuf,
+    budget: Option<Arc<plumb_core::storage::StorageBudget>>,
     ids: HashSet<Hash>,
     /// Shared, so a list or a count can be taken out of the store's lock
     /// and worked on after ([`ReportStore::snapshot`]).
@@ -34,6 +35,7 @@ impl ReportStore {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let mut store = ReportStore {
             dir: dir.to_path_buf(),
+            budget: None,
             ids: HashSet::new(),
             by_epoch: BTreeMap::new(),
         };
@@ -67,6 +69,11 @@ impl ReportStore {
         epoch <= current && epoch + 1 >= current
     }
 
+    pub fn with_budget(mut self, budget: Option<Arc<plumb_core::storage::StorageBudget>>) -> Self {
+        self.budget = budget;
+        self
+    }
+
     /// Reports held.
     pub fn len(&self) -> usize {
         self.ids.len()
@@ -94,13 +101,20 @@ impl ReportStore {
         let path = self.dir.join(format!("{}.jsonl", report.epoch));
         let mut line = serde_json::to_vec(report).context("encoding a report")?;
         line.push(b'\n');
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        file.write_all(&line)
-            .with_context(|| format!("writing {}", path.display()))?;
+        if let Some(budget) = &self.budget {
+            let mut file =
+                plumb_core::storage::BudgetFile::open_write(&path, false, Some(budget.clone()))?;
+            file.seek(std::io::SeekFrom::End(0))?;
+            file.write_all(&line)?;
+        } else {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .with_context(|| format!("opening {}", path.display()))?;
+            file.write_all(&line)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
         self.ids.insert(id);
         Arc::make_mut(self.by_epoch.entry(report.epoch).or_default()).push(report.clone());
         Ok(true)
@@ -140,7 +154,7 @@ impl ReportStore {
                 self.ids.remove(&report.id());
             }
             let path = self.dir.join(format!("{epoch}.jsonl"));
-            if let Err(err) = fs::remove_file(&path) {
+            if let Err(err) = plumb_core::storage::remove_file(&path, self.budget.as_deref()) {
                 warn!("cannot delete {}: {err}", path.display());
             }
         }

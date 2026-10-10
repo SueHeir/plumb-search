@@ -151,15 +151,15 @@ pub async fn download_wikipedia_intros(
         }
     }
 
-    tokio::fs::create_dir_all(dir)
+    crate::storage::create_dir_all(dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
     let dest = dir.join(INTROS_FILE_NAME);
     let part = part_path(&dest);
-    tokio::fs::write(&part, tsv.as_bytes())
+    crate::storage::write(&part, tsv.as_bytes())
         .await
         .with_context(|| format!("writing {}", part.display()))?;
-    tokio::fs::rename(&part, &dest)
+    crate::storage::rename(&part, &dest)
         .await
         .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))?;
     info!(
