@@ -27,6 +27,8 @@ jobs:
       - run: cargo fmt --all --check
       # The desktop app needs GUI libraries; the desktop job checks it.
       - run: cargo clippy --workspace --exclude plumb-desktop --all-targets -- -D warnings
+      - name: Test the read-only page probe with synthetic fixtures
+        run: cargo test --locked -p plumb-index --lib --features local-page-probe page_probe::tests -- --test-threads=1
       - run: cargo test --workspace --exclude plumb-desktop
 
   # Every third-party crate's license is one about.toml accepts, and the
