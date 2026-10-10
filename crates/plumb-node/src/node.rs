@@ -984,6 +984,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         warn!("{err:#}");
     }
     let worker = tokio::spawn(worker::run(inner.clone()));
+    tokio::spawn(release_memory_now_and_then(inner.clone()));
     let embedding = inner.config.search_by_meaning.then(|| {
         supervise(&inner, "search by meaning", |inner| {
             tokio::task::spawn_blocking(move || embedding::run(inner))
@@ -1025,6 +1026,25 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         news,
         adult,
     })
+}
+
+/// How often a running node hands the memory its threads freed back to the
+/// system, besides after each background job: a crawl round runs for most
+/// of an hour, and searches, the network and embedding free memory
+/// meanwhile, which would otherwise sit in the allocator until swapped out.
+const RELEASE_MEMORY_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// Hands freed memory back every [`RELEASE_MEMORY_EVERY`] until the node stops.
+async fn release_memory_now_and_then(inner: Arc<Inner>) {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(RELEASE_MEMORY_EVERY) => {}
+            () = inner.stopped() => return,
+        }
+        // Not on an async thread: right after a big job it takes up to a
+        // fifth of a second.
+        let _ = tokio::task::spawn_blocking(crate::release_freed_memory).await;
+    }
 }
 
 /// First wait before a background task that panicked is started again.

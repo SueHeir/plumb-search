@@ -100,6 +100,7 @@ pub fn init_logging() {
 
 /// Runs one `plumb` subcommand.
 pub fn run(cli: Cli) -> Result<()> {
+    set_up_allocator();
     limits::raise_open_file_limit();
     match cli.command {
         Command::Run(args) => run::run(args),
@@ -263,23 +264,101 @@ pub(crate) fn sync_parent_dir(path: &Path) {
     }
 }
 
+/// Arenas glibc's allocator keeps at most, unless `MALLOC_ARENA_MAX` or
+/// `GLIBC_TUNABLES` says otherwise. By default a thread may get an arena of
+/// its own, up to eight per CPU, and what a thread frees stays in its arena
+/// for that arena's threads: half an hour after starting, plumbsearch.org
+/// (2.8 million sites, 8 GB of memory) held about 3.5 GB in 75 arena heaps,
+/// and the system was swapping.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MAX_ARENAS: std::os::raw::c_int = 4;
+
+/// Allocations at least this big get memory of their own from the system,
+/// which goes back as soon as they are freed, unless
+/// `MALLOC_MMAP_THRESHOLD_` or `GLIBC_TUNABLES` says otherwise. glibc
+/// starts at 128 KiB but raises it to the size of each such allocation
+/// freed, up to 32 MiB, after which big buffers stay in the arenas when
+/// freed.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MMAP_THRESHOLD: std::os::raw::c_int = 4 << 20;
+
+/// Sets glibc's allocator up for a node that runs for weeks: at most
+/// [`MAX_ARENAS`] arenas and a fixed [`MMAP_THRESHOLD`]. Building an index
+/// of 2.8 million sites then peaks at 1.17 GB instead of 1.31 GB, takes no
+/// longer, and leaves 5 MB behind instead of 140 MB once freed memory is
+/// handed back. Runs before the node starts its threads. Does nothing on
+/// other systems.
+pub(crate) fn set_up_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        use std::os::raw::c_int;
+        const M_MMAP_THRESHOLD: c_int = -3;
+        const M_ARENA_MAX: c_int = -8;
+        extern "C" {
+            fn mallopt(param: c_int, value: c_int) -> c_int;
+        }
+        let tunables = std::env::var("GLIBC_TUNABLES").unwrap_or_default();
+        let set = |variable: &str, tunable: &str, param: c_int, value: c_int| {
+            if std::env::var_os(variable).is_none() && !tunables.contains(tunable) {
+                // SAFETY: mallopt only changes the allocator's settings,
+                // and glibc lets any thread call it at any time.
+                unsafe {
+                    mallopt(param, value);
+                }
+            }
+        };
+        set("MALLOC_ARENA_MAX", "arena_max", M_ARENA_MAX, MAX_ARENAS);
+        set(
+            "MALLOC_MMAP_THRESHOLD_",
+            "mmap_threshold",
+            M_MMAP_THRESHOLD,
+            MMAP_THRESHOLD,
+        );
+    }
+}
+
 /// Hands memory that big jobs (loading records, building an index) freed
 /// back to the system. glibc keeps freed memory in its arenas for reuse, so
 /// a long-running node would otherwise sit on it between refreshes: idle
 /// after indexing 300,000 sites, a node held about 390 MB without this and
-/// 60 to 90 MB with it. Does nothing on other systems.
+/// 60 to 90 MB with it. Logs how much went back when it is 100 MB or more.
+/// Does nothing on other systems.
 pub(crate) fn release_freed_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         extern "C" {
             fn malloc_trim(pad: usize) -> std::os::raw::c_int;
         }
+        let before = resident_anonymous_mb();
         // SAFETY: malloc_trim only gives free memory back to the system, and
         // glibc lets any thread call it at any time.
         unsafe {
             malloc_trim(0);
         }
+        if let (Some(before), Some(after)) = (before, resident_anonymous_mb()) {
+            let released = before.saturating_sub(after);
+            if released >= RELEASED_WORTH_LOGGING_MB {
+                tracing::info!(
+                    "handed {released} MB of freed memory back to the system ({after} MB still resident)"
+                );
+            }
+        }
     }
+}
+
+/// Memory handed back that [`release_freed_memory`] logs: after an index
+/// build, not after every small job.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const RELEASED_WORTH_LOGGING_MB: u64 = 100;
+
+/// The process's resident anonymous memory (`RssAnon`) in MB: what it
+/// allocated and has not handed back, less what is swapped out.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn resident_anonymous_mb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("RssAnon:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024)
 }
 
 /// Has the calling thread, and the threads it starts from now on, yield
