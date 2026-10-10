@@ -826,7 +826,8 @@ async fn name_facts(
     info!("naming {} items the facts are about", items.len());
     let mut labels = fetch_labels(client, endpoint, pacing, &items).await?;
     let retry = follow_namesakes(client, endpoint, pacing, &mut raw, &pairs, &labels).await?;
-    completion.checked.retain(|pair| !retry.contains(pair));
+    let retry_set: HashSet<_> = retry.iter().collect();
+    completion.checked.retain(|pair| !retry_set.contains(pair));
     completion.retry.extend(retry);
     let unnamed: Vec<String> = raw
         .named_items()
@@ -1026,7 +1027,7 @@ pub async fn fetch_targeted_facts(
         ..Default::default()
     };
     for &kind in KINDS {
-        let items: Vec<_> = pairs
+        let mut items: Vec<_> = pairs
             .iter()
             .filter(|pair| pair.kind == kind)
             .map(|pair| pair.item.clone())
@@ -1036,6 +1037,7 @@ pub async fn fetch_targeted_facts(
         if items.is_empty() {
             continue;
         }
+        items.sort_unstable();
         let wanted: HashSet<_> = items.iter().cloned().collect();
         let read = fill_in(client, endpoint, pacing, &mut raw, kind, &items, &wanted).await?;
         completion.properties.push(PropertyCompletion {
