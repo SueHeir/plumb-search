@@ -220,6 +220,7 @@ impl SearchBackend for FrozenBackend {
         let words = if ops.any() { ops.words.as_str() } else { query };
         Ok(self
             .pages
+            .in_language(options.language.as_deref())
             .entities(words, TYPED_CANDIDATES)?
             .into_iter()
             .filter(|hit| options_allow(options, &hit.page) && operators_allow(&ops, &hit.page))
