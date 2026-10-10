@@ -1,24 +1,45 @@
-# Canonical papers and bounded recent ingestion integration
+# Generic paper consistency and bounded recent ingestion
 
-This patch starts at `e33582cd8e30c5c288629b58f68348e56c9e91d7`. It owns scholarly ingestion and metadata; it does not modify `plumb-node/src/fetch.rs` or publish a dataset.
+The generic consistency follow-up starts at parent `bb8b59a131b74ea4ac4dda19ae428b69e6333646`. It replaces the earlier case-specific repair/gate contract. It changes scholarly metadata, verification helpers and paper publisher/promotion callbacks; it does not modify query outputs or frozen evaluation labels.
 
-## Publisher contract (required)
+## Publisher and verification contract
 
-`paper_names::improve(client, &mut papers, cache)` now verifies arXiv `1706.03762` and `2005.11401` before consulting Papers with Code. It returns an error when either required authoritative response is missing or inconsistent. Papers with Code failures remain supplementary. Its `Named` report adds `corrected` for existing primary arXiv rows; `redated` remains the audited Transformer DOI correction.
+`paper_names::improve` selects existing arXiv identities from the input corpus, with at most 100 unique identities (one batch) per ordinary run. Corrections lacking source snapshots are selected first, then input order supplies the rest. It never fetches a curated pair merely because those papers are well known. Missing, malformed, duplicate or contradictory selected responses fail verification and retain the prior generation. Supplementary Papers with Code methods still have their separate bound of 1,000 missing arXiv identities and archive failures remain supplementary. The existing arXiv per-request/retry/pacing budgets are unchanged; a bounded caller-owned `ConsistencyQueue` supports larger audits.
 
-The ingestion worker must propagate an `improve` error, replacing the existing warn-and-write behavior, and call `paper_validation::validate_landmarks(&papers)?` before publishing the staged generation. An optional recent lane must also require `RecentFetched.complete`, reject/queue `Merged.conflicting_ids`, and then run the same landmark validation. Preserve the previous good generation on failure. This explicit handoff avoids overlapping the ingestion worker's cache/publication rewrite.
+The publisher propagates enrichment failures and runs `paper_validation::validate_consistency` both when staging and when promoting papers. This generic gate validates primary DOI/OpenAlex IDs, conflicting duplicate source identities, bounded metadata, publication date/year agreement, primary-preprint date agreement, linked ID agreement and source-snapshot title/author/submission/revision agreement. Corrections require an explicit source snapshot. Unverified legacy rows remain unverified: internal consistency is not a claim that every historical row was externally checked. It does not require any particular paper, title, DOI, author or year to exist in a corpus.
 
-For a narrow existing-file repair without fetching the full methods archive, fetch `paper_validation::required_arxiv_ids()` with `paper_names::fetch_arxiv`, then call `paper_validation::repair_landmarks`. The returned metadata must first pass the fixed ID/title/first-author/first-submission checks; missing data causes an error. Network metadata is not replaced with embedded fixture metadata at runtime.
+Only an authoritative response for the record's primary arXiv DOI permits replacement of that record's title/authors/dates. Original primary IDs and conflicting values remain in bounded correction reports, and associated OpenAlex IDs/count meaning remain intact. A non-arXiv DOI is never replaced or redated just because a title or year gap resembles a preprint. A unique title plus compatible first author can link a preprint while retaining the primary journal DOI and independent publication/version dates. Different full given names sharing an initial do not match; initial/full-name variants remain compatible. Multiple matching source identities or conflicting explicit links preserve the original row and report unresolved identities. `Named.retained_publications` separately reports publication IDs whose independent DOI/date claims were retained; arXiv metadata cannot adjudicate those publication claims.
 
-A `ConsistencyQueue` accepts an explicit caller-owned staged-generation key and at most 10,000 IDs. `verify_batch(..., budget)` verifies at most 100 identities per call. Persist corrected staged articles before calling `queue.save`; otherwise interruption could advance the queue without retaining corrections. `unresolved` is an explicit report and a retry input, not successful verification.
+The formerly special `10.65215/2q58a426` record is now handled by these generic rules. Its DOI and publication year are preserved. Source-backed preprint linking can supply its separate submitted/revised dates, but it does not prove that the record's claimed publication date is false. No claim is made here that a live row or that DOI has been repaired by the new algorithm. The earlier scratch canary used the superseded DOI-specific conversion and is not validation evidence for this generic implementation; a new staged canary must preserve original hashes and report actual results.
+
+A `ConsistencyQueue` accepts an explicit caller-owned staged-generation key and at most 10,000 IDs; each application verifies at most 100. Queue version 2 invalidates older checkpoints that lacked unique-response/source-snapshot verification. Missing or ambiguous responses remain in `unresolved` and can seed a retry queue. Persist corrected staged articles before saving queue progress; otherwise interruption can lose a correction. Publisher-owned quarantine/retain-previous-generation behavior is unchanged.
+
+## Explicit optional canaries and curated assumptions
+
+`PaperCanary` expectations are supplied by the caller. `canary_ids`, `repair_canary` and `validate_canary` support bounded optional canaries without loading expectations during ordinary enrichment/publication. The Transformer/RAG expectations reside only in `crates/plumb-ingest/tests/fixtures/paper-canary.json` and test Atom feeds. They are regression fixtures or explicit caller-selected canary data, not production algorithm switches. Missing or conflicting authoritative canary responses fail before repair; runtime code never substitutes fixture metadata for a provider response.
+
+Title/first-author corroboration is a bibliographic linking assumption, not a cross-provider identity proof or a journal publication-date validator. Papers with Code is an optional curated method-name archive; its aliases must still corroborate actual paper identities/titles. No curated evaluation answers or labels are rewritten. No HPC query, build, service operation, corpus write, promotion or fresh provider probe was performed for this generalization.
+
+## Offline scratch canary recipe
+
+A reusable example performs no network requests and has no embedded paper IDs/titles:
+
+```sh
+cargo run --locked -p plumb-ingest --example paper_consistency_canary -- \
+  INPUT.tsv.gz AUTHORITATIVE.xml NEW_OUTPUT_DIR [OPTIONAL_CANARY.json]
+```
+
+Use a new output directory with an existing parent. The input corpus and XML are read-only; an existing output directory is refused. Source XML is bounded to 4 MiB and 1,000 identities. The helper applies the generic repair/linking rules to whatever the caller-supplied XML actually establishes, reports corrected primary rows, added preprints, unresolved source identities, retained independent publication claims, before/after records and structured publication/preprint date coverage, and saves original/XML/candidate hashes. Row signatures count semantic changes independently of popularity-order changes. The generic source-consistency gate and full serialization round-trip must pass, and unresolved source identities prevent an eligible candidate from being written. Optional expectation JSON supplies diagnostics only; it never selects a repair rule or overwrites source metadata. The report explicitly records zero network calls and no promotion.
+
+Parent may use its immutable `baseline-snapshot/pages/sets/papers.tsv.gz` and the cached `papers-repair-canary-09842dd/authoritative-arxiv.xml` in HPC scratch after a clean integrated build. No second provider request is needed. This example has only been tested against synthetic local temp files here; the real offline corpus canary is an integration operation and has not been run for this commit. A linked journal publication may remain internally consistent while its independent publication date is unresolved; the helper lists retained publication IDs rather than pretending those dates were corrected.
 
 ## Minimal core extension contract
 
 `Article.paper: Option<plumb_core::papers::PaperMetadata>` is additive and defaults to absent. A profiles line carries `paper=<JSON with percent escaping of %, pipe, tab and newlines>`. The six primary columns are unchanged. Unknown keys are ignored by old readers. New readers ignore malformed/oversized paper extensions; writers reject invalid metadata before emitting the row.
 
-The extension holds DOI, arXiv/OpenAlex IDs, bounded authors, strict publication day and raw provider date, original preprint submission day, separate record-version and arXiv-revision days, venue/source, count type and alternate URLs. Up to four correction snapshots preserve previous item/title/authors/dates/description. Conflicting old titles are removed from aliases/names when a primary arXiv identity is corrected.
+The extension holds DOI, arXiv/OpenAlex IDs, bounded authors, strict publication day and raw provider date, original preprint submission day, separate record-version and arXiv-revision days, venue/source, count type and alternate URLs. `verified_arxiv` is an optional bounded source snapshot (ID/title/authors/submission/revision) populated from an explicit authoritative response, with no embedded named-paper defaults. It remains inside the existing 16 KiB extension bound. Legacy metadata defaults to no snapshot. Up to four correction snapshots preserve prior primary IDs/title/authors/dates/description. Prior unrelated titles are removed from search aliases when a primary arXiv record is authoritatively corrected.
 
-Journal/preprint linking needs normalized title and first-author corroboration, including an initial/full-name variant. A year gap alone never replaces a journal DOI or publication date. The audited bad Transformer DOI is checked even when another canonical Transformer row is already present; an uncorroborated surviving audited DOI fails the generation gate. The narrowly audited `10.65215/2q58a426` Transformer copy can be replaced after corroboration. Same-title unrelated authors remain separate. Confirmed arXiv records reserve three bounded identifier aliases (raw ID, arXiv label and DOI) in the existing name index; at most five aliases are retained. PWC method-use counts carry `method_uses`, OpenAlex counts carry `citations`, and legacy/unavailable counts carry `unknown`.
+Confirmed arXiv records reserve three identifier aliases (raw ID, arXiv label and DOI), with at most five aliases total. PWC method-use counts carry `method_uses`, OpenAlex counts carry `citations`, and legacy/unavailable counts carry `unknown`. Journal rows retain their original source metadata and count meaning when linked to a preprint.
 
 The rich-docs worker may add its own optional fields and profile keys alongside `paper`; retain both parse/write/attachment paths. Full `Article` literals need the new field or `..Article::default()`. The extra one-line changes in existing ingestion constructors are compilation compatibility only. The separate paper-search follow-up carries this extension through `Page::from_paper`, retaining the integrated parent `Page.search` and `Page.content_language` fields.
 
@@ -36,9 +57,21 @@ Author/date acceptance fixtures use the original [Transformer](https://arxiv.org
 
 Focused checks use an isolated Cargo target directory. A shared target produced a foreign `plumb-core` schema artifact (the rich-docs `search` field), so that failed run is not validation. Subsequent checks use the papers target with the parent's bounded settings: one build job, incremental off and debug information off. The shared target was not cleaned or deleted.
 
-## Focused validation
+## Generic consistency focused validation
 
-Passed on this worktree, in the isolated papers target with one job, incremental compilation disabled and debug information disabled:
+The generic follow-up passed locally with one Cargo build job, incremental compilation disabled, debug information disabled and the isolated `plumb-search-quality-20261009-papers-target` directory:
+
+- `cargo test -p plumb-core -p plumb-ingest paper --no-default-features`: 6 core and 28 ingest tests.
+- `cargo test -p plumb-node paper --no-default-features`: 12 node tests, including retain-previous-generation and generic promotion checks.
+- `cargo test -p plumb-node whole_set_hook --no-default-features`: 1 semantic publication/DOI round-trip test.
+- `cargo test -p plumb-ingest --example paper_consistency_canary`: 1 offline synthetic repair/linking/round-trip test, including refusal to overwrite an existing output directory.
+- `cargo clippy -p plumb-core -p plumb-ingest --all-targets -- -D warnings`, `cargo fmt --all --check` and `git diff --check`.
+
+Tests cover unseen primary identities, independent later journal dates, full-name collisions, ambiguous multi-preprint matches, malformed/duplicate responses, conflicting explicit IDs, source-snapshot round-trips and bounded queue selection. Production repair/validation code contains no Transformer/RAG IDs or titles; named expectations are explicit fixtures only. No new live-provider probe, HPC operation, full-corpus canary, search evaluation, frozen-label change or production promotion was performed. These commands overlap and their counts are not a sum of unique tests.
+
+## Historical focused validation
+
+The earlier ingestion/search commits passed on this worktree, in the isolated papers target with one job, incremental compilation disabled and debug information disabled:
 
 - `cargo test -p plumb-core -p plumb-ingest paper --no-default-features`: 23 checks.
 - `cargo test -p plumb-core article::tests`: 12 serialization checks.

@@ -552,7 +552,7 @@ fn promote_locked(generation: &Path, dest: &Path, set: &str, options: Options) -
         {
             bail!("paper generation lacks completed publication quality stages; previous set kept");
         }
-        plumb_ingest::paper_validation::validate_landmarks(&pages)?;
+        plumb_ingest::paper_validation::validate_consistency(&pages)?;
     }
     drop(pages);
     if dest.is_file() {
@@ -795,18 +795,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("papers.tsv.gz");
         let mut pages = vec![];
-        let source: Vec<_> = plumb_ingest::paper_validation::LANDMARKS
+        let source: Vec<_> =
+            serde_json::from_str::<Vec<plumb_ingest::paper_validation::PaperCanary>>(include_str!(
+                "../../../plumb-ingest/tests/fixtures/paper-canary.json"
+            ))
+            .unwrap()
             .iter()
             .map(|landmark| plumb_ingest::paper_names::ArxivPaper {
-                id: landmark.id.into(),
-                title: landmark.title.into(),
+                id: landmark.id.clone(),
+                title: landmark.title.clone(),
                 year: landmark.submitted[..4].parse().ok(),
-                authors: vec![landmark.first_author.into()],
-                published: Some(landmark.submitted.into()),
+                authors: vec![landmark.first_author.clone()],
+                published: Some(landmark.submitted.clone()),
                 updated: None,
             })
             .collect();
-        plumb_ingest::paper_validation::repair_landmarks(&mut pages, &source).unwrap();
+        plumb_ingest::paper_names::add_arxiv_papers(&mut pages, &source, &Default::default());
         let stages = [
             "source-refresh",
             "canonical-paper-repair",

@@ -693,6 +693,9 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
         "named {} papers by their titles and {} by Papers with Code's methods; added {} arXiv papers OpenAlex lacks and repaired {} dates and {} records",
         named.by_title, named.by_method, named.added, named.redated, named.corrected
     );
+    if !named.retained_publications.is_empty() {
+        info!("{} publication IDs retained with independent DOI/date claims; linked preprints do not verify journal publication metadata: {:?}", named.retained_publications.len(), named.retained_publications);
+    }
     stages.extend(
         ["canonical-paper-repair", "article-validation"].map(|name| {
             plumb_net::pages::QualityStage {
@@ -770,7 +773,7 @@ fn publish_papers(
         papers,
         stages,
         options,
-        plumb_ingest::paper_validation::validate_landmarks,
+        plumb_ingest::paper_validation::validate_consistency,
     )?;
     info!("staged paper generation {}", generation.display());
     if !args.stage_only {
@@ -1463,19 +1466,23 @@ mod tests {
     }
 
     fn canonical_papers() -> Vec<plumb_core::Article> {
-        let source: Vec<_> = plumb_ingest::paper_validation::LANDMARKS
+        let source: Vec<_> =
+            serde_json::from_str::<Vec<plumb_ingest::paper_validation::PaperCanary>>(include_str!(
+                "../../plumb-ingest/tests/fixtures/paper-canary.json"
+            ))
+            .unwrap()
             .iter()
             .map(|landmark| plumb_ingest::paper_names::ArxivPaper {
-                id: landmark.id.into(),
-                title: landmark.title.into(),
+                id: landmark.id.clone(),
+                title: landmark.title.clone(),
                 year: landmark.submitted[..4].parse().ok(),
-                authors: vec![landmark.first_author.into()],
-                published: Some(landmark.submitted.into()),
+                authors: vec![landmark.first_author.clone()],
+                published: Some(landmark.submitted.clone()),
                 updated: None,
             })
             .collect();
         let mut papers = vec![];
-        plumb_ingest::paper_validation::repair_landmarks(&mut papers, &source).unwrap();
+        plumb_ingest::paper_names::add_arxiv_papers(&mut papers, &source, &Default::default());
         papers
     }
 
@@ -1526,7 +1533,7 @@ mod tests {
     }
 
     #[test]
-    fn paper_promotion_rechecks_completed_stages_and_landmarks() {
+    fn paper_promotion_rechecks_completed_stages_and_generic_consistency() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("papers.tsv.gz");
         let args = paper_args(&dest);

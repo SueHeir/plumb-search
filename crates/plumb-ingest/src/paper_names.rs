@@ -18,8 +18,8 @@
 //! The papers those methods come from that the set lacks (OpenAlex has no
 //! arXiv record of "Proximal Policy Optimization Algorithms") are added
 //! from arXiv's API (its metadata is CC0). Method-use counts remain
-//! explicitly distinct from citations. Landmark identities are checked
-//! even when present; title-only matches need author corroboration and
+//! explicitly distinct from citations. Existing identities can be verified
+//! in bounded batches; title matches need author corroboration and
 //! cannot replace a legitimate later publication's DOI or date.
 
 use std::collections::{HashMap, HashSet};
@@ -31,8 +31,8 @@ use anyhow::{bail, Context, Result};
 use plumb_core::article::{Article, MAX_ARTICLE_DESCRIPTION_CHARS};
 use plumb_core::normalize_text;
 use plumb_core::papers::{
-    valid_date, PaperCorrection, PaperCountKind, PaperMetadata, MAX_PAPER_AUTHORS,
-    MAX_PAPER_CORRECTIONS,
+    valid_date, ArxivVerification, PaperCorrection, PaperCountKind, PaperMetadata,
+    MAX_PAPER_AUTHORS, MAX_PAPER_CORRECTIONS,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -247,8 +247,36 @@ pub struct ArxivPaper {
 }
 
 impl ArxivPaper {
+    pub(crate) fn complete(&self) -> bool {
+        arxiv_id_of(&format!("https://arxiv.org/abs/{}", self.id)).as_deref()
+            == Some(self.id.as_str())
+            && !self.title.trim().is_empty()
+            && self.title.chars().count() <= 2000
+            && !self.authors.is_empty()
+            && self.authors.iter().all(|a| !a.trim().is_empty())
+            && self.published.as_deref().is_some_and(valid_date)
+            && self.year == self.published.as_deref().and_then(|d| d[..4].parse().ok())
+            && self
+                .updated
+                .as_deref()
+                .is_none_or(|d| valid_date(d) && self.published.as_deref().is_some_and(|p| d >= p))
+            && self.metadata(0, PaperCountKind::Unknown).write().is_some()
+    }
+
     pub fn metadata(&self, count: u64, count_kind: PaperCountKind) -> PaperMetadata {
         PaperMetadata {
+            verified_arxiv: self.published.as_ref().map(|submitted| ArxivVerification {
+                id: self.id.clone(),
+                title: self.title.clone(),
+                authors: self
+                    .authors
+                    .iter()
+                    .take(MAX_PAPER_AUTHORS)
+                    .cloned()
+                    .collect(),
+                submitted: submitted.clone(),
+                updated: self.updated.clone(),
+            }),
             doi: Some(self.doi()),
             arxiv_id: Some(self.id.clone()),
             authors: self
@@ -388,10 +416,15 @@ pub struct Named {
     pub by_method: usize,
     /// arXiv papers added.
     pub added: usize,
-    /// Mis-dated copies given their arXiv DOI.
+    /// Retained for report compatibility; generic linking never redates journals.
     pub redated: usize,
     /// Existing primary arXiv identities with corrected metadata.
     pub corrected: usize,
+    /// Source identities whose responses/links were ambiguous or incomplete.
+    pub unresolved: Vec<String>,
+    /// Journal/publication IDs linked to a preprint while retaining their
+    /// original DOI and publication dates. arXiv cannot adjudicate those dates.
+    pub retained_publications: Vec<String>,
 }
 
 /// Where papers are, by arXiv id and by title.
@@ -585,17 +618,30 @@ pub(crate) fn metadata_of(paper: &Article) -> PaperMetadata {
 }
 
 pub(crate) fn same_author(a: &str, b: &str) -> bool {
-    let a = normalize_text(a);
-    let b = normalize_text(b);
+    // normalize_text joins consecutive initials (J. A. -> ja), which
+    // is useful for search names but loses author-name token boundaries.
+    let tokens = |s: &str| -> Vec<String> {
+        s.split(|c: char| !c.is_alphanumeric() && !matches!(c, '\'' | '’'))
+            .map(normalize_text)
+            .filter(|word| !word.is_empty())
+            .collect()
+    };
+    let a = tokens(a);
+    let b = tokens(b);
     if a == b && !a.is_empty() {
         return true;
     }
-    let a: Vec<&str> = a.split_whitespace().collect();
-    let b: Vec<&str> = b.split_whitespace().collect();
     a.len() >= 2
         && b.len() >= 2
         && a.last() == b.last()
-        && a[0].chars().next() == b[0].chars().next()
+        && a[..a.len() - 1]
+            .iter()
+            .zip(&b[..b.len() - 1])
+            .all(|(a, b)| {
+                a == b
+                    || (a.chars().count() == 1 || b.chars().count() == 1)
+                        && a.chars().next() == b.chars().next()
+            })
 }
 
 fn corroborated(paper: &Article, arxiv: &ArxivPaper) -> bool {
@@ -670,40 +716,69 @@ fn canonicalize(paper: &mut Article, arxiv: &ArxivPaper, reason: &str) -> bool {
     changed
 }
 
+pub(crate) fn unique_sources(found: &[ArxivPaper]) -> HashMap<&str, &ArxivPaper> {
+    let mut counts = HashMap::<&str, usize>::new();
+    for source in found {
+        *counts.entry(&source.id).or_default() += 1;
+    }
+    found
+        .iter()
+        .filter(|s| counts[s.id.as_str()] == 1 && s.complete())
+        .map(|s| (s.id.as_str(), s))
+        .collect()
+}
+
+fn unresolved(done: &mut Named, id: &str) {
+    if !done.unresolved.iter().any(|old| old == id) && done.unresolved.len() < 1000 {
+        done.unresolved.push(id.to_string());
+    }
+}
+
+fn link_and_report(done: &mut Named, paper: &mut Article, source: &ArxivPaper) {
+    if let Some(item) = &paper.item {
+        if done.retained_publications.len() < 1000 && !done.retained_publications.contains(item) {
+            done.retained_publications.push(item.clone());
+        }
+    }
+    link_preprint(paper, source);
+}
+
 /// Updates every primary record of a confirmed arXiv identity, including
 /// duplicates with a corrupt title. Journal rows linked to a preprint keep
 /// their independent publication metadata and require corroboration.
 pub fn verify_existing(papers: &mut [Article], found: &[ArxivPaper]) -> Named {
-    let by_id: HashMap<&str, &ArxivPaper> = found
-        .iter()
-        .filter(|p| {
-            !p.title.is_empty()
-                && !p.authors.is_empty()
-                && p.published.as_deref().is_some_and(valid_date)
-        })
-        .map(|p| (p.id.as_str(), p))
-        .collect();
+    let by_id = unique_sources(found);
     let mut done = Named::default();
     for paper in papers {
-        // Verify the audited bad copy even when a separate canonical row
-        // is already present in this generation.
-        if paper.item.as_deref() == Some("10.65215/2q58a426") {
-            if let Some(arxiv) = by_id.get("1706.03762") {
-                if normalize_text(&paper.title) == normalize_text(&arxiv.title)
-                    && corroborated(paper, arxiv)
-                {
-                    canonicalize(paper, arxiv, "verified-misdated-transformer-copy");
-                    done.redated += 1;
-                    continue;
-                }
-            }
-        }
         let Some(id) = paper_arxiv_id(paper) else {
             continue;
         };
         let Some(arxiv) = by_id.get(id.as_str()) else {
+            if found.iter().any(|p| p.id == id) {
+                unresolved(&mut done, &id);
+            }
             continue;
         };
+        let old = metadata_of(paper);
+        if old
+            .verified_arxiv
+            .as_ref()
+            .is_some_and(|proof| proof.id != id)
+            || old.arxiv_id.as_ref().is_some_and(|other| other != &id)
+            || old
+                .doi
+                .as_ref()
+                .zip(paper.item.as_ref())
+                .is_some_and(|(a, b)| !a.eq_ignore_ascii_case(b))
+            || paper
+                .website
+                .as_deref()
+                .and_then(arxiv_id_of)
+                .is_some_and(|other| other != id)
+        {
+            unresolved(&mut done, &id);
+            continue;
+        }
         if paper
             .item
             .as_deref()
@@ -717,7 +792,9 @@ pub fn verify_existing(papers: &mut [Article], found: &[ArxivPaper]) -> Named {
         } else if normalize_text(&paper.title) == normalize_text(&arxiv.title)
             && corroborated(paper, arxiv)
         {
-            link_preprint(paper, arxiv);
+            link_and_report(&mut done, paper, arxiv);
+        } else {
+            unresolved(&mut done, &id);
         }
     }
     done
@@ -729,6 +806,7 @@ fn link_preprint(paper: &mut Article, arxiv: &ArxivPaper) {
         paper.website = Some(abs.clone());
     }
     let mut metadata = metadata_of(paper);
+    metadata.verified_arxiv = arxiv.metadata(0, PaperCountKind::Unknown).verified_arxiv;
     metadata.arxiv_id = Some(arxiv.id.clone());
     metadata.preprint_date = arxiv.published.clone();
     metadata.preprint_version_date = arxiv.updated.clone();
@@ -739,17 +817,21 @@ fn link_preprint(paper: &mut Article, arxiv: &ArxivPaper) {
     add_identifiers(paper, arxiv);
 }
 
-/// Adds the arXiv papers `found` (with the papers using their methods,
-/// `uses`) that `papers` lack, or gives a mis-dated copy of one its DOI
-/// and year (see the module docs). A copy under the same title that is
-/// not mis-dated (the conference version of an arXiv paper) keeps its
-/// DOI and is given the arXiv copy to read free, if it has none.
+/// Adds complete, uniquely verified arXiv identities. A unique title and
+/// compatible author can link a journal row to its preprint, but never
+/// replaces the journal's primary source ID, publication date or version.
 pub fn add_arxiv_papers(
     papers: &mut Vec<Article>,
     found: &[ArxivPaper],
     uses: &HashMap<String, u64>,
 ) -> Named {
     let mut named = verify_existing(papers, found);
+    let sources = unique_sources(found);
+    for source in found {
+        if !sources.contains_key(source.id.as_str()) {
+            unresolved(&mut named, &source.id);
+        }
+    }
     let at = Found::of(papers);
     let mut by_title: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, paper) in papers.iter().enumerate() {
@@ -759,23 +841,30 @@ pub fn add_arxiv_papers(
             .push(i);
     }
     let mut present: HashSet<String> = at.by_arxiv.keys().cloned().collect();
-    for arxiv in found {
-        if present.contains(&arxiv.id) {
-            continue;
+    for arxiv in found.iter().filter(|p| sources.contains_key(p.id.as_str())) {
+        // Linking each corroborated journal row is independent of whether
+        // a canonical arXiv row already exists elsewhere in the corpus.
+        if let Some(indices) = by_title.get(&normalize_text(&arxiv.title)) {
+            for &i in indices {
+                if paper_arxiv_id(&papers[i]).is_some() || !corroborated(&papers[i], arxiv) {
+                    continue;
+                }
+                let candidates = sources
+                    .values()
+                    .filter(|s| {
+                        normalize_text(&s.title) == normalize_text(&arxiv.title)
+                            && corroborated(&papers[i], s)
+                    })
+                    .count();
+                if candidates == 1 {
+                    link_and_report(&mut named, &mut papers[i], arxiv);
+                    present.insert(arxiv.id.clone());
+                } else {
+                    unresolved(&mut named, &arxiv.id);
+                }
+            }
         }
-        let matched = by_title
-            .get(&normalize_text(&arxiv.title))
-            .and_then(|indices| {
-                indices
-                    .iter()
-                    .copied()
-                    .find(|&i| corroborated(&papers[i], arxiv))
-            });
-        if let Some(i) = matched {
-            let paper = &mut papers[i];
-            // Matching a preprint does not falsify a journal's later date.
-            link_preprint(paper, arxiv);
-            present.insert(arxiv.id.clone());
+        if present.contains(&arxiv.id) {
             continue;
         }
         let count = uses.get(&arxiv.id).copied().unwrap_or(0);
@@ -917,10 +1006,21 @@ pub async fn improve(
     papers: &mut Vec<Article>,
     cache_dir: Option<&Path>,
 ) -> Result<Named> {
-    let required = fetch_arxiv(client, &crate::paper_validation::required_arxiv_ids())
-        .await
-        .context("required canonical paper verification; retain the previous generation")?;
-    let mut done = crate::paper_validation::repair_landmarks(papers, &required)?;
+    let ids = crate::paper_validation::consistency_ids(papers, ARXIV_IDS_A_REQUEST);
+    let mut done = Named::default();
+    if !ids.is_empty() {
+        let found = fetch_arxiv(client, &ids)
+            .await
+            .context("bounded existing-identity verification; retain the previous generation")?;
+        let mut queue = crate::paper_validation::ConsistencyQueue::new("enrichment-batch", &ids)?;
+        done = queue.apply(papers, ids.len(), &found);
+        if !queue.unresolved.is_empty() {
+            bail!(
+                "unresolved arXiv verification for {:?}; retain the previous generation",
+                queue.unresolved
+            );
+        }
+    }
     let methods = match fetch_methods(client, cache_dir).await {
         Ok(methods) => methods,
         Err(err) => {
@@ -930,7 +1030,7 @@ pub async fn improve(
     };
     let missing = missing_arxiv_ids(papers, &methods);
     if !missing.is_empty() {
-        // Supplementary enrichment is bounded separately from required anchors.
+        // Supplementary enrichment has its own 1000-identity bound.
         let ids: Vec<String> = missing
             .iter()
             .take(1000)
@@ -943,10 +1043,20 @@ pub async fn improve(
                 done.added += added.added;
                 done.redated += added.redated;
                 done.corrected += added.corrected;
+                done.unresolved.extend(added.unresolved);
+                done.retained_publications
+                    .extend(added.retained_publications);
             }
             Err(err) => warn!("{err:#}; no arXiv papers added"),
         }
     }
+    if !done.unresolved.is_empty() {
+        bail!(
+            "ambiguous arXiv enrichment for {:?}; retain the previous generation",
+            done.unresolved
+        );
+    }
+    crate::paper_validation::validate_consistency(papers)?;
     let named = name_papers(papers, &methods);
     Ok(Named {
         by_title: named.by_title,
@@ -958,6 +1068,148 @@ pub async fn improve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn canaries() -> Vec<crate::paper_validation::PaperCanary> {
+        serde_json::from_str(include_str!("../tests/fixtures/paper-canary.json")).unwrap()
+    }
+
+    fn synthetic_source(id: &str) -> ArxivPaper {
+        ArxivPaper {
+            id: id.into(),
+            title: "Synthetic research example".into(),
+            year: Some(2024),
+            authors: vec!["Jane Example".into()],
+            published: Some("2024-01-02".into()),
+            updated: Some("2024-02-03".into()),
+        }
+    }
+
+    #[test]
+    fn generic_arxiv_primary_identity_repairs_unseen_corrupt_rows() {
+        let source = synthetic_source("2401.01234");
+        let mut old = paper("Wrong title", &source.doi(), 25, 2025);
+        old.description = Some("Paper by Other Scientist et al., 2025".into());
+        old.aliases = vec!["Wrong alias".into()];
+        let mut rows = vec![old.clone()];
+        let report = verify_existing(&mut rows, std::slice::from_ref(&source));
+        assert_eq!(report.corrected, 1);
+        assert_eq!(rows[0].title, source.title);
+        assert_eq!(rows[0].views, 25);
+        assert!(!rows[0].aliases.contains(&"Wrong alias".to_string()));
+        let metadata = rows[0].paper.as_ref().unwrap();
+        assert_eq!(metadata.corrections[0].previous_item, old.item);
+        assert_eq!(
+            metadata.corrections[0].previous_authors,
+            ["Other Scientist"]
+        );
+        assert_eq!(metadata.verified_arxiv.as_ref().unwrap().id, source.id);
+        crate::paper_validation::validate_consistency(&rows).unwrap();
+        rows[0].title = "A later corruption".into();
+        assert!(crate::paper_validation::validate_consistency(&rows).is_err());
+    }
+
+    #[test]
+    fn generic_journal_link_preserves_source_ids_and_independent_dates() {
+        let source = synthetic_source("2401.01234");
+        let mut journal = paper(&source.title, "10.1234/journal", 50, 2025);
+        journal.description = Some("Paper by J. Example et al., 2025, Journal".into());
+        let mut metadata = metadata_of(&journal);
+        metadata.publication_date = Some("2025-03-04".into());
+        metadata.version_date = Some("2025-04-05".into());
+        metadata.openalex_id = Some("W987654".into());
+        journal.paper = Some(metadata);
+        let mut rows = vec![journal.clone()];
+        let report = add_arxiv_papers(
+            &mut rows,
+            std::slice::from_ref(&source),
+            &Default::default(),
+        );
+        assert_eq!((report.added, report.redated), (0, 0));
+        assert_eq!(report.retained_publications, ["10.1234/journal"]);
+        assert_eq!(rows[0].item, journal.item);
+        assert_eq!(rows[0].description, journal.description);
+        let m = rows[0].paper.as_ref().unwrap();
+        assert_eq!(m.openalex_id.as_deref(), Some("W987654"));
+        assert_eq!(m.doi, journal.item);
+        assert_eq!(m.publication_date.as_deref(), Some("2025-03-04"));
+        assert_eq!(m.version_date.as_deref(), Some("2025-04-05"));
+        assert_eq!(m.preprint_date, source.published);
+        crate::paper_validation::validate_consistency(&rows).unwrap();
+    }
+
+    #[test]
+    fn full_author_collisions_and_title_only_matches_do_not_link() {
+        assert!(!same_author("Jane Example", "John Example"));
+        assert!(!same_author("Jane Alice Example", "Jane Bob Example"));
+        assert!(same_author("J. A. Example", "Jane Alice Example"));
+        let source = synthetic_source("2401.01234");
+        for byline in [
+            "Paper by John Example et al., 2025",
+            "Paper by Unknown et al., 2025",
+        ] {
+            let mut unrelated = paper(&source.title, "10.1234/unrelated", 50, 2025);
+            unrelated.description = Some(byline.into());
+            let mut rows = vec![unrelated.clone()];
+            assert_eq!(
+                add_arxiv_papers(
+                    &mut rows,
+                    std::slice::from_ref(&source),
+                    &Default::default()
+                )
+                .added,
+                1
+            );
+            assert_eq!(rows[0], unrelated);
+        }
+    }
+
+    #[test]
+    fn conflicting_source_responses_and_links_remain_unresolved() {
+        let source = synthetic_source("2401.01234");
+        let mut conflict = source.clone();
+        conflict.title = "Another title".into();
+        let original = paper("Wrong title", &source.doi(), 50, 2025);
+        let mut rows = vec![original.clone()];
+        let report = verify_existing(&mut rows, &[source.clone(), conflict]);
+        assert_eq!(rows.as_slice(), std::slice::from_ref(&original));
+        assert_eq!(
+            report.unresolved.as_slice(),
+            std::slice::from_ref(&source.id)
+        );
+        let mut invalid = source.clone();
+        invalid.published = Some("2024-02-30".into());
+        assert_eq!(
+            verify_existing(&mut rows, &[invalid]).unresolved,
+            std::slice::from_ref(&source.id)
+        );
+        assert_eq!(rows, [original]);
+        rows[0].paper = Some(PaperMetadata {
+            arxiv_id: Some("2402.05678".into()),
+            ..metadata_of(&rows[0])
+        });
+        let before = rows.clone();
+        assert_eq!(
+            verify_existing(&mut rows, &[source]).unresolved,
+            ["2401.01234"]
+        );
+        assert_eq!(rows, before);
+        assert!(crate::paper_validation::validate_consistency(&rows).is_err());
+    }
+
+    #[test]
+    fn multiple_preprints_with_same_title_and_author_preserve_journal_ambiguity() {
+        let sources = [
+            synthetic_source("2401.01234"),
+            synthetic_source("2402.05678"),
+        ];
+        let mut journal = paper(&sources[0].title, "10.1234/journal", 50, 2025);
+        journal.description = Some("Paper by Jane Example et al., 2025".into());
+        let mut rows = vec![journal.clone()];
+        let report = add_arxiv_papers(&mut rows, &sources, &Default::default());
+        assert_eq!(rows[0], journal);
+        assert_eq!(report.unresolved.len(), 2);
+        assert_eq!(report.added, 2);
+    }
 
     fn paper(title: &str, item: &str, views: u64, year: i32) -> Article {
         Article {
@@ -1128,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_arxiv_papers_are_added_and_misdated_copies_fixed() {
+    fn missing_arxiv_papers_are_added_and_journal_dates_are_preserved() {
         let mut papers = vec![
             paper(
                 "Attention Is All You Need",
@@ -1188,15 +1440,19 @@ mod tests {
         );
         let uses: HashMap<String, u64> = missing.into_iter().collect();
         let done = add_arxiv_papers(&mut papers, &parse_arxiv_feed(FEED), &uses);
-        assert_eq!((done.added, done.redated), (1, 1));
-        // The mis-dated copy takes arXiv's DOI and year.
+        assert_eq!((done.added, done.redated), (1, 0));
+        // A year gap cannot establish that a different DOI is false.
         let attention = papers
             .iter()
             .find(|p| p.title == "Attention Is All You Need")
             .unwrap();
-        assert_eq!(attention.item.as_deref(), Some("10.48550/arxiv.1706.03762"));
+        assert_eq!(attention.item.as_deref(), Some("10.65215/2q58a426"));
         assert_eq!(attention.views, 26_807);
-        assert!(attention.description.as_deref().unwrap().contains("2017"));
+        assert!(attention.description.as_deref().unwrap().contains("2025"));
+        assert_eq!(
+            attention.paper.as_ref().unwrap().preprint_date.as_deref(),
+            Some("2017-06-12")
+        );
         // The conference version keeps its DOI and gets the arXiv copy.
         let bert = papers.iter().find(|p| p.title.starts_with("BERT")).unwrap();
         assert_eq!(bert.item.as_deref(), Some("10.18653/v1/n19-1423"));
@@ -1258,7 +1514,8 @@ mod tests {
             100,
         );
         assert!(missing_arxiv_ids(&papers, std::slice::from_ref(&rag_method)).is_empty());
-        let done = crate::paper_validation::repair_landmarks(&mut papers, &found).unwrap();
+        let done =
+            crate::paper_validation::repair_canary(&mut papers, &found, &canaries()).unwrap();
         assert_eq!(done.corrected, 1);
         let false_name = method(
             "AffordanceMagic",
@@ -1291,7 +1548,7 @@ mod tests {
             papers
         );
         assert_eq!(
-            crate::paper_validation::repair_landmarks(&mut papers, &found)
+            crate::paper_validation::repair_canary(&mut papers, &found, &canaries())
                 .unwrap()
                 .corrected,
             0
@@ -1299,35 +1556,28 @@ mod tests {
     }
 
     #[test]
-    fn transformer_repair_needs_authors_and_keeps_the_original_source() {
+    fn known_transformer_canary_does_not_replace_an_unproven_journal_doi() {
         let found = parse_arxiv_feed(LANDMARK_FEED);
-        let mut bad = paper(
+        let mut journal = paper(
             "Attention Is All You Need",
             "10.65215/2q58a426",
             26807,
             2025,
         );
-        bad.description = Some("Paper by Ashish Vaswani et al., 2025".into());
-        let mut papers = vec![bad];
-        let done = crate::paper_validation::repair_landmarks(&mut papers, &found).unwrap();
-        assert_eq!(done.redated, 1);
-        let transformer = papers.iter().find(|p| p.title == found[0].title).unwrap();
-        assert_eq!(
-            transformer.item.as_deref(),
-            Some("10.48550/arxiv.1706.03762")
-        );
-        let metadata = transformer.paper.as_ref().unwrap();
-        assert_eq!(metadata.authors.len(), 8);
-        assert_eq!(metadata.publication_date.as_deref(), Some("2017-06-12"));
-        assert_eq!(metadata.version_date.as_deref(), Some("2023-08-02"));
-        assert_eq!(
-            metadata.corrections[0].previous_item.as_deref(),
-            Some("10.65215/2q58a426")
-        );
-        assert_eq!(
-            metadata.corrections[0].previous_publication_year,
-            Some(2025)
-        );
+        journal.description = Some("Paper by Ashish Vaswani et al., 2025".into());
+        let mut papers = vec![journal.clone()];
+        let done =
+            crate::paper_validation::repair_canary(&mut papers, &found, &canaries()).unwrap();
+        assert_eq!(done.redated, 0);
+        assert_eq!(done.retained_publications, ["10.65215/2q58a426"]);
+        let row = papers.iter().find(|p| p.title == found[0].title).unwrap();
+        assert_eq!(row.item, journal.item);
+        assert_eq!(row.description, journal.description);
+        let metadata = row.paper.as_ref().unwrap();
+        assert_eq!(metadata.publication_year, Some(2025));
+        assert_eq!(metadata.preprint_date.as_deref(), Some("2017-06-12"));
+        assert_eq!(metadata.verified_arxiv.as_ref().unwrap().authors.len(), 8);
+        assert!(metadata.corrections.is_empty());
     }
 
     #[test]
@@ -1388,30 +1638,36 @@ mod tests {
     }
 
     #[test]
-    fn a_present_canonical_transformer_does_not_hide_its_audited_bad_copy() {
+    fn a_present_preprint_does_not_hide_other_dois_with_the_same_title() {
         let found = parse_arxiv_feed(LANDMARK_FEED);
         let canonical = Article {
             title: found[0].title.clone(),
             item: Some(found[0].doi()),
             description: Some(found[0].description()),
             paper: Some(found[0].metadata(100, PaperCountKind::Citations)),
-            ..Article::default()
+            ..Default::default()
         };
-        let mut bad = paper(
+        let mut linked = paper(
             "Attention Is All You Need",
             "10.65215/2q58a426",
             26807,
             2025,
         );
-        bad.description = Some("Paper by Ashish Vaswani et al., 2025".into());
-        let mut papers = vec![canonical.clone(), bad];
-        let done = crate::paper_validation::repair_landmarks(&mut papers, &found).unwrap();
-        assert_eq!(done.redated, 1);
-        assert!(papers
-            .iter()
-            .all(|p| p.item.as_deref() != Some("10.65215/2q58a426")));
-        let uncorroborated = paper("Attention Is All You Need", "10.65215/2q58a426", 100, 2025);
-        let mut papers = vec![canonical, uncorroborated];
-        assert!(crate::paper_validation::repair_landmarks(&mut papers, &found).is_err());
+        linked.description = Some("Paper by Ashish Vaswani et al., 2025".into());
+        let unknown = paper("Attention Is All You Need", "10.1234/unknown", 100, 2025);
+        let mut papers = vec![canonical, linked.clone(), unknown.clone()];
+        let done = add_arxiv_papers(&mut papers, &found[..1], &Default::default());
+        assert_eq!(done.redated, 0);
+        assert_eq!(papers[1].item, linked.item);
+        assert_eq!(
+            papers[1].paper.as_ref().unwrap().publication_year,
+            Some(2025)
+        );
+        assert_eq!(
+            papers[1].paper.as_ref().unwrap().preprint_date.as_deref(),
+            Some("2017-06-12")
+        );
+        assert_eq!(papers[2], unknown);
+        crate::paper_validation::validate_consistency(&papers).unwrap();
     }
 }

@@ -20,6 +20,9 @@ pub enum PaperCountKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PaperMetadata {
+    /// Source snapshot from an explicit arXiv response, used by generic
+    /// consistency checks. Absent for legacy or unverified records.
+    pub verified_arxiv: Option<ArxivVerification>,
     pub doi: Option<String>,
     pub arxiv_id: Option<String>,
     pub openalex_id: Option<String>,
@@ -41,6 +44,15 @@ pub struct PaperMetadata {
     pub count: u64,
     pub alternate_urls: Vec<String>,
     pub corrections: Vec<PaperCorrection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArxivVerification {
+    pub id: String,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub submitted: String,
+    pub updated: Option<String>,
 }
 
 /// Conflicting provider values are audit evidence, never search aliases.
@@ -167,7 +179,21 @@ impl PaperMetadata {
     }
 
     fn bounded(&self) -> bool {
-        self.authors.len() <= MAX_PAPER_AUTHORS
+        self.verified_arxiv.as_ref().is_none_or(|proof| {
+            !proof.id.is_empty()
+                && proof.id.len() <= 128
+                && !proof.id.contains(char::is_whitespace)
+                && !proof.title.trim().is_empty()
+                && proof.title.chars().count() <= 2000
+                && !proof.authors.is_empty()
+                && proof.authors.len() <= MAX_PAPER_AUTHORS
+                && proof.authors.iter().all(|a| !a.trim().is_empty())
+                && valid_date(&proof.submitted)
+                && proof
+                    .updated
+                    .as_deref()
+                    .is_none_or(|d| valid_date(d) && d >= proof.submitted.as_str())
+        }) && self.authors.len() <= MAX_PAPER_AUTHORS
             && self.alternate_urls.len() <= 8
             && self.corrections.len() <= MAX_PAPER_CORRECTIONS
             && self
@@ -189,6 +215,34 @@ impl PaperMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paper_source_snapshots_are_optional_bounded_and_round_trip() {
+        assert!(PaperMetadata::parse(r#"{"source":"legacy-paper-row"}"#)
+            .unwrap()
+            .verified_arxiv
+            .is_none());
+        let mut metadata = PaperMetadata {
+            verified_arxiv: Some(ArxivVerification {
+                id: "2401.01234".into(),
+                title: "Synthetic research example".into(),
+                authors: vec!["Jane Example".into()],
+                submitted: "2024-01-02".into(),
+                updated: Some("2024-02-03".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            PaperMetadata::parse(&metadata.write().unwrap()),
+            Some(metadata.clone())
+        );
+        metadata.verified_arxiv.as_mut().unwrap().updated = Some("2023-12-01".into());
+        assert!(metadata.write().is_none());
+        metadata.verified_arxiv.as_mut().unwrap().updated = None;
+        metadata.verified_arxiv.as_mut().unwrap().authors =
+            vec!["Jane Example".into(); MAX_PAPER_AUTHORS + 1];
+        assert!(metadata.write().is_none());
+    }
 
     #[test]
     fn dates_and_extensions_are_bounded() {
