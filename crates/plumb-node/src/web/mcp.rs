@@ -19,7 +19,10 @@
 //!
 //! `/mcp?answers=text` leaves the JSON copy of each tool's answer out, for
 //! AI apps that would give the model the JSON instead of the short text
-//! ([`crate::mcp::text_only`]).
+//! ([`crate::mcp::text_only`]). `/mcp?findings=off` answers as if the
+//! client were on another computer of a node without `--mcp-findings`: no
+//! findings or leads with search results, and no `report_finding`, for
+//! runs that compare searches with and without them.
 //!
 //! `report_finding`, and the findings listed with search results, are
 //! offered only to apps on the node's own computer: they hold what its
@@ -307,6 +310,15 @@ fn wants_text_answers(uri: &Uri) -> bool {
     })
 }
 
+/// Whether the address asks for searches without findings or leads, and
+/// no `report_finding` (`/mcp?findings=off`).
+fn wants_no_findings(uri: &Uri) -> bool {
+    uri.query().is_some_and(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .any(|(key, value)| key == "findings" && value.eq_ignore_ascii_case("off"))
+    })
+}
+
 async fn mcp(State(state): State<AppState>, request: Request) -> Response {
     if foreign_origin(request.headers()) {
         return answer(
@@ -321,7 +333,8 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
     let client = client(&request);
     let here = from_this_computer(&request);
     let reads_pages = state.settings.read_pages_for_all || here;
-    let keeps_findings = state.settings.findings_for_all || here;
+    let no_findings = wants_no_findings(request.uri());
+    let keeps_findings = !no_findings && (state.settings.findings_for_all || here);
     let text_answers = wants_text_answers(request.uri());
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
         return answer(
@@ -396,7 +409,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         } else {
             None
         })
-        .with_leads(here)
+        .with_leads(here && !no_findings)
         .with_plugin_results(plugins);
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     let reply = tokio::task::spawn_blocking(move || server.handle(&message)).await;
@@ -523,6 +536,16 @@ mod tests {
         assert!(!asks("/mcp"));
         assert!(!asks("/mcp?answers=json"));
         assert!(!asks("/mcp?text"));
+    }
+
+    #[test]
+    fn leaves_findings_out_when_the_address_asks() {
+        let asks = |uri: &str| wants_no_findings(&uri.parse::<Uri>().unwrap());
+        assert!(asks("/mcp?findings=off"));
+        assert!(asks("/mcp?answers=text&findings=OFF"));
+        assert!(!asks("/mcp"));
+        assert!(!asks("/mcp?findings=on"));
+        assert!(!asks("/mcp?answers=text"));
     }
 
     #[test]
