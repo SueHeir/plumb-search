@@ -213,7 +213,9 @@ async fn frozen12_router_secondary_place_lookup_preserves_bound_primary_raw() {
     .is_empty());
     assert!(expected.hits.is_empty());
     inner.search_full(query, 5, &options).unwrap();
-    inner.search_full(query, 10, &SearchOptions::default()).unwrap();
+    inner
+        .search_full(query, 10, &SearchOptions::default())
+        .unwrap();
     assert!(inner.raw.lock().unwrap().is_none());
     assert!(!inner
         .sites
