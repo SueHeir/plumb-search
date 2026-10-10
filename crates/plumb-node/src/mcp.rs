@@ -673,17 +673,23 @@ impl Mcp {
             let package_home = self
                 .package_home(name, wants_docs, options)
                 .or_else(|| self.package_home(bare.as_deref()?, wants_docs, options));
-            if let Some((home, registry, _, _)) = &package_home {
+            if let Some((home, registry, docs, _)) = &package_home {
+                let resource = if *docs { "documentation" } else { "home page" };
                 why = vec![format!(
-                    "The {registry} package of this name gives {home} as its home page."
+                    "The {registry} package of this name gives {home} as its {resource}."
                 )];
             } else if let Some(fixed) = did_you_mean {
                 why.push(format!("Did you mean {fixed:?}? Look that up instead."));
             }
             let destination = package_home
                 .as_ref()
-                .filter(|(_, _, docs, _)| !docs || wants_docs)
+                // A cached docs URL alone does not establish affiliation
+                // with the requested owner or technical resource.
+                .filter(|(_, _, docs, _)| !docs)
                 .and_then(|(home, _, _, _)| Some((home, registrable_domain(home)?)));
+            if package_home.as_ref().is_some_and(|(_, _, docs, _)| *docs) {
+                why.push("The cached package documentation has no matching indexed owner or destination evidence; treat it as an unverified hint.".to_string());
+            }
             return Ok(json!({
                 "name": name,
                 "found": destination.is_some(),
@@ -930,6 +936,17 @@ impl Mcp {
                 .or_else(|| self.package_home(bare.as_deref()?, wants_docs, options));
             if let Some((home, registry, docs, owner)) = found {
                 let home_domain = registrable_domain(&home);
+                // Package metadata can connect a project's indexed homepage
+                // to its docs, but a same-name cached docs link cannot supply
+                // missing evidence for the requested owner or qualifiers.
+                let docs_supported = !docs
+                    || (verified_destination && owner.as_deref() == Some(domain.as_str()))
+                    || results.hits.iter().any(|hit| {
+                        intent.supports_site(hit)
+                            && (owner.as_deref() == Some(hit.domain.as_str())
+                                || (official(hit)
+                                    && home_domain.as_deref() == Some(hit.domain.as_str())))
+                    });
                 // Rejecting an inferred owner label does not establish that
                 // a same-name package is the requested entity. Keep a full
                 // matching official candidate as unresolved evidence, even
@@ -963,6 +980,23 @@ impl Mcp {
                         "Both {} and the {registry} package's {home} are candidates; \
                          the package name does not resolve which entity was requested.",
                         conflict.url
+                    ));
+                    package_home = Some(home);
+                } else if !docs_supported {
+                    alternatives.retain(|alt| alt["url"] != home);
+                    // Preserve indexed owner rivals ahead of an unverified
+                    // metadata hint when the alternatives list is capped.
+                    alternatives.push(json!({
+                        "domain": home_domain,
+                        "url": home,
+                        "title": format!("{registry} package {bare_or_name} documentation"),
+                        "official": false,
+                        "well_known": false,
+                    }));
+                    alternatives.truncate(ALTERNATIVES);
+                    why.push(format!(
+                        "Cached {registry} metadata lists {home} as documentation, but indexed \
+                         evidence does not bind that host to the complete requested identity."
                     ));
                     package_home = Some(home);
                 } else if home_domain.as_deref() == Some(domain.as_str()) {
@@ -3269,19 +3303,9 @@ fn named_article_site(pages: &[PlacedPage]) -> Option<(&Page, &str)> {
         .and_then(|placed| Some((&placed.hit.page, placed.hit.page.site.as_deref()?)))
 }
 
-/// Words after a name that say what is wanted from its site, besides the
-/// index's own intent words ("docs", "login"): "NPS API developer".
-const WANTED_WORDS: &[&str] = &[
-    "api",
-    "apis",
-    "developer",
-    "developers",
-    "reference",
-    "spec",
-    "specification",
-    "docs",
-    "documentation",
-];
+/// Documentation navigation is separate from identity. Technical resource
+/// words such as API, developer and specification still constrain the owner.
+const WANTED_WORDS: &[&str] = &["docs", "documentation"];
 
 /// The name in `asked` without what is wanted from its site after it:
 /// "Pillow docs" -> "pillow", `None` when nothing is wanted.

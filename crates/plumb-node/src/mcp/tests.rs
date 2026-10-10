@@ -1831,9 +1831,8 @@ fn official_site_leaves_out_alternatives_with_nothing_of_the_name() {
 }
 
 #[test]
-fn official_site_trusts_no_unrelated_official_site() {
-    // github.com is official, but not Pillow's; Pillow's package says
-    // where its docs are.
+fn official_site_package_docs_need_a_matching_indexed_owner() {
+    // An unrelated official site cannot verify a cached docs host.
     let mcp = scripted(|query| {
         if query.ends_with("package") {
             let page = Page::from_package(plumb_core::article::Article {
@@ -1859,12 +1858,13 @@ fn official_site_trusts_no_unrelated_official_site() {
         results(vec![github], Vec::new())
     });
     let answer = official(&mcp, "Pillow docs");
-    assert_eq!(answer["url"], "https://pillow.readthedocs.io", "{answer}");
-    assert_eq!(answer["confidence"], "medium");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["package_home"], "https://pillow.readthedocs.io");
+    assert_eq!(answer["confidence"], "low");
 }
 
 #[test]
-fn official_site_finds_the_site_of_an_abbreviation_in_the_name() {
+fn official_site_an_abbreviation_owner_does_not_prove_its_requested_api() {
     let mcp = scripted(|query| match query {
         "NPS" => {
             let mut owner = titled("nps.gov", "National Park Service", 0.7, true);
@@ -1874,9 +1874,13 @@ fn official_site_finds_the_site_of_an_abbreviation_in_the_name() {
         _ => results(vec![titled("npmjs.org", "npm", 0.8, false)], Vec::new()),
     });
     let answer = official(&mcp, "NPS API developer");
-    assert_eq!(answer["domain"], "nps.gov", "{answer}");
-    assert_eq!(answer["confidence"], "medium");
-    assert_eq!(answer["alternatives"][0]["domain"], "npmjs.org");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["confidence"], "low");
+    assert!(answer["alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|alt| alt["domain"] == "nps.gov"));
 }
 
 #[test]
@@ -1917,9 +1921,10 @@ fn site_info_says_what_it_folds_and_whose_official_site_it_is() {
 }
 
 #[test]
-fn names_lose_what_is_wanted_of_their_sites() {
+fn names_separate_navigation_but_keep_technical_qualifiers() {
     assert_eq!(bare_name("Pillow docs").as_deref(), Some("pillow"));
-    assert_eq!(bare_name("NPS API developer").as_deref(), Some("nps"));
+    assert_eq!(bare_name("NPS API developer"), None);
+    assert_eq!(bare_name("Orion API docs").as_deref(), Some("orion api"));
     assert_eq!(bare_name("paypal login").as_deref(), Some("paypal"));
     assert_eq!(bare_name("Pillow"), None);
     assert_eq!(bare_name("docs"), None);
@@ -2059,7 +2064,7 @@ fn official_site_takes_no_package_docs_for_a_home() {
     assert_eq!(answer["found"], false, "{answer}");
     assert_eq!(answer["package_home"], "https://pandas.readthedocs.io/");
 
-    // Asked for the docs, the package's docs are the answer.
+    // A matching indexed project homepage corroborates the package's docs.
     let mcp = scripted(|query| {
         if query.ends_with("package") {
             return results(
@@ -2067,7 +2072,7 @@ fn official_site_takes_no_package_docs_for_a_home() {
                 vec![package_page(
                     "pypi",
                     "pillow",
-                    None,
+                    Some("https://python-pillow.org/"),
                     Some("https://pillow.readthedocs.io/"),
                 )],
             );
@@ -2125,8 +2130,8 @@ fn official_site_is_unsure_of_a_name_its_site_does_not_show() {
 }
 
 #[test]
-fn official_site_keeps_a_well_known_sites_own_docs() {
-    // PyPI's anthropic.readthedocs.io is no docs of anthropic.com's.
+fn official_site_keeps_api_evidence_when_separating_docs_navigation() {
+    // Neither the company's name nor a same-name SDK proves the requested API.
     let mcp = scripted(|query| {
         if query.ends_with("package") {
             return results(
@@ -2144,7 +2149,9 @@ fn official_site_keeps_a_well_known_sites_own_docs() {
         results(vec![anthropic], Vec::new())
     });
     let answer = official(&mcp, "anthropic api docs");
-    assert_eq!(answer["domain"], "anthropic.com", "{answer}");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["confidence"], "low");
+    assert!(answer["url"].is_null());
 }
 
 #[test]
@@ -2218,6 +2225,15 @@ fn official_site_binds_package_docs_to_the_typed_entity_despite_popular_spelling
             found
         });
         let answer = official(&mcp, "mypy documentation");
+        if mode == 0 {
+            assert_eq!(answer["found"], false, "{answer}");
+            assert_eq!(answer["confidence"], "low");
+            assert_eq!(
+                answer["package_home"],
+                "https://mypy.readthedocs.io/en/stable/"
+            );
+            continue;
+        }
         assert_eq!(answer["found"], true, "{answer}");
         assert_eq!(answer["url"], "https://mypy.readthedocs.io/en/stable/");
         assert_eq!(answer["confidence"], "medium");
@@ -3289,6 +3305,84 @@ fn official_site_arbitrary_namesakes_require_disambiguation() {
             assert_eq!(qualified["found"], true, "{qualified}");
             assert_eq!(qualified["domain"], "museum.example");
             assert_ne!(qualified["status"], "ambiguous");
+        }
+    }
+}
+
+#[test]
+fn official_site_technical_qualifiers_distinguish_arbitrary_acronym_owners() {
+    for (acronym, expansion) in [
+        ("QRS", "Quantum Research Society"),
+        ("ABC", "Assembly of Botanical Curators"),
+    ] {
+        for qualifier in [
+            "API developer",
+            "APIs developers",
+            "API reference",
+            "spec",
+            "specification",
+        ] {
+            let name = format!("{acronym} {qualifier}");
+            assert_eq!(identity::Intent::of(&name).entity, name.to_lowercase());
+            let mut namesake = titled("namesake.example", expansion, 0.9, true);
+            namesake.official = true;
+            let answer = official(&server(vec![namesake.clone()]), &name);
+            assert_eq!(answer["found"], false, "{name}: {answer}");
+            assert_eq!(answer["confidence"], "low");
+            assert!(answer["url"].is_null());
+
+            let mut resource = titled("owner.example", &name, 0.1, false);
+            resource.official = true;
+            resource.score = 0.1;
+            let answer = official(&server(vec![namesake, resource]), &name);
+            assert_eq!(answer["found"], true, "{name}: {answer}");
+            assert_eq!(answer["domain"], "owner.example");
+            let typed = official(
+                &server(vec![titled("owner.example", "Owner", 0.1, false)]),
+                "owner.example",
+            );
+            assert_eq!(typed["found"], true, "{typed}");
+        }
+    }
+}
+
+#[test]
+fn official_site_cached_docs_require_indexed_owner_or_complete_destination_evidence() {
+    for indexed in 0..4 {
+        let mcp = scripted(move |query| {
+            if query.ends_with("package") {
+                return results(
+                    Vec::new(),
+                    vec![package_page(
+                        "pypi",
+                        "brindle",
+                        Some("https://brindle.example/"),
+                        Some("https://brindle.docs.test/"),
+                    )],
+                );
+            }
+            let hits = match indexed {
+                0 => Vec::new(),
+                1 => vec![titled("unrelated.example", "Brindle", 0.1, true)],
+                2 => vec![titled("brindle.example", "Brindle", 0.1, true)],
+                _ => {
+                    let mut docs = titled("docs.test", "Brindle", 0.1, true);
+                    docs.url = "https://brindle.docs.test/".into();
+                    docs.official = true;
+                    vec![docs]
+                }
+            };
+            results(hits, Vec::new())
+        });
+        let answer = official(&mcp, "Brindle docs");
+        if indexed < 2 {
+            assert_eq!(answer["found"], false, "{answer}");
+            assert_eq!(answer["confidence"], "low");
+            assert!(answer["url"].is_null());
+            assert_eq!(answer["package_home"], "https://brindle.docs.test/");
+        } else {
+            assert_eq!(answer["found"], true, "{answer}");
+            assert_eq!(answer["url"], "https://brindle.docs.test/");
         }
     }
 }

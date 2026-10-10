@@ -36,6 +36,12 @@ identity; no category suffix is stripped to validate a familiar brand. A
 title/identity lacking those words can leave a plausible candidate unresolved,
 even if the strict suite expects its domain. An agency's parent site does
 not establish the destination of a separately named database or application.
+Documentation navigation can be separated, but API, developer, reference and
+specification qualifiers remain part of candidate validation. Cached package
+docs alone are an unverified hint: selecting them requires a matching indexed
+project homepage or an official indexed docs destination that supports the
+complete requested identity. This does not infer current company affiliation
+from a package name or exempt any documentation host.
 An exact package's homepage
 outweighs generated framework documentation on an unrelated host. These
 contracts are exercised by deterministic MCP tests for the wrong-owner
