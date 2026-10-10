@@ -19,10 +19,10 @@
 use std::collections::{HashMap, HashSet};
 
 use plumb_core::{
-    domain_label, is_function_word, joined, kind_key, language_code, language_fits, normalize_country,
-    normalize_text, other_number, record_adult_level, registrable_domain, site_country,
-    site_language, truncate_chars, Operators, SafeSearch, SiteRecord, MAX_ALIASES, MAX_HEADINGS,
-    MAX_TERMS, MAX_TEXT_CHARS,
+    domain_label, is_function_word, joined, kind_key, language_code, language_fits,
+    normalize_country, normalize_text, other_number, record_adult_level, registrable_domain,
+    site_country, site_language, truncate_chars, Operators, SafeSearch, SiteRecord, MAX_ALIASES,
+    MAX_HEADINGS, MAX_TERMS, MAX_TEXT_CHARS,
 };
 use serde::Serialize;
 

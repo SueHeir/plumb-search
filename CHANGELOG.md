@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Search
+
+- When a homepage has no valid language declaration, a dominant non-Latin title/description script can exclude it from an incompatible language filter. Short and mixed text stays eligible. Declared languages and full typed site names are preserved. Shared scripts do not identify a language; the fallback takes effect on the next index build.
+
 ### Fixes
 
 - A node hands the memory its threads free back to the system every five minutes instead of only after background work: a crawl round runs for most of an hour, and searches, the network and embedding free memory meanwhile, which sat unused until the system swapped it out. On Linux the node also keeps glibc's allocator to four arenas instead of up to eight per CPU, each keeping what its own threads freed (half an hour after a restart, plumbsearch.org held about 3.5 GB in 75 arena heaps), and gives buffers of 4 MB or more back as soon as they are freed. Building an index of 2.8 million sites then peaks at 1.17 GB instead of 1.31 GB and takes no longer. `MALLOC_ARENA_MAX` and `MALLOC_MMAP_THRESHOLD_` still override these.

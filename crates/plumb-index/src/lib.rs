@@ -7073,6 +7073,65 @@ mod tests {
     }
 
     #[test]
+    fn news_topic_language_filter_uses_the_same_script_fallback() {
+        let title = "News — научные исследования технологии и материалы";
+        let mut declared = site(
+            "declared.example",
+            Some(title),
+            None,
+            &[],
+            &[],
+            popular(500, 30000),
+        );
+        declared.language = Some("en".into());
+        let records = [
+            site(
+                "inferred.example",
+                Some(title),
+                None,
+                &[],
+                &[],
+                popular(500, 30000),
+            ),
+            declared,
+            site(
+                "mixed.example",
+                Some("News 中文社区 English language daily reporting"),
+                None,
+                &[],
+                &[],
+                popular(500, 30000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let found = |language: Option<&str>| {
+            searcher
+                .search_full(
+                    "world news",
+                    20,
+                    &RankConfig::default(),
+                    &SearchOptions {
+                        language: language.map(str::to_string),
+                        ..SearchOptions::default()
+                    },
+                )
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|hit| hit.domain)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found(None).len(), 3);
+        let english = found(Some("en"));
+        assert!(!english.contains(&"inferred.example".to_string()));
+        assert!(english.contains(&"declared.example".to_string()));
+        assert!(english.contains(&"mixed.example".to_string()));
+        let russian = found(Some("ru"));
+        assert!(russian.contains(&"inferred.example".to_string()));
+        assert!(!russian.contains(&"declared.example".to_string()));
+    }
+
+    #[test]
     fn a_site_that_says_it_is_of_a_kind_joins_the_kind() {
         let wikipedia = with_facts(
             site(
@@ -7390,7 +7449,7 @@ mod tests {
             &[],
             ranked(755, 5_000),
         ));
-        // Says English, as its template did, but is Russian too.
+        // Explicit English metadata remains authoritative.
         let mut template = site(
             "banktemplate.example",
             Some("Bank Москва — кредиты и вклады онлайн"),
@@ -7444,18 +7503,19 @@ mod tests {
             ..SearchOptions::default()
         });
         assert!(has(&german, "bankde.example"));
-        // Sites written in another script go too, whatever they say.
-        for domain in ["bankru.example", "banktemplate.example"] {
-            assert!(has(&off, domain), "{domain}");
-            assert!(!has(&english, domain), "{domain}");
-            assert!(!has(&german, domain), "{domain}");
-            for language in ["ru", "uk"] {
-                let found = with(SearchOptions {
-                    language: Some(language.into()),
-                    ..SearchOptions::default()
-                });
-                assert!(has(&found, domain), "{domain} {language}");
-            }
+        // Missing-language Cyrillic text is excluded by incompatible filters.
+        assert!(has(&off, "bankru.example"));
+        assert!(!has(&english, "bankru.example"));
+        assert!(!has(&german, "bankru.example"));
+        // Explicit language is authoritative, even for a multilingual excerpt.
+        assert!(has(&english, "banktemplate.example"));
+        for language in ["ru", "uk"] {
+            let found = with(SearchOptions {
+                language: Some(language.into()),
+                ..SearchOptions::default()
+            });
+            assert!(has(&found, "bankru.example"), "{language}");
+            assert!(!has(&found, "banktemplate.example"), "{language}");
         }
         // ...unless the query names the site.
         let english = SearchOptions {

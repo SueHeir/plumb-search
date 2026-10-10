@@ -1245,45 +1245,58 @@ pub fn language_code(tag: &str) -> Option<String> {
     (letters && (2..=3).contains(&primary.len()) && named).then_some(primary)
 }
 
-/// Letters of one writing system that text needs before [`text_script`]
-/// names it; a Chinese, Japanese or Korean character counts as two.
+/// Minimum alphabetic characters before using a script as fallback evidence.
 const MIN_SCRIPT_LETTERS: usize = 6;
 
-/// The writing system of a language code, as an ISO 15924 code: `ru` ->
-/// `Cyrl`, `ko` -> `Hang`, `en` -> `Latn`. Japanese is `Jpan` (kanji
-/// with kana).
-pub fn language_script(language: &str) -> &'static str {
-    match language {
-        "ru" | "uk" | "bg" | "sr" | "mk" | "be" | "kk" | "ky" | "mn" | "tg" | "tt" | "ba" => "Cyrl",
-        "el" => "Grek",
-        "ar" | "fa" | "ur" | "ps" | "ug" | "sd" => "Arab",
-        "he" | "yi" => "Hebr",
-        "hi" | "mr" | "ne" | "sa" => "Deva",
-        "bn" | "as" => "Beng",
-        "ta" => "Taml",
-        "te" => "Telu",
-        "kn" => "Knda",
-        "ml" => "Mlym",
-        "gu" => "Gujr",
-        "pa" => "Guru",
-        "si" => "Sinh",
-        "th" => "Thai",
-        "lo" => "Laoo",
-        "km" => "Khmr",
-        "my" => "Mymr",
-        "ka" => "Geor",
-        "hy" => "Armn",
-        "am" | "ti" => "Ethi",
-        "ko" => "Hang",
-        "ja" => "Jpan",
-        "zh" => "Hani",
-        _ => "Latn",
-    }
+/// Scripts covered by this conservative filter, including secondary scripts
+/// from Unicode CLDR languageData. This is not a language detector or a
+/// complete language/script registry. Unlisted languages remain uncertain.
+fn language_scripts(language: &str) -> Option<&'static [&'static str]> {
+    Some(match language {
+        "ru" | "uk" | "bg" | "mk" | "be" | "ky" | "tg" | "tt" | "ba" => &["Cyrl"],
+        "sr" => &["Cyrl", "Latn"],
+        "az" | "uz" | "ku" => &["Latn", "Cyrl", "Arab"],
+        "kk" => &["Cyrl", "Arab"],
+        "mn" => &["Cyrl", "Mong", "Phag"],
+        "el" => &["Grek"],
+        "ar" | "fa" | "ur" | "ps" | "ug" => &["Arab"],
+        "sd" => &["Arab", "Deva", "Khoj", "Sind"],
+        "ha" | "ms" => &["Latn", "Arab"],
+        "he" | "yi" => &["Hebr"],
+        "hi" | "mr" | "ne" | "sa" => &["Deva"],
+        "bn" | "as" => &["Beng"],
+        "ta" => &["Taml"],
+        "te" => &["Telu"],
+        "kn" => &["Knda"],
+        "ml" => &["Mlym"],
+        "gu" => &["Gujr"],
+        "pa" => &["Guru", "Arab"],
+        "si" => &["Sinh"],
+        "th" => &["Thai"],
+        "lo" => &["Laoo"],
+        "km" => &["Khmr"],
+        "my" => &["Mymr"],
+        "ka" => &["Geor"],
+        "hy" => &["Armn"],
+        "am" | "ti" => &["Ethi"],
+        "ko" => &["Hang", "Hani"],
+        "ja" => &["Jpan", "Hani"],
+        "zh" => &["Hani"],
+        "en" | "de" | "fr" | "es" | "it" | "pt" | "nl" | "da" | "sv" | "no" | "nb" | "nn"
+        | "fi" | "is" | "pl" | "cs" | "sk" | "sl" | "hr" | "ro" | "hu" | "tr" | "vi" | "id"
+        | "sw" | "af" | "eu" | "ca" | "cy" | "ga" | "et" | "lv" | "lt" => &["Latn"],
+        _ => return None,
+    })
 }
 
-/// The writing system of one character, and how many letters it counts
-/// for; `None` for a character that is not a letter.
+/// The approximate writing system of an alphabetic character. Block
+/// ranges are deliberately limited; unsupported letters count toward
+/// uncertainty, and digits and punctuation never count as letters.
 fn char_script(c: char) -> Option<(&'static str, usize)> {
+    use unicode_categories::UnicodeCategories;
+    if !c.is_letter() {
+        return None;
+    }
     let script = match c as u32 {
         0x0041..=0x005A | 0x0061..=0x007A | 0x00C0..=0x024F | 0x1E00..=0x1EFF => "Latn",
         0x0370..=0x03FF | 0x1F00..=0x1FFF => "Grek",
@@ -1308,19 +1321,19 @@ fn char_script(c: char) -> Option<(&'static str, usize)> {
         0x10A0..=0x10FF => "Geor",
         0x1200..=0x139F => "Ethi",
         0x1780..=0x17FF => "Khmr",
-        0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F => return Some(("Kana", 2)),
-        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF => return Some(("Hani", 2)),
-        0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF => return Some(("Hang", 2)),
+        0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F => return Some(("Kana", 1)),
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF => return Some(("Hani", 1)),
+        0x1100..=0x11FF | 0x3130..=0x318F | 0xAC00..=0xD7AF => return Some(("Hang", 1)),
         _ if c.is_alphabetic() => "other",
         _ => return None,
     };
     Some((script, 1))
 }
 
-/// The writing system most of `text`'s letters are in when it is not the
+/// The writing system of at least two thirds of `text`'s letters, if not the
 /// Latin alphabet: `Cyrl` for "Купить предметы | Магазин Rust", `Hani`
 /// for Chinese, `Jpan` for Japanese (kanji with kana). `None` when most
-/// letters are Latin, no one system has most of them, or there are too
+/// letters are Latin, no one system has that share, or there are too
 /// few. Lets a site that does not say its language still be told apart
 /// from English by the script its title and description are in.
 pub fn text_script(text: &str) -> Option<&'static str> {
@@ -1345,40 +1358,58 @@ pub fn text_script(text: &str) -> Option<&'static str> {
             .filter(|(s, _)| *s != "other")
             .max_by_key(|&(_, n)| n)?
     };
-    (script != "Latn" && letters >= MIN_SCRIPT_LETTERS && letters * 2 > total).then_some(script)
+    (script != "Latn" && letters >= MIN_SCRIPT_LETTERS && letters * 3 >= total * 2)
+        .then_some(script)
 }
 
-/// Whether a site in `site` suits a search for `wanted` sites, both
-/// language codes, except that `site` can be a writing system from
-/// [`text_script`]: a Cyrillic site suits Russian and Ukrainian, a
-/// Chinese-character one Chinese and Japanese.
+/// Whether a language filter is compatible with a declared language or
+/// fallback script. A script can be shared by many languages; matching it
+/// only keeps the candidate, it does not establish its language. Unlisted
+/// languages and scripts fail open rather than excluding uncertain text.
 pub fn language_fits(wanted: &str, site: &str) -> bool {
     if site.starts_with(|c: char| c.is_ascii_uppercase()) {
-        let script = language_script(wanted);
-        script == site || (script == "Jpan" && site == "Hani")
+        if !matches!(
+            site,
+            "Cyrl"
+                | "Grek"
+                | "Arab"
+                | "Hebr"
+                | "Deva"
+                | "Beng"
+                | "Taml"
+                | "Telu"
+                | "Knda"
+                | "Mlym"
+                | "Gujr"
+                | "Guru"
+                | "Sinh"
+                | "Thai"
+                | "Laoo"
+                | "Khmr"
+                | "Mymr"
+                | "Geor"
+                | "Armn"
+                | "Ethi"
+                | "Hang"
+                | "Jpan"
+                | "Hani"
+        ) {
+            return true;
+        }
+        language_scripts(wanted).is_none_or(|scripts| scripts.contains(&site))
     } else {
         wanted == site
     }
 }
 
-/// The language to keep for a site that says it is in `declared` (a
-/// language code) and whose title and description are `text`: the
-/// declared one, unless the text is plainly in a writing system that
-/// language does not use (a Russian page left with its template's
-/// `lang="en"`); then that writing system, as does a site that says
-/// nothing.
+/// Keep valid declared language metadata authoritative. Only missing or
+/// invalid declarations fall back to dominant title/description script.
+/// Short excerpts and multilingual names do not reliably contradict an
+/// explicit declaration; this intentionally leaves mistagged pages alone.
 pub fn site_language(declared: Option<&str>, text: &str) -> Option<String> {
-    let declared = declared.and_then(language_code);
-    match text_script(text) {
-        Some(script)
-            if !declared
-                .as_deref()
-                .is_some_and(|d| language_fits(d, script)) =>
-        {
-            Some(script.to_string())
-        }
-        _ => declared,
-    }
+    declared
+        .and_then(language_code)
+        .or_else(|| text_script(text).map(str::to_string))
 }
 
 /// Collapses every whitespace run to one space and trims the ends.
@@ -1498,7 +1529,7 @@ mod tests {
         assert_eq!(script("Купить предметы | Магазин Rust"), Some("Cyrl"));
         assert_eq!(script("个人技术知识分享"), Some("Hani"));
         assert_eq!(script("東京の天気 - ウェザーニュース"), Some("Jpan"));
-        assert_eq!(script("네이버 뉴스"), Some("Hang"));
+        assert_eq!(script("네이버 새로운 뉴스"), Some("Hang"));
         assert_eq!(script("الجزيرة نت - آخر الأخبار"), Some("Arab"));
         // Latin text, whatever its language, says nothing; nor do a few
         // words of another script in it, or too few letters.
@@ -1524,10 +1555,8 @@ mod tests {
 
         let russian = "Купить предметы | Магазин Rust";
         assert_eq!(site_language(None, russian).as_deref(), Some("Cyrl"));
-        // A template's lang="en" on a Russian page is not believed...
-        assert_eq!(site_language(Some("en"), russian).as_deref(), Some("Cyrl"));
-        // ...but a language the text can be in is kept, and so is what
-        // a page with Latin text says.
+        // An excerpt cannot reliably contradict declared metadata.
+        assert_eq!(site_language(Some("en"), russian).as_deref(), Some("en"));
         assert_eq!(site_language(Some("ru-RU"), russian).as_deref(), Some("ru"));
         assert_eq!(
             site_language(Some("ja"), "个人技术知识分享").as_deref(),
@@ -1538,6 +1567,52 @@ mod tests {
             Some("de")
         );
         assert_eq!(site_language(None, "Bank Deutschland"), None);
+    }
+
+    #[test]
+    fn script_fallback_is_conservative_for_multilingual_text() {
+        for text in [
+            "研究所",        // Three Han characters are not six letters.
+            "١٢٣٤٥٦٧٨٩٠،؛؟", // Arabic numbers and punctuation are not letters.
+            "ًًًًِِِِ",              // Combining vowel marks alone are not letters.
+            "ाााााााा",
+            "東京 中文社区 English language research community",
+            "Learn Ελληνικά with our English language lessons",
+            "Олена Коваль — English language research and publications",
+            "! ? 12345",
+        ] {
+            assert_eq!(text_script(text), None, "{text}");
+        }
+        for (language, text) in [
+            ("az", "Азәрбајҹан елми арашдырмалар"),
+            ("uz", "Ўзбекистон илмий тадқиқотлар"),
+            ("kk", "قازاقستان غىلىمى زەرتتەۋ"),
+            ("pa", "پنجابی علمی تحقیق"),
+            ("ko", "韓國學術研究資料"),
+            ("ja", "日本學術研究資料"),
+        ] {
+            let script = text_script(text).unwrap();
+            assert!(language_fits(language, script), "{language} {script}");
+            assert_eq!(
+                site_language(Some(language), text).as_deref(),
+                Some(language)
+            );
+        }
+        assert!(language_fits("bo", "Hani"), "unlisted language fails open");
+        assert!(
+            language_fits("en", "Zzzz"),
+            "unrecognized script fails open"
+        );
+        assert_eq!(
+            site_language(Some("en-US"), "中國科學研究資料庫").as_deref(),
+            Some("en")
+        );
+        assert_eq!(
+            site_language(Some("invalid"), "中國科學研究資料庫").as_deref(),
+            Some("Hani")
+        );
+        assert!(!language_fits("en", "Hani"));
+        assert!(!language_fits("en", "ru"));
     }
 
     #[test]

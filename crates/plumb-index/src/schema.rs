@@ -19,7 +19,7 @@
 //! | `country`     | [`plumb_core::site_country`], untokenized            | stored, fast                |
 //! | `kind_key`    | [`plumb_core::kind_key`] of each kind                | kind queries ("banks")      |
 //! | `search_url`  | the site's search address                            | stored, site search links   |
-//! | `language`    | the homepage's language code, untokenized            | stored, fast, language filter |
+//! | `language`    | homepage language or fallback script, untokenized            | stored, fast, language filter |
 //! | `adult`       | [`plumb_core::AdultLevel`] as 0, 1 or 2              | fast, safe search           |
 //! | `key_pages`   | the site's key pages, as JSON                        | stored, sitelinks           |
 //! | `fingerprint` | [`plumb_core::simhash`] of the homepage's text       | stored, near-copies         |
@@ -438,8 +438,7 @@ pub(crate) fn document(
     if let Some(search_url) = non_empty(&record.search_url) {
         doc.add_text(f.search_url, search_url.trim());
     }
-    // What the homepage says, or the writing system its title and
-    // description are in when that is plainly not the one it says.
+    // Keep the homepage declaration; use script only when it is missing.
     let text = format!(
         "{} {}",
         record.title.as_deref().unwrap_or_default(),

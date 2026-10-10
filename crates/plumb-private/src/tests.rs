@@ -764,3 +764,136 @@ fn operators_narrow_as_in_the_index() {
     );
     assert!(!private_top(&records, "bank -chase", &o, 5).contains(&"chase.com".to_string()));
 }
+
+#[test]
+fn script_language_filters_keep_multilingual_controls_and_native_private_parity() {
+    // Frozen synthetic excerpts exercise filtering, not production domain rules.
+    // Every document contains the same generic query word; no candidate is a
+    // domain-name match, so language filtering alone changes the returned set.
+    let cases = [
+        (
+            None,
+            "Lab — научные исследования технологии и материалы",
+            false,
+        ),
+        (None, "Lab — 中國科學研究技術資料文獻庫", false),
+        (None, "Lab — 日本の科学研究資料と技術情報", false),
+        (None, "Lab — 한국의 과학 연구 자료와 기술 정보", false),
+        (None, "Lab — البحوث العلمية والتقنية والمعلومات", false),
+        (None, "Lab in the English language", true),
+        (None, "Lab und wissenschaftliche Veröffentlichungen", true),
+        (
+            None,
+            "Lab 中文社区 English language research community",
+            true,
+        ),
+        (None, "Lab — Олена Коваль and English publications", true),
+        (None, "Lab 研究所", true),
+        (None, "Lab ١٢٣٤٥٦٧٨٩٠،؛؟", true),
+        (
+            Some("en"),
+            "Lab — научные исследования технологии и материалы",
+            true,
+        ),
+        (Some("en-US"), "Lab — 中國科學研究技術資料文獻庫", true),
+        (
+            Some("de"),
+            "Lab und wissenschaftliche Veröffentlichungen",
+            false,
+        ),
+        (Some("az"), "Lab — Азәрбајҹан елми арашдырмалар", false),
+        (Some("uz"), "Lab — Ўзбекистон илмий тадқиқотлар", false),
+        (Some("kk"), "Lab — قازاقستان غىلىمى زەرتتەۋ", false),
+        (Some("ko"), "Lab — 韓國學術研究資料", false),
+        (Some("ja"), "Lab — 日本學術研究資料", false),
+    ];
+    let records: Vec<_> = cases
+        .iter()
+        .enumerate()
+        .map(|(i, (language, title, _))| {
+            let mut record = site(&format!("sample{i}.example"), title, Some(5000), 300);
+            record.language = language.map(str::to_string);
+            record
+        })
+        .collect();
+    let limit = records.len();
+    let compare = |query: &str, language: Option<&str>| {
+        let language = language.map(str::to_string);
+        let mut native = index_top(
+            &records,
+            query,
+            &SearchOptions {
+                language: language.clone(),
+                ..SearchOptions::default()
+            },
+            limit,
+        );
+        let mut private = private_top(
+            &records,
+            query,
+            &Options {
+                language,
+                ..Options::default()
+            },
+            limit,
+        );
+        native.sort();
+        private.sort();
+        assert_eq!(native, private, "{query}");
+        native
+    };
+    assert_eq!(compare("lab", None).len(), limit);
+    let english = compare("lab", Some("en"));
+    for (i, (_, _, keep)) in cases.iter().enumerate() {
+        assert_eq!(
+            english.contains(&records[i].domain),
+            *keep,
+            "{}",
+            cases[i].1
+        );
+    }
+    // Shared scripts keep candidates without asserting a particular language.
+    for (language, expected) in [
+        ("ru", 0),
+        ("uk", 0),
+        ("zh", 1),
+        ("ja", 2),
+        ("ko", 3),
+        ("ar", 4),
+    ] {
+        assert!(
+            compare("lab", Some(language)).contains(&records[expected].domain),
+            "{language}"
+        );
+    }
+    // Secondary scripts and unknown language mappings must not lose candidates.
+    for language in ["az", "uz", "kk", "pa", "bo"] {
+        let found = compare("lab", Some(language));
+        let expected = if language == "kk" || language == "pa" {
+            4
+        } else {
+            0
+        };
+        assert!(found.contains(&records[expected].domain), "{language}");
+    }
+    assert!(
+        compare("lab", Some("ko")).contains(&records[1].domain),
+        "Han alone can also be Korean"
+    );
+    // Valid declarations override the fallback, including Han-heavy Korean.
+    for (language, index) in [("az", 14), ("uz", 15), ("kk", 16), ("ko", 17), ("ja", 18)] {
+        assert!(compare("lab", Some(language)).contains(&records[index].domain));
+    }
+    // Full typed names retain the current native/private exception.
+    for i in [0, 1, 13, 17] {
+        assert_eq!(
+            compare(&records[i].domain, Some("en")),
+            vec![records[i].domain.clone()]
+        );
+    }
+    // Native-script queries use the same filter semantics, rather than an
+    // English-only query special case.
+    for (query, language, index) in [("научные", "ru", 0), ("البحوث", "ar", 4)] {
+        assert!(compare(query, Some(language)).contains(&records[index].domain));
+    }
+}
