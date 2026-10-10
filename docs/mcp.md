@@ -23,7 +23,7 @@ All but `read_page` only read the index.
 
 Each also takes an optional `country`, a two-letter code (`US`, `DE`) whose sites rank a little higher, or `any` for none. Without it the node's home country setting decides.
 
-Answers come as short plain text, one line per result with its address, which is what the model reads; small local models have little room, and the same answer as JSON takes three to four times as many tokens. The JSON is in `structuredContent` for programs.
+Answers come twice: as short plain text, one line per result with its address, and as JSON in `structuredContent` for programs. Which one the model reads is up to the app, and Claude Code, for one, gives it the JSON. The text is about half the size (on 176 answers from agents' test projects, 101,000 characters against 192,000), and small local models have little room, so to have the model read the text alone, add `--text-answers` to `plumb mcp` or `?answers=text` to a node's address (`https://plumbsearch.org/mcp?answers=text`). Without them, answers carry both, as before.
 
 `check_lookalike` reads the names out of the address (`paypal-login.us` spells "paypal login", `wellsfargo.com.account-check.io` contains "wellsfargo") and looks them up. When they lead to a well-known or official site other than this one, and the address spells that site's name out or is a typo of it (`paypa1.com`, `twiter.com`), it is a look-alike. A site that is well known or official in its own right is never called one. `unknown` only means Plumb does not have the site: that proves nothing either way.
 
@@ -31,11 +31,16 @@ Answers come as short plain text, one line per result with its address, which is
 
 ### Claude Code
 
-```sh
-claude mcp add --transport http plumb https://plumbsearch.org/mcp
-```
+Pick the line for what you have on this computer. Apart from plumbsearch.org, each one offers `read_page` (see [Reading pages](#reading-pages)), so Claude can read a page from the results without a fetch tool of its own.
 
-To ask your own node instead, give its address: `http://127.0.0.1:7586/mcp` for the desktop app, or `http://<server>:8080/mcp` for a Docker node. With the `plumb` command installed you can also use stdio: `claude mcp add plumb -- plumb mcp`.
+| You have | Add Plumb with |
+| --- | --- |
+| The desktop app | `claude mcp add --transport http plumb http://127.0.0.1:7586/mcp` |
+| The `plumb` command, built from source | `claude mcp add plumb -- plumb mcp` |
+| A node in Docker | `claude mcp add plumb -- docker exec -i plumb plumb mcp --node http://127.0.0.1:8080` |
+| None of them | `claude mcp add --transport http plumb https://plumbsearch.org/mcp` |
+
+`plumb mcp` asks plumbsearch.org unless you give it `--node`, and reads pages itself, on your computer. Claude Code gives the model each answer's JSON; to have it read the shorter text instead, add `--text-answers` after `plumb mcp`, or `?answers=text` to the address (quote it in the shell: `"https://plumbsearch.org/mcp?answers=text"`). A node in Docker on another computer is `http://<server>:8080/mcp`, without `read_page`.
 
 ### Claude Desktop
 

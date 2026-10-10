@@ -180,6 +180,11 @@ pub struct McpArgs {
     /// the maps' articles can be embedded.
     #[arg(long, value_name = "DIR", requires = "relations")]
     pub relations_model: Option<PathBuf>,
+    /// Answer tool calls with the short text alone, leaving out the same
+    /// answer as JSON (`structuredContent`), for AI apps that give the
+    /// model the JSON.
+    #[arg(long)]
+    pub text_answers: bool,
 }
 
 #[derive(Debug, Args)]
