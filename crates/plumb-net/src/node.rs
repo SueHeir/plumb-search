@@ -5213,30 +5213,40 @@ mod tests {
         config.storage_budget = Some(budget.clone());
         let (handle, records) = start(config.clone(), source.clone()).await.unwrap();
         handle.recount().await.unwrap();
+        handle.shutdown().await;
+        drop(records);
         let table_path = dir.path().join(POPULARITY_FILE);
         let old_table =
             serde_json::to_vec_pretty(&PopularityTable::new(vec![123], Vec::new())).unwrap();
-        plumb_core::storage::write_atomic(
-            &table_path,
-            &table_path.with_extension("tmp"),
-            &old_table,
-            Some(&budget),
-            None,
-        )
-        .unwrap();
-        handle.shutdown().await;
-        drop(records);
+        {
+            // Recount waits for its own save, but startup maintenance can have
+            // another blocking save pending after shutdown. Close admission
+            // under the mutation barrier before seeding the persisted fixture.
+            let _mutation = budget.mutation();
+            budget.set_limit(1);
+            plumb_core::storage::write_atomic(
+                &table_path,
+                &table_path.with_extension("tmp"),
+                &old_table,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        budget.recount(dir.path()).unwrap();
         let old = std::fs::read(dir.path().join(SCOPE_FILE)).unwrap();
         let used = budget.status().used_bytes;
+        assert!(used > 0);
         budget.set_limit(used);
         config.search_scope = SearchScope::Trusted;
+        let rejected_before_restart = budget.status().rejected_writes;
         let (handle, records) = start(config.clone(), source.clone()).await.unwrap();
         let recounted = handle.recount().await.unwrap();
         assert!(recounted.epochs.is_empty());
         assert_eq!(std::fs::read(&table_path).unwrap(), old_table);
         assert!(!table_path.with_extension("tmp").exists());
         assert_eq!(std::fs::read(dir.path().join(SCOPE_FILE)).unwrap(), old);
-        assert!(budget.status().rejected_writes > 0);
+        assert!(budget.status().rejected_writes > rejected_before_restart);
         assert_eq!(budget.status().reserved_bytes, 0);
         assert_eq!(
             budget.status().used_bytes,

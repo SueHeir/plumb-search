@@ -165,6 +165,8 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].domain, published[0].domain);
     assert_eq!(got[0].title.as_deref(), Some("The harbor site!"));
+    // Delivery wakes this receiver before the producer refreshes cached status.
+    wait_for(|| (b.handle.status().agreement.confirmed_sites == 1).then_some(())).await;
     assert_eq!(b.handle.status().agreement.confirmed_sites, 1);
     // The relay's own crawl confirmed A's; what that confirms it already has.
     assert_eq!(relay.handle.status().agreement.confirmed_sites, 1);
