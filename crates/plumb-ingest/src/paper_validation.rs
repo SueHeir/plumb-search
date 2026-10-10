@@ -1,11 +1,13 @@
 //! Publication gates and a bounded, resumable arXiv consistency queue.
 //! The fetch/publish owner must validate the candidate before swapping it.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{article::Article, normalize_text};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::paper_names::{self, ArxivPaper, Named};
 
@@ -28,6 +30,7 @@ pub fn repair_canary(
     found: &[ArxivPaper],
     expected: &[PaperCanary],
 ) -> Result<Named> {
+    let baseline = consistency_baseline(papers)?;
     let sources = paper_names::unique_sources(found);
     for canary in expected {
         let Some(source) = sources.get(canary.id.as_str()) else {
@@ -52,12 +55,20 @@ pub fn repair_canary(
     if !done.unresolved.is_empty() {
         bail!("canary identities remain ambiguous: {:?}", done.unresolved);
     }
-    validate_canary(papers, expected)?;
+    validate_canary_against_baseline(papers, expected, &baseline)?;
     Ok(done)
 }
 
 pub fn validate_canary(papers: &[Article], expected: &[PaperCanary]) -> Result<()> {
-    validate_consistency(papers)?;
+    validate_canary_against_baseline(papers, expected, &ConsistencyBaseline::default())
+}
+
+pub fn validate_canary_against_baseline(
+    papers: &[Article],
+    expected: &[PaperCanary],
+    baseline: &ConsistencyBaseline,
+) -> Result<()> {
+    validate_against_baseline(papers, baseline)?;
     for canary in expected {
         let rows: Vec<_> = papers
             .iter()
@@ -108,11 +119,228 @@ pub fn consistency_ids(papers: &[Article], budget: usize) -> Vec<String> {
     ids
 }
 
-/// Validate every row's internal/source-backed consistency without
-/// requiring particular titles or external coverage for legacy records.
-/// Unverified legacy data stays unverified; a correction must carry proof.
+/// Unverified six-column records sharing a primary ID may be title/subtitle
+/// or imported-date variants, rather than proven contradictions. Preserve
+/// their complete multiset; these diagnostics do not choose a canonical row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyVariants {
+    pub primary_id: String,
+    pub records: usize,
+    pub titles: Vec<String>,
+    pub descriptions: Vec<String>,
+    pub row_sha256: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct ConsistencyBaseline {
+    variants: BTreeMap<String, LegacyVariants>,
+}
+
+impl ConsistencyBaseline {
+    pub fn legacy_variants(&self) -> impl Iterator<Item = &LegacyVariants> {
+        self.variants.values()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConsistencyReport {
+    pub checked_records: usize,
+    pub verified_arxiv_records: usize,
+    pub preserved_legacy_variants: Vec<LegacyVariants>,
+    pub resolved_legacy_ids: Vec<String>,
+    /// The gate checks record consistency and non-regression, not external
+    /// verification of every DOI, date or historical record in the corpus.
+    pub whole_corpus_verified: bool,
+}
+
+fn primary_groups(papers: &[Article]) -> HashMap<String, Vec<&Article>> {
+    let mut groups = HashMap::<String, Vec<&Article>>::new();
+    for row in papers {
+        if let Some(id) = &row.item {
+            groups.entry(id.to_ascii_lowercase()).or_default().push(row);
+        }
+    }
+    groups
+}
+
+fn first_author(row: &Article) -> Option<&str> {
+    row.paper
+        .as_ref()
+        .and_then(|m| m.authors.first())
+        .map(String::as_str)
+        .or_else(|| {
+            row.description
+                .as_deref()?
+                .strip_prefix("Paper by ")?
+                .split(" et al.")
+                .next()?
+                .split(", ")
+                .next()
+        })
+        .filter(|a| !a.trim().is_empty())
+}
+
+fn differing_values<'a>(values: impl Iterator<Item = Option<&'a str>>) -> bool {
+    let mut values = values.flatten();
+    values
+        .next()
+        .is_some_and(|first| values.any(|v| v != first))
+}
+
+fn identity_variants(rows: &[&Article]) -> bool {
+    let Some(first) = rows.first() else {
+        return false;
+    };
+    if rows
+        .iter()
+        .any(|r| normalize_text(&r.title) != normalize_text(&first.title))
+    {
+        return true;
+    }
+    let mut proofs = rows
+        .iter()
+        .filter_map(|r| r.paper.as_ref()?.verified_arxiv.as_ref());
+    if proofs
+        .next()
+        .is_some_and(|first| proofs.any(|p| p != first))
+    {
+        return true;
+    }
+    // Check every distinct known author, so an unknown byline or an initial
+    // on the first row cannot hide contradictory later full given names.
+    let authors: HashSet<_> = rows.iter().filter_map(|r| first_author(r)).collect();
+    let authors: Vec<_> = authors.into_iter().collect();
+    if authors.iter().enumerate().any(|(i, a)| {
+        authors[i + 1..]
+            .iter()
+            .any(|b| !paper_names::same_author(a, b))
+    }) {
+        return true;
+    }
+    if differing_values(
+        rows.iter()
+            .map(|r| r.paper.as_ref().and_then(|m| m.publication_date.as_deref())),
+    ) || differing_values(
+        rows.iter()
+            .map(|r| r.paper.as_ref().and_then(|m| m.arxiv_id.as_deref())),
+    ) {
+        return true;
+    }
+    let years: HashSet<_> = rows
+        .iter()
+        .filter_map(|r| {
+            r.paper
+                .as_ref()
+                .and_then(|m| m.publication_year)
+                .or_else(|| paper_names::year_of(r))
+        })
+        .collect();
+    years.len() > 1
+}
+
+fn row_hashes(rows: &[&Article]) -> Result<Vec<String>> {
+    let mut hashes = rows
+        .iter()
+        .map(|row| Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(row)?))))
+        .collect::<Result<Vec<_>>>()?;
+    hashes.sort();
+    Ok(hashes)
+}
+
+/// Capture only metadata-absent legacy variants from an immutable input.
+/// Explicit metadata/snapshot conflicts never receive a legacy exception.
+/// The baseline is not serialized or reconstructed from candidate claims.
+pub fn consistency_baseline(papers: &[Article]) -> Result<ConsistencyBaseline> {
+    let mut baseline = ConsistencyBaseline::default();
+    for (id, rows) in primary_groups(papers) {
+        if rows.len() < 2 || !rows.iter().all(|r| r.paper.is_none()) || !identity_variants(&rows) {
+            continue;
+        }
+        let mut titles: Vec<_> = rows.iter().map(|r| r.title.clone()).collect();
+        titles.sort();
+        titles.dedup();
+        let mut descriptions: Vec<_> = rows.iter().filter_map(|r| r.description.clone()).collect();
+        descriptions.sort();
+        descriptions.dedup();
+        baseline.variants.insert(
+            id.clone(),
+            LegacyVariants {
+                primary_id: id,
+                records: rows.len(),
+                titles,
+                descriptions,
+                row_sha256: row_hashes(&rows)?,
+            },
+        );
+    }
+    Ok(baseline)
+}
+
+/// No baseline means strict duplicate-ID validation. Use an explicit
+/// immutable-input baseline to preserve and report known legacy variants.
 pub fn validate_consistency(papers: &[Article]) -> Result<()> {
-    let mut identities = std::collections::HashMap::<String, (&str, Option<&str>)>::new();
+    validate_against_baseline(papers, &ConsistencyBaseline::default()).map(|_| ())
+}
+
+pub fn validate_against_baseline(
+    papers: &[Article],
+    baseline: &ConsistencyBaseline,
+) -> Result<ConsistencyReport> {
+    validate_record_consistency(papers)?;
+    let groups = primary_groups(papers);
+    let mut report = ConsistencyReport {
+        checked_records: papers.len(),
+        verified_arxiv_records: papers
+            .iter()
+            .filter(|r| r.paper.as_ref().is_some_and(|m| m.verified_arxiv.is_some()))
+            .count(),
+        preserved_legacy_variants: vec![],
+        resolved_legacy_ids: vec![],
+        whole_corpus_verified: false,
+    };
+    for (id, rows) in &groups {
+        if rows.len() < 2 || !identity_variants(rows) {
+            continue;
+        }
+        let Some(previous) = baseline.variants.get(id) else {
+            bail!("new or explicit-metadata variants for primary source ID {id}; retain the previous generation");
+        };
+        if rows.iter().any(|r| r.paper.is_some()) || row_hashes(rows)? != previous.row_sha256 {
+            bail!("changed or source-verified variants for primary source ID {id}; retain the previous generation");
+        }
+        report.preserved_legacy_variants.push(previous.clone());
+    }
+    for (id, previous) in &baseline.variants {
+        let Some(rows) = groups.get(id) else {
+            bail!("legacy variant group {id} removed without primary-source resolution");
+        };
+        if row_hashes(rows)? == previous.row_sha256 {
+            continue;
+        }
+        // Only a confirmed primary arXiv ID licenses replacing every variant.
+        // Linking a journal row to a preprint cannot resolve its DOI/date claims.
+        if rows.len() != previous.records
+            || identity_variants(rows)
+            || !rows.iter().all(|r| {
+                r.paper
+                    .as_ref()
+                    .and_then(|m| m.verified_arxiv.as_ref())
+                    .is_some_and(|p| id == &format!("{}{}", crate::openalex::ARXIV_DOI, p.id))
+            })
+        {
+            bail!("legacy variant group {id} changed without complete primary-source resolution");
+        }
+        report.resolved_legacy_ids.push(id.clone());
+    }
+    report
+        .preserved_legacy_variants
+        .sort_by(|a, b| a.primary_id.cmp(&b.primary_id));
+    Ok(report)
+}
+
+/// Strict checks on each record, including all explicit metadata and source
+/// snapshots. Duplicate-ID policy is enforced separately against a baseline.
+pub fn validate_record_consistency(papers: &[Article]) -> Result<()> {
     for (index, row) in papers.iter().enumerate() {
         let item = row
             .item
@@ -128,24 +356,6 @@ pub fn validate_consistency(papers: &[Article]) -> Result<()> {
         }
         if row.title.trim().is_empty() {
             bail!("paper row {index} has an empty title");
-        }
-        if let Some(item) = row.item.as_deref().filter(|id| !id.is_empty()) {
-            let author = row
-                .paper
-                .as_ref()
-                .and_then(|m| m.authors.first())
-                .map(String::as_str);
-            if let Some((title, first)) = identities.get(&item.to_ascii_lowercase()) {
-                if normalize_text(title) != normalize_text(&row.title)
-                    || first
-                        .zip(author)
-                        .is_some_and(|(a, b)| !paper_names::same_author(a, b))
-                {
-                    bail!("paper row {index} has conflicting records for source ID {item}");
-                }
-            } else {
-                identities.insert(item.to_ascii_lowercase(), (&row.title, author));
-            }
         }
         let Some(m) = &row.paper else {
             continue;
@@ -358,6 +568,116 @@ pub async fn verify_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_variants(id: &str) -> Vec<Article> {
+        vec![
+            Article {
+                title: "Synthetic handbook".into(),
+                item: Some(id.into()),
+                description: Some("Paper by Jane Example et al., 2009, Publisher".into()),
+                ..Default::default()
+            },
+            Article {
+                title: "Synthetic handbook: Methods and examples".into(),
+                item: Some(id.into()),
+                description: Some("Paper by Jane Example et al., 2013".into()),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn legacy_variants_are_reported_only_when_the_full_record_multiset_is_preserved() {
+        let rows = legacy_variants("10.4321/legacy");
+        let baseline = consistency_baseline(&rows).unwrap();
+        assert!(validate_consistency(&rows).is_err());
+        let report = validate_against_baseline(&rows, &baseline).unwrap();
+        assert!(!report.whole_corpus_verified);
+        assert_eq!(report.verified_arxiv_records, 0);
+        assert_eq!(report.preserved_legacy_variants[0].records, 2);
+        assert_eq!(report.preserved_legacy_variants[0].titles.len(), 2);
+        assert_eq!(report.preserved_legacy_variants[0].descriptions.len(), 2);
+        let mut reversed = rows.clone();
+        reversed.reverse();
+        assert!(validate_against_baseline(&reversed, &baseline).is_ok());
+        let mut changed = rows.clone();
+        changed[0].title.push_str(" changed");
+        assert!(validate_against_baseline(&changed, &baseline).is_err());
+        let mut changed_date = rows.clone();
+        changed_date[0].description = Some("Paper by Jane Example et al., 2024".into());
+        assert!(validate_against_baseline(&changed_date, &baseline).is_err());
+        let mut changed_views = rows.clone();
+        changed_views[0].views += 1;
+        assert!(validate_against_baseline(&changed_views, &baseline).is_err());
+        let mut added = rows.clone();
+        added.push(rows[0].clone());
+        assert!(validate_against_baseline(&added, &baseline).is_err());
+        assert!(validate_against_baseline(&rows[..1], &baseline).is_err());
+        assert!(validate_against_baseline(&[], &baseline).is_err());
+        let mut new_variants = rows.clone();
+        new_variants.extend(legacy_variants("10.4321/new"));
+        assert!(validate_against_baseline(&new_variants, &baseline).is_err());
+        let mut explicit = rows.clone();
+        for row in &mut explicit {
+            row.paper = Some(Default::default());
+        }
+        assert!(consistency_baseline(&explicit).unwrap().variants.is_empty());
+        assert!(validate_against_baseline(&explicit, &baseline).is_err());
+    }
+
+    #[test]
+    fn primary_source_resolution_is_required_for_changed_legacy_variants() {
+        let source = ArxivPaper {
+            id: "2401.01234".into(),
+            title: "Synthetic research".into(),
+            year: Some(2024),
+            authors: vec!["Jane Example".into()],
+            published: Some("2024-01-02".into()),
+            updated: None,
+        };
+        let mut rows = legacy_variants(&source.doi());
+        let baseline = consistency_baseline(&rows).unwrap();
+        let done = paper_names::verify_existing(&mut rows, std::slice::from_ref(&source));
+        assert_eq!(done.corrected, 2);
+        let report = validate_against_baseline(&rows, &baseline).unwrap();
+        assert!(report.preserved_legacy_variants.is_empty());
+        assert_eq!(report.resolved_legacy_ids, [source.doi()]);
+        assert_eq!(report.verified_arxiv_records, 2);
+        let mut other_authors = source.clone();
+        other_authors.authors.push("Another Scientist".into());
+        let mut changed_authors = vec![];
+        paper_names::add_arxiv_papers(&mut changed_authors, &[other_authors], &Default::default());
+        let author_conflict = [rows[0].clone(), changed_authors.remove(0)];
+        validate_record_consistency(&author_conflict).unwrap();
+        assert!(validate_consistency(&author_conflict).is_err());
+        assert!(validate_against_baseline(&author_conflict, &baseline).is_err());
+        // Two individually valid source snapshots still conflict on the same
+        // primary ID; a candidate cannot declare that conflict legacy.
+        let mut other = source;
+        other.title = "Another source title".into();
+        let mut conflicting = vec![];
+        paper_names::add_arxiv_papers(&mut conflicting, &[other], &Default::default());
+        validate_record_consistency(&conflicting).unwrap();
+        rows[1] = conflicting.remove(0);
+        assert!(validate_against_baseline(&rows, &baseline).is_err());
+        assert!(validate_consistency(&rows).is_err());
+        assert!(consistency_baseline(&rows).unwrap().variants.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_or_initial_author_cannot_hide_later_full_author_conflicts() {
+        let mut rows = legacy_variants("10.4321/author-variants");
+        rows[1].title = rows[0].title.clone();
+        rows[0].description = None;
+        rows[1].description = Some("Paper by Jane Example et al., 2024".into());
+        let mut conflicting = rows[1].clone();
+        conflicting.description = Some("Paper by John Example et al., 2024".into());
+        rows.push(conflicting);
+        assert!(validate_consistency(&rows).is_err());
+        assert_eq!(consistency_baseline(&rows).unwrap().variants.len(), 1);
+        rows[0].description = Some("Paper by J. Example et al., 2024".into());
+        assert!(validate_consistency(&rows).is_err());
+    }
 
     #[test]
     fn corpus_validation_has_no_curated_paper_requirement() {

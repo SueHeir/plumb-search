@@ -122,6 +122,8 @@ fn repair(
     report["input_records"] = json!(rows.len());
     report["coverage_before"] = coverage(&rows);
     report["before_rows"] = relevant_rows(&rows, &sources);
+    let baseline = paper_validation::consistency_baseline(&rows)?;
+    report["legacy_variants_before"] = json!(baseline.legacy_variants().collect::<Vec<_>>());
     let mut original = HashMap::<[u8; 32], usize>::new();
     for row in &rows {
         *original.entry(signature(row)?).or_default() += 1;
@@ -147,20 +149,21 @@ fn repair(
             serde_json::from_slice(&std::fs::read(path)?)?;
         // Diagnostics only. Expectations never select the repair rule,
         // replace provider data, or overwrite independent journal dates.
-        report["optional_canary_diagnostics"] = match paper_validation::validate_canary(
-            &rows, &expected,
-        ) {
-            Ok(()) => json!({ "passed": true, "expectations_sha256": file_hash(path)? }),
-            Err(error) => {
-                json!({ "passed": false, "error": format!("{error:#}"), "expectations_sha256": file_hash(path)? })
-            }
-        };
+        report["optional_canary_diagnostics"] =
+            match paper_validation::validate_canary_against_baseline(&rows, &expected, &baseline) {
+                Ok(()) => json!({ "passed": true, "expectations_sha256": file_hash(path)? }),
+                Err(error) => {
+                    json!({ "passed": false, "error": format!("{error:#}"), "expectations_sha256": file_hash(path)? })
+                }
+            };
     }
-    paper_validation::validate_consistency(&rows).inspect_err(|error| {
-        report["source_consistency_gate"] =
-            json!({ "passed": false, "error": format!("{error:#}") });
-    })?;
-    report["source_consistency_gate"] = json!({ "passed": true });
+    let gate =
+        paper_validation::validate_against_baseline(&rows, &baseline).inspect_err(|error| {
+            report["source_consistency_gate"] =
+                json!({ "passed": false, "error": format!("{error:#}") });
+        })?;
+    report["source_consistency_gate"] =
+        json!({ "passed": true, "scope": "record_consistency_and_nonregression", "report": gate });
     ensure!(
         done.unresolved.is_empty(),
         "unresolved source identities; no eligible candidate written"
@@ -179,12 +182,12 @@ fn repair(
         usize::MAX,
     )?;
     ensure!(decoded == rows, "serialization round-trip differs");
-    paper_validation::validate_consistency(&decoded)?;
+    paper_validation::validate_against_baseline(&decoded, &baseline)?;
     report["roundtrip_equal"] = json!(true);
     report["candidate_records"] = json!(decoded.len());
     report["candidate_sha256"] = json!(file_hash(&part)?);
     std::fs::rename(part, output.join("papers.tsv.gz"))?;
-    report["status"] = json!("validated_consistent_scratch_candidate");
+    report["status"] = json!("validated_scoped_scratch_candidate");
     Ok(())
 }
 
@@ -196,7 +199,7 @@ fn run(input: &Path, xml: &Path, output: &Path, expectations: Option<&Path>) -> 
     std::fs::create_dir(output)
         .context("output must be a new directory with an existing parent")?;
     let mut report = json!({ "status": "not_validated", "input": input, "source_xml": xml, "output": output,
-        "original_sha256": original_hash, "source_xml_sha256": xml_hash, "network_requests": 0, "promoted": false,
+        "original_sha256": original_hash, "source_xml_sha256": xml_hash, "network_requests": 0, "promoted": false, "whole_corpus_verified": false,
         "limits": { "source_xml_bytes": MAX_XML_BYTES, "source_identities": MAX_SOURCE_IDENTITIES, "reported_rows": MAX_REPORT_ROWS } });
     if let Err(error) = repair(input, xml, output, expectations, &mut report) {
         report["error"] = json!(format!("{error:#}"));
@@ -230,7 +233,7 @@ fn main() -> Result<()> {
     )?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     ensure!(
-        report["status"] == "validated_consistent_scratch_candidate",
+        report["status"] == "validated_scoped_scratch_candidate",
         "canary failed; see report.json"
     );
     Ok(())
@@ -245,6 +248,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("input.tsv.gz");
         let xml = dir.path().join("source.xml");
+        let canary = dir.path().join("canary.json");
+        std::fs::write(
+            &canary,
+            serde_json::to_vec(&vec![paper_validation::PaperCanary {
+                id: "2401.01234".into(),
+                title: "Synthetic research".into(),
+                first_author: "Jane Example".into(),
+                submitted: "2024-01-02".into(),
+            }])
+            .unwrap(),
+        )
+        .unwrap();
         std::fs::write(&xml, r#"<feed><entry><id>https://arxiv.org/abs/2401.01234</id><title>Synthetic research</title><published>2024-01-02T00:00:00Z</published><author><name>Jane Example</name></author></entry></feed>"#).unwrap();
         let rows = [
             Article {
@@ -258,6 +273,18 @@ mod tests {
                 description: Some("Paper by Jane Example et al., 2025, Journal".into()),
                 ..Default::default()
             },
+            Article {
+                title: "Synthetic handbook".into(),
+                item: Some("10.4321/legacy-variants".into()),
+                description: Some("Paper by Other Scientist et al., 2009".into()),
+                ..Default::default()
+            },
+            Article {
+                title: "Synthetic handbook: Methods and examples".into(),
+                item: Some("10.4321/legacy-variants".into()),
+                description: Some("Paper by Other Scientist et al., 2013".into()),
+                ..Default::default()
+            },
         ];
         let mut writer = GzEncoder::new(File::create(&input).unwrap(), Compression::default());
         writer.write_all(ARTICLES_HEADER.as_bytes()).unwrap();
@@ -265,8 +292,8 @@ mod tests {
             write_article(&mut writer, row).unwrap();
         }
         writer.finish().unwrap();
-        let report = run(&input, &xml, &dir.path().join("candidate"), None).unwrap();
-        assert_eq!(report["status"], "validated_consistent_scratch_candidate");
+        let report = run(&input, &xml, &dir.path().join("candidate"), Some(&canary)).unwrap();
+        assert_eq!(report["status"], "validated_scoped_scratch_candidate");
         assert_eq!(report["repair"]["corrected_primary_records"], 1);
         assert_eq!(
             report["repair"]["retained_publications"],
@@ -276,9 +303,34 @@ mod tests {
             report["after_rows"]["rows"][1]["paper"]["publication_year"],
             2025
         );
-        assert_eq!(report["coverage_after"]["unknown_publication_day"], 1);
+        assert_eq!(report["coverage_after"]["unknown_publication_day"], 3);
         assert_eq!(report["network_requests"], 0);
-        assert_eq!(report["candidate_records"], 2);
+        assert_eq!(report["candidate_records"], 4);
+        assert_eq!(report["whole_corpus_verified"], false);
+        assert_eq!(report["optional_canary_diagnostics"]["passed"], true);
+        assert_eq!(
+            report["legacy_variants_before"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            report["source_consistency_gate"]["report"]["preserved_legacy_variants"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            report["source_consistency_gate"]["report"]["whole_corpus_verified"],
+            false
+        );
+        let decoded = read_articles(
+            BufReader::new(MultiGzDecoder::new(
+                File::open(dir.path().join("candidate/papers.tsv.gz")).unwrap(),
+            )),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(decoded[2..], rows[2..]);
         assert_eq!(report["roundtrip_equal"], true);
         assert_eq!(report["original_unchanged"], true);
         assert_eq!(report["source_xml_unchanged"], true);

@@ -378,7 +378,7 @@ pub fn parse_arxiv_feed(xml: &str) -> Vec<ArxivPaper> {
 
 /// The year of a paper of the set, from its description ("Paper by A et
 /// al., 2017, Venue").
-fn year_of(paper: &Article) -> Option<i32> {
+pub(crate) fn year_of(paper: &Article) -> Option<i32> {
     if let Some(year) = paper.paper.as_ref().and_then(|m| m.publication_year) {
         return Some(year);
     }
@@ -425,6 +425,8 @@ pub struct Named {
     /// Journal/publication IDs linked to a preprint while retaining their
     /// original DOI and publication dates. arXiv cannot adjudicate those dates.
     pub retained_publications: Vec<String>,
+    /// Untouched, unverified legacy source-ID variants; no canonical choice.
+    pub legacy_variants: Vec<crate::paper_validation::LegacyVariants>,
 }
 
 /// Where papers are, by arXiv id and by title.
@@ -469,11 +471,26 @@ impl Found {
 /// `methods` (see the module docs), at most [`MAX_NAMES`] each, after
 /// those they have.
 pub fn name_papers(papers: &mut [Article], methods: &[Method]) -> Named {
+    name_papers_excluding(papers, methods, &HashSet::new())
+}
+
+fn name_papers_excluding(
+    papers: &mut [Article],
+    methods: &[Method],
+    preserved_ids: &HashSet<String>,
+) -> Named {
     let mut named = Named::default();
     // Names given, with the paper given each and its citations.
     let mut given: HashMap<String, (usize, u64)> = HashMap::new();
     let mut names: HashMap<usize, Vec<(u64, String)>> = HashMap::new();
     let mut give = |name: &str, paper: usize, views: u64, weight: u64| {
+        if papers[paper]
+            .item
+            .as_ref()
+            .is_some_and(|id| preserved_ids.contains(&id.to_ascii_lowercase()))
+        {
+            return;
+        }
         let key = normalize_text(name);
         if key.is_empty() {
             return;
@@ -1006,6 +1023,7 @@ pub async fn improve(
     papers: &mut Vec<Article>,
     cache_dir: Option<&Path>,
 ) -> Result<Named> {
+    let baseline = crate::paper_validation::consistency_baseline(papers)?;
     let ids = crate::paper_validation::consistency_ids(papers, ARXIV_IDS_A_REQUEST);
     let mut done = Named::default();
     if !ids.is_empty() {
@@ -1056,8 +1074,15 @@ pub async fn improve(
             done.unresolved
         );
     }
-    crate::paper_validation::validate_consistency(papers)?;
-    let named = name_papers(papers, &methods);
+    let report = crate::paper_validation::validate_against_baseline(papers, &baseline)?;
+    let preserved_ids = report
+        .preserved_legacy_variants
+        .iter()
+        .map(|v| v.primary_id.clone())
+        .collect();
+    let named = name_papers_excluding(papers, &methods, &preserved_ids);
+    crate::paper_validation::validate_against_baseline(papers, &baseline)?;
+    done.legacy_variants = report.preserved_legacy_variants;
     Ok(Named {
         by_title: named.by_title,
         by_method: named.by_method,
@@ -1082,6 +1107,40 @@ mod tests {
             published: Some("2024-01-02".into()),
             updated: Some("2024-02-03".into()),
         }
+    }
+
+    #[test]
+    fn supplementary_names_preserve_reported_legacy_variants() {
+        let mut rows = vec![
+            paper(
+                "SYNTH: Synthetic research",
+                "10.4321/legacy-variants",
+                30,
+                2009,
+            ),
+            paper(
+                "SYNTH: Synthetic research and methods",
+                "10.4321/legacy-variants",
+                25,
+                2013,
+            ),
+        ];
+        let baseline = crate::paper_validation::consistency_baseline(&rows).unwrap();
+        let original = rows.clone();
+        let preserved = baseline
+            .legacy_variants()
+            .map(|v| v.primary_id.clone())
+            .collect();
+        let methods = vec![method(
+            "SyntheticMethod",
+            &rows[0].title,
+            "https://example.org/method",
+            100,
+        )];
+        let done = name_papers_excluding(&mut rows, &methods, &preserved);
+        assert_eq!((done.by_title, done.by_method), (0, 0));
+        assert_eq!(rows, original);
+        crate::paper_validation::validate_against_baseline(&rows, &baseline).unwrap();
     }
 
     #[test]

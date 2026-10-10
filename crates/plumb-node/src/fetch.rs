@@ -696,6 +696,9 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     if !named.retained_publications.is_empty() {
         info!("{} publication IDs retained with independent DOI/date claims; linked preprints do not verify journal publication metadata: {:?}", named.retained_publications.len(), named.retained_publications);
     }
+    if !named.legacy_variants.is_empty() {
+        info!("{} unverified legacy identity-variant groups preserved unchanged; titles and imported dates remain unresolved: {:?}", named.legacy_variants.len(), named.legacy_variants.iter().map(|v| &v.primary_id).collect::<Vec<_>>());
+    }
     stages.extend(
         ["canonical-paper-repair", "article-validation"].map(|name| {
             plumb_net::pages::QualityStage {
@@ -773,7 +776,7 @@ fn publish_papers(
         papers,
         stages,
         options,
-        plumb_ingest::paper_validation::validate_consistency,
+        plumb_ingest::paper_validation::validate_record_consistency,
     )?;
     info!("staged paper generation {}", generation.display());
     if !args.stage_only {
@@ -1564,15 +1567,16 @@ mod tests {
                 stages,
                 publication::Options::default(),
                 |_| Ok(()),
-            )
-            .unwrap();
-            assert!(publication::promote(
-                &generation,
-                &dest,
-                "papers",
-                publication::Options::default()
-            )
-            .is_err());
+            );
+            if let Ok(generation) = generation {
+                assert!(publication::promote(
+                    &generation,
+                    &dest,
+                    "papers",
+                    publication::Options::default()
+                )
+                .is_err());
+            }
             assert_eq!(std::fs::read(&dest).unwrap(), original);
         }
     }

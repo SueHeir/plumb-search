@@ -115,6 +115,8 @@ struct Manifest {
     failed_hosts: usize,
     layers: Vec<String>,
     quality: SetQuality,
+    #[serde(default)]
+    paper_consistency: Option<plumb_ingest::paper_validation::ConsistencyReport>,
 }
 
 fn host(url: &str) -> Option<String> {
@@ -129,6 +131,14 @@ fn article_host(article: &Article) -> Option<String> {
 
 fn read_pages(path: &Path) -> Result<Vec<Article>> {
     plumb_core::article::read_articles(plumb_ingest::open_maybe_gz(path)?, usize::MAX)
+}
+
+fn paper_baseline(dest: &Path) -> Result<plumb_ingest::paper_validation::ConsistencyBaseline> {
+    if dest.is_file() {
+        plumb_ingest::paper_validation::consistency_baseline(&read_pages(dest)?)
+    } else {
+        Ok(Default::default())
+    }
 }
 
 /// Keep the old host on failed, empty, or implausibly smaller refreshes.
@@ -393,6 +403,7 @@ pub(super) fn publish(
         failed_hosts,
         layers,
         quality,
+        paper_consistency: None,
     };
     write_json(&stage.path().join("manifest.json"), &manifest)?;
     note_quality(&file, &manifest.quality)?;
@@ -442,6 +453,14 @@ pub(super) fn stage_checked_articles(
     if stages.iter().any(|stage| !stage.complete) {
         bail!("builder validation/enrichment is incomplete; previous set kept");
     }
+    // Baseline exceptions come from the current destination, never from the
+    // candidate or a caller-supplied report. First publication remains strict.
+    let baseline = (set == plumb_index::pages::PAPERS_SET)
+        .then(|| paper_baseline(dest))
+        .transpose()?;
+    if let Some(baseline) = &baseline {
+        plumb_ingest::paper_validation::validate_against_baseline(pages, baseline)?;
+    }
     validate(pages)?;
     if pages.is_empty() {
         bail!("empty candidate; previous set kept");
@@ -458,6 +477,12 @@ pub(super) fn stage_checked_articles(
         bail!("candidate lost records during serialization");
     }
     validate(&roundtrip)?;
+    let paper_consistency = baseline
+        .as_ref()
+        .map(|baseline| {
+            plumb_ingest::paper_validation::validate_against_baseline(&roundtrip, baseline)
+        })
+        .transpose()?;
     if options.max_bytes > 0 && std::fs::metadata(&file)?.len() > options.max_bytes {
         bail!("candidate exceeds --max-set-bytes; previous set kept");
     }
@@ -498,6 +523,7 @@ pub(super) fn stage_checked_articles(
         failed_hosts: 0,
         layers: crate::node::newer::layers_of(&file)?,
         quality,
+        paper_consistency,
     };
     write_json(&stage.path().join("manifest.json"), &manifest)?;
     note_quality(&file, &manifest.quality)?;
@@ -552,7 +578,11 @@ fn promote_locked(generation: &Path, dest: &Path, set: &str, options: Options) -
         {
             bail!("paper generation lacks completed publication quality stages; previous set kept");
         }
-        plumb_ingest::paper_validation::validate_consistency(&pages)?;
+        let report = plumb_ingest::paper_validation::validate_against_baseline(
+            &pages,
+            &paper_baseline(dest)?,
+        )?;
+        info!("paper record consistency/non-regression checked; {} unverified legacy identity-variant groups preserved; whole corpus is not externally verified", report.preserved_legacy_variants.len());
     }
     drop(pages);
     if dest.is_file() {
@@ -787,6 +817,71 @@ mod tests {
         );
         std::fs::write(first.join("pages.tsv.gz"), b"corrupt").unwrap();
         assert!(promote(first, &dest, "docs", Options::default()).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), original);
+    }
+
+    #[test]
+    fn paper_legacy_variants_are_reported_and_changed_records_fail_again_at_promotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("papers.tsv.gz");
+        let pages = vec![
+            Article {
+                title: "Synthetic handbook".into(),
+                item: Some("10.4321/legacy-variants".into()),
+                description: Some("Paper by Jane Example et al., 2009".into()),
+                ..Default::default()
+            },
+            Article {
+                title: "Synthetic handbook: Methods and examples".into(),
+                item: Some("10.4321/legacy-variants".into()),
+                description: Some("Paper by Jane Example et al., 2013".into()),
+                ..Default::default()
+            },
+        ];
+        let stages = [
+            "source-refresh",
+            "canonical-paper-repair",
+            "article-validation",
+        ]
+        .map(|name| QualityStage {
+            name: name.into(),
+            complete: true,
+        })
+        .to_vec();
+        // A new, ambiguous corpus cannot label itself legacy. Only the
+        // existing destination provides a baseline for ordinary publication.
+        assert!(stage_checked_articles(
+            &dest,
+            "papers",
+            &pages,
+            stages.clone(),
+            Options::default(),
+            |_| Ok(())
+        )
+        .is_err());
+        plumb_ingest::articles::write_articles_file(&dest, &pages).unwrap();
+        let path =
+            stage_checked_articles(&dest, "papers", &pages, stages, Options::default(), |_| {
+                Ok(())
+            })
+            .unwrap();
+        let mut manifest: Manifest =
+            serde_json::from_reader(std::fs::File::open(path.join("manifest.json")).unwrap())
+                .unwrap();
+        let report = manifest.paper_consistency.as_ref().unwrap();
+        assert!(!report.whole_corpus_verified);
+        assert_eq!(report.preserved_legacy_variants.len(), 1);
+        promote(&path, &dest, "papers", Options::default()).unwrap();
+        let original = std::fs::read(&dest).unwrap();
+        let mut changed = pages;
+        changed[0].description = Some("Paper by Jane Example et al., 2024".into());
+        plumb_ingest::articles::write_articles_file(&path.join("pages.tsv.gz"), &changed).unwrap();
+        // Even a coherent checksum and stale success report cannot authorize
+        // changed ambiguity; promotion checks the actual current baseline.
+        manifest.sha256 = hash_file(&path.join("pages.tsv.gz")).unwrap();
+        manifest.quality.sha256 = manifest.sha256.clone();
+        write_json(&path.join("manifest.json"), &manifest).unwrap();
+        assert!(promote(&path, &dest, "papers", Options::default()).is_err());
         assert_eq!(std::fs::read(&dest).unwrap(), original);
     }
 
