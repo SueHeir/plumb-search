@@ -104,7 +104,7 @@ pub struct Recent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
     pub headlines: Vec<RecentHeadline>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub status: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<NewsSource>,
