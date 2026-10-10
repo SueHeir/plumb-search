@@ -4303,11 +4303,15 @@ mod tests {
     fn docs_kind_host_and_exact_symbols_survive_candidate_caps() {
         let mut pages = short_docs_fixture();
         for i in 0..CANDIDATES + 20 {
-            pages.push(page(
+            let mut article = page(
                 &format!("Python tomllib {i}"),
                 1_000_000,
                 &["Python tomllib"],
-            ));
+            );
+            // Other redirect names are indexed as exact keys; ordinary
+            // Wikipedia aliases only contribute to the words field.
+            article.names.push("Python tomllib".into());
+            pages.push(article);
             pages.push(Page::from_question(Article {
                 title: format!("Python tomllib question {i}"),
                 description: Some("python, tomllib".into()),
