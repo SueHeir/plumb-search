@@ -24,7 +24,7 @@ shows up.
 | `music_queries.tsv` | a song or album with its artist ("hey jude beatles", "abbey road album") | its MusicBrainz page | `--pages music.tsv.gz` |
 | `topic_queries.tsv` | the news ("world news") or a topic in it ("tariffs") | a major news site, or the topic's Wikipedia article | `--pages wikipedia-en.tsv.gz` |
 | `lyrics_queries.tsv` | a song's lyrics ("jolene lyrics") | its lyrics page on Genius, shown above the results | `--pages music.tsv.gz --profiles` |
-| `subpage_queries.tsv` | one page deep inside a well-known site ("perft results", "nist sp 811", "nba standings") | that page | `--pages subpages.tsv.gz` |
+| `subpage_queries.tsv` | one page deep inside a well-known site ("perft results", "nist sp 811", "nba standings") | that page | `--pages subpages2.tsv.gz` |
 
 ## Format
 

@@ -861,8 +861,16 @@ pub const DOCS_SET: &str = "docs";
 pub const REFERENCE_SET: &str = "reference";
 /// The set of inner pages of other well-known sites: universities and
 /// labs, big companies, government agencies, entertainment and museums
-/// (see `plumb_core::subpages`). Found like reference pages.
-pub const SUBPAGES_SET: &str = "subpages";
+/// (see `plumb_core::subpages`). Found like reference pages, but listed
+/// only when the search asks for them (`subpage_asked`).
+///
+/// Named "subpages2", not "subpages": nodes before v0.2.1 list the
+/// "subpages" set with no such check, so it is never offered under that
+/// name again, and they never ask for this one, which they do not know.
+pub const SUBPAGES_SET: &str = "subpages2";
+/// The name [`SUBPAGES_SET`] had before v0.2.1, which a node's settings
+/// may still use.
+pub const OLD_SUBPAGES_SET: &str = "subpages";
 /// Fewest words (stemmed, without the most common ones) of a query that
 /// finds reference pages by their words: "define prioritize".
 pub const REFERENCE_QUERY_WORDS: usize = 2;
