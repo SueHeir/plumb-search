@@ -97,7 +97,7 @@ Agents search for the same things again and again: the latest version of a libra
 Found before (searched "tokio latest version", 2 days ago): 1.47.1 Source: https://crates.io/crates/tokio (crates.io lists the newest release)
 ```
 
-Searches say a lot about whoever makes them, so findings never leave the node unless an agent shares one (below). They are kept in `findings.jsonl` in its data folder (the newest 5,000), and only apps on the node's own computer can report them or see them, even on a node run with `--mcp-read-pages`. A page that `check_lookalike` calls a look-alike is not kept. `plumb serve` keeps no findings. Delete the file to forget them all.
+Searches say a lot about whoever makes them, so findings never leave the node unless an agent shares one (below). They are kept in `findings.jsonl` in its data folder (the newest 5,000), and only apps on the node's own computer can report them or see them, even on a node run with `--mcp-read-pages`. A node run with `--mcp-findings` lets every client report and see findings, for a node whose address only people you trust have; sharing a finding with other nodes stays with the node's own computer. A page that `check_lookalike` calls a look-alike is not kept. `plumb serve` keeps no findings. Delete the file to forget them all.
 
 ### Sharing a finding with other nodes
 

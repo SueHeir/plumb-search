@@ -190,6 +190,9 @@ pub struct NodeConfig {
     pub web_search: Option<Engine>,
     /// Every client of `/mcp` may use `read_page`, not only this computer's.
     pub mcp_read_pages: bool,
+    /// Every client of `/mcp` may keep and see findings, not only this
+    /// computer's.
+    pub mcp_findings: bool,
     /// How `read_page` fetches pages.
     pub page_reader: plumb_crawl::ReadConfig,
     /// Rank by meaning too, for searches that name no site: the node
@@ -332,6 +335,7 @@ impl NodeConfig {
             lang: None,
             web_search: None,
             mcp_read_pages: false,
+            mcp_findings: false,
             page_reader: plumb_crawl::ReadConfig::default(),
             search_by_meaning: false,
             meaning_model: crate::meaning::MeaningModel::default(),
@@ -924,6 +928,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         language: inner.config.lang.clone(),
         web_search: inner.config.web_search,
         read_pages_for_all: inner.config.mcp_read_pages,
+        findings_for_all: inner.config.mcp_findings,
         page_reader: inner.config.page_reader.clone(),
         plugins: load_plugins(&inner),
     };

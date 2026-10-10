@@ -22,11 +22,12 @@
 //! ([`crate::mcp::text_only`]).
 //!
 //! `report_finding`, and the findings listed with search results, are
-//! offered only to apps on the node's own computer, always: they hold
-//! what its agents searched for (see [`crate::findings`]). So are the
-//! leads other nodes shared, listed with search results, and sharing a
-//! finding with `report_finding`'s `share`, on a node that allows it: a
-//! lead goes out signed with the node's key. Behind a reverse proxy on the
+//! offered only to apps on the node's own computer: they hold what its
+//! agents searched for (see [`crate::findings`]). A node run with
+//! `--mcp-findings` offers them to every client. Only this computer's apps
+//! ever get the leads other nodes shared, listed with search results, and
+//! sharing a finding with `report_finding`'s `share`, on a node that
+//! allows it: a lead goes out signed with the node's key. Behind a reverse proxy on the
 //! same computer that does not say who it forwards for, every request looks
 //! local (see `docs/docker.md`), so such a node should not share findings.
 
@@ -320,6 +321,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
     let client = client(&request);
     let here = from_this_computer(&request);
     let reads_pages = state.settings.read_pages_for_all || here;
+    let keeps_findings = state.settings.findings_for_all || here;
     let text_answers = wants_text_answers(request.uri());
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
         return answer(
@@ -389,7 +391,11 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         .with_reader(reader)
         .with_rates(rates)
         .with_node(state.node.clone())
-        .with_findings(if here { state.findings() } else { None })
+        .with_findings(if keeps_findings {
+            state.findings()
+        } else {
+            None
+        })
         .with_leads(here)
         .with_plugin_results(plugins);
     let id = message.get("id").cloned().unwrap_or(Value::Null);

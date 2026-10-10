@@ -7,6 +7,10 @@
 - Rare words and names are no longer rewritten by spelling: "perft" stays "perft" rather than becoming perf1.com's name, "Kiwipete" is not "kimipet" and "Inkala" is not "ikala". A word is now only corrected to a word that many sites or pages use and that starts with the same letter ("perft" is not "erft"), and only when the slip is likelier than the word typed as meant, counting a word no site or page has as if one did ("perft" is not "perf"), and never to one with a digit in it, whether a word or a site's name.
 - With "Use the Plumb network" on, "weather in denver" no longer puts Spain's social security site first. Network searches no longer ask for the bucket of a small joining word ("in", "of", "the") in a longer query, and a site only the network found that lacks some of the query's words comes after the node's own results: its score was measured against the few sites the network sent, where the best partial match looks like a full one.
 
+### Nodes
+
+- `--mcp-findings` lets every client of a node's `/mcp` keep findings with `report_finding` and see them with search results, not only AI apps on the node's own computer. It is off by default and meant for a node whose address only trusted people have; `read_page` and sharing findings with other nodes are unchanged.
+
 ### Fixes
 
 - Search by meaning reads the vectors file in place, mapped into memory, instead of holding a copy: a node with 2.8 million sites' vectors holds about 50 MB for them instead of 1.6 GB, and the system can drop the file's pages when memory runs short instead of swapping. Searches by meaning also take about a third less time on CPUs with AVX2, with the same results.
