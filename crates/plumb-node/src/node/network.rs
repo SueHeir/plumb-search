@@ -799,6 +799,7 @@ mod tests {
         Hit {
             demand: None,
             missing_words: false,
+            query_evidence: None,
             placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://{domain}/"),

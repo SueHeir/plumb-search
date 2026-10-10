@@ -1521,6 +1521,7 @@ mod tests {
         let site = |domain: &str, named: bool| Hit {
             demand: None,
             missing_words: false,
+            query_evidence: None,
             placing_text_score: None,
             domain: domain.into(),
             url: format!("https://{domain}/"),

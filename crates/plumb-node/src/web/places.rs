@@ -462,6 +462,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
         };
         let mut shop = place("Elliott Bay Book Company", "shop=books", 47.6, -122.3);
         shop.town = Some("Seattle".into());
@@ -517,6 +518,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
         };
         let mut hits = vec![
             site("denvergov.org", "City and County of Denver"),

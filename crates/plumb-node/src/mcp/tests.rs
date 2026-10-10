@@ -30,6 +30,7 @@ fn hit(domain: &str, score: f32, link_score: f32, named: bool) -> Hit {
     Hit {
         demand: None,
         missing_words: false,
+        query_evidence: None,
         placing_text_score: None,
         domain: domain.to_string(),
         url: format!("https://www.{domain}/"),

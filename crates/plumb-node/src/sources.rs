@@ -603,6 +603,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
         }
     }
 

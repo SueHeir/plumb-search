@@ -1411,6 +1411,7 @@ mod tests {
         let mut hit = Hit {
             demand: None,
             missing_words: false,
+            query_evidence: None,
             placing_text_score: None,
             domain: "rust-lang.org".into(),
             url: "https://rust-lang.org/".into(),

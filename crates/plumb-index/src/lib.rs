@@ -69,10 +69,11 @@
 //! `us bank` and `US BANK` are the same query and `nestle` finds `Nestlé`.
 
 mod analysis;
-mod health;
+pub mod health;
 pub mod learned;
 pub mod pages;
 pub mod places;
+mod query_evidence;
 mod replace;
 mod schema;
 mod spell;
@@ -102,6 +103,7 @@ use tantivy::{
     Term, TERMINATED,
 };
 
+pub use crate::query_evidence::CandidateEvidence;
 pub use crate::replace::remove_build_leftovers;
 use crate::replace::Staging;
 use crate::schema::Fields;
@@ -208,6 +210,10 @@ pub const KEEPS_ITS_NAME_LINK_SCORE: f32 = 0.4;
 /// link text (github.com for "docs"), so a query ending in them is ranked
 /// by the words before them. Each entry is one or more normalized words.
 const INTENT_WORDS: &[&str] = &[
+    "refund",
+    "refund status",
+    "online banking",
+    "tickets",
     "login",
     "log in",
     "logon",
@@ -358,6 +364,12 @@ pub struct RankConfig {
     /// cricket.com.au's). Fewer results are shown rather than these.
     /// `None` keeps them.
     pub partial_closeness: Option<f32>,
+    /// Measure the substantive coverage of every candidate before giving
+    /// partial names or popularity their boost. Exact names, typed domains
+    /// and the existing explicit navigation intents retain their controls.
+    /// Disable coverage/tier adjustments for a focused fixed-corpus
+    /// comparison; source quality and intent parsing remain independent.
+    pub whole_query_relevance: bool,
     /// BM25 boost of a query word matching a site's search terms
     /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
     pub terms_boost: f32,
@@ -439,6 +451,7 @@ impl Default for RankConfig {
             named_share: Some(0.4),
             named_needs_all_words: true,
             partial_closeness: Some(0.5),
+            whole_query_relevance: true,
             terms_boost: 1.0,
             filler_words: true,
             questions_name_nothing: true,
@@ -544,6 +557,10 @@ pub struct Hit {
     /// ([`pages::drop_namesakes_of_words`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub missing_words: bool,
+    /// Query evidence unaffected by learned/display score trading. Older
+    /// peers and synthetic/source-routed hits may have no such evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_evidence: Option<CandidateEvidence>,
 }
 
 /// Per-search choices of the person searching.
@@ -581,7 +598,7 @@ pub struct SiteSearch {
 
 /// Where the sites a query ranks come from ([`Searcher::candidate_pool`]).
 /// A site can come from more than one place.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CandidatePool {
     /// The first [`RankConfig::candidates`] sites by BM25, best first.
     pub words: Vec<String>,
@@ -593,6 +610,9 @@ pub struct CandidatePool {
     pub kind: Vec<String>,
     /// The sites near the query in meaning that are ranked.
     pub meaning: Vec<String>,
+    /// Independent relevance and quality diagnostics for eligible
+    /// candidates, before pruning or downstream order-score changes.
+    pub evidence: Vec<CandidateEvidence>,
 }
 
 impl CandidatePool {
@@ -1039,6 +1059,7 @@ impl Searcher {
                 text_score: 0.0,
                 placing_text_score: None,
                 named: false,
+                query_evidence: None,
                 ..hit
             }))
     }
@@ -1324,6 +1345,7 @@ impl Searcher {
             Some(_) if site.is_some() => {
                 let cfg = RankConfig {
                     meaning_only_relevance: None,
+                    whole_query_relevance: false,
                     ..*cfg
                 };
                 self.rank(query_text, limit, &cfg, options, meaning)?.0
@@ -1516,7 +1538,7 @@ impl Searcher {
         // nearest: among hundreds of thousands of sites, small ones whose
         // text repeats the query's words crowd out the big site it
         // describes, which may say little about itself.
-        let (nearest, nearest_ranked) = match meaning {
+        let nearest = match meaning {
             Some(meaning) => {
                 let domains = meaning.nearest();
                 let terms = |domains: &[String]| -> Vec<Term> {
@@ -1532,20 +1554,9 @@ impl Searcher {
                 let mut next = link_scores(&searcher, &next);
                 next.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
                 docs.extend(next.into_iter().take(NEAREST_POPULAR).map(|(_, addr)| addr));
-                (docs, ranked)
+                docs
             }
-            None => match any_meaning.filter(|_| cfg.partial_closeness.is_some()) {
-                Some(any) => {
-                    let domains = any.nearest();
-                    let terms: Vec<Term> = domains
-                        .iter()
-                        .take(NEAREST_RANKED)
-                        .map(|domain| Term::from_field_text(self.fields.domain, domain))
-                        .collect();
-                    (HashSet::new(), matching_docs(&searcher, terms)?)
-                }
-                None => (HashSet::new(), HashSet::new()),
-            },
+            None => HashSet::new(),
         };
         let known: HashSet<DocAddress> = candidates.iter().map(|&(_, addr)| addr).collect();
         let mut unranked: Vec<DocAddress> = names
@@ -1558,7 +1569,8 @@ impl Searcher {
             .collect();
         unranked.sort_unstable();
         unranked.dedup();
-        if let Some(pool) = pool {
+        let mut pool = pool;
+        if let Some(pool) = pool.as_deref_mut() {
             let domains = |docs: &mut dyn Iterator<Item = DocAddress>| -> Vec<String> {
                 docs.filter_map(|addr| domain_of(&searcher, addr)).collect()
             };
@@ -1568,6 +1580,7 @@ impl Searcher {
                 named: domains(&mut names.keys().copied()),
                 kind: domains(&mut kinds.iter().copied()),
                 meaning: domains(&mut nearest.iter().copied()),
+                evidence: Vec::new(),
             };
         }
         candidates.extend(bm25_of(&searcher, &text_query, unranked)?);
@@ -1609,13 +1622,24 @@ impl Searcher {
         };
 
         let default = RankConfig::default();
-        // A query is taken to describe what it looks for unless it names a
-        // kind of thing, a site in full, or a well-known site by its first
-        // words ("chase center tickets"; not code.gov in "code hosting").
+        let navigation_words =
+            without_intent_words(query_text).map(|name| analysis::tokens(&self.words, &name).len());
+        // Refund/status requests can include a product qualifier (Amazon
+        // Prime refund); docs requests still require the named subject.
+        let normalized = normalize_text(query_text);
+        let refund_navigation =
+            normalized.ends_with(" refund") || normalized.ends_with(" refund status");
+        // A leading name needs an explicit navigation intent, rather than
+        // merely the popularity of a namesake (Amazon in Amazon River).
         let navigational = named_in_full
             || query.domain.is_some()
             || names.iter().any(|(&addr, name)| {
-                name.typed || (name.words() > 0 && link_score_of(addr) >= WELL_KNOWN_LINK_SCORE)
+                name.typed
+                    || (name.words() > 0
+                        && (!cfg.whole_query_relevance
+                            || navigation_words == Some(name.words())
+                            || refund_navigation)
+                        && link_score_of(addr) >= WELL_KNOWN_LINK_SCORE)
             });
         let alpha = match cfg.described_alpha {
             Some(described) if !navigational => unit_or(described, default.alpha),
@@ -1709,15 +1733,22 @@ impl Searcher {
                     .map(|domain| meaning.plain_closeness(&domain))
             })
         };
-        let no_vector: Vec<DocAddress> = match meaning {
-            Some(_) => candidates
-                .iter()
-                .map(|&(_, addr)| addr)
-                .filter(|&addr| closeness_of(addr).is_none())
-                .collect(),
-            None => Vec::new(),
-        };
-        let coverage = query.coverage(&searcher, &self.fields, &no_vector)?;
+        let addresses: Vec<_> = candidates.iter().map(|&(_, addr)| addr).collect();
+        let evidence = query.whole_query_evidence(&searcher, &self.fields, &addresses)?;
+        let tokens = analysis::tokens(&self.words, query_text);
+        let prefix_distinct: HashMap<_, _> = names
+            .values()
+            .map(|name| {
+                (
+                    name.words(),
+                    tokens
+                        .iter()
+                        .take(name.words())
+                        .collect::<HashSet<_>>()
+                        .len(),
+                )
+            })
+            .collect();
 
         let max_bm25 = candidates.iter().map(|&(bm25, _)| bm25).fold(0.0, f32::max);
         let mut ranked: Vec<Ranked> = Vec::with_capacity(candidates.len());
@@ -1737,6 +1768,37 @@ impl Searcher {
             let link_score = link_score_of(addr);
             let is_kind = kinds.contains(&addr);
             let name = names.get(&addr).copied().unwrap_or_default();
+            let lexical = &evidence[&addr];
+            let semantic = closeness_of(addr).map(|score| unit_or(score, 0.0));
+            let full_name = name.typed || name.words() >= query.len;
+            let explicit_navigation = name.words() > 0
+                && (navigation_words == Some(name.words()) || refund_navigation)
+                && link_score >= WELL_KNOWN_LINK_SCORE;
+            let protects_bare_name =
+                !bare.is_empty() && name.words() > 0 && link_score >= WELL_KNOWN_LINK_SCORE;
+            let protected = full_name || is_kind || explicit_navigation || protects_bare_name;
+            let support = lexical.substantive.max(semantic.unwrap_or(0.0));
+            let whole_share = if !cfg.whole_query_relevance || protected {
+                1.0
+            } else {
+                // Retain weak lexical/semantic results as fallbacks; a
+                // missing vector does not remove their lexical evidence.
+                lexical.coverage.max(semantic.unwrap_or(0.0))
+            };
+            let remainder =
+                lexical.remaining(prefix_distinct.get(&name.words()).copied().unwrap_or(0));
+            let name_share = if !cfg.whole_query_relevance || protected {
+                1.0
+            } else {
+                remainder.max(semantic.unwrap_or(0.0))
+            };
+            let relevance_tier = u8::from(
+                cfg.whole_query_relevance
+                    && (protected
+                        || support >= 0.75
+                        || semantic
+                            .is_some_and(|s| s >= cfg.partial_closeness.unwrap_or(0.5).max(0.5))),
+            );
             // A site whose domain the whole query names stays whatever its
             // language: "spiegel" finds spiegel.de with English chosen.
             if let (Some(wanted), Some(site)) = (&language, column.language(addr.doc_id)) {
@@ -1759,11 +1821,10 @@ impl Searcher {
                 } else {
                     0.0
                 };
-                let closeness =
-                    closeness_of(addr).or_else(|| coverage.get(&addr).map(|&share| share * words));
+                let closeness = semantic.or_else(|| meaning.map(|_| lexical.words * words));
                 if let Some(Some(plain)) = plain_closeness_of(addr) {
                     placing_text_score = Some(
-                        match plain.or_else(|| coverage.get(&addr).map(|&share| share * words)) {
+                        match plain.or_else(|| meaning.map(|_| lexical.words * words)) {
                             Some(plain) => {
                                 (1.0 - meaning_weight) * words
                                     + meaning_weight * plain.clamp(0.0, 1.0)
@@ -1778,7 +1839,7 @@ impl Searcher {
                     }
                     None => words,
                 }
-            };
+            } * whole_share;
             let closeness = if is_kind || name.label >= query.len {
                 None
             } else {
@@ -1787,7 +1848,7 @@ impl Searcher {
                 } else {
                     0.0
                 };
-                closeness_of(addr).or_else(|| coverage.get(&addr).map(|&share| share * words))
+                semantic.or_else(|| meaning.map(|_| lexical.words * words))
             };
             let label_bonus = if name.label >= query.len {
                 cfg.exact_label_bonus
@@ -1802,6 +1863,7 @@ impl Searcher {
             if is_kind {
                 name_bonus = name_bonus.max(cfg.kind_bonus);
             }
+            name_bonus *= name_share;
             let trust = if name.typed || trusted_link_score <= 0.0 {
                 1.0
             } else if bare.contains(&addr) {
@@ -1816,7 +1878,12 @@ impl Searcher {
                 .as_ref()
                 .and_then(|domains| domains.term_ords(addr.doc_id).next())
                 .unwrap_or(u64::MAX);
-            let unnamed = !is_kind && name.words() == 0;
+            let unnamed = !is_kind
+                && if cfg.whole_query_relevance {
+                    !protected
+                } else {
+                    name.words() == 0
+                };
             let prior = match (relevance_floor, cfg.meaning_only_relevance) {
                 // No word of the query: only meaning speaks for it.
                 (_, Some(floor)) if unnamed && bm25 <= 0.0 && floor > 0.0 => {
@@ -1824,7 +1891,31 @@ impl Searcher {
                 }
                 (Some(floor), _) if unnamed => link_score * (text_score / floor).min(1.0),
                 _ => link_score,
+            } * whole_share;
+            let mut query_evidence = CandidateEvidence {
+                domain: column.domain(addr.doc_id).unwrap_or_default(),
+                lexical_score: bm25,
+                semantic_closeness: semantic,
+                query_coverage: lexical.coverage,
+                substantive_coverage: lexical.substantive,
+                remaining_coverage: remainder,
+                full_name,
+                typed_domain: name.typed,
+                partial_name_words: if full_name { 0 } else { name.words() },
+                relevance_tier,
+                source_quality: None,
             };
+            if let Some(pool) = pool.as_deref_mut() {
+                let doc: TantivyDocument = searcher.doc(addr)?;
+                let text = |field| doc.get_first(field).and_then(|value| value.as_str());
+                query_evidence.source_quality = health::source_quality(
+                    &query_evidence.domain,
+                    text(self.fields.title),
+                    text(self.fields.description),
+                    Some(link_score),
+                );
+                pool.evidence.push(query_evidence.clone());
+            }
             ranked.push(Ranked {
                 addr,
                 score: alpha * prior
@@ -1837,15 +1928,32 @@ impl Searcher {
                 named: name.typed || name.words() >= query.len,
                 label_names_query: query.len >= 2 && name.label >= query.len,
                 closeness,
+                relevance_tier,
+                query_evidence: Some(query_evidence),
                 tie_break: (addr.segment_ord, domain_ord),
             });
         }
         ranked.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
+            b.relevance_tier
+                .cmp(&a.relevance_tier)
+                .then_with(|| b.score.total_cmp(&a.score))
                 .then_with(|| b.link_score.total_cmp(&a.link_score))
                 .then_with(|| a.tie_break.cmp(&b.tie_break))
         });
+        // Keep the score-order contract used by downstream blending and
+        // network results. A weak fallback cannot regain its old place
+        // merely because another caller sorts the displayed scores.
+        if let Some(first_weak) = ranked
+            .iter()
+            .position(|row| row.relevance_tier == 0)
+            .filter(|&at| at > 0)
+        {
+            let boundary = ranked[first_weak - 1].score;
+            let ceiling = boundary - f32::EPSILON * boundary.abs().max(1.0);
+            for row in &mut ranked[first_weak..] {
+                row.score = row.score.min(ceiling);
+            }
+        }
 
         // Matching a word or two of a longer query, found by no name and
         // not near it in meaning: no answer, however big the site
@@ -1856,10 +1964,11 @@ impl Searcher {
             .filter(|floor| *floor > 0.0)
             .zip(any_meaning)
         {
+            let convincing_alternative = ranked.iter().any(|row| row.relevance_tier > 0);
             let (named_inside, alias_inside) = self.names_inside(&searcher, &query, query_text)?;
             let mut partial = Vec::new();
             for r in &ranked {
-                if r.named || kinds.contains(&r.addr) || nearest_ranked.contains(&r.addr) {
+                if r.named || kinds.contains(&r.addr) {
                     continue;
                 }
                 // A name only counts for a site known by it: hilton.com in
@@ -1879,7 +1988,13 @@ impl Searcher {
                         .domain(r.addr.doc_id)
                         .and_then(|domain| any.closeness(&domain)),
                 };
-                if closeness.is_none_or(|closeness| closeness < floor) {
+                // A purely semantic paraphrase can remain as a weak
+                // fallback with real similarity. Nearest-list membership
+                // itself never exempts a partial lexical/name match.
+                let semantic_fallback = !convincing_alternative
+                    && evidence[&r.addr].coverage <= 0.0
+                    && closeness.is_some_and(|s| s >= floor * 0.5);
+                if !semantic_fallback && closeness.is_none_or(|closeness| closeness < floor) {
                     partial.push(r.addr);
                 }
             }
@@ -2012,7 +2127,13 @@ impl Searcher {
             let (mut hit, fingerprint) = self.hit(&searcher, ranked)?;
             hit.missing_words = missing_words;
             let left_out = is_reserved_name(&hit.domain)
-                || is_pill_shop(&hit.domain, hit.link_score)
+                || health::source_quality(
+                    &hit.domain,
+                    hit.title.as_deref(),
+                    hit.description.as_deref(),
+                    Some(hit.link_score),
+                )
+                .is_some_and(|quality| quality.informational_penalty())
                 || (hit.link_score < WELL_KNOWN_LINK_SCORE
                     && hit
                         .title
@@ -2349,9 +2470,10 @@ impl Searcher {
             .unwrap_or_else(|| format!("https://{domain}/"));
         let own = |field| text(field).filter(|_| !borrowed);
         let about = text(self.fields.about);
-        let hit = Hit {
+        let mut hit = Hit {
             demand: None,
             missing_words: false,
+            query_evidence: ranked.query_evidence,
             url,
             // A title in the wrong encoding ("����") says nothing.
             title: own(self.fields.title).filter(|title| !title.contains('\u{FFFD}')),
@@ -2370,6 +2492,14 @@ impl Searcher {
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default(),
         };
+        if let Some(evidence) = &mut hit.query_evidence {
+            evidence.source_quality = health::source_quality(
+                &hit.domain,
+                hit.title.as_deref(),
+                hit.description.as_deref(),
+                Some(hit.link_score),
+            );
+        }
         Ok((hit, fingerprint))
     }
 }
@@ -2582,6 +2712,8 @@ struct Ranked {
     /// match for a site with no embedding; `None` without a [`Meaning`] or
     /// for a site the query names in full.
     closeness: Option<f32>,
+    relevance_tier: u8,
+    query_evidence: Option<CandidateEvidence>,
     tie_break: (u32, u64),
 }
 
@@ -4142,6 +4274,329 @@ mod tests {
     }
 
     #[test]
+    fn whole_query_subjects_precede_domain_words_with_and_without_meaning() {
+        let cases = [
+            (
+                "asyncio",
+                "async.com",
+                "Async telecommunications",
+                "Python asyncio asynchronous I/O reference",
+            ),
+            (
+                "tomllib",
+                "tomayko.com",
+                "Ryan Tomayko personal website",
+                "Python tomllib TOML parser reference",
+            ),
+            (
+                "K2 height",
+                "k2.com",
+                "K2 business workflow automation",
+                "K2 height mountain geography guide",
+            ),
+            (
+                "Amazon River length",
+                "amazon.com",
+                "Amazon online shopping and retail",
+                "Amazon River length and geography",
+            ),
+            (
+                "Logan Square neighborhood",
+                "square.com",
+                "Square payment processing",
+                "Logan Square neighborhood in Chicago",
+            ),
+            (
+                "budget meal planning",
+                "budget.com",
+                "Budget car rental",
+                "Budget meal planning and recipes",
+            ),
+            (
+                "deadline management tips",
+                "deadline.com",
+                "Deadline Hollywood entertainment news",
+                "Deadline management tips for projects",
+            ),
+            (
+                "climate change effects",
+                "change.org",
+                "Change petitions and campaigns",
+                "Climate change effects and science",
+            ),
+        ];
+        for (query, wrong, wrong_title, subject) in cases {
+            let mut records = vec![site(
+                wrong,
+                Some(wrong_title),
+                None,
+                &[],
+                &[],
+                popular(10, 50_000),
+            )];
+            // Three independently retrieved subject rows ensure partial
+            // names cannot occupy the requested top three, even when the
+            // misleading name has much greater popularity and BM25.
+            for domain in [
+                "subject-guide.example",
+                "subject-reference.example",
+                "subject-library.example",
+            ] {
+                records.push(site(
+                    domain,
+                    Some(subject),
+                    Some(subject),
+                    &[],
+                    &[],
+                    obscure(700_000, 5),
+                ));
+            }
+            let (_dir, searcher) = build(&records);
+            let meaning = FixedMeaning(vec![(wrong, 0.1), ("subject-guide.example", 0.9)]);
+            let options = SearchOptions {
+                exact: true,
+                ..Default::default()
+            };
+            for vector in [None, Some(&meaning as &dyn Meaning)] {
+                let hits = searcher
+                    .search_meaning(query, 10, &RankConfig::default(), &options, vector)
+                    .unwrap()
+                    .hits;
+                assert_eq!(hits.len().min(3), 3, "{query}: {hits:?}");
+                assert!(
+                    !domains(&hits).iter().take(3).any(|domain| *domain == wrong),
+                    "{query}: {hits:?}"
+                );
+                assert!(
+                    hits.windows(2).all(|pair| pair[0].score >= pair[1].score),
+                    "{query}: scores must preserve ranking"
+                );
+                let mut learned_hits = hits.clone();
+                learned::reorder(
+                    learned::Model::builtin(),
+                    query,
+                    &mut learned_hits,
+                    &mut Vec::new(),
+                );
+                assert!(
+                    !domains(&learned_hits)
+                        .iter()
+                        .take(3)
+                        .any(|domain| *domain == wrong),
+                    "{query}: learned {learned_hits:?}"
+                );
+                for hit in &learned_hits {
+                    assert_eq!(
+                        hit.query_evidence,
+                        hits.iter()
+                            .find(|before| before.domain == hit.domain)
+                            .unwrap()
+                            .query_evidence
+                    );
+                    let mut legacy = serde_json::to_value(hit).unwrap();
+                    legacy.as_object_mut().unwrap().remove("query_evidence");
+                    let legacy: Hit = serde_json::from_value(legacy).unwrap();
+                    assert!(legacy.query_evidence.is_none());
+                }
+                let pool = searcher
+                    .candidate_pool(query, &RankConfig::default(), &options, vector)
+                    .unwrap();
+                let correct = pool
+                    .evidence
+                    .iter()
+                    .find(|e| e.domain == "subject-reference.example")
+                    .unwrap();
+                assert_eq!(
+                    correct.semantic_closeness, None,
+                    "a missing vector is unknown"
+                );
+                assert!(correct.substantive_coverage > 0.99, "{query}: {correct:?}");
+                assert_eq!(correct.relevance_tier, 1);
+                if let Some(wrong) = pool.evidence.iter().find(|e| e.domain == wrong) {
+                    assert_eq!(wrong.relevance_tier, 0, "{query}: {wrong:?}");
+                    assert!(wrong.substantive_coverage < correct.substantive_coverage);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_brands_keep_their_matching_subjects_and_explicit_navigation() {
+        let mut records = vec![
+            site(
+                "budget.com",
+                Some("Budget car rental"),
+                Some("Car rental reservations"),
+                &["Budget"],
+                &[],
+                popular(500, 8_000),
+            ),
+            site(
+                "deadline.com",
+                Some("Deadline Hollywood entertainment news"),
+                None,
+                &["Deadline"],
+                &[],
+                popular(500, 8_000),
+            ),
+            site(
+                "change.org",
+                Some("Change petitions and campaigns"),
+                None,
+                &["Change"],
+                &[],
+                popular(500, 8_000),
+            ),
+            site(
+                "chase.com",
+                Some("Chase bank"),
+                None,
+                &["Chase"],
+                &[],
+                popular(100, 50_000),
+            ),
+            site(
+                "chase-login.example",
+                Some("Chase login account"),
+                Some("Chase login account"),
+                &[],
+                &[],
+                Signals::default(),
+            ),
+        ];
+        records[3].about = Some("American bank".to_string());
+        let (_dir, searcher) = build(&records);
+        let meaning = FixedMeaning(vec![
+            ("budget.com", 0.1),
+            ("deadline.com", 0.1),
+            ("change.org", 0.1),
+            ("chase-login.example", 0.9),
+        ]);
+        for vector in [None, Some(&meaning as &dyn Meaning)] {
+            for (query, expected) in [
+                ("Budget car rental", "budget.com"),
+                ("Deadline Hollywood", "deadline.com"),
+                ("Change.org", "change.org"),
+                ("Chase login", "chase.com"),
+            ] {
+                let results = searcher
+                    .search_meaning(
+                        query,
+                        10,
+                        &RankConfig::default(),
+                        &SearchOptions::default(),
+                        vector,
+                    )
+                    .unwrap();
+                assert_eq!(results.hits[0].domain, expected, "{query}: {results:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nearest_membership_does_not_save_a_weak_partial_match() {
+        let records = vec![
+            site(
+                "hbo.com",
+                Some("HBO series and movies"),
+                None,
+                &[],
+                &[],
+                popular(10, 50_000),
+            ),
+            site(
+                "physics.example",
+                Some("Atomic spectral lines"),
+                Some("Electromagnetic transitions in hydrogen atoms"),
+                &[],
+                &[],
+                obscure(700_000, 5),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let meaning = FixedMeaning(vec![("hbo.com", 0.05), ("physics.example", 0.85)]);
+        let results = searcher
+            .search_meaning(
+                "paschen series",
+                10,
+                &RankConfig::default(),
+                &SearchOptions {
+                    exact: true,
+                    ..Default::default()
+                },
+                Some(&meaning),
+            )
+            .unwrap();
+        assert_eq!(domains(&results.hits), ["physics.example"]);
+    }
+
+    #[test]
+    fn drug_sales_patterns_are_excluded_but_small_guidance_and_navigation_survive() {
+        let records = vec![
+            site(
+                "quick-meds.info",
+                Some("Buy Viagra online without a prescription"),
+                Some("Viagra dosage and side effects"),
+                &[],
+                &[],
+                popular(100, 20_000),
+            ),
+            site(
+                "small-clinic.pics",
+                Some("Viagra dosage and side effects"),
+                Some("Clinical guidance about Viagra dosage and side effects"),
+                &[],
+                &[],
+                obscure(900_000, 0),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let meaning = FixedMeaning(vec![("quick-meds.info", 0.99), ("small-clinic.pics", 0.7)]);
+        for vector in [None, Some(&meaning as &dyn Meaning)] {
+            let results = searcher
+                .search_meaning(
+                    "Viagra dosage side effects",
+                    10,
+                    &RankConfig::default(),
+                    &SearchOptions {
+                        exact: true,
+                        ..Default::default()
+                    },
+                    vector,
+                )
+                .unwrap();
+            assert_eq!(domains(&results.hits), ["small-clinic.pics"]);
+            let explicit = searcher
+                .search_meaning(
+                    "quick-meds.info",
+                    1,
+                    &RankConfig::default(),
+                    &SearchOptions::default(),
+                    vector,
+                )
+                .unwrap();
+            assert_eq!(domains(&explicit.hits), ["quick-meds.info"]);
+            let pool = searcher
+                .candidate_pool(
+                    "Viagra dosage side effects",
+                    &RankConfig::default(),
+                    &SearchOptions::default(),
+                    vector,
+                )
+                .unwrap();
+            let offer = pool
+                .evidence
+                .iter()
+                .find(|e| e.domain == "quick-meds.info")
+                .unwrap();
+            assert_eq!(
+                offer.source_quality.as_ref().unwrap().reason,
+                health::SourceQualityReason::UnprescribedDrugOffer
+            );
+        }
+    }
+
+    #[test]
     fn big_sites_far_in_meaning_do_not_fill_a_weak_search() {
         let records = vec![
             site(
@@ -4189,6 +4644,7 @@ mod tests {
             meaning_only_relevance: None,
             question_relevance: None,
             partial_closeness: None,
+            whole_query_relevance: false,
             ..RankConfig::default()
         };
         // On popularity alone it would have come before the plumbers...
@@ -5648,6 +6104,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
         };
         // "tco bell": bell.ca as typed, tacobell.com right under it.
         let mut hits = vec![
@@ -5734,6 +6191,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
         };
         let kept = |hits: Vec<Hit>, typed: Option<&str>| -> Vec<String> {
             without_copies(hits, typed, None)
@@ -6135,7 +6593,13 @@ mod tests {
     #[test]
     fn scores_blend_text_and_popularity() {
         let (_dir, searcher) = build(&corpus());
-        let cfg = RankConfig::default();
+        // The comparison arm retains the preceding blend; evidence-tier
+        // behavior and score monotonicity have their own ranking fixtures.
+        let cfg = RankConfig {
+            whole_query_relevance: false,
+            ..RankConfig::default()
+        };
+        let search = |query| searcher.search_with(query, 10, &cfg).unwrap();
         let check = |hits: &[Hit], expected: &dyn Fn(&Hit) -> f32| {
             assert!(hits.iter().any(|hit| hit.text_score == 1.0));
             for pair in hits.windows(2) {
@@ -6153,7 +6617,7 @@ mod tests {
         // with popularity counting in proportion below the relevance floor.
         let alpha = cfg.described_alpha.unwrap();
         let floor = cfg.described_relevance.unwrap();
-        let hits = searcher.search("online banking", 10).unwrap();
+        let hits = search("online banking");
         check(&hits, &|hit| {
             let prior = hit.link_score * (hit.text_score / floor).min(1.0);
             alpha * prior + (1.0 - alpha) * hit.text_score
@@ -6161,7 +6625,7 @@ mod tests {
 
         // "us bank" is usbank.com's whole name, as its label and in most
         // links to it: the larger bonus of the two, full trust.
-        let hits = searcher.search("us bank", 10).unwrap();
+        let hits = search("us bank");
         let usbank = &hits[0];
         assert_eq!(usbank.domain, "usbank.com");
         let record_score = corpus()[0].link_score();
@@ -6186,7 +6650,7 @@ mod tests {
 
         // "us bank online" goes on past the name: usbank.com gets 2/3 of the
         // bonus, and sites below the trusted link score lose some of theirs.
-        let hits = searcher.search("us bank online", 10).unwrap();
+        let hits = search("us bank online");
         assert_eq!(hits[0].domain, "usbank.com");
         let trusted = cfg.trusted_link_score.min(usbank.link_score);
         assert!(hits.iter().any(|hit| hit.link_score < trusted));
@@ -6456,7 +6920,7 @@ mod tests {
             ("login", None),
             ("help center", None),
             ("login help desk", None),
-            ("chase center tickets", None),
+            ("chase center tickets", Some("chase center")),
         ] {
             assert_eq!(without_intent_words(query).as_deref(), name, "{query:?}");
         }
@@ -6478,6 +6942,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
             placing_text_score: None,
         };
         let order = |query: &str, name: &str| {
@@ -6535,7 +7000,11 @@ mod tests {
         let (_dir, searcher) = build(&lookalike_corpus());
         // chasecenter.com covers "chase center", chase.com only "chase".
         let hits = searcher.search("chase center tickets", 10).unwrap();
-        assert_eq!(domains(&hits)[..2], ["chasecenter.com", "chase.com"]);
+        assert_eq!(
+            domains(&hits)[..2],
+            ["chasecenter.com", "chase.com"],
+            "{hits:#?}"
+        );
         assert_eq!(top(&searcher, "chase login"), "chase.com");
     }
 

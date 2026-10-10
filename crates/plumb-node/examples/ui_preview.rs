@@ -39,6 +39,7 @@ impl SearchBackend for PreviewSearch {
                 key_pages: Vec::new(),
                 demand: None,
                 missing_words: false,
+                query_evidence: None,
             })
             .collect())
     }

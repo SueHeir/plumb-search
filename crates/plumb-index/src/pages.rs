@@ -3047,7 +3047,9 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
 /// stays where it put it: before the same site, or last, except that a
 /// docs page found by its words never comes before the best site.
 pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -> Vec<PlacedPage> {
-    pages.retain(|hit| subpage_asked(query, sites, hit));
+    pages.retain(|hit| {
+        crate::health::page_allowed(query, &hit.page) && subpage_asked(query, sites, hit)
+    });
     if !asks_for_podcasts(query) {
         // Podcasts it does not ask for take no other page's place
         // ([`keep_page_rules`]).
@@ -3196,6 +3198,7 @@ fn in_other_language(url: &str) -> bool {
 /// podcasts come after the best site and the other pages listed on their
 /// own ("better call saul" wants amc.com and the article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
+    placed.retain(|page| crate::health::page_allowed(query, &page.hit.page));
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
         if docs_kept_below(&page.hit, sites) {
             page.at = page.at.max(1).min(sites.len());
@@ -5137,6 +5140,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
             placing_text_score: None,
         }
     }

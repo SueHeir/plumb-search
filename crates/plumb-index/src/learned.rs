@@ -89,6 +89,9 @@ pub struct RowSignals {
     pub whole: bool,
     /// Pages shown under a site.
     pub under: Vec<PageSignals>,
+    /// Diagnostic evidence only. This does not add model input features
+    /// or change the compatible built-in model contract.
+    pub query_evidence: Option<crate::CandidateEvidence>,
     /// In training data: 1 when the row holds an expected answer.
     pub label: u8,
 }
@@ -107,6 +110,7 @@ impl RowSignals {
             demand: hit.demand,
             country: hit.country.clone(),
             title: hit.title.clone(),
+            query_evidence: hit.query_evidence.clone(),
             under: under.iter().map(|p| PageSignals::of(p)).collect(),
             ..RowSignals::default()
         }
@@ -373,7 +377,30 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
             Listed::Page(i) => RowSignals::page(&placed[i].hit),
         })
         .collect();
-    let order = model.order(query, &signals);
+    let mut order = model.order(query, &signals);
+    // The model may reorder within a relevance tier, but an unsupported
+    // domain word cannot regain top placement because it is popular.
+    // Pages keep their model positions; only the site slots change.
+    let mut sites: Vec<_> = order
+        .iter()
+        .copied()
+        .filter(|&row| matches!(rows[row], Listed::Site(_)))
+        .collect();
+    sites.sort_by_key(|&row| {
+        std::cmp::Reverse(match rows[row] {
+            Listed::Site(i) => hits[i]
+                .query_evidence
+                .as_ref()
+                .map_or(1, |evidence| evidence.relevance_tier),
+            Listed::Page(_) => unreachable!(),
+        })
+    });
+    let mut sites = sites.into_iter();
+    for row in &mut order {
+        if matches!(rows[*row], Listed::Site(_)) {
+            *row = sites.next().expect("site slot");
+        }
+    }
     let mut new_hits: Vec<Hit> = Vec::with_capacity(hits.len());
     let mut alone: Vec<PlacedPage> = Vec::new();
     for &row in &order {
@@ -872,6 +899,7 @@ mod tests {
             key_pages: Vec::new(),
             demand: None,
             missing_words: false,
+            query_evidence: None,
             placing_text_score: None,
         }
     }

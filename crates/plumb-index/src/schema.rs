@@ -163,6 +163,19 @@ pub(crate) struct Fields {
 }
 
 impl Fields {
+    /// Fields that describe the site's subject, rather than merely spelling
+    /// a domain or repeating a name supplied by another site. This uses the
+    /// existing index fields, so older readable indexes need no rebuild.
+    pub(crate) fn substantive(self) -> [Field; 5] {
+        [
+            self.title,
+            self.description,
+            self.about,
+            self.headings,
+            self.terms,
+        ]
+    }
+
     /// Looks the fields up by name; fails when `schema` lacks one.
     pub(crate) fn new(schema: &Schema) -> Result<Fields> {
         let field = |name: &str| {
