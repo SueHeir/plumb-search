@@ -27,7 +27,9 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{article_url, Article};
 use plumb_core::packages::PackageInfo;
-use plumb_core::{adult_level, host_of, normalize_text, AdultLevel, Operators, SafeSearch};
+use plumb_core::{
+    adult_level, host_of, normalize_text, registrable_domain, AdultLevel, Operators, SafeSearch,
+};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
@@ -2738,6 +2740,7 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
 /// stays where it put it: before the same site, or last, except that a
 /// docs page found by its words never comes before the best site.
 pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -> Vec<PlacedPage> {
+    pages.retain(|hit| subpage_asked(query, sites, hit));
     if !asks_for_podcasts(query) {
         // Podcasts it does not ask for take no other page's place
         // ([`keep_page_rules`]).
@@ -2757,6 +2760,87 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -
     }
     keep_page_rules(query, sites, &mut placed);
     placed
+}
+
+/// Best sites of a query looked at for the site of a subpage found by its
+/// words ([`subpage_asked`]).
+const SUBPAGE_SITES: usize = 3;
+/// Least share of a subpage's title words a query found it by must have,
+/// when it does not name the page's site.
+const SUBPAGE_TITLE_SHARE: f32 = 0.75;
+/// Words a title shares with anything, left out of [`SUBPAGE_TITLE_SHARE`].
+const TITLE_STOP_WORDS: &[&str] = &[
+    "a", "an", "and", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with",
+];
+
+/// Whether `hit`, when it is a page of the subpages set, may be listed for
+/// `query`: named by its whole title, on one of the query's best sites
+/// ("rotten tomatoes oppenheimer", "met museum hours"), or with most of
+/// its title's words in the query ("amazon leadership principles" for
+/// "Leadership Principles"). A big site's news, press releases and reviews
+/// share words with all sorts of searches: "seven summits" is not a
+/// leadership summit at jnj.com, nor "mount everest" a film review at
+/// ign.com. Pages of other sets always may.
+fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
+    if hit.page.set != SUBPAGES_SET || hit.named {
+        return true;
+    }
+    if in_other_language(&hit.page.url) {
+        return false;
+    }
+    let domain = registrable_domain(&hit.page.url);
+    if domain.is_some()
+        && sites
+            .iter()
+            .take(SUBPAGE_SITES)
+            .any(|site| registrable_domain(&site.domain) == domain)
+    {
+        return true;
+    }
+    let words = |text: &str| -> HashSet<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            // The "s" of "John's" says nothing.
+            .filter(|word| word.chars().count() > 1)
+            .map(|word| {
+                let word = word.to_lowercase();
+                // "Sheets" is "sheet".
+                match word.strip_suffix('s') {
+                    Some(one) if one.len() > 2 => one.to_string(),
+                    _ => word,
+                }
+            })
+            .filter(|word| !TITLE_STOP_WORDS.contains(&word.as_str()))
+            .collect()
+    };
+    let title = words(&hit.page.title);
+    let asked = words(query);
+    let shared = title.intersection(&asked).count();
+    shared >= 2 && shared as f32 >= SUBPAGE_TITLE_SHARE * title.len() as f32
+}
+
+/// Languages a site's pages in another language than English are under
+/// (`https://www.iso.org/ru/...`, `/de-de/`). "uk" is left out: it is the
+/// UK's pages as often as Ukrainian ones.
+const OTHER_LANGUAGES: &[&str] = &[
+    "ar", "bg", "cs", "da", "de", "el", "es", "fa", "fi", "fr", "he", "hi", "hu", "id", "it", "ja",
+    "ko", "nl", "no", "pl", "pt", "ro", "ru", "sk", "sv", "th", "tr", "vi", "zh",
+];
+
+/// Whether `url`'s path starts with another language than English:
+/// `https://www.iso.org/ru/iso-4217-currency-codes.html`.
+fn in_other_language(url: &str) -> bool {
+    let path = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split_once('/')
+        .map_or("", |(_, path)| path);
+    let first = path
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    let language = first.split(['-', '_']).next().unwrap_or("");
+    first.len() <= 5 && OTHER_LANGUAGES.contains(&language)
 }
 
 /// The places no ranking overrides, applied after [`place_pages`] and
@@ -3534,6 +3618,132 @@ mod tests {
         );
         // Part of a title names nothing.
         assert!(found("perft").is_empty());
+    }
+
+    #[test]
+    fn subpages_are_listed_only_when_asked_for() {
+        let hit = |url: &str, title: &str, named: bool| PageHit {
+            page: Page::from_set(
+                SUBPAGES_SET,
+                Article {
+                    title: title.into(),
+                    item: Some(url.into()),
+                    views: 2_000,
+                    ..Article::default()
+                },
+            )
+            .unwrap(),
+            score: 0.9,
+            named,
+            popularity: 0.5,
+            whole: false,
+            learned: None,
+        };
+        let listed = |query: &str, sites: &[&str], hit: PageHit| {
+            let sites: Vec<crate::Hit> = sites.iter().map(|d| site(d, false)).collect();
+            !place_pages(query, &sites, vec![hit]).is_empty()
+        };
+        let summit = || {
+            hit(
+                "https://www.jnj.com/latest-news/womens-leadership-summit",
+                "Women's Leadership Summit brings seven teams together",
+                false,
+            )
+        };
+        // Found by its words on a site the query does not name.
+        assert!(!listed(
+            "seven summits",
+            &["7summits.com", "wikipedia.org"],
+            summit()
+        ));
+        // On one of the query's best sites.
+        assert!(listed("jnj seven summit", &["jnj.com"], summit()));
+        let everest = || {
+            hit(
+                "https://www.ign.com/articles/everest-review",
+                "Everest Review",
+                false,
+            )
+        };
+        assert!(!listed("mount everest", &["everest.com"], everest()));
+        // Two of three words is not enough, and the "s" of "John's" is
+        // not a word.
+        let gatsby = || {
+            hit(
+                "https://www.broadway.org/shows/gatsby",
+                "The Great Gatsby - On Broadway",
+                false,
+            )
+        };
+        assert!(!listed(
+            "the great gatsby f scott fitzgerald",
+            &["gatsbyjs.com"],
+            gatsby()
+        ));
+        let health = || {
+            hit(
+                "https://www.oracle.com/customers/st-johns-health/",
+                "St. John's Health",
+                false,
+            )
+        };
+        assert!(!listed("time in st john's", &["stjohns.edu"], health()));
+        // Not in another language, even on a best site.
+        let codes = |path: &str| {
+            hit(
+                &format!("https://www.iso.org/{path}iso-4217-currency-codes.html"),
+                "ISO 4217 Currency codes",
+                false,
+            )
+        };
+        assert!(!listed("iso 4217", &["iso.org"], codes("ru/")));
+        assert!(!listed("iso 4217", &["iso.org"], codes("fr-fr/")));
+        assert!(listed("iso 4217", &["iso.org"], codes("")));
+        assert!(listed("iso 4217", &["iso.org"], codes("en/")));
+        // Most of its title's words.
+        let principles = || {
+            hit(
+                "https://www.aboutamazon.com/about-us/leadership-principles",
+                "Leadership Principles",
+                false,
+            )
+        };
+        assert!(listed(
+            "amazon leadership principles",
+            &["amazon.com"],
+            principles()
+        ));
+        let fact_sheet = || {
+            hit(
+                "https://nssdc.gsfc.nasa.gov/planetary/factsheet/",
+                "Planetary Fact Sheet - Metric",
+                false,
+            )
+        };
+        assert!(listed(
+            "planetary fact sheet",
+            &["planetary.org"],
+            fact_sheet()
+        ));
+        // Named by its whole title, or on a subdomain of a best site.
+        assert!(listed(
+            "perft results",
+            &[],
+            hit(
+                "https://chessprogramming.org/Perft_Results",
+                "Perft Results",
+                true
+            )
+        ));
+        assert!(listed(
+            "codata constants",
+            &["nist.gov"],
+            hit(
+                "https://physics.nist.gov/cuu/Constants/",
+                "Fundamental Physical Constants",
+                false
+            )
+        ));
     }
 
     #[test]
