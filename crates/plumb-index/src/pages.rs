@@ -1163,6 +1163,50 @@ fn base_title(title: &str) -> &str {
     }
 }
 
+#[derive(Hash, PartialEq, Eq)]
+struct VersionEvidence {
+    literal: String,
+    labelled: bool,
+}
+
+/// Version literals retain dots, suffixes and numeric boundaries. A v/V
+/// prefix is case folded but retained: v3.2 and 3.2 are distinct evidence.
+/// An explicit "version" request also requires labelled evidence, so a
+/// decimal in a step count cannot stand in for the requested version.
+fn version_evidence(text: &str) -> HashSet<VersionEvidence> {
+    let mut evidence = HashSet::new();
+    let mut after_label = false;
+    for atom in text.split(|c: char| !c.is_alphanumeric() && !matches!(c, '.' | '-' | '+' | '_')) {
+        let atom = atom.trim_end_matches('.').to_ascii_lowercase();
+        if atom.is_empty() {
+            continue;
+        }
+        let prefixed = atom.starts_with('v');
+        let numeric = atom.strip_prefix('v').unwrap_or(&atom);
+        let release = numeric.split(['-', '+']).next().unwrap_or("");
+        let components: Vec<_> = release.split('.').collect();
+        let valid = components
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+        if valid {
+            if components.len() > 1 || prefixed {
+                evidence.insert(VersionEvidence {
+                    literal: atom.clone(),
+                    labelled: false,
+                });
+            }
+            if after_label || prefixed {
+                evidence.insert(VersionEvidence {
+                    literal: atom.clone(),
+                    labelled: true,
+                });
+            }
+        }
+        after_label = matches!(atom.as_str(), "version" | "versions");
+    }
+    evidence
+}
+
 /// What kind of page words around a name ask for ([`hinted_name`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hint {
@@ -2993,6 +3037,7 @@ impl PageSearcher {
         // found only here must pass the full subject and task check below.
         // Keep the existing exact-title collectors and their limits intact.
         let subject_words = self.subject_words(&words);
+        let versions = version_evidence(query);
         let mut subject_word = None;
         if subject_words.len() >= 2 && subject_words.len() < words.len() {
             for word in &subject_words {
@@ -3062,7 +3107,8 @@ impl PageSearcher {
             if page.set == MUSIC_SET && !asked_by_title {
                 continue;
             }
-            let subject = self.subject_match(&page, &words, &subject_words, &inside_keys);
+            let subject =
+                self.subject_match(&page, &words, &subject_words, &inside_keys, &versions);
             if only_subject_word.contains(&address) && subject <= 0.0 {
                 continue;
             }
@@ -3275,15 +3321,17 @@ impl PageSearcher {
     /// A title or alias in full anchors the subject. Every substantive
     /// query word must also be supported by the stored indexed text,
     /// including a task word beyond that name. Asking words cannot dilute
-    /// the subject's score, and an unsupported client, version or task
-    /// cannot gain it. This does not mark the page as named or as answering
-    /// the whole question.
+    /// the subject's score. Client/task words and intact version literals
+    /// need lexical evidence; mentions in negative or unrelated passages
+    /// do not establish compatibility. This does not mark the page as
+    /// named or as answering the whole question.
     fn subject_match(
         &self,
         page: &Page,
         words: &[String],
         substantive: &[String],
         inside_keys: &HashSet<String>,
+        versions: &HashSet<VersionEvidence>,
     ) -> f32 {
         if substantive.len() == words.len()
             || !(page.is_article() || page.is_site_page() || page.set == GITHUB_SET)
@@ -3319,17 +3367,12 @@ impl PageSearcher {
             context.push(' ');
             context.push_str(lead);
         }
-        let said_in_order = analysis::tokens(&self.words, &context);
-        // Tokenization splits dotted versions. Their components must stay
-        // together and in order: 3.2 cannot support a request for 2.3 or 3.3.
-        if words
-            .split(|word| !word.chars().any(|c| c.is_ascii_digit()))
-            .filter(|run| run.len() > 1)
-            .any(|run| !said_in_order.windows(run.len()).any(|span| span == run))
-        {
+        if !versions.is_subset(&version_evidence(&context)) {
             return 0.0;
         }
-        let said: HashSet<_> = said_in_order.into_iter().collect();
+        let said: HashSet<_> = analysis::tokens(&self.words, &context)
+            .into_iter()
+            .collect();
         let stems: HashSet<_> = analysis::tokens(&self.stemmed, &context)
             .into_iter()
             .collect();
@@ -7771,6 +7814,55 @@ mod tests {
             let hits = s.search(query, 10).unwrap();
             assert!(place_pages(query, &[], hits).is_empty(), "{query}");
         }
+    }
+
+    #[test]
+    fn subject_versions_require_intact_labelled_literals_and_numeric_boundaries() {
+        let descriptions = [
+            "Enable tracking in Legacy client version 4.0; step 3:2 attempts.",
+            "Enable tracking in Legacy client version 4.0; step 3.2 attempts.",
+            "Enable tracking in Legacy client version 13.2; step 3:2 attempts.",
+            "Enable tracking in Legacy client version 3.20; step 3:2 attempts.",
+            "Enable tracking in Legacy client version 3.2.1; step 3:2 attempts.",
+            "Enable tracking in Legacy client version 3.2-beta; step 3:2 attempts.",
+            "Enable tracking in Legacy client version client3.2; step 3:2 attempts.",
+            "Enable tracking in Legacy client version v3.2; step 3:2 attempts.",
+        ];
+        let pages: Vec<_> = descriptions
+            .iter()
+            .enumerate()
+            .map(|(i, description)| {
+                let mut page = page("HarborKit", 0, &[]);
+                page.url = format!("https://en.wikipedia.org/wiki/HarborKit_fixture_{i}");
+                page.description = Some((*description).into());
+                page
+            })
+            .collect();
+        let (_dir, s) = searcher(&pages);
+        let query = "How do I enable HarborKit tracking in Legacy client version 3.2?";
+        let hits = s.search(query, 20).unwrap();
+        assert!(place_pages(query, &[], hits).is_empty());
+
+        // Full literals remain usable, including case-folded v/V prefixes,
+        // suffixes and explicitly labelled major versions.
+        for version in ["3.2", "V3.2", "3.2-rc.1", "3.2+build5", "3"] {
+            let mut page = page("HarborKit", 0, &[]);
+            page.description = Some(format!(
+                "Enable tracking in Legacy client version {}.",
+                version.to_ascii_lowercase()
+            ));
+            let (_dir, s) = searcher(std::slice::from_ref(&page));
+            let query =
+                format!("How do I enable HarborKit tracking in Legacy client version {version}?");
+            let hits = s.search(&query, 10).unwrap();
+            assert_eq!(place_pages(&query, &[], hits).len(), 1, "{version}");
+        }
+        let mut page = page("HarborKit", 0, &[]);
+        page.description =
+            Some("Enable tracking in Legacy client version 4; step 3 attempts.".into());
+        let (_dir, s) = searcher(&[page]);
+        let query = "How do I enable HarborKit tracking in Legacy client version 3?";
+        assert!(place_pages(query, &[], s.search(query, 10).unwrap()).is_empty());
     }
 
     #[test]
