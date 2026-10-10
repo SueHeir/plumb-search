@@ -27,6 +27,8 @@ jobs:
       - run: cargo fmt --all --check
       # The desktop app needs GUI libraries; the desktop job checks it.
       - run: cargo clippy --workspace --exclude plumb-desktop --all-targets -- -D warnings
+      - name: Test retained replay with all six delivery reservations
+        run: cargo test --locked -p plumb-node --lib node::tests::a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_acknowledgment -- --exact --test-threads=1
       - run: cargo test --workspace --exclude plumb-desktop
 
   # Every third-party crate's license is one about.toml accepts, and the
