@@ -855,18 +855,18 @@ pub struct FetchPagesArgs {
     /// Docs/reference/subpages: fewest useful pages needed to replace a host.
     #[arg(long, value_name = "N", default_value_t = 3)]
     pub min_useful_pages: usize,
-    /// Docs/reference/subpages: write an immutable generation for evaluation
+    /// Docs/reference/subpages/papers: write an immutable generation for evaluation
     /// without publishing the set file.
     #[arg(long, conflicts_with = "promote_generation")]
     pub stage_only: bool,
     /// Promote a previously staged generation after its canaries pass.
     #[arg(long, value_name = "DIR")]
     pub promote_generation: Option<PathBuf>,
-    /// Docs/reference/subpages: explicitly permit growth beyond 125% of the
+    /// Docs/reference/subpages/papers: explicitly permit growth beyond 125% of the
     /// current compressed set (normally left staged for review).
     #[arg(long)]
     pub allow_set_growth: bool,
-    /// Docs/reference/subpages: maximum compressed bytes in a candidate set;
+    /// Docs/reference/subpages/papers: maximum compressed bytes in a candidate set;
     /// 0 leaves the limit unset. Includes retained hosts in a targeted refresh.
     #[arg(long, value_name = "BYTES", default_value_t = 0)]
     pub max_set_bytes: u64,
@@ -920,6 +920,26 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Papers: opt in to bounded recent publication ingestion ending on this
+    /// inclusive ISO date (YYYY-MM-DD). Requires --work for resumable progress.
+    /// The recent lane stays off unless this option is supplied.
+    #[arg(long, value_name = "DATE", requires = "work")]
+    pub recent_papers_end: Option<String>,
+    /// Papers: inclusive recent publication window, 1..366 days.
+    #[arg(long, value_name = "DAYS", default_value_t = plumb_ingest::recent_papers::DEFAULT_WINDOW_DAYS, requires = "recent_papers_end")]
+    pub recent_papers_days: usize,
+    /// Papers: recent records reserved across date/domain partitions, 1..50000.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::recent_papers::DEFAULT_RECORD_BUDGET, requires = "recent_papers_end")]
+    pub recent_papers_records: usize,
+    /// Papers: most recent-provider requests this invocation, 1..1000. A
+    /// refused or unfinished run retains progress and keeps the previous set.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 1000,
+        requires = "recent_papers_end"
+    )]
+    pub recent_papers_requests: usize,
     /// Papers: most requests to CORE for free copies (fifty papers each),
     /// when CORE_API_KEY is set.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::core_ac::DEFAULT_MAX_REQUESTS)]
@@ -1486,6 +1506,66 @@ mod tests {
             "generation"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn recent_paper_ingestion_is_explicit_and_requires_resumable_work() {
+        let Command::FetchPages(defaults) =
+            parse(&["fetch-pages", "--set", "papers", "--out", "papers.tsv.gz"])
+                .unwrap()
+                .command
+        else {
+            panic!("not fetch-pages")
+        };
+        assert!(defaults.recent_papers_end.is_none());
+        assert!(parse(&[
+            "fetch-pages",
+            "--set",
+            "papers",
+            "--out",
+            "papers.tsv.gz",
+            "--recent-papers-end",
+            "2026-10-09",
+        ])
+        .is_err());
+        assert!(parse(&[
+            "fetch-pages",
+            "--set",
+            "papers",
+            "--out",
+            "papers.tsv.gz",
+            "--recent-papers-requests",
+            "5",
+        ])
+        .is_err());
+        let Command::FetchPages(args) = parse(&[
+            "fetch-pages",
+            "--set",
+            "papers",
+            "--out",
+            "papers.tsv.gz",
+            "--work",
+            "scratch",
+            "--recent-papers-end",
+            "2026-10-09",
+            "--recent-papers-days",
+            "30",
+            "--recent-papers-records",
+            "100",
+            "--recent-papers-requests",
+            "4",
+            "--stage-only",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not fetch-pages")
+        };
+        assert_eq!(args.recent_papers_end.as_deref(), Some("2026-10-09"));
+        assert_eq!(args.recent_papers_days, 30);
+        assert_eq!(args.recent_papers_records, 100);
+        assert_eq!(args.recent_papers_requests, 4);
+        assert!(args.stage_only);
     }
 
     #[test]

@@ -590,6 +590,7 @@ fn publish_sites<S>(
 /// Makes the papers set file `dest` from OpenAlex's API, with free copies
 /// from OpenAlex (Unpaywall's data and arXiv) and CORE.
 fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    let recent = recent_paper_options(args)?;
     let key = std::env::var("OPENALEX_API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty());
@@ -609,8 +610,8 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
         progress.as_deref(),
     ))??;
     if !fetched.complete {
-        warn!(
-            "OpenAlex stopped answering: writing the {} most cited papers; run again{} to carry on",
+        bail!(
+            "OpenAlex fetch incomplete ({} papers); previous set kept; run again{} to carry on",
             fetched.papers.len(),
             if progress.is_some() {
                 " with the same --work"
@@ -620,6 +621,27 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
         );
     }
     let mut papers = fetched.papers;
+    let mut stages = vec![plumb_net::pages::QualityStage {
+        name: "source-refresh".into(),
+        complete: true,
+    }];
+    if let Some((options, progress)) = recent {
+        info!(
+            "asking OpenAlex for recent publications from {} to {} (at most {} records, {} requests)",
+            options.from_date, options.to_date, options.record_budget, options.request_budget
+        );
+        let fetched = block_on(plumb_ingest::recent_papers::fetch_recent_papers(
+            &client,
+            &options,
+            key.as_deref(),
+            &progress,
+        ))??;
+        merge_recent_papers(&mut papers, fetched)?;
+        stages.push(plumb_net::pages::QualityStage {
+            name: "recent-publications".into(),
+            complete: true,
+        });
+    }
     // CORE's repositories give free copies of papers OpenAlex knows none
     // of; with --work, what CORE answered is kept there for later runs.
     let core_key = std::env::var("CORE_API_KEY")
@@ -653,20 +675,99 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     // OpenAlex lacks; with --work, Papers with Code's methods are kept
     // there.
     let methods_cache = args.work.as_deref().map(|w| w.join("papers-with-code"));
-    match block_on(plumb_ingest::paper_names::improve(
+    let named = block_on(plumb_ingest::paper_names::improve(
         &client,
         &mut papers,
         methods_cache.as_deref(),
-    ))? {
-        Ok(named) => info!(
-            "named {} papers by their titles and {} by Papers with Code's methods; added {} arXiv papers OpenAlex lacks and gave {} mis-dated ones their arXiv DOI",
-            named.by_title, named.by_method, named.added, named.redated
-        ),
-        Err(err) => warn!("naming the papers: {err:#}; writing them without"),
-    }
+    ))??;
+    info!(
+        "named {} papers by their titles and {} by Papers with Code's methods; added {} arXiv papers OpenAlex lacks and repaired {} dates and {} records",
+        named.by_title, named.by_method, named.added, named.redated, named.corrected
+    );
+    stages.extend(
+        ["canonical-paper-repair", "article-validation"].map(|name| {
+            plumb_net::pages::QualityStage {
+                name: name.into(),
+                complete: true,
+            }
+        }),
+    );
     let free = papers.iter().filter(|p| p.website.is_some()).count();
     info!("{free} of {} papers have a free copy", papers.len());
-    write_set(dest, &papers, "papers")
+    publish_papers(args, dest, &papers, stages)
+}
+
+fn recent_paper_options(
+    args: &FetchPagesArgs,
+) -> Result<Option<(plumb_ingest::recent_papers::RecentOptions, PathBuf)>> {
+    let Some(end) = &args.recent_papers_end else {
+        return Ok(None);
+    };
+    let mut options =
+        plumb_ingest::recent_papers::RecentOptions::ending(end, args.recent_papers_days)?;
+    if !(1..=plumb_ingest::recent_papers::DEFAULT_RECORD_BUDGET)
+        .contains(&args.recent_papers_records)
+        || !(1..=1000).contains(&args.recent_papers_requests)
+    {
+        bail!("recent-paper budgets must be 1..50000 records and 1..1000 requests");
+    }
+    if args.recent_papers_records < 4 * args.recent_papers_days.div_ceil(30) {
+        bail!("recent-paper record budget must reserve a record for each date/domain partition");
+    }
+    options.record_budget = args.recent_papers_records;
+    options.request_budget = args.recent_papers_requests;
+    let progress = args
+        .work
+        .as_deref()
+        .context("pass --work DIR for resumable recent-paper progress")?
+        .join("openalex-recent");
+    Ok(Some((options, progress)))
+}
+
+fn merge_recent_papers(
+    papers: &mut Vec<plumb_core::Article>,
+    fetched: plumb_ingest::recent_papers::RecentFetched,
+) -> Result<()> {
+    if !fetched.complete || fetched.stopped_status.is_some() {
+        bail!(
+            "recent-paper fetch incomplete ({} requests this run, stopped status {:?}); previous set kept; resume with the same --work and window",
+            fetched.requests_this_run, fetched.stopped_status
+        );
+    }
+    let merged = plumb_ingest::recent_papers::merge_recent(papers, fetched.papers);
+    if !merged.conflicting_ids.is_empty() {
+        bail!(
+            "recent-paper merge has {} conflicting identities; previous set kept",
+            merged.conflicting_ids.len()
+        );
+    }
+    info!(
+        "added {} recent papers and matched {} existing identities",
+        merged.added, merged.matched
+    );
+    Ok(())
+}
+
+fn publish_papers(
+    args: &FetchPagesArgs,
+    dest: &Path,
+    papers: &[plumb_core::Article],
+    stages: Vec<plumb_net::pages::QualityStage>,
+) -> Result<()> {
+    let options = publication_options(args);
+    let generation = publication::stage_checked_articles(
+        dest,
+        plumb_index::pages::PAPERS_SET,
+        papers,
+        stages,
+        options,
+        plumb_ingest::paper_validation::validate_landmarks,
+    )?;
+    info!("staged paper generation {}", generation.display());
+    if !args.stage_only {
+        publication::promote(&generation, dest, plumb_index::pages::PAPERS_SET, options)?;
+    }
+    Ok(())
 }
 
 /// Makes the packages set file `dest` from ecosyste.ms's lists of the
@@ -976,6 +1077,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
         (None, Some(data)) => set.file(data),
         (None, None) => bail!("pass --data DIR or --out PATH"),
     };
+    if args.recent_papers_end.is_some() && set.id != plumb_index::pages::PAPERS_SET {
+        bail!("--recent-papers-end is only supported for --set papers");
+    }
     if let Some(generation) = &args.promote_generation {
         return publication::promote(generation, &dest, set.id, publication_options(&args));
     }
@@ -1331,6 +1435,168 @@ fn ingest_hint(outcomes: &[(&str, Outcome)], dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paper_args(dest: &Path) -> FetchPagesArgs {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "plumb",
+            "fetch-pages",
+            "--set",
+            "papers",
+            "--out",
+            dest.to_str().unwrap(),
+        ])
+        .unwrap();
+        let crate::cli::Command::FetchPages(args) = cli.command else {
+            panic!("not fetch-pages")
+        };
+        args
+    }
+
+    fn canonical_papers() -> Vec<plumb_core::Article> {
+        let source: Vec<_> = plumb_ingest::paper_validation::LANDMARKS
+            .iter()
+            .map(|landmark| plumb_ingest::paper_names::ArxivPaper {
+                id: landmark.id.into(),
+                title: landmark.title.into(),
+                year: landmark.submitted[..4].parse().ok(),
+                authors: vec![landmark.first_author.into()],
+                published: Some(landmark.submitted.into()),
+                updated: None,
+            })
+            .collect();
+        let mut papers = vec![];
+        plumb_ingest::paper_validation::repair_landmarks(&mut papers, &source).unwrap();
+        papers
+    }
+
+    fn paper_stages() -> Vec<plumb_net::pages::QualityStage> {
+        [
+            "source-refresh",
+            "canonical-paper-repair",
+            "article-validation",
+        ]
+        .map(|name| plumb_net::pages::QualityStage {
+            name: name.into(),
+            complete: true,
+        })
+        .to_vec()
+    }
+
+    #[test]
+    fn paper_publication_stages_and_keeps_previous_on_quality_or_semantic_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("papers.tsv.gz");
+        let mut args = paper_args(&dest);
+        args.stage_only = true;
+        let papers = canonical_papers();
+        publish_papers(&args, &dest, &papers, paper_stages()).unwrap();
+        assert!(!dest.exists());
+        args.stage_only = false;
+        std::fs::write(
+            crate::pages::notes_path(&dest),
+            br#"{"lines":1,"complete":false,"source_modified":1,"fetched_at":1}"#,
+        )
+        .unwrap();
+        publish_papers(&args, &dest, &papers, paper_stages()).unwrap();
+        assert!(!crate::pages::notes_path(&dest).exists());
+        let original = std::fs::read(&dest).unwrap();
+        let (modified, size) = crate::node::newer::stamp(&dest).unwrap();
+        assert!(plumb_net::pages::read_quality(&dest, modified, size)
+            .unwrap()
+            .stages
+            .iter()
+            .all(|s| s.complete));
+        let mut stages = paper_stages();
+        stages[0].complete = false;
+        assert!(publish_papers(&args, &dest, &papers, stages).is_err());
+        let mut invalid = papers;
+        invalid[0].title = "Conflicting canonical title".into();
+        assert!(publish_papers(&args, &dest, &invalid, paper_stages()).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), original);
+    }
+
+    #[test]
+    fn paper_promotion_rechecks_completed_stages_and_landmarks() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("papers.tsv.gz");
+        let args = paper_args(&dest);
+        let papers = canonical_papers();
+        let mut stages = paper_stages();
+        stages.push(plumb_net::pages::QualityStage {
+            name: "recent-publications".into(),
+            complete: true,
+        });
+        publish_papers(&args, &dest, &papers, stages).unwrap();
+        let original = std::fs::read(&dest).unwrap();
+        assert!(publish_papers(&args, &dest, &papers, paper_stages()).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), original);
+        for (candidate, stages) in [
+            (papers.clone(), vec![]),
+            (
+                vec![plumb_core::Article {
+                    title: "Unverified paper".into(),
+                    ..Default::default()
+                }],
+                paper_stages(),
+            ),
+        ] {
+            let generation = publication::stage_checked_articles(
+                &dest,
+                "papers",
+                &candidate,
+                stages,
+                publication::Options::default(),
+                |_| Ok(()),
+            )
+            .unwrap();
+            assert!(publication::promote(
+                &generation,
+                &dest,
+                "papers",
+                publication::Options::default()
+            )
+            .is_err());
+            assert_eq!(std::fs::read(&dest).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn recent_paper_config_is_bounded_and_uses_a_separate_cache() {
+        let mut args = paper_args(Path::new("papers.tsv.gz"));
+        assert!(recent_paper_options(&args).unwrap().is_none());
+        args.recent_papers_end = Some("2026-10-09".into());
+        assert!(recent_paper_options(&args).is_err());
+        args.work = Some(PathBuf::from("scratch"));
+        let (options, progress) = recent_paper_options(&args).unwrap().unwrap();
+        assert_eq!(options.to_date, "2026-10-09");
+        assert_eq!(options.from_date, "2026-07-12");
+        assert_eq!(progress, Path::new("scratch/openalex-recent"));
+        args.recent_papers_requests = 1001;
+        assert!(recent_paper_options(&args).is_err());
+        args.recent_papers_requests = 1;
+        args.recent_papers_records = 50_001;
+        assert!(recent_paper_options(&args).is_err());
+    }
+
+    #[test]
+    fn recent_paper_incomplete_provider_and_conflicts_block_candidate_publication() {
+        let mut papers = canonical_papers();
+        let original = papers.clone();
+        let fetched = |complete, papers| plumb_ingest::recent_papers::RecentFetched {
+            papers,
+            complete,
+            requests_this_run: 1,
+            partitions: vec![],
+            stopped_status: (!complete).then_some(429),
+        };
+        assert!(merge_recent_papers(&mut papers, fetched(false, vec![])).is_err());
+        assert_eq!(papers, original);
+        let mut conflict = papers[0].clone();
+        conflict.title = "Different title with the same DOI".into();
+        assert!(merge_recent_papers(&mut papers, fetched(true, vec![conflict])).is_err());
+        assert_eq!(papers, original);
+    }
 
     fn args(release: Option<&str>, url: Option<&str>) -> FetchDataArgs {
         FetchDataArgs {

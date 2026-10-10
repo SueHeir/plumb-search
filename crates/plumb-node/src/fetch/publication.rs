@@ -431,7 +431,6 @@ pub(super) fn promote(generation: &Path, dest: &Path, set: &str, options: Option
 /// Whole-set builder hook: the owner supplies a semantic validator and
 /// quality stages. This stages bytes; promotion remains a separate operation.
 /// DOI items are valid here, unlike the URL-only inner-page host merge.
-#[allow(dead_code)] // Integration hook for the separately developed paper repair.
 pub(super) fn stage_checked_articles(
     dest: &Path,
     set: &str,
@@ -531,10 +530,51 @@ fn promote_locked(generation: &Path, dest: &Path, set: &str, options: Options) -
     if options.max_bytes > 0 && std::fs::metadata(&file)?.len() > options.max_bytes {
         bail!("candidate exceeds --max-set-bytes; previous set kept");
     }
-    if read_pages(&file)?.len() != manifest.records {
+    let pages = read_pages(&file)?;
+    if pages.len() != manifest.records {
         bail!("generation count mismatch");
     }
+    if set == plumb_index::pages::PAPERS_SET {
+        if manifest.quality.stages.iter().any(|stage| !stage.complete)
+            || [
+                "source-refresh",
+                "canonical-paper-repair",
+                "article-validation",
+            ]
+            .iter()
+            .any(|name| {
+                !manifest
+                    .quality
+                    .stages
+                    .iter()
+                    .any(|stage| &stage.name == name)
+            })
+        {
+            bail!("paper generation lacks completed publication quality stages; previous set kept");
+        }
+        plumb_ingest::paper_validation::validate_landmarks(&pages)?;
+    }
+    drop(pages);
     if dest.is_file() {
+        if set == plumb_index::pages::PAPERS_SET {
+            let (modified, size) =
+                crate::node::newer::stamp(dest).context("current paper stamp")?;
+            if plumb_net::pages::read_quality(dest, modified, size).is_some_and(|quality| {
+                quality
+                    .stages
+                    .iter()
+                    .filter(|s| s.complete)
+                    .any(|existing| {
+                        !manifest
+                            .quality
+                            .stages
+                            .iter()
+                            .any(|candidate| candidate.name == existing.name && candidate.complete)
+                    })
+            }) {
+                bail!("paper generation drops a completed quality stage; previous set kept");
+            }
+        }
         let layers = crate::node::newer::layers_of(dest)?;
         if layers.iter().any(|l| !manifest.layers.contains(l)) {
             bail!("generation lacks a current enrichment layer");
@@ -562,6 +602,8 @@ fn promote_locked(generation: &Path, dest: &Path, set: &str, options: Options) -
         .0;
     let previous_manifest = std::fs::read(suffix(dest, ".manifest.json")).ok();
     let previous_quality = std::fs::read(quality_path(dest)).ok();
+    let transfer_notes = crate::pages::notes_path(dest);
+    let previous_transfer_notes = std::fs::read(&transfer_notes).ok();
     let had_previous = dest.is_file();
     crate::node::newer::install(part.path(), dest, modified)?;
     let metadata = (|| -> Result<()> {
@@ -574,6 +616,11 @@ fn promote_locked(generation: &Path, dest: &Path, set: &str, options: Options) -
                 quality: manifest.quality.clone(),
             },
         )?;
+        // This local whole-set generation supersedes notes describing an
+        // earlier peer transfer, including a truncated/incomplete transfer.
+        if transfer_notes.exists() {
+            std::fs::remove_file(&transfer_notes)?;
+        }
         // The generation pointer is published last, after all complete bytes.
         write_json(&suffix(dest, ".manifest.json"), &manifest)?;
         std::fs::File::open(parent)?.sync_all()?;
@@ -587,6 +634,7 @@ fn promote_locked(generation: &Path, dest: &Path, set: &str, options: Options) -
         }
         restore_note(&suffix(dest, ".manifest.json"), previous_manifest)?;
         restore_note(&quality_path(dest), previous_quality)?;
+        restore_note(&transfer_notes, previous_transfer_notes)?;
         return Err(error.context("publication rolled back after metadata failure"));
     }
     info!(
@@ -612,7 +660,7 @@ fn note_quality(file: &Path, quality: &SetQuality) -> Result<()> {
 fn restore_note(path: &Path, bytes: Option<Vec<u8>>) -> Result<()> {
     if let Some(bytes) = bytes {
         std::fs::write(path, bytes)?;
-    } else if path.exists() {
+    } else if path.is_file() {
         std::fs::remove_file(path)?;
     }
     Ok(())
@@ -746,15 +794,29 @@ mod tests {
     fn whole_set_hook_requires_semantic_validation_and_roundtrips_doi_items() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("papers.tsv.gz");
-        let pages = [Article {
-            title: "Attention Is All You Need".into(),
-            item: Some("10.48550/arxiv.1706.03762".into()),
-            ..Default::default()
-        }];
-        let stages = vec![QualityStage {
-            name: "canonical-paper-repair".into(),
+        let mut pages = vec![];
+        let source: Vec<_> = plumb_ingest::paper_validation::LANDMARKS
+            .iter()
+            .map(|landmark| plumb_ingest::paper_names::ArxivPaper {
+                id: landmark.id.into(),
+                title: landmark.title.into(),
+                year: landmark.submitted[..4].parse().ok(),
+                authors: vec![landmark.first_author.into()],
+                published: Some(landmark.submitted.into()),
+                updated: None,
+            })
+            .collect();
+        plumb_ingest::paper_validation::repair_landmarks(&mut pages, &source).unwrap();
+        let stages = [
+            "source-refresh",
+            "canonical-paper-repair",
+            "article-validation",
+        ]
+        .map(|name| QualityStage {
+            name: name.into(),
             complete: true,
-        }];
+        })
+        .to_vec();
         assert!(stage_checked_articles(
             &dest,
             "papers",
@@ -768,7 +830,7 @@ mod tests {
         let path =
             stage_checked_articles(&dest, "papers", &pages, stages, Options::default(), |p| {
                 anyhow::ensure!(
-                    p[0].title == "Attention Is All You Need" && p[0].item == pages[0].item,
+                    p[0].title == pages[0].title && p[0].item == pages[0].item,
                     "canonical identity changed"
                 );
                 Ok(())
@@ -828,6 +890,9 @@ mod tests {
             snapshot_key
         );
         let current = std::fs::read(&dest).unwrap();
+        let quality_before = std::fs::read(quality_path(&dest)).unwrap();
+        let transfer_before = br#"{"lines":1,"complete":false,"source_modified":1,"fetched_at":1}"#;
+        std::fs::write(crate::pages::notes_path(&dest), transfer_before).unwrap();
         assert!(promote(
             &staged,
             &dest,
@@ -855,5 +920,10 @@ mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(&dest).unwrap(), current);
+        assert_eq!(std::fs::read(quality_path(&dest)).unwrap(), quality_before);
+        assert_eq!(
+            std::fs::read(crate::pages::notes_path(&dest)).unwrap(),
+            transfer_before
+        );
     }
 }
