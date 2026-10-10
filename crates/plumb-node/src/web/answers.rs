@@ -658,7 +658,9 @@ pub(crate) fn resolve_entity<'a>(
     if !named.is_empty() {
         candidates = named;
     } else {
-        candidates.retain(|hit| hit.whole || company);
+        // A type hint cannot validate a partial namesake: "Pear" is
+        // not "Pear Records" just because it is the only company found.
+        candidates.retain(|hit| hit.whole);
     }
     match candidates.as_slice() {
         [] => EntityResolution::Unresolved,
