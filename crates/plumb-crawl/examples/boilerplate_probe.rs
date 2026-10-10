@@ -9,9 +9,15 @@ fn main() {
             &url::Url::parse(row["url"].as_str().unwrap()).unwrap(),
             row["html"].as_str().unwrap(),
         );
+        let rich = plumb_crawl::extract_inner_page_meta(
+            &url::Url::parse(row["url"].as_str().unwrap()).unwrap(),
+            row["html"].as_str().unwrap(),
+            plumb_crawl::InnerPageExtraction::Docs,
+        )
+        .search;
         println!(
             "{}",
-            serde_json::json!({"id": row["id"], "body": meta.body_text,
+            serde_json::json!({"id": row["id"], "url": row["url"], "meta": meta, "rich": rich, "body": meta.body_text,
             "page": meta.page_text, "title": meta.title, "description": meta.description,
             "headings": meta.headings, "sections": meta.sections,
             "structured_names": meta.structured_names, "terms": meta.terms})
