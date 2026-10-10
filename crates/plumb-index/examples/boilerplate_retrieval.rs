@@ -19,7 +19,14 @@ fn main() -> Result<()> {
                 .unwrap();
             let mut meta = row["meta"].clone();
             meta["domain"] = domain.into();
-            meta["url"] = url.into();
+            // Synthetic controls share example.com in the HTML fixture file.
+            // Give each its assigned host, so the borrowed-homepage guard does
+            // not discard text as if it had been fetched from another site.
+            meta["url"] = if id.starts_with("http") {
+                url.into()
+            } else {
+                format!("https://{domain}/").into()
+            };
             let mut record: SiteRecord = serde_json::from_value(meta).unwrap();
             if let Some(name) = row["meta"]["site_name"].as_str() {
                 record.add_alias(name);
