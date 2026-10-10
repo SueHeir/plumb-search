@@ -24,6 +24,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Print the embedded version, Git revision and cleanliness as JSON.
+    BuildInfo,
     /// Run a node: set up an index from public seed data on first start,
     /// serve the search page, and keep crawling homepages to refresh the index.
     Run(RunArgs),
@@ -1206,8 +1208,18 @@ pub struct EvalArgs {
     /// Queries file: `query<TAB>expected_domain[,another_ok_domain]` per line;
     /// blank lines and lines starting with `#` are skipped. Can be given
     /// more than once; each file is measured on its own.
-    #[arg(long, value_name = "TSV", required = true)]
+    #[arg(long, value_name = "TSV", required_unless_present = "acceptance")]
     pub queries: Vec<PathBuf>,
+    /// Family-based JSONL contracts, separate from training features.
+    #[arg(long, value_name = "JSONL", requires = "report")]
+    pub acceptance: Vec<PathBuf>,
+    /// Machine-readable manifest, complete responses, stages and summary.
+    /// Core offline mode: findings, personalization, plugins and peers are off.
+    #[arg(long, value_name = "JSONL", requires = "eval_time", conflicts_with_all = ["sweep", "features_out", "facts", "profiles", "follow_suggestions", "rerank_model"])]
+    pub report: Option<PathBuf>,
+    /// Fixed evaluation clock, Unix seconds. Required for reproducible reports.
+    #[arg(long, value_name = "UNIX", value_parser = clap::value_parser!(u64).range(0..=i64::MAX as u64))]
+    pub eval_time: Option<u64>,
     /// Try several rankings in one run: a file of `name<TAB>{"knob": value}`
     /// lines, each changing knobs of the ranking --rank gives. Prints one
     /// table of every queries file under every ranking, and which queries

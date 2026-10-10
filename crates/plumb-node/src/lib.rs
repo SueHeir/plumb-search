@@ -27,6 +27,7 @@ use plumb_index::RankConfig;
 use tracing_subscriber::EnvFilter;
 
 pub mod about;
+pub mod build_info;
 pub mod cli;
 pub mod clicks;
 pub mod country;
@@ -103,6 +104,10 @@ pub fn run(cli: Cli) -> Result<()> {
     set_up_allocator();
     limits::raise_open_file_limit();
     match cli.command {
+        Command::BuildInfo => {
+            println!("{}", serde_json::to_string(&build_info::current())?);
+            Ok(())
+        }
         Command::Run(args) => run::run(args),
         Command::FetchData(args) => fetch::run(args),
         Command::FetchPages(args) => fetch::run_pages(args),

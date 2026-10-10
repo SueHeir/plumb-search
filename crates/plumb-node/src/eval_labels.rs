@@ -26,6 +26,9 @@ pub struct CheckLabelsArgs {
     /// Queries files (eval/*_queries.tsv). Can be given more than once.
     #[arg(long, value_name = "TSV")]
     pub queries: Vec<PathBuf>,
+    /// Family-based JSONL contracts; inspect their relevant URLs too.
+    #[arg(long, value_name = "JSONL")]
+    pub acceptance: Vec<PathBuf>,
     /// Page set files (wikipedia-en.tsv.gz, github.tsv.gz from
     /// fetch-pages), named as for `plumb eval --pages`. Can be given more
     /// than once.
@@ -119,11 +122,22 @@ pub fn run(args: CheckLabelsArgs) -> Result<()> {
             println!("  {}  {}  {} views", page.url, page.title, page.views);
         }
     }
-    for path in &args.queries {
+    for path in args.queries.iter().chain(&args.acceptance) {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let queries =
-            parse_queries(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let queries = if args.acceptance.contains(path) {
+            crate::eval::contracts::parse_cases(&text)?
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| crate::eval::EvalQuery {
+                    line: i + 1,
+                    query: c.query,
+                    expected: c.relevant.into_iter().map(|r| r.identity).collect(),
+                })
+                .collect()
+        } else {
+            parse_queries(&text).with_context(|| format!("parsing {}", path.display()))?
+        };
         let (mut ok, mut wrong) = (0, 0);
         println!("== {}", path.display());
         for q in &queries {

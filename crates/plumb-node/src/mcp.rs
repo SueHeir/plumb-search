@@ -2066,6 +2066,7 @@ fn initialize(params: &Value, read_pages: bool, findings: bool, leads: bool, sha
         .and_then(|asked| PROTOCOL_VERSIONS.iter().find(|v| **v == asked))
         .unwrap_or(&PROTOCOL_VERSIONS[0]);
     json!({
+        "_meta": { "plumb.build": crate::build_info::current() },
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": {

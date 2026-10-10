@@ -125,3 +125,183 @@ sites' vectors with it and `plumb eval --model DIR --vectors FILE` embeds
 the searches with it, so a model Plumb cannot run yet (llama.cpp's
 `llama-server --embedding`) can be measured before anyone ports it. Server
 vectors are for evals only; nodes keep the pinned model.
+
+## Reproducible contracts and one combined batch
+
+`plumb eval --report run.jsonl --eval-time UNIX` extends the existing evaluator.
+TSV suites still use the original query hash; `--acceptance file.jsonl` uses a
+stable **family** hash, or an explicit `tune`/`held-out` split. All paraphrases
+of a family must share a split, including across files. Acceptance files cannot
+be passed to `--features-out` or `train-rank`. Do not use held-out observations
+to tune or train; revise the development suite instead.
+
+Each JSONL record has `id`, `family`, `category`, `query`, `label_status`,
+`relevant: [{identity, grade}]` (grades 1–3), and optional `options`, `expect`,
+`negatives: [{identity, max_rank, reason}]`. A negative fails its contract even
+when a positive answer also appears. Domain negatives match hostname boundaries;
+URL labels are exact or end in `*`. Supported options are `kind`, `site`,
+`language`, `country`, `only_country`, and `exact`. Expectations can constrain
+`kind`, `site`, `language`, `country`, `answer_contains`, `answer_excludes`,
+`date_contains`, or `abstain`. Unknown metadata fails an explicit metadata
+expectation. Date/answer checks inspect the answer and its note, never the query
+or label. `tool`, `arguments`, and `expect.verdict` cover identity-tool fixtures.
+
+`label_status` is `candidate`, `legacy`, or `manual`. Manual labels require a
+`reviewer` and `evidence`. `self_grade`, `evidence`, and `root_cause` are separate
+fields preserved in the response record. A self-grade alone never makes a label
+manual. `audit.jsonl` contains exact plan queries and proposed negative labels;
+it explicitly records that original complete RPCs were unavailable.
+`family_heldout.jsonl` has 40 independently authored families / 200 prompts
+separate from the audit families. Its identity labels need human full-response
+adjudication before release gating. `offline.jsonl` is a tiny controlled fixture
+suite, not a real-corpus accuracy estimate.
+
+The DeepSeek report's 17% yes rate was call-weighted and self-graded, including
+retries and saved findings. It is not independent-query accuracy. Preserve full
+request/response transcripts when supplied; do not treat the summary or a
+1,500-character excerpt as adjudicated relevance. Family pass counts keep retries
+and paraphrases from multiplying category success. The original 1,000-job model
+runner stays paused; these commands never invoke it or a paid grader.
+
+A report starts with embedded build revision/dirty status, rank configuration,
+learned model checksum, embedding model ID/vector checksum, query instruction,
+fixed clock, enabled source files, full corpus checksums/bytes, indexed counts,
+and disabled findings/personalization/plugins/external/peer features. Files are
+stream-hashed before and after; a changed corpus invalidates the run. Neither
+source mtimes nor a runtime checkout attest a serving binary's revision.
+
+Every query keeps complete hits/pages/answer/spelling/rows, score, response bytes,
+and explicit diagnostic stages: record membership, exact label-address lookup,
+lexical and semantic candidates, source filtering, page selection, blended rows,
+learned order, serialization and loss attribution. Production entity lookup is
+marked unobserved. Candidate recall at 10/50/100 is a diagnostic search separate
+from the real candidate window. Serialized recall is `null` above the requested
+limit. Typed and operator paths use the existing page search/filter primitives;
+they are observations of the **offline evaluator**, not claims of HTML/API/MCP
+parity on a live node. Surface parity tests must use the same in-process fixture
+backend after shared assembly is integrated.
+
+Per-category summaries keep label statuses separate, report top-one/top-three,
+MRR, graded NDCG@10, family pass counts, wrong-domain and wrong-brand-top-three
+counts. Manual contract failures fail the process after writing the report.
+Latency excludes diagnostic searches. Response bytes, corpus storage and process
+peak RSS are separate observations. Peak evaluator RSS includes loading/index
+building; measure steady-state node RSS separately on a representative server
+and desktop before enforcing the proposed +10% p95 / +20% RSS gates. No performance
+gate has been measured by adding this harness.
+
+Print artifact identity with `plumb build-info`; `/api/status` adds `build` and
+MCP initialization adds `_meta["plumb.build"]`. Worktrees resolve Git's own HEAD,
+ref and index paths. Archive/release-container builders must supply a full SHA:
+
+```sh
+docker build --build-arg PLUMB_BUILD_REVISION="$(git rev-parse HEAD)" \
+  --build-arg PLUMB_BUILD_DIRTY=false -t plumb-search:review .
+```
+
+Only use `false` after establishing a clean source tree. Missing/invalid revision
+is `unknown`, and an explicit revision without a cleanliness assertion has
+`dirty: null`. A matching SHA with unknown cleanliness does not establish parity. Git builds
+also embed a checksum of tracked and non-ignored source files to identify dirty
+artifacts. Archive builds report that source checksum as unknown.
+
+The bounded runner requires an already-built binary and writes only its new
+output directory. First establish the tiny deterministic/offline baseline:
+
+```sh
+CARGO_TARGET_DIR=/Users/suehr/.codex/cache/plumb-search-quality-20261009-batch-evaluation-target \
+  CARGO_BUILD_JOBS=4 cargo build --locked -p plumb-node
+python3 eval/contracts/run_batch.py \
+  --plumb /Users/suehr/.codex/cache/plumb-search-quality-20261009-batch-evaluation-target/debug/plumb \
+  --fixture-baseline --out-dir /tmp/plumb-search-offline-baseline --seconds 120
+```
+
+Run the combined batch **once after all worker commits are integrated**, using
+an immutable index snapshot and the same page files/rank/model as the baseline:
+
+```sh
+python3 eval/contracts/run_batch.py --plumb /scratch/plumb-quality/target/release/plumb \
+  --index /scratch/plumb-quality/snapshot/index \
+  --pages /scratch/plumb-quality/snapshot/docs.tsv.gz \
+  --pages /scratch/plumb-quality/snapshot/papers.tsv.gz \
+  --pages /scratch/plumb-quality/snapshot/wikipedia-en.tsv.gz \
+  --queries eval/brand_queries.tsv --queries eval/ai_queries.tsv \
+  --acceptance eval/contracts/audit.jsonl \
+  --acceptance eval/contracts/family_heldout.jsonl \
+  --rank '{}' --eval-time 1791586800 --seconds 1800 \
+  --out-dir /scratch/plumb-quality/results/combined
+```
+
+The paths are explicit staging inputs, not a request to copy production data.
+Keep any baseline/candidate ranker comparison on identical hashes. To measure
+meaning, append `--model SNAPSHOT_MODEL --vectors SNAPSHOT_VECTORS
+--query-instruction split`; offline fixture mode has no embedding model or network.
+Use an independently frozen corpus for corpus-change experiments, keeping the
+ranker fixed, and report those effects separately.
+
+If the coordinator prepares an isolated scratch candidate with the same full
+corpus and build, append `--mcp http://127.0.0.1:18081/mcp --identity-calls 400
+--identity-seconds 600`. The runner requires loopback and an exact clean embedded
+revision. It runs the existing official-site suites plus the audit's own official,
+lookalike and facts contracts, records complete initialization and RPCs, and
+reports false medium/high-confidence official answers and false lookalike
+accusations separately. Loopback alone does not isolate production: provide a
+scratch backend with findings/history/plugins/peer/external results disabled.
+The coordinator reports the production HPC moved to `739dd11` during dispatch
+and now supports findings-off. Record the actually serving build and corpus;
+findings-off alone does not isolate history/plugins/peer results or data refresh.
+Do not point this runner at its production listener. `plumb serve` alone has no page-set backend
+and cannot validate package/docs evidence; use the integrated scratch node or
+in-process MCP fixture tests.
+
+Re-score identity transcripts offline with:
+
+```sh
+python3 eval/official_site/run.py --responses results/identity.jsonl \
+  --out results/identity-regraded.jsonl --max-calls 400 --time-budget 60 \
+  eval/contracts/audit.jsonl eval/official_site/queries.tsv eval/official_site/heldout.tsv
+```
+
+A run that hits its call/time cap exits 2 and records `incomplete`; no runner
+silently resumes calls. Core timeout kills the evaluator's process group and
+leaves `batch.json` incomplete. `core-resource.log` contains `/usr/bin/time` peak
+RSS and wall time; `core.jsonl` contains search latency and storage separately.
+
+HPC staging constraints: read-only inspection found 24 GiB root free initially,
+a 3.8 GiB release target and a 45 GiB debug target. External cleanup/restart
+during dispatch reclaimed over 81 GiB according to the coordinator; that original
+24 GiB reading is historical, not current. Recheck available disk/RSS before
+staging and retain explicit resource caps. Do not copy the ~50 GB
+production data, mutate caches/sets, reuse its release binary path, or start
+multiple Linux builds. After coordinator readiness, one scratch release build
+with debug/incremental off has a 12 GiB disk cap, 8 GiB RSS cap, four jobs and a
+30-minute wall cap. A reference-only manifest or read-only bind view of a frozen
+generation avoids corpus duplication; indexes can create lockfiles, so attach an
+immutable view with lockfiles handled in scratch rather than opening a live
+writer's generation. Corpus migration/index rebuilds need their own measured
+space budget and must not be hidden in this evaluation cap. If a cap is exceeded,
+stop and report it; never prune production artifacts to make room.
+
+
+Compare an already-recorded baseline without rerunning it by adding
+`--compare /scratch/plumb-quality/results/baseline/core.jsonl` to the combined
+batch command. The runner verifies corpus/suite/vector checksums, model,
+instruction, fixed clock, options and isolation before producing
+`comparison.json`. It reports paired category deltas and a deterministic
+500-resample family bootstrap interval, keeping candidate/legacy/manual labels
+separate. Manual contract regressions are named explicitly. For a separate
+corpus experiment (same rank settings and learned model), use:
+
+```sh
+python3 eval/contracts/compare.py baseline/core.jsonl corpus-candidate/core.jsonl \
+  --mode corpus --out corpus-comparison.json
+```
+
+Establish the fixed-corpus baseline from the pinned integration base plus the
+harness commit, then apply the other worker commits and run the candidate once.
+Do not equate the tiny fixture baseline with a production-corpus baseline. The
+coordinator owns the final page backend and combined run. Workspace builds must
+use an isolated target directory: shared worktree targets were observed reusing
+foreign schema/build-script artifacts during this batch. Worker checks use one
+job, incremental off, and dev/test debug info off; the final integrated checks
+can use four jobs after worker builds finish.

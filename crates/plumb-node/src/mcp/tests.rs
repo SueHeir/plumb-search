@@ -72,6 +72,10 @@ fn initialize_agrees_on_a_protocol_version() {
     let reply = answer("2025-03-26");
     assert_eq!(reply["id"], 1);
     assert_eq!(reply["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(
+        reply["result"]["_meta"]["plumb.build"],
+        serde_json::to_value(crate::build_info::current()).unwrap()
+    );
     assert_eq!(reply["result"]["serverInfo"]["name"], "plumb-search");
     assert!(reply["result"]["capabilities"]["tools"].is_object());
     // An unknown version gets the newest.

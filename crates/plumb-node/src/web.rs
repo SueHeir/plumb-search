@@ -2272,7 +2272,12 @@ async fn api_status(State(state): State<AppState>) -> Response {
         StatusCode::OK,
         security_headers(),
         [(header::CACHE_CONTROL, "no-store")],
-        Json(node.status()),
+        Json({
+            let mut status = serde_json::to_value(node.status()).expect("serializable status");
+            status["build"] =
+                serde_json::to_value(crate::build_info::current()).expect("serializable build");
+            status
+        }),
     )
         .into_response()
 }
@@ -5315,6 +5320,10 @@ mod tests {
         assert_eq!(serde_json::from_str::<Status>(&body).unwrap(), status);
         // The names are an interface: the desktop app and scripts read them.
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            json["build"],
+            serde_json::to_value(crate::build_info::current()).unwrap()
+        );
         assert_eq!(json["phase"], "setting_up");
         assert_eq!(json["step"], "downloading");
         assert_eq!(
