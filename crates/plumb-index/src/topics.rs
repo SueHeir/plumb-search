@@ -140,7 +140,7 @@ impl Searcher {
                 continue;
             }
             if let (Some(wanted), Some(site)) = (&language, column.language(addr.doc_id)) {
-                if *wanted != site {
+                if !plumb_core::language_fits(wanted, &site) {
                     continue;
                 }
             }

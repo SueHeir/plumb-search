@@ -87,9 +87,9 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{
-    canonical_domain, kind_key, language_code, normalize_country, normalize_text, other_number,
-    registrable_domain, search_link, search_template_for, truncate_chars, AdultLevel, KeyPage,
-    Operators, SafeSearch, SiteRecord, MAX_TEXT_CHARS,
+    canonical_domain, kind_key, language_code, language_fits, normalize_country, normalize_text,
+    other_number, registrable_domain, search_link, search_template_for, truncate_chars, AdultLevel,
+    KeyPage, Operators, SafeSearch, SiteRecord, MAX_TEXT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
@@ -1995,7 +1995,7 @@ impl Searcher {
             // A site whose domain the whole query names stays whatever its
             // language: "spiegel" finds spiegel.de with English chosen.
             if let (Some(wanted), Some(site)) = (&language, column.language(addr.doc_id)) {
-                if *wanted != site && !name.typed && name.label < query.len {
+                if !language_fits(wanted, &site) && !name.typed && name.label < query.len {
                     continue;
                 }
             }
@@ -7073,6 +7073,65 @@ mod tests {
     }
 
     #[test]
+    fn news_topic_language_filter_uses_the_same_script_fallback() {
+        let title = "News — научные исследования технологии и материалы";
+        let mut declared = site(
+            "declared.example",
+            Some(title),
+            None,
+            &[],
+            &[],
+            popular(500, 30000),
+        );
+        declared.language = Some("en".into());
+        let records = [
+            site(
+                "inferred.example",
+                Some(title),
+                None,
+                &[],
+                &[],
+                popular(500, 30000),
+            ),
+            declared,
+            site(
+                "mixed.example",
+                Some("News 中文社区 English language daily reporting"),
+                None,
+                &[],
+                &[],
+                popular(500, 30000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let found = |language: Option<&str>| {
+            searcher
+                .search_full(
+                    "world news",
+                    20,
+                    &RankConfig::default(),
+                    &SearchOptions {
+                        language: language.map(str::to_string),
+                        ..SearchOptions::default()
+                    },
+                )
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|hit| hit.domain)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found(None).len(), 3);
+        let english = found(Some("en"));
+        assert!(!english.contains(&"inferred.example".to_string()));
+        assert!(english.contains(&"declared.example".to_string()));
+        assert!(english.contains(&"mixed.example".to_string()));
+        let russian = found(Some("ru"));
+        assert!(russian.contains(&"inferred.example".to_string()));
+        assert!(!russian.contains(&"declared.example".to_string()));
+    }
+
+    #[test]
     fn a_site_that_says_it_is_of_a_kind_joins_the_kind() {
         let wikipedia = with_facts(
             site(
@@ -7381,6 +7440,26 @@ mod tests {
         );
         german.language = Some("de".into());
         records.push(german);
+        // Says no language, but its title is Russian.
+        records.push(site(
+            "bankru.example",
+            Some("Bank Россия — официальный сайт банка"),
+            None,
+            &[],
+            &[],
+            ranked(755, 5_000),
+        ));
+        // Explicit English metadata remains authoritative.
+        let mut template = site(
+            "banktemplate.example",
+            Some("Bank Москва — кредиты и вклады онлайн"),
+            None,
+            &[],
+            &[],
+            ranked(745, 5_000),
+        );
+        template.language = Some("en".into());
+        records.push(template);
         let (_dir, searcher) = build(&records);
         let with = |options: SearchOptions| {
             let hits = searcher
@@ -7424,6 +7503,20 @@ mod tests {
             ..SearchOptions::default()
         });
         assert!(has(&german, "bankde.example"));
+        // Missing-language Cyrillic text is excluded by incompatible filters.
+        assert!(has(&off, "bankru.example"));
+        assert!(!has(&english, "bankru.example"));
+        assert!(!has(&german, "bankru.example"));
+        // Explicit language is authoritative, even for a multilingual excerpt.
+        assert!(has(&english, "banktemplate.example"));
+        for language in ["ru", "uk"] {
+            let found = with(SearchOptions {
+                language: Some(language.into()),
+                ..SearchOptions::default()
+            });
+            assert!(has(&found, "bankru.example"), "{language}");
+            assert!(!has(&found, "banktemplate.example"), "{language}");
+        }
         // ...unless the query names the site.
         let english = SearchOptions {
             language: Some("en".into()),

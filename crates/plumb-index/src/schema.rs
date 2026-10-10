@@ -19,7 +19,7 @@
 //! | `country`     | [`plumb_core::site_country`], untokenized            | stored, fast                |
 //! | `kind_key`    | [`plumb_core::kind_key`] of each kind                | kind queries ("banks")      |
 //! | `search_url`  | the site's search address                            | stored, site search links   |
-//! | `language`    | the homepage's language code, untokenized            | stored, fast, language filter |
+//! | `language`    | homepage language or fallback script, untokenized            | stored, fast, language filter |
 //! | `adult`       | [`plumb_core::AdultLevel`] as 0, 1 or 2              | fast, safe search           |
 //! | `key_pages`   | the site's key pages, as JSON                        | stored, sitelinks           |
 //! | `fingerprint` | [`plumb_core::simhash`] of the homepage's text       | stored, near-copies         |
@@ -41,8 +41,8 @@
 use anyhow::{Context, Result};
 use plumb_core::key_pages::{key_pages_or_known, valid_key_pages};
 use plumb_core::{
-    domain_label, joined, kind_key, language_code, normalize_text, record_adult_level,
-    site_country, truncate_chars, AdultLevel, LinkText, SiteRecord, MAX_ALIASES, MAX_HEADINGS,
+    domain_label, joined, kind_key, normalize_text, record_adult_level, site_country,
+    site_language, truncate_chars, AdultLevel, LinkText, SiteRecord, MAX_ALIASES, MAX_HEADINGS,
     MAX_KINDS, MAX_LINK_TEXTS, MAX_TERMS, MAX_TEXT_CHARS,
 };
 use tantivy::schema::{
@@ -438,7 +438,13 @@ pub(crate) fn document(
     if let Some(search_url) = non_empty(&record.search_url) {
         doc.add_text(f.search_url, search_url.trim());
     }
-    if let Some(language) = record.language.as_deref().and_then(language_code) {
+    // Keep the homepage declaration; use script only when it is missing.
+    let text = format!(
+        "{} {}",
+        record.title.as_deref().unwrap_or_default(),
+        record.description.as_deref().unwrap_or_default()
+    );
+    if let Some(language) = site_language(record.language.as_deref(), &text) {
         doc.add_text(f.language, language);
     }
     doc.add_u64(f.adult, record_adult_level(record) as u64);
