@@ -319,19 +319,17 @@ impl RecordStore {
                 "records are outside the node storage root"
             );
             let _mutation = budget.mutation();
-            let old = plumb_core::storage::existing_file_bytes(&self.journal_path)?;
+            // Appends follow a final symlink; charge its resolved file and
+            // directory rather than the alias inode excluded by the census.
+            let accounted = canonical_file_path(&self.journal_path)?;
+            let old = plumb_core::storage::existing_file_bytes(&accounted)?;
             let len = file_len(&self.journal_path);
             let mut reserved = budget.reserve(
                 allocation_for(len.saturating_add(lines.len() as u64).saturating_add(1))
                     .saturating_sub(old),
                 false,
             )?;
-            let before_dir = self
-                .journal_path
-                .parent()
-                .map(file_bytes)
-                .transpose()?
-                .unwrap_or(0);
+            let before_dir = accounted.parent().map(file_bytes).transpose()?.unwrap_or(0);
             let written = (|| -> Result<()> {
                 if self.journal.is_none() {
                     self.journal = Some(open_journal(&self.journal_path)?);
@@ -346,8 +344,8 @@ impl RecordStore {
                 Ok(())
             })();
             let new = match (
-                file_bytes(&self.journal_path),
-                self.journal_path.parent().map(file_bytes).transpose(),
+                file_bytes(&accounted),
+                accounted.parent().map(file_bytes).transpose(),
             ) {
                 (Ok(bytes), Ok(parent)) => {
                     bytes.saturating_add(parent.unwrap_or(0).saturating_sub(before_dir))
@@ -442,15 +440,16 @@ impl RecordStore {
         let mut reserved = budget.reserve(plumb_core::storage::allocation_for(max), false)?;
         // Raw compaction uses one temporary file beside records, not a corpus
         // tree walk. Include failure leftovers before releasing the reservation.
-        let parent = self
-            .path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let before = shallow_bytes(parent)?;
+        let parent = fs::canonicalize(
+            self.path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?;
+        let before = shallow_bytes(&parent)?;
         let result = rewrite();
         let after =
-            shallow_bytes(parent).unwrap_or_else(|_| before.saturating_add(reserved.bytes()));
+            shallow_bytes(&parent).unwrap_or_else(|_| before.saturating_add(reserved.bytes()));
         reserved.commit(reserved.bytes(), before, after);
         result
     }
@@ -583,6 +582,24 @@ fn shallow_bytes(path: &Path) -> Result<u64> {
     Ok(bytes)
 }
 
+fn canonical_file_path(path: &Path) -> io::Result<PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            Ok(
+                fs::canonicalize(parent)?.join(path.file_name().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "journal needs a file name")
+                })?),
+            )
+        }
+        Err(err) => Err(err),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use plumb_core::{read_jsonl, write_jsonl};
@@ -650,6 +667,52 @@ mod tests {
         assert_eq!(
             fs::read(node.path().join("protected")).unwrap(),
             vec![7; 64 * 1024]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn internal_journal_and_root_aliases_charge_the_resolved_disk_allocation() {
+        use std::os::unix::fs::symlink;
+        let owner = tempfile::tempdir().unwrap();
+        let aliases = tempfile::tempdir().unwrap();
+        let root_alias = aliases.path().join("node");
+        symlink(owner.path(), &root_alias).unwrap();
+        let path = root_alias.join("records.jsonl");
+        write_jsonl(&path, &[SiteRecord::new("alias-journal.example")]).unwrap();
+        let target_dir = owner.path().join("journal-targets");
+        fs::create_dir(&target_dir).unwrap();
+        let target = target_dir.join("held.journal");
+        fs::write(&target, b"\n").unwrap();
+        let journal_alias = journal_path(&path);
+        symlink(&target, &journal_alias).unwrap();
+        let budget = plumb_core::storage::StorageBudget::open(&root_alias, u64::MAX).unwrap();
+        let protected = fs::read(&path).unwrap();
+        let mut changed = SiteRecord::new("alias-journal.example");
+        changed.description = Some("resolved allocation ".repeat(8_000));
+        let mut store = RecordStore::open(&path).with_budget(Some(budget.clone()));
+        store.save(&[Change::Merge { record: changed }]).unwrap();
+        assert!(fs::metadata(&target).unwrap().len() > 100_000);
+        assert_eq!(fs::read(&path).unwrap(), protected);
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            plumb_core::storage::directory_bytes(owner.path()).unwrap()
+        );
+        let retained_target = fs::read(&target).unwrap();
+        store.fold().unwrap();
+        assert!(!journal_alias.exists());
+        assert_eq!(fs::read(&target).unwrap(), retained_target);
+        assert!(fs::read(&path).unwrap().len() > 100_000);
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            plumb_core::storage::directory_bytes(owner.path()).unwrap()
+        );
+        budget.recount(&root_alias).unwrap();
+        assert_eq!(
+            budget.status().used_bytes,
+            plumb_core::storage::directory_bytes(owner.path()).unwrap()
         );
     }
 
