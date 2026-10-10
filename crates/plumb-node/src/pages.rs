@@ -956,6 +956,54 @@ mod tests {
     }
 
     #[test]
+    fn selective_cutters_keep_metadata_only_with_selected_parents() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("selected.tsv.gz");
+        let mut text = ARTICLES_HEADER.as_bytes().to_vec();
+        for (title, views) in [("A", 3), ("B", 1), ("C", 2)] {
+            write_article(
+                &mut text,
+                &Article {
+                    title: title.into(),
+                    item: Some(format!("url{title}")),
+                    views,
+                    sections: vec![format!("Section {title}")],
+                    search: Some(plumb_core::article::SearchContent {
+                        symbols: vec![plumb_core::article::SearchSymbol {
+                            identifier: format!("symbol_{title}"),
+                            anchor: None,
+                        }],
+                        ..plumb_core::article::SearchContent::default()
+                    }),
+                    ..Article::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut cutter = SetFileCutter::create(&out, 1)
+            .unwrap()
+            .keep_past(Box::new(|line| line.starts_with(b"2\t")));
+        for piece in text.chunks(3) {
+            cutter.write_all(piece).unwrap();
+        }
+        cutter.finish().unwrap();
+        assert_eq!(cutter.pages(), 2);
+        let back =
+            plumb_core::article::read_articles(plumb_ingest::open_maybe_gz(&out).unwrap(), 10)
+                .unwrap();
+        assert_eq!(
+            back.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+            ["A", "C"]
+        );
+        assert_eq!(back[1].sections, ["Section C"]);
+        assert_eq!(
+            back[1].search.as_ref().unwrap().symbols[0].identifier,
+            "symbol_C"
+        );
+    }
+
+    #[test]
     fn sizes_follow_the_storage_limit() {
         assert_eq!(PageSetSize::Auto.pages(500), 100_000);
         assert_eq!(PageSetSize::Auto.pages(2_000), 1_000_000);
