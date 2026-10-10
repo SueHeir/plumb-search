@@ -4085,6 +4085,7 @@ async fn a_pending_network_delivery_survives_inbox_io_failure_without_restart() 
     let delivery = tokio::spawn(super::network::persist_delivery(
         node.inner.clone(),
         vec![SiteRecord::new("retry-inbox.example")],
+        Vec::new(),
         None,
         None,
     ));
@@ -4205,6 +4206,11 @@ async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_t
     record.url = Some("https://restart-inbox.example/".into());
     record.title = Some("Durable receiver restart".into());
     record.crawled_at = Some(now_unix());
+    record.news = vec![plumb_core::Headline {
+        title: "A headline that survives receiver restart".into(),
+        url: "https://restart-inbox.example/receiver-restart".into(),
+        at: now_unix(),
+    }];
     let id = source.publish(vec![record]).await.unwrap().unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     while receiver
@@ -4213,6 +4219,7 @@ async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_t
         .get()
         .is_none_or(|n| n.status().batches_received != 1)
         || budget.status().reserved_bytes == 0
+        || crate::news::NewsStore::open(&receiver.inner.paths.news).headline_count() != 1
     {
         assert!(
             Instant::now() < deadline,
@@ -4266,6 +4273,10 @@ async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_t
     let inbox: Vec<SiteRecord> = read_jsonl(&inbox_path).unwrap();
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].domain, "restart-inbox.example");
+    assert_eq!(
+        crate::news::NewsStore::open(&receiver.inner.paths.news).headline_count(),
+        1
+    );
     assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 1);
     assert_eq!(
         std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
@@ -4285,6 +4296,11 @@ async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_t
     wait_for(receiver.addr(), "restarted index", ready_and_idle).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 0);
+    assert_eq!(receiver.inner.news.headline_count(), 1);
+    assert_eq!(
+        crate::news::NewsStore::open(&receiver.inner.paths.news).headline_count(),
+        1
+    );
     assert_eq!(
         std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
         signed
@@ -4297,4 +4313,139 @@ async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_t
         (after.confirmed, after.earned),
         (credited.confirmed, credited.earned)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart() {
+    for with_raw in [false, true] {
+        let source_dir = tempfile::tempdir().unwrap();
+        let mut source_config = plumb_net::NetConfig::new(source_dir.path().to_owned());
+        source_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        source_config.upnp = false;
+        source_config.local_discovery = false;
+        source_config.round_every = None;
+        let table =
+            plumb_net::BucketTable::build::<SiteRecord>(&source_dir.path().join("buckets"), &[])
+                .unwrap();
+        let (source, _source_records) = plumb_net::start(source_config, Arc::new(table))
+            .await
+            .unwrap();
+        let source_id = source.peer_id();
+        let source_addr: plumb_net::Multiaddr = loop {
+            if let Some(addr) = source.status().listening.first() {
+                break addr.parse().unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let dir = seeded_dir();
+        let mut config = test_config(dir.path());
+        config.take_new_sites = true;
+        let mut net = plumb_net::NetConfig::new(PathBuf::new());
+        net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        net.upnp = false;
+        net.local_discovery = false;
+        net.round_every = None;
+        net.fill = false;
+        net.trusted_peers = vec![source_id];
+        net.bootstrap = vec![source_addr.with_p2p(source_id).unwrap()];
+        config.network = Some(net);
+        let receiver = start(config.clone()).await.unwrap();
+        wait_for(receiver.addr(), "initial index", ready_and_idle).await;
+        let raw = std::fs::read(&receiver.inner.paths.records).unwrap();
+        let news_dir = receiver.inner.paths.news.clone();
+        let budget = receiver.inner.storage.as_ref().unwrap();
+        plumb_core::storage::create_directory(&news_dir, Some(budget)).unwrap();
+        let blocked = news_dir.join("headlines.json");
+        plumb_core::storage::create_directory(&blocked, Some(budget)).unwrap();
+        let mut record = SiteRecord::new("headline-persist.example");
+        record.news = vec![plumb_core::Headline {
+            title: "News survives a failed durable write".into(),
+            url: "https://headline-persist.example/story".into(),
+            at: now_unix(),
+        }];
+        if with_raw {
+            record.url = Some("https://headline-persist.example/".into());
+            record.title = Some("A raw crawl with its headline".into());
+            record.crawled_at = Some(now_unix());
+        }
+        let id = source.publish(vec![record]).await.unwrap().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while receiver
+            .inner
+            .net
+            .get()
+            .is_none_or(|n| n.status().batches_received != 1)
+            || receiver.inner.news.headline_count() != 1
+        {
+            assert!(
+                Instant::now() < deadline,
+                "headline delivery did not reach the receiver"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(receiver.inner.news.save().is_err());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let batches = dir.path().join("net/batches");
+        let marker = batches.join(format!("{id}.delivered-trusted"));
+        let signed = std::fs::read(batches.join(format!("{id}.json"))).unwrap();
+        assert!(!marker.exists(), "failed headline save was acknowledged");
+        assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 0);
+        assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 0);
+        assert!(!receiver.inner.paths.inbox.exists());
+        assert_eq!(std::fs::read(&receiver.inner.paths.records).unwrap(), raw);
+        receiver.shutdown().await.unwrap();
+        source.shutdown().await;
+        let credits = dir.path().join("net/credits");
+        let before = plumb_net::credits::Ledger::open(&credits)
+            .unwrap()
+            .account(&source_id);
+        assert_eq!(before.confirmed, u64::from(with_raw));
+        assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 0);
+        std::fs::remove_dir(&blocked).unwrap();
+        config.network.as_mut().unwrap().bootstrap.clear();
+        let receiver = start(config.clone()).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !marker.is_file() {
+            assert!(
+                Instant::now() < deadline,
+                "restart did not persist both destinations before acknowledging"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 1);
+        let inbox: Vec<SiteRecord> = read_jsonl(&receiver.inner.paths.inbox).unwrap_or_default();
+        let held = crate::records::load_records(&receiver.inner.paths.records).unwrap();
+        let durable_raw = inbox
+            .iter()
+            .filter(|r| r.domain == "headline-persist.example")
+            .count()
+            + usize::from(held.get("headline-persist.example").is_some());
+        assert_eq!(durable_raw, usize::from(with_raw));
+        assert_eq!(
+            std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
+            signed
+        );
+        receiver.shutdown().await.unwrap();
+        let after = plumb_net::credits::Ledger::open(&credits)
+            .unwrap()
+            .account(&source_id);
+        assert_eq!(
+            (after.confirmed, after.earned),
+            (before.confirmed, before.earned)
+        );
+        let receiver = start(config).await.unwrap();
+        wait_for(receiver.addr(), "acknowledged restart", ready_and_idle).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(receiver.inner.news.headline_count(), 1);
+        assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 1);
+        assert_eq!(receiver.inner.inbox_records.load(Ordering::SeqCst), 0);
+        receiver.shutdown().await.unwrap();
+        let after = plumb_net::credits::Ledger::open(&credits)
+            .unwrap()
+            .account(&source_id);
+        assert_eq!(
+            (after.confirmed, after.earned),
+            (before.confirmed, before.earned)
+        );
+    }
 }

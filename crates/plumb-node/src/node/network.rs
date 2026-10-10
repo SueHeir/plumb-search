@@ -312,17 +312,20 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
             if receiver.config.crawl_only {
                 batch.clear();
             }
-            // Trusted nodes' feed checks go to the headline store, not the
-            // records (see plumb_net::start).
-            if batch.iter().any(|record| !record.news.is_empty()) {
-                let (news, rest) = batch.into_iter().partition(|r| !r.news.is_empty());
-                receiver.news.put_shared(news, now_unix());
-                batch = rest;
-            }
+            // Feed checks and raw crawls have separate durable destinations.
+            let (news, mut batch): (Vec<_>, Vec<_>) =
+                batch.into_iter().partition(|r| !r.news.is_empty());
             if !receiver.config.take_new_sites {
                 held_only(&receiver, &mut batch);
             }
-            persist_delivery(receiver.clone(), batch, reservation, Some(acknowledgment)).await;
+            persist_delivery(
+                receiver.clone(),
+                batch,
+                news,
+                reservation,
+                Some(acknowledgment),
+            )
+            .await;
         }
     });
     Ok(())
@@ -549,17 +552,20 @@ pub(super) fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> 
     append_inbox_reserved(inner, records, &mut None)
 }
 
-/// Keep one bounded delivery through temporary inbox failures. The upstream
-/// channel stays bounded while this waits; its signed batch is already durable
-/// for replay after shutdown. Retrying inbox I/O never reapplies net credits.
+/// Keep one bounded delivery until both headline and raw destinations persist,
+/// then acknowledge it. Shutdown leaves it eligible for replay while its signed
+/// source survives configured retention; recovery never reapplies net credits.
 pub(super) async fn persist_delivery(
     inner: Arc<Inner>,
     records: Vec<SiteRecord>,
+    news: Vec<SiteRecord>,
     mut reservation: Option<plumb_net::storage::Reservation>,
     acknowledgment: Option<plumb_net::store::DeliveryAck>,
 ) {
     let records = Arc::new(records);
+    let news = Arc::new(news);
     let acknowledgment = acknowledgment.map(Arc::new);
+    let mut news_persisted = news.is_empty();
     let mut persisted = false;
     let mut delay = Duration::from_millis(100);
     let mut warned = false;
@@ -569,37 +575,57 @@ pub(super) async fn persist_delivery(
         }
         let writer = inner.clone();
         let payload = records.clone();
+        let headlines = news.clone();
         let acknowledgment = acknowledgment.clone();
         let mut admitted = reservation.take();
         let saved = tokio::task::spawn_blocking(move || {
+            let mut news_durable = news_persisted;
+            if !news_durable {
+                // Headline persistence rewrites its complete store. It admits
+                // that peak itself; raw persistence reacquires its own room.
+                drop(admitted.take());
+                writer.news.put_shared(headlines.to_vec(), now_unix());
+                if let Err(err) = writer.news.save() {
+                    return (
+                        false,
+                        persisted,
+                        admitted,
+                        Err(anyhow::anyhow!("saving shared headlines: {err}")),
+                    );
+                }
+                news_durable = true;
+            }
             if !persisted && !payload.is_empty() {
                 if let Err(err) = append_inbox_reserved(&writer, &payload, &mut admitted) {
-                    return (false, admitted, Err(err));
+                    return (news_durable, false, admitted, Err(err));
                 }
             }
-            // An acknowledgment failure retries only the marker, not the
-            // already durable inbox append. Release the inbox's peak room first.
+            // Marker failures retry neither destination after its successful
+            // persistence. Release the inbox's peak room before marking it.
             drop(admitted);
             let result = acknowledgment
                 .as_ref()
                 .map_or(Ok(()), |ack| ack.acknowledge());
-            (true, None, result)
+            (news_durable, true, None, result)
         })
         .await;
-        if saved.as_ref().is_ok_and(|(durable, _, _)| *durable) && !persisted {
-            persisted = true;
-            let n = records.len() as u64;
-            let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
-            if total >= REBUILD_AFTER_RECORDS {
-                inner.wake.notify_one();
+        if let Ok((durable_news, durable_raw, _, _)) = &saved {
+            news_persisted = *durable_news;
+            if *durable_raw && !persisted {
+                persisted = true;
+                let n = records.len() as u64;
+                let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
+                if total >= REBUILD_AFTER_RECORDS {
+                    inner.wake.notify_one();
+                }
             }
         }
         let failure = match saved {
-            Ok((_, admitted, Ok(()))) => {
+            Ok((_, _, admitted, Ok(()))) => {
                 drop(admitted);
                 return;
             }
-            Ok((_, admitted, Err(err))) => {
+            Ok((_, _, admitted, Err(err))) => {
                 reservation = admitted;
                 err
             }

@@ -412,6 +412,13 @@ impl NewsStore {
             write_json(&self.dir.join(FEEDS_FILE), &state.watched)?;
             write_json(&self.dir.join(HEADLINES_FILE), &state.headlines)?;
         }
+        #[cfg(unix)]
+        {
+            fs::File::open(&self.dir)?.sync_all()?;
+            if let Some(parent) = self.dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+                fs::File::open(parent)?.sync_all()?;
+            }
+        }
         state.dirty = false;
         Ok(())
     }
