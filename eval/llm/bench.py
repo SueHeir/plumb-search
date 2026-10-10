@@ -44,6 +44,7 @@ TOOLS_NOTE = (
     "and keep your lookups few. "
 )
 MAX_ROUNDS = 6
+ANSWER_NOW = "Stop looking things up and answer from what you have. Finish with a line 'Answer: <answer>'."
 
 
 class Mcp:
@@ -122,8 +123,8 @@ def without_outline(description):
     return " ".join(s for s in sentences if "outline" not in s)
 
 
-def chat(server, model, messages, tools):
-    body = {"model": model, "messages": messages, "temperature": 0, "max_tokens": 512}
+def chat(server, model, messages, tools, max_tokens):
+    body = {"model": model, "messages": messages, "temperature": 0, "max_tokens": max_tokens}
     if tools:
         body["tools"] = tools
     request = urllib.request.Request(
@@ -161,8 +162,9 @@ def ask(question, args, mcp):
     prompt_tokens = completion_tokens = tool_calls = tool_tokens = 0
     started = time.time()
     text = ""
-    for _ in range(MAX_ROUNDS):
-        reply = chat(args.server, args.model, messages, tools)
+    calls = []
+    for _ in range(args.rounds):
+        reply = chat(args.server, args.model, messages, tools, args.max_tokens)
         usage = reply.get("usage", {})
         prompt_tokens += usage.get("prompt_tokens", 0)
         completion_tokens += usage.get("completion_tokens", 0)
@@ -183,6 +185,16 @@ def ask(question, args, mcp):
                 result = result[: args.budget * 4]
             tool_tokens += len(result) // 4
             messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
+    # Out of rounds, or a reply with no answer in it (cut off at
+    # --max-tokens): one more turn, without tools, asks for the answer.
+    forced = bool(calls) or not final_answer(text)
+    if forced:
+        messages.append({"role": "user", "content": ANSWER_NOW})
+        reply = chat(args.server, args.model, messages, None, args.max_tokens)
+        usage = reply.get("usage", {})
+        prompt_tokens += usage.get("prompt_tokens", 0)
+        completion_tokens += usage.get("completion_tokens", 0)
+        text = reply["choices"][0]["message"].get("content") or ""
     answer = final_answer(text)
     return {
         "id": question["id"],
@@ -195,6 +207,7 @@ def ask(question, args, mcp):
         "last_context": usage.get("prompt_tokens", 0),
         "tool_calls": tool_calls,
         "tool_tokens": tool_tokens,
+        "forced": forced,
         "seconds": round(time.time() - started, 2),
     }
 
@@ -224,6 +237,8 @@ def main():
     parser.add_argument("--mode", choices=["none", "plumb", "budget", "outline"], default="none")
     parser.add_argument("--plumb", default="plumb mcp", help="command that runs plumb mcp")
     parser.add_argument("--budget", type=int, default=300, help="tokens per tool result in budget mode")
+    parser.add_argument("--rounds", type=int, default=MAX_ROUNDS, help="model turns that may call tools")
+    parser.add_argument("--max-tokens", type=int, default=512, help="tokens a reply may take (thinking included)")
     parser.add_argument("--limit", type=int, default=0, help="ask only the first N questions")
     parser.add_argument("--out", required=True, help="results file (JSON lines), appended to")
     args = parser.parse_args()
