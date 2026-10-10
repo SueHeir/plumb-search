@@ -1,0 +1,18 @@
+# Entity/task/jurisdiction regressions from the October 9 audit.
+# Optional third column contains arguments passed to official_site.
+mypy documentation	mypy.readthedocs.io
+Xe currency converter	xe.com
+Chroma vector database	trychroma.com
+SAT México	sat.gob.mx
+SAT México	sat.gob.mx	{"country":"MX"}
+SAT México	sat.gob.mx	{"country":"GT"}
+SAT México	sat.gob.mx	{"country":"any"}
+# Matching-brand and package controls: task removal must preserve identity.
+Mapy	mapy.com,mapy.cz
+Vector	vector.dev
+Converter	converter.app
+Pillow docs	pillow.readthedocs.io
+Python docs	docs.python.org
+Anthropic API docs	anthropic.com,docs.anthropic.com,platform.claude.com
+Elixir	elixir-lang.org,elixir-europe.org
+DefinitelyUnresolvedPlumbEntity9f302c	@unresolved

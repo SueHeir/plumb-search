@@ -794,7 +794,8 @@ fn official_site_falls_back_on_a_packages_home_page() {
     let mcp = Mcp::new(Arc::new(Packages), None);
     let reply = call(&mcp, "official_site", json!({ "name": "serde" }));
     let answer = &reply["result"]["structuredContent"];
-    assert_eq!(answer["found"], false);
+    assert_eq!(answer["found"], true);
+    assert_eq!(answer["url"], "https://serde.rs");
     assert_eq!(answer["package_home"], "https://serde.rs");
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
     assert!(
@@ -1459,7 +1460,9 @@ fn official_site_is_unsure_of_a_namesake_of_an_article_without_a_site() {
         )
     });
     let answer = official(&mcp, "Golly");
-    assert_eq!(answer["domain"], "gollo.com");
+    assert_eq!(answer["found"], false);
+    assert_eq!(answer["status"], "unresolved");
+    assert_eq!(answer["alternatives"][0]["domain"], "gollo.com");
     assert_eq!(answer["confidence"], "low", "{answer}");
     assert!(answer["why"].to_string().contains("Golly (program)"));
 }
@@ -1730,7 +1733,7 @@ fn official_site_takes_no_package_docs_for_a_home() {
         results(vec![titled("pydata.org", "PyData", 0.1, true)], Vec::new())
     });
     let answer = official(&mcp, "pandas");
-    assert_eq!(answer["domain"], "pydata.org", "{answer}");
+    assert_eq!(answer["found"], false, "{answer}");
     assert_eq!(answer["package_home"], "https://pandas.readthedocs.io/");
 
     // Asked for the docs, the package's docs are the answer.
@@ -1846,4 +1849,260 @@ fn official_site_takes_a_site_whose_address_is_a_word_of_the_name() {
     let answer = official(&mcp, "cube20 God's number");
     assert_eq!(answer["domain"], "cube20.org", "{answer}");
     assert_eq!(answer["confidence"], "low");
+}
+
+#[test]
+fn official_site_binds_package_docs_to_the_typed_entity_despite_popular_spelling() {
+    for mode in 0..3 {
+        let mcp = scripted(move |query| {
+            if query.ends_with("package") {
+                return results(
+                    Vec::new(),
+                    vec![package_page(
+                        "pypi",
+                        "mypy",
+                        Some("https://mypy-lang.org/"),
+                        Some("https://mypy.readthedocs.io/en/stable/"),
+                    )],
+                );
+            }
+            let mut hits = Vec::new();
+            if mode != 2 {
+                let mut mapy = titled("mapy.com", "Mapy.com", 0.9, true);
+                mapy.official = true;
+                hits.push(mapy);
+            }
+            if mode != 0 {
+                let mut project = titled("mypy-lang.org", "mypy", 0.9, true);
+                project.official = true;
+                project.score = 0.5;
+                hits.push(project);
+            }
+            let mut found = results(hits, vec![article("Mapy", Some("mapy.com"), None)]);
+            found.spelling = Some(plumb_index::Spelling {
+                query: "mapy documentation".into(),
+                site: Some("mapy.com".into()),
+                applied: true,
+            });
+            found
+        });
+        let answer = official(&mcp, "mypy documentation");
+        assert_eq!(answer["found"], true, "{answer}");
+        assert_eq!(answer["url"], "https://mypy.readthedocs.io/en/stable/");
+        assert_eq!(answer["confidence"], "medium");
+        assert!(answer["did_you_mean"].is_null());
+        let why = answer["why"].to_string();
+        assert!(
+            why.contains("PyPI") && !why.contains("Wikidata") && !why.contains("well-known"),
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn official_site_task_domains_cannot_displace_the_entity_even_for_short_brands() {
+    for (name, task_domain, task_title, entity_domain, entity_title) in [
+        (
+            "Xe currency converter",
+            "converter.app",
+            "Text converter",
+            "xe.com",
+            "Xe",
+        ),
+        (
+            "Chroma vector database",
+            "vector.dev",
+            "Vector",
+            "trychroma.com",
+            "Chroma",
+        ),
+    ] {
+        let mcp = server(vec![
+            titled(task_domain, task_title, 0.9, true),
+            titled(entity_domain, entity_title, 0.5, true),
+        ]);
+        let answer = official(&mcp, name);
+        assert_eq!(answer["domain"], entity_domain, "{name}: {answer}");
+        assert_eq!(answer["found"], true);
+    }
+    // A short string inside an unrelated word does not identify Xe.
+    let answer = official(
+        &server(vec![titled("example.com", "Text converter", 0.9, true)]),
+        "Xe currency converter",
+    );
+    assert_eq!(answer["found"], false, "{answer}");
+    let mut namesake = titled("chromakey.com", "ChromaKey", 0.9, true);
+    namesake.official = true;
+    let answer = official(&server(vec![namesake]), "Chroma vector database");
+    assert_eq!(answer["found"], false, "{answer}");
+}
+
+#[test]
+fn official_site_cannot_validate_another_entity_from_spelling_or_official_status() {
+    let mcp = scripted(|_| {
+        let mut mapy = titled("mapy.com", "Mapy", 0.9, true);
+        mapy.official = true;
+        let mut found = results(vec![mapy], vec![article("Mapy", Some("mapy.com"), None)]);
+        found.spelling = Some(plumb_index::Spelling {
+            query: "mapy".into(),
+            site: Some("mapy.com".into()),
+            applied: true,
+        });
+        found
+    });
+    let answer = official(&mcp, "mypy");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["status"], "unresolved");
+    assert_eq!(answer["confidence"], "low");
+    assert!(answer["url"].is_null());
+    assert_eq!(answer["did_you_mean"], "mapy");
+    assert_eq!(answer["alternatives"][0]["domain"], "mapy.com");
+    assert!(!answer["why"].to_string().contains("Wikidata lists"));
+    let mut amazon = titled("amazon.com", "Amazon", 0.9, true);
+    amazon.official = true;
+    let answer = official(
+        &server(vec![titled("river.example", "River", 0.1, false), amazon]),
+        "Amazon River length",
+    );
+    assert_eq!(answer["found"], false, "{answer}");
+}
+
+#[test]
+fn official_site_keeps_matching_brands_that_include_country_names() {
+    for (name, title, domain) in [
+        ("Bank of America", "Bank of America", "bankofamerica.com"),
+        ("Air France", "Air France", "airfrance.com"),
+        ("Mapy", "Mapy", "mapy.com"),
+        ("Vector", "Vector", "vector.dev"),
+        ("X", "X", "x.com"),
+        ("R", "The R Project", "r-project.org"),
+        ("H&M", "H&M", "hm.com"),
+    ] {
+        let mut brand = titled(domain, title, 0.8, true);
+        brand.official = true;
+        let answer = official(&server(vec![brand]), name);
+        assert_eq!(answer["found"], true, "{answer}");
+        assert_eq!(answer["domain"], domain);
+        assert_eq!(answer["confidence"], "high");
+    }
+}
+
+#[test]
+fn official_site_uses_the_query_jurisdiction_and_reports_conflicting_preferences() {
+    struct Countries;
+    impl SearchBackend for Countries {
+        fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+            unreachable!()
+        }
+        fn num_docs(&self) -> u64 {
+            2
+        }
+        fn search_full(&self, _: &str, _: usize, options: &SearchOptions) -> Result<SearchResults> {
+            assert_eq!(options.country.as_deref(), Some("MX"));
+            let mut gt = titled("sat.gob.gt", "SAT Guatemala", 0.9, true);
+            gt.country = Some("GT".into());
+            gt.official = true;
+            let mut mx = titled("sat.gob.mx", "SAT", 0.6, true);
+            mx.country = Some("MX".into());
+            mx.official = true;
+            // Deliberately keep the default-country result first to exercise
+            // the identity gate independently of the backend's country boost.
+            Ok(results(vec![gt, mx], Vec::new()))
+        }
+    }
+    let mcp = Mcp::new(Arc::new(Countries), Some("GT".into()));
+    for country in [None, Some("MX"), Some("GT"), Some("any")] {
+        let mut args = json!({ "name": "SAT México" });
+        if let Some(country) = country {
+            args["country"] = json!(country);
+        }
+        let reply = call(&mcp, "official_site", args);
+        let answer = &reply["result"]["structuredContent"];
+        assert_eq!(answer["domain"], "sat.gob.mx", "{answer}");
+        assert_eq!(answer["found"], true);
+        if country.is_none() || country == Some("GT") {
+            assert_eq!(answer["country_conflict"]["query"], "MX");
+            assert_eq!(answer["country_conflict"]["preference"], "GT");
+        } else {
+            assert!(answer["country_conflict"].is_null());
+        }
+    }
+}
+
+#[test]
+fn check_lookalike_accepts_only_the_provenance_backed_exact_aliases() {
+    let mcp = Mcp::new(Arc::new(Broken), None);
+    for host in [
+        "console.hetzner.cloud",
+        "console.hetzner.com",
+        "api.semanticscholar.org",
+    ] {
+        let answer = mcp
+            .check_lookalike(host, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "official", "{answer}");
+        assert_eq!(answer["lookalike"], false);
+        assert_eq!(answer["affiliation"]["host"], host);
+        assert!(!answer["affiliation"]["sources"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(answer["reasons"].to_string().contains("https://"));
+    }
+    let migration = identity::affiliation("console.hetzner.cloud").unwrap();
+    assert_eq!(migration["kind"], "verified_migration");
+    assert_eq!(
+        migration["observed_redirect"]["to"],
+        "https://console.hetzner.com/"
+    );
+    // No wildcard, suffix, same-TLD brand, hosted-tenant or Unicode exception.
+    for host in [
+        "hetzner.cloud",
+        "hetzner.net",
+        "login.console.hetzner.cloud",
+        "console.hetzner.cloud.attacker.example",
+        "console.hetzner.cloud.github.io",
+        "console.hеtzner.cloud",
+    ] {
+        assert!(
+            identity::affiliation(&host_of(host).unwrap()).is_none(),
+            "{host}"
+        );
+    }
+}
+
+#[test]
+fn check_lookalike_preserves_impersonation_and_unverified_tenant_controls() {
+    let mcp = scripted(|query| {
+        let brand = if query.contains("hetzner") {
+            "hetzner.com"
+        } else {
+            "paypal.com"
+        };
+        let mut official = hit(brand, 2.0, 0.9, true);
+        official.official = true;
+        results(vec![official], Vec::new())
+    });
+    for host in [
+        "paypa1.com",
+        "paypal-login.us",
+        "paypal.com.attacker.example",
+        "paypal.readthedocs.io",
+        "раypal.com",
+        "console.hetzner.cloud.attacker.example",
+    ] {
+        let answer = mcp
+            .check_lookalike(host, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "lookalike", "{host}: {answer}");
+        assert_eq!(answer["lookalike"], true);
+        assert!(answer["affiliation"].is_null());
+    }
+    // An unverified alternate domain is suspected, with no claim of ownership.
+    let answer = mcp
+        .check_lookalike("console.hetzner.net", &SearchOptions::default())
+        .unwrap();
+    assert_eq!(answer["verdict"], "suspected", "{answer}");
+    assert_eq!(answer["lookalike"], false);
+    assert_eq!(answer["suspected"], true);
 }

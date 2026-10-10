@@ -372,6 +372,14 @@ fn search(out: &mut String, answer: &Value) {
 
 fn official_site(out: &mut String, answer: &Value) {
     let name = text(answer, "name").unwrap_or("");
+    if let Some(conflict) = answer.get("country_conflict").filter(|c| c.is_object()) {
+        let _ = writeln!(
+            out,
+            "Using the query's jurisdiction {} over country preference {}.",
+            text(conflict, "query").unwrap_or(""),
+            text(conflict, "preference").unwrap_or("")
+        );
+    }
     if !flag(answer, "found") {
         let _ = writeln!(out, "Plumb knows no site called \"{name}\".");
         why(out, answer, "why");
@@ -434,6 +442,7 @@ fn check_lookalike(out: &mut String, answer: &Value) {
                 "official" => "the official site",
                 "known_site" => "a well-known site",
                 "little_known" => "a little-known site, not a known look-alike",
+                "suspected" => "a possible look-alike with unverified affiliation",
                 _ => "not known to Plumb",
             };
             let _ = writeln!(out, "{input}: {said} (verdict {verdict}).");

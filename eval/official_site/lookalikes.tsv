@@ -1,0 +1,18 @@
+# Run with --tool check_lookalike. Expected values are accepted verdicts.
+# Owner references for Hetzner's exact old/current consoles:
+# https://status.hetzner.com/incident/62839f8e-073a-4159-87a1-b05d093fe689
+# https://www.hetzner.com/cloud/
+# Semantic Scholar API control (already official before this change):
+# https://webflow.semanticscholar.org/product/api/tutorial
+console.hetzner.cloud	official
+console.hetzner.com	official
+api.semanticscholar.org	official
+paypal.com	official,known_site
+paypa1.com	lookalike
+paypal-login.us	lookalike
+paypal.com.attacker.example	lookalike
+console.hetzner.cloud.attacker.example	lookalike
+paypal.readthedocs.io	lookalike
+раypal.com	lookalike
+# Same label on an unverified alternate TLD cannot establish ownership.
+console.hetzner.example	suspected,unknown

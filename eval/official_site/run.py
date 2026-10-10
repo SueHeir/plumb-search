@@ -37,8 +37,13 @@ def ask(mcp, name):
 
 
 def host(answer):
-    h = urllib.parse.urlsplit(answer.get("url") or "").hostname or ""
-    return h.lower().removeprefix("www.")
+    url = answer.get("url") or ""
+    if not url:
+        return ""
+    parsed = urllib.parse.urlsplit(url if "://" in url else "https://" + url)
+    if parsed.username or parsed.password:
+        return ""
+    return (parsed.hostname or "").lower().rstrip(".").removeprefix("www.")
 
 
 def domain_matches(want, got):
@@ -53,24 +58,48 @@ def domain_matches(want, got):
 
 
 def right(answer, expected):
+    if expected == ["@unresolved"]:
+        return answer.get("found") is False and not answer.get("error")
     if not answer.get("found"):
         return False
-    got = {host(answer), (answer.get("domain") or "").lower()}
+    # A correct identity label cannot conceal an unrelated selected URL.
+    got = {host(answer)}
     return any(domain_matches(want, g) for want in expected for g in got)
 
 
 def read(path):
-    """Old TSV iterator, also used by downstream scripts."""
+    """Two-column suites remain valid; a third column holds tool arguments."""
     for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
-        name, sep, answers = line.partition("\t")
-        if not sep or not name.strip() or not answers.strip():
+        fields = line.split("\t")
+        if len(fields) not in (2, 3):
             raise ValueError(f"invalid TSV line in {path}")
-        yield name, [a.strip() for a in answers.split(",") if a.strip()]
+        name, answers = fields[:2]
+        args = json.loads(fields[2]) if len(fields) == 3 else {}
+        if not name.strip() or not answers.strip() or not isinstance(args, dict):
+            raise ValueError(f"invalid TSV case in {path}")
+        yield name, [a.strip() for a in answers.split(",") if a.strip()], args
 
 
-def cases(path):
+def row_key(row):
+    case = row.get("case", {})
+    return (row["file"], row["name"], row.get("tool", case.get("tool", "official_site")),
+            json.dumps(row.get("arguments", case.get("arguments", {})), sort_keys=True))
+
+
+def adjudicate(answer, expected, tool):
+    if tool == "check_lookalike":
+        good = answer.get("verdict") in expected
+        false_accusation = "lookalike" not in expected and answer.get("verdict") == "lookalike"
+        missed = "lookalike" in expected and answer.get("verdict") != "lookalike"
+        return good, false_accusation, missed
+    good = right(answer, expected)
+    false_official = not good and bool(answer.get("found")) and answer.get("confidence") in ("high", "medium")
+    return good, false_official, False
+
+
+def cases(path, tool="official_site", country=None):
     if Path(path).suffix == ".jsonl":
         for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
             if not line.strip() or line.lstrip().startswith("#"):
@@ -79,17 +108,18 @@ def cases(path):
             if case.get("tool", "search") in ("official_site", "check_lookalike", "facts"):
                 yield case
     else:
-        for i, (name, expected) in enumerate(read(path)):
-            yield {"id": f"{path}:{i}", "family": name, "category": "official_site",
-                   "query": name, "tool": "official_site", "label_status": "legacy",
-                   "relevant": [{"identity": e, "grade": 1} for e in expected],
-                   "expect": {}, "negatives": []}
+        for i, (name, expected, args) in enumerate(read(path)):
+            if country:
+                args.setdefault("country", country)
+            yield {"id": f"{path}:{i}", "family": name, "category": tool,
+                   "query": name, "tool": tool, "label_status": "legacy", "arguments": args,
+                   "relevant": [{"identity": e, "grade": 1} for e in expected] if tool == "official_site" else [],
+                   "expect": {"verdicts": expected} if tool == "check_lookalike" else {}, "negatives": []}
 
 
 def arguments(case):
     args = dict(case.get("arguments") or {})
-    if not args:
-        args = {"url" if case["tool"] == "check_lookalike" else "name": case["query"]}
+    args.setdefault("url" if case["tool"] == "check_lookalike" else "name", case["query"])
     options = case.get("options") or {}
     for key, value in (("country", options.get("country")),
                        ("lang", options.get("language")),
@@ -111,7 +141,7 @@ def judge(case, reply):
         if not good:
             violations.append("wrong official destination")
     elif case["tool"] == "check_lookalike":
-        good = answer.get("verdict") == expect.get("verdict")
+        good = answer.get("verdict") in expect.get("verdicts", [expect.get("verdict")])
         if not good:
             violations.append("wrong affiliation verdict")
     else:
@@ -139,7 +169,9 @@ def judge(case, reply):
             "false_official": case["tool"] == "official_site" and not passed and
                 bool(answer.get("found")) and answer.get("confidence") in ("high", "medium"),
             "false_lookalike": case["tool"] == "check_lookalike" and
-                expect.get("verdict") != "lookalike" and answer.get("verdict") == "lookalike",
+                "lookalike" not in expect.get("verdicts", [expect.get("verdict")]) and answer.get("verdict") == "lookalike",
+            "missed_impersonation": case["tool"] == "check_lookalike" and
+                "lookalike" in expect.get("verdicts", [expect.get("verdict")]) and answer.get("verdict") != "lookalike",
             "domain": answer.get("domain"), "url": answer.get("url"),
             "confidence": answer.get("confidence"), "answer": answer}
 
@@ -158,6 +190,8 @@ def main():
     mode.add_argument("--responses", help="saved complete RPC JSONL; no network")
     ap.add_argument("--out", required=True)
     ap.add_argument("--compare")
+    ap.add_argument("--tool", choices=("official_site", "check_lookalike"), default="official_site")
+    ap.add_argument("--country", help="TSV country preference, overridden by case arguments")
     ap.add_argument("--timeout", type=float, default=10)
     ap.add_argument("--max-calls", type=int, default=400)
     ap.add_argument("--time-budget", type=float, default=600)
@@ -177,8 +211,8 @@ def main():
         for line in Path(args.compare).read_text().splitlines():
             row = json.loads(line)
             if "name" in row:
-                old[(row["file"], row["name"])] = row
-    selected = [(path, c) for path in args.files for c in cases(path)]
+                old[row_key(row)] = row
+    selected = [(path, c) for path in args.files for c in cases(path, args.tool, args.country)]
     if len({c["id"] for _, c in selected}) != len(selected):
         ap.error("duplicate case IDs")
     manifest = {"type": "manifest", "schema": 1, "mode": "offline-replay" if args.responses else "mcp",
@@ -223,7 +257,7 @@ def main():
             out.write(json.dumps(row, ensure_ascii=False) + "\n")
             out.flush()
             groups[(case["label_status"], case["category"])].append(row)
-            before = old.get((path, case["query"]))
+            before = old.get(row_key(row))
             if before is not None and before["right"] != row["right"]:
                 print(f"  {'FIXED' if row['right'] else 'BROKE'} {case['query']!r}")
         summary = {"type": "summary", "incomplete": incomplete, "selected": len(selected), "groups": {}}
@@ -232,7 +266,7 @@ def main():
             summary["groups"][f"{status}:{category}"] = {
                 "queries": len(rows), "families": len(families),
                 "families_all_passed": sum(all(r["right"] for r in rows if r["case"]["family"] == f) for f in families),
-                **{k: sum(r[k] for r in rows) for k in ("right", "false_official", "false_lookalike")}}
+                **{k: sum(r[k] for r in rows) for k in ("right", "false_official", "false_lookalike", "missed_impersonation")}}
         out.write(json.dumps(summary) + "\n")
     print(json.dumps(summary))
     return 2 if incomplete else 0

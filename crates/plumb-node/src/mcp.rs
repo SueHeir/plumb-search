@@ -57,6 +57,7 @@ use crate::rank_config;
 use crate::web::answers;
 use crate::web::{IndexBackend, SearchBackend, StatusSource, MAX_QUERY_CHARS};
 
+mod identity;
 mod text;
 
 pub(crate) use text::answer_line;
@@ -576,13 +577,33 @@ impl Mcp {
 
     /// `official_site`: the site the name names, best first.
     pub fn official_site(&self, name: &str, options: &SearchOptions) -> Result<Value> {
-        let results = self.lookup(name, 1 + ALTERNATIVES, options)?;
+        let intent = identity::Intent::of(name);
+        let country_conflict = intent.country.filter(|country| {
+            options.country.as_deref().is_some_and(|preference| preference != *country)
+        }).map(|country| json!({
+            "query": country,
+            "preference": options.country,
+            "resolution": "The jurisdiction named in the query takes precedence over the country preference.",
+        }));
+        let options = &SearchOptions {
+            country: intent
+                .country
+                .map(str::to_string)
+                .or_else(|| options.country.clone()),
+            ..options.clone()
+        };
+        let mut results = self.lookup(name, 1 + ALTERNATIVES, options)?;
+        // Keep ranking within the requested entity. A popular spelling
+        // suggestion or a task-word domain cannot validate another entity.
+        if let Some(at) = results.hits.iter().position(|hit| intent.matches_site(hit)) {
+            results.hits[..=at].rotate_right(1);
+        }
         let did_you_mean = results.spelling.as_ref().map(|s| s.query.as_str());
         // "Pillow docs" is Pillow, wanting its docs.
         let bare = bare_name(name);
-        let bare_or_name = bare.as_deref().unwrap_or(name);
+        let bare_or_name = intent.entity.as_str();
         let wants_docs = asks_for_docs(name);
-        let words = name_words(bare_or_name);
+        let words = intent.words.clone();
         let pages = place_pages(
             name,
             &results.hits,
@@ -590,7 +611,8 @@ impl Mcp {
         );
         // The Wikipedia article the name names, and the site Wikidata gives
         // as its item's: LifeWiki is conwaylife.com, not life-wiki.com.
-        let about = answers::page_about(&results.hits, &pages).filter(|page| is_article(page));
+        let about = answers::page_about(&results.hits, &pages)
+            .filter(|page| is_article(page) && intent.matches_article(page));
         let about_site = about.and_then(|page| Some((page, page.site.as_deref()?)));
         let Some(top) = results.hits.first() else {
             if let Some((page, site)) = about_site {
@@ -598,6 +620,7 @@ impl Mcp {
                 return Ok(json!({
                     "name": name,
                     "found": true,
+                    "status": "resolved",
                     "domain": domain,
                     "url": url,
                     "package_home": Value::Null,
@@ -611,36 +634,57 @@ impl Mcp {
                     )],
                     "alternatives": [],
                     "did_you_mean": Value::Null,
+                    "country_conflict": country_conflict,
                 }));
             }
             let mut why = vec!["Plumb knows no site by this name.".to_string()];
             let package_home = self
                 .package_home(name, wants_docs, options)
                 .or_else(|| self.package_home(bare.as_deref()?, wants_docs, options));
-            if let Some((home, registry, _)) = &package_home {
-                why.push(format!(
+            if let Some((home, registry, _, _)) = &package_home {
+                why = vec![format!(
                     "The {registry} package of this name gives {home} as its home page."
-                ));
+                )];
             } else if let Some(fixed) = did_you_mean {
                 why.push(format!("Did you mean {fixed:?}? Look that up instead."));
             }
+            let destination = package_home
+                .as_ref()
+                .filter(|(_, _, docs, _)| !docs || wants_docs)
+                .and_then(|(home, _, _, _)| Some((home, registrable_domain(home)?)));
             return Ok(json!({
                 "name": name,
-                "found": false,
+                "found": destination.is_some(),
+                "status": if destination.is_some() { "resolved" } else { "unresolved" },
+                "domain": destination.as_ref().map(|(_, domain)| domain),
+                "url": destination.as_ref().map(|(home, _)| home),
+                "confidence": if destination.is_some() { "medium" } else { "low" },
                 "why": why,
                 "did_you_mean": did_you_mean,
-                "package_home": package_home.map(|(home, _, _)| home),
+                "package_home": package_home.map(|(home, _, _, _)| home),
+                "country_conflict": country_conflict,
             }));
         };
-        let official = |hit: &Hit| hit.official || article_of(&hit.domain, &pages).is_some();
+        let entity_pages: Vec<_> = pages
+            .iter()
+            .filter(|placed| intent.matches_article(&placed.hit.page))
+            .cloned()
+            .collect();
+        let official = |hit: &Hit| {
+            (hit.official && intent.matches_site(hit))
+                || article_of(&hit.domain, &entity_pages).is_some()
+        };
         let well_known = |hit: &Hit| hit.link_score >= WELL_KNOWN_LINK_SCORE;
         // A site named by the name that shows nothing of it is not the
         // site of the article the name names: "USNO" is not mo.gov, whatever
         // names it, when the article on the United States Naval Observatory
         // gives navy.mil.
-        let top_shows = shows_name(top, &words) || title_has(top, bare_or_name);
-        let about_site =
-            about_site.or_else(|| (!top_shows).then(|| named_article_site(&pages)).flatten());
+        let top_shows = intent.matches_site(top);
+        let about_site = about_site.or_else(|| {
+            (!top_shows)
+                .then(|| named_article_site(&entity_pages))
+                .flatten()
+        });
         let mut why = Vec::new();
         let mut pick = top;
         let mut url = top.url.clone();
@@ -649,6 +693,7 @@ impl Mcp {
         let mut description = top.description.as_deref().map(short);
         let mut did_you_mean = did_you_mean;
         let mut package_home = None;
+        let mut verified_destination = false;
         let mut confidence;
         match about_site {
             Some((page, site)) if site == top.domain => {
@@ -667,6 +712,7 @@ impl Mcp {
                     url = site_url;
                 }
                 confidence = "high";
+                verified_destination = true;
             }
             // The article's own site, unless the first site is a well-known
             // or official site of exactly this name that shows it.
@@ -699,10 +745,11 @@ impl Mcp {
                 domain = site_domain;
                 did_you_mean = None;
                 confidence = "high";
+                verified_destination = true;
             }
             _ => {
                 if official(top) {
-                    why.push(match article_of(&top.domain, &pages) {
+                    why.push(match article_of(&top.domain, &entity_pages) {
                         Some(page) => format!(
                             "Wikidata gives it as the official website of {}.",
                             page.title
@@ -710,10 +757,10 @@ impl Mcp {
                         None => "Wikidata lists it as an official website.".to_string(),
                     });
                 }
-                if top.named {
+                if top.named && top_shows {
                     why.push("The name is the site's own name or address.".to_string());
                 }
-                if well_known(top) {
+                if well_known(top) && top_shows {
                     why.push("It is a well-known site, linked from many others.".to_string());
                 }
                 // How far ahead of the next site it is, as a share of its score.
@@ -729,7 +776,11 @@ impl Mcp {
                 // (lifewire.com for "LifeWiki"), nor is one of two official,
                 // well-known sites of the name ("Elixir").
                 let rival = results.hits[1..].iter().any(|hit| {
-                    hit.named && official(hit) && well_known(hit) && shows_name(hit, &words)
+                    hit.named
+                        && official(hit)
+                        && well_known(hit)
+                        && intent.matches_site(hit)
+                        && shows_name(hit, &words)
                 });
                 confidence = if top.named
                     && (official(top) || well_known(top))
@@ -738,9 +789,11 @@ impl Mcp {
                     && !rival
                 {
                     "high"
-                } else if (top.named && (words.len() < 2 || shows))
-                    || (official(top) && shows)
-                    || (well_known(top) && lead >= 0.2 && shows)
+                } else if top_shows
+                    && ((top.named && (words.len() < 2 || shows))
+                        || title_has(top, bare_or_name)
+                        || (official(top) && shows)
+                        || (well_known(top) && lead >= 0.2 && shows))
                 {
                     "medium"
                 } else {
@@ -763,7 +816,7 @@ impl Mcp {
                 if !top.named && !title_has(top, bare_or_name) {
                     if let Some(hit) = results.hits[1..]
                         .iter()
-                        .find(|hit| title_has(hit, bare_or_name))
+                        .find(|hit| intent.matches_site(hit) && title_has(hit, bare_or_name))
                     {
                         why = vec![format!(
                             "Its title has the name; {}'s does not.",
@@ -781,10 +834,12 @@ impl Mcp {
                 // official, well-known site that shows all of it: "Outlook
                 // email" is outlook.live.com, not office.com.
                 if confidence == "low" && !shows && words.iter().all(|word| word.len() >= 3) {
-                    if let Some(hit) = results.hits[1..]
-                        .iter()
-                        .find(|hit| official(hit) && well_known(hit) && shows_name(hit, &words))
-                    {
+                    if let Some(hit) = results.hits[1..].iter().find(|hit| {
+                        official(hit)
+                            && well_known(hit)
+                            && intent.matches_site(hit)
+                            && shows_name(hit, &words)
+                    }) {
                         why = vec![format!(
                             "It shows every word of the name; {} does not.",
                             top.domain
@@ -803,7 +858,10 @@ impl Mcp {
                 // is not navy.mil.
                 let label_word = |hit: &Hit| {
                     let label = letters(&domain_label(&hit.domain));
-                    label.len() >= 4 && words.contains(&label)
+                    label.len() >= 4
+                        && words.first() == Some(&label)
+                        && intent.matches_country(&hit.domain, hit.country.as_deref())
+                        && (intent.country.is_none() || intent.matches_site(hit))
                 };
                 if confidence == "low" && !shows && !label_word(top) {
                     if let Some(hit) = results.hits[1..].iter().find(|hit| label_word(hit)) {
@@ -816,6 +874,11 @@ impl Mcp {
                         domain = hit.domain.clone();
                         title = hit.title.clone();
                         description = hit.description.as_deref().map(short);
+                        // A distinctive identifier such as cube20 can be
+                        // followed by an explanation absent from its title.
+                        verified_destination = domain_label(&hit.domain)
+                            .chars()
+                            .any(|c| c.is_ascii_digit());
                     }
                 }
             }
@@ -823,7 +886,9 @@ impl Mcp {
         let rivals: Vec<&str> = results
             .hits
             .iter()
-            .filter(|hit| hit.domain != pick.domain && (hit.named || hit.official))
+            .filter(|hit| {
+                hit.domain != pick.domain && intent.matches_site(hit) && (hit.named || hit.official)
+            })
             .map(|hit| hit.domain.as_str())
             .collect();
         if !rivals.is_empty() && confidence != "high" {
@@ -846,13 +911,13 @@ impl Mcp {
             && !official(top)
             && !well_known(top)
             && confidence == "medium";
-        if confidence != "high" {
+        if confidence != "high" || wants_docs {
             // A software package of the name says where its home is:
             // FastAPI's PyPI card names fastapi.tiangolo.com.
             let found = self
                 .package_home(name, wants_docs, options)
                 .or_else(|| self.package_home(bare.as_deref()?, wants_docs, options));
-            if let Some((home, registry, docs)) = found {
+            if let Some((home, registry, docs, owner)) = found {
                 let home_domain = registrable_domain(&home);
                 if home_domain.as_deref() == Some(domain.as_str()) {
                     why.push(format!(
@@ -860,18 +925,23 @@ impl Mcp {
                     ));
                     url = home;
                     confidence = "high";
+                    verified_destination = true;
                     did_you_mean = None;
-                } else if let Some(home_domain) = home_domain
-                    .clone()
-                    .filter(|_| wants_docs && docs && !well_known(pick))
-                {
+                } else if let Some(home_domain) = home_domain.clone().filter(|_| {
+                    wants_docs
+                        && docs
+                        && (!well_known(pick)
+                            || !intent.matches_site(pick)
+                            || owner.as_deref() == Some(pick.domain.as_str()))
+                }) {
                     // "Pillow docs" is the docs the package names,
                     // pillow.readthedocs.io, not python-pillow.org; a
-                    // well-known site keeps its own: "Anthropic API docs" is
-                    // not anthropic.readthedocs.io.
-                    why.push(format!(
+                    // A matching well-known site keeps its own unless the
+                    // package's homepage also ties its docs to that site:
+                    // "Anthropic API docs" is not an SDK's unrelated docs.
+                    why = vec![format!(
                         "The {registry} package of this name gives it as its documentation."
-                    ));
+                    )];
                     alternatives.retain(|alt| alt["domain"] != home_domain.as_str());
                     alternatives.insert(0, brief_with(pick, &pages));
                     alternatives.truncate(ALTERNATIVES);
@@ -880,6 +950,7 @@ impl Mcp {
                     title = None;
                     description = None;
                     confidence = "medium";
+                    verified_destination = true;
                     did_you_mean = None;
                 } else if let Some(home_domain) = home_domain
                     .filter(|_| !docs || wants_docs)
@@ -890,10 +961,10 @@ impl Mcp {
                     // The best match of the words is a guess; the
                     // package's own home page is not: "FastAPI" is not
                     // xapo.com.
-                    why.push(format!(
+                    why = vec![format!(
                         "No site is called exactly this, but the {registry} package of this \
                          name gives it as its home page."
-                    ));
+                    )];
                     alternatives.insert(0, brief_with(pick, &pages));
                     alternatives.truncate(ALTERNATIVES);
                     url = home;
@@ -901,6 +972,7 @@ impl Mcp {
                     title = None;
                     description = None;
                     confidence = "medium";
+                    verified_destination = true;
                     did_you_mean = None;
                 } else {
                     why.push(format!(
@@ -913,7 +985,10 @@ impl Mcp {
         if confidence == "low" {
             // A name that spells out its abbreviation: "CIAAW Commission on
             // Isotopic Abundances and Atomic Weights" is ciaaw.org.
-            if let Some(hit) = self.abbreviation_site(name, options) {
+            if let Some(hit) = self.abbreviation_site(name, options).filter(|hit| {
+                intent.matches_country(&hit.domain, hit.country.as_deref())
+                    && (intent.country.is_none() || intent.matches_site(hit))
+            }) {
                 why = vec![format!(
                     "Its address is {}, an abbreviation in the name.",
                     hit.domain
@@ -928,11 +1003,13 @@ impl Mcp {
                 title = hit.title.clone();
                 description = hit.description.as_deref().map(short);
                 confidence = "medium";
+                verified_destination = true;
                 did_you_mean = None;
             }
         }
         // "Python docs" is docs.python.org, a site of its own.
-        if wants_docs && url.contains(&format!("{domain}/")) {
+        let bound = verified_destination || intent.matches_site(pick);
+        if bound && wants_docs && url.contains(&format!("{domain}/")) {
             if let Some((site, _)) = plumb_core::subdomain_sites().find(|(site, parent)| {
                 *parent == domain && (site.starts_with("docs.") || site.starts_with("doc."))
             }) {
@@ -943,23 +1020,40 @@ impl Mcp {
                 description = None;
             }
         }
-        if confidence == "low" {
+        if !bound {
+            alternatives.insert(0, brief_with(pick, &pages));
+            alternatives.truncate(ALTERNATIVES);
+            why = vec![format!(
+                "No evidence ties the suggested site to {:?}; search suggestions and spelling \
+                 corrections do not establish its official destination.",
+                intent.entity
+            )];
+            if let Some(page) = about {
+                why.push(format!(
+                    "Wikipedia's article {} gives no matching official destination.",
+                    page.title
+                ));
+            }
+            confidence = "low";
+        } else if confidence == "low" {
             why.push(
                 "No site is called exactly this; it is the best match of the words.".to_string(),
             );
         }
         Ok(json!({
             "name": name,
-            "found": true,
-            "domain": domain,
-            "url": url,
+            "found": bound,
+            "status": if bound { "resolved" } else { "unresolved" },
+            "domain": bound.then_some(domain),
+            "url": bound.then_some(url),
             "package_home": package_home,
-            "title": title,
-            "description": description,
+            "title": bound.then_some(title).flatten(),
+            "description": bound.then_some(description).flatten(),
             "confidence": confidence,
             "why": why,
             "alternatives": alternatives,
             "did_you_mean": did_you_mean,
+            "country_conflict": country_conflict,
         }))
     }
 
@@ -984,13 +1078,14 @@ impl Mcp {
 
     /// The home page (else the docs; the docs first when `wants_docs`) of
     /// the most used package called `name`, its registry's name, and whether
-    /// it is the docs.
+    /// it is the docs, and the package's homepage domain. The latter binds
+    /// a docs link to a matching well-known project homepage.
     fn package_home(
         &self,
         name: &str,
         wants_docs: bool,
         options: &SearchOptions,
-    ) -> Option<(String, String, bool)> {
+    ) -> Option<(String, String, bool, Option<String>)> {
         let found = self.package(name, None, options).ok()?;
         let card = found["packages"].as_array()?.iter().find(|card| {
             card["name"]
@@ -1014,6 +1109,7 @@ impl Mcp {
             home.to_string(),
             card["registry"].as_str()?.to_string(),
             key == "docs",
+            card["homepage"].as_str().and_then(registrable_domain),
         ))
     }
 
@@ -1025,6 +1121,24 @@ impl Mcp {
         let Some(domain) = registrable_domain(&host) else {
             bail!("{host:?} has no registrable domain");
         };
+        if let Some(evidence) = identity::affiliation(&host) {
+            return Ok(json!({
+                "input": input,
+                "host": host,
+                "domain": domain,
+                "verdict": "official",
+                "lookalike": false,
+                "reasons": [format!(
+                    "{} identifies this exact host as its service in the owner references: {}.",
+                    evidence["owner"].as_str().unwrap_or("The owner"),
+                    evidence["sources"].as_array().unwrap().iter()
+                        .filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+                )],
+                "affiliation": evidence,
+                "imitates": Value::Null,
+                "site": Value::Null,
+            }));
+        }
         let mut searches = 0;
         // The site itself: a typed hostname names it.
         let own = self.lookup(&domain, 1, options)?;
@@ -1090,16 +1204,36 @@ impl Mcp {
                 "known_site"
             }
             (_, Some(other)) => {
-                reasons.push(format!(
-                    "Its address borrows the name of {}, a far better-known site.",
-                    other.domain
-                ));
-                if site.is_none() {
-                    reasons.push("Plumb does not list it as a site of its own.".to_string());
+                // Sharing an entire brand label on another TLD can also
+                // describe a legitimate regional or product domain. Without
+                // owner evidence it is suspected, never automatically trusted.
+                if domain_label(&domain) == domain_label(&other.domain)
+                    && (domain.matches('.').count() == 1
+                        || plumb_core::tld_country(&domain).is_some())
+                    && !host
+                        .strip_suffix(&domain)
+                        .unwrap_or("")
+                        .split(['.', '-'])
+                        .any(|word| matches!(word, "login" | "signin" | "verify" | "secure"))
+                {
+                    reasons.push(format!(
+                        "Its name resembles {}, but Plumb has no owner reference establishing \
+                         affiliation or evidence confirming impersonation.",
+                        other.domain
+                    ));
+                    "suspected"
                 } else {
-                    reasons.push("Few other sites link to it.".to_string());
+                    reasons.push(format!(
+                        "Its address borrows the name of {}, a far better-known site.",
+                        other.domain
+                    ));
+                    if site.is_none() {
+                        reasons.push("Plumb does not list it as a site of its own.".to_string());
+                    } else {
+                        reasons.push("Few other sites link to it.".to_string());
+                    }
+                    "lookalike"
                 }
-                "lookalike"
             }
             (Some(_), None) => {
                 reasons.push(
@@ -1123,8 +1257,9 @@ impl Mcp {
             "domain": domain,
             "verdict": verdict,
             "lookalike": verdict == "lookalike",
+            "suspected": verdict == "suspected",
             "reasons": reasons,
-            "imitates": (verdict == "lookalike").then(|| imitated.as_ref().map(brief)).flatten(),
+            "imitates": matches!(verdict, "lookalike" | "suspected").then(|| imitated.as_ref().map(brief)).flatten(),
             "site": site.as_ref().map(brief),
         }))
     }
@@ -2115,7 +2250,9 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
             "description": "The official website for a company, organization, product, project \
                  or service, by name (\"PayPal\", \"rust docs\", \"IRS\"). Returns the domain and \
                  URL, a confidence (high, medium, low), the reasons, and other candidates. Use \
-                 it instead of guessing a URL.",
+                 it instead of guessing a URL. Unresolved identity returns found:false with \
+                 suggestions; task words and spelling corrections do not establish ownership. \
+                 A jurisdiction named in the query takes precedence over the country preference.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2131,7 +2268,9 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
             "title": "Check for a look-alike site",
             "description": "Whether a URL or domain is a real site or one made to look like \
                  another (paypal-login.us, twiter.com). Returns a verdict (official, known_site, \
-                 little_known, lookalike or unknown), the reasons, and the real site it imitates. \
+                 little_known, lookalike, suspected or unknown), the reasons, and any verified \
+                 owner references or the real site it resembles. Suspected means affiliation \
+                 is unverified and impersonation is not established. \
                  Use it before entering credentials or trusting a link.",
             "inputSchema": {
                 "type": "object",
@@ -2730,18 +2869,19 @@ fn letters(text: &str) -> String {
         .collect()
 }
 
-/// The words of `name` a site of that name would show, as [`letters`]:
+/// The normalized words of `name` a site of that name would show:
 /// all but filler, what is wanted from the site and words of host names
 /// that say nothing of whose site it is ("com").
 fn name_words(name: &str) -> Vec<String> {
-    name.split(|c: char| !c.is_alphanumeric())
-        .map(letters)
+    plumb_core::normalize_text(name)
+        .split_whitespace()
         .filter(|word| {
-            word.len() >= 2
-                && !plumb_core::packages::FILLER_WORDS.contains(&word.as_str())
-                && !WANTED_WORDS.contains(&word.as_str())
-                && !FILLER_WORDS.contains(&word.as_str())
+            word.chars().count() >= 2
+                && !plumb_core::packages::FILLER_WORDS.contains(word)
+                && !WANTED_WORDS.contains(word)
+                && !FILLER_WORDS.contains(word)
         })
+        .map(str::to_string)
         .collect()
 }
 
@@ -2844,6 +2984,9 @@ fn name_queries(host: &str, domain: &str) -> Vec<String> {
     let label = domain_label(domain);
     let label_words = label.replace(['-', '_'], " ");
     let mut queries = vec![without_intent_words(&label_words).unwrap_or(label_words)];
+    if label.contains("xn--") {
+        queries.insert(0, squash(&label));
+    }
     let subdomains = host.strip_suffix(domain).unwrap_or("");
     let mut words: Vec<String> = subdomains
         .split(['.', '-', '_'])
@@ -2865,16 +3008,33 @@ fn name_queries(host: &str, domain: &str) -> Vec<String> {
 /// pass for letters read as them: `paypa1` -> `paypal`, `rnicrosoft` ->
 /// `microsoft`.
 fn squash(text: &str) -> String {
-    let plain: String = text
+    let (unicode, _) = idna::domain_to_unicode(text);
+    let plain: String = unicode
         .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|c| match c.to_ascii_lowercase() {
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
             '0' => 'o',
             '1' => 'l',
             '3' => 'e',
             '5' => 's',
+            // Common Cyrillic/Greek homographs; retain the literal ASCII
+            // hostname for ownership checks, using this only for resemblance.
+            'а' | 'α' => 'a',
+            'е' | 'ε' => 'e',
+            'о' | 'ο' => 'o',
+            'р' | 'ρ' => 'p',
+            'с' => 'c',
+            'у' | 'ү' => 'y',
+            'х' | 'χ' => 'x',
+            'і' | 'ι' => 'i',
+            'ј' => 'j',
+            'ѕ' => 's',
+            'к' | 'κ' => 'k',
+            'м' => 'm',
+            'т' | 'τ' => 't',
             c => c,
         })
+        .filter(char::is_ascii_alphanumeric)
         .collect();
     plain.replace("rn", "m").replace("vv", "w")
 }
