@@ -1041,7 +1041,8 @@ async fn release_memory_now_and_then(inner: Arc<Inner>) {
             () = tokio::time::sleep(RELEASE_MEMORY_EVERY) => {}
             () = inner.stopped() => return,
         }
-        // Not on an async thread: it takes tens of milliseconds.
+        // Not on an async thread: right after a big job it takes up to a
+        // fifth of a second.
         let _ = tokio::task::spawn_blocking(crate::release_freed_memory).await;
     }
 }
