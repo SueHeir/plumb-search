@@ -983,6 +983,12 @@ pub fn run_facts(args: FetchFactsArgs) -> Result<()> {
         .persist(&report)
         .with_context(|| format!("saving {}", report.display()))?;
     let added = item_facts::apply_fetched_facts(&path, &fetched)?;
+    if added.kept_newer_populations > 0 {
+        info!(
+            "kept {} population counts with later observation years than the refresh",
+            added.kept_newer_populations
+        );
+    }
     info!(
         "facts completion: {} failed item/property pairs; report {}",
         fetched.completion.retry.len(),

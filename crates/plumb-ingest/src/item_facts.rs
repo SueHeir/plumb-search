@@ -1077,6 +1077,9 @@ pub struct AddedFacts {
     pub articles: u64,
     pub with_facts: u64,
     pub facts: u64,
+    /// Older or undated incoming population values did not replace a
+    /// count with a later source observation year.
+    pub kept_newer_populations: u64,
 }
 
 /// Replaces only the imported property kinds; keeps unrelated enrichment.
@@ -1126,11 +1129,29 @@ fn write_facts_to_file(
         if let Some(item) = article.item.as_deref() {
             let incoming = facts.get(item).map(Vec::as_slice).unwrap_or(&[]);
             let checked = checked_by_item.get(item);
+            let keep_population = article
+                .facts
+                .iter()
+                .find(|fact| fact.kind == FactKind::Population)
+                .and_then(Fact::observation_year)
+                .zip(
+                    incoming
+                        .iter()
+                        .find(|fact| fact.kind == FactKind::Population),
+                )
+                .is_some_and(|(kept, new)| kept > new.observation_year().unwrap_or(i32::MIN));
+            added.kept_newer_populations += u64::from(keep_population);
             article.facts.retain(|fact| {
-                !incoming.iter().any(|new| new.kind == fact.kind)
-                    && !checked.is_some_and(|kinds| kinds.contains(&fact.kind))
+                keep_population && fact.kind == FactKind::Population
+                    || !incoming.iter().any(|new| new.kind == fact.kind)
+                        && !checked.is_some_and(|kinds| kinds.contains(&fact.kind))
             });
-            article.facts.extend_from_slice(incoming);
+            article.facts.extend(
+                incoming
+                    .iter()
+                    .filter(|fact| !keep_population || fact.kind != FactKind::Population)
+                    .cloned(),
+            );
         }
         added.articles += 1;
         if !article.facts.is_empty() {
@@ -1254,6 +1275,43 @@ mod tests {
             .remove(0);
         assert!(!after.facts.iter().any(|fact| fact.kind == FactKind::Ceo));
         assert_eq!(after.facts.len(), 2);
+    }
+
+    #[test]
+    fn older_population_observations_cannot_regress_a_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wikipedia-en.tsv.gz");
+        let before = Article {
+            title: "Example country".into(),
+            item: Some("Q17".into()),
+            facts: vec![fact(FactKind::Population, "100;2025")],
+            ..Default::default()
+        };
+        for (incoming, kept) in [("99;2024", true), ("99", true), ("101;2026", false)] {
+            crate::articles::write_articles_file(&path, std::slice::from_ref(&before)).unwrap();
+            let fetched = FetchedFacts {
+                facts: HashMap::from([("Q17".into(), vec![fact(FactKind::Population, incoming)])]),
+                completion: FactsCompletion {
+                    checked: vec![FactRetry {
+                        item: "Q17".into(),
+                        kind: FactKind::Population,
+                    }],
+                    ..Default::default()
+                },
+            };
+            let added = apply_fetched_facts(&path, &fetched).unwrap();
+            assert_eq!(added.kept_newer_populations, u64::from(kept));
+            let after = read_articles(open_maybe_gz(&path).unwrap(), 1)
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                after.facts,
+                vec![fact(
+                    FactKind::Population,
+                    if kept { "100;2025" } else { incoming }
+                )]
+            );
+        }
     }
 
     #[test]
