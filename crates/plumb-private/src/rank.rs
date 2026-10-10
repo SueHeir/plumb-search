@@ -214,23 +214,47 @@ fn rank_words(
     let text: Vec<f32> = docs.iter().map(|doc| query.text_match(doc)).collect();
     let max_text = text.iter().copied().fold(0.0, f32::max);
     let weights = query.evidence_weights(&docs);
-    let named_subject_words = names
+    // Buckets contain no query vectors. Whole-query lexical support can
+    // resolve competing aliases; otherwise a single established identity
+    // retains its scope. A domain spelling repeated in its own text cannot.
+    let full_identity = names
+        .iter()
+        .any(|name| name.typed || name.alias >= query.len);
+    let subject_names: Vec<_> = names
         .iter()
         .zip(&docs)
-        .flat_map(|(name, doc)| {
-            [(true, name.alias), (false, name.label)]
-                .map(move |(established, words)| (doc, established, words))
-        })
-        .filter(|(doc, _, words)| {
+        .filter(|_| !full_identity)
+        .map(|(name, doc)| (doc, name.alias))
+        .filter(|(_, words)| {
             *words > 0
                 && *words < query.len
                 && !query
                     .tokens
                     .get(*words)
                     .is_some_and(|word| is_function_word(word))
-                && query.evidence(doc, &weights, *words).subject == Some(1.0)
         })
-        .map(|(_, established, words)| (established, words))
+        .map(|(doc, words)| {
+            let evidence = query.evidence(doc, &weights, words);
+            (
+                doc,
+                words,
+                evidence.substantive >= 0.75 && evidence.task_supported,
+            )
+        })
+        .collect();
+    let mut identities: HashMap<usize, HashSet<String>> = HashMap::new();
+    for &(doc, words, _) in &subject_names {
+        identities
+            .entry(words)
+            .or_default()
+            .insert(doc.domain.clone());
+    }
+    let named_subject_words = subject_names
+        .into_iter()
+        .filter(|(_, words, compatible)| {
+            *compatible || identities.get(words).is_some_and(|sites| sites.len() == 1)
+        })
+        .map(|(_, words, compatible)| (compatible, words))
         .max()
         .map(|(_, words)| words)
         .unwrap_or(0);
@@ -265,9 +289,11 @@ fn rank_words(
             _ => 0.0,
         };
         let link_score = link_scores[i];
-        let named = name.typed || name.words() >= query.len;
+        let full_hostname = self::words(&site.domain) == query.tokens;
+        let named = name.typed || full_hostname || name.words() >= query.len;
         let protected = named && named_subject_words == 0
             || name.typed
+            || full_hostname
             || name.alias >= query.len
             || is_kind
             || navigation_names[i];

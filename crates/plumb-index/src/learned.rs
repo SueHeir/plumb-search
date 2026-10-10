@@ -938,6 +938,8 @@ mod tests {
             substantive_coverage: 0.3,
             remaining_coverage: 0.3,
             named_subject_words: 0,
+            named_subject_domain: None,
+            named_subject_reason: None,
             subject_coverage: None,
             subject_remaining_coverage: None,
             full_name: false,

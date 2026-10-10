@@ -374,6 +374,71 @@ fn alias_subjects_precede_longer_domains_and_preserve_supported_qualifiers() {
 }
 
 #[test]
+fn descriptive_queries_survive_self_labels_and_competing_unsupported_aliases() {
+    for (aliases, first_domain, second_domain) in [
+        (false, "nimbus.example", "nimbus-town.example"),
+        (true, "nimbus.example", "nimbus-town.example"),
+        (true, "first.github.io", "second.github.io"),
+    ] {
+        let mut first = site(first_domain, "Nimbus village", Some(1), 90_000);
+        let mut second = site(second_domain, "Nimbus magazine", Some(2), 80_000);
+        if aliases {
+            first.aliases = vec!["Nimbus".into()];
+            second.aliases = vec!["Nimbus".into()];
+        }
+        let records = [
+            first,
+            second,
+            site("aster.example", "Research project guidance status", None, 0),
+        ];
+        let query = "nimbus research project guidance status";
+        let ranked = rank(query, &records, &Options::default(), 3);
+        assert_eq!(ranked[0].domain, "aster.example");
+        assert_eq!(
+            private_top(&records, query, &Options::default(), 1),
+            index_top(&records, query, &SearchOptions::default(), 1)
+        );
+    }
+}
+
+#[test]
+fn complete_alias_identity_survives_borrowed_homepage_and_partial_rivals() {
+    let mut owner = site("aster.example", "Borrowed portal", Some(1), 90_000);
+    owner.aliases = vec!["Nimbus Research".into()];
+    owner.signals.official_site = true;
+    owner.about = Some("Research organization".into());
+    owner.url = Some("https://other.example/".into());
+    let mut rival = site("nimbus.example", "Nimbus Research guidance", None, 0);
+    rival.aliases = vec!["Nimbus".into()];
+    let records = [owner, rival];
+    let query = "nimbus research";
+    assert_eq!(
+        private_top(&records, query, &Options::default(), 1),
+        ["aster.example"]
+    );
+    assert_eq!(
+        private_top(&records, query, &Options::default(), 1),
+        index_top(&records, query, &SearchOptions::default(), 1)
+    );
+}
+
+#[test]
+fn a_complete_hostname_written_as_words_keeps_address_lookup() {
+    let mut owner = site("aa.example", "Aster Research", Some(1), 90_000);
+    owner.aliases = vec!["Aster Research".into()];
+    let records = [owner, SiteRecord::new("asterresearch.fr")];
+    let query = "asterresearch fr";
+    assert_eq!(
+        private_top(&records, query, &Options::default(), 1),
+        ["asterresearch.fr"]
+    );
+    assert_eq!(
+        private_top(&records, query, &Options::default(), 1),
+        index_top(&records, query, &SearchOptions::default(), 1)
+    );
+}
+
+#[test]
 fn a_bare_query_domain_needs_corroboration_except_when_typed() {
     let mut owner = site(
         "aster.example",

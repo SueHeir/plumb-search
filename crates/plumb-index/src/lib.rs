@@ -1751,38 +1751,121 @@ impl Searcher {
                 )
             })
             .collect();
-        // Resolve one query-wide subject, not a different prefix for each
-        // candidate. A domain spelling needs corroboration in the site's
-        // own indexed text or aliases; popularity never supplies it.
-        let named_subject_words = if cfg.whole_query_relevance {
-            names
+        // label_key also contains structured names and redirect identities.
+        // Preserve those independently of borrowed homepage text, without
+        // treating a domain spelling repeated in its own text as an alias.
+        let independent_labels: HashMap<_, _> = names
+            .iter()
+            .filter_map(|(&addr, name)| {
+                let domain = columns[addr.segment_ord as usize].domain(addr.doc_id)?;
+                let label = plumb_core::joined(&schema::label_text(&domain));
+                let raw_words = query
+                    .leading
+                    .iter()
+                    .filter(|(key, _)| *key == label)
+                    .map(|(_, words)| *words)
+                    .max()
+                    .unwrap_or(0);
+                (name.label > raw_words).then_some((addr, name.label))
+            })
+            .collect();
+        let full_identity = names.iter().any(|(addr, name)| {
+            name.typed
+                || name.alias >= query.len
+                || name.linked >= query.len
+                || independent_labels
+                    .get(addr)
+                    .is_some_and(|&words| words >= query.len)
+        });
+        let semantic_floor = cfg.meaning_only_relevance.unwrap_or(0.35).max(f32::EPSILON);
+        // Whole-query support resolves competing established identities.
+        // Without it, only an independently dominant link name or one
+        // unambiguous identity can scope the query. Weak semantic evidence
+        // does not erase an otherwise known subject and let a task-only
+        // nearest result claim it. Complete names precede partial ones.
+        let named_subject = if cfg.whole_query_relevance && !full_identity {
+            let subject_names: Vec<_> = names
                 .iter()
                 .flat_map(|(&addr, name)| {
-                    [(true, name.alias.max(name.linked)), (false, name.label)]
-                        .map(move |(established, words)| (addr, established, words))
+                    [
+                        (name.alias, "alias"),
+                        (name.linked, "independent_links"),
+                        (
+                            independent_labels.get(&addr).copied().unwrap_or(0),
+                            "structured_name",
+                        ),
+                    ]
+                    .map(move |(words, reason)| (addr, words, reason))
                 })
-                .filter(|(_, _, words)| {
+                .filter(|(_, words, _)| {
                     *words > 0
                         && *words < query.len
                         && !tokens
                             .get(*words)
                             .is_some_and(|word| is_function_word(word))
                 })
-                .filter(|(addr, _, words)| {
-                    evidence.get(addr).is_some_and(|lexical| {
-                        let distinct = tokens.iter().take(*words).collect::<HashSet<_>>().len();
-                        lexical.subject(distinct) == Some(1.0)
-                    })
+                .map(|(addr, words, reason)| {
+                    let compatible = evidence.get(&addr).is_some_and(|lexical| {
+                        let distinct = tokens.iter().take(words).collect::<HashSet<_>>().len();
+                        lexical.substantive >= 0.75
+                            && lexical
+                                .task_coverage(distinct)
+                                .is_none_or(|task| task > 0.0)
+                            || closeness_of(addr)
+                                .is_some_and(|score| unit_or(score, 0.0) >= semantic_floor)
+                    });
+                    (addr, words, reason, compatible)
                 })
-                // An established alias precedes a longer self-described
-                // domain spelling that may merely repeat query modifiers.
-                .map(|(_, established, words)| (established, words))
-                .max()
-                .map(|(_, words)| words)
-                .unwrap_or(0)
+                .collect();
+            let mut identities: HashMap<usize, HashSet<String>> = HashMap::new();
+            for &(addr, words, _, _) in &subject_names {
+                if let Some(domain) = columns[addr.segment_ord as usize].domain(addr.doc_id) {
+                    identities.entry(words).or_default().insert(domain);
+                }
+            }
+            subject_names
+                .into_iter()
+                .filter(|(_, words, reason, compatible)| {
+                    *compatible
+                        || *reason == "independent_links"
+                        || identities.get(words).is_some_and(|sites| sites.len() == 1)
+                })
+                .max_by(
+                    |(a, a_words, a_reason, a_compatible), (b, b_words, b_reason, b_compatible)| {
+                        a_compatible
+                            .cmp(b_compatible)
+                            .then_with(|| {
+                                (*a_reason == "independent_links")
+                                    .cmp(&(*b_reason == "independent_links"))
+                            })
+                            .then_with(|| a_words.cmp(b_words))
+                            .then_with(|| {
+                                closeness_of(*a)
+                                    .unwrap_or(0.0)
+                                    .total_cmp(&closeness_of(*b).unwrap_or(0.0))
+                            })
+                            .then_with(|| {
+                                columns[b.segment_ord as usize]
+                                    .domain(b.doc_id)
+                                    .cmp(&columns[a.segment_ord as usize].domain(a.doc_id))
+                            })
+                    },
+                )
+                .map(|(addr, words, reason, compatible)| {
+                    let reason = match (reason, compatible) {
+                        ("alias", false) => "unambiguous_alias",
+                        ("structured_name", false) => "unambiguous_structured_name",
+                        (reason, _) => reason,
+                    };
+                    (addr, words, reason)
+                })
         } else {
-            0
+            None
         };
+        let named_subject_words = named_subject.map_or(0, |(_, words, _)| words);
+        let named_subject_domain = named_subject
+            .and_then(|(addr, _, _)| columns[addr.segment_ord as usize].domain(addr.doc_id));
+        let named_subject_reason = named_subject.map(|(_, _, reason)| reason.to_string());
         let subject_prefix = (named_subject_words > 0).then(|| {
             tokens
                 .iter()
@@ -1813,18 +1896,38 @@ impl Searcher {
             // A full-name rival can disable semantic score blending, but
             // cannot erase available whole-query evidence for this site.
             let semantic_evidence = closeness_of(addr).map(|score| unit_or(score, 0.0));
-            let full_name = name.typed || name.words() >= query.len;
+            // The complete hostname written as words retains address
+            // lookup, including its suffix ("americanairlines fr").
+            let full_hostname = column
+                .domain(addr.doc_id)
+                .is_some_and(|domain| analysis::tokens(&self.words, &domain) == tokens);
+            let full_name = name.typed || full_hostname || name.words() >= query.len;
             let explicit_navigation = navigation_names.contains(&addr);
             // A full domain spelling cannot override a resolved subject.
             // Without one, retain exact-name lookup. Typed addresses and
             // independently indexed full names keep their controls.
             let protected = full_name && subject_prefix.is_none()
                 || name.typed
+                || full_hostname
                 || name.alias >= query.len
                 || name.linked >= query.len
+                || independent_labels
+                    .get(&addr)
+                    .is_some_and(|&words| words >= query.len)
                 || is_kind
                 || explicit_navigation;
-            let subject_coverage = subject_prefix.and_then(|prefix| lexical.subject(prefix));
+            let subject_coverage = subject_prefix.and_then(|prefix| {
+                if name
+                    .alias
+                    .max(name.linked)
+                    .max(independent_labels.get(&addr).copied().unwrap_or(0))
+                    >= named_subject_words
+                {
+                    Some(1.0)
+                } else {
+                    lexical.subject(prefix)
+                }
+            });
             let subject_remaining = subject_prefix.and_then(|prefix| lexical.task_coverage(prefix));
             let subject_share = if protected {
                 1.0
@@ -1833,8 +1936,9 @@ impl Searcher {
             };
             let subject_supported = subject_share >= 1.0 - f32::EPSILON;
             // Relative nearest-result scores can be high for a task-only
-            // provider. They cannot establish a missing named subject, or
-            // verify a task with no substantive indexed support at all.
+            // provider. They cannot establish a missing named subject.
+            // Missing indexed task words remain unknown: semantic support
+            // for the whole query may still support ordering, not verification.
             let qualified_semantic = semantic_evidence.map(|s| s * subject_share);
             let semantic = meaning.and(qualified_semantic);
             // Without a resolved subject, retain descriptive semantic recall
@@ -1847,14 +1951,22 @@ impl Searcher {
                             || query.others.iter().flatten().any(|other| other == word)
                     })
             });
-            let semantic_floor = cfg.meaning_only_relevance.unwrap_or(0.35).max(0.0);
             let convincing = protected
                 || subject_supported
-                    && subject_remaining.is_none_or(|remaining| remaining > 0.0)
                     && (lexical.substantive >= 0.75
+                        && subject_remaining.is_none_or(|remaining| remaining > 0.0)
                         || qualified_semantic.is_some_and(|s| {
                             if subject_coverage.is_some() {
-                                s >= semantic_floor.max(f32::EPSILON)
+                                // With no indexed task words, retain the
+                                // existing stronger calibration for literal
+                                // domain collisions. Other subject-supported
+                                // results keep descriptive semantic recall.
+                                let floor = if domain_collision && subject_remaining == Some(0.0) {
+                                    cfg.partial_closeness.unwrap_or(0.5).max(semantic_floor)
+                                } else {
+                                    semantic_floor
+                                };
+                                s >= floor
                             } else {
                                 s >= cfg.partial_closeness.unwrap_or(0.5).max(0.5)
                                     || !domain_collision && s >= semantic_floor.max(f32::EPSILON)
@@ -1979,6 +2091,8 @@ impl Searcher {
                 substantive_coverage: lexical.substantive,
                 remaining_coverage: remainder,
                 named_subject_words,
+                named_subject_domain: named_subject_domain.clone(),
+                named_subject_reason: named_subject_reason.clone(),
                 subject_coverage,
                 subject_remaining_coverage: subject_remaining,
                 full_name,
@@ -4582,7 +4696,7 @@ mod tests {
     }
 
     #[test]
-    fn light_modifiers_do_not_supply_missing_substantive_task_evidence() {
+    fn semantic_support_keeps_missing_task_evidence_visible() {
         let records = [site(
             "aster.example",
             Some("Aster platform"),
@@ -4593,7 +4707,7 @@ mod tests {
         )];
         let (_dir, searcher) = build(&records);
         let meaning = FixedMeaning(vec![("aster.example", 0.9)]);
-        for (query, task, tier) in [("aster q9 docs", Some(0.0), 0), ("aster online", None, 1)] {
+        for (query, task) in [("aster q9 docs", Some(0.0)), ("aster online", None)] {
             let pool = searcher
                 .candidate_pool(
                     query,
@@ -4604,8 +4718,233 @@ mod tests {
                 .unwrap();
             let owner = &pool.evidence[0];
             assert_eq!(owner.subject_remaining_coverage, task, "{query}: {owner:?}");
-            assert_eq!(owner.relevance_tier, tier, "{query}: {owner:?}");
+            assert_eq!(owner.relevance_tier, 1, "{query}: {owner:?}");
         }
+    }
+
+    #[test]
+    fn self_labels_and_competing_unsupported_aliases_do_not_scope_descriptions() {
+        for (aliases, first, second) in [
+            (false, "nimbus.example", "nimbus-town.example"),
+            (true, "nimbus.example", "nimbus-town.example"),
+            (true, "first.github.io", "second.github.io"),
+        ] {
+            let names: &[&str] = if aliases { &["Nimbus"] } else { &[] };
+            let records = [
+                site(
+                    first,
+                    Some("Nimbus village"),
+                    None,
+                    names,
+                    &[],
+                    popular(100, 30_000),
+                ),
+                site(
+                    second,
+                    Some("Nimbus magazine"),
+                    None,
+                    names,
+                    &[],
+                    popular(200, 20_000),
+                ),
+                site(
+                    "aster.example",
+                    Some("Research project guidance status"),
+                    None,
+                    &[],
+                    &[],
+                    obscure(500_000, 5),
+                ),
+            ];
+            let (_dir, searcher) = build(&records);
+            let meaning = FixedMeaning(vec![(first, 0.1), (second, 0.1), ("aster.example", 1.0)]);
+            for vector in [None, Some(&meaning as &dyn Meaning)] {
+                let hits = searcher
+                    .search_meaning(
+                        "nimbus research project guidance status",
+                        10,
+                        &RankConfig::default(),
+                        &SearchOptions {
+                            exact: true,
+                            ..Default::default()
+                        },
+                        vector,
+                    )
+                    .unwrap()
+                    .hits;
+                assert_eq!(hits[0].domain, "aster.example", "{aliases}: {hits:?}");
+                let evidence = hits[0].query_evidence.as_ref().unwrap();
+                assert_eq!(evidence.named_subject_words, 0);
+                assert_eq!(evidence.named_subject_domain, None);
+                assert_eq!(evidence.subject_coverage, None);
+                assert_eq!(evidence.relevance_tier, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn weak_known_subjects_keep_task_only_nearest_results_as_fallbacks() {
+        for (query, domain, name, score) in [
+            ("openai api", "openai.com", "OpenAI", 0.231),
+            ("aws s3 docs", "aws.amazon.com", "AWS", 0.126),
+            ("gitlab ci docs", "gitlab.com", "GitLab", 0.467),
+        ] {
+            let records = [
+                site(domain, Some(name), None, &[name], &[], popular(100, 30_000)),
+                site(
+                    "task-provider.example",
+                    Some("API S3 CI docs reference"),
+                    None,
+                    &[],
+                    &[],
+                    popular(50, 40_000),
+                ),
+            ];
+            let (_dir, searcher) = build(&records);
+            let meaning = FixedMeaning(vec![(domain, score), ("task-provider.example", 1.0)]);
+            let mut hits = searcher
+                .search_meaning(
+                    query,
+                    10,
+                    &RankConfig::default(),
+                    &SearchOptions::default(),
+                    Some(&meaning),
+                )
+                .unwrap()
+                .hits;
+            let owner = hits
+                .iter()
+                .find(|hit| hit.domain == domain)
+                .unwrap()
+                .query_evidence
+                .as_ref()
+                .unwrap();
+            assert_eq!(owner.subject_coverage, Some(1.0));
+            assert_eq!(owner.subject_remaining_coverage, Some(0.0));
+            assert_eq!(owner.relevance_tier, 0);
+            assert_eq!(owner.named_subject_domain.as_deref(), Some(domain));
+            assert!(matches!(
+                owner.named_subject_reason.as_deref(),
+                Some(
+                    "alias"
+                        | "unambiguous_alias"
+                        | "structured_name"
+                        | "unambiguous_structured_name"
+                )
+            ));
+            let pool = searcher
+                .candidate_pool(
+                    query,
+                    &RankConfig::default(),
+                    &SearchOptions::default(),
+                    Some(&meaning),
+                )
+                .unwrap();
+            let provider = pool
+                .evidence
+                .iter()
+                .find(|e| e.domain == "task-provider.example")
+                .unwrap();
+            assert_eq!(provider.subject_coverage, Some(0.0));
+            assert_eq!(provider.relevance_tier, 0);
+            if let Some(provider) = hits
+                .iter()
+                .find(|hit| hit.domain == "task-provider.example")
+            {
+                assert_eq!(provider.score, 0.0);
+            }
+            assert_eq!(hits[0].domain, domain, "{query}: {hits:?}");
+            learned::reorder(learned::Model::builtin(), query, &mut hits, &mut Vec::new());
+            assert_eq!(hits[0].domain, domain, "{query}: {hits:?}");
+        }
+    }
+
+    #[test]
+    fn sparse_subject_owners_keep_existing_strong_semantic_calibration() {
+        let records = [site(
+            "aster.example",
+            Some("Aster platform"),
+            None,
+            &["Aster"],
+            &[],
+            popular(100, 30_000),
+        )];
+        let (_dir, searcher) = build(&records);
+        for score in [0.55, 0.793, 0.970] {
+            let meaning = FixedMeaning(vec![("aster.example", score)]);
+            let hits = searcher
+                .search_meaning(
+                    "aster runtime api",
+                    10,
+                    &RankConfig::default(),
+                    &SearchOptions::default(),
+                    Some(&meaning),
+                )
+                .unwrap()
+                .hits;
+            let owner = &hits[0];
+            let evidence = owner.query_evidence.as_ref().unwrap();
+            assert_eq!(evidence.subject_remaining_coverage, Some(0.0));
+            assert_eq!(evidence.relevance_tier, 1);
+            assert!(owner.text_score >= 0.7 * score, "{owner:?}");
+        }
+        // An independent alias on another hostname keeps the existing
+        // descriptive calibration, as a sparse authority homepage does.
+        let records = [site(
+            "authority.example",
+            Some("Nimbus office"),
+            None,
+            &["Nimbus"],
+            &[],
+            popular(100, 30_000),
+        )];
+        let (_dir, searcher) = build(&records);
+        let meaning = FixedMeaning(vec![("authority.example", 0.406)]);
+        let hits = searcher
+            .search_meaning(
+                "nimbus renewal",
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap()
+            .hits;
+        let evidence = hits[0].query_evidence.as_ref().unwrap();
+        assert_eq!(evidence.subject_remaining_coverage, Some(0.0));
+        assert_eq!(evidence.relevance_tier, 1);
+    }
+
+    #[test]
+    fn complete_structured_identity_precedes_partial_scopes_with_borrowed_text() {
+        let mut owner = site(
+            "aster.example",
+            Some("Borrowed portal"),
+            None,
+            &["Nimbus Research"],
+            &[],
+            popular(100, 30_000),
+        );
+        owner.url = Some("https://other.example/".into());
+        owner.about = Some("Research organization".into());
+        let records = [
+            owner,
+            site(
+                "nimbus.example",
+                Some("Nimbus Research guidance"),
+                None,
+                &["Nimbus"],
+                &[],
+                obscure(500_000, 5),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("nimbus research", 10).unwrap();
+        assert_eq!(hits[0].domain, "aster.example", "{hits:?}");
+        let evidence = hits[0].query_evidence.as_ref().unwrap();
+        assert!(evidence.full_name);
+        assert_eq!(evidence.relevance_tier, 1);
+        assert_eq!(evidence.named_subject_words, 0);
     }
 
     #[test]
@@ -4749,11 +5088,12 @@ mod tests {
             .find(|e| e.domain == "asterrefund.test")
             .unwrap();
         assert_eq!(corroborated.relevance_tier, 1);
-        assert_eq!(corroborated.subject_coverage, Some(1.0));
+        assert_eq!(corroborated.subject_coverage, None);
+        assert_eq!(corroborated.named_subject_words, 0);
     }
 
     #[test]
-    fn a_long_subject_does_not_verify_an_unsupported_task() {
+    fn strong_semantic_ordering_does_not_claim_indexed_task_verification() {
         let subject = "Aster Nimbus Zephyr Lunar Observatory Institute Lab";
         let records = [
             site(
@@ -4790,6 +5130,22 @@ mod tests {
             .unwrap();
         assert!(owner.substantive_coverage > 0.75);
         assert_eq!(owner.named_subject_words, 7);
+        assert_eq!(owner.subject_remaining_coverage, Some(0.0));
+        assert_eq!(owner.relevance_tier, 1);
+        // Without vectors, a long name alone cannot certify the remainder.
+        let pool = searcher
+            .candidate_pool(
+                &format!("{subject} refund"),
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                None,
+            )
+            .unwrap();
+        let owner = pool
+            .evidence
+            .iter()
+            .find(|e| e.domain == "aster.example")
+            .unwrap();
         assert_eq!(owner.subject_remaining_coverage, Some(0.0));
         assert_eq!(owner.relevance_tier, 0);
     }
@@ -5016,7 +5372,7 @@ mod tests {
             .iter()
             .find(|hit| hit.domain == "nimbus.example")
             .unwrap();
-        assert_eq!(supported.query_evidence.as_ref().unwrap().relevance_tier, 0);
+        assert_eq!(supported.query_evidence.as_ref().unwrap().relevance_tier, 1);
         assert_eq!(
             supported
                 .query_evidence
@@ -5093,8 +5449,8 @@ mod tests {
             .find(|e| e.domain == "aster.example")
             .unwrap();
         assert_eq!(evidence.relevance_tier, 0, "{evidence:?}");
-        // Relative semantic evidence survives disabled score blending, but
-        // cannot verify task words absent from the owner's indexed text.
+        // Strong semantic support survives disabled score blending while
+        // diagnostics still report task words absent from indexed text.
         let meaning = FixedMeaning(vec![("aster.example", 0.6)]);
         let hits = searcher
             .search_meaning(
@@ -5112,7 +5468,7 @@ mod tests {
             .unwrap();
         let evidence = supported.query_evidence.as_ref().unwrap();
         assert_eq!(evidence.semantic_closeness, Some(0.6));
-        assert_eq!(evidence.relevance_tier, 0);
+        assert_eq!(evidence.relevance_tier, 1);
         assert_eq!(evidence.subject_remaining_coverage, Some(0.0));
         let unadjusted = searcher
             .search_meaning(
@@ -7949,7 +8305,7 @@ mod tests {
                 .unwrap()
                 .hits;
             let owner = hits.iter().find(|hit| hit.domain == "amazon.com").unwrap();
-            assert_eq!(owner.query_evidence.as_ref().unwrap().relevance_tier, 0);
+            assert_eq!(owner.query_evidence.as_ref().unwrap().relevance_tier, 1);
             assert_eq!(
                 owner
                     .query_evidence

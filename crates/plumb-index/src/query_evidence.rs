@@ -32,12 +32,24 @@ pub struct CandidateEvidence {
     /// Corroborated leading-name span used for every candidate, in query words.
     #[serde(default)]
     pub named_subject_words: usize,
-    /// Substantive coverage of that span; unknown when no subject was resolved.
+    /// Identity chosen for the shared span from established names, using
+    /// whole-query evidence to resolve competitors. Domain spelling alone
+    /// cannot choose it.
+    #[serde(default)]
+    pub named_subject_domain: Option<String>,
+    /// Indexed identity provenance: alias, independent link name, or a
+    /// structured/redirect name distinct from the raw domain label. An
+    /// unambiguous_* reason records identity without claiming task support.
+    #[serde(default)]
+    pub named_subject_reason: Option<String>,
+    /// Coverage of that span in substantive text or an established name;
+    /// unknown when no subject was resolved.
     #[serde(default)]
     pub subject_coverage: Option<f32>,
     /// Coverage of main task words after the subject, excluding light
     /// navigation/presentation modifiers. None when there are no main task
-    /// words or no subject was resolved.
+    /// words or no subject was resolved. Zero is missing indexed task
+    /// evidence, not proof that the site cannot fulfill the task.
     #[serde(default)]
     pub subject_remaining_coverage: Option<f32>,
     pub full_name: bool,
@@ -45,6 +57,7 @@ pub struct CandidateEvidence {
     pub partial_name_words: usize,
     /// Convincing lexical or semantic evidence precedes popularity. Zero
     /// denotes a weak fallback, not proof that the site is irrelevant.
+    /// One supports ordering; it does not certify indexed task fulfillment.
     pub relevance_tier: u8,
     /// Explainable source evidence, when present; never a TLD/popularity verdict.
     pub source_quality: Option<crate::health::SourceQualityEvidence>,
