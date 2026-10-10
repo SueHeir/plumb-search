@@ -487,6 +487,13 @@ pub struct RunArgs {
     /// on a node the whole internet can reach.
     #[arg(long)]
     pub mcp_read_pages: bool,
+    /// Let every client of `/mcp`, not only AI apps on this computer, keep
+    /// findings with its `report_finding` tool and see them listed with
+    /// search results. Findings hold what agents searched for, so only for
+    /// a node whose address you give to people you trust. Sharing findings
+    /// with other nodes stays with this computer's apps.
+    #[arg(long)]
+    pub mcp_findings: bool,
     /// Also find sites by meaning for searches that name no site ("electric
     /// car maker"). Downloads a small embedding model (about 130 MB) into
     /// DIR/model and embeds each site's text in the background after every
@@ -1167,6 +1174,13 @@ pub struct ServeArgs {
     /// on a node the whole internet can reach.
     #[arg(long)]
     pub mcp_read_pages: bool,
+    /// Let every client of `/mcp`, not only AI apps on this computer, keep
+    /// findings with its `report_finding` tool and see them listed with
+    /// search results. Findings hold what agents searched for, so only for
+    /// a node whose address you give to people you trust. Sharing findings
+    /// with other nodes stays with this computer's apps.
+    #[arg(long)]
+    pub mcp_findings: bool,
     /// A places file (places.tsv.gz from `fetch-pages --set places`), so
     /// "pizza in denver" lists places. Indexed next to it on first use.
     #[arg(long, value_name = "PATH")]
