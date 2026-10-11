@@ -2361,9 +2361,9 @@ impl Task {
         epoch: u64,
         now: u64,
     ) -> Result<Option<Hash>> {
-        // Already signed Own batches must remain durable, but fresh crawls
-        // acquire headroom before signing. This reservation remains held while
-        // the store writes, so other producers cannot consume it meanwhile.
+        // Fresh crawls reserve their headroom before signing. This
+        // reservation remains held while the store writes, so the ledger
+        // counts it meanwhile.
         let budget = self.lock_store().storage().cloned();
         let _headroom = if let Some(budget) = budget {
             let mut size = crate::storage::ByteCount {
@@ -5041,97 +5041,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_replay_shutdown_cancels_both_quota_and_receiver_waits() {
-        for full_quota in [true, false] {
-            let dir = tempfile::tempdir().unwrap();
-            let now = now_unix();
-            let key = Keypair::generate_ed25519();
-            let crawler = key.public().to_peer_id();
-            let batches = dir.path().join("batches");
-            let mut legacy = BatchStore::open(&batches).unwrap();
-            for n in 0..6 {
-                let mut record = SiteRecord::new(format!("shutdown-replay-{n}.example"));
-                record.title = Some("Pending legacy delivery".into());
-                record.crawled_at = Some(now);
-                legacy
-                    .insert(
-                        &Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-                            .unwrap()
-                            .unwrap(),
-                    )
-                    .unwrap();
-            }
-            drop(legacy);
-            let source = Arc::new(
-                crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
-            );
-            let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
-            let mut config = NetConfig::new(dir.path().to_owned());
-            config.listen.clear();
-            config.upnp = false;
-            config.local_discovery = false;
-            config.round_every = None;
-            config.trusted_peers = vec![crawler];
-            config.storage_budget = Some(budget.clone());
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            if full_quota {
-                // Tighten after retention: an initially full legacy store is
-                // correctly pruned before replay and cannot exercise this wait.
-                let store = Mutex::new(
-                    BatchStore::open_retained(
-                        &batches,
-                        true,
-                        StoreLimits {
-                            own: Vec::new(),
-                            bytes: None,
-                            now,
-                            epochs: crate::store::RETAIN_EPOCHS,
-                            storage: Some(budget.clone()),
-                        },
-                    )
-                    .unwrap(),
-                );
-                let ids = store.lock().unwrap().ids_oldest_first();
-                budget.set_limit(1);
-                let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let cancelled = stopped.clone();
-                let (tx, rx) = mpsc::channel(RECORD_DELIVERIES);
-                let producer = tokio::task::spawn_blocking(move || {
-                    resend_pending(&store, &ids, &tx, PeerId::random(), &[crawler], &cancelled)
-                });
-                while budget.status().rejected_writes == 0 {
-                    assert!(std::time::Instant::now() < deadline);
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                stopped.store(true, std::sync::atomic::Ordering::SeqCst);
-                tokio::time::timeout(std::time::Duration::from_secs(2), producer)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(rx.is_empty());
-            } else {
-                let (handle, records) = start(config, source).await.unwrap();
-                while records.len() != RECORD_DELIVERIES {
-                    assert!(std::time::Instant::now() < deadline);
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                tokio::time::timeout(std::time::Duration::from_secs(2), handle.shutdown())
-                    .await
-                    .unwrap();
-                assert!(handle
-                    .replay_stopped
-                    .load(std::sync::atomic::Ordering::SeqCst));
-                drop(records);
-            }
-            while budget.status().reserved_bytes != 0 {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "cancelled replay retained its reservation"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            assert_eq!(BatchStore::open(&batches).unwrap().len(), 6);
+    async fn startup_replay_shutdown_cancels_the_receiver_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_unix();
+        let key = Keypair::generate_ed25519();
+        let crawler = key.public().to_peer_id();
+        let batches = dir.path().join("batches");
+        let mut legacy = BatchStore::open(&batches).unwrap();
+        for n in 0..6 {
+            let mut record = SiteRecord::new(format!("shutdown-replay-{n}.example"));
+            record.title = Some("Pending legacy delivery".into());
+            record.crawled_at = Some(now);
+            legacy
+                .insert(
+                    &Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
         }
+        drop(legacy);
+        let source = Arc::new(
+            crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
+        );
+        let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let mut config = NetConfig::new(dir.path().to_owned());
+        config.listen.clear();
+        config.upnp = false;
+        config.local_discovery = false;
+        config.round_every = None;
+        config.trusted_peers = vec![crawler];
+        config.storage_budget = Some(budget.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (handle, records) = start(config, source).await.unwrap();
+        while records.len() != RECORD_DELIVERIES {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle.shutdown())
+            .await
+            .unwrap();
+        assert!(handle
+            .replay_stopped
+            .load(std::sync::atomic::Ordering::SeqCst));
+        drop(records);
+        while budget.status().reserved_bytes != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled replay retained its reservation"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(BatchStore::open(&batches).unwrap().len(), 6);
     }
 
     #[tokio::test]
@@ -5197,7 +5158,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_scope_change_refused_by_quota_keeps_the_previous_marker() {
+    async fn a_scope_change_past_the_storage_limit_is_saved() {
         let dir = tempfile::tempdir().unwrap();
         let source = Arc::new(
             crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
@@ -5239,30 +5200,30 @@ mod tests {
         assert!(used > 0);
         budget.set_limit(used);
         config.search_scope = SearchScope::Trusted;
-        let rejected_before_restart = budget.status().rejected_writes;
-        let (handle, records) = start(config.clone(), source.clone()).await.unwrap();
-        let recounted = handle.recount().await.unwrap();
-        assert!(recounted.epochs.is_empty());
-        assert_eq!(std::fs::read(&table_path).unwrap(), old_table);
-        assert!(!table_path.with_extension("tmp").exists());
-        assert_eq!(std::fs::read(dir.path().join(SCOPE_FILE)).unwrap(), old);
-        assert!(budget.status().rejected_writes > rejected_before_restart);
-        assert_eq!(budget.status().reserved_bytes, 0);
-        assert_eq!(
-            budget.status().used_bytes,
-            crate::storage::directory_bytes(dir.path()).unwrap()
-        );
-        handle.shutdown().await;
-        drop(records);
-        // A later configuration with room can retry the preserved marker.
-        budget.set_limit(u64::MAX);
+        // The limit is a target, as in 0.2.0: a node at it still saves a
+        // changed scope rather than keep the old one.
         let (handle, records) = start(config, source).await.unwrap();
+        handle.recount().await.unwrap();
+        assert_ne!(std::fs::read(dir.path().join(SCOPE_FILE)).unwrap(), old);
         assert_eq!(
             std::fs::read_to_string(dir.path().join(SCOPE_FILE)).unwrap(),
             "trusted"
         );
         handle.shutdown().await;
         drop(records);
+        // Saves are no longer refused, so one startup began can still be
+        // finishing.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while table_path.with_extension("tmp").exists() || budget.status().reserved_bytes != 0 {
+            assert!(std::time::Instant::now() < deadline, "a save never ended");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let _mutation = budget.mutation();
+        assert_eq!(budget.status().rejected_writes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            crate::storage::directory_bytes(dir.path()).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -5354,7 +5315,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_waits_when_its_actual_serialized_delivery_cannot_fit() {
+    fn replay_past_the_storage_limit_still_delivers() {
         let dir = tempfile::tempdir().unwrap();
         let key = Keypair::generate_ed25519();
         let crawler = key.public().to_peer_id();
@@ -5397,17 +5358,16 @@ mod tests {
         let producer = std::thread::spawn(move || {
             resend_pending(&store, &[id], &tx, me, &[crawler], &cancelled);
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while budget.status().rejected_writes == 0 {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(rx.try_recv().is_err());
-        assert_eq!(budget.status().reserved_bytes, 0);
-        stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The limit is a target, as in 0.2.0: the delivery is not held
+        // back for it; crawls pause instead.
+        let delivery = rx.blocking_recv().unwrap();
+        assert_eq!(delivery.records, confirmed);
+        assert!(budget.status().backpressure);
+        assert_eq!(budget.status().rejected_writes, 0);
         producer.join().unwrap();
+        drop((delivery, stopped));
+        assert_eq!(budget.status().reserved_bytes, 0);
         assert_eq!(std::fs::read(path).unwrap(), signed);
-        assert!(!batches.join(format!("{id}.delivered-trusted")).exists());
         assert_eq!(
             budget.status().used_bytes,
             crate::storage::directory_bytes(dir.path()).unwrap()

@@ -1,6 +1,12 @@
-//! Admission for node-managed storage. A startup count includes the entire data
-//! directory; subsequent network writes reserve room before creating files.
+//! The node's storage ledger. A startup count includes the entire data
+//! directory; subsequent writes reserve room before creating files.
 //! Recounts accompany the node's existing storage-maintenance checkpoints.
+//!
+//! The storage limit (`storage_limit_mb`) means what it meant in 0.2.0: the
+//! bytes of the files in the data folder, a target the node keeps to by
+//! pausing crawls and trimming once past it. Nothing is refused for it
+//! ([`StorageBudget::reserve`]): a node upgraded from 0.2.0 near its limit
+//! keeps writing, trimming and building its indexes.
 
 use std::fs;
 use std::io::{self, Write};
@@ -10,36 +16,21 @@ use std::sync::{Arc, Mutex, PoisonError};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
-// Allow for block rounding and per-file filesystem metadata. Counting logical
-// JSON lengths alone is particularly misleading for thousands of small files.
-const BLOCK: u64 = 4096;
-const FILE_OVERHEAD: u64 = 4096;
-
+/// What writing `bytes` adds to the ledger: their length, as 0.2.0 counted
+/// the data folder.
 pub fn allocation_for(bytes: u64) -> u64 {
     bytes
-        .div_ceil(BLOCK)
-        .saturating_mul(BLOCK)
-        .saturating_add(FILE_OVERHEAD)
-        .saturating_add(BLOCK) // transient directory growth while staging
 }
 
+/// The bytes `path` counts for: a file's length; nothing for a directory
+/// or a symlink.
 pub fn file_bytes(path: &Path) -> io::Result<u64> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Ok(0);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(metadata
-            .blocks()
-            .saturating_mul(512)
-            .saturating_add(FILE_OVERHEAD))
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(allocation_for(metadata.len()))
-    }
+    Ok(if metadata.is_file() {
+        metadata.len()
+    } else {
+        0
+    })
 }
 
 pub fn existing_file_bytes(path: &Path) -> io::Result<u64> {
@@ -50,22 +41,21 @@ pub fn existing_file_bytes(path: &Path) -> io::Result<u64> {
     }
 }
 
+/// The bytes of the files under `path`, counting what can be read, as 0.2.0
+/// did: an unreadable entry (a root-owned `lost+found`) counts nothing
+/// rather than keeping the node from starting.
 pub fn directory_bytes(path: &Path) -> io::Result<u64> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
+    if !metadata.is_dir() {
+        return file_bytes(path);
+    }
+    let Ok(entries) = fs::read_dir(path) else {
         return Ok(0);
-    }
-    let mut bytes = file_bytes(path)?;
-    if metadata.is_dir() {
-        for entry in fs::read_dir(path)? {
-            match directory_bytes(&entry?.path()) {
-                Ok(size) => bytes = bytes.saturating_add(size),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err),
-            }
-        }
-    }
-    Ok(bytes)
+    };
+    Ok(entries
+        .flatten()
+        .map(|entry| directory_bytes(&entry.path()).unwrap_or(0))
+        .fold(0u64, u64::saturating_add))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,8 +63,11 @@ pub struct StorageStatus {
     pub limit_bytes: u64,
     pub used_bytes: u64,
     pub reserved_bytes: u64,
-    /// New foreign batches, inbox data and cached buckets wait for room.
+    /// Past the limit, with what is reserved: crawls pause until trims
+    /// make room.
     pub backpressure: bool,
+    /// Writes refused for the limit: none since it is a target again, kept
+    /// for `GET /api/status` readers.
     pub rejected_writes: u64,
     /// Unlinked segment files whose mapped readers still own their allocation.
     pub reader_held_bytes: u64,
@@ -155,25 +148,16 @@ impl StorageBudget {
             .saturating_sub(state.used_bytes.saturating_add(state.reserved_bytes))
     }
 
-    /// Only the node's own signed batches are exempt. Raw records, inboxes
-    /// and credits are never removed to make this reservation fit.
-    pub fn reserve(self: &Arc<Self>, bytes: u64, exempt: bool) -> Result<Reservation> {
+    /// Holds `bytes` for a write until it is measured. The limit is a
+    /// target, as in 0.2.0: a reservation past it is never refused, it only
+    /// sets [`StorageStatus::backpressure`], which pauses crawls until trims
+    /// bring the node back under it. `_exempt` (the node's own signed
+    /// batches) no longer changes anything.
+    pub fn reserve(self: &Arc<Self>, bytes: u64, _exempt: bool) -> Result<Reservation> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let next = state
-            .used_bytes
-            .saturating_add(state.reserved_bytes)
-            .saturating_add(bytes);
-        if !exempt && next > state.limit_bytes {
-            state.backpressure = true;
-            state.rejected_writes = state.rejected_writes.saturating_add(1);
-            anyhow::bail!(
-                "storage backpressure: {bytes} bytes requested, {} available",
-                state
-                    .limit_bytes
-                    .saturating_sub(state.used_bytes.saturating_add(state.reserved_bytes))
-            );
-        }
         state.reserved_bytes = state.reserved_bytes.saturating_add(bytes);
+        state.backpressure =
+            state.used_bytes.saturating_add(state.reserved_bytes) >= state.limit_bytes;
         Ok(Reservation {
             budget: self.clone(),
             bytes,
@@ -376,17 +360,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reservations_include_allocated_baseline_and_concurrent_work() {
+    fn reservations_past_the_limit_pause_but_are_not_refused() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("records.jsonl"), b"raw records stay").unwrap();
         let used = directory_bytes(dir.path()).unwrap();
         let budget = StorageBudget::open(dir.path(), used + allocation_for(20)).unwrap();
-        let reserved = budget.reserve(allocation_for(20), false).unwrap();
-        assert!(budget.reserve(1, false).is_err());
+        let reserved = budget.reserve(allocation_for(19), false).unwrap();
+        assert!(!budget.status().backpressure);
+        let past = budget.reserve(1, false).unwrap();
+        assert!(budget.status().backpressure);
         assert_eq!(budget.status().reserved_bytes, allocation_for(20));
-        drop(reserved);
+        assert_eq!(budget.status().rejected_writes, 0);
+        drop((reserved, past));
         assert_eq!(budget.status().reserved_bytes, 0);
-        assert!(budget.reserve(allocation_for(20), false).is_ok());
+        assert!(!budget.status().backpressure);
         assert_eq!(
             fs::read(dir.path().join("records.jsonl")).unwrap(),
             b"raw records stay"
@@ -394,17 +381,41 @@ mod tests {
     }
 
     #[test]
-    fn own_exemption_exposes_backpressure_and_never_frees_raw_data() {
+    fn a_node_over_its_limit_keeps_writing_and_never_frees_raw_data() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("inbox.absorbing"), b"unfinished replay").unwrap();
         let budget = StorageBudget::open(dir.path(), 1).unwrap();
         assert!(budget.status().backpressure);
-        assert!(budget.reserve(1, false).is_err());
-        let mut own = budget.reserve(allocation_for(10), true).unwrap();
-        own.commit(allocation_for(10), 0, allocation_for(10));
+        let mut write = budget.reserve(allocation_for(10), false).unwrap();
+        write.commit(allocation_for(10), 0, allocation_for(10));
         assert!(budget.status().backpressure);
         assert_eq!(budget.status().reserved_bytes, 0);
         assert!(dir.path().join("inbox.absorbing").exists());
+    }
+
+    #[test]
+    fn the_data_folder_counts_as_0_2_0_counted_it() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("icons/a")).unwrap();
+        fs::write(dir.path().join("records.jsonl"), b"0123456789").unwrap();
+        // Empty and small files: no block rounding or per-file overhead.
+        fs::write(dir.path().join("icons/a/empty.ico"), b"").unwrap();
+        fs::write(dir.path().join("icons/a/small.ico"), b"abc").unwrap();
+        assert_eq!(directory_bytes(dir.path()).unwrap(), 13);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // An unreadable folder counts nothing (unless run as root,
+            // who reads it anyway); it does not stop the count.
+            let locked = dir.path().join("lost+found");
+            fs::create_dir(&locked).unwrap();
+            fs::write(locked.join("x"), b"xyz").unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+            let bytes = directory_bytes(dir.path()).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(bytes == 13 || bytes == 16, "{bytes}");
+            assert!(StorageBudget::open(dir.path(), 1).is_ok());
+        }
     }
 }
 
@@ -831,7 +842,7 @@ pub struct StageGuard {
 impl StageGuard {
     pub fn create(path: &Path, budget: Arc<StorageBudget>) -> Result<Self> {
         let _mutation = budget.mutation();
-        let mut reservation = budget.reserve(allocation_for(BLOCK), false)?;
+        let mut reservation = budget.reserve(allocation_for(0), false)?;
         let before = path.parent().map(file_bytes).transpose()?.unwrap_or(0);
         fs::create_dir(path)?;
         let created = file_bytes(path).unwrap_or(allocation_for(0));
@@ -982,50 +993,10 @@ pub fn create_directory(path: &Path, budget: Option<&Arc<StorageBudget>>) -> Res
     create_directory_locked(path, budget)
 }
 
-/// Caller holds the budget mutation barrier.
-pub fn create_directory_locked(path: &Path, budget: Option<&Arc<StorageBudget>>) -> Result<()> {
-    let Some(budget) = budget else {
-        fs::create_dir_all(path)?;
-        return Ok(());
-    };
-    let mut missing = Vec::new();
-    let mut parent = path;
-    loop {
-        match fs::symlink_metadata(parent) {
-            Ok(_) => break,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                missing.push(parent.to_owned());
-                parent = parent
-                    .parent()
-                    .ok_or_else(|| io::Error::other("directory has no existing parent"))?;
-            }
-            Err(err) => return Err(err.into()),
-        }
-    }
-    if missing.is_empty() {
-        return Ok(());
-    }
-    let before = file_bytes(parent)?;
-    let mut reservation = budget.reserve(
-        allocation_for(BLOCK).saturating_mul(missing.len() as u64),
-        false,
-    )?;
-    let result = fs::create_dir_all(path);
-    let mut created = 0u64;
-    for dir in &missing {
-        match file_bytes(dir) {
-            Ok(bytes) => created = created.saturating_add(bytes),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => created = created.saturating_add(allocation_for(0)),
-        }
-    }
-    created = created.saturating_add(
-        file_bytes(parent)
-            .unwrap_or(before + 4096)
-            .saturating_sub(before),
-    );
-    reservation.commit(reservation.bytes(), 0, created);
-    result?;
+/// Caller holds the budget mutation barrier. Directories count nothing in
+/// the ledger ([`file_bytes`]).
+pub fn create_directory_locked(path: &Path, _budget: Option<&Arc<StorageBudget>>) -> Result<()> {
+    fs::create_dir_all(path)?;
     Ok(())
 }
 
@@ -1057,10 +1028,12 @@ mod maintenance_tests {
         let root = tempfile::tempdir().unwrap();
         let budget = StorageBudget::open(root.path(), 128 * 1024).unwrap();
         let used = budget.status().used_bytes;
-        budget.set_limit(used - 1);
-        assert!(budget.reserve(1, false).is_err());
+        let held = budget.reserve(8192, false).unwrap();
         budget.set_limit(used + 8192);
-        assert!(budget.reserve(8192, false).is_ok());
+        assert!(budget.status().backpressure);
+        budget.set_limit(used + 16384);
+        assert!(!budget.status().backpressure);
+        drop(held);
         fs::write(root.path().join("untracked"), vec![0; 65536]).unwrap();
         for _ in 0..100 {
             budget.recount_if_due(root.path()).unwrap();

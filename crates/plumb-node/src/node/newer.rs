@@ -637,11 +637,13 @@ mod tests {
         assert_eq!(budget.status().reader_held_bytes, 0);
         assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap());
         budget.set_limit(budget.status().used_bytes + 8192);
-        assert!(budget.reserve(16384, false).is_err());
+        let past = budget.reserve(16384, false).unwrap();
+        assert!(budget.status().backpressure);
+        drop(past);
     }
 
     #[test]
-    fn insufficient_backup_headroom_preserves_all_generations() {
+    fn an_install_past_the_limit_still_keeps_the_previous_generation() {
         use plumb_core::storage::{directory_bytes, StorageBudget};
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("set.gz");
@@ -652,12 +654,14 @@ mod tests {
         std::fs::write(&part, b"new").unwrap();
         let used = directory_bytes(dir.path()).unwrap();
         let budget = StorageBudget::open(dir.path(), used + 4096).unwrap();
-        assert!(install_with_budget(&part, &file, 123, Some(&budget)).is_err());
-        assert_eq!(std::fs::read(&file).unwrap(), vec![b'a'; 64 * 1024]);
-        assert_eq!(std::fs::read(&previous).unwrap(), b"previous");
-        assert_eq!(std::fs::read(&part).unwrap(), b"new");
-        assert_eq!(budget.status().used_bytes, used);
+        // The limit is a target, as in 0.2.0: the new file is installed.
+        install_with_budget(&part, &file, 123, Some(&budget)).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"new");
+        assert_eq!(std::fs::read(&previous).unwrap(), vec![b'a'; 64 * 1024]);
+        assert!(!part.exists());
         assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(budget.status().rejected_writes, 0);
+        assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap());
     }
 
     #[test]
@@ -729,7 +733,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn copy_fallback_is_rejected_before_copying_a_sparse_source_over_quota() {
+    fn copy_fallback_past_the_limit_keeps_a_sparse_source_as_the_previous_file() {
         use plumb_core::storage::{directory_bytes, file_bytes, StorageBudget};
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("map.pmtiles");
@@ -742,18 +746,21 @@ mod tests {
         let used = directory_bytes(dir.path()).unwrap();
         let budget =
             StorageBudget::open(dir.path(), used + file_bytes(&file).unwrap() + 16384).unwrap();
-        assert!(install_using(
+        install_using(
             &part,
             &file,
             123,
             Some(&budget),
             |_, _| Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
-            |a, b| std::fs::rename(a, b)
+            |a, b| std::fs::rename(a, b),
         )
-        .is_err());
-        assert_eq!(std::fs::metadata(&file).unwrap().len(), 32 * 1024 * 1024);
-        assert_eq!(std::fs::read(&part).unwrap(), b"new");
-        assert!(!prev_path(&file).exists());
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"new");
+        assert_eq!(
+            std::fs::metadata(prev_path(&file)).unwrap().len(),
+            32 * 1024 * 1024
+        );
+        assert_eq!(budget.status().rejected_writes, 0);
         assert_eq!(budget.status().reserved_bytes, 0);
         assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap());
     }

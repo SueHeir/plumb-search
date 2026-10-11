@@ -257,27 +257,29 @@ mod tests {
     }
 
     #[test]
-    fn atomic_replacement_reserves_both_generations_and_rejection_preserves_old_bytes() {
+    fn atomic_replacement_past_the_limit_is_written_and_counted_once() {
         let root = tempfile::tempdir().unwrap();
         let (directory, budget) = directory(root.path(), 64 * 1024);
         directory
             .atomic_write(Path::new("metadata"), &[1; 8192])
             .unwrap();
         let used = budget.status().used_bytes;
+        // The limit is a target: a write past it is not refused.
         budget.set_limit(used + allocation_for(8192) - 1);
-        assert!(directory
+        directory
             .atomic_write(Path::new("metadata"), &[2; 8192])
-            .is_err());
+            .unwrap();
         assert_eq!(
             directory.atomic_read(Path::new("metadata")).unwrap(),
-            vec![1; 8192]
+            vec![2; 8192]
         );
         assert_eq!(budget.status().used_bytes, used);
         assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(budget.status().rejected_writes, 0);
     }
 
     #[test]
-    fn mid_build_quota_failure_preserves_the_old_native_searcher_and_releases_stage() {
+    fn a_build_past_the_limit_completes_and_the_old_searcher_keeps_its_bytes() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("index");
         let mut protected = plumb_core::SiteRecord::new("protected.example");
@@ -294,30 +296,33 @@ mod tests {
                 record
             })
             .collect();
-        assert!(crate::build_index_with_budget(&path, &records, Some(budget.clone())).is_err());
+        // The limit is a target: the build goes past it, and crawls pause.
+        crate::build_index_with_budget(&path, &records, Some(budget.clone())).unwrap();
+        assert!(budget.status().backpressure);
+        assert_eq!(budget.status().rejected_writes, 0);
+        assert_eq!(
+            crate::Searcher::open(&path)
+                .unwrap()
+                .search("fresh index content 7", 1)
+                .unwrap()[0]
+                .domain,
+            "fresh-7.example"
+        );
+        // The replaced index still answers until its searcher closes.
         assert_eq!(
             old.search("protected", 1).unwrap()[0].domain,
             "protected.example"
         );
-        assert_eq!(
-            crate::Searcher::open(&path)
-                .unwrap()
-                .search("protected", 1)
-                .unwrap()[0]
-                .domain,
-            "protected.example"
-        );
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
-        // Detached Tantivy workers have closed the failed stage's descriptors;
-        // their allocation leases can release without a full root recount.
+        drop(old);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while budget.status().reader_held_bytes > 0 || budget.status().reserved_bytes > 0 {
+        while budget.status().reserved_bytes > 0 {
             assert!(
                 std::time::Instant::now() < deadline,
-                "stage writer leases leaked"
+                "stage writer reservations leaked"
             );
             std::thread::yield_now();
         }
-        assert!(budget.status().used_bytes <= baseline + 8192);
+        assert!(budget.status().used_bytes > baseline + 64 * 1024);
     }
 }
