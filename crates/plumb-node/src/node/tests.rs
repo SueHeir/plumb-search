@@ -4368,6 +4368,7 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
     let mut legacy = BatchStore::open(&batches).unwrap();
     let now = now_unix();
     let mut signed = Vec::new();
+    let mut initial_delivery_bytes = Vec::new();
     for n in 0..BATCHES {
         let made = now - (BATCHES - n) as u64;
         let records: Vec<_> = (n * PER_BATCH..(n + 1) * PER_BATCH)
@@ -4377,6 +4378,16 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
             .unwrap()
             .unwrap();
         assert_eq!(batch.records.len(), PER_BATCH);
+        if n < 6 {
+            // These trusted crawls carry only homepage facts, which replay
+            // preserves. Check each of the six held batches' actual encoding.
+            let bytes = batch
+                .records
+                .iter()
+                .map(|line| line.len() as u64 + 1)
+                .sum::<u64>();
+            initial_delivery_bytes.push(plumb_core::storage::allocation_for(bytes + 1));
+        }
         legacy.insert(&batch).unwrap();
         let file = batches.join(format!("{}.json", batch.id()));
         signed.push((
@@ -4504,6 +4515,13 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
     }
     let first = records.recv().await.unwrap();
     assert_eq!(first.records.len(), PER_BATCH);
+    let first_bytes = first
+        .reservation
+        .as_ref()
+        .expect("replay delivery admission")
+        .bytes();
+    assert_eq!(initial_delivery_bytes, vec![first_bytes; 6]);
+    let full_queue_bytes = first_bytes.checked_mul(6).expect("six delivery admissions");
     // Hold actual receiver I/O, while its owned reservation and the producer's
     // fifth pending batch remain live. The raw worker resumes an absorbing file.
     let (locked, ready) = tokio::sync::oneshot::channel();
@@ -4526,13 +4544,24 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         )
         .await;
     });
-    while records.len() != 4 {
-        assert!(Instant::now() < deadline);
+    // Four queued deliveries, the blocked receiver, and one pending producer
+    // must all own their admission before the fold's pressure snapshot.
+    loop {
+        let status = budget.status();
+        assert!(
+            status.reserved_bytes <= full_queue_bytes,
+            "replay exceeded six held admissions: expected {full_queue_bytes}, status {status:?}"
+        );
+        if records.len() == 4 && status.reserved_bytes == full_queue_bytes {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replay did not fill and charge all six owners: queued={}, expected={full_queue_bytes}, status={status:?}",
+            records.len()
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    // Let the producer get its next bounded batch and encounter the full queue.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let full_queue_bytes = budget.status().reserved_bytes;
     let old_one =
         plumb_core::storage::allocation_for((PER_BATCH * 2 * (MAX_RECORD_BYTES + 4096)) as u64);
     assert!(
