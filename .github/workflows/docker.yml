@@ -14,7 +14,10 @@ name: Docker image
 
 on:
   push:
-    branches: [main]
+    # claude/droplet-memory-fix-iu1dg1: plumbsearch.org's 0.2.0 build with
+    # only the memory fix (#412), published as sha-<commit> and nothing else.
+    # This branch is never merged.
+    branches: [main, claude/droplet-memory-fix-iu1dg1]
     tags: ["v*"]
   pull_request:
 
