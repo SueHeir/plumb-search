@@ -28,8 +28,8 @@ use tracing::{debug, info, warn};
 
 use super::{Inner, NodeSettings};
 use crate::pages::{
-    notes_path, open_or_build_with_budget, remove_other_indexes_with_budget, thousands,
-    wanted_counts, SetFileCutter, SetFileNotes, SetInfo, Wanted,
+    index_dir, notes_path, open_or_build_with_budget, remove_other_indexes_with_budget, stand_in,
+    thousands, wanted_counts, SetFileCutter, SetFileNotes, SetInfo, Wanted,
 };
 
 /// How often the job looks for changed settings or set files.
@@ -152,6 +152,23 @@ pub(super) fn run(inner: Arc<Inner>) {
             .as_ref()
             .is_some_and(|(k, at)| Some(k) == key.as_ref() && at.elapsed() < RETRY_WAIT);
         if key != current && !retry_later {
+            // At a start that has to build the index, the one the last
+            // start or 0.2.0 left is searched until then: an upgrade's
+            // build of every page takes minutes on a server and longer
+            // on a desktop. It is removed once the new one is in use.
+            let building = key
+                .as_deref()
+                .filter(|key| current.is_none() && !index_dir(&inner.paths.data, key).exists());
+            if let Some((older, searcher)) =
+                building.and_then(|key| stand_in(&inner.paths.data, key))
+            {
+                info!(
+                    "searching the page index {older} ({} pages) while the one of these pages is built",
+                    searcher.num_pages()
+                );
+                *inner.pages.write().unwrap_or_else(PoisonError::into_inner) =
+                    Some((older, Arc::new(searcher)));
+            }
             match open_or_build_with_budget(&inner.paths.data, &wanted, inner.storage.clone()) {
                 Ok(found) => {
                     let pages = found.as_ref().map_or(0, |(_, s)| s.num_pages());

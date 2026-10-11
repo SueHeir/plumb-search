@@ -14,6 +14,10 @@
 
 - Homepage text is read in blocks. Cookie notices, browser warnings, obvious code and link menus are left out, and repeated blocks are kept once. Brief business details, mathematical prose and descriptions of policy or JavaScript products remain. Generic action labels are used only when no substantive text is available. Crawl version 2 makes nodes read older homepages again, best-known first. Inner-page fetch caches also become stale so the next fetch uses the changed text extraction.
 
+### Running a node
+
+- A node that has to build its page index when it starts, as one upgraded from 0.2.0 does, keeps searching the index it already has meanwhile and builds the new one beside it. Wikipedia, Stack Overflow, docs and book results no longer go missing for the build (13 minutes on plumbsearch.org, longer on a desktop), or for half an hour more when it fails. While 0.2.0's index stands in, searches limited to a set, a site, docs, papers or a language other than English find no pages. It is removed once the new one is in use.
+
 ## 0.2.1
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.2.1), and the Docker image is `ghcr.io/sueheir/plumb-search:0.2.1` (also `:0.2` and `:latest`).

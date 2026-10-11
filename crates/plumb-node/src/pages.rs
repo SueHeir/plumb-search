@@ -858,6 +858,29 @@ pub fn open_or_build_with_budget(
     Ok(Some((key, PageSearcher::open(&dir)?)))
 }
 
+/// The newest page index other than `key`'s that this version can search:
+/// the one an earlier start left, or 0.2.0's (see
+/// [`PageSearcher::is_older`]). It is searched while `key`'s is built
+/// beside it, so pages are not missing from results until that ends.
+pub fn stand_in(data_dir: &Path, key: &str) -> Option<(String, PageSearcher)> {
+    let mut found: Vec<(std::time::SystemTime, String)> =
+        std::fs::read_dir(data_dir.join(PAGES_DIR))
+            .ok()?
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                let other = name.strip_prefix("index-")?;
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                (other != key).then(|| (modified, other.to_string()))
+            })
+            .collect();
+    found.sort_by(|a, b| b.cmp(a));
+    found.into_iter().find_map(|(_, other)| {
+        let searcher = PageSearcher::open(&index_dir(data_dir, &other)).ok()?;
+        Some((other, searcher))
+    })
+}
+
 struct HoldingPages {
     pages: Box<dyn Iterator<Item = Page>>,
     // Drop the input fd before releasing its physical allocation lease.
@@ -1229,6 +1252,38 @@ mod tests {
         assert!(index_dir(data, &other).exists());
         let off = Wanted::new(data, &PageSets::parse("wikipedia-en=off").unwrap(), 0);
         assert!(open_or_build(data, &off).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_index_an_earlier_version_left_stands_in_while_this_ones_is_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        write_set(data, &[("Marie Curie", 900), ("Pierre Curie", 300)]);
+        let all = Wanted::new(data, &PageSets::default(), 0);
+        let key = all.key().unwrap();
+        assert!(stand_in(data, &key).is_none());
+        // What 0.2.0 left under its own key, and a build cut short.
+        let curie = Page::from_article(
+            "en",
+            plumb_core::Article {
+                title: "Marie Curie".into(),
+                views: 900,
+                ..Default::default()
+            },
+        );
+        plumb_index::pages::build_older_page_index(&index_dir(data, "0a0b0c0d0e0f0102"), [curie])
+            .unwrap();
+        std::fs::create_dir_all(index_dir(data, "ffffffffffffffff")).unwrap();
+        let (older, searcher) = stand_in(data, &key).unwrap();
+        assert_eq!(older, "0a0b0c0d0e0f0102");
+        assert!(searcher.is_older());
+        assert_eq!(searcher.search("curie", 10).unwrap().len(), 1);
+        // It stays until this version's is in use, then goes.
+        let (built, _) = open_or_build(data, &all).unwrap().unwrap();
+        assert_eq!(built, key);
+        assert!(index_dir(data, &older).exists());
+        remove_other_indexes(data, Some(&key));
+        assert!(stand_in(data, &key).is_none());
     }
 
     #[test]
