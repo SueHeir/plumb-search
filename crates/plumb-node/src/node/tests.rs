@@ -4396,7 +4396,15 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         ));
     }
     drop(legacy);
-    std::fs::write(dir.path().join("net/trusted-applied"), crawler.to_string()).unwrap();
+    // 0.2.0's note names another crawler: this one became trusted after
+    // 0.2.0 last started, so its batches were never taken in whole and are
+    // all sent again.
+    let other = plumb_net::load_or_create_key(&key_dir.path().join("other.key")).unwrap();
+    std::fs::write(
+        dir.path().join("net/trusted-applied"),
+        other.public().to_peer_id().to_string(),
+    )
+    .unwrap();
     let mut config = test_config(dir.path());
     config.take_new_sites = true;
     let rank = RankConfig::default();
