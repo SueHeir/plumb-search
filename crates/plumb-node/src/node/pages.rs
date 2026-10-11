@@ -387,6 +387,7 @@ fn fetch_if_needed(
                 layers: super::newer::layers(set.id, &file),
                 quality: plumb_net::pages::read_quality(&file, modified, size),
                 may_grow,
+                noted_by_0_2_0: super::newer::LAYERED_BY_0_2_0.contains(&set.id),
             };
             match super::newer::newest(&mine, &offers, now) {
                 Ok(offer) => offer.clone(),
@@ -667,6 +668,7 @@ fn keep_map(
         layers: Vec::new(),
         may_grow,
         quality: None,
+        noted_by_0_2_0: false,
     };
     let offer = match super::newer::newest(&mine, &offers, now_unix()) {
         Ok(offer) => offer.clone(),

@@ -14,6 +14,10 @@
 
 - Homepage text is read in blocks. Cookie notices, browser warnings, obvious code and link menus are left out, and repeated blocks are kept once. Brief business details, mathematical prose and descriptions of policy or JavaScript products remain. Generic action labels are used only when no substantive text is available. Crawl version 2 makes nodes read older homepages again, best-known first. Inner-page fetch caches also become stale so the next fetch uses the changed text extraction.
 
+### Running a node
+
+- A node takes a newer docs, subpages, reference or papers file from a trusted 0.2 node again, as 0.2.0 did, unless its own file holds entries no 0.2 file has (typed search terms, paper details, languages, symbols): 0.2 nodes note what those files hold for Wikipedia and Wikidata only, so a node trusting plumbsearch.org while it runs 0.2 took none of its newer files of those sets.
+
 ## 0.2.1
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.2.1), and the Docker image is `ghcr.io/sueheir/plumb-search:0.2.1` (also `:0.2` and `:latest`).
