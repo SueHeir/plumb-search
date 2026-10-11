@@ -56,11 +56,19 @@ struct Entry {
 }
 
 impl Entry {
-    fn site(hit: &Hit) -> Self {
+    fn site(hit: &Hit, navigation: Option<&crate::assembly::NavigationDestination>) -> Self {
         Entry {
             url: hit.url.clone(),
             title: hit.title.clone().unwrap_or_else(|| hit.domain.clone()),
-            content: hit.description.clone().unwrap_or_default(),
+            content: match navigation {
+                Some(navigation) => format!(
+                    "Site navigation: {}. Homepage: {}. Site description: {}",
+                    navigation.label,
+                    navigation.homepage_url,
+                    hit.description.as_deref().unwrap_or_default(),
+                ),
+                None => hit.description.clone().unwrap_or_default(),
+            },
             category: "general",
             published: None,
             engine: "plumb".into(),
@@ -285,7 +293,7 @@ async fn collect(
         });
     }
     let assembled = crate::assembly::Assembled {
-        rows: crate::assembly::ordered_rows(&results.hits, &placed, limit),
+        rows: crate::assembly::ordered_rows(query, &results.hits, &placed, &results.pages, limit),
         places,
         recent: recent.clone(),
         answer: extras.answer.as_ref(),
@@ -294,8 +302,12 @@ async fn collect(
     for row in &assembled.rows {
         match row {
             crate::assembly::Row::Page { page } => entries.push(Entry::page(page)),
-            crate::assembly::Row::Site { site, pages } => {
-                entries.push(Entry::site(site));
+            crate::assembly::Row::Site {
+                site,
+                pages,
+                navigation,
+            } => {
+                entries.push(Entry::site(site, navigation.as_ref()));
                 entries.extend(pages.iter().map(|page| Entry::page(page)));
             }
         }
@@ -547,6 +559,30 @@ pub(super) async fn external(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_navigation_searxng_keeps_site_metadata_and_link_provenance() {
+        let (query, site, selected_url) = crate::assembly::task_navigation_fixture();
+        let sites = [site.clone()];
+        let rows = crate::assembly::ordered_rows(&query, &sites, &[], &[], 10);
+        let crate::assembly::Row::Site {
+            site: selected,
+            navigation,
+            ..
+        } = &rows[0]
+        else {
+            panic!("a site row")
+        };
+        let output = Entry::site(selected, navigation.as_ref()).to_json(1);
+        assert_eq!(output["url"], selected_url);
+        assert_eq!(output["title"], site.title.unwrap());
+        assert!(output["content"]
+            .as_str()
+            .unwrap()
+            .contains("Site navigation: Dine & Shop."));
+        assert!(output["content"].as_str().unwrap().contains(&site.url));
+        assert!(output["publishedDate"].is_null());
+    }
 
     #[test]
     fn dates_and_categories_read_as_searxng_writes_them() {
