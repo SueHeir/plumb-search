@@ -14,6 +14,10 @@
 
 - Homepage text is read in blocks. Cookie notices, browser warnings, obvious code and link menus are left out, and repeated blocks are kept once. Brief business details, mathematical prose and descriptions of policy or JavaScript products remain. Generic action labels are used only when no substantive text is available. Crawl version 2 makes nodes read older homepages again, best-known first. Inner-page fetch caches also become stale so the next fetch uses the changed text extraction.
 
+### For AI apps
+
+- `check_lookalike` says `lookalike: true` for a `suspected` address too (another site's exact name on another ending or host, with no owner evidence either way), as 0.2.0 did: an app that checks `lookalike` before entering credentials still stops at `paypal.co`. `verdict` and `suspected` tell the two apart.
+
 ## 0.2.1
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.2.1), and the Docker image is `ghcr.io/sueheir/plumb-search:0.2.1` (also `:0.2` and `:latest`).

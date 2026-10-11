@@ -2826,7 +2826,8 @@ fn check_lookalike_uses_indexed_public_owner_evidence_and_abstains_on_alternates
             .check_lookalike(alternate, &SearchOptions::default())
             .unwrap();
         assert_eq!(answer["verdict"], "suspected", "{answer}");
-        assert_eq!(answer["lookalike"], false);
+        // Unverified is not safe for credentials, as in 0.2.0.
+        assert_eq!(answer["lookalike"], true);
         assert!(answer["site"].is_null());
         assert!(answer["affiliation"].is_null());
     }
@@ -2869,7 +2870,7 @@ fn check_lookalike_preserves_impersonation_and_unverified_tenant_controls() {
             .check_lookalike(host, &SearchOptions::default())
             .unwrap();
         assert_eq!(answer["verdict"], "suspected", "{host}: {answer}");
-        assert_eq!(answer["lookalike"], false);
+        assert_eq!(answer["lookalike"], true);
         assert_eq!(answer["suspected"], true);
     }
 }

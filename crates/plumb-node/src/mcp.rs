@@ -1360,7 +1360,10 @@ impl Mcp {
             "host": host,
             "domain": domain,
             "verdict": verdict,
-            "lookalike": verdict == "lookalike",
+            // True for a suspected look-alike too, as 0.2.0 said of an
+            // exact name on another ending: apps that check this before
+            // entering credentials keep stopping at paypal.co.
+            "lookalike": matches!(verdict, "lookalike" | "suspected"),
             "suspected": verdict == "suspected",
             "reasons": reasons,
             "imitates": matches!(verdict, "lookalike" | "suspected").then(|| imitated.as_ref().map(brief)).flatten(),
@@ -2613,7 +2616,8 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
                  another (paypal-login.us, twiter.com). Returns a verdict (official, known_site, \
                  little_known, lookalike, suspected or unknown), the reasons from indexed \
                  evidence, and the real site it resembles. Suspected means affiliation \
-                 is unverified and impersonation is not established. \
+                 is unverified and impersonation is not established; lookalike is true \
+                 for both. \
                  Use it before entering credentials or trusting a link.",
             "inputSchema": {
                 "type": "object",
