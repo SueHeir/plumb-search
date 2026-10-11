@@ -77,6 +77,7 @@ pub mod pages;
 pub mod places;
 mod query_evidence;
 mod replace;
+pub mod retained;
 mod schema;
 mod spell;
 pub mod spell_model;
@@ -1010,6 +1011,35 @@ impl Searcher {
     pub fn open(dir: &Path) -> Result<Self> {
         let index = Index::open_in_dir(dir)
             .with_context(|| format!("opening search index in {}", dir.display()))?;
+        Self::from_index(index, dir)
+    }
+
+    /// Opens only an externally retained immutable generation; no filesystem locks.
+    pub fn open_retained(generation: &retained::RetainedGeneration) -> Result<Self> {
+        // The shared production constructor reads this auxiliary file directly.
+        // Bind presence as well as contents to the retained catalog first.
+        anyhow::ensure!(
+            generation.path().join(spell_model::MODEL_FILE).exists()
+                == generation
+                    .binding()
+                    .files
+                    .contains_key(spell_model::MODEL_FILE),
+            "spelling file is outside the retained catalog"
+        );
+        let searcher = Self::from_index(generation.index()?, generation.path())?;
+        anyhow::ensure!(
+            generation
+                .binding()
+                .files
+                .contains_key(spell_model::MODEL_FILE)
+                == searcher.spelling_model().is_some(),
+            "retained spelling model unreadable"
+        );
+        generation.verify()?;
+        Ok(searcher)
+    }
+
+    fn from_index(index: Index, dir: &Path) -> Result<Self> {
         analysis::register(index.tokenizers());
         if !schema::readable(&index.schema()) {
             bail!(

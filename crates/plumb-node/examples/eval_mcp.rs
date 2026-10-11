@@ -17,10 +17,7 @@ use axum::routing::get;
 use axum::Json;
 use clap::Parser;
 use plumb_core::Operators;
-use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, operators_allow, options_allow,
-    place_operator_pages, place_pages, Page, PageHit, PageSearcher, OPERATOR_PAGES,
-};
+use plumb_index::pages::{operators_allow, options_allow, Page, PageHit, PageSearcher};
 use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher};
 use plumb_node::cli::MeaningArgs;
 use plumb_node::country::HomeCountry;
@@ -31,7 +28,6 @@ use plumb_node::websearch::WebSettings;
 use serde_json::{json, Value};
 
 const TYPED_CANDIDATES: usize = 200;
-const DISPLAY_CANDIDATES: usize = 10;
 const MAX_BODY: usize = 64 * 1024;
 // Production's shared-client limiter permits 60 tools/minute. Pace this
 // sequential evaluator through that limiter; report latency in the core run.
@@ -68,9 +64,7 @@ struct Args {
     snapshot_manifest: Option<PathBuf>,
 }
 
-/// Mirrors the bounded public retrieval/placement primitives in node/pages.
-/// Changes to production assembly must be reviewed here before treating these
-/// surface checks as deployment evidence; it is not a live Node equivalence test.
+/// Uses the same page retrieval/placement helper as the production node.
 struct FrozenBackend {
     sites: IndexBackend,
     pages: PageSearcher,
@@ -85,70 +79,15 @@ impl FrozenBackend {
         rank: &RankConfig,
         results: &mut SearchResults,
     ) -> Result<()> {
-        let pages = self.pages.in_language(options.language.as_deref());
-        let ops = Operators::parse(query);
-        if ops.any() {
-            if !ops.words.is_empty() {
-                let mut found =
-                    pages.search_naming_docs(&ops.words, &ops, false, OPERATOR_PAGES)?;
-                found.retain(|hit| options_allow(options, &hit.page));
-                results.pages = place_operator_pages(&ops, &results.hits, found);
-            }
-            return Ok(());
-        }
-        let applied = results
-            .spelling
-            .as_ref()
-            .filter(|spelling| spelling.applied)
-            .map(|spelling| spelling.query.clone());
-        let query = applied.as_deref().unwrap_or(query);
-        let mut found = pages.search(query, DISPLAY_CANDIDATES)?;
-        pages.add_other_number(query, &results.hits, &mut found, DISPLAY_CANDIDATES)?;
-        found.retain(|hit| options_allow(options, &hit.page));
-        if rank.add_named_site {
-            add_named_site(&mut results.hits, &found, |domain| self.sites.site(domain));
-        }
-        if rank.drop_namesakes {
-            drop_namesakes_of_words(&mut results.hits, &found);
-        }
-        lift_named_sites(&mut results.hits, &found);
-        pages.note_demand(&mut results.hits)?;
-        let spelled_right = found
-            .iter()
-            .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
-        if spelled_right && applied.is_none() {
-            results.spelling = None;
-        }
-        if let Some(link) = &results.site_search {
-            if found
-                .iter()
-                .any(|hit| hit.named && hit.page.site.as_deref() != Some(link.domain.as_str()))
-            {
-                results.site_search = None;
-            }
-        }
-        if let Some(spelling) = results.spelling.take_if(|_| applied.is_none()) {
-            results.spelling = pages.check_spelling(query, spelling)?;
-        }
-        if results.spelling.is_none() && !spelled_right {
-            let sites = self.sites.searcher();
-            results.spelling = pages.suggest_spelling(query, sites.spelling_model(), &|word| {
-                sites.word_sites(word) >= plumb_index::KNOWN_WORD_SITES
-            })?;
-        }
-        results.pages = place_pages(query, &results.hits, found);
-        if rank.learned {
-            plumb_index::learned::reorder(
-                plumb_index::learned::Model::builtin(),
-                query,
-                &mut results.hits,
-                &mut results.pages,
-            );
-        }
-        if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.as_deref()) {
-            plumb_index::suggested_site_second(&mut results.hits, site);
-        }
-        pages.title_untitled(&mut results.hits)?;
+        let errors = plumb_node::page_retrieval::add_pages(
+            &self.pages,
+            Some(&self.sites),
+            rank,
+            query,
+            options,
+            results,
+        );
+        ensure!(errors.is_empty(), "page retrieval: {}", errors.join("; "));
         Ok(())
     }
 }

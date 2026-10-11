@@ -41,6 +41,8 @@ pub mod map;
 pub mod mcp;
 pub mod meaning;
 pub mod node;
+#[doc(hidden)]
+pub mod page_retrieval;
 pub mod pages;
 pub mod places;
 pub mod plugins;
