@@ -281,6 +281,15 @@ pub fn remove_other_indexes_with_budget(
     keep: Option<&str>,
     budget: Option<&plumb_core::storage::StorageBudget>,
 ) {
+    remove_indexes_except_with_budget(data_dir, keep.as_slice(), budget);
+}
+
+/// Deletes place indexes other than the protected keys.
+pub(crate) fn remove_indexes_except_with_budget(
+    data_dir: &Path,
+    keep: &[&str],
+    budget: Option<&plumb_core::storage::StorageBudget>,
+) {
     let _mutation = budget.map(plumb_core::storage::StorageBudget::mutation);
     let Ok(entries) = std::fs::read_dir(data_dir.join(PAGES_DIR)) else {
         return;
@@ -290,7 +299,7 @@ pub fn remove_other_indexes_with_budget(
         let Some(key) = name.to_str().and_then(|n| n.strip_prefix("places-")) else {
             continue;
         };
-        if Some(key) != keep {
+        if !keep.contains(&key) {
             let path = entry.path();
             if let Ok(bytes) = plumb_core::storage::directory_bytes(&path) {
                 if std::fs::remove_dir_all(&path).is_ok() {
