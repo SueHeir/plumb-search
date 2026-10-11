@@ -147,7 +147,35 @@ fn asked_tasks(query: &str, site: &Hit) -> Option<Tasks> {
     if !format!(" {title} ").contains(&format!(" {identity_name} "))
         || words
             .iter()
-            .any(|word| matches!(*word, "not" | "without" | "except"))
+            // normalize_text joins straight and curly apostrophes, so
+            // negative contractions retain their meaning as single words.
+            .any(|word| {
+                matches!(
+                    *word,
+                    "no" | "not"
+                        | "without"
+                        | "except"
+                        | "dont"
+                        | "doesnt"
+                        | "didnt"
+                        | "isnt"
+                        | "arent"
+                        | "wasnt"
+                        | "werent"
+                        | "havent"
+                        | "hasnt"
+                        | "hadnt"
+                        | "cant"
+                        | "cannot"
+                        | "couldnt"
+                        | "wont"
+                        | "wouldnt"
+                        | "shouldnt"
+                        | "mustnt"
+                        | "neednt"
+                        | "shant"
+                )
+            })
     {
         return None;
     }

@@ -88,11 +88,43 @@ fn task_navigation_keeps_homepage_navigation_and_weak_or_unrelated_requests() {
         "Meridian Center parking",
         "Meridian Center shopping",
         "Meridian Center without restaurants",
+        "Meridian Center no restaurants",
+        "Meridian Center no dining",
+        "don't show restaurants at Meridian Center",
+        "don’t show restaurants at Meridian Center",
+        "don't show dining at Meridian Center",
+        "don’t show dining at Meridian Center",
+        "Meridian Center doesn't offer dining",
+        "Meridian Center won’t offer restaurants",
         "Meridian Center -restaurants",
     ] {
         let (selected, navigation) = site_destination(query, &original, &[]);
         assert!(navigation.is_none(), "{query}");
         assert_eq!(selected.url, original.url);
+    }
+    let mut shopping = original.clone();
+    shopping.key_pages = vec![KeyPage {
+        label: "Shopping".into(),
+        url: format!("{}shopping/", original.url),
+    }];
+    assert_eq!(
+        site_destination("Find shops at Meridian Center", &shopping, &[])
+            .1
+            .unwrap()
+            .url,
+        shopping.key_pages[0].url
+    );
+    for query in [
+        "Meridian Center no shops",
+        "Meridian Center no shopping",
+        "don't show shopping at Meridian Center",
+        "don’t show shopping at Meridian Center",
+        "Meridian Center can't offer shops",
+        "Meridian Center can’t offer shops",
+    ] {
+        let (selected, navigation) = site_destination(query, &shopping, &[]);
+        assert!(navigation.is_none(), "{query}");
+        assert_eq!(selected.url, shopping.url);
     }
     original.title = Some("An unrelated observatory".into());
     assert!(
