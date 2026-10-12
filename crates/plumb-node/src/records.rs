@@ -962,49 +962,36 @@ mod tests {
     }
 
     #[test]
-    fn queued_receiving_can_block_the_exact_output_until_its_reservation_is_released() {
+    fn a_fold_past_the_limit_runs_while_receiving_holds_room() {
         let (dir, mut store, budget) = pressured_fold();
-        let raw = fs::read(&store.path).unwrap();
-        let journal = fs::read(&store.journal_path).unwrap();
         let inbox = fs::read(dir.path().join("inbox.absorbing")).unwrap();
-        let initial = names(dir.path());
         let queued = budget.reserve(64 * 1024, false).unwrap();
-        assert!(store
-            .fold()
-            .unwrap_err()
-            .to_string()
-            .contains("backpressure"));
-        assert_eq!(fs::read(&store.path).unwrap(), raw);
-        assert_eq!(fs::read(&store.journal_path).unwrap(), journal);
-        assert_eq!(fs::read(dir.path().join("inbox.absorbing")).unwrap(), inbox);
-        assert_eq!(names(dir.path()), initial);
-        assert_eq!(budget.status().reserved_bytes, 64 * 1024);
-        drop(queued);
-        assert_fold_ledger(&budget);
-        // Retry at the same cap, after the receiving owner releases its token.
+        // The limit is a target, as in 0.2.0: the fold that keeps the node
+        // near it is not held back by it.
         assert_eq!(store.fold().unwrap(), crate::outline::Folded::Records(1));
+        assert!(!store.journal_path.exists());
+        assert_eq!(fs::read(dir.path().join("inbox.absorbing")).unwrap(), inbox);
+        assert_eq!(budget.status().reserved_bytes, 64 * 1024);
+        assert_eq!(budget.status().rejected_writes, 0);
+        drop(queued);
         assert_fold_ledger(&budget);
     }
 
     #[test]
-    fn genuinely_insufficient_exact_output_preserves_every_input_for_restart() {
-        let (dir, mut store, budget) = pressured_fold();
+    fn a_fold_with_less_room_than_its_output_still_runs() {
+        let (_dir, mut store, budget) = pressured_fold();
         budget.set_limit(budget.status().used_bytes + 64 * 1024);
-        let raw = fs::read(&store.path).unwrap();
-        let journal = fs::read(&store.journal_path).unwrap();
-        let initial = names(dir.path());
-        for _ in 0..2 {
-            let mut restarted = RecordStore::open(&store.path).with_budget(Some(budget.clone()));
-            assert!(restarted.fold().is_err());
-            assert_eq!(fs::read(&store.path).unwrap(), raw);
-            assert_eq!(fs::read(&store.journal_path).unwrap(), journal);
-            assert_eq!(names(dir.path()), initial);
-            assert_fold_ledger(&budget);
-        }
-        // Even an uncapped owner still uses the ordinary journal semantics.
-        store.budget = None;
-        assert_eq!(store.fold().unwrap(), crate::outline::Folded::Records(1));
+        let mut restarted = RecordStore::open(&store.path).with_budget(Some(budget.clone()));
+        assert_eq!(
+            restarted.fold().unwrap(),
+            crate::outline::Folded::Records(1)
+        );
+        assert!(!store.journal_path.exists());
         assert_eq!(load_records(&store.path).unwrap().len(), 1);
+        assert_eq!(budget.status().rejected_writes, 0);
+        assert_eq!(budget.status().reserved_bytes, 0);
+        store.budget = None;
+        assert_eq!(store.fold().unwrap(), crate::outline::Folded::Nothing);
     }
 
     #[test]
@@ -1065,7 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn an_outside_raw_replacement_during_count_is_not_overwritten() {
+    fn an_outside_raw_replacement_during_a_fold_is_not_overwritten() {
         let (dir, mut store, budget) = pressured_fold();
         let path = store.path.clone();
         let journal = fs::read(&store.journal_path).unwrap();
@@ -1081,9 +1068,7 @@ mod tests {
                 Ok(())
             })
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("changed during the admitted fold"));
+        assert!(format!("{error:#}").contains("changed during the admitted fold"));
         assert_eq!(
             load_records(&path).unwrap().into_sorted_vec()[0].domain,
             "outside.example"

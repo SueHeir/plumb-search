@@ -37,7 +37,9 @@ use plumb_core::{
 use serde::{Deserialize, Serialize};
 use std::ops::Bound;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, Query, RangeQuery, TermQuery};
+use tantivy::query::{
+    BooleanQuery, ConstScoreQuery, EmptyQuery, Occur, Query, RangeQuery, TermQuery,
+};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, INDEXED, STORED,
     STRING,
@@ -1072,7 +1074,12 @@ struct Fields {
     page: Field,
 }
 
-fn schema() -> (Schema, Fields) {
+/// The page index schema, or with `current` false the one 0.2.0 built its
+/// indexes with (key `v2`): the same fields in the same order, without
+/// `scope`, `language` and the paper dates. A searcher of such an index
+/// ([`PageSearcher::is_older`]) never reads those, so its [`Fields`] name
+/// `words` in their place.
+fn schema_with(current: bool) -> (Schema, Fields) {
     let mut builder = Schema::builder();
     let words = builder.add_text_field(
         "words",
@@ -1090,7 +1097,7 @@ fn schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
-    let scope = builder.add_text_field("scope", STRING);
+    let scope = current.then(|| builder.add_text_field("scope", STRING));
     let topic = builder.add_text_field(
         "topic",
         TextOptions::default().set_indexing_options(
@@ -1125,25 +1132,25 @@ fn schema() -> (Schema, Fields) {
     );
     let popularity = builder.add_u64_field("popularity", FAST | STORED);
     let site = builder.add_text_field("site", STRING);
-    let language = builder.add_text_field("language", STRING);
-    let paper_year = builder.add_u64_field("paper_year", INDEXED | FAST);
-    let paper_day = builder.add_u64_field("paper_day", INDEXED | FAST);
+    let language = current.then(|| builder.add_text_field("language", STRING));
+    let paper_year = current.then(|| builder.add_u64_field("paper_year", INDEXED | FAST));
+    let paper_day = current.then(|| builder.add_u64_field("paper_day", INDEXED | FAST));
     let page = builder.add_text_field("page", STORED);
     (
         builder.build(),
         Fields {
             words,
             keys,
-            scope,
+            scope: scope.unwrap_or(words),
             topic,
             about,
             lead,
             word,
             popularity,
             site,
-            language,
-            paper_year,
-            paper_day,
+            language: language.unwrap_or(words),
+            paper_year: paper_year.unwrap_or(words),
+            paper_day: paper_day.unwrap_or(words),
             page,
         },
     )
@@ -1416,8 +1423,29 @@ pub fn build_page_index_with_budget(
     pages: impl IntoIterator<Item = Page>,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 ) -> Result<PageIndexStats> {
+    build_with(dir, pages, budget, true)
+}
+
+/// Builds the page index of `pages` in `dir` as 0.2.0 did, without the
+/// fields it lacked ([`schema_with`]): for tests of an upgrade from it.
+#[doc(hidden)]
+pub fn build_older_page_index(
+    dir: &Path,
+    pages: impl IntoIterator<Item = Page>,
+) -> Result<PageIndexStats> {
+    build_with(dir, pages, None, false)
+}
+
+/// [`build_page_index_with_budget`], or with `current` false
+/// [`build_older_page_index`].
+fn build_with(
+    dir: &Path,
+    pages: impl IntoIterator<Item = Page>,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    current: bool,
+) -> Result<PageIndexStats> {
     let staging = Staging::new_with_budget(dir, budget.clone())?;
-    let (schema, fields) = schema();
+    let (schema, fields) = schema_with(current);
     let index = crate::storage::create_index(staging.path(), schema, budget, staging.lifecycle())
         .with_context(|| format!("creating the page index in {}", dir.display()))?;
     analysis::register(index.tokenizers());
@@ -1439,65 +1467,67 @@ pub fn build_page_index_with_budget(
             ((page.views as f32).ln_1p() / (*most as f32).ln_1p()).min(1.0)
         };
         let mut document = TantivyDocument::default();
-        if let Some(language) = page.language() {
-            document.add_text(fields.language, language);
-            *stats.languages.entry(language.to_string()).or_default() += 1;
-        } else {
-            document.add_text(fields.language, "unknown");
-        }
-        document.add_text(fields.scope, format!("set:{}", page.set));
-        if page.set == PAPERS_SET {
-            stats.papers.total += 1;
-            if let Some(paper) = &page.paper {
-                if let Some(year) = publication_year(paper) {
-                    document.add_u64(fields.paper_year, year);
-                    stats.papers.publication_year += 1;
-                }
-                if let Some(date) = paper
-                    .publication_date
-                    .as_deref()
-                    .filter(|d| day_number(d).is_some())
-                {
-                    document.add_u64(fields.paper_day, day_number(date).unwrap());
-                    stats.papers.publication_day += 1;
-                    if stats
-                        .papers
-                        .earliest_day
-                        .as_deref()
-                        .is_none_or(|old| date < old)
-                    {
-                        stats.papers.earliest_day = Some(date.to_string());
+        if current {
+            if let Some(language) = page.language() {
+                document.add_text(fields.language, language);
+                *stats.languages.entry(language.to_string()).or_default() += 1;
+            } else {
+                document.add_text(fields.language, "unknown");
+            }
+            document.add_text(fields.scope, format!("set:{}", page.set));
+            if page.set == PAPERS_SET {
+                stats.papers.total += 1;
+                if let Some(paper) = &page.paper {
+                    if let Some(year) = publication_year(paper) {
+                        document.add_u64(fields.paper_year, year);
+                        stats.papers.publication_year += 1;
                     }
-                    if stats
-                        .papers
-                        .latest_day
+                    if let Some(date) = paper
+                        .publication_date
                         .as_deref()
-                        .is_none_or(|old| date > old)
+                        .filter(|d| day_number(d).is_some())
                     {
-                        stats.papers.latest_day = Some(date.to_string());
+                        document.add_u64(fields.paper_day, day_number(date).unwrap());
+                        stats.papers.publication_day += 1;
+                        if stats
+                            .papers
+                            .earliest_day
+                            .as_deref()
+                            .is_none_or(|old| date < old)
+                        {
+                            stats.papers.earliest_day = Some(date.to_string());
+                        }
+                        if stats
+                            .papers
+                            .latest_day
+                            .as_deref()
+                            .is_none_or(|old| date > old)
+                        {
+                            stats.papers.latest_day = Some(date.to_string());
+                        }
                     }
                 }
             }
-        }
-        if let Some(host) = host_of(&page.url) {
-            document.add_text(fields.scope, format!("host:{host}"));
-            let mut suffix = host.as_str();
-            loop {
-                document.add_text(fields.scope, format!("under:{suffix}"));
-                let Some((_, rest)) = suffix.split_once('.') else {
-                    break;
-                };
-                suffix = rest;
+            if let Some(host) = host_of(&page.url) {
+                document.add_text(fields.scope, format!("host:{host}"));
+                let mut suffix = host.as_str();
+                loop {
+                    document.add_text(fields.scope, format!("under:{suffix}"));
+                    let Some((_, rest)) = suffix.split_once('.') else {
+                        break;
+                    };
+                    suffix = rest;
+                }
             }
-        }
-        if page.set == DOCS_SET {
-            for symbol in docs_symbols(&page) {
-                document.add_text(fields.scope, format!("symbol:{symbol}"));
-            }
-            if let Some(site) = plumb_core::docs::site_of_url(&page.url) {
-                document.add_text(fields.scope, format!("docs:{}", site.key));
-                if docs_overview(&page, site) {
-                    document.add_text(fields.scope, format!("overview:{}", site.key));
+            if page.set == DOCS_SET {
+                for symbol in docs_symbols(&page) {
+                    document.add_text(fields.scope, format!("symbol:{symbol}"));
+                }
+                if let Some(site) = plumb_core::docs::site_of_url(&page.url) {
+                    document.add_text(fields.scope, format!("docs:{}", site.key));
+                    if docs_overview(&page, site) {
+                        document.add_text(fields.scope, format!("overview:{}", site.key));
+                    }
                 }
             }
         }
@@ -1591,6 +1621,13 @@ pub struct PageSearcher {
     stemmed: TextAnalyzer,
     stats: PageIndexStats,
     requested_language: Option<String>,
+    /// Built by 0.2.0, without `scope`, `language` and the paper dates
+    /// ([`schema_with`]). Such an index is searched only while this
+    /// version's index of the same pages is built beside it, so that an
+    /// upgrade does not leave pages out of results meanwhile: a search
+    /// scoped to a set, a site or docs finds nothing in it, as does one
+    /// for papers or in a language other than English.
+    older: bool,
 }
 
 impl PageSearcher {
@@ -1598,13 +1635,17 @@ impl PageSearcher {
         let index = Index::open_in_dir(dir)
             .with_context(|| format!("opening the page index in {}", dir.display()))?;
         analysis::register(index.tokenizers());
-        let (schema, fields) = schema();
-        if index.schema() != schema {
+        let older = if index.schema() == schema_with(true).0 {
+            false
+        } else if index.schema() == schema_with(false).0 {
+            true
+        } else {
             bail!(
                 "the page index in {} was built by another version; rebuild it",
                 dir.display()
             );
-        }
+        };
+        let (_, fields) = schema_with(!older);
         let stats: PageIndexStats = serde_json::from_slice(
             &std::fs::read(dir.join("pages.json"))
                 .with_context(|| format!("reading {}/pages.json", dir.display()))?,
@@ -1621,11 +1662,17 @@ impl PageSearcher {
             stemmed: analysis::stemmed_analyzer(),
             stats,
             requested_language: None,
+            older,
         })
     }
 
     pub fn num_pages(&self) -> u64 {
         self.stats.pages
+    }
+
+    /// Whether 0.2.0 built this index (see [`PageSearcher::older`]).
+    pub fn is_older(&self) -> bool {
+        self.older
     }
 
     pub fn paper_coverage(&self) -> &PaperCoverage {
@@ -1638,7 +1685,8 @@ impl PageSearcher {
     /// The extra date collector prevents older popular papers from
     /// exhausting a newest request's candidate budget.
     pub fn search_papers(&self, query: &PaperQuery, limit: usize) -> Result<Vec<PageHit>> {
-        if limit == 0 {
+        // 0.2.0's index has no papers' dates or sets.
+        if limit == 0 || self.older {
             return Ok(Vec::new());
         }
         let ops = Operators::parse(&query.query);
@@ -1833,6 +1881,7 @@ impl PageSearcher {
             stats: self.stats.clone(),
             requested_language: language
                 .map(|tag| plumb_core::language_code(tag).unwrap_or_else(|| "invalid".to_string())),
+            older: self.older,
         }
     }
 
@@ -1853,6 +1902,11 @@ impl PageSearcher {
     fn language_query(&self, query: &dyn Query) -> Box<dyn Query> {
         match &self.requested_language {
             None => query.box_clone(),
+            // 0.2.0's pages have no language, which is English's "unknown".
+            Some(language) if self.older => match language.as_str() {
+                "en" => query.box_clone(),
+                _ => Box::new(EmptyQuery),
+            },
             Some(language) => {
                 let mut allowed = vec![(
                     Occur::Should,
@@ -2293,6 +2347,10 @@ impl PageSearcher {
     }
 
     fn scope_term(&self, text: &str) -> Box<dyn Query> {
+        // 0.2.0's index has no scope terms: a scoped search finds nothing.
+        if self.older {
+            return Box::new(EmptyQuery);
+        }
         Box::new(TermQuery::new(
             Term::from_field_text(self.fields.scope, text),
             IndexRecordOption::Basic,
@@ -4571,6 +4629,39 @@ mod tests {
             }),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn an_index_built_by_0_2_0_is_searched_without_the_fields_it_lacks() {
+        let pages = vec![
+            page("Marie Curie", 900, &[]),
+            dated_paper("Transformer recent", Some("2026-09-30"), Some(2026), 0),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pages");
+        build_older_page_index(&path, pages.clone()).unwrap();
+        let older = PageSearcher::open(&path).unwrap();
+        assert!(older.is_older());
+        assert_eq!(older.num_pages(), 2);
+        let hits = older.search("marie curie", 10).unwrap();
+        assert_eq!(hits[0].page.title, "Marie Curie");
+        // Its pages have no language, so only English keeps them.
+        let english = older.in_language(Some("en"));
+        assert_eq!(english.search("marie curie", 10).unwrap().len(), 1);
+        let spanish = older.in_language(Some("es"));
+        assert!(spanish.search("marie curie", 10).unwrap().is_empty());
+        // Nor dates or sets: paper and scoped searches find nothing.
+        let after = PaperQuery::parse("transformer after:2026").unwrap();
+        assert!(older.search_papers(&after, 10).unwrap().is_empty());
+        let ops = Operators::parse("curie site:wikipedia.org");
+        assert!(older
+            .search_naming_docs("curie", &ops, false, 10)
+            .unwrap()
+            .is_empty());
+        // This version's index of the same pages has them all.
+        let (_dir, current) = searcher(&pages);
+        assert!(!current.is_older());
+        assert_eq!(current.search_papers(&after, 10).unwrap().len(), 1);
     }
 
     #[test]
