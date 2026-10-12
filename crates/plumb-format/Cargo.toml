@@ -1,0 +1,18 @@
+[package]
+name = "plumb-format"
+description = "The data format Plumb Search nodes, set builders and plugins exchange: items, refs, canonical URLs and signed set manifests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.22"
+ed25519-dalek = "3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10"
+unicode-normalization = "0.1.24"
+url = "2.5.8"

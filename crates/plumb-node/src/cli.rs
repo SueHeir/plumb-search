@@ -129,6 +129,10 @@ pub enum Command {
     /// Check that a running node answers: exits 0 when its /api/status
     /// answers with success, 1 otherwise. The Docker image's HEALTHCHECK.
     Healthcheck(HealthcheckArgs),
+    /// Sets in the new data format: make one from a page set, sign it with
+    /// a set-signing key, or check one as a node would. Nothing a node
+    /// indexes or sends reads them yet.
+    Set(crate::sets::SetArgs),
 }
 
 #[derive(Debug, Args)]

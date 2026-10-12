@@ -6007,6 +6007,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "plumb-format"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "unicode-normalization",
+ "url",
+]
+
+[[package]]
 name = "plumb-index"
 version = "0.2.1"
 dependencies = [
@@ -6015,6 +6029,7 @@ dependencies = [
  "idna",
  "levenshtein_automata",
  "plumb-core",
+ "plumb-format",
  "serde",
  "serde_json",
  "stable_deref_trait",
@@ -6084,6 +6099,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "ed25519-dalek",
  "flate2",
  "getrandom 0.3.4",
  "idna",
@@ -6091,6 +6107,7 @@ dependencies = [
  "plumb-core",
  "plumb-crawl",
  "plumb-embed",
+ "plumb-format",
  "plumb-index",
  "plumb-ingest",
  "plumb-net",
@@ -6113,6 +6130,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wasmi",
+ "zstd",
 ]
 
 [[package]]

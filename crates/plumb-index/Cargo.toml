@@ -14,6 +14,7 @@ stable_deref_trait = "1.2.1"
 idna = "1.1.0"
 levenshtein_automata = "0.2.1"
 plumb-core = { version = "0.2.1", path = "../plumb-core" }
+plumb-format = { path = "../plumb-format" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tantivy = "0.26.2"
