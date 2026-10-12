@@ -955,7 +955,7 @@ mod tests {
         .unwrap();
         let snapshot = crate::pages::Wanted::new(dir.path(), &crate::pages::PageSets::default(), 0);
         let snapshot_key = snapshot.key();
-        let snapshot_file = snapshot.sets[0].1.clone();
+        let snapshot_file = snapshot.sets[0].1.file().unwrap().to_path_buf();
         assert_ne!(
             snapshot_file, dest,
             "index builds read immutable generations"

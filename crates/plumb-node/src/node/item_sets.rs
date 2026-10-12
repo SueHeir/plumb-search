@@ -1,6 +1,7 @@
 //! The item sets a node searches beside its page sets: the sets its
 //! plugins build ([`crate::plugins::publish`]) and any set it holds
-//! besides the denylist and the site rules ([`super::signed_sets`]).
+//! besides the denylist, the site rules and the project's page sets
+//! ([`super::signed_sets`]).
 //!
 //! The page index ([`crate::pages`]) takes them in with today's page sets.
 //! Each set is checked as `plumb set check` does, then read as items. The
@@ -71,7 +72,12 @@ pub fn find(
     }
     let project = project_key();
     for (set, dir) in set_dirs(&data.join(DIR)) {
-        if TAKEN_SETS.contains(&set.as_str()) {
+        // The project's page sets are read as the page sets they are
+        // ([`crate::pages::HeldPageSet`]).
+        let page_set = set
+            .strip_prefix("plumb/")
+            .is_some_and(|id| crate::pages::SetInfo::find(id).is_some());
+        if TAKEN_SETS.contains(&set.as_str()) || page_set {
             continue;
         }
         found.extend(item_set(set, dir, publishers, |publisher| {

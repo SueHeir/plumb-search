@@ -158,10 +158,11 @@ pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
                 warn!("page set {}: {err:#}", set.id);
             }
         }
-        let wanted = Wanted::new(
+        let wanted = Wanted::taking(
             &inner.paths.data,
             &settings.page_sets,
             settings.storage_limit_mb,
+            &inner.config.set_publishers,
         );
         let page_sets_key = wanted.key();
         if own_key.is_none() {

@@ -123,7 +123,7 @@ mod places;
 mod round;
 pub mod schedule;
 mod shared_vectors;
-mod signed_sets;
+pub(crate) mod signed_sets;
 pub(crate) mod store;
 mod trim;
 mod worker;
