@@ -266,6 +266,12 @@ pub(super) struct SavedState {
     /// files from before there was one.
     #[serde(default)]
     pub(super) sites_version: u32,
+    /// The site rules set the records were made with
+    /// ([`crate::site_rules::in_use`]), or `None` for the built-in lists.
+    /// A node whose rules changed folds its seed data in again, as for a
+    /// newer [`SITES_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) site_rules: Option<String>,
 }
 
 impl Default for SavedState {
@@ -282,6 +288,7 @@ impl Default for SavedState {
             downloaded_total: 0,
             homepages_visited: 0,
             sites_version: SITES_VERSION,
+            site_rules: None,
         }
     }
 }
@@ -330,7 +337,21 @@ impl SavedState {
             downloaded_total: 0,
             homepages_visited: 0,
             sites_version: SITES_VERSION,
+            site_rules: crate::site_rules::in_use().map(str::to_string),
         }
+    }
+
+    /// Whether the records were made with other lists of sites than the
+    /// node uses now: an older [`SITES_VERSION`], or other site rules.
+    pub(super) fn sites_changed(&self) -> bool {
+        self.sites_version < SITES_VERSION
+            || self.site_rules.as_deref() != crate::site_rules::in_use()
+    }
+
+    /// Notes that the records are made with the lists of sites in use.
+    pub(super) fn sites_current(&mut self) {
+        self.sites_version = SITES_VERSION;
+        self.site_rules = crate::site_rules::in_use().map(str::to_string);
     }
 }
 
@@ -543,6 +564,7 @@ mod tests {
             downloaded_total: 5_678,
             homepages_visited: 90,
             sites_version: SITES_VERSION,
+            site_rules: Some("ab".repeat(32)),
         };
         save_state(&paths, &state).unwrap();
         assert_eq!(load_state(&paths), Some(state));

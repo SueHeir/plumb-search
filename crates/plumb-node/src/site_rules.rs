@@ -5,6 +5,7 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{ensure, Context, Result};
 use plumb_core::subsites::{NOT_SITES, SUBDOMAIN_SITES, UMBRELLA_DOMAINS};
@@ -30,15 +31,21 @@ pub fn built_in_rules() -> Vec<Rule> {
     subsites.chain(umbrellas).chain(not_sites).collect()
 }
 
+/// A site rules set read from its folder ([`read_site_rules`]).
+#[derive(Debug, Clone)]
+pub struct ReadRules {
+    pub rules: SiteRules,
+    /// Rules newer than this version understands, which it passes over.
+    pub newer: usize,
+    /// The SHA-256 of each of the set's parts, joined with `+`: it names
+    /// the rules, so a set signed again with the same rules keeps it.
+    pub hash: String,
+}
+
 /// Reads the site rules set in `dir`, after checking it as a node does
 /// before taking a set ([`check_set`]): published by `trusted` or the key
-/// it handed over to in `notes`. Returns the rules and how many of them
-/// are newer than this version understands, which it passes over.
-pub fn read_site_rules(
-    dir: &Path,
-    trusted: &PublicKey,
-    notes: &[Note],
-) -> Result<(SiteRules, usize)> {
+/// it handed over to in `notes`.
+pub fn read_site_rules(dir: &Path, trusted: &PublicKey, notes: &[Note]) -> Result<ReadRules> {
     check_set(dir, Some(trusted), notes)?;
     let text = fs::read_to_string(dir.join(MANIFEST))?;
     let (manifest, _) = Manifest::from_signed_json(&text, &now())?;
@@ -59,14 +66,40 @@ pub fn read_site_rules(
         }
         newer += rules.add_items(&items).1.len();
     }
-    Ok((rules, newer))
+    let hashes: Vec<&str> = manifest
+        .files
+        .iter()
+        .map(|part| part.sha256.as_str())
+        .collect();
+    Ok(ReadRules {
+        rules,
+        newer,
+        hash: hashes.join("+"),
+    })
 }
 
-/// Makes `rules` say which site every host is, in place of the built-in
+/// The [`ReadRules::hash`] of the site rules in use ([`use_site_rules`]);
+/// `None` while the built-in lists are.
+static IN_USE: OnceLock<String> = OnceLock::new();
+
+/// Makes `read` say which site every host is, in place of the built-in
 /// lists ([`plumb_core::use_site_list`]). Once only, at start: false when
 /// other rules already are in use.
-pub fn use_site_rules(rules: SiteRules) -> bool {
-    plumb_core::use_site_list(Box::new(Rules(rules)))
+pub fn use_site_rules(read: ReadRules) -> bool {
+    let ReadRules { rules, hash, .. } = read;
+    let used = plumb_core::use_site_list(Box::new(Rules(rules)));
+    if used {
+        let _ = IN_USE.set(hash);
+    }
+    used
+}
+
+/// The [`ReadRules::hash`] of the site rules in use in place of the
+/// built-in lists, or `None` while those are: what a node's records were
+/// last made with is kept, so a node folds its seed data in again when
+/// the rules change.
+pub fn in_use() -> Option<&'static str> {
+    IN_USE.get().map(String::as_str)
 }
 
 struct Rules(SiteRules);
@@ -135,14 +168,14 @@ pub struct Moved {
 }
 
 /// The hosts (or URLs) among `hosts` whose site by `rules` is not the one
-/// the built-in lists give ([`plumb_core::registrable_domain`]). Hosts
-/// that are no website's are passed over.
+/// the built-in lists give ([`plumb_core::built_in_site`]). Hosts that are
+/// no website's are passed over.
 pub fn moved_sites<'a>(rules: &SiteRules, hosts: impl IntoIterator<Item = &'a str>) -> Vec<Moved> {
     hosts
         .into_iter()
         .filter_map(|input| {
             let host = plumb_core::host_of(input)?;
-            let built_in = plumb_core::registrable_domain(&host);
+            let built_in = plumb_core::built_in_site(&host);
             let by_rules = rules.site_of(&host);
             (built_in != by_rules).then_some(Moved {
                 host,

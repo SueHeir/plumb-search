@@ -12,7 +12,8 @@
 //! So a set can come from any node, trusted or not.
 //!
 //! Only the site rules are read from here so far, at start
-//! ([`crate::site_rules`]).
+//! ([`use_held_site_rules`]): a set taken while the node runs is used from
+//! its next start.
 //!
 //! [`NodeConfig::set_publishers`]: super::NodeConfig::set_publishers
 
@@ -34,6 +35,7 @@ use tracing::{debug, info, warn};
 
 use super::{network, Inner};
 use crate::sets::{check_set, measure, now, MANIFEST};
+use crate::site_rules::{self, read_site_rules, use_site_rules};
 
 /// The project's set-signing key, which a node trusts for the sets it
 /// takes unless told otherwise. Made on hpc on 2026-10-12; it stays there
@@ -41,7 +43,7 @@ use crate::sets::{check_set, measure, now, MANIFEST};
 pub const PROJECT_KEY: &str = "ed25519:MMrfl7-ASNz-h2d2f0ru1EWjAws59Ls3D5TbdfJS98c";
 
 /// The sets every node takes, the denylist first.
-pub(super) const TAKEN_SETS: &[&str] = &["plumb/denylist", "plumb/site-rules"];
+pub(super) const TAKEN_SETS: &[&str] = &["plumb/denylist", SITE_RULES];
 
 /// The folder of the signed sets in the data directory.
 const DIR: &str = "sets";
@@ -112,6 +114,48 @@ pub(super) fn held_part(data: &Path, sha256: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The site rules set.
+const SITE_RULES: &str = "plumb/site-rules";
+
+/// Puts the site rules set held in `data` in place of the built-in lists
+/// ([`crate::site_rules`]) when one of `publishers` signed it. At start,
+/// before any site is worked out. A set none of them signed, such as one
+/// taken before the publishers changed, is left unused.
+pub(super) fn use_held_site_rules(data: &Path, publishers: &[PublicKey]) {
+    let Some(dir) = set_dir(data, SITE_RULES).filter(|dir| dir.join(MANIFEST).is_file()) else {
+        return;
+    };
+    let mut failed = None;
+    for publisher in publishers {
+        let read = match read_site_rules(&dir, publisher, &[]) {
+            Ok(read) => read,
+            Err(err) => {
+                failed = Some(err);
+                continue;
+            }
+        };
+        if read.newer > 0 {
+            warn!(
+                "the site rules set has {} rules newer than this version understands; they are passed over",
+                read.newer
+            );
+        }
+        let hash = read.hash.clone();
+        if use_site_rules(read) {
+            info!("working out sites by the site rules set {hash}");
+        } else if site_rules::in_use() != Some(hash.as_str()) {
+            warn!(
+                "other site rules are in use already; the set held is used when Plumb next starts"
+            );
+        }
+        return;
+    }
+    match failed {
+        Some(err) => warn!("not using the site rules set held: {err:#}"),
+        None => warn!("not using the site rules set held: the node trusts no publisher"),
+    }
 }
 
 /// What one look for a set found.

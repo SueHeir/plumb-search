@@ -996,11 +996,22 @@ pub fn is_valid_host(host: &str) -> bool {
 /// may use other lists ([`use_site_list`]).
 pub fn registrable_domain(input: &str) -> Option<String> {
     let host = host_of(input)?;
-    if let Some(list) = subsites::site_list() {
-        return list.site_of(&host);
+    match subsites::site_list() {
+        Some(list) => list.site_of(&host),
+        None => built_in_site_of(&host),
     }
-    let domain = psl::domain_str(&host)?;
-    Some(subsites::site_of(&host, domain))
+}
+
+/// The site of a URL or hostname by the built-in lists, as
+/// [`registrable_domain`] gives it while a node uses no other lists
+/// ([`use_site_list`]). For telling which sites other lists move.
+pub fn built_in_site(input: &str) -> Option<String> {
+    built_in_site_of(&host_of(input)?)
+}
+
+fn built_in_site_of(host: &str) -> Option<String> {
+    let domain = psl::domain_str(host)?;
+    Some(subsites::site_of(host, domain))
 }
 
 /// `links` made fit for [`SiteRecord::links_to`] of `domain`: each made a

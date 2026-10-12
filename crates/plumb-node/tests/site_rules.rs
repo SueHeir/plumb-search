@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use plumb_node::site_rules::{read_site_rules, use_site_rules};
+use plumb_node::site_rules::{in_use, read_site_rules, use_site_rules};
 
 fn plumb(args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_plumb"))
@@ -61,15 +61,21 @@ fn a_node_works_out_sites_by_a_signed_site_rules_set() {
         path(&dir.path().join("other.key")),
     ]);
     assert!(read_site_rules(&set, &other.trim().parse().unwrap(), &[]).is_err());
-    let (rules, newer) = read_site_rules(&set, &publisher.trim().parse().unwrap(), &[]).unwrap();
-    assert_eq!(newer, 0);
+    let read = read_site_rules(&set, &publisher.trim().parse().unwrap(), &[]).unwrap();
+    assert_eq!(read.newer, 0);
+    assert_eq!(read.hash.len(), 64);
 
     assert_eq!(
         plumb_core::registrable_domain("https://x.github.io/a").as_deref(),
         Some("x.github.io")
     );
-    assert!(use_site_rules(rules.clone()));
-    assert!(!use_site_rules(rules), "the rules in use stay");
+    assert_eq!(in_use(), None);
+    assert!(use_site_rules(read.clone()));
+    assert_eq!(in_use(), Some(read.hash.as_str()));
+    let mut other_rules = read;
+    other_rules.hash = "another".into();
+    assert!(!use_site_rules(other_rules), "the rules in use stay");
+    assert_eq!(in_use().map(str::len), Some(64));
     for (input, site) in [
         ("https://x.github.io/a", Some("github.io")),
         ("https://news.bbc.co.uk/", Some("bbc.co.uk")),
@@ -89,6 +95,11 @@ fn a_node_works_out_sites_by_a_signed_site_rules_set() {
             "{input}"
         );
     }
+    // The built-in lists can still be asked, to tell which sites moved.
+    assert_eq!(
+        plumb_core::built_in_site("https://x.github.io/a").as_deref(),
+        Some("x.github.io")
+    );
     assert_eq!(
         plumb_core::canonical_domain("x.github.io").as_deref(),
         Some("github.io")

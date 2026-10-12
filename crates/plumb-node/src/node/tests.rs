@@ -1248,6 +1248,30 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     node.shutdown().await.unwrap();
     assert_eq!(check(), sites);
 
+    // Records made with a site rules set the node no longer uses are
+    // brought up to date the same way, and the lists in use noted.
+    let mut saved = store::load_state(&paths).unwrap();
+    saved.site_rules = Some("ab".repeat(32));
+    store::save_state(&paths, &saved).unwrap();
+    assert!(saved.sites_changed());
+    let index_before = names(&dir.path().join("indexes"));
+    let mut config = test_config(dir.path());
+    config.sources = offline.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the records updated for the rules", |s| {
+        ready_and_idle(s)
+            && s.index
+                .as_ref()
+                .is_some_and(|index| !index_before.contains(index))
+    })
+    .await;
+    node.shutdown().await.unwrap();
+    let saved = store::load_state(&paths).unwrap();
+    assert_eq!(saved.site_rules, None);
+    assert!(!saved.sites_changed());
+    assert_eq!(check(), sites);
+
     // Nothing to fold in a directory with no node yet.
     assert!(!request_reseed(tempfile::tempdir().unwrap().path()).unwrap());
 }

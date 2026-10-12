@@ -1179,6 +1179,8 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
         Ok(false) => {}
         Err(err) => warn!("{err:#}"),
     }
+    // Before any site is worked out.
+    signed_sets::use_held_site_rules(&paths.data, &config.set_publishers);
     let mut saved =
         store::load_state(&paths).unwrap_or_else(|| SavedState::fresh(config.initial_crawl));
 
