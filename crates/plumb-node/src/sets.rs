@@ -818,7 +818,7 @@ pub(crate) fn write_set(
     let mut part: Option<(String, zstd::Encoder<'static, BufWriter<File>>, u64)> = None;
     let (mut items, mut left_out) = (0u64, 0u64);
     for item in items_in {
-        let Some(item) = item.filter(|item| ids.insert(item.id.clone())) else {
+        let Some(item) = item.filter(|item| ids.insert(id_hash(&item.id))) else {
             left_out += 1;
             continue;
         };
