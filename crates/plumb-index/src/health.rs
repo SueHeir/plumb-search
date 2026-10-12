@@ -271,7 +271,8 @@ const SOURCES: &[(&str, &[&str])] = &[
 /// The sites `query` asks for as its source, by domain: a health source
 /// it names ([`SOURCES`]) or an address typed in it ("acetaminophen dose
 /// healthychildren.org"). Doses and abbreviations ("0.5mg", "e.g.") are
-/// not addresses.
+/// not addresses. A typed address keeps its own host unless it only adds
+/// "www.": ecdc.europa.eu is not europa.eu, whose homepage is the EU's.
 fn named_sources(query: &str) -> Vec<String> {
     let folded = format!(" {} ", normalize_text(query));
     let words: Vec<&str> = query
@@ -297,7 +298,9 @@ fn named_sources(query: &str) -> Vec<String> {
             .rsplit_once('.')
             .is_some_and(|(_, end)| end.len() > 1 && end.chars().all(|c| c.is_ascii_alphabetic()));
         if let Some(host) = plumb_core::host_of(word).filter(|_| ends_in_letters) {
-            let domain = plumb_core::registrable_domain(&host).unwrap_or(host);
+            let domain = plumb_core::registrable_domain(&host)
+                .filter(|domain| same_site(domain, &host))
+                .unwrap_or(host);
             if !named.iter().any(|known| same_site(known, &domain)) {
                 named.push(domain);
             }
@@ -696,6 +699,30 @@ mod tests {
                 "mayoclinic.org",
                 "clevelandclinic.org",
                 "pir.org"
+            ]
+        );
+        // A typed address is its own site, not the larger one it is part
+        // of (europa.eu's homepage is the EU's), but "www." changes nothing.
+        assert_eq!(
+            named_sources("ecdc.europa.eu seasonal influenza"),
+            ["ecdc.europa.eu"]
+        );
+        assert_eq!(named_sources("lisinopril www.drugs.com"), ["drugs.com"]);
+        let mut hits = vec![hit("flu.example", false, 0.3)];
+        authorities_first(
+            "ecdc.europa.eu seasonal influenza",
+            None,
+            &mut hits,
+            4,
+            &|domain| (domain != "ecdc.europa.eu").then(|| hit(domain, false, 0.6)),
+        );
+        assert_eq!(
+            domains(&hits),
+            [
+                "medlineplus.gov",
+                "mayoclinic.org",
+                "clevelandclinic.org",
+                "flu.example"
             ]
         );
         // Words that are some site's address name ask for no source,
