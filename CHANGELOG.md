@@ -16,6 +16,7 @@
 
 ### Running a node
 
+- A node that has to build its page index when it starts, as one upgraded from 0.2.0 does, keeps searching the index it already has meanwhile and builds the new one beside it. Wikipedia, Stack Overflow, docs and book results no longer go missing for the build (13 minutes on plumbsearch.org, longer on a desktop), or for half an hour more when it fails. While 0.2.0's index stands in, searches limited to a set, a site, docs, papers or a language other than English find no pages. It is removed once the new one is in use.
 - A node takes a newer docs, subpages, reference or papers file from a trusted 0.2 node again, as 0.2.0 did, unless its own file holds entries no 0.2 file has (typed search terms, paper details, languages, symbols): 0.2 nodes note what those files hold for Wikipedia and Wikidata only, so a node trusting plumbsearch.org while it runs 0.2 took none of its newer files of those sets.
 
 ## 0.2.1

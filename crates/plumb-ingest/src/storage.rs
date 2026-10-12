@@ -124,14 +124,14 @@ impl OutputFile {
 mod tests {
     use super::*;
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn download_scopes_are_isolated_and_partial_growth_never_exceeds_room() {
+    async fn download_scopes_are_isolated_and_writes_past_the_limit_are_counted() {
         let full = tempfile::tempdir().unwrap();
         let roomy = tempfile::tempdir().unwrap();
         let a = StorageBudget::open(full.path(), 20 * 1024).unwrap();
         let b = StorageBudget::open(roomy.path(), 128 * 1024).unwrap();
         let p = full.path().join("seed.part");
         let q = roomy.path().join("seed.part");
-        let (blocked, saved) = tokio::join!(
+        let (past, saved) = tokio::join!(
             with_budget(Some(a.clone()), async {
                 let mut file = OutputFile::create(&p).await.unwrap();
                 file.write_all(&[1; 4096]).await.unwrap();
@@ -141,16 +141,22 @@ mod tests {
                 write(&q, vec![3; 64 * 1024]).await
             })
         );
-        assert!(blocked.is_err());
+        // The limit is a target: the download goes on past it, is counted,
+        // and pauses crawling until trims make room.
+        past.unwrap();
         saved.unwrap();
-        assert_eq!(std::fs::read(&p).unwrap(), vec![1; 4096]);
+        let mut expected = vec![1; 4096];
+        expected.extend(vec![2; 64 * 1024]);
+        assert_eq!(std::fs::read(&p).unwrap(), expected);
         assert_eq!(std::fs::read(&q).unwrap(), vec![3; 64 * 1024]);
         assert_eq!(a.status().reserved_bytes, 0);
+        assert_eq!(a.status().rejected_writes, 0);
         assert!(
             a.status().used_bytes >= plumb_core::storage::directory_bytes(full.path()).unwrap()
         );
-        assert!(a.status().used_bytes <= a.status().limit_bytes);
+        assert!(a.status().backpressure);
         assert_eq!(b.status().reserved_bytes, 0);
+        assert!(!b.status().backpressure);
         let used = a.status().used_bytes;
         with_budget(Some(a.clone()), remove_file(&p)).await.unwrap();
         assert!(a.status().used_bytes < used);

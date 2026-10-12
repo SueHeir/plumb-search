@@ -1,0 +1,171 @@
+# official_site names DeepSeek looked up on 2026-10-10 (week-review replay).
+# Answers are hand-labelled from the Oct 10 and Oct 11 replies, the blind
+# judge's reasons and the sites' own pages; a few small venues are best guesses.
+# Optional third column: arguments passed to official_site.
+Xe currency converter	xe.com
+Chroma vector database	trychroma.com
+Proton Mail login	proton.me
+Khruangbin	khruangbin.com
+Zotero	zotero.org
+Powell's City of Books hours	powells.com
+NHS burns and scalds treatment	nhs.uk
+Apple iPad Air technical specifications	apple.com
+Wirecutter best robot vacuum	nytimes.com
+IKEA KALLAX shelf unit	ikea.com
+Patagonia returns	patagonia.com
+Brita replacement filters	brita.com
+Home Depot coupons	homedepot.com
+Apple iPad Air	apple.com
+Brita water filter replacements	brita.com
+Patagonia returns and repairs	patagonia.com
+Kindle Paperwhite	amazon.com
+Kobo Clara Colour	kobo.com
+Home Depot promo codes	homedepot.com
+Vietnam e-visa	evisa.gov.vn,immigration.gov.vn
+Yosemite National Park	nps.gov
+ETIAS	travel-europe.europa.eu
+SAT México facturación	sat.gob.mx	{"country": "MX"}
+Receita Federal consultar CPF	gov.br	{"country": "BR"}
+Yoshua Bengio Google Scholar profile	scholar.google.com
+Yoshua Bengio dblp	dblp.org
+Receita Federal	gov.br	{"country": "BR"}
+Receita Federal do Brasil	gov.br	{"country": "BR"}
+Pasaporte argentino	argentina.gob.ar	{"country": "AR"}
+SAT México facturar	sat.gob.mx
+Receita Federal consultar CPF	gov.br
+SAT México facturar	sat.gob.mx	{"country": "MX"}
+Chase login	chase.com
+IRS Free File	irs.gov
+Xfinity sign in	xfinity.com
+Canvas Instructure login	instructure.com
+my Social Security	ssa.gov
+Fidelity NetBenefits login	fidelity.com,netbenefits.com
+Ticketmaster	ticketmaster.com
+Washington State Department of Licensing	dol.wa.gov
+Poilâne Paris bakery	poilane.com,poilane.fr
+Musei Capitolini	museicapitolini.org
+Toronto Public Library	torontopubliclibrary.ca,tpl.ca
+Tomod's drugstore Japan	tomods.jp
+dol.wa.gov Washington State Department of Licensing	dol.wa.gov	{"country": "US"}
+MDN Web Docs structuredClone	developer.mozilla.org
+typescript-eslint getting started flat config	typescript-eslint.io
+Vite server options proxy	vite.dev,vitejs.dev
+Node.js fs promises API	nodejs.org
+Poilâne	poilane.com,poilane.fr
+Mayo Clinic plantar fasciitis	mayoclinic.org
+USPS package tracking	usps.com
+Sony WH-1000XM6	sony.com
+Swiss Travel Pass	swisstravelsystem.com,mystsnet.com,sbb.ch
+Nature Communications	nature.com
+Semantic Scholar API	semanticscholar.org
+Swiss Travel System	swisstravelsystem.com,mystsnet.com
+Deutsche Bahn	bahn.de,deutschebahn.com
+SNCF	sncf.com,groupe-sncf.com,sncf-connect.com
+Musée du Louvre	louvre.fr
+MeteoSchweiz	meteoschweiz.admin.ch
+Carta d'identità elettronica	interno.gov.it
+JR東日本	jreast.co.jp
+Naver 네이버	naver.com
+Rust Playground	play.rust-lang.org
+Compiler Explorer godbolt	godbolt.org
+故宫博物院	dpm.org.cn
+tenki.jp 東京の天気	tenki.jp
+首相官邸	kantei.go.jp
+terraform registry aws provider docs	registry.terraform.io
+caddy documentation	caddyserver.com
+US Department of State passport renewal online	state.gov	{"country": "US"}
+UK government check your State Pension age	gov.uk	{"country": "GB"}
+Government of Canada apply Social Insurance Number	canada.ca	{"country": "CA"}
+Australian Taxation Office individual income tax rates residents	ato.gov.au	{"country": "AU"}
+California DMV REAL ID appointment	dmv.ca.gov	{"country": "US"}
+Go slog documentation	go.dev,pkg.go.dev
+California Department of Motor Vehicles	dmv.ca.gov	{"country": "US"}
+GNU Make manual	gnu.org
+CMake documentation	cmake.org
+Clang documentation	clang.llvm.org
+Go package documentation	pkg.go.dev
+Rust Blog	blog.rust-lang.org
+Serde	serde.rs
+California DMV REAL ID	dmv.ca.gov	{"country": "US"}
+Nespresso machine descaling instructions	nespresso.com
+dmv.ca.gov	dmv.ca.gov	{"country": "US"}
+FTC report fraud ReportFraud	ftc.gov
+NIST Chemistry WebBook	webbook.nist.gov
+Real Madrid fixtures schedule	realmadrid.com
+Stylus Firefox extension	add0n.com
+WebAssembly Studio	webassembly.studio
+Bevy game engine documentation	bevy.org,bevyengine.org
+Folding@home	foldingathome.org
+SerenityOS	serenityos.org
+Jellyfin media server	jellyfin.org
+Godot engine	godotengine.org
+Veracruz All Natural Austin	veracruzallnatural.com
+mypy documentation	mypy.readthedocs.io
+Stylus addon	add0n.com
+Willamette Dental Group	willamettedental.com
+DJI Mini 4 Pro product page	dji.com
+Apple Certified Refurbished store	apple.com
+Vatican Museums	museivaticani.va
+Eurail Pass	eurail.com
+Wirecutter	nytimes.com
+RATP Paris Metro	ratp.fr
+Brazil visa	gov.br
+Japan Ministry of Foreign Affairs	mofa.go.jp
+Eurail	eurail.com
+Google Flights	google.com
+Skyscanner	skyscanner.net,skyscanner.com
+eurail.com	eurail.com
+Visit Japan Web	digital.go.jp
+Brazil Ministry of Foreign Affairs	gov.br
+Kayak flights	kayak.com
+Prefeitura de São Paulo	prefeitura.sp.gov.br
+cita previa DNI Policía Nacional España	citapreviadnie.es,policia.es
+Cristo Redentor ingressos Trem do Corcovado	tremdocorcovado.rio
+Mercadona supermercados horarios	mercadona.es,mercadona.com
+O Globo jornal	oglobo.globo.com
+Gmail login	gmail.com,google.com
+Facebook login	facebook.com
+Walmart	walmart.com
+Amazon sign in	amazon.com
+Vite	vite.dev,vitejs.dev
+YouTube	youtube.com
+Wikipedia	wikipedia.org
+USPS tracking	usps.com
+Microsoft	microsoft.com
+Node.js download	nodejs.org
+Pilpel falafel London	pilpel.co.uk
+Barcomi's Berlin	barcomis.de
+La Maquinita coworking Buenos Aires	lamaquinitaco.com
+Pilpel	pilpel.co.uk
+WHO malaria fact sheet	who.int
+Urban Station coworking Buenos Aires	urbanstation.com.ar
+Hoxton Beach	hoxtonbeach.com
+Vietnam Railways	dsvn.vn,vr.com.vn
+Zappos return policy	zappos.com
+iRobot Roomba Combo j9+	irobot.com
+Casper Standard Mattress	casper.com
+ECDC European Centre for Disease Prevention and Control influenza	ecdc.europa.eu
+ORCID	orcid.org
+Elsevier Developer Portal	dev.elsevier.com
+Deutsche Bahn Fahrplan Berlin Prag	bahn.de	{"country": "DE"}
+Beijing Capital International Airport official website	bcia.com.cn
+Indian Railways	indianrailways.gov.in
+Tokyo Metro	tokyometro.jp
+TheFork prenotazione ristorante	thefork.it,thefork.com	{"country": "IT"}
+JR Central Shinkansen timetable	jr-central.co.jp
+Louvre billetterie	louvre.fr	{"country": "FR"}
+GeoSphere Austria Wetter Wien	geosphere.at	{"country": "AT"}
+JR East Japan Railway Company	jreast.co.jp
+Certbot documentation	certbot.eff.org,eff-certbot.readthedocs.io,certbot.readthedocs.io
+Ansible documentation	docs.ansible.com
+Ansible	ansible.com
+GitLab CI YAML reference docs	docs.gitlab.com
+Jenkins pipeline documentation	jenkins.io
+Prometheus configuration documentation	prometheus.io
+Social Security Administration my benefits	ssa.gov
+PayPal how to spot phishing email	paypal.com
+Microsoft Security Response Center	msrc.microsoft.com
+Let's Encrypt	letsencrypt.org
+Tour de France official website	letour.fr
+MSRC	msrc.microsoft.com
+Google Account security 2-Step Verification	google.com
