@@ -212,7 +212,8 @@ nothing else) and says what it builds in a `publish` section of its
     "points": {"type": "number", "roles": ["filter", "show"]},
     "comments": {"type": "number", "roles": ["show"]}
   },
-  "show": {"about": "{points} points · {comments} comments"}
+  "show": {"about": "{points} points · {comments} comments"},
+  "place": {"how": "asked", "ask": ["hn", "hacker news"]}
 }
 ```
 
@@ -227,6 +228,7 @@ nothing else) and says what it builds in a `publish` section of its
 | `source` | Where its items come from. |
 | `fields` | The fields its items have, each with a `type` (`text`, `keyword`, `number`, `date`, `geo`, `url`, `ref`, `vector`, `object`) and `roles` (`search:name`, `search:about`, `search:body`, `filter`, `show`, `answer`). An item with a field not listed here is refused. |
 | `show` | How its items are shown: text with `{field}` slots. |
+| `place` | Where its items show in search: `own`, the default, or `asked`, with up to 8 `ask` words. See below. |
 | `personal` | `true` for your own data (your library, your bookmarks): the set and every item in it are labelled `personal` and can never be shared. |
 
 ```rust
@@ -277,9 +279,27 @@ left out too.
 The node signs the set with its owner's publisher key, made on the first run
 in `keys/publisher.key` in the data folder: what a node's plugins build is its
 owner's to publish, not the plugin's author's. It keeps the set in `own-sets/`
-in the data folder, which it never sends to other nodes. Searching these sets,
-and sharing one with other nodes when its license allows and its owner chooses
-to, are not built yet.
+in the data folder, which it never sends to other nodes. Sharing one with other
+nodes, when its license allows and its owner chooses to, is not built yet.
+
+The node searches its sets beside the rest of its index. Each item with a
+title and an address is a result, shown under the set's `title`, with the
+`show` line under it (or the item's own `about`, when a slot the line names is
+missing). Where a set's items come up depends on its `place`:
+
+- **`{"how": "own"}`**, the default: they are ordinary results, found by their
+  titles, names and `about` text.
+- **`{"how": "asked", "ask": ["hn", "hacker news"]}`**: they come up only when a
+  search starts or ends with one of the `ask` words, and then first. "hn rust"
+  lists the Hacker News stories about Rust, and "rust" alone does not.
+
+Anyone who can search the node sees these results, as with a plugin's other
+results, and that includes a `personal` set's: put a plugin that builds one on
+the node of the computer you browse on.
+
+A new set is searched as soon as the node has rebuilt its index to take it in.
+Since that rebuild covers the whole index, a run that only changes what is in a
+set is taken in at most every six hours.
 
 A node started with `plumb run` (and the desktop app and the Docker image) runs
 each plugin a couple of minutes after it starts, then every `every`; one that

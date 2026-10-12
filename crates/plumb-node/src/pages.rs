@@ -736,6 +736,9 @@ impl FromStr for SetUpdates {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wanted {
     pub sets: Vec<(&'static SetInfo, PathBuf, u64)>,
+    /// The item sets taken in with the page sets
+    /// ([`crate::node::item_sets`]).
+    pub items: Vec<crate::node::item_sets::ItemSetFile>,
 }
 
 impl Wanted {
@@ -764,13 +767,20 @@ impl Wanted {
                     (pages > 0 && file.is_file()).then_some((set, file, pages))
                 })
                 .collect(),
+            items: Vec::new(),
         }
     }
 
+    /// These pages and the pages of the item sets `items`.
+    pub fn with_items(self, items: Vec<crate::node::item_sets::ItemSetFile>) -> Self {
+        Wanted { items, ..self }
+    }
+
     /// Names the index of these pages: changes when a set, its file (size
-    /// or time) or its count changes.
+    /// or time) or its count changes, or an item set or what it holds. With
+    /// no item sets it is the key of the page sets alone.
     pub fn key(&self) -> Option<String> {
-        if self.sets.is_empty() {
+        if self.sets.is_empty() && self.items.is_empty() {
             return None;
         }
         // Keep schema generations separate; the indexed scope fields used
@@ -788,6 +798,12 @@ impl Wanted {
             if let Some(quality) = plumb_net::pages::read_quality(file, modified, len) {
                 text.push_str(&format!(":generation={}", quality.generation));
             }
+        }
+        for items in &self.items {
+            text.push_str(&format!(
+                "|items:{}:{}:{}",
+                items.set, items.publisher, items.stamp
+            ));
         }
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(text.as_bytes());
@@ -830,6 +846,17 @@ pub fn open_or_build_with_budget(
     wanted: &Wanted,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 ) -> Result<Option<(String, PageSearcher)>> {
+    open_or_build_with(data_dir, wanted, budget, None)
+}
+
+/// [`open_or_build_with_budget`], leaving out of the item sets what
+/// `denylist` denies.
+pub fn open_or_build_with(
+    data_dir: &Path,
+    wanted: &Wanted,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    denylist: Option<&plumb_format::deny::Denylist>,
+) -> Result<Option<(String, PageSearcher)>> {
     let Some(key) = wanted.key() else {
         return Ok(None);
     };
@@ -848,6 +875,20 @@ pub fn open_or_build_with_budget(
             _lease: lease,
         };
         pages = Box::new(pages.chain(read));
+    }
+    if !wanted.items.is_empty() {
+        let read = crate::node::item_sets::pages(&wanted.items, denylist);
+        for (set, why) in &read.failed {
+            warn!("item set {set} left out of the page index: {why}");
+        }
+        info!(
+            "indexing {} pages of {} item sets ({} layer entries merged, {} denied)",
+            read.pages.len(),
+            wanted.items.len() - read.failed.len(),
+            read.layers,
+            read.denied
+        );
+        pages = Box::new(pages.chain(read.pages));
     }
     let stats = plumb_index::pages::build_page_index_with_budget(&dir, pages, budget)?;
     info!(

@@ -15,6 +15,7 @@
       "comments": {"type": "number", "roles": ["show"]},
       "discussion": {"type": "url", "roles": ["show"]}
     },
-    "show": {"about": "{points} points · {comments} comments"}
+    "show": {"about": "{points} points · {comments} comments"},
+    "place": {"how": "asked", "ask": ["hn", "hacker news"]}
   }
 }

@@ -112,6 +112,7 @@ mod denylist;
 mod embedding;
 pub mod features;
 mod fill;
+pub(crate) mod item_sets;
 pub mod journal;
 mod network;
 pub(crate) mod newer;
@@ -1053,6 +1054,14 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
             tokio::task::spawn_blocking(move || embedding::run(inner))
         })
     });
+    // The sets the plugins build, searched once built. A set left by a
+    // plugin since taken out is not.
+    let plugin_sets: Vec<String> = plugins
+        .publishing()
+        .iter()
+        .filter_map(|plugin| plugin.manifest.publish.as_ref())
+        .map(|publish| publish.set_name())
+        .collect();
     let (pages, news, adult) = if inner.config.crawl_only {
         // Only searching needs these.
         info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
@@ -1063,8 +1072,9 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         )
     } else {
         (
-            supervise(&inner, "page sets", |inner| {
-                tokio::task::spawn_blocking(move || pages::run(inner))
+            supervise(&inner, "page sets", move |inner| {
+                let plugin_sets = plugin_sets.clone();
+                tokio::task::spawn_blocking(move || pages::run(inner, plugin_sets))
             }),
             supervise(&inner, "checking feeds", |inner| {
                 tokio::spawn(news::run(inner))

@@ -5667,6 +5667,7 @@ mod tests {
         let url = "https://en.wikipedia.org/wiki/But_I%27m_a_Cheerleader";
         let article = PageHit {
             page: Page {
+                item_set: None,
                 paper: None,
                 set: "wikipedia-en".into(),
                 url: url.into(),
@@ -5770,6 +5771,7 @@ mod tests {
         use plumb_index::pages::Page;
         let article = PageHit {
             page: Page {
+                item_set: None,
                 paper: None,
                 set: "wikipedia-en".into(),
                 url: "https://en.wikipedia.org/wiki/YouTube_Music".into(),
@@ -7282,6 +7284,7 @@ mod tests {
                 results.pages.push(PlacedPage {
                     hit: PageHit {
                         page: Page {
+                            item_set: None,
                             paper: None,
                             set: "wikipedia-en".into(),
                             url: "https://en.wikipedia.org/wiki/MrBeast".into(),
@@ -7360,6 +7363,7 @@ mod tests {
         use plumb_index::pages::{Page, PageHit, PlacedPage};
         let article = PageHit {
             page: Page {
+                item_set: None,
                 paper: None,
                 set: "wikipedia-en".into(),
                 url: "https://en.wikipedia.org/wiki/Marie_Curie".into(),

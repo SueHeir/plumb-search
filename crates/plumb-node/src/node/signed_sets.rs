@@ -48,7 +48,7 @@ pub const PROJECT_KEY: &str = "ed25519:MMrfl7-ASNz-h2d2f0ru1EWjAws59Ls3D5TbdfJS9
 pub(super) const TAKEN_SETS: &[&str] = &[DENYLIST, SITE_RULES];
 
 /// The folder of the signed sets in the data directory.
-const DIR: &str = "sets";
+pub(super) const DIR: &str = "sets";
 
 /// How often the node looks for newer sets.
 const LOOK_EVERY: Duration = Duration::from_secs(6 * 3600);

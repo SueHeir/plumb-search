@@ -66,7 +66,7 @@ impl Weight {
 
 /// Whom a set comes from, as the merge ranks it. A publisher the owner
 /// set to *off* has none: its sets are left out of the merge.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trust {
     /// The node owner's own layers, personal ones included.
     Owner,
@@ -485,6 +485,109 @@ pub fn merge_all(
         .zip(&on)
         .filter_map(|(thing, on)| merge(sources, *thing, on))
         .collect()
+}
+
+/// The extensions a node holds, by what they name, so that things can be
+/// merged one at a time as they are read: the layers stay in memory and
+/// the things don't. It finds what [`Join`] finds, from the other side.
+#[derive(Debug, Default)]
+pub struct Layers {
+    held: Vec<(Item, usize)>,
+    by_target: HashMap<Target, Vec<usize>>,
+}
+
+/// What an extension names, as the thing it names is found by.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Target {
+    /// `wd:Q90` is the outside id `wd` `Q90`.
+    Id(String, String),
+    /// A match key ([`match_key`]).
+    Url(String),
+    Site(String),
+    /// Publisher, set and id.
+    Item(String, String, String),
+}
+
+impl Layers {
+    /// Holds `extensions`, each with the position of its source. Items
+    /// that extend nothing, or a blob, are passed over.
+    pub fn new(extensions: impl IntoIterator<Item = (Item, usize)>) -> Layers {
+        let mut layers = Layers::default();
+        for (item, source) in extensions {
+            let Some(target) = item.extends.as_ref().and_then(target_of) else {
+                continue;
+            };
+            layers
+                .by_target
+                .entry(target)
+                .or_default()
+                .push(layers.held.len());
+            layers.held.push((item, source));
+        }
+        layers
+    }
+
+    /// How many extensions it holds.
+    pub fn len(&self) -> usize {
+        self.held.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+
+    /// The extensions that name `thing`, in the order they were held.
+    pub fn on(&self, sources: &[Source], thing: Sourced<'_>) -> Vec<Sourced<'_>> {
+        let item = thing.item;
+        if self.held.is_empty() || item.is_extension() || item.is_deleted() {
+            return Vec::new();
+        }
+        let mut targets: Vec<Target> = item
+            .ids
+            .iter()
+            .map(|(namespace, value)| Target::Id(namespace.clone(), value.clone()))
+            .collect();
+        if let Some(key) = item.url.as_deref().and_then(match_key) {
+            targets.push(Target::Url(key));
+        }
+        if node_site(item).as_deref() == Some(item.id.as_str()) {
+            targets.push(Target::Site(item.id.clone()));
+        }
+        let source = &sources[thing.source];
+        targets.push(Target::Item(
+            source.publisher.clone(),
+            source.set.clone(),
+            item.id.clone(),
+        ));
+        let mut found: Vec<usize> = targets
+            .iter()
+            .filter_map(|target| self.by_target.get(target))
+            .flatten()
+            .copied()
+            .collect();
+        found.sort_unstable();
+        found.dedup();
+        found
+            .into_iter()
+            .map(|n| Sourced {
+                item: &self.held[n].0,
+                source: self.held[n].1,
+            })
+            .collect()
+    }
+}
+
+fn target_of(target: &Ref) -> Option<Target> {
+    Some(match target {
+        Ref::Wd(id) => Target::Id("wd".into(), id.clone()),
+        Ref::Id { namespace, value } => Target::Id(namespace.clone(), value.clone()),
+        Ref::Url(url) => Target::Url(match_key(url)?),
+        Ref::Site(domain) => Target::Site(domain.clone()),
+        Ref::Item { publisher, set, id } => {
+            Target::Item(publisher.clone(), set.clone(), id.clone())
+        }
+        Ref::Blob(_) => return None,
+    })
 }
 
 #[cfg(test)]
@@ -935,5 +1038,50 @@ mod tests {
         assert_eq!(merged[0].name_weights, [0.25]);
         assert_eq!(merged[1].item.names, ["CPython"]);
         assert!(merged[2].item.names.is_empty());
+
+        // Held as layers, the same extensions find the same things when
+        // the things come one at a time.
+        let extensions: Vec<Item> = [
+            ("e1", "wd:Q28865"),
+            ("e2", "site:python.org"),
+            ("e3", "url:http://docs.python.org/3"),
+            ("e4", "id:pypi:python"),
+            ("e5", "item:ed25519:project/plumb%2Fwikipedia-en/https:%2F%2Fen.wikipedia.org%2Fwiki%2FPython_(programming_language)"),
+            ("e6", "site:example.org"),
+        ]
+        .into_iter()
+        .map(|(id, target)| item(json!({"id": id, "extends": target, "names": [id]})))
+        .chain([taken_back.clone()])
+        .collect();
+        let layers = Layers::new(extensions.iter().map(|e| (e.clone(), 3)));
+        assert_eq!(layers.len(), 7);
+        let on: Vec<Vec<&str>> = things
+            .iter()
+            .map(|thing| {
+                layers
+                    .on(&sources, *thing)
+                    .iter()
+                    .map(|layer| layer.item.id.as_str())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            on,
+            [
+                vec!["e1", "e2", "n2"],
+                vec!["e1", "e5"],
+                vec!["e3", "e4"],
+                vec![],
+            ]
+        );
+        let sourced: Vec<Sourced<'_>> = extensions
+            .iter()
+            .map(|item| Sourced { item, source: 3 })
+            .collect();
+        let streamed: Vec<Merged> = things
+            .iter()
+            .filter_map(|thing| merge(&sources, *thing, &layers.on(&sources, *thing)))
+            .collect();
+        assert_eq!(streamed, merge_all(&sources, &things, &sourced));
     }
 }

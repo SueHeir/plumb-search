@@ -5823,7 +5823,7 @@ async fn a_held_denylist_takes_results_off_and_its_csam_entries_stay_when_off() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_plugin_that_publishes_builds_its_set_soon_after_the_start() {
+async fn a_plugin_that_publishes_builds_its_set_soon_after_the_start_and_it_is_searched() {
     use plumb_format::PublicKey;
 
     let dir = seeded_dir();
@@ -5834,12 +5834,17 @@ async fn a_plugin_that_publishes_builds_its_set_soon_after_the_start() {
         serde_json::json!({
             "name": "News",
             "hosts": ["news.example"],
-            "publish": {"set": "stories", "kinds": ["story"], "every": "1d"},
+            "publish": {
+                "set": "stories", "title": "News stories", "kinds": ["story"], "every": "1d",
+                "fields": {"points": {"type": "number", "roles": ["show"]}},
+                "show": {"about": "{points} points"},
+                "place": {"how": "asked", "ask": ["news"]},
+            },
         })
         .to_string(),
     )
     .unwrap();
-    let items = r#"[{"id":"1","kind":"story","title":"One","url":"https://news.example/1"}]"#;
+    let items = r#"[{"id":"1","kind":"story","title":"Rust 2026 is out","url":"https://news.example/1","fields":{"points":42}}]"#;
     let output = r#"{"state":{"seen":1}}"#;
     let escape = |text: &str| -> String { text.bytes().map(|b| format!("\\{b:02x}")).collect() };
     std::fs::write(
@@ -5869,6 +5874,30 @@ async fn a_plugin_that_publishes_builds_its_set_soon_after_the_start() {
         assert!(Instant::now() < deadline, "the plugin never ran");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // The set is indexed with the node's pages, and listed first for a
+    // query that asks for it by its word.
+    let addr = node.addr();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let page = loop {
+        let page = get(addr, "/search?q=news+rust").await.2;
+        if page.contains("https://news.example/1") {
+            break page;
+        }
+        assert!(Instant::now() < deadline, "the set was never searched");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(page.contains("42 points"), "{page}");
+    assert!(page.contains("News stories"), "{page}");
+    let (answer, _) = mcp_call(addr, "search", serde_json::json!({ "query": "rust news" })).await;
+    assert_eq!(
+        answer["pages"][0]["url"], "https://news.example/1",
+        "{answer}"
+    );
+    // Not otherwise.
+    assert!(!get(addr, "/search?q=rust+2026+is+out")
+        .await
+        .2
+        .contains("https://news.example/1"));
     node.shutdown().await.unwrap();
     let key = crate::sets::read_key(&dir.path().join("keys/publisher.key")).unwrap();
     let set = crate::plugins::publish::own_set_dir(dir.path(), "local/stories");

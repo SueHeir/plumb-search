@@ -105,7 +105,9 @@ pub struct Publish {
     /// How its items are shown: templates with `{field}` slots.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub show: BTreeMap<String, String>,
-    /// Where its items go among results.
+    /// Where its items go among results: `{"how": "own"}`, the default,
+    /// lists them as pages are listed; `{"how": "asked", "ask": ["hn"]}`
+    /// only for a query with one of those words ("hn rust").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub place: Option<Value>,
     /// Personal data (the owner's own library or bookmarks): the set and
@@ -170,6 +172,7 @@ impl Publish {
                 "{kind:?} is not a kind it may publish"
             );
         }
+        plumb_index::items::Place::read(self.place.as_ref()).map_err(anyhow::Error::msg)?;
         let mut manifest = self.manifest("plugin", None);
         manifest.insert(
             "files".into(),
@@ -533,6 +536,16 @@ pub fn own_key(data: &Path) -> Result<SigningKey> {
         PublicKey::of(&key)
     );
     Ok(key)
+}
+
+/// The public half of the owner's publisher key in `data`, once its first
+/// plugin run made one.
+pub fn own_public_key(data: &Path) -> Option<PublicKey> {
+    let path = data.join(KEY_FILE);
+    path.is_file()
+        .then(|| sets::read_key(&path).ok())
+        .flatten()
+        .map(|key| PublicKey::of(&key))
 }
 
 /// What a run of a plugin's `plumb_publish` needs from the node.

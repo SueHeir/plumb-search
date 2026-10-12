@@ -191,12 +191,31 @@ pub struct Page {
     /// Bounded source symbols and passages, when an inner-page rebuild supplied them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search: Option<SearchContent>,
+    /// For a page of an item set ([`crate::items::item_page`]), what its
+    /// set says of it. `None` for pages of today's page sets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_set: Option<ItemSetPage>,
+}
+
+/// What an item set says of one of its pages ([`Page::item_set`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemSetPage {
+    /// The set's title, shown with the page: "Hacker News stories".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// What the item is (`story`).
+    pub kind: String,
+    /// Words a query names the set by ("hn"). A page whose set has any is
+    /// listed only for a query with one of them ([`PageSearcher::asked`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ask: Vec<String>,
 }
 
 impl Page {
     /// The Wikipedia article `article` of Wikipedia in `lang`.
     pub fn from_article(lang: &str, article: Article) -> Self {
         Page {
+            item_set: None,
             paper: None,
             set: format!("wikipedia-{lang}"),
             url: article_url(lang, &article.title),
@@ -225,6 +244,7 @@ impl Page {
     /// `owner/name`, its views its stars, its site its homepage's domain.
     pub fn from_repo(repo: Article) -> Self {
         Page {
+            item_set: None,
             paper: None,
             set: GITHUB_SET.to_string(),
             url: format!("https://github.com/{}", repo.title),
@@ -250,6 +270,7 @@ impl Page {
     /// item is the question's id and whose description is its tags.
     pub fn from_question(question: Article) -> Self {
         Page {
+            item_set: None,
             paper: None,
             set: STACKOVERFLOW_SET.to_string(),
             url: format!(
@@ -285,6 +306,7 @@ impl Page {
         let (site, id) =
             plumb_core::stack_exchange::parse_question_item(question.item.as_deref()?)?;
         Some(Page {
+            item_set: None,
             paper: None,
             set: STACKEXCHANGE_SET.to_string(),
             url: site.question_url(id),
@@ -333,6 +355,7 @@ impl Page {
     /// the work id (`OL45804W`).
     pub fn from_book(book: Article) -> Self {
         Page {
+            item_set: None,
             paper: None,
             set: BOOKS_SET.to_string(),
             url: format!(
@@ -362,6 +385,7 @@ impl Page {
     /// of its own.
     pub fn from_podcast(podcast: Article) -> Self {
         Page {
+            item_set: None,
             paper: None,
             set: PODCASTS_SET.to_string(),
             url: format!(
@@ -400,6 +424,7 @@ impl Page {
             return None;
         }
         Some(Page {
+            item_set: None,
             paper: None,
             set: MUSIC_SET.to_string(),
             url: format!("https://musicbrainz.org/{item}"),
@@ -451,6 +476,7 @@ impl Page {
             Some(_) => return None,
         };
         Some(Page {
+            item_set: None,
             paper: None,
             set: FILMS_SET.to_string(),
             url,
@@ -482,6 +508,7 @@ impl Page {
                 && !item.contains(char::is_whitespace)
         })?;
         Some(Page {
+            item_set: None,
             paper: None,
             set: DOCS_SET.to_string(),
             url,
@@ -518,6 +545,7 @@ impl Page {
                 && !item.contains(char::is_whitespace)
         })?;
         Some(Page {
+            item_set: None,
             paper: None,
             set: set.to_string(),
             url,
@@ -548,7 +576,7 @@ impl Page {
     /// The host of a docs, reference or subpages page's address, without
     /// `www.`: `docs.python.org`, `healthline.com`.
     fn docs_host(&self) -> Option<&str> {
-        if self.set != DOCS_SET && !self.is_site_page() {
+        if self.set != DOCS_SET && !self.is_site_page() && self.item_set.is_none() {
             return None;
         }
         let host = self
@@ -601,6 +629,7 @@ impl Page {
             format!("https://openalex.org/{item}")
         };
         Page {
+            item_set: None,
             paper: paper.paper,
             set: PAPERS_SET.to_string(),
             url,
@@ -629,6 +658,7 @@ impl Page {
     /// English name and whose views are its sitelinks.
     pub fn from_item(item: Article) -> Self {
         Page {
+            item_set: None,
             paper: None,
             set: WIKIDATA_SET.to_string(),
             url: format!(
@@ -662,6 +692,7 @@ impl Page {
             1,
         );
         Page {
+            item_set: None,
             paper: None,
             set: WIKTIONARY_SET.to_string(),
             url,
@@ -692,6 +723,7 @@ impl Page {
         let info = package.package?;
         let url = info.page_url()?;
         Some(Page {
+            item_set: None,
             paper: None,
             set: PACKAGES_SET.to_string(),
             url,
@@ -790,6 +822,19 @@ impl Page {
             }
             return Some(topic);
         }
+        if self.is_asked() {
+            let mut topic = self.title.clone();
+            for text in self
+                .aliases
+                .iter()
+                .chain(&self.names)
+                .chain(&self.description)
+            {
+                topic.push(' ');
+                topic.push_str(text);
+            }
+            return Some(topic);
+        }
         self.is_question().then(|| {
             let mut topic = self.title.clone();
             for text in self.aliases.iter().chain(&self.description) {
@@ -845,6 +890,14 @@ impl Page {
         Some(about)
     }
 
+    /// Whether the page is of an item set listed only when a query asks
+    /// for it by name ([`PageSearcher::asked`]): never found otherwise.
+    pub fn is_asked(&self) -> bool {
+        self.item_set
+            .as_ref()
+            .is_some_and(|set| !set.ask.is_empty())
+    }
+
     /// Whether the page may be listed before every site. Books, podcasts,
     /// papers, songs, albums, films and shows share their titles with too
     /// much ("Python", "Apple", "Hello", "Up") to.
@@ -858,7 +911,12 @@ impl Page {
 
     /// The name of the set people see: "Wikipedia".
     pub fn set_name(&self) -> &str {
-        if self.set.starts_with("wikipedia-") || self.is_film_with_article() {
+        if let Some(set) = &self.item_set {
+            set.title
+                .as_deref()
+                .or_else(|| self.docs_host())
+                .unwrap_or(&self.set)
+        } else if self.set.starts_with("wikipedia-") || self.is_film_with_article() {
             "Wikipedia"
         } else if self.set == GITHUB_SET {
             "GitHub"
@@ -912,7 +970,9 @@ impl Page {
 
     /// The site whose icon marks the page: wikipedia.org, github.com.
     pub fn set_domain(&self) -> &str {
-        if self.set == GITHUB_SET {
+        if self.item_set.is_some() {
+            self.docs_host().unwrap_or_default()
+        } else if self.set == GITHUB_SET {
             "github.com"
         } else if self.set == STACKOVERFLOW_SET {
             "stackoverflow.com"
@@ -1034,6 +1094,15 @@ pub struct PageHit {
     /// ([`crate::learned::reorder`]), which [`place_pages`] keeps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learned: Option<LearnedPlace>,
+}
+
+/// What a query asks of item sets it names ([`PageSearcher::asked`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asked {
+    /// The query without the words that name the sets.
+    pub words: String,
+    /// The sets, `<scope>/<name>`.
+    pub sets: Vec<String>,
 }
 
 /// Where the learned ranking listed a page on its own.
@@ -1408,6 +1477,9 @@ pub struct PageIndexStats {
     /// old manifests; unknown pages are `pages - sum(languages)`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub languages: std::collections::BTreeMap<String, u64>,
+    /// The item sets each ask word names ([`ItemSetPage::ask`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub asked: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Builds the page index of `pages` in `dir`, replacing any there.
@@ -1535,6 +1607,12 @@ fn build_with(
             fields.popularity,
             (popularity * POPULARITY_SCALE).round() as u64,
         );
+        for word in page.item_set.iter().flat_map(|set| &set.ask) {
+            let sets = stats.asked.entry(word.clone()).or_default();
+            if !sets.contains(&page.set) {
+                sets.push(page.set.clone());
+            }
+        }
         if page.set == WIKTIONARY_SET {
             document.add_text(fields.word, &page.title);
             document.add_text(fields.page, serde_json::to_string(&page)?);
@@ -2253,6 +2331,116 @@ impl PageSearcher {
     }
 
     /// The best `limit` pages for `query`, best first.
+    /// The item sets `query` asks for by one of their ask words, first or
+    /// last ("hn rust", "rust hacker news"), and the rest of it. `None`
+    /// when it names none, or nothing else.
+    pub fn asked(&self, query: &str) -> Option<Asked> {
+        if self.stats.asked.is_empty() {
+            return None;
+        }
+        let query = crate::items::ask_word(query);
+        let mut words: Vec<&String> = self.stats.asked.keys().collect();
+        // "hacker news rust" is asked by "hacker news" before "hacker".
+        words.sort_by_key(|word| std::cmp::Reverse(word.len()));
+        words.into_iter().find_map(|word| {
+            let rest = query
+                .strip_prefix(word.as_str())
+                .filter(|rest| rest.starts_with(' '))
+                .or_else(|| {
+                    query
+                        .strip_suffix(word.as_str())
+                        .filter(|rest| rest.ends_with(' '))
+                })?
+                .trim();
+            (!rest.is_empty()).then(|| Asked {
+                words: rest.to_string(),
+                sets: self.stats.asked[word].clone(),
+            })
+        })
+    }
+
+    /// The pages of the sets `asked` names that have the words it asks
+    /// for (all of up to two, three quarters of more), by how many they
+    /// have and then how read they are.
+    pub fn search_sets(&self, asked: &Asked, limit: usize) -> Result<Vec<PageHit>> {
+        let stems = self.question_words(&asked.words);
+        if limit == 0 || self.older || stems.is_empty() || asked.sets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let needed = if stems.len() < QUESTION_QUERY_WORDS {
+            stems.len()
+        } else {
+            (stems.len() as f32 * QUESTION_SHARE).ceil() as usize
+        };
+        let words = BooleanQuery::with_minimum_required_clauses(
+            stems
+                .iter()
+                .map(|stem| {
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.topic, stem),
+                            IndexRecordOption::Basic,
+                        )) as Box<dyn Query>,
+                    )
+                })
+                .collect(),
+            needed,
+        );
+        let sets = BooleanQuery::new(
+            asked
+                .sets
+                .iter()
+                .map(|set| (Occur::Should, self.scope_term(&format!("set:{set}"))))
+                .collect(),
+        );
+        let query = BooleanQuery::new(vec![
+            (Occur::Must, Box::new(words) as Box<dyn Query>),
+            (Occur::Must, Box::new(sets) as Box<dyn Query>),
+        ]);
+        let searcher = self.reader.searcher();
+        let found = searcher.search(
+            self.language_query(&query).as_ref(),
+            &TopDocs::with_limit(CANDIDATES)
+                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+        )?;
+        let mut hits = Vec::new();
+        for (popularity, address) in found {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            let has: HashSet<String> = page
+                .topic()
+                .map(|topic| {
+                    analysis::content_tokens(page.language(), &topic)
+                        .tokens
+                        .into_iter()
+                        .map(|token| token.text)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let share =
+                stems.iter().filter(|stem| has.contains(*stem)).count() as f32 / stems.len() as f32;
+            let popularity = popularity.unwrap_or(0) as f32 / POPULARITY_SCALE;
+            hits.push(PageHit {
+                score: share * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
+                named: false,
+                popularity,
+                whole: true,
+                learned: None,
+                page,
+            });
+        }
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
         let paper = PaperQuery::parse(query)?;
         if paper.constrained {
@@ -3056,6 +3244,9 @@ impl PageSearcher {
                 continue;
             };
             let page: Page = serde_json::from_str(stored)?;
+            if page.is_asked() {
+                continue;
+            }
             let popularity = document
                 .get_first(self.fields.popularity)
                 .and_then(|v| v.as_u64())
@@ -4629,6 +4820,81 @@ mod tests {
             }),
             ..Default::default()
         })
+    }
+
+    /// A page of an item set, asked for by `ask`.
+    fn item_set_page(set: &str, title: &str, views: u64, ask: &[&str]) -> Page {
+        Page {
+            set: set.into(),
+            url: format!("https://example.com/{}", title.replace(' ', "-")),
+            description: Some(format!("{views} points")),
+            item_set: Some(ItemSetPage {
+                title: Some("Hacker News stories".into()),
+                kind: "story".into(),
+                ask: ask.iter().map(|word| word.to_string()).collect(),
+            }),
+            ..page(title, views, &[])
+        }
+    }
+
+    #[test]
+    fn an_asked_item_set_is_listed_only_for_a_query_that_asks_for_it() {
+        let hn = ["hn", "hacker news"];
+        let (_dir, searcher) = searcher(&[
+            page("Rust (programming language)", 5000, &[]),
+            item_set_page("local/hn-stories", "A new CSS framework", 900, &hn),
+            item_set_page("local/hn-stories", "Rust 1.90 is out", 500, &hn),
+            item_set_page(
+                "local/hn-stories",
+                "Why we rewrote our search engine in Rust",
+                300,
+                &hn,
+            ),
+            item_set_page("local/notes", "Plumb Search", 10, &[]),
+        ]);
+        let titles = |hits: &[PageHit]| -> Vec<String> {
+            hits.iter().map(|hit| hit.page.title.clone()).collect()
+        };
+        for query in ["rust", "rust 1.90 is out", "a new css framework"] {
+            let found = searcher.search(query, 10).unwrap();
+            assert!(
+                found.iter().all(|hit| !hit.page.is_asked()),
+                "{query}: {:?}",
+                titles(&found)
+            );
+        }
+        // A set listed as pages are is found as they are.
+        assert_eq!(
+            titles(&searcher.search("plumb search", 10).unwrap()),
+            ["Plumb Search"]
+        );
+
+        let asked = |query: &str| searcher.asked(query);
+        let rust = Asked {
+            words: "rust".into(),
+            sets: vec!["local/hn-stories".into()],
+        };
+        assert_eq!(asked("hn rust").as_ref(), Some(&rust));
+        assert_eq!(asked("Rust  Hacker News").as_ref(), Some(&rust));
+        for query in ["rust", "hn", "hacker news", "hnrust", "rust hacker"] {
+            assert_eq!(asked(query), None, "{query}");
+        }
+        assert_eq!(
+            titles(&searcher.search_sets(&rust, 10).unwrap()),
+            [
+                "Rust 1.90 is out",
+                "Why we rewrote our search engine in Rust"
+            ],
+            "by how many of the words they have, then how read"
+        );
+        let engine = asked("hn search engine rust").unwrap();
+        let found = searcher.search_sets(&engine, 10).unwrap();
+        assert_eq!(titles(&found), ["Why we rewrote our search engine in Rust"]);
+        assert!(found[0].whole && found[0].page.is_asked());
+
+        // The ask words are kept with the index.
+        let reopened = PageSearcher::open(_dir.path().join("pages").as_path()).unwrap();
+        assert_eq!(reopened.asked("hn rust"), asked("hn rust"));
     }
 
     #[test]
