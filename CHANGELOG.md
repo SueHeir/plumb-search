@@ -6,10 +6,12 @@
 
 - `after:`, `before:` and `sort:` act as paper filters only with a value they can use: a date (`2025` or `2025-03-01`) or an order (`newest`, `relevance`). Otherwise the word is searched as it is, as in 0.2.0: "before:sunset lyrics" and "after:party" are searches again, not errors.
 - When a homepage has no valid language declaration, a dominant non-Latin title/description script can exclude it from an incompatible language filter. Short and mixed text stays eligible. Declared languages and full typed site names are preserved. Shared scripts do not identify a language; the fallback takes effect on the next index build.
+- A health search that names its own source ("how long is the flu contagious CDC", "lisinopril MedlinePlus", "acetaminophen dose healthychildren.org") keeps that source where it ranks, instead of getting MedlinePlus, Mayo Clinic and Cleveland Clinic homepages put above it. A health search that names no source still lists them first.
 
 ### Fixes
 
 - A node hands the memory its threads free back to the system every five minutes instead of only after background work: a crawl round runs for most of an hour, and searches, the network and embedding free memory meanwhile, which sat unused until the system swapped it out. On Linux the node also keeps glibc's allocator to four arenas instead of up to eight per CPU, each keeping what its own threads freed (half an hour after a restart, plumbsearch.org held about 3.5 GB in 75 arena heaps), and gives buffers of 4 MB or more back as soon as they are freed. Building an index of 2.8 million sites then peaks at 1.17 GB instead of 1.31 GB and takes no longer. `MALLOC_ARENA_MAX` and `MALLOC_MMAP_THRESHOLD_` still override these.
+- Searches no longer wait while the node saves its headlines. The save held the headlines while it waited for the storage ledger, which a records fold can hold for minutes, and every search reads the headlines. The news loop also saves off the threads that answer searches.
 
 ### Crawling
 

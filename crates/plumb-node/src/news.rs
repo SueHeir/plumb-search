@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use plumb_core::news::{merge_headlines, NEWS_PUBLISHERS as PUBLISHERS, NEWS_WINDOW_SECS};
 use plumb_core::Headline;
@@ -147,6 +147,7 @@ struct State {
 pub struct NewsStore {
     dir: PathBuf,
     state: RwLock<State>,
+    saving: Mutex<()>,
     budget: Option<Arc<plumb_core::storage::StorageBudget>>,
 }
 
@@ -159,6 +160,7 @@ impl NewsStore {
         NewsStore {
             dir,
             budget: None,
+            saving: Mutex::new(()),
             state: RwLock::new(State {
                 watched,
                 headlines,
@@ -385,32 +387,50 @@ impl NewsStore {
         self.read().headlines.values().map(Vec::len).sum()
     }
 
-    /// Writes the store to its folder, if it changed.
+    /// Writes the store to its folder, if it changed. The headlines are
+    /// copied out first, so searches keep reading them while the write
+    /// waits for the storage ledger, which a records fold can hold for
+    /// minutes.
     pub fn save(&self) -> io::Result<()> {
-        let mut state = self.write();
-        if !state.dirty {
-            return Ok(());
+        // One save at a time, so an older copy never lands after a newer one.
+        let _saving = self.saving.lock().unwrap_or_else(PoisonError::into_inner);
+        let (feeds, headlines) = {
+            let mut state = self.write();
+            if !state.dirty {
+                return Ok(());
+            }
+            let copy = (
+                serde_json::to_vec(&state.watched)?,
+                serde_json::to_vec(&state.headlines)?,
+            );
+            state.dirty = false;
+            copy
+        };
+        let written = self.write_files(&feeds, &headlines);
+        if written.is_err() {
+            self.write().dirty = true;
         }
+        written
+    }
+
+    fn write_files(&self, feeds: &[u8], headlines: &[u8]) -> io::Result<()> {
         if self.budget.is_some() {
             plumb_core::storage::create_directory(&self.dir, self.budget.as_ref())
                 .map_err(io::Error::other)?;
-            for (name, bytes) in [
-                (FEEDS_FILE, serde_json::to_vec(&state.watched)?),
-                (HEADLINES_FILE, serde_json::to_vec(&state.headlines)?),
-            ] {
+            for (name, bytes) in [(FEEDS_FILE, feeds), (HEADLINES_FILE, headlines)] {
                 let path = self.dir.join(name);
                 plumb_core::storage::write_atomic(
                     &path,
                     &path.with_extension("json.tmp"),
-                    &bytes,
+                    bytes,
                     self.budget.as_ref(),
                     None,
                 )?;
             }
         } else {
             fs::create_dir_all(&self.dir)?;
-            write_json(&self.dir.join(FEEDS_FILE), &state.watched)?;
-            write_json(&self.dir.join(HEADLINES_FILE), &state.headlines)?;
+            write_bytes(&self.dir.join(FEEDS_FILE), feeds)?;
+            write_bytes(&self.dir.join(HEADLINES_FILE), headlines)?;
         }
         #[cfg(unix)]
         {
@@ -419,7 +439,6 @@ impl NewsStore {
                 fs::File::open(parent)?.sync_all()?;
             }
         }
-        state.dirty = false;
         Ok(())
     }
 
@@ -820,9 +839,9 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     }
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+fn write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec(value)?)?;
+    fs::write(&temporary, bytes)?;
     fs::rename(&temporary, path)
 }
 
@@ -1147,5 +1166,66 @@ mod tests {
         assert_eq!(again.headline_count(), 1);
         again.prune(NOW + 8 * 24 * HOUR);
         assert_eq!(again.headline_count(), 0);
+    }
+
+    #[test]
+    fn headlines_stay_readable_while_a_save_waits_for_storage() {
+        let (dir, store) = store();
+        let budget =
+            Arc::new(plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap());
+        let store = Arc::new(store.with_budget(Some(Arc::clone(&budget))));
+        let before = store.headline_count();
+        // A records fold holds the storage ledger.
+        let fold = budget.mutation();
+        let saving = Arc::clone(&store);
+        let save = std::thread::spawn(move || saving.save());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!save.is_finished());
+        // Searches still read the headlines, and new ones still arrive.
+        let reading = Arc::clone(&store);
+        let search = std::thread::spawn(move || {
+            let found = reading.recent("election", None, NOW).is_some();
+            reading.put_shared(
+                vec![shared(
+                    "late.com",
+                    vec![headline("late.com", "Late news", HOUR)],
+                )],
+                NOW,
+            );
+            found
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !search.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(search.is_finished(), "a search waited for the save");
+        assert!(search.join().unwrap());
+        assert_eq!(store.headline_count(), before + 1);
+        drop(fold);
+        save.join().unwrap().unwrap();
+        // What arrived during the save is written by the next one.
+        let saved = || NewsStore::open(dir.path().join("news")).headline_count();
+        assert_eq!(saved(), before);
+        store.save().unwrap();
+        assert_eq!(saved(), before + 1);
+    }
+
+    #[test]
+    fn a_failed_save_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "a file where the folder should be").unwrap();
+        let store = NewsStore::open(blocked.join("news"));
+        store.put_shared(
+            vec![shared(
+                "news.com",
+                vec![headline("news.com", "Some news", HOUR)],
+            )],
+            NOW,
+        );
+        assert!(store.save().is_err());
+        std::fs::remove_file(&blocked).unwrap();
+        store.save().unwrap();
+        assert_eq!(NewsStore::open(blocked.join("news")).headline_count(), 1);
     }
 }
