@@ -492,6 +492,11 @@ pub trait StatusSource: Send + Sync {
     fn rank(&self) -> RankConfig {
         RankConfig::default()
     }
+    /// True when the node's denylist takes off the page at `url`.
+    fn denies(&self, url: &str) -> bool {
+        let _ = url;
+        false
+    }
     /// Names the bucket table private search fetches from, when the node
     /// serves private search and its index has buckets.
     fn bucket_table(&self) -> Option<String> {

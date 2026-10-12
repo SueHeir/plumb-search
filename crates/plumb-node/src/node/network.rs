@@ -125,6 +125,14 @@ struct Published {
 struct ServedIndex(Arc<Inner>);
 
 impl BucketSource for ServedIndex {
+    fn denying(&self) -> bool {
+        self.0.denylist().is_some()
+    }
+
+    fn denies(&self, url: &str) -> bool {
+        self.0.denies(url)
+    }
+
     fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
         let index = self.0.current()?;
         let table = index.buckets.as_ref()?;
@@ -329,6 +337,7 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
             if receiver.config.crawl_only {
                 batch.clear();
             }
+            receiver.drop_denied_records(&mut batch);
             // Feed checks and raw crawls have separate durable destinations.
             let (news, mut batch): (Vec<_>, Vec<_>) =
                 batch.into_iter().partition(|r| !r.news.is_empty());
@@ -512,6 +521,7 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
                 }
             })?;
             crawled.sort_by_key(|r| r.crawled_at);
+            inner.drop_denied_records(&mut crawled);
             anyhow::Ok(crawled)
         })
         .await

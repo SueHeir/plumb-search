@@ -53,6 +53,19 @@ pub trait BucketSource: Send + Sync + 'static {
         None
     }
 
+    /// Whether this node applies a denylist ([`BucketSource::denies`]).
+    fn denying(&self) -> bool {
+        false
+    }
+
+    /// True when this node's denylist takes off the page at `url`. It
+    /// neither keeps nor lists such a lead, and relays no batch that names
+    /// such a site, homepage, key page or headline.
+    fn denies(&self, url: &str) -> bool {
+        let _ = url;
+        false
+    }
+
     /// The icon this node holds for `domain`, as base64 PNG, sent with the
     /// site's record to a node filling its space; `None` when it has none.
     fn icon(&self, domain: &str) -> Option<String> {

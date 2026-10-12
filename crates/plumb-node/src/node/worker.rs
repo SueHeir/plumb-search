@@ -1115,6 +1115,7 @@ impl Fetcher for NodeFetcher<'_> {
                 // check throws away holds few records anyway.
                 let mut records = plumb_crawl::to_records(&results);
                 crate::icons::attach(&mut records, &results);
+                inner.drop_denied_records(&mut records);
                 if let Err(err) = net.publish(records).await {
                     warn!("cannot publish crawl results to the network: {err:#}");
                 }
@@ -1632,12 +1633,18 @@ fn save_icons(icons: &IconStore, results: &[CrawlResult]) {
 /// Builds an index of `records` in a new numbered directory and opens it.
 pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingIndex> {
     // Sites judged dead stay in the records, out of the index and the
-    // buckets other nodes take.
-    let records: Vec<&SiteRecord> = records
+    // buckets other nodes take. So do what the denylist denies.
+    let denylist = inner.denylist();
+    let records: Vec<std::borrow::Cow<'_, SiteRecord>> = records
         .iter()
         .map(Borrow::borrow)
         .filter(|record| record.gone_at.is_none())
+        .filter_map(|record| match &denylist {
+            Some(list) => super::denylist::allowed_record(list, record),
+            None => Some(std::borrow::Cow::Borrowed(record)),
+        })
         .collect();
+    let records: Vec<&SiteRecord> = records.iter().map(AsRef::as_ref).collect();
     let records = records.as_slice();
     let id = store::next_index_id(&inner.paths);
     let dir = inner.paths.index(id);

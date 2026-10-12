@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use plumb_core::now_unix;
-use plumb_crawl::{check_feeds, CrawlConfig};
+use plumb_crawl::{check_feeds, CrawlConfig, FeedOutcome};
 use tracing::{info, warn};
 
 use super::Inner;
@@ -82,6 +82,14 @@ async fn check_due(inner: &Arc<Inner>, now: u64) {
     };
     if let Err(err) = inner.add_downloaded(cfg.downloaded.swap(0, Ordering::Relaxed)) {
         warn!("cannot count the feeds' downloads: {err:#}");
+    }
+    let mut checks = checks;
+    if let Some(list) = inner.denylist() {
+        for check in &mut checks {
+            if let FeedOutcome::Read { headlines, .. } = &mut check.outcome {
+                headlines.retain(|headline| list.denies_url(&headline.url).is_none());
+            }
+        }
     }
     let fresh = inner.news.apply(checks, now_unix());
     let (watched, feeds) = inner.news.watched();

@@ -2348,6 +2348,10 @@ impl StatusSource for Inner {
         Inner::status(self)
     }
 
+    fn denies(&self, url: &str) -> bool {
+        Inner::denies(self, url)
+    }
+
     fn network(&self) -> Option<Arc<plumb_net::NetHandle>> {
         network::handle(self).cloned()
     }

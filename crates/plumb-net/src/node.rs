@@ -3519,6 +3519,7 @@ impl Task {
                 self.lists_serving += 1;
                 let store = self.store.clone();
                 let tx = self.answers_tx.clone();
+                let source = self.source.clone();
                 tokio::task::spawn_blocking(move || {
                     let response = match request {
                         // Read and parsed with the store let go: a batch
@@ -3531,10 +3532,17 @@ impl Task {
                             let batch = held.map_or(Ok(None), |path| {
                                 read_held_with_budget(&path, budget.as_deref())
                             });
-                            BatchResponse::Batch(batch.unwrap_or_else(|err| {
+                            let batch = batch.unwrap_or_else(|err| {
                                 warn!("cannot read a batch: {err:#}");
                                 None
-                            }))
+                            });
+                            // Signed, it can't be passed on without what
+                            // the denylist takes off: the asker gets it
+                            // from another node, or not at all.
+                            BatchResponse::Batch(
+                                batch
+                                    .filter(|batch| !holds_denied(source.as_ref(), &batch.records)),
+                            )
                         }
                         BatchRequest::List { since_epoch } => BatchResponse::Headers(
                             store
@@ -4089,6 +4097,10 @@ impl Task {
                 return None;
             }
         };
+        if self.source.denies(&lead.url) {
+            debug!("refused a lead the denylist takes off");
+            return None;
+        }
         match self.leads.insert(lead, reporter, now) {
             Ok(inserted) => Some(inserted),
             Err(err) => {
@@ -4104,8 +4116,9 @@ impl Task {
         let Ok(lead) = serde_json::from_slice::<Lead>(data) else {
             return gossipsub::MessageAcceptance::Reject;
         };
-        if lead.expired(now_unix()) {
-            // It may have expired on the way.
+        // It may have expired on the way; and a node with another
+        // denylist, or none, did nothing wrong in passing it on.
+        if lead.expired(now_unix()) || self.source.denies(&lead.url) {
             return gossipsub::MessageAcceptance::Ignore;
         }
         match self.take_lead(lead) {
@@ -4144,7 +4157,8 @@ impl Task {
                 message: request_response::Message::Request { channel, .. },
                 ..
             } => {
-                let leads = self.leads.list(MAX_LISTED_LEADS);
+                let mut leads = self.leads.list(MAX_LISTED_LEADS);
+                leads.retain(|lead| !self.source.denies(&lead.url));
                 let _ = self
                     .swarm
                     .behaviour_mut()
@@ -5153,6 +5167,37 @@ fn is_loopback(addr: &Multiaddr) -> bool {
 
 /// A relayed address whose relay is `relay`.
 /// The relay a circuit address goes through, if it is one.
+/// True when the lines of a batch name a site, homepage, key page or
+/// headline the node's denylist takes off ([`BucketSource::denies`]): a
+/// record, an icon or a site's headlines.
+fn holds_denied(source: &dyn BucketSource, lines: &[String]) -> bool {
+    if !source.denying() {
+        return false;
+    }
+    lines.iter().any(|line| {
+        let Ok(line) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        let text = |value: &serde_json::Value, key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let sites = ["domain", "icon_of", "news_of"]
+            .iter()
+            .filter_map(|key| text(&line, key))
+            .map(|domain| format!("https://{domain}/"));
+        let pages = ["key_pages", "items"]
+            .iter()
+            .filter_map(|key| line.get(*key)?.as_array())
+            .flatten()
+            .filter_map(|page| text(page, "url"));
+        let mut urls = sites.chain(text(&line, "url")).chain(pages);
+        urls.any(|url| source.denies(&url))
+    })
+}
+
 fn relay_of(addr: &Multiaddr) -> Option<PeerId> {
     let mut previous = None;
     for p in addr.iter() {
@@ -5196,6 +5241,41 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_batch_naming_what_the_denylist_takes_off_is_not_relayed() {
+        struct Denying(Option<&'static str>);
+        impl BucketSource for Denying {
+            fn bucket(&self, _bucket: u32) -> Option<Vec<String>> {
+                None
+            }
+            fn denying(&self) -> bool {
+                self.0.is_some()
+            }
+            fn denies(&self, url: &str) -> bool {
+                self.0 == Some(url)
+            }
+        }
+        let lines: Vec<String> = [
+            r#"{"domain":"example.com","url":"https://www.example.com/","key_pages":[{"label":"Docs","url":"https://example.com/docs"}]}"#,
+            r#"{"icon_of":"icons.example","png":"AAAA"}"#,
+            r#"{"news_of":"news.example","items":[{"title":"A","url":"https://news.example/a","at":1}]}"#,
+            "not a record",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert!(!holds_denied(&Denying(None), &lines), "no list");
+        assert!(!holds_denied(&Denying(Some("https://other.org/")), &lines));
+        for denied in [
+            "https://example.com/",
+            "https://www.example.com/",
+            "https://example.com/docs",
+            "https://icons.example/",
+            "https://news.example/a",
+        ] {
+            assert!(holds_denied(&Denying(Some(denied)), &lines), "{denied}");
+        }
+    }
 
     #[test]
     fn empty_startup_lists_retry_with_bounded_peers_attempts_and_backoff() {

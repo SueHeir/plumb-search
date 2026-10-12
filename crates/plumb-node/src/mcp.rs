@@ -2141,6 +2141,13 @@ impl Mcp {
                 })
             }
         };
+        if self.denies(&finding.url) {
+            return json!({
+                "shared": false,
+                "why_not": "the denylist this node applies takes this page off, so it is not \
+                     passed on; it was kept on this node only",
+            });
+        }
         let draft = plumb_net::leads::LeadDraft {
             keys: crate::findings::lead_keys(&finding.query),
             query: (share == Share::PageAndQuery).then(|| finding.query.clone()),
@@ -2160,8 +2167,14 @@ impl Mcp {
         }
     }
 
-    /// The pages other nodes shared for `query`, besides `known` ones,
-    /// each checked for look-alikes; at most [`MAX_LEADS_LISTED`].
+    /// True when the node's denylist takes off the page at `url`.
+    fn denies(&self, url: &str) -> bool {
+        self.node.as_ref().is_some_and(|node| node.denies(url))
+    }
+
+    /// The pages other nodes shared for `query`, besides `known` ones and
+    /// those the denylist takes off, each checked for look-alikes; at most
+    /// [`MAX_LEADS_LISTED`].
     fn leads_for(
         &self,
         query: &str,
@@ -2185,7 +2198,7 @@ impl Mcp {
         };
         found
             .into_iter()
-            .filter(|lead| !known.contains(&lead.url.as_str()))
+            .filter(|lead| !known.contains(&lead.url.as_str()) && !self.denies(&lead.url))
             // A page made to look like another site is no lead.
             .filter(|lead| {
                 self.check_lookalike(&lead.url, options)
