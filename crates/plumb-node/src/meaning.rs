@@ -75,7 +75,7 @@ impl MeaningIndex {
         }
     }
 
-    pub(crate) fn embedder(&self) -> &Embedder {
+    pub fn embedder(&self) -> &Embedder {
         &self.embedder
     }
 

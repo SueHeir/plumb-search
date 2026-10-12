@@ -2,7 +2,7 @@
 # well-known organizations, each with its official registrable domain.
 #
 # Run it against an index built from real seed data, for example:
-#   plumb eval --index data/index --queries eval/brand_queries.tsv
+#   plumb-tools eval --index data/index --queries eval/brand_queries.tsv
 #
 # Format: query<TAB>expected_domain[,another_ok_domain]. Blank lines and lines
 # starting with `#` are skipped. Only unambiguous pairs are listed; where an

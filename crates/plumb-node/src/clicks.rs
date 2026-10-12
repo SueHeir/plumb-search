@@ -322,7 +322,7 @@ impl PositionStore {
 /// ([`plumb_net::popularity::pick_query`]: normalized, at most 6 words, no
 /// e-mail address and no run of 4 digits or more), and kept with no
 /// browser's profile. Nothing of it leaves the node; `plumb click-labels`
-/// writes it out for `plumb eval` and `plumb train-rank`.
+/// writes it out for `plumb-tools eval` and `plumb-tools train-rank`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Labels {
@@ -428,7 +428,7 @@ pub struct Label {
     pub wanted: f32,
 }
 
-/// The site each search is after, as a `plumb eval` queries file line,
+/// The site each search is after, as a `plumb-tools eval` queries file line,
 /// when the clicks say so clearly: opened at least `min_opened` times,
 /// and wanted at least twice as much as the next site. Searches whose
 /// clicks are split between sites are left out.
@@ -521,8 +521,8 @@ pub fn run(args: &crate::cli::ClickLabelsArgs) -> Result<()> {
         let answers = clear_answers(&all, args.min_opened);
         let mut tsv = String::from(
             "# Searches made on this node, each with the site its clicks say it is\n\
-             # after (plumb click-labels). For plumb eval --features-out, then\n\
-             # plumb train-rank.\n",
+             # after (plumb click-labels). For plumb-tools eval --features-out, then\n\
+             # plumb-tools train-rank.\n",
         );
         for (query, domain) in &answers {
             tsv.push_str(&format!("{query}\t{domain}\n"));

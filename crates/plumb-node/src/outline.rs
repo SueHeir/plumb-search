@@ -34,7 +34,7 @@ use crate::{sync_parent_dir, temp_path_for};
 
 /// What a build needs to know of a site before it reads its record.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Outline {
+pub struct Outline {
     /// Where the record's line starts in the records file.
     pub(crate) offset: u64,
     /// The length of the line, without its line break.
@@ -434,7 +434,7 @@ pub(crate) fn measure_fold_journal(
 
 /// Calls `each` with every record of the records file at `path`, in file
 /// order, as the file holds it: the journal is not replayed.
-pub(crate) fn for_each_record(path: &Path, mut each: impl FnMut(SiteRecord)) -> Result<()> {
+pub fn for_each_record(path: &Path, mut each: impl FnMut(SiteRecord)) -> Result<()> {
     let mut lines = Lines::open(path)?;
     let mut line_no = 0usize;
     while let Some((_, line)) = lines.next()? {
@@ -672,7 +672,7 @@ fn write_folded_into<W: Write>(
 /// journal folded in is written to `copy` (when there is a journal), and
 /// the outlines are of `copy` then. Returns the file to read the records
 /// from with them; `None` as [`outline`] does.
-pub(crate) fn outline_copy<'a>(
+pub fn outline_copy<'a>(
     path: &'a Path,
     copy: &'a Path,
 ) -> Result<Option<(&'a Path, Vec<Outline>)>> {

@@ -1,5 +1,5 @@
 //! End-to-end tests: run the `plumb` binary over the synthetic fixtures in
-//! `fixtures/` (ingest, index, search, eval), and drive the web app's router
+//! `fixtures/` (ingest, index, search), and drive the web app's router
 //! directly with `tower::ServiceExt::oneshot`, without a network listener.
 
 use std::ffi::{OsStr, OsString};
@@ -77,7 +77,7 @@ fn build_fixture_index(dir: &Path) -> (PathBuf, String) {
 }
 
 #[test]
-fn ingest_index_search_and_eval_the_fixtures() {
+fn ingest_index_and_search_the_fixtures() {
     let tmp = tempfile::tempdir().unwrap();
     let (index, ingest) = build_fixture_index(tmp.path());
 
@@ -123,120 +123,6 @@ fn ingest_index_search_and_eval_the_fixtures() {
         &"search", &"--index", &index, &"--limit", &"3", &"chase",
     ]));
     assert!(text.starts_with(" 1. chase.com "), "{text}");
-
-    let eval = plumb_ok(&args(&[
-        &"eval",
-        &"--index",
-        &index,
-        &"--queries",
-        &fixture("brand_queries.tsv"),
-        &"--min-top1",
-        &"0.9",
-    ]));
-    assert!(eval.contains("top-1"), "{eval}");
-    assert!(eval.contains("MRR@10"), "{eval}");
-}
-
-#[test]
-fn eval_scores_the_same_with_the_page_index_kept() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (index, _) = build_fixture_index(tmp.path());
-    let pages = tmp.path().join("wikipedia-en.tsv");
-    std::fs::write(
-        &pages,
-        "views\ttitle\tdescription\titem\tsite\taliases\n\
-         9000\tU.S. Bancorp\tAmerican bank holding company\tQ1\tusbank.com\tUS Bank\n\
-         8000\tMarie Curie\tPolish-French physicist and chemist\tQ7186\t\t\n\
-         7000\tChase Bank\tAmerican bank\tQ2\tchase.com\t\n",
-    )
-    .unwrap();
-    let queries = tmp.path().join("queries.tsv");
-    std::fs::write(
-        &queries,
-        "us bank\tusbank.com\n\
-         marie curie\thttps://en.wikipedia.org/wiki/Marie_Curie\n\
-         chase\tchase.com\n",
-    )
-    .unwrap();
-    let cache = tmp.path().join("cache");
-    let eval = |cached: bool| {
-        let mut items: Vec<&dyn AsRef<OsStr>> = vec![
-            &"eval",
-            &"--index",
-            &index,
-            &"--queries",
-            &queries,
-            &"--pages",
-            &pages,
-            &"--show",
-            &"3",
-        ];
-        if cached {
-            items.extend([&"--pages-cache" as &dyn AsRef<OsStr>, &cache]);
-        }
-        plumb_ok(&args(&items))
-    };
-    let fresh = eval(false);
-    assert!(fresh.contains("top-1"), "{fresh}");
-    // The first cached run builds the index, the second reuses it.
-    assert_eq!(eval(true), fresh);
-    assert_eq!(eval(true), fresh);
-    let kept: Vec<_> = std::fs::read_dir(&cache)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .filter(|name| name.len() == 64)
-        .collect();
-    assert_eq!(kept.len(), 1, "{kept:?}");
-
-    // A changed page set file builds another index.
-    std::fs::write(
-        &pages,
-        std::fs::read_to_string(&pages).unwrap() + "100\tChase\tA pursuit\tQ3\t\t\n",
-    )
-    .unwrap();
-    eval(true);
-    let kept = std::fs::read_dir(&cache)
-        .unwrap()
-        .filter(|e| e.as_ref().unwrap().file_name().len() == 64)
-        .count();
-    assert_eq!(kept, 2);
-}
-
-#[test]
-fn eval_fails_below_min_top1_and_reports_misses() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (index, _) = build_fixture_index(tmp.path());
-    let queries = tmp.path().join("queries.tsv");
-    std::fs::write(
-        &queries,
-        "# one right, one wrong on purpose\nus bank\tusbank.com\nus bank\tchase.com\n",
-    )
-    .unwrap();
-    let eval_args = |min: &str| {
-        args(&[
-            &"eval",
-            &"--index",
-            &index,
-            &"--queries",
-            &queries,
-            &"--min-top1",
-            &min,
-        ])
-    };
-
-    let output = plumb(&eval_args("0.9"));
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("miss: \"us bank\" (line 3) expected chase.com"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("first was usbank.com"), "{stdout}");
-    assert!(stdout.contains("top-1    50.0%  (1/2)"), "{stdout}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("below --min-top1"), "{stderr}");
-
-    plumb_ok(&eval_args("0.5"));
 }
 
 async fn get(app: &Router, uri: &str) -> (StatusCode, String, String) {

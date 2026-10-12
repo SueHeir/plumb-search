@@ -3,7 +3,7 @@
 # base is the default, 0.5).
 # Measured with --vectors and --model (it needs meaning) on the suites
 # here and on the ORCAS everyday searches, which are not in the repo:
-#   plumb eval --index DIR --vectors FILE --model DIR --pages ... \
+#   plumb-tools eval --index DIR --vectors FILE --model DIR --pages ... \
 #     --queries eval/brand_queries.tsv ... --sweep eval/sweeps/partial.tsv
 off	{"partial_closeness": null}
 partial-0.3	{"partial_closeness": 0.3}

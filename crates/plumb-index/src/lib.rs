@@ -1403,7 +1403,7 @@ impl Searcher {
     }
 
     /// The sites [`Searcher::search_meaning`] ranks for `query_text` as
-    /// typed, before ranking, by where each came from: what `plumb eval
+    /// typed, before ranking, by where each came from: what `plumb-tools eval
     /// --recall` measures. A site the ranking never looks at cannot be
     /// found, however it is scored.
     pub fn candidate_pool(

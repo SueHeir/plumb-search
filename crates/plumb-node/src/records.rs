@@ -152,7 +152,7 @@ pub(crate) fn journal_path(records: &Path) -> PathBuf {
 /// Reads a records file into a set, then replays the journal an interrupted
 /// crawl may have left next to it. Records for the same domain are merged,
 /// and ones without a valid domain are dropped.
-pub(crate) fn load_records(path: &Path) -> Result<RecordSet> {
+pub fn load_records(path: &Path) -> Result<RecordSet> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut reader = BufReader::with_capacity(1 << 20, file);
     let mut set = RecordSet::new();
@@ -730,7 +730,7 @@ pub(crate) fn records_budget(
 /// Replaces the records file at `path` with `records`, which hold every
 /// change made so far, and deletes the file's journal. Returns how many
 /// records were written.
-pub(crate) fn replace_records<'a, I>(path: &Path, records: I) -> Result<usize>
+pub fn replace_records<'a, I>(path: &Path, records: I) -> Result<usize>
 where
     I: IntoIterator<Item = &'a SiteRecord>,
 {
@@ -804,7 +804,7 @@ fn file_len(path: &Path) -> u64 {
 
 /// All records in the order [`RecordSet::into_sorted_vec`] gives (best link
 /// score first, ties by domain), without copying them.
-pub(crate) fn sorted_by_link_score(set: &RecordSet) -> Vec<&SiteRecord> {
+pub fn sorted_by_link_score(set: &RecordSet) -> Vec<&SiteRecord> {
     let mut scored: Vec<(f32, &SiteRecord)> = set.iter().map(|r| (r.link_score(), r)).collect();
     scored.sort_by(|a, b| {
         b.0.total_cmp(&a.0)

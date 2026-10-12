@@ -61,7 +61,7 @@ impl PageSignals {
 }
 
 /// One listed row, as the model reads it: a site with the pages shown
-/// under it, or a page listed on its own. `plumb eval --features-out`
+/// under it, or a page listed on its own. `plumb-tools eval --features-out`
 /// writes rows in this shape.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -284,7 +284,7 @@ impl Model {
     }
 
     /// The model every node ranks with, trained on `eval/`
-    /// (`plumb train-rank`).
+    /// (`plumb-tools train-rank`).
     pub fn builtin() -> &'static Model {
         static MODEL: OnceLock<Model> = OnceLock::new();
         MODEL.get_or_init(|| {
