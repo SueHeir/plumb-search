@@ -2,20 +2,5 @@
   "name": "Hacker News",
   "about": "Stories from Hacker News, through its public search API at hn.algolia.com.",
   "hosts": ["hn.algolia.com"],
-  "keywords": ["hn", "hacker news"],
-  "publish": {
-    "set": "hn-stories",
-    "title": "Hacker News stories",
-    "every": "1d",
-    "kinds": ["story"],
-    "license": "unknown",
-    "source": "https://hn.algolia.com/api",
-    "fields": {
-      "points": {"type": "number", "roles": ["filter", "show"]},
-      "comments": {"type": "number", "roles": ["show"]},
-      "discussion": {"type": "url", "roles": ["show"]}
-    },
-    "show": {"about": "{points} points · {comments} comments"},
-    "place": {"how": "asked", "ask": ["hn", "hacker news"]}
-  }
+  "keywords": ["hn", "hacker news"]
 }

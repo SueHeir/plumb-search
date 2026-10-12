@@ -31,8 +31,6 @@ use plumb_index::pages::{Page, PageSearcher};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::node::item_sets::PageLayers;
-
 /// Directory of page sets and their index in a data directory.
 pub const PAGES_DIR: &str = "pages";
 /// Directory of the set files, in [`PAGES_DIR`].
@@ -756,15 +754,6 @@ impl SetSource {
             SetSource::Items(_) => None,
         }
     }
-
-    /// When what is read was made, in Unix seconds: the file's time, or
-    /// the item set's generation.
-    fn made(&self) -> i64 {
-        match self {
-            SetSource::File(file) => file_time(file),
-            SetSource::Items(held) => held.generation,
-        }
-    }
 }
 
 /// A file's time in Unix seconds, 0 when it can't be read. A set file
@@ -897,9 +886,6 @@ impl HeldPageSet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wanted {
     pub sets: Vec<(&'static SetInfo, SetSource, u64)>,
-    /// The item sets taken in with the page sets
-    /// ([`crate::node::item_sets`]).
-    pub items: Vec<crate::node::item_sets::ItemSetFile>,
     /// The stamp of the denylist the pages are built without, when the
     /// node holds one.
     pub denylist: Option<String>,
@@ -960,14 +946,8 @@ impl Wanted {
                     Some((set, source, pages))
                 })
                 .collect(),
-            items: Vec::new(),
             denylist: None,
         }
-    }
-
-    /// These pages and the pages of the item sets `items`.
-    pub fn with_items(self, items: Vec<crate::node::item_sets::ItemSetFile>) -> Self {
-        Wanted { items, ..self }
     }
 
     /// These pages without what the denylist of `stamp` denies.
@@ -979,11 +959,10 @@ impl Wanted {
     }
 
     /// Names the index of these pages: changes when a set, its file (size
-    /// or time) or its count changes, an item set or what it holds, or the
-    /// denylist. With no item sets and no denylist it is the key of the
-    /// page sets alone.
+    /// or time), the item set it is read from or its count changes, or the
+    /// denylist. Read from files with no denylist, it is 0.2.0's key.
     pub fn key(&self) -> Option<String> {
-        if self.sets.is_empty() && self.items.is_empty() {
+        if self.sets.is_empty() {
             return None;
         }
         // Keep schema generations separate; the indexed scope fields used
@@ -1013,12 +992,6 @@ impl Wanted {
             if let Some(quality) = plumb_net::pages::read_quality(file, modified, len) {
                 text.push_str(&format!(":generation={}", quality.generation));
             }
-        }
-        for items in &self.items {
-            text.push_str(&format!(
-                "|items:{}:{}:{}",
-                items.set, items.publisher, items.stamp
-            ));
         }
         if let Some(denylist) = &self.denylist {
             text.push_str(&format!("|denylist:{denylist}"));
@@ -1100,32 +1073,6 @@ pub fn open_or_build_with(
         return Ok(Some((key, searcher)));
     }
     let started = std::time::Instant::now();
-    // The item sets first: their layers are laid on the page sets' pages.
-    let (mut item_pages, mut layers) = (Vec::new(), None);
-    if !wanted.items.is_empty() {
-        let mut read = crate::node::item_sets::pages(&wanted.items, denylist);
-        for (set, why) in &read.failed {
-            warn!("item set {set} left out of the page index: {why}");
-        }
-        info!(
-            "indexing {} pages of {} item sets ({} layer entries, {} denied)",
-            read.pages.len(),
-            wanted.items.len() - read.failed.len(),
-            read.layers.len(),
-            read.denied
-        );
-        layers = PageLayers::of(&mut read);
-        item_pages = read.pages;
-    }
-    let sources: Vec<Option<usize>> = wanted
-        .sets
-        .iter()
-        .map(|(set, source, _)| {
-            let made = source.made();
-            layers.as_mut().map(|layers| layers.page_set(set.id, made))
-        })
-        .collect();
-    let layers = layers.map(std::rc::Rc::new);
     let denied = std::cell::Cell::new(0usize);
     let allowed = |page: &Page| {
         let Some(denial) = denylist.and_then(|list| list.denies_url(&page.url)) else {
@@ -1141,7 +1088,7 @@ pub fn open_or_build_with(
         false
     };
     let mut pages: Box<dyn Iterator<Item = Page> + '_> = Box::new(std::iter::empty());
-    for ((set, from, count), source) in wanted.sets.iter().zip(sources) {
+    for (set, from, count) in &wanted.sets {
         let read = match from {
             SetSource::File(file) => {
                 info!("indexing page set {} from {}", set.id, file.display());
@@ -1165,26 +1112,14 @@ pub fn open_or_build_with(
             }
         }
         .filter(allowed);
-        pages = match (layers.clone(), source) {
-            (Some(layers), Some(source)) => {
-                Box::new(pages.chain(read.map(move |page| layers.lay(page, source))))
-            }
-            _ => Box::new(pages.chain(read)),
-        };
+        pages = Box::new(pages.chain(read));
     }
-    pages = Box::new(pages.chain(item_pages));
     let stats = plumb_index::pages::build_page_index_with_budget(&dir, pages, budget)?;
     info!(
         "built the page index of {} pages in {:.1}s",
         stats.pages,
         started.elapsed().as_secs_f32()
     );
-    if let Some(layers) = layers {
-        info!(
-            "layers of item sets changed {} pages of the page sets",
-            thousands(layers.laid() as u64)
-        );
-    }
     if denied.get() > 0 {
         info!(
             "the denylist left {} pages of the page sets out",
@@ -1659,10 +1594,6 @@ mod tests {
             Wanted::taking(data, &PageSets::default(), 0, &stranger),
             from_file,
             "a set no trusted publisher signed is not read"
-        );
-        assert!(
-            crate::node::item_sets::find(data, None, &project).is_empty(),
-            "not searched as an item set too"
         );
         let from_items = Wanted::taking(data, &PageSets::default(), 0, &project);
         let SetSource::Items(read) = &from_items.sets[0].1 else {

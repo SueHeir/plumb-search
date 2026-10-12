@@ -13,9 +13,7 @@ scraping its pages.
 
 What a plugin finds stays on the node that ran it. It is never shared with
 other nodes, never put in the node's records or index, and never sent with a
-network search. A plugin can also build a set ahead of time, which the node
-keeps, but only for itself (see [Build a set ahead of
-time](#build-a-set-ahead-of-time)).
+network search.
 
 ## The sandbox
 
@@ -191,140 +189,6 @@ the computer the node runs on, to a local address such as
 `http://127.0.0.1:8080`, and not from a page of another site: browser
 extensions' own origins are fine.
 
-## Build a set ahead of time
-
-A plugin can also build a set of items on a schedule, rather than search a
-source while someone waits: Hacker News stories with 100 points or more, your
-bookmarks, a list of recipes. It exports `plumb_publish`
-(`plumb_plugin::publish!(publish)`, or `publish_only!` for a plugin that does
-nothing else) and says what it builds in a `publish` section of its
-`plugin.json`:
-
-```json
-"publish": {
-  "set": "hn-stories",
-  "title": "Hacker News stories",
-  "every": "1d",
-  "kinds": ["story"],
-  "license": "unknown",
-  "source": "https://hn.algolia.com/api",
-  "fields": {
-    "points": {"type": "number", "roles": ["filter", "show"]},
-    "comments": {"type": "number", "roles": ["show"]}
-  },
-  "show": {"about": "{points} points · {comments} comments"},
-  "place": {"how": "asked", "ask": ["hn", "hacker news"]}
-}
-```
-
-| Field | Meaning |
-| --- | --- |
-| `set` | The set's name: lower-case letters, digits and dashes. The node keeps it as `local/<set>`. |
-| `every` | How often it runs: `6h`, `1d`, `7d`; an hour to 30 days, a day without it. |
-| `title` | What the set is called; the plugin's `name` without it. |
-| `kinds` | The kinds its items may be (`story`, `recipe`). An item of another kind is refused. |
-| `extends` | For items that add to other items rather than stand alone, the kinds of refs they name: `url`, `site`, `wd`. |
-| `license` | The license of what it emits, an [SPDX](https://spdx.org/licenses/) expression. `unknown`, the default, means the set can never leave the node. Many APIs' terms do not allow passing their data on. |
-| `source` | Where its items come from. |
-| `fields` | The fields its items have, each with a `type` (`text`, `keyword`, `number`, `date`, `geo`, `url`, `ref`, `vector`, `object`) and `roles` (`search:name`, `search:about`, `search:body`, `filter`, `show`, `answer`). An item with a field not listed here is refused. |
-| `show` | How its items are shown: text with `{field}` slots. |
-| `place` | Where its items show in search: `own`, the default, or `asked`, with up to 8 `ask` words. See below. |
-| `personal` | `true` for your own data (your library, your bookmarks): the set and every item in it are labelled `personal` and can never be shared. |
-
-```rust
-use plumb_plugin::{emit, encode, get, Error, Published, PublishInput, SetItem};
-
-fn publish(input: &PublishInput) -> Result<Published, Error> {
-    // Where the last run got to, or a week back on the first.
-    let since = input.state["since"].as_u64().unwrap_or(input.now - 7 * 86_400);
-    let url = format!(
-        "https://api.example.org/recipes?since={since}&key={}",
-        encode(input.config["api_key"].as_str().unwrap_or_default())
-    );
-    let found: Found = get(&url)?.json()?;
-    emit(
-        &found
-            .recipes
-            .into_iter()
-            .map(|r| SetItem::new(r.id, "recipe", r.name, r.url).field("minutes", r.minutes))
-            .collect::<Vec<_>>(),
-    )?;
-    Ok(Published::changes(serde_json::json!({ "since": input.now })))
-}
-
-plumb_plugin::publish_only!(publish);
-```
-
-`publish` gets the set's name, the owner's `config.json`, the `state` its last
-run saved (`null` the first time) and the time the run started (`now`, in Unix
-seconds). It hands items to the node with `emit`, as many times as it likes,
-and returns what to save for the next run, up to 64 KB as JSON. What a run
-emits changes the set as it was: an item replaces the one with its id, and
-`SetItem::gone(id, now)` takes one away. A run that returns
-`Published::whole_set(state)` emitted the whole set instead, and what it did
-not emit is dropped. A run that fails changes nothing, and its state is not
-saved.
-
-Each `SetItem` has an `id`, the source's own id for it ("8863", never its
-title), and for a thing a `kind`, a `title` and a `url`; it may have `names`,
-`about`, `text` (a snippet, up to 1,000 characters), `lang`, `weight` (how
-popular it is), `published`, `ids` on other services (`wd` for Wikidata),
-`labels` (`adult`), `edges` to other things and `fields`. The node checks every
-item as it comes: addresses are put in their canonical form and only `http` and
-`https` ones are kept, text is trimmed, and kinds and fields must be as
-`plugin.json` declares them. An item that fails is left out and counted, and
-the first one's reason goes in the log. Items the node's denylist names are
-left out too.
-
-The node signs the set with its owner's publisher key, made on the first run
-in `keys/publisher.key` in the data folder: what a node's plugins build is its
-owner's to publish, not the plugin's author's. It keeps the set in `own-sets/`
-in the data folder, which it never sends to other nodes. Sharing one with other
-nodes, when its license allows and its owner chooses to, is not built yet.
-
-The node searches its sets beside the rest of its index. Each item with a
-title and an address is a result, shown under the set's `title`, with the
-`show` line under it (or the item's own `about`, when a slot the line names is
-missing). Where a set's items come up depends on its `place`:
-
-- **`{"how": "own"}`**, the default: they are ordinary results, found by their
-  titles, names and `about` text.
-- **`{"how": "asked", "ask": ["hn", "hacker news"]}`**: they come up only when a
-  search starts or ends with one of the `ask` words, and then first. "hn rust"
-  lists the Hacker News stories about Rust, and "rust" alone does not.
-
-An item that `extends` another is not a result of its own. What it adds is laid
-on what it names, in the node's other sets and in its page sets (Wikipedia,
-docs, papers): its `names` find that page too, and since your own sets rank
-above the project's, its `about` becomes the line under the page's title and
-its `weight` the page's popularity.
-
-Anyone who can search the node sees these results, as with a plugin's other
-results, and that includes a `personal` set's: put a plugin that builds one on
-the node of the computer you browse on.
-
-A new set is searched as soon as the node has rebuilt its index to take it in.
-Since that rebuild covers the whole index, a run that only changes what is in a
-set is taken in at most every six hours.
-
-A node started with `plumb run` (and the desktop app and the Docker image) runs
-each plugin a couple of minutes after it starts, then every `every`; one that
-failed is tried again after an hour. A run may take 30 minutes and make 1,000
-requests, at most one a second to each host, and a set holds up to 250,000
-items. The activity list says how each run went, and `own-sets/local/<set>.run.json`
-keeps what the last one saved and why it failed, if it did. `plumb serve` does
-not run them.
-
-To try one without keeping anything:
-
-```sh
-plumb try-plugin --plugin plugins/hacker-news --publish
-```
-
-This prints the items the node would keep, how many it would refuse and why,
-and the state the plugin would save. `--state '<json>'` hands it a state, as if
-an earlier run had saved it.
-
 ## Install a plugin
 
 A plugin is a folder:
@@ -378,7 +242,7 @@ into its folder as `plugin.wasm`.
 
 | Plugin | What it adds | Needs |
 | --- | --- | --- |
-| `hacker-news` | `hn rust async`: Hacker News stories; and, built once a day, a set of the stories with 100 points or more since a week before its first run. | Nothing. |
+| `hacker-news` | `hn rust async`: Hacker News stories. | Nothing. |
 | `youtube-music` | `ytm` or `yt` searches: songs and videos from YouTube and YouTube Music, and a channel's uploads for searches about someone with one. | A YouTube Data API key (see its README). |
 | `reddit` | `reddit` searches: Reddit threads. | Your own Reddit app keys (see its README). |
 | `github` | `gh http client`: repositories with stars, language and last push. With a token: "Starred" badges, star counts on GitHub results among the node's own, and Star and Unstar buttons. | Nothing to search (GitHub allows 10 searches a minute without a token); a [fine-grained token](https://github.com/settings/personal-access-tokens) with read and write access to Starring for the rest. |
@@ -541,12 +405,11 @@ answers, as the example does.
 ## The interface
 
 The `plumb-plugin` crate covers this; it is here for reference. A plugin
-module exports its `memory`, `plumb_abi() -> i32` (returning `3`; a node also
-runs plugins built for interfaces `1` and `2`), `plumb_search()`, for buttons
-`plumb_act()`, to mark up results `plumb_annotate()` (whose input is
-`{"query", "results": [...], "config"}`), and to build a set
-`plumb_publish()` (whose input is `{"set", "config", "state", "now"}`), and
-may import only these functions from the `plumb` module:
+module exports its `memory`, `plumb_abi() -> i32` (returning `2`; a node also
+runs plugins built for interface `1`), `plumb_search()`, for buttons
+`plumb_act()`, and to mark up results `plumb_annotate()` (whose input is
+`{"query", "results": [...], "config"}`), and may import only these functions
+from the `plumb` module:
 
 | Import | Does |
 | --- | --- |
@@ -554,8 +417,7 @@ may import only these functions from the `plumb` module:
 | `fetch(ptr, len) -> i32` | Sends the request at `ptr` (JSON: `method`, `url`, `headers`, `body`); returns the body's length, or -1 host not allowed, -2 failed, -3 too many requests, -4 too large, -5 time up, -6 bad request. |
 | `fetch_status() -> i32`, `body_read(ptr)` | The last response's status and body. |
 | `headers_len() -> i32`, `headers_read(ptr)` | The last response's headers, as JSON: `[["name", "value"], ...]`. |
-| `output(ptr, len)` | The answer, as JSON: `{"results": [...]}`, for `plumb_act` `{"message": "..."}`, for `plumb_annotate` `{"notes": [...]}`, for `plumb_publish` `{"state": ..., "replace": true}`, or `{"error": "..."}`. |
+| `output(ptr, len)` | The answer, as JSON: `{"results": [...]}`, for `plumb_act` `{"message": "..."}`, for `plumb_annotate` `{"notes": [...]}`, or `{"error": "..."}`. |
 | `log(ptr, len)` | A line for the node's log. |
-| `emit(ptr, len) -> i32` | From `plumb_publish`: items for its set, a JSON list of up to 1 MB. Returns 0, or -1 not publishing, -2 the run has emitted as many items as it may (or the node is stopping), -3 not a JSON list. |
 
 A node refuses a module that imports anything else.

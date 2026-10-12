@@ -1,7 +1,5 @@
 //! Today's page sets read as items of the data format ([`plumb_format`]),
-//! so a set can be published in it without being rebuilt, and items of
-//! other sets made into pages, so the page index can search them
-//! ([`item_page`]).
+//! so a set can be published in it without being rebuilt.
 //!
 //! Each page becomes one item ([`page_item`]) whose extra fields a page
 //! set's manifest declares with [`page_fields`]. What a page is about
@@ -31,10 +29,9 @@ use plumb_format::value::{check_text, is_date, is_language, normalize_text};
 use plumb_format::{Edge, FieldSpec, Item, Ref};
 use serde_json::{json, Map, Value};
 
-use crate::merge::Merged;
 use crate::pages::{
-    ItemSetPage, Page, BOOKS_SET, DOCS_SET, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET,
-    PAPERS_SET, PODCASTS_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET, WIKIDATA_SET, WIKTIONARY_SET,
+    Page, BOOKS_SET, DOCS_SET, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET, PAPERS_SET,
+    PODCASTS_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET, WIKIDATA_SET, WIKTIONARY_SET,
 };
 
 /// Fields left out of an item, in this order, while it is over the size
@@ -62,17 +59,8 @@ pub fn kind_of(page: &Page) -> &'static str {
     }
 }
 
-/// The site a node gives `item`: the site of the host its URL is on, by
-/// the site rules this node uses, whatever its publisher wrote. An item
-/// with no URL keeps the site it names. `None` when that is not a domain,
-/// as for an IP address.
-pub fn node_site(item: &Item) -> Option<String> {
-    match &item.url {
-        Some(url) => site_of_url(url),
-        None => item.site.clone().filter(|site| is_domain(site)),
-    }
-}
-
+/// The site of the host `url` is on, by the site rules this node uses;
+/// `None` when that is not a domain, as for an IP address.
 fn site_of_url(url: &str) -> Option<String> {
     plumb_core::registrable_domain(url).filter(|site| is_domain(site))
 }
@@ -183,7 +171,6 @@ pub fn page_of_item(item: &Item, set: &str) -> Option<Page> {
         sections: texts(field("sections")),
         content_language: None,
         search: search_of(item),
-        item_set: None,
     };
     let given = field("page").and_then(Value::as_object);
     if let Some(given) = given {
@@ -414,10 +401,8 @@ fn names_of<'a>(names: &[String], taken: impl Iterator<Item = &'a String>) -> Ve
     kept
 }
 
-/// What a layer finds `page` by ([`crate::merge::Layers::on`]): the id,
-/// kind, URL and outside ids of [`page_item`], without the rest, which
-/// takes far longer to make.
-pub fn page_stub(page: &Page) -> Option<Item> {
+/// The id, kind, URL and outside ids of [`page_item`].
+fn page_stub(page: &Page) -> Option<Item> {
     let url = canonical_url(&page.url)?;
     let wd = page
         .item
@@ -853,278 +838,11 @@ fn too_big(item: &Item) -> bool {
     serde_json::to_vec(item).map_or(true, |json| json.len() > MAX_ITEM_BYTES)
 }
 
-/// Where an item set's pages are listed among results: its manifest's
-/// `place` (`manifest.md` in the design notes).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum Place {
-    /// As other pages are: when a query names one. `under-site` is listed
-    /// this way too, for now.
-    #[default]
-    Own,
-    /// Only for a query with one of these words, in [`ask_word`] form.
-    Asked(Vec<String>),
-    /// Never listed.
-    AnswerOnly,
-}
-
-/// Most words a set may be asked by.
-pub const MAX_ASK_WORDS: usize = 8;
-/// Longest word, or words, a set may be asked by, in characters.
-pub const MAX_ASK_CHARS: usize = 40;
-
-impl Place {
-    /// The placement `place` says, or why a node can't read it.
-    pub fn read(place: Option<&Value>) -> Result<Place, String> {
-        let Some(place) = place else {
-            return Ok(Place::Own);
-        };
-        let how = place
-            .get("how")
-            .and_then(Value::as_str)
-            .ok_or("its place says no how")?;
-        match how {
-            "own" | "under-site" => Ok(Place::Own),
-            "answer-only" => Ok(Place::AnswerOnly),
-            "asked" => {
-                let words = place
-                    .get("ask")
-                    .and_then(Value::as_array)
-                    .ok_or("an asked place needs its ask words")?;
-                let mut ask: Vec<String> = Vec::new();
-                for word in words {
-                    let word = word.as_str().map(ask_word).ok_or("ask words are text")?;
-                    if word.is_empty() || word.chars().count() > MAX_ASK_CHARS {
-                        return Err(format!("{word:?} can't be an ask word"));
-                    }
-                    if !ask.contains(&word) {
-                        ask.push(word);
-                    }
-                }
-                if ask.is_empty() || ask.len() > MAX_ASK_WORDS {
-                    return Err(format!("an asked place has 1 to {MAX_ASK_WORDS} ask words"));
-                }
-                Ok(Place::Asked(ask))
-            }
-            other => Err(format!(
-                "place {other:?} is not own, under-site, asked or answer-only"
-            )),
-        }
-    }
-}
-
-/// `text` as ask words are compared: lower case, with single spaces.
-pub fn ask_word(text: &str) -> String {
-    plumb_core::collapse_whitespace(text.trim()).to_lowercase()
-}
-
-/// What the page index takes from an item set's manifest for its pages.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SetView {
-    /// `<scope>/<name>`, which becomes the pages' [`Page::set`].
-    pub set: String,
-    pub title: Option<String>,
-    /// The line under a page's title, `show.about`, with `{field}` slots.
-    pub about: Option<String>,
-    pub place: Place,
-}
-
-impl SetView {
-    /// The view of the set `manifest` describes. A place this version
-    /// can't read counts as [`Place::Own`].
-    pub fn of(manifest: &plumb_format::Manifest) -> SetView {
-        SetView {
-            set: manifest.set.clone(),
-            title: manifest.title.clone(),
-            about: manifest.show.get("about").cloned(),
-            place: Place::read(manifest.place.as_ref()).unwrap_or_default(),
-        }
-    }
-}
-
-/// Longest line under the title of a page made from an item, in
-/// characters.
-pub const MAX_PAGE_ABOUT_CHARS: usize = 300;
-
-/// The page `merged` becomes in the page index, as its set's `view` says.
-/// `None` for an item without a title or a URL, which can't be listed.
-///
-/// Names from the owner and the project are its aliases; names from
-/// outside publishers, which count for less (merge rule 7), are its other
-/// names ([`Page::names`]), which a query matches less well.
-pub fn item_page(merged: &Merged, view: &SetView) -> Option<Page> {
-    let item = &merged.item;
-    let title = item
-        .title
-        .as_deref()
-        .and_then(clean)
-        .filter(|title| title.chars().count() <= 1000)?;
-    let url = item.url.clone()?;
-    let description = view
-        .about
-        .as_deref()
-        .and_then(|template| show(template, merged))
-        .or_else(|| item.about.as_deref().and_then(clean))
-        .or_else(|| item.text.as_deref().and_then(clean))
-        .map(|line| plumb_core::truncate_chars(&line, MAX_PAGE_ABOUT_CHARS));
-    let site = about_site(item);
-    let (mut aliases, mut names) = (Vec::new(), Vec::new());
-    for (n, name) in item.names.iter().enumerate() {
-        if *name == title {
-            continue;
-        }
-        if merged
-            .name_weights
-            .get(n)
-            .is_none_or(|weight| *weight >= 1.0)
-        {
-            aliases.push(name.clone());
-        } else {
-            names.push(name.clone());
-        }
-    }
-    let ask = match &view.place {
-        Place::Asked(words) => words.clone(),
-        Place::Own | Place::AnswerOnly => Vec::new(),
-    };
-    Some(Page {
-        paper: None,
-        set: view.set.clone(),
-        url,
-        title,
-        description,
-        site,
-        views: views_of(item.weight),
-        aliases,
-        item: item.ids.get("wd").cloned(),
-        profiles: Vec::new(),
-        website: None,
-        package: None,
-        facts: Vec::new(),
-        lead: None,
-        names,
-        sections: Vec::new(),
-        content_language: item.lang.as_deref().and_then(plumb_core::language_code),
-        search: None,
-        item_set: Some(ItemSetPage {
-            title: view.title.clone(),
-            kind: item.kind.clone(),
-            ask,
-        }),
-    })
-}
-
-/// `page`, of today's page sets, with what the layers merged onto it
-/// ([`page_item`], then [`crate::merge::merge`]) add: the description,
-/// views, Wikidata item or language of a layer that ranks above the page's
-/// own set, and the names layers add, split as [`item_page`] splits them.
-/// Everything else stays as the page has it, so a page no layer names
-/// comes back the same.
-pub fn layered_page(mut page: Page, merged: &Merged) -> Page {
-    let item = &merged.item;
-    let from_layer = |name: &str| {
-        merged
-            .sources
-            .get(name)
-            .is_some_and(|source| *source != merged.source)
-    };
-    if from_layer("about") {
-        if let Some(about) = item.about.as_deref().and_then(clean) {
-            page.description = Some(plumb_core::truncate_chars(&about, MAX_PAGE_ABOUT_CHARS));
-        }
-    }
-    if from_layer("weight") {
-        page.views = views_of(item.weight);
-    }
-    if from_layer("ids.wd") {
-        page.item = item.ids.get("wd").cloned();
-    }
-    if from_layer("lang") {
-        if let Some(lang) = item.lang.as_deref().and_then(plumb_core::language_code) {
-            page.content_language = Some(lang);
-        }
-    }
-    let mut known: std::collections::HashSet<String> = std::iter::once(&page.title)
-        .chain(&page.aliases)
-        .chain(&page.names)
-        .map(|name| name.to_lowercase())
-        .collect();
-    for (name, weight) in item.names.iter().zip(&merged.name_weights) {
-        if !known.insert(name.to_lowercase()) {
-            continue;
-        }
-        if *weight >= 1.0 {
-            page.aliases.push(name.clone());
-        } else {
-            page.names.push(name.clone());
-        }
-    }
-    page
-}
-
 /// A page's views for an item's `weight`.
 fn views_of(weight: Option<f64>) -> u64 {
     weight
         .filter(|weight| weight.is_finite() && *weight > 0.0)
         .map_or(0, |weight| weight.round().min(u64::MAX as f64) as u64)
-}
-
-/// `template` with each `{name}` slot filled from `merged`: its `title`,
-/// `about`, `text`, `lang`, `site` or `published` (the day), or a field
-/// of its set. `None` when a slot has no value, so that a line never
-/// shows an empty one.
-pub fn show(template: &str, merged: &Merged) -> Option<String> {
-    let mut line = String::new();
-    let mut rest = template;
-    while let Some(start) = rest.find('{') {
-        line.push_str(&rest[..start]);
-        let after = &rest[start + 1..];
-        let end = after.find('}')?;
-        line.push_str(&slot(&after[..end], merged)?);
-        rest = &after[end + 1..];
-    }
-    line.push_str(rest);
-    let line = plumb_core::collapse_whitespace(line.trim());
-    (!line.is_empty()).then_some(line)
-}
-
-fn slot(name: &str, merged: &Merged) -> Option<String> {
-    let item = &merged.item;
-    let text = match name {
-        "title" => item.title.clone(),
-        "about" => item.about.clone(),
-        "text" => item.text.clone(),
-        "lang" => item.lang.clone(),
-        "site" => item.site.clone(),
-        "published" => item
-            .published
-            .as_deref()
-            .map(|date| date.get(..10).unwrap_or(date).to_string()),
-        _ => merged
-            .fields
-            .values()
-            .filter(|field| field.name == name)
-            .min_by_key(|field| field.source != merged.source)
-            .and_then(|field| shown(&field.value)),
-    };
-    text.filter(|text| !text.trim().is_empty())
-}
-
-/// A field's value as a line shows it: lists by their first five values,
-/// whole numbers without a point. `None` for objects.
-fn shown(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Number(number) => Some(match number.as_f64() {
-            Some(n) if n.fract() == 0.0 && n.abs() < 1e15 => format!("{}", n as i64),
-            _ => number.to_string(),
-        }),
-        Value::Bool(yes) => Some(if *yes { "yes" } else { "no" }.to_string()),
-        Value::Array(list) => {
-            let values: Vec<String> = list.iter().filter_map(shown).take(5).collect();
-            (!values.is_empty()).then(|| values.join(", "))
-        }
-        Value::Null | Value::Object(_) => None,
-    }
 }
 
 #[cfg(test)]
@@ -1459,229 +1177,6 @@ mod tests {
             page_item_or_why(&page),
             Err("its URL has no canonical form".to_string())
         );
-    }
-
-    #[test]
-    fn the_node_works_out_an_items_site_from_its_url() {
-        let cases = [
-            (
-                json!({"id": "a", "kind": "page", "url": "https://blog.example.org/x",
-                       "site": "elsewhere.example"}),
-                Some("example.org"),
-            ),
-            (
-                json!({"id": "b", "kind": "page", "url": "https://news.ycombinator.com/item"}),
-                Some("news.ycombinator.com"),
-            ),
-            (
-                json!({"id": "c", "kind": "page", "url": "http://192.0.2.1/"}),
-                None,
-            ),
-            (
-                json!({"id": "d", "kind": "note", "site": "python.org"}),
-                Some("python.org"),
-            ),
-            (json!({"id": "e", "kind": "note"}), None),
-        ];
-        for (value, site) in cases {
-            let item = item(value);
-            assert_eq!(node_site(&item).as_deref(), site, "{}", item.id);
-        }
-    }
-
-    fn item(value: Value) -> Item {
-        serde_json::from_value(value).unwrap()
-    }
-
-    fn sources() -> Vec<crate::merge::Source> {
-        use crate::merge::{Source, Trust, Weight};
-        let source = |publisher: &str, set: &str, trust| Source {
-            publisher: publisher.into(),
-            set: set.into(),
-            generation: 1,
-            trust,
-            same_as: BTreeMap::new(),
-            labels: Vec::new(),
-        };
-        vec![
-            source("ed25519:me", "local/hn-stories", Trust::Owner),
-            source(
-                "ed25519:other",
-                "other/nicknames",
-                Trust::Outside {
-                    weight: Weight::Low,
-                    added: 0,
-                },
-            ),
-        ]
-    }
-
-    #[test]
-    fn a_layer_changes_only_what_it_gives_of_a_page_set_page() {
-        use crate::merge::{merge, Source, Sourced, Trust};
-        let mut sources = sources();
-        sources.push(Source {
-            publisher: "ed25519:project".into(),
-            set: "plumb/wikipedia-en".into(),
-            generation: 1,
-            trust: Trust::Project,
-            same_as: BTreeMap::new(),
-            labels: Vec::new(),
-        });
-        let adams = page(json!({
-            "set": "wikipedia-en", "url": "https://en.wikipedia.org/wiki/Douglas_Adams",
-            "title": "Douglas Adams", "description": "English author", "views": 5000,
-            "aliases": ["DNA"], "item": "Q42", "lead": "Douglas Noël Adams was an English author.",
-        }));
-        let thing = page_item(&adams).unwrap();
-        let merged_with = |layers: &[(Item, usize)]| {
-            let on: Vec<Sourced<'_>> = layers
-                .iter()
-                .map(|(layer, source)| Sourced {
-                    item: layer,
-                    source: *source,
-                })
-                .collect();
-            let thing = Sourced {
-                item: &thing,
-                source: 2,
-            };
-            layered_page(adams.clone(), &merge(&sources, thing, &on).unwrap())
-        };
-        assert_eq!(merged_with(&[]), adams, "no layer, no change");
-
-        // An outside publisher adds a name, which counts for less, and
-        // can't change the project's description.
-        let outside = item(json!({"id": "x", "extends": "wd:Q42",
-                                  "names": ["Hitchhiker author", "dna"], "about": "Not this"}));
-        let page = merged_with(&[(outside.clone(), 1)]);
-        assert_eq!(page.names, ["Hitchhiker author"]);
-        assert_eq!(page.description, adams.description);
-        assert_eq!(
-            Page {
-                names: Vec::new(),
-                ..page
-            },
-            adams
-        );
-
-        // The owner ranks above the project.
-        let mine = item(
-            json!({"id": "o", "extends": "url:https://en.wikipedia.org/wiki/Douglas_Adams",
-                               "names": ["Doug"], "about": "My favourite author", "weight": 9000}),
-        );
-        let page = merged_with(&[(outside, 1), (mine, 0)]);
-        assert_eq!(page.description.as_deref(), Some("My favourite author"));
-        assert_eq!(page.views, 9000);
-        assert_eq!(page.aliases, ["DNA", "Doug"]);
-        assert_eq!(page.names, ["Hitchhiker author"]);
-        assert_eq!(
-            (page.lead, page.item, page.title),
-            (adams.lead, adams.item, adams.title)
-        );
-    }
-
-    #[test]
-    fn an_items_page_takes_its_sets_title_line_and_place() {
-        use crate::merge::{merge, Sourced};
-        let story = item(json!({
-            "id": "hn:41", "kind": "story", "title": "Plumb, a search engine you run",
-            "url": "https://plumbsearch.org/", "names": ["Plumb"], "weight": 272.4,
-            "lang": "en", "published": "2026-10-11T08:00:00Z", "ids": {"wd": "Q1"},
-            "edges": [{"rel": "about", "to": "site:plumbsearch.org"}],
-            "fields": {"points": 272, "comments": 31, "tags": ["show", "rust"]},
-        }));
-        let nickname = item(json!({"id": "n", "extends": "wd:Q1", "names": ["Plumbing"]}));
-        let sources = sources();
-        let merged = merge(
-            &sources,
-            Sourced {
-                item: &story,
-                source: 0,
-            },
-            &[Sourced {
-                item: &nickname,
-                source: 1,
-            }],
-        )
-        .unwrap();
-        let view = SetView {
-            set: "local/hn-stories".into(),
-            title: Some("Hacker News stories".into()),
-            about: Some("{points} points · {comments} comments, {published}".into()),
-            place: Place::read(Some(
-                &json!({"how": "asked", "ask": ["HN", " Hacker  News"]}),
-            ))
-            .unwrap(),
-        };
-        let page = item_page(&merged, &view).unwrap();
-        assert_eq!(page.set, "local/hn-stories");
-        assert_eq!(page.title, "Plumb, a search engine you run");
-        assert_eq!(page.url, "https://plumbsearch.org/");
-        assert_eq!(
-            page.description.as_deref(),
-            Some("272 points · 31 comments, 2026-10-11")
-        );
-        assert_eq!(page.site.as_deref(), Some("plumbsearch.org"));
-        assert_eq!(page.views, 272);
-        assert_eq!(page.aliases, ["Plumb"], "the owner's name counts in full");
-        assert_eq!(page.names, ["Plumbing"], "an outside publisher's for less");
-        assert_eq!(page.item.as_deref(), Some("Q1"));
-        assert_eq!(page.content_language.as_deref(), Some("en"));
-        let set = page.item_set.as_ref().unwrap();
-        assert_eq!(set.title.as_deref(), Some("Hacker News stories"));
-        assert_eq!(set.kind, "story");
-        assert_eq!(set.ask, ["hn", "hacker news"]);
-        assert!(page.is_asked());
-        assert_eq!(page.set_name(), "Hacker News stories");
-        assert_eq!(page.set_domain(), "plumbsearch.org");
-
-        // A slot with no value leaves the item's own line; lists show
-        // their first values.
-        let view = SetView {
-            about: Some("{votes} votes".into()),
-            title: None,
-            ..view
-        };
-        let mut about = merged.clone();
-        about.item.about = Some("A search engine".into());
-        let page = item_page(&about, &view).unwrap();
-        assert_eq!(page.description.as_deref(), Some("A search engine"));
-        assert_eq!(page.set_name(), "plumbsearch.org");
-        assert_eq!(show("{tags}", &merged).as_deref(), Some("show, rust"));
-        assert_eq!(show("{points", &merged), None);
-
-        // No title or no URL, no page.
-        let mut untitled = merged.clone();
-        untitled.item.title = None;
-        assert!(item_page(&untitled, &view).is_none());
-        let mut nowhere = merged;
-        nowhere.item.url = None;
-        assert!(item_page(&nowhere, &view).is_none());
-    }
-
-    #[test]
-    fn a_sets_place_reads_as_a_node_lists_its_pages() {
-        let read = |place: Value| Place::read(Some(&place));
-        assert_eq!(Place::read(None), Ok(Place::Own));
-        assert_eq!(read(json!({"how": "own", "cap": 1.0})), Ok(Place::Own));
-        assert_eq!(read(json!({"how": "under-site"})), Ok(Place::Own));
-        assert_eq!(read(json!({"how": "answer-only"})), Ok(Place::AnswerOnly));
-        assert_eq!(
-            read(json!({"how": "asked", "ask": ["hn", "HN"]})),
-            Ok(Place::Asked(vec!["hn".into()]))
-        );
-        for wrong in [
-            json!({"how": "asked"}),
-            json!({"how": "asked", "ask": []}),
-            json!({"how": "asked", "ask": [" "]}),
-            json!({"how": "asked", "ask": [1]}),
-            json!({"how": "asked", "ask": ["x".repeat(41)]}),
-            json!({"how": "first"}),
-            json!({"ask": ["hn"]}),
-        ] {
-            assert!(read(wrong.clone()).is_err(), "{wrong}");
-        }
     }
 
     /// Every row of a real articles file reads as an item that passes the

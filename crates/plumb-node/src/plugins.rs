@@ -19,10 +19,6 @@
 //! its results. Pressing one runs the
 //! plugin's `plumb_act` in the same sandbox; only the node's owner, on
 //! the computer the node runs on, can press them (see `web::plugins`).
-//!
-//! And a plugin may build a set ahead of time, on a schedule, through its
-//! `plumb_publish` ([`publish`]): the one way what a plugin finds is
-//! kept, as a set the node's owner publishes and that stays on the node.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv6Addr;
@@ -90,7 +86,7 @@ const CACHE_ENTRIES: usize = 1000;
 const THING_CACHE_TIME: Duration = Duration::from_secs(86_400);
 
 /// A plugin's `plugin.json`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Manifest {
     /// What the results page calls it: "From Hacker News".
     pub name: String,
@@ -141,10 +137,6 @@ pub struct Manifest {
     /// The results page waits for its slowest plugin.
     #[serde(default)]
     pub seconds: Option<u64>,
-    /// The set it builds ahead of time, for a plugin with
-    /// `plumb_publish` ([`publish`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub publish: Option<publish::Publish>,
 }
 
 /// What a search that fits a plugin (by its `ids` or `hints`) does when
@@ -276,9 +268,8 @@ impl HostSpec {
 
 impl Manifest {
     /// Whether it is a `plugin.json` the node can run, for a plugin that
-    /// `annotates` the node's results or not, and that `publishes` a set
-    /// or not.
-    fn check(&self, annotates: bool, publishes: bool) -> Result<()> {
+    /// `annotates` the node's results or not.
+    fn check(&self, annotates: bool) -> Result<()> {
         let name = self.name.trim();
         if name.is_empty() || name.chars().count() > 60 {
             bail!("its name must be 1 to 60 characters");
@@ -289,15 +280,8 @@ impl Manifest {
             && self.hints.iter().all(|k| k.trim().is_empty())
             && self.pages.is_empty()
             && !annotates
-            && !publishes
         {
             bail!("it needs keywords, ids, hints, pages, or \"always\": true");
-        }
-        match (&self.publish, publishes) {
-            (Some(publish), true) => publish.check().context("in publish")?,
-            (Some(_), false) => bail!("it has a publish section but no plumb_publish"),
-            (None, true) => bail!("it has plumb_publish but no publish section"),
-            (None, false) => {}
         }
         for host in &self.hosts {
             if HostSpec::parse(host).is_none() {
@@ -439,8 +423,6 @@ pub struct Plugin {
     acts: bool,
     /// Whether it exports `plumb_annotate`, to mark up the node's results.
     annotates: bool,
-    /// Whether it exports `plumb_publish`, to build a set ahead of time.
-    publishes: bool,
 }
 
 impl std::fmt::Debug for Plugin {
@@ -463,7 +445,6 @@ const IMPORTS: &[&str] = &[
     "headers_read",
     "output",
     "log",
-    "emit",
 ];
 
 impl Plugin {
@@ -520,10 +501,7 @@ impl Plugin {
         let annotates = module
             .exports()
             .any(|export| export.name() == "plumb_annotate");
-        let publishes = module
-            .exports()
-            .any(|export| export.name() == "plumb_publish");
-        manifest.check(annotates, publishes)?;
+        manifest.check(annotates)?;
         let allowed = manifest.clone();
         let client = reqwest::Client::builder()
             .user_agent(format!(
@@ -553,7 +531,6 @@ impl Plugin {
             fuel: FUEL,
             acts,
             annotates,
-            publishes,
         })
     }
 
@@ -601,26 +578,6 @@ impl Plugin {
         deadline: Instant,
         runtime: &tokio::runtime::Handle,
     ) -> Result<Output> {
-        let limits = Limits {
-            deadline,
-            fuel: self.fuel,
-            fetches: MAX_FETCHES,
-            pace: None,
-            stop: None,
-        };
-        Ok(self.call_with(entry, input, limits, None, runtime)?.0)
-    }
-
-    /// [`Plugin::call`] within `limits`, with `emitter` taking what the
-    /// plugin emits; hands it back with the output.
-    fn call_with(
-        &self,
-        entry: &str,
-        input: Vec<u8>,
-        limits: Limits,
-        emitter: Option<publish::Emitter>,
-        runtime: &tokio::runtime::Handle,
-    ) -> Result<(Output, Option<publish::Emitter>)> {
         let host = Host {
             input,
             output: None,
@@ -628,12 +585,7 @@ impl Plugin {
             headers: Vec::new(),
             status: 0,
             fetches: 0,
-            max_fetches: limits.fetches,
-            pace: limits.pace,
-            last_fetch: HashMap::new(),
-            stop: limits.stop,
-            emitter,
-            deadline: limits.deadline,
+            deadline,
             limits: wasmi::StoreLimitsBuilder::new()
                 .memory_size(MAX_MEMORY)
                 .instances(1)
@@ -648,7 +600,7 @@ impl Plugin {
         };
         let mut store = Store::new(&self.engine, host);
         store.limiter(|host| &mut host.limits);
-        store.set_fuel(limits.fuel).map_err(wasm_error)?;
+        store.set_fuel(self.fuel).map_err(wasm_error)?;
         let linker = linker(&self.engine)?;
         let instance = linker
             .instantiate_and_start(&mut store, &self.module)
@@ -671,8 +623,7 @@ impl Plugin {
             .map_err(|_| anyhow::anyhow!("plugin.wasm has no {entry}"))?
             .call(&mut store, ())
             .map_err(wasm_error)?;
-        let host = store.into_data();
-        let Some(output) = host.output else {
+        let Some(output) = store.into_data().output else {
             bail!("the plugin handed back nothing");
         };
         let output: Output =
@@ -680,7 +631,7 @@ impl Plugin {
         if let Some(error) = output.error {
             bail!("{error}");
         }
-        Ok((output, host.emitter))
+        Ok(output)
     }
 
     /// Fetches the pictures `items` name from the plugin's hosts and puts
@@ -772,18 +723,6 @@ fn wasm_error(error: wasmi::Error) -> anyhow::Error {
     anyhow::anyhow!("the plugin failed: {error}")
 }
 
-/// What one call of a plugin may use.
-struct Limits {
-    deadline: Instant,
-    fuel: u64,
-    /// Requests it may make.
-    fetches: usize,
-    /// The least time between two requests to one host.
-    pace: Option<Duration>,
-    /// Becomes true when the node stops: no more requests or items then.
-    stop: Option<tokio::sync::watch::Receiver<bool>>,
-}
-
 /// What the sandbox keeps for one run.
 struct Host {
     input: Vec<u8>,
@@ -793,13 +732,6 @@ struct Host {
     headers: Vec<u8>,
     status: i32,
     fetches: usize,
-    max_fetches: usize,
-    pace: Option<Duration>,
-    /// When each host was last asked, for `pace`.
-    last_fetch: HashMap<String, Instant>,
-    stop: Option<tokio::sync::watch::Receiver<bool>>,
-    /// Takes the items `plumb_publish` emits; none for other calls.
-    emitter: Option<publish::Emitter>,
     deadline: Instant,
     limits: StoreLimits,
     manifest: Manifest,
@@ -910,23 +842,6 @@ fn linker(engine: &Engine) -> Result<Linker<Host>> {
         )?;
         linker.func_wrap(
             "plumb",
-            "emit",
-            |mut caller: Caller<'_, Host>, ptr: i32, len: i32| -> Result<i32, wasmi::Error> {
-                if caller.data().stopping() {
-                    return Ok(plumb_plugin::EMIT_TOO_MANY);
-                }
-                if caller.data().emitter.is_none() {
-                    return Ok(plumb_plugin::EMIT_NOT_PUBLISHING);
-                }
-                let json = read(&caller, ptr, len)?;
-                Ok(match caller.data_mut().emitter.as_mut() {
-                    Some(emitter) => emitter.take(&json),
-                    None => plumb_plugin::EMIT_NOT_PUBLISHING,
-                })
-            },
-        )?;
-        linker.func_wrap(
-            "plumb",
             "log",
             |caller: Caller<'_, Host>, ptr: i32, len: i32| -> Result<(), wasmi::Error> {
                 let line = read(&caller, ptr, len.min(4096))?;
@@ -950,11 +865,6 @@ fn linker(engine: &Engine) -> Result<Linker<Host>> {
 type Fetched = (u16, Vec<(String, String)>, Vec<u8>);
 
 impl Host {
-    /// True once the node is stopping.
-    fn stopping(&self) -> bool {
-        self.stop.as_ref().is_some_and(|stop| *stop.borrow())
-    }
-
     /// Sends the plugin's request: its status, headers and body, or a
     /// `FETCH_*` code.
     fn fetch(&mut self, request: &[u8]) -> Result<Fetched, i32> {
@@ -970,22 +880,8 @@ impl Host {
         if !self.manifest.allows(&url) {
             return Err(plumb_plugin::FETCH_NOT_ALLOWED);
         }
-        if self.fetches >= self.max_fetches {
+        if self.fetches >= MAX_FETCHES {
             return Err(plumb_plugin::FETCH_TOO_MANY);
-        }
-        if self.stopping() {
-            return Err(plumb_plugin::FETCH_TIME_UP);
-        }
-        if let Some(pace) = self.pace {
-            let host = url.host_str().unwrap_or_default().to_string();
-            if let Some(last) = self.last_fetch.get(&host) {
-                let wait = (*last + pace).saturating_duration_since(Instant::now());
-                if Instant::now() + wait >= self.deadline {
-                    return Err(plumb_plugin::FETCH_TIME_UP);
-                }
-                std::thread::sleep(wait);
-            }
-            self.last_fetch.insert(host, Instant::now());
         }
         let Some(left) = self.deadline.checked_duration_since(Instant::now()) else {
             return Err(plumb_plugin::FETCH_TIME_UP);
@@ -1415,16 +1311,6 @@ impl Plugins {
 
     pub fn list(&self) -> impl Iterator<Item = &Plugin> {
         self.inner.plugins.iter().map(Arc::as_ref)
-    }
-
-    /// The plugins that build a set ahead of time.
-    pub fn publishing(&self) -> Vec<Arc<Plugin>> {
-        self.inner
-            .plugins
-            .iter()
-            .filter(|plugin| plugin.publishes)
-            .cloned()
-            .collect()
     }
 
     /// Whether any plugin has buttons.
@@ -1868,24 +1754,6 @@ pub fn try_plugin(
     Ok(())
 }
 
-/// `plumb try-plugin --publish`: runs the `plumb_publish` of the plugin in
-/// folder `dir` once, with `state` (JSON) as what it saved last, and
-/// prints what the node would keep of it, as JSON. Nothing is kept.
-pub fn try_publishing(dir: &Path, state: Option<&str>) -> Result<()> {
-    let plugin = Plugin::load(dir)?;
-    if !plugin.publishes() {
-        bail!("the plugin builds no set (it has no plumb_publish)");
-    }
-    let state = match state {
-        Some(state) => serde_json::from_str(state).context("reading --state")?,
-        None => serde_json::Value::Null,
-    };
-    let runtime = tokio::runtime::Runtime::new().context("starting the runtime")?;
-    let tried = publish::try_publish(&plugin, state, runtime.handle())?;
-    println!("{}", serde_json::to_string_pretty(&tried)?);
-    Ok(())
-}
-
 /// What a results page knows a search is about, for plugins: the
 /// Wikipedia article or Wikidata item `page`, its item and its profiles'
 /// identifiers; or the song or album `page` of the music set, by its
@@ -2033,8 +1901,6 @@ pub(crate) fn offering_plugins(name: &str, hint: &str, output: &str) -> Plugins 
     .expect("a plugin");
     Plugins::new(vec![plugin])
 }
-
-pub mod publish;
 
 #[cfg(test)]
 mod tests;

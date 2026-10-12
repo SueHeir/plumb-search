@@ -112,12 +112,10 @@ mod denylist;
 mod embedding;
 pub mod features;
 mod fill;
-pub(crate) mod item_sets;
 pub mod journal;
 mod network;
 pub(crate) mod newer;
 mod news;
-mod own_sets;
 mod pages;
 mod places;
 mod round;
@@ -802,7 +800,6 @@ pub struct NodeHandle {
     news: JoinHandle<()>,
     adult: JoinHandle<()>,
     signed_sets: JoinHandle<()>,
-    own_sets: JoinHandle<()>,
 }
 
 impl NodeHandle {
@@ -857,7 +854,6 @@ impl NodeHandle {
             news,
             adult,
             signed_sets,
-            own_sets,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -893,9 +889,6 @@ impl NodeHandle {
         }
         if let Err(err) = signed_sets.await {
             warn!("signed sets failed: {err}");
-        }
-        if let Err(err) = own_sets.await {
-            warn!("plugins' sets failed: {err}");
         }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
@@ -982,7 +975,6 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         "Plumb Search {} started",
         env!("CARGO_PKG_VERSION")
     ));
-    let plugins = load_plugins(&inner);
     let settings = WebSettings {
         home: inner.config.country.clone(),
         only_country: inner.config.only_country,
@@ -991,7 +983,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         read_pages_for_all: inner.config.mcp_read_pages,
         findings_for_all: inner.config.mcp_findings,
         page_reader: inner.config.page_reader.clone(),
-        plugins: plugins.clone(),
+        plugins: load_plugins(&inner),
     };
     let app = web::node_router_with(inner.clone(), inner.clone(), settings);
     let https = match inner.config.https_bind {
@@ -1054,14 +1046,6 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
             tokio::task::spawn_blocking(move || embedding::run(inner))
         })
     });
-    // The sets the plugins build, searched once built. A set left by a
-    // plugin since taken out is not.
-    let plugin_sets: Vec<String> = plugins
-        .publishing()
-        .iter()
-        .filter_map(|plugin| plugin.manifest.publish.as_ref())
-        .map(|publish| publish.set_name())
-        .collect();
     let (pages, news, adult) = if inner.config.crawl_only {
         // Only searching needs these.
         info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
@@ -1072,9 +1056,8 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         )
     } else {
         (
-            supervise(&inner, "page sets", move |inner| {
-                let plugin_sets = plugin_sets.clone();
-                tokio::task::spawn_blocking(move || pages::run(inner, plugin_sets))
+            supervise(&inner, "page sets", |inner| {
+                tokio::task::spawn_blocking(move || pages::run(inner))
             }),
             supervise(&inner, "checking feeds", |inner| {
                 tokio::spawn(news::run(inner))
@@ -1086,9 +1069,6 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     };
     let signed_sets = supervise(&inner, "signed sets", |inner| {
         tokio::spawn(signed_sets::run(inner))
-    });
-    let own_sets = supervise(&inner, "plugins' sets", move |inner| {
-        tokio::spawn(own_sets::run(inner, plugins.clone()))
     });
     info!(
         "serving http://{addr}/ with data in {}",
@@ -1105,7 +1085,6 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         news,
         adult,
         signed_sets,
-        own_sets,
     })
 }
 

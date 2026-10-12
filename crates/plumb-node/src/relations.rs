@@ -787,7 +787,6 @@ pub(crate) mod tests {
 
     fn page(title: &str, item: &str, description: &str, facts: &[(FactKind, &str)]) -> Page {
         Page {
-            item_set: None,
             paper: None,
             set: "wikipedia-en".into(),
             url: format!("https://en.wikipedia.org/wiki/{title}"),

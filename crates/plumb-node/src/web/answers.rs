@@ -1014,7 +1014,6 @@ mod tests {
     fn article(title: &str, description: &str, site: Option<&str>) -> PageHit {
         PageHit {
             page: Page {
-                item_set: None,
                 paper: None,
                 set: "wikipedia-en".to_string(),
                 url: format!("https://en.wikipedia.org/wiki/{}", title.replace(' ', "_")),

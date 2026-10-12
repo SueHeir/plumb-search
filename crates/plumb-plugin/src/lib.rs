@@ -7,9 +7,7 @@
 //! hosts its `plugin.json` lists, and hand back results. It cannot read
 //! files, open other connections or see who searched. A plugin may also
 //! offer actions on its results ("Add", "Download"), buttons the node's
-//! owner can press; see [`Action`] and [`plugin!`]. And it may build a
-//! set of items ahead of time, on a schedule, that the node keeps and
-//! signs as its owner's; see [`publish!`].
+//! owner can press; see [`Action`] and [`plugin!`].
 //!
 //! ```ignore
 //! use plumb_plugin::{get, encode, Item, Query, Error};
@@ -42,24 +40,18 @@
 //!   headers, as a JSON list of `[name, value]` pairs.
 //! - `output(ptr, len)`: the [`Output`] as JSON.
 //! - `log(ptr, len)`: a line for the node's log, as UTF-8.
-//! - `emit(ptr, len) -> i32`: from `plumb_publish` only, a JSON list of
-//!   [`SetItem`]s for the set it builds; 0, or one of the negative
-//!   `EMIT_*` codes.
 //!
 //! A plugin with actions also exports `plumb_act`, which the node calls
-//! when the owner presses one of its buttons, a plugin that marks up the
-//! node's own results exports `plumb_annotate` (see [`annotate!`]), and
-//! one that builds a set exports `plumb_publish`, which gets a
-//! [`PublishInput`] (see [`publish!`]).
+//! when the owner presses one of its buttons, and a plugin that marks up
+//! the node's own results exports `plumb_annotate` (see [`annotate!`]).
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// The version of the interface. A node runs plugins of its own version
 /// and the ones before it; version 2 added response headers, actions,
-/// images, badges, [`About`] and page lookups, and version 3 sets built
-/// ahead of time ([`publish!`]).
-pub const ABI: i32 = 3;
+/// images, badges, [`About`] and page lookups.
+pub const ABI: i32 = 2;
 
 /// `fetch` codes: the host is not one the plugin's `plugin.json` lists.
 pub const FETCH_NOT_ALLOWED: i32 = -1;
@@ -73,13 +65,6 @@ pub const FETCH_TOO_LARGE: i32 = -4;
 pub const FETCH_TIME_UP: i32 = -5;
 /// The request is not a [`Request`].
 pub const FETCH_BAD_REQUEST: i32 = -6;
-
-/// `emit` codes: items are emitted only by `plumb_publish`.
-pub const EMIT_NOT_PUBLISHING: i32 = -1;
-/// The run emitted as many items as one run may; it should stop.
-pub const EMIT_TOO_MANY: i32 = -2;
-/// What was emitted is not a JSON list of items.
-pub const EMIT_BAD: i32 = -3;
 
 /// What was searched, as the node hands it to a plugin.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -320,294 +305,6 @@ pub struct Output {
     /// Why there are none, or why the action failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// What `plumb_publish` saves for its next run ([`Published::state`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<serde_json::Value>,
-    /// Whether what `plumb_publish` emitted is the whole set
-    /// ([`Published::replace`]).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub replace: bool,
-}
-
-/// What `plumb_publish` gets: the set it builds, its settings, and what it
-/// saved last time.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PublishInput {
-    /// The set's name, as `publish.set` in `plugin.json` gives it.
-    pub set: String,
-    /// The node owner's settings for this plugin, as in [`Query::config`].
-    #[serde(default)]
-    pub config: serde_json::Value,
-    /// What the last run that worked saved ([`Published::state`]); `null`
-    /// on the first run.
-    #[serde(default)]
-    pub state: serde_json::Value,
-    /// When this run started, in Unix seconds.
-    #[serde(default)]
-    pub now: u64,
-}
-
-/// How a run of `plumb_publish` ends, besides the items it emitted.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Published {
-    /// Kept for the next run: where it got to, the newest date it saw.
-    /// Up to 64 KB as JSON. The node keeps it only when the run worked.
-    pub state: serde_json::Value,
-    /// What this run emitted is the whole set, and anything it did not
-    /// emit is gone. Without it, what a run emits changes the set as it
-    /// was: an item replaces the one with its id, and [`SetItem::gone`]
-    /// takes one away.
-    pub replace: bool,
-}
-
-impl Published {
-    /// A run that changed the set as it was, and saves `state`.
-    pub fn changes(state: serde_json::Value) -> Self {
-        Published {
-            state,
-            replace: false,
-        }
-    }
-
-    /// A run that emitted the whole set, and saves `state`.
-    pub fn whole_set(state: serde_json::Value) -> Self {
-        Published {
-            state,
-            replace: true,
-        }
-    }
-}
-
-/// One item of a set a plugin builds, in Plumb's data format: a thing
-/// with a kind, a title and a web address, or an extension that adds to
-/// another item (`extends`). The node checks each one as it comes:
-/// addresses are put in their canonical form and only `http` and `https`
-/// ones are kept, text is trimmed, and fields must be as `plugin.json`
-/// declares them; see `docs/plugins.md`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SetItem {
-    /// Its id in the set: the source's own stable id ("8863"), never its
-    /// title. An item emitted again with the same id replaces it.
-    pub id: String,
-    /// What it is (`story`, `recipe`), one of `publish.kinds`.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub kind: String,
-    /// The item it adds to, as a ref: `url:https://...`, `site:...`,
-    /// `wd:Q42`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extends: Option<String>,
-    /// Set on an item that is gone: `{"at": "<date>"}`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deleted: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// Other names it goes by, searched as names.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub names: Vec<String>,
-    /// One line under the title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub about: Option<String>,
-    /// A snippet, up to 1,000 characters, searched as its body.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// Its language, such as `en`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lang: Option<String>,
-    /// How popular it is within the set (points, stars).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub weight: Option<f64>,
-    /// When it was published, as a date: `2026-10-12` or
-    /// `2026-10-12T09:30:00Z` ([`date`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub published: Option<String>,
-    /// When it stops being worth showing, as a date.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires: Option<String>,
-    /// Its ids elsewhere, by namespace: `wd` (Wikidata), `doi`, `isbn`.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub ids: std::collections::BTreeMap<String, String>,
-    /// `adult` for an adult item; `personal` keeps it from ever being
-    /// shared.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub labels: Vec<String>,
-    /// Links to other things: `{"rel": "by", "to": "wd:Q42"}`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub edges: Vec<Edge>,
-    /// The fields `publish.fields` declares, by name.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub fields: std::collections::BTreeMap<String, serde_json::Value>,
-}
-
-/// A link from a [`SetItem`] to another thing.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Edge {
-    /// What the link says: `by`, `about`, `part_of`, `links_to`.
-    pub rel: String,
-    /// What it links to, as a ref: `wd:Q42`, `url:https://...`.
-    pub to: String,
-}
-
-impl SetItem {
-    /// A thing of `kind` named `title`, at `url`.
-    pub fn new(
-        id: impl Into<String>,
-        kind: impl Into<String>,
-        title: impl Into<String>,
-        url: impl Into<String>,
-    ) -> Self {
-        SetItem {
-            id: id.into(),
-            kind: kind.into(),
-            title: Some(title.into()),
-            url: Some(url.into()),
-            ..SetItem::default()
-        }
-    }
-
-    /// An extension that adds to the item `target` names (`wd:Q42`,
-    /// `url:https://...`), for a set whose `publish.extends` lists that
-    /// kind of ref.
-    pub fn extending(id: impl Into<String>, target: impl Into<String>) -> Self {
-        SetItem {
-            id: id.into(),
-            extends: Some(target.into()),
-            ..SetItem::default()
-        }
-    }
-
-    /// Takes the item with this id out of the set, as of `now` (Unix
-    /// seconds).
-    pub fn gone(id: impl Into<String>, now: u64) -> Self {
-        SetItem {
-            id: id.into(),
-            deleted: Some(serde_json::json!({ "at": date(now) })),
-            ..SetItem::default()
-        }
-    }
-
-    pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.names.push(name.into());
-        self
-    }
-
-    pub fn about(mut self, about: impl Into<String>) -> Self {
-        self.about = Some(about.into());
-        self
-    }
-
-    pub fn text(mut self, text: impl Into<String>) -> Self {
-        self.text = Some(text.into());
-        self
-    }
-
-    pub fn lang(mut self, lang: impl Into<String>) -> Self {
-        self.lang = Some(lang.into());
-        self
-    }
-
-    pub fn weight(mut self, weight: f64) -> Self {
-        self.weight = Some(weight);
-        self
-    }
-
-    /// When it was published, in Unix seconds.
-    pub fn published(mut self, unix_seconds: u64) -> Self {
-        self.published = Some(date(unix_seconds));
-        self
-    }
-
-    pub fn id_on(mut self, namespace: impl Into<String>, id: impl Into<String>) -> Self {
-        self.ids.insert(namespace.into(), id.into());
-        self
-    }
-
-    pub fn label(mut self, label: impl Into<String>) -> Self {
-        self.labels.push(label.into());
-        self
-    }
-
-    pub fn edge(mut self, rel: impl Into<String>, to: impl Into<String>) -> Self {
-        self.edges.push(Edge {
-            rel: rel.into(),
-            to: to.into(),
-        });
-        self
-    }
-
-    pub fn field(mut self, name: impl Into<String>, value: impl Serialize) -> Self {
-        if let Ok(value) = serde_json::to_value(value) {
-            self.fields.insert(name.into(), value);
-        }
-        self
-    }
-}
-
-/// `unix_seconds` as a UTC date and time, `2026-10-12T09:30:00Z`, the
-/// form dates take in sets.
-pub fn date(unix_seconds: u64) -> String {
-    let days = (unix_seconds / 86_400) as i64;
-    let rest = unix_seconds % 86_400;
-    // Howard Hinnant's days-to-civil.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rest / 3600,
-        rest / 60 % 60,
-        rest % 60
-    )
-}
-
-/// The most `emit` sends to the node at once, as JSON.
-const EMIT_BATCH: usize = 512 * 1024;
-
-/// Adds `items` to the set `plumb_publish` is building. Call it as often
-/// as you like: the node writes what it gets as it comes, so a set can be
-/// much bigger than the plugin's memory. An item the node refuses is left
-/// out and logged; an error here means the run should stop.
-pub fn emit(items: &[SetItem]) -> Result<(), Error> {
-    let mut batch = Vec::with_capacity(EMIT_BATCH.min(items.len() * 256 + 2));
-    batch.push(b'[');
-    for item in items {
-        let json = serde_json::to_vec(item)?;
-        if batch.len() > 1 && batch.len() + json.len() + 2 > EMIT_BATCH {
-            batch.push(b']');
-            send_batch(&batch)?;
-            batch.truncate(1);
-        }
-        if batch.len() > 1 {
-            batch.push(b',');
-        }
-        batch.extend_from_slice(&json);
-    }
-    if batch.len() > 1 {
-        batch.push(b']');
-        send_batch(&batch)?;
-    }
-    Ok(())
-}
-
-fn send_batch(json: &[u8]) -> Result<(), Error> {
-    match host::emit(json) {
-        0 => Ok(()),
-        EMIT_NOT_PUBLISHING => Err(Error::Other(
-            "items are emitted only by plumb_publish".into(),
-        )),
-        EMIT_TOO_MANY => Err(Error::Other(
-            "the run emitted as many items as one run may".into(),
-        )),
-        _ => Err(Error::Other("the node could not read the items".into())),
-    }
 }
 
 /// An HTTP request to one of the plugin's hosts.
@@ -903,60 +600,6 @@ pub fn run_annotate(annotate: fn(&Shown) -> Result<Vec<Note>, Error>) {
     host::output(&json);
 }
 
-/// Makes `publish` the plugin's way of building a set ahead of time:
-/// `publish!(publish)` once in the crate, where `publish` is a
-/// `fn(&PublishInput) -> Result<Published, Error>` that [`emit`]s the
-/// set's items and says what to save for the next run. It can go with
-/// [`plugin!`] and [`annotate!`], or alone with [`publish_only!`]. The
-/// node runs it on the schedule `publish.every` in `plugin.json` sets.
-#[macro_export]
-macro_rules! publish {
-    ($publish:path) => {
-        #[no_mangle]
-        pub extern "C" fn plumb_publish() {
-            $crate::run_publish($publish)
-        }
-    };
-}
-
-/// [`publish!`] without [`plugin!`] still needs the interface version.
-#[macro_export]
-macro_rules! publish_only {
-    ($publish:path) => {
-        #[no_mangle]
-        pub extern "C" fn plumb_abi() -> i32 {
-            $crate::ABI
-        }
-
-        $crate::publish!($publish);
-    };
-}
-
-/// Runs `publish` and hands back how it ended; what [`publish!`] exports
-/// as `plumb_publish`.
-#[doc(hidden)]
-pub fn run_publish(publish: fn(&PublishInput) -> Result<Published, Error>) {
-    let output = match serde_json::from_slice::<PublishInput>(&host::input()) {
-        Ok(input) => match publish(&input) {
-            Ok(published) => Output {
-                state: Some(published.state),
-                replace: published.replace,
-                ..Output::default()
-            },
-            Err(error) => Output {
-                error: Some(error.to_string()),
-                ..Output::default()
-            },
-        },
-        Err(error) => Output {
-            error: Some(format!("unreadable input: {error}")),
-            ..Output::default()
-        },
-    };
-    let json = serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec());
-    host::output(&json);
-}
-
 /// Runs `act` on the button the owner pressed and hands back what it
 /// did; what [`plugin!`] exports as `plumb_act`.
 #[doc(hidden)]
@@ -997,7 +640,6 @@ mod host {
             pub fn headers_read(ptr: *mut u8);
             pub fn output(ptr: *const u8, len: i32);
             pub fn log(ptr: *const u8, len: i32);
-            pub fn emit(ptr: *const u8, len: i32) -> i32;
         }
     }
 
@@ -1042,11 +684,6 @@ mod host {
         // SAFETY: the node reads `len` bytes at the pointer.
         unsafe { ffi::log(line.as_ptr(), line.len() as i32) }
     }
-
-    pub fn emit(json: &[u8]) -> i32 {
-        // SAFETY: the node reads `len` bytes at the pointer.
-        unsafe { ffi::emit(json.as_ptr(), json.len() as i32) }
-    }
 }
 
 /// Outside WebAssembly there is no node to ask: a plugin's code builds
@@ -1069,10 +706,6 @@ mod host {
 
     pub fn log(line: &str) {
         eprintln!("{line}");
-    }
-
-    pub fn emit(_json: &[u8]) -> i32 {
-        super::EMIT_NOT_PUBLISHING
     }
 }
 
@@ -1138,35 +771,6 @@ mod tests {
         );
         let hidden: Note = serde_json::from_str(r#"{"id":1,"hide":true}"#).unwrap();
         assert_eq!(hidden, Note::new(1).hide());
-    }
-
-    #[test]
-    fn set_items_leave_out_what_they_lack() {
-        let item = SetItem::new("8863", "story", "My YC app", "https://dropbox.com/")
-            .field("points", 104)
-            .published(1_175_714_200);
-        assert_eq!(
-            serde_json::to_string(&item).unwrap(),
-            r#"{"id":"8863","kind":"story","title":"My YC app","url":"https://dropbox.com/","published":"2007-04-04T19:16:40Z","fields":{"points":104}}"#
-        );
-        assert_eq!(
-            serde_json::to_string(&SetItem::gone("8863", 0)).unwrap(),
-            r#"{"id":"8863","deleted":{"at":"1970-01-01T00:00:00Z"}}"#
-        );
-    }
-
-    #[test]
-    fn dates_in_utc() {
-        assert_eq!(date(0), "1970-01-01T00:00:00Z");
-        assert_eq!(date(951_782_400), "2000-02-29T00:00:00Z");
-        assert_eq!(date(1_791_806_399), "2026-10-12T11:59:59Z");
-        assert_eq!(date(4_102_444_800), "2100-01-01T00:00:00Z");
-    }
-
-    #[test]
-    fn emitting_outside_a_node_fails() {
-        assert!(emit(&[]).is_ok());
-        assert!(emit(&[SetItem::gone("1", 0)]).is_err());
     }
 
     #[test]

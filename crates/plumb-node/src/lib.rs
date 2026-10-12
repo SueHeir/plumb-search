@@ -141,9 +141,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Relations(args) => relations::run(&args),
         Command::TopSites(args) => top_sites::run(&args),
         Command::Mcp(args) => mcp::run(args),
-        Command::TryPlugin(args) if args.publish => {
-            plugins::try_publishing(&args.plugin, args.state.as_deref())
-        }
         Command::TryPlugin(args) => plugins::try_plugin(
             &args.plugin,
             &args.query.join(" "),

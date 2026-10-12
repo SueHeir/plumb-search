@@ -19,7 +19,7 @@ use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, Operators};
 use plumb_index::pages::{
     add_named_site, drop_namesakes_of_words, lift_named_sites, operators_allow, options_allow,
-    place_operator_pages, place_pages, PageHit, PlacedPage, OPERATOR_PAGES,
+    place_operator_pages, place_pages, PageHit, OPERATOR_PAGES,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -37,24 +37,19 @@ use crate::pages::{
 const LOOK_EVERY: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const LOOK_EVERY: Duration = Duration::from_millis(200);
-/// Least time between two builds of the page index for changes inside
-/// item sets it already holds, such as a plugin's hourly run, or for a new
-/// denylist, which already applies to what the node shows: the whole index
-/// is built again each time. A set added or taken away is built in at
-/// once.
+/// Least time between two builds of the page index for a new denylist,
+/// which already applies to what the node shows: the whole index is built
+/// again each time.
 #[cfg(not(test))]
-const ITEM_CHANGES_EVERY: Duration = Duration::from_secs(6 * 3600);
+const LIST_CHANGES_EVERY: Duration = Duration::from_secs(6 * 3600);
 #[cfg(test)]
-const ITEM_CHANGES_EVERY: Duration = Duration::from_secs(0);
+const LIST_CHANGES_EVERY: Duration = Duration::from_secs(0);
 /// Wait after a failed build before trying the same pages again.
 const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How often a wait looks for shutdown.
 const TICK: Duration = Duration::from_millis(250);
 /// Pages looked at per search, before [`place_pages`] picks.
 const PAGES_PER_SEARCH: usize = 10;
-/// Most pages of item sets a query asks for by name listed first
-/// ([`plumb_index::pages::PageSearcher::asked`]).
-const ASKED_PAGES: usize = 5;
 /// Eligible pages scored for typed search. Docs kind and host constraints
 /// narrow retrieval before its internal candidate windows.
 const KIND_PAGES: usize = 200;
@@ -106,9 +101,8 @@ pub(super) fn coverage(inner: &Inner) -> super::PageCoverage {
     }
 }
 
-/// Runs until the node stops, on a blocking thread. `own_sets` are the
-/// sets the node's plugins build ([`super::item_sets::find`]).
-pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
+/// Runs until the node stops, on a blocking thread.
+pub(super) fn run(inner: Arc<Inner>) {
     remove_stale_parts(&inner.paths.data, inner.storage.as_deref());
     // Legacy complete transfers must have their source timestamp before the
     // first Wanted key is computed, including when downloads start slowly.
@@ -142,10 +136,8 @@ pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
     let mut retired_places = Vec::new();
     let mut kept_whole = HashSet::new();
     let mut retired_readers: Vec<std::sync::Weak<plumb_index::pages::PageSearcher>> = Vec::new();
-    let mut own_key = None;
-    // The page sets and the item set names of the index last built, and
-    // when it was.
-    let mut built: Option<(Option<String>, Vec<String>, Instant)> = None;
+    // The page sets of the index last built, and when it was.
+    let mut built: Option<(Option<String>, Instant)> = None;
     while !inner.stopping() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
@@ -180,15 +172,6 @@ pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
             &inner.config.set_publishers,
         );
         let page_sets_key = wanted.key();
-        if own_key.is_none() {
-            own_key = crate::plugins::publish::own_public_key(&inner.paths.data);
-        }
-        let wanted = wanted.with_items(super::item_sets::find(
-            &inner.paths.data,
-            own_key.as_ref().map(|key| (key, own_sets.as_slice())),
-            &inner.config.set_publishers,
-        ));
-        let item_sets: Vec<String> = wanted.items.iter().map(|items| items.set.clone()).collect();
         let denylist = inner.denylist_stamped();
         let wanted = wanted.with_denylist(denylist.as_ref().map(|(_, stamp)| stamp.clone()));
         let key = wanted.key();
@@ -196,15 +179,11 @@ pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
         let retry_later = failed
             .as_ref()
             .is_some_and(|(k, at)| Some(k) == key.as_ref() && at.elapsed() < RETRY_WAIT);
-        // Only what is inside the item sets, or the denylist, changed: that
-        // waits a while.
-        let items_wait = built.as_ref().is_some_and(|(sets_key, sets, at)| {
-            current.is_some()
-                && *sets_key == page_sets_key
-                && *sets == item_sets
-                && at.elapsed() < ITEM_CHANGES_EVERY
+        // Only the denylist changed: that waits a while.
+        let list_wait = built.as_ref().is_some_and(|(sets_key, at)| {
+            current.is_some() && *sets_key == page_sets_key && at.elapsed() < LIST_CHANGES_EVERY
         });
-        if key != current && !retry_later && !items_wait {
+        if key != current && !retry_later && !list_wait {
             // At a start that has to build the index, the one the last
             // start or 0.2.0 left is searched until then: an upgrade's
             // build of every page takes minutes on a server and longer
@@ -229,7 +208,7 @@ pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
                 denylist.as_ref().map(|(list, _)| list.as_ref()),
             ) {
                 Ok(found) => {
-                    built = Some((page_sets_key, item_sets, Instant::now()));
+                    built = Some((page_sets_key, Instant::now()));
                     let pages = found.as_ref().map_or(0, |(_, s)| s.num_pages());
                     let kept = found.as_ref().map(|(k, _)| k.clone());
                     let replacement = found.map(|(k, s)| (k, Arc::new(s)));
@@ -1269,7 +1248,6 @@ pub(super) fn add_pages(
         .as_ref()
         .filter(|spelling| spelling.applied)
         .map(|spelling| spelling.query.clone());
-    let typed = query;
     let query = applied.as_deref().unwrap_or(query);
     match searcher.search(query, PAGES_PER_SEARCH) {
         Ok(mut found) => {
@@ -1355,29 +1333,6 @@ pub(super) fn add_pages(
             }
         }
         Err(err) => warn!("searching pages: {err:#}"),
-    }
-    // Pages of item sets the query asks for by name ("hn rust") come
-    // first: the query says where to look.
-    let Some(asked) = searcher.asked(typed) else {
-        return;
-    };
-    match searcher.search_sets(&asked, ASKED_PAGES) {
-        Ok(found) => {
-            let asked: Vec<PlacedPage> = found
-                .into_iter()
-                .filter(|hit| options_allow(options, &hit.page))
-                .map(|hit| PlacedPage {
-                    hit,
-                    under: None,
-                    at: 0,
-                })
-                .collect();
-            if !asked.is_empty() {
-                results.spelling = None;
-            }
-            results.pages.splice(0..0, asked);
-        }
-        Err(err) => warn!("searching the item sets asked for: {err:#}"),
     }
 }
 
