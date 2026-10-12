@@ -22,6 +22,20 @@ use super::store::{self, SavedState};
 use super::*;
 use crate::meaning::MeaningModel;
 
+/// Writes `articles` as a gzipped articles file, as `plumb-tools fetch-pages`
+/// makes them.
+fn write_articles_file(dest: &Path, articles: &[plumb_core::Article]) -> anyhow::Result<()> {
+    use std::io::Write;
+    let file = std::fs::File::create(dest)?;
+    let mut out = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    out.write_all(plumb_core::article::ARTICLES_HEADER.as_bytes())?;
+    for article in articles {
+        plumb_core::article::write_article(&mut out, article)?;
+    }
+    out.finish()?;
+    Ok(())
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures")
@@ -2446,7 +2460,7 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     })
     .collect();
     let set_file = peer_dir.path().join("wikipedia-en.tsv.gz");
-    plumb_ingest::articles::write_articles_file(&set_file, &articles).unwrap();
+    write_articles_file(&set_file, &articles).unwrap();
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
         &[SiteRecord::new("lighthouses.org")],
@@ -2530,7 +2544,7 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
         ..Default::default()
     };
     let write = |path: &Path, articles: &[plumb_core::Article]| {
-        plumb_ingest::articles::write_articles_file(path, articles).unwrap();
+        write_articles_file(path, articles).unwrap();
     };
     let long_ago = now_unix() - 100_000;
 
@@ -2759,7 +2773,7 @@ async fn a_set_file_being_downloaded_is_not_cut_at_the_same_time() {
             ..Default::default()
         })
         .collect();
-    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    write_articles_file(&file, &articles).unwrap();
     let notes = crate::pages::SetFileNotes {
         lines: 3,
         complete: true,
@@ -2832,7 +2846,7 @@ async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
         ..Default::default()
     })
     .collect();
-    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    write_articles_file(&file, &articles).unwrap();
     let notes = crate::pages::SetFileNotes {
         lines: 3,
         complete: true,
@@ -2979,7 +2993,7 @@ async fn a_node_searches_the_pages_it_has_while_a_download_waits() {
         views: 500,
         ..Default::default()
     }];
-    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    write_articles_file(&file, &articles).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let (_, _, body) = get(addr, "/search?q=pierre+curie").await;
@@ -3428,7 +3442,7 @@ fn write_set_file(dir: &Path, set: &str, articles: &[plumb_core::Article]) {
     let set = crate::pages::SetInfo::find(set).unwrap();
     let file = set.file(dir);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    plumb_ingest::articles::write_articles_file(&file, articles).unwrap();
+    write_articles_file(&file, articles).unwrap();
     let notes = crate::pages::SetFileNotes {
         lines: articles.len() as u64,
         complete: true,
@@ -3723,7 +3737,7 @@ async fn legacy_complete_set_timestamp_precedes_the_first_key_and_builds_once() 
     let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
     let file = set.file(dir.path());
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    plumb_ingest::articles::write_articles_file(
+    write_articles_file(
         &file,
         &[plumb_core::Article {
             title: "Legacy Curie".into(),
@@ -3872,7 +3886,7 @@ async fn replaced_page_index_stays_charged_and_searchable_until_held_reader_clos
         views: 10,
         ..Default::default()
     };
-    plumb_ingest::articles::write_articles_file(&file, &[article("First Quota Page")]).unwrap();
+    write_articles_file(&file, &[article("First Quota Page")]).unwrap();
     super::newer::set_time(&file, 1_700_000_000).unwrap();
     let mut config = test_config(dir.path());
     config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
@@ -3886,7 +3900,7 @@ async fn replaced_page_index_stays_charged_and_searchable_until_held_reader_clos
     let (old_key, old_reader) = node.inner.pages.read().unwrap().as_ref().unwrap().clone();
     let old_dir = crate::pages::index_dir(dir.path(), &old_key);
     let old_bytes = plumb_core::storage::directory_bytes(&old_dir).unwrap();
-    plumb_ingest::articles::write_articles_file(&file, &[article("Second Quota Page")]).unwrap();
+    write_articles_file(&file, &[article("Second Quota Page")]).unwrap();
     super::newer::set_time(&file, 1_700_000_001).unwrap();
     while node.inner.page_key().as_deref() == Some(&old_key) {
         assert!(Instant::now() < deadline, "replacement never became ready");
@@ -4120,7 +4134,7 @@ async fn a_page_set_cut_past_the_storage_limit_still_runs() {
             ..Default::default()
         })
         .collect();
-    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    write_articles_file(&file, &articles).unwrap();
     let notes = crate::pages::SetFileNotes {
         lines: 3,
         complete: true,

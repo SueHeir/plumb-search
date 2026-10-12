@@ -796,7 +796,7 @@ fn remove_stale_parts(data: &std::path::Path, budget: Option<&plumb_core::storag
 /// choice went down), and the rest takes room for nothing. Taken again
 /// from a trusted node when more are wanted later.
 ///
-/// A file with no notes is the user's own (made by `plumb fetch-pages`),
+/// A file with no notes is the user's own (made by `plumb-tools fetch-pages`),
 /// not one taken from another node, so it is never cut: it could not be
 /// taken back. `kept_whole` holds the sets already said so, to say it once.
 ///

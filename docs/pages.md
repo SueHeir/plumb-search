@@ -24,10 +24,10 @@ The choice is saved with the other settings (`page_sets` in `settings.json`, for
 
 ## Where the pages come from
 
-From Wikimedia's public dumps, not from crawling Wikipedia:
+Page sets are made with `plumb-tools`, a program of their own beside the node (`cargo build --release -p plumb-tools`; it is not in the Docker image, since a node only takes the sets made). Wikipedia's come from Wikimedia's public dumps, not from crawling Wikipedia:
 
 ```sh
-plumb fetch-pages --work /big/disk/dumps --data /path/to/node-data \
+plumb-tools fetch-pages --work /big/disk/dumps --data /path/to/node-data \
   --official-sites seed/wikidata-official-sites.tsv
 ```
 
@@ -38,7 +38,7 @@ This downloads the latest `page`, `page_props` and `redirect` tables of English 
 Then, to add each article's official profiles (YouTube, Twitch, TikTok, Instagram, X, Bluesky, Mastodon, Threads, Facebook, LinkedIn, GitHub, Reddit, Spotify, Apple Music, SoundCloud, Patreon, Steam, the App Store and Google Play) from Wikidata's external identifiers, and where a film, show, game, album, song or podcast is listed or can be watched or heard (IMDb, Rotten Tomatoes, Metacritic, Letterboxd, TMDB, IGDB, MyAnimeList, Netflix, MusicBrainz, Discogs, Genius, Spotify and Apple Music albums and songs, Apple Podcasts and a song's music video on YouTube):
 
 ```sh
-plumb fetch-profiles --data /path/to/node-data
+plumb-tools fetch-profiles --data /path/to/node-data
 ```
 
 It asks Wikidata's query service for each service's property, a page of 200,000 statements at a time, and adds a `profiles` line after each article whose item has any (see `plumb_core::article`). Readers made before profiles skip those lines. Each property's formatter URL is checked first, so a service whose property points elsewhere is left out. Only the identifier is kept; the node builds the address and links only identifiers of the right shape. Run it again after each `fetch-pages`, which writes the file without profiles.
@@ -54,7 +54,7 @@ The results page lists an article's profiles in its info box, its own accounts a
 To answer searches that ask a fact ("capital of australia", "how tall is mount everest", "when was albert einstein born", "how old is elon musk", "who is the ceo of nvidia", "who founded tesla", "japan population"), add a few facts about each article's item from Wikidata:
 
 ```sh
-plumb fetch-facts --data /path/to/node-data
+plumb-tools fetch-facts --data /path/to/node-data
 ```
 
 It asks for twenty-five properties, only their best-ranked statements, a page of 50,000 at a time: capital, population (the latest count), elevation, height, area, birth and death dates, founding date, founders, CEO, headquarters, currency, author, director, composer, creator, owner, birthplace, spouse, head of state, head of government, coordinates, atomic number, orbital period and radius. Authors and creators (millions of papers and paintings) are asked for only for the most read articles, by name. Wikidata's query service times out on the deep pages of the biggest properties (birth and death dates, population), so a property it stops answering is read on from [QLever](https://qlever.dev)'s copy of Wikidata (`--deep-endpoint URL` to use another, `--wikidata-only` for none); one that still stops is asked for only for the most read articles, by name. A capital, CEO, spouse or leader that ended is left out, and one that applies only to a part (South Africa's three capitals) counts only when there is no other. Quantities are kept in metres and square metres whatever unit Wikidata has them in, dates only as precise as Wikidata knows them, and items (Canberra, a founder) by their English labels. They ride on the article's `profiles` line as `f-capital=Canberra` entries, which readers made before facts leave out, so `fetch-profiles` and `fetch-facts` keep each other's entries and can run in either order. The answer is shown above the results, with "From Wikidata", only when the search's subject names an article that has the fact; the node never guesses one.
@@ -66,8 +66,8 @@ The website, `/api/search?full=1`, and MCP resolve fact and profile subjects fro
 For a fixed list of important entities, use a targeted repair against a staged articles file, then retry only failed pairs:
 
 ```sh
-plumb fetch-facts --articles /scratch/wikipedia-en.tsv.gz --items Q17 Q408 --properties population capital
-plumb fetch-facts --articles /scratch/wikipedia-en.tsv.gz --retry-facts /scratch/wikipedia-en.tsv.gz.facts.json
+plumb-tools fetch-facts --articles /scratch/wikipedia-en.tsv.gz --items Q17 Q408 --properties population capital
+plumb-tools fetch-facts --articles /scratch/wikipedia-en.tsv.gz --retry-facts /scratch/wikipedia-en.tsv.gz.facts.json
 ```
 
 Targeted repairs accept at most 100,000 item/property pairs and reuse the existing best-rank, ended-statement, population-year and namesake parsing. They make no worldwide scan. Reports are written after the ingestion call finishes; an interrupted process has no new checkpoint. The report is local ingestion diagnostics and is not transferred as article fact metadata. Population observation years continue to travel in the existing compact fact value. A retrieval timestamp never stands in for the year a population was counted.
@@ -77,7 +77,7 @@ Targeted repairs accept at most 100,000 item/property pairs and reuse the existi
 To find an article by what its first sentences say ("triassic jurassic cretaceous" finds Mesozoic) and by the other titles that lead to it ("manubrium" leads to a section of Sternum), add each article's lead and other names from Wikimedia's weekly dump of its search index:
 
 ```sh
-plumb fetch-leads --data /path/to/node-data --work /path/to/scratch
+plumb-tools fetch-leads --data /path/to/node-data --work /path/to/scratch
 ```
 
 It downloads the dump's files (about 66 of 600 MB for English, three at a time), reads each into a small file in `--work` and deletes it, so a stopped run carries on from the files already read. The 2,000,000 most read articles (`--top`) get their lead, as many whole sentences of the paragraph before the first heading as fit in 300 characters, and up to ten other names: the titles that lead to the article but are not among its five most read aliases, the shortest first, including those that lead to one of its sections, which `fetch-pages` leaves out. They ride on the `profiles` line as `lead=` and `name=` entries, which readers made before leave out; `fetch-profiles` and `fetch-facts` keep them. A query that is one of an article's other names lists the article, though not as named, after the first sites. A query whose words the lead has with the article's names and description lists the article the same way, the lead that matches best first. The info box shows the lead, and a query that asks what something is ("what is a manatee", "define photosynthesis", "who was ada lovelace") is answered above the results with the first sentence of the article it names, "From Wikipedia".
@@ -87,7 +87,7 @@ It downloads the dump's files (about 66 of 600 MB for English, three at a time),
 To answer searches that ask what a word means ("define anadromous", "prioritize meaning", "what is a portmanteau"), keep the `wiktionary` set of English words:
 
 ```sh
-plumb fetch-pages --set wiktionary --data /path/to/node-data --work /path/to/scratch
+plumb-tools fetch-pages --set wiktionary --data /path/to/node-data --work /path/to/scratch
 ```
 
 It reads kaikki.org's English dictionary (about 3.3 GB of JSON lines that wiktextract makes from Wiktionary's dumps every few days) and keeps each word with the first usual sense of up to three of its parts of speech, in at most 300 characters, the words Wiktionary says most of (senses and translations) first. Senses that only point at another word ("plural of mouse") and proper names are left out. The set's pages are never listed among the results: a word is only looked up, by itself, for a query that asks what it means, and its meaning shown above the results, "From Wiktionary". A query with "define", "definition" or "meaning" gets the word first; "what is ..." gets the first sentence of the Wikipedia article it names first, and the word when there is none.
@@ -101,7 +101,7 @@ A node with no set file (unless `--set-updates` leaves the set out, below), or f
 The `github` set lists public GitHub repositories with at least 500 stars: "ripgrep" finds BurntSushi/ripgrep. Each keeps only its `owner/name`, its name as another title, its description, its stars (in place of page views) and the domain of its homepage, so tauri-apps/tauri is shown under tauri.app's result. No code or README is kept. It has its own choice under **Page sets**.
 
 ```sh
-GITHUB_TOKEN=... plumb fetch-pages --set github --data /path/to/node-data --min-stars 500
+GITHUB_TOKEN=... plumb-tools fetch-pages --set github --data /path/to/node-data --min-stars 500
 ```
 
 This walks GitHub's repository search, most starred first. Without a token GitHub allows 10 searches a minute, about 1,000 repositories, so a few hundred thousand repositories take some hours; a token makes it three times faster. Stars are compared with the most starred repository and page views with the most read article, so neither set crowds out the other.
@@ -111,7 +111,7 @@ This walks GitHub's repository search, most starred first. Without a token GitHu
 The `stackoverflow` set lists Stack Overflow's most viewed questions (2,000,000 by default, each with a score of at least 1): "undo last git commit" finds "How do I undo the most recent local commits in Git?". Each keeps only its title, its tags (shown as its description), its question number and its views. No question or answer text is kept. The questions come from Stack Exchange's public data dump on the Internet Archive (CC BY-SA 4.0), the 7z of Stack Overflow's posts, about 20 GB:
 
 ```sh
-plumb fetch-pages --set stackoverflow --work /big/disk/dumps --data /path/to/node-data
+plumb-tools fetch-pages --set stackoverflow --work /big/disk/dumps --data /path/to/node-data
 ```
 
 `--posts PATH` reads a downloaded posts 7z instead; `--min-score` and `--max-questions` change what is kept.
@@ -125,7 +125,7 @@ The `stackexchange` set lists the most viewed questions of 33 other Stack Exchan
 The set is made from each site's whole dump in the same Internet Archive collection, a few GB in all, downloaded one site at a time:
 
 ```sh
-plumb fetch-pages --set stackexchange --work /big/disk/dumps --data /path/to/node-data
+plumb-tools fetch-pages --set stackexchange --work /big/disk/dumps --data /path/to/node-data
 ```
 
 `--max-per-site` (100,000 by default) caps each site's questions, `--min-score` works as for Stack Overflow, and `--drop-dumps` deletes each dump once it is read. A site whose dump can't be downloaded is left out with a warning.
@@ -135,7 +135,7 @@ plumb fetch-pages --set stackexchange --work /big/disk/dumps --data /path/to/nod
 The `books` set lists Open Library's works that readers shelve or rate most (1,000,000 by default, each on a reading log or rated at least 3 times): "dune frank herbert" finds Dune. Each keeps only its title, "Book by AUTHOR, YEAR" as its description, "TITLE AUTHOR" as another title, its work id and how many readers shelved or rated it. Open Library's dumps are CC0; the works, authors, reading log and ratings dumps are about 4 GB together:
 
 ```sh
-plumb fetch-pages --set books --work /big/disk/dumps --data /path/to/node-data
+plumb-tools fetch-pages --set books --work /big/disk/dumps --data /path/to/node-data
 ```
 
 `--min-shelvings` and `--max-books` change what is kept.
@@ -145,7 +145,7 @@ plumb fetch-pages --set books --work /big/disk/dumps --data /path/to/node-data
 The `podcasts` set lists the podcasts Podcast Index rates most popular (300,000 by default, each scoring at least 4 of 9 and answering when last fetched): "hardcore history podcast" and "dan carlin podcast" find Dan Carlin's Hardcore History. Podcast Index keeps an open index of podcast feeds, "available for free, for any use", and publishes it whole as a SQLite database of about 1.8 GB (5 GB unpacked):
 
 ```sh
-plumb fetch-pages --set podcasts --work /big/disk/dumps --data /path/to/node-data
+plumb-tools fetch-pages --set podcasts --work /big/disk/dumps --data /path/to/node-data
 ```
 
 Each podcast keeps its title, "Podcast by AUTHOR · CATEGORY" as its description, "AUTHOR podcast" as another title, its Podcast Index id (its page at podcastindex.org lists its episodes and the apps that play it), its Apple Podcasts id, and its website's domain when that is a site of its own, so it goes under that site's result. Many podcasts share Podcast Index's popularity score, so an Apple Podcasts listing, then the years a show has run, then its episodes (counted up to 999) break ties, and a show listed twice under one title and site (or author) is kept once. Like a book, a podcast is never listed before every site by its title alone, but its title or the end of it followed by "podcast", or by its author's name, asks for it. `--min-podcast-score`, `--max-podcasts` and `--podcast-db` (an unpacked database) change what is read and kept.
@@ -155,7 +155,7 @@ Each podcast keeps its title, "Podcast by AUTHOR · CATEGORY" as its description
 The `music` set lists the songs and albums people listen to most (150,000 songs and 30,000 albums by default): "hey jude beatles", "hey jude by the beatles" and "hey jude song" find the song, "abbey road album" the album. It is made from MusicBrainz's core data dump (CC0, `mbdump.tar.bz2`, about 7 GB; nothing of the derived dumps is read) and how many people listened to each song and album, which ListenBrainz's popularity API (CC0) gives for 1,000 at a time:
 
 ```sh
-plumb fetch-pages --set music --work /big/disk/dumps --data /path/to/node-data
+plumb-tools fetch-pages --set music --work /big/disk/dumps --data /path/to/node-data
 ```
 
 A song is all the recordings of one title by one artist credit, remasters and live versions too, and its listeners are its recordings' together. ListenBrainz is asked about every song on at least two release groups (an album, a single, a compilation) and every song of the 30,000 albums most listened to, so an album's best-known songs are found even when no single put them out. ListenBrainz counts a song's listens on one canonical recording of it, often a single's or a compilation's, so the canonical recording of each one asked about is asked about too, from ListenBrainz's canonical data dump (CC0, `canonical_recording_redirect.csv`). Each song keeps its title, "Song by ARTIST, YEAR" as its description, "TITLE ARTIST" as another title, its most listened to recording's MusicBrainz id (its address on musicbrainz.org), its listeners, and the links MusicBrainz has for it: its lyrics on Genius, its Spotify track and its music video. Each album keeps the same, with "Album by ARTIST, YEAR", and its Spotify and Apple Music albums. A compilation, live album or DJ mix is no album here; a soundtrack is.
@@ -171,7 +171,7 @@ The answers ListenBrainz gives are kept in `--work` (`listenbrainz-albums.tsv`, 
 The `films` set lists the films and TV shows Wikidata knows best (150,000 by default, each with a page on at least 3 Wikipedias or other wikis, the most such pages first), from Wikidata's query service (CC0):
 
 ```sh
-plumb fetch-pages --set films --data /path/to/node-data
+plumb-tools fetch-pages --set films --data /path/to/node-data
 ```
 
 Each keeps its English name (or else its English article's title, or its title in its own language), its other English names and original titles, "Film by DIRECTOR, YEAR · with CAST" or "TV series by CREATOR, 2008–2013 · with CAST" as its description (the three best-known cast members that fit), its Wikidata item, its English Wikipedia article when it has one, how many wikis have a page on it, and its listings: IMDb, Rotten Tomatoes, Metacritic, Letterboxd, TMDB, MyAnimeList and Netflix. Only Wikidata's identifiers for those are kept, which make links; nothing is copied from IMDb or TMDB. Films are items of film, animated film, documentary film or TV film; shows of TV series, miniseries, animated series, anime series or web series. Each class's label is checked before it is asked for.
@@ -185,7 +185,7 @@ Most films and shows with an English article are already listed by their titles 
 The `papers` set lists the most cited scholarly works (2,000,000 by default, each cited at least 200 times), from OpenAlex's API (CC0): "attention is all you need" finds the paper. Each keeps only its title, "Paper by AUTHOR et al., YEAR, VENUE" as its description, its DOI (or OpenAlex id) and its citations. Like questions, papers are also found by most of their title's words. A paper cited more than 40,000 times for each year since it came out is left out as a data error. A paper's whole title of four words or more ("basic local alignment search tool"), or its title followed by its first author's name, its year, its venue or "paper" ("random forests breiman", "deep learning lecun nature"), asks for the paper, which then comes first like an asked-for book.
 
 ```sh
-plumb fetch-pages --set papers --work /big/disk/dumps --data /path/to/node-data --min-citations 200
+plumb-tools fetch-pages --set papers --work /big/disk/dumps --data /path/to/node-data --min-citations 200
 ```
 
 A paper that can be read free also keeps where, shown under it as "Free to read on arxiv.org" (and given to AI apps as `free_copy`): the publisher's own free PDF, else its copy on arXiv, else the best free copy Unpaywall's data knows of (an accepted version in a university repository, PubMed Central), all from OpenAlex, which carries Unpaywall's data. For a paper OpenAlex knows no free copy of, CORE (core.ac.uk), which gathers the papers of thousands of repositories, is asked by DOI when `CORE_API_KEY` holds a CORE API key (free for personal and research use; ask for one at core.ac.uk/services/api). CORE allows a free key about a thousand requests a day, so a run asks at most `--max-core-requests` times (900 by default, fifty papers each, the most cited first) and keeps what CORE answered in `DIR/core/` under `--work`, so each later run asks only about the papers left and gives every paper the copies found before. Only the copy's address is kept, never its text.
@@ -199,7 +199,7 @@ Book and paper titles are often common words ("Python", "Apple"), so a book or p
 The `packages` set lists the most used packages of eight registries: npm, PyPI, crates.io, Go modules, RubyGems, Packagist, NuGet and Maven Central (20,000 of each by default). It is for coding agents, which mostly search to look up a library: its latest version, how to install it and where its docs are. Each package keeps its name, its description, its latest version and when that came out, its license, and the addresses of its docs, code and homepage. The install command (`cargo add serde`) and the registry page are made from the registry and the name, and docs.rs, pkg.go.dev, rubydoc.info and javadoc.io stand in for docs a crate, module, gem or Maven package names none of.
 
 ```sh
-plumb fetch-pages --set packages --data /path/to/node-data
+plumb-tools fetch-pages --set packages --data /path/to/node-data
 ```
 
 The lists come from [ecosyste.ms](https://packages.ecosyste.ms)'s open API (CC BY-SA 4.0), most downloaded first, or most depended on for Go and Maven, which count no downloads. It allows 5,000 requests an hour, and the whole set takes about 650. `--registries npm,pypi,crates` lists only some registries, and `--max-per-registry` changes how many of each are kept. Registries count downloads in very different numbers, so a package's popularity is its downloads as a share of its registry's most downloaded package: the top crate weighs as much as the top npm package.
@@ -216,7 +216,7 @@ The MCP server's `package` tool returns the same card by name ([mcp.md](mcp.md))
 The `docs` set lists the pages of software docs sites: MDN, Python's docs, Rust's standard library and books, Go, Node.js, TypeScript, React, Vue, Next.js, Tailwind CSS, Django, Flask, NumPy, pandas, PyTorch, PostgreSQL, MySQL, SQLite, Docker, Kubernetes, Git, GitHub Docs, Java, C++ (cppreference), .NET, Kotlin, PHP, Ruby, Rails, Linux man pages, Bash, the Arch Wiki, nginx, Redis, MongoDB, Terraform, Godot and Bootstrap (`plumb_core::docs::DOCS_SITES`):
 
 ```sh
-plumb fetch-pages --set docs --work /path/to/work --data /path/to/node-data
+plumb-tools fetch-pages --set docs --work /path/to/work --data /path/to/node-data
 ```
 
 Each site's pages are those its sitemaps (named in its robots.txt, or `/sitemap.xml`) and its table of contents link to under its docs addresses (`https://docs.python.org/3/`), the shallowest first, at most 20,000 a site (`--max-docs-per-site`). Each page is fetched like a homepage in a crawl: robots.txt is obeyed for every address, a site is asked one page at a time with a second (or its `Crawl-delay`) between answers, and only redirects on the same site are followed. Sixteen sites are fetched at once. Each page keeps its title without the site's name ("Sorting Techniques — Python 3.14 documentation" is "Sorting Techniques"), its description (or else the start of its text), and its address. Its views are the site's weight (1 to 10) over how deep the page is under the site's docs, so a site's main pages come first. With `--work`, each site's pages are kept there (`docs-rich-2-python.json`, with the rich extractor version in the filename) as it finishes, and a run that stops carries on with the sites not yet done. `--docs-sites python,mdn` fetches only some.
@@ -239,9 +239,9 @@ This is the first set of inner pages of good sites; universities, professors, co
 ## Measuring
 
 ```sh
-plumb eval --index data/indexes/000123 --queries eval/article_queries.tsv \
+plumb-tools eval --index data/indexes/000123 --queries eval/article_queries.tsv \
   --pages data/pages/sets/wikipedia-en.tsv.gz --pages-top 1000000
-plumb eval --index data/indexes/000123 --queries eval/repo_queries.tsv \
+plumb-tools eval --index data/indexes/000123 --queries eval/repo_queries.tsv \
   --pages data/pages/sets/wikipedia-en.tsv.gz --pages data/pages/sets/github.tsv.gz
 ```
 

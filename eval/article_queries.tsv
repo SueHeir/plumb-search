@@ -3,7 +3,7 @@
 # The last few name the article and say more.
 #
 # Run it with a page set made by fetch-pages, for example:
-#   plumb eval --index data/index --queries eval/article_queries.tsv \
+#   plumb-tools eval --index data/index --queries eval/article_queries.tsv \
 #     --pages data/pages/sets/wikipedia-en.tsv.gz
 marie curie	https://en.wikipedia.org/wiki/Marie_Curie
 albert einstein	https://en.wikipedia.org/wiki/Albert_Einstein

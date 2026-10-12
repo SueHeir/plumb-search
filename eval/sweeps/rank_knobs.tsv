@@ -1,5 +1,5 @@
 # Ranking knobs one at a time, each a step either side of its default.
-#   plumb eval --index DIR --pages wikipedia-en.tsv.gz \
+#   plumb-tools eval --index DIR --pages wikipedia-en.tsv.gz \
 #     --queries eval/brand_queries.tsv --queries eval/ai_queries.tsv ... \
 #     --sweep eval/sweeps/rank_knobs.tsv --ranks-out ranks.tsv
 alpha-0.25	{"alpha": 0.25}

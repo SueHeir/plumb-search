@@ -252,7 +252,7 @@ mod tests {
         let Command::Run(args) = cli.command else {
             panic!("not run");
         };
-        node_config(args)
+        node_config(*args)
     }
 
     #[test]

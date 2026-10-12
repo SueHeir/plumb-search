@@ -1,5 +1,5 @@
 //! Downloads the seed datasets. These hosts must be reachable from the
-//! machine running `plumb fetch-data` (or a `plumb run` node on first start).
+//! machine running `plumb-tools fetch-data` (or a `plumb run` node on first start).
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -338,7 +338,7 @@ async fn stream_body(
 }
 
 /// `dest` with `.part` appended to its file name.
-pub(crate) fn part_path(dest: &Path) -> PathBuf {
+pub fn part_path(dest: &Path) -> PathBuf {
     let mut part = OsString::from(dest.as_os_str());
     part.push(".part");
     PathBuf::from(part)

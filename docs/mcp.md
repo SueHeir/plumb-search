@@ -121,7 +121,7 @@ Each lead says which nodes reported it, how this node stands to each (`trusted`,
 
 ## Following relations (experiment)
 
-`plumb relations` learns each kind of Wikidata fact whose value is another thing (capital, founder, CEO, headquarters, currency and the rest) as a map between the EmbeddingGemma vectors of Wikipedia articles, made from each article's title and description. It reads a Wikipedia articles file with facts (from `plumb fetch-facts`), embeds the articles in its facts, fits the maps, and reports how often they find the facts it held out:
+`plumb relations` learns each kind of Wikidata fact whose value is another thing (capital, founder, CEO, headquarters, currency and the rest) as a map between the EmbeddingGemma vectors of Wikipedia articles, made from each article's title and description. It reads a Wikipedia articles file with facts (from `plumb-tools fetch-facts`), embeds the articles in its facts, fits the maps, and reports how often they find the facts it held out:
 
 ```sh
 plumb relations --articles wikipedia-en.tsv.gz --model <EmbeddingGemma dir> --out relations/
@@ -139,4 +139,4 @@ plumb relations --articles wikipedia-en.tsv.gz --model <EmbeddingGemma dir> --ou
 
 ## Checking it
 
-The end-to-end tests run every tool over the fixture index, through `plumb mcp --index` and through `/mcp` (`cargo test -p plumb-node --test end_to_end mcp`). `official_site` returns the first result of an ordinary search for the name, so `plumb eval --queries eval/ai_queries.tsv` measures it on real data.
+The end-to-end tests run every tool over the fixture index, through `plumb mcp --index` and through `/mcp` (`cargo test -p plumb-node --test end_to_end mcp`). `official_site` returns the first result of an ordinary search for the name, so `plumb-tools eval --queries eval/ai_queries.tsv` measures it on real data.

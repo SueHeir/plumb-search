@@ -16,7 +16,7 @@ const WANTED_OPEN_FILES: u64 = 10_240;
 /// with a soft limit of 1,024; a crawl with a few hundred homepages in flight
 /// then runs out of sockets, nearly every site fails, and the batch looks
 /// offline. Raising the soft limit up to the hard one needs no privileges.
-pub(crate) fn raise_open_file_limit() {
+pub fn raise_open_file_limit() {
     #[cfg(unix)]
     {
         use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};

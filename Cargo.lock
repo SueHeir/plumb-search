@@ -6043,25 +6043,17 @@ name = "plumb-ingest"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "bzip2",
  "flate2",
- "futures-util",
  "httpdate",
- "osmpbf",
  "plumb-core",
  "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
- "sevenz-rust2",
- "sha2 0.10.9",
- "tar",
  "tempfile",
  "tokio",
  "tracing",
  "url",
  "zip",
- "zstd",
 ]
 
 [[package]]
@@ -6205,6 +6197,41 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "plumb-tools"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bzip2",
+ "chrono",
+ "clap",
+ "flate2",
+ "futures-util",
+ "osmpbf",
+ "plumb-answer",
+ "plumb-core",
+ "plumb-crawl",
+ "plumb-embed",
+ "plumb-index",
+ "plumb-ingest",
+ "plumb-net",
+ "plumb-node",
+ "reqwest",
+ "rusqlite",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sevenz-rust2",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+ "zstd",
 ]
 
 [[package]]

@@ -37,10 +37,10 @@
 //! (`lead=The sternum or breastbone is a long flat bone ...`), and its
 //! other names: the titles that lead to it that are not among its aliases,
 //! such as those that lead to one of its sections (`name=Manubrium`). Both
-//! come from Wikipedia's search dump (`plumb fetch-leads`).
+//! come from Wikipedia's search dump (`plumb-tools fetch-leads`).
 //!
 //! A docs page's line carries the headings of its sections the same way
-//! (`section=List Comprehensions`), from `plumb fetch-pages --set docs`.
+//! (`section=List Comprehensions`), from `plumb-tools fetch-pages --set docs`.
 //! Rich docs optionally add `search={"version":1,...}` to that same line.
 //! Its bounded JSON preserves exact API identifiers, fragment anchors and
 //! source passages; pipes are JSON-escaped so legacy readers ignore the
