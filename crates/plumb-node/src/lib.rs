@@ -66,6 +66,7 @@ mod records;
 mod relations;
 mod run;
 mod search;
+mod sets;
 pub mod sources;
 mod summaries;
 mod terms;
@@ -145,6 +146,7 @@ pub fn run(cli: Cli) -> Result<()> {
             args.act.as_deref(),
             args.annotate.as_deref(),
         ),
+        Command::Set(args) => sets::run(args),
         Command::Healthcheck(args) => healthcheck(&args),
     }
 }

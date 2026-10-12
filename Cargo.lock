@@ -6099,6 +6099,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "ed25519-dalek",
  "flate2",
  "getrandom 0.3.4",
  "idna",
@@ -6106,6 +6107,7 @@ dependencies = [
  "plumb-core",
  "plumb-crawl",
  "plumb-embed",
+ "plumb-format",
  "plumb-index",
  "plumb-ingest",
  "plumb-net",
@@ -6128,6 +6130,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wasmi",
+ "zstd",
 ]
 
 [[package]]
