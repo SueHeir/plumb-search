@@ -165,6 +165,9 @@ pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
             if let Err(err) = cut_if_longer(&inner, set, pages, &near, &mut kept_whole) {
                 warn!("page set {}: {err:#}", set.id);
             }
+            if let Err(err) = super::signed_sets::trim_page_set(&inner, set, pages) {
+                warn!("plumb/{}: {err:#}", set.id);
+            }
         }
         let wanted = Wanted::taking(
             &inner.paths.data,

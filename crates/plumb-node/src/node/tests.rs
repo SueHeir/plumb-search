@@ -2914,6 +2914,20 @@ async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
         (Some(3), Some(true))
     );
 
+    // Under a storage limit, keeping fewer pages drops the parts past them.
+    let mut settings = node.inner.settings();
+    settings.storage_limit_mb = 1024;
+    settings.page_sets = crate::pages::PageSets::parse("books=1").unwrap();
+    node.inner.change_settings(settings).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while indexed(&node) != 1 {
+        assert!(Instant::now() < deadline, "the parts past the first stayed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(taken.join("items-001.jsonl.zst").is_file());
+    assert!(!taken.join("items-002.jsonl.zst").exists());
+    assert!(!taken.join("items-003.jsonl.zst").exists());
+
     peer.shutdown().await;
     node.shutdown().await.unwrap();
 }

@@ -358,6 +358,30 @@ fn parts_for(manifest: &Manifest, pages: u64) -> usize {
     manifest.files.len()
 }
 
+/// Removes the parts of the project's item set of `set` held past the
+/// first that hold `pages` pages, as a page set file is cut to its first
+/// pages: the node keeps no more, and they take room for nothing. They
+/// are taken again when more are wanted.
+pub(super) fn trim_page_set(inner: &Inner, set: &SetInfo, pages: u64) -> Result<()> {
+    let data = &inner.paths.data;
+    let Some(held) = HeldPageSet::find(data, set, &inner.config.set_publishers) else {
+        return Ok(());
+    };
+    let name = format!("plumb/{}", set.id);
+    let text = held_manifest(data, &name).context("its manifest is gone")?;
+    let (manifest, _) = Manifest::from_signed_json(&text, &now())?;
+    let keep = parts_for(&manifest, pages);
+    if held.parts.len() <= keep {
+        return Ok(());
+    }
+    // The last first, so what is left is always the set's first parts.
+    for part in held.parts[keep..].iter().rev() {
+        storage::remove_file(&held.dir.join(part), inner.storage.as_deref())?;
+    }
+    info!("{name}: kept its first {keep} parts, which hold the {pages} pages kept");
+    Ok(())
+}
+
 /// Keeps the project's item set of the page set `set` up to date, as far
 /// as its first `pages` pages: takes a newer generation, or more parts of
 /// the one held when the node keeps more pages now.
