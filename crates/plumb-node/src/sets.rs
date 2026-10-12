@@ -13,7 +13,7 @@
 //!
 //! Nothing here changes what a node indexes or sends.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{hash_map, BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -469,7 +469,7 @@ pub struct Differ {
     /// Pages whose item gives them back otherwise ([`page_of_item`]), by
     /// the member that differs.
     pub members: BTreeMap<String, Differs>,
-    /// Pages left out, by why: how many, and the first one's URL.
+    /// Pages left out, by why: how many, and the first one.
     pub left_out: BTreeMap<String, (u64, String)>,
 }
 
@@ -489,11 +489,23 @@ impl Differ {
         self.members.is_empty() && self.left_out.is_empty()
     }
 
+    /// Whether every page comes back the same from its item but for
+    /// pages that repeat an earlier page's id and URL, which are left
+    /// out: the same link listed twice.
+    pub fn only_repeats(&self) -> bool {
+        self.members.is_empty() && self.left_out.keys().all(|why| why == REPEAT)
+    }
+
     /// Says what of the set `name` does not come over, or that all of it
     /// does.
     pub fn print(&self, name: &str) {
         if self.is_empty() {
             println!("{name}: every page comes back the same from its item");
+        } else if self.only_repeats() {
+            println!(
+                "{name}: every page comes back the same from its item but {} that repeat an earlier page",
+                self.left_out[REPEAT].0
+            );
         }
         let mut left_out: Vec<_> = self.left_out.iter().collect();
         left_out.sort_by_key(|(_, (pages, _))| std::cmp::Reverse(*pages));
@@ -514,10 +526,16 @@ impl Differ {
         }
     }
 
-    fn leave_out(&mut self, why: String, url: &str) {
-        self.left_out.entry(why).or_insert((0, url.to_string())).0 += 1;
+    fn leave_out(&mut self, why: &str, first: impl FnOnce() -> String) {
+        self.left_out
+            .entry(why.to_string())
+            .or_insert_with(|| (0, first()))
+            .0 += 1;
     }
 }
+
+/// Why a page with the id and URL of a page before it is left out.
+const REPEAT: &str = "an earlier page has its id and URL";
 
 /// `page`'s member `name` as JSON, with what NFC could change shown
 /// ([`visible`]), cut to 300 characters.
@@ -582,21 +600,32 @@ pub fn from_pages(args: &FromPagesArgs) -> Result<(Written, Differ)> {
     }
     manifest.insert("order".into(), json!("weight"));
     let mut differ = Differ::default();
-    let mut ids = HashSet::new();
+    // Each id's URL, by hash, to tell a link listed twice from two pages
+    // that share an id.
+    let mut ids = HashMap::new();
     let items = pages.map(|page| {
         let item = match page_item_or_why(&page) {
             Ok(item) => item,
             Err(why) => {
-                differ.leave_out(why, &page.url);
+                differ.leave_out(&why, || page.url.clone());
                 return None;
             }
         };
-        if !ids.insert(id_hash(&item.id)) {
-            differ.leave_out(
-                format!("an earlier page has its id, {}", item.id),
-                &page.url,
-            );
-            return None;
+        let url = id_hash(item.url.as_deref().unwrap_or_default());
+        match ids.entry(id_hash(&item.id)) {
+            hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(url);
+            }
+            hash_map::Entry::Occupied(earlier) if *earlier.get() == url => {
+                differ.leave_out(REPEAT, || page.url.clone());
+                return None;
+            }
+            hash_map::Entry::Occupied(_) => {
+                differ.leave_out("an earlier page has its id but another URL", || {
+                    format!("{} (id {})", page.url, item.id)
+                });
+                return None;
+            }
         }
         let back = page_of_item(&item, &args.set);
         let members = back.as_ref().map_or_else(
@@ -708,7 +737,6 @@ pub fn page_sets(args: &PageSetsArgs) -> Result<()> {
             level: args.level,
         };
         let (made, differ) = from_pages(&from).with_context(|| format!("writing {name}"))?;
-        let left_out: u64 = differ.left_out.values().map(|(pages, _)| pages).sum();
         let bytes: u64 = fs::read_dir(&from.out)?
             .flatten()
             .filter_map(|entry| entry.metadata().ok())
@@ -716,9 +744,7 @@ pub fn page_sets(args: &PageSetsArgs) -> Result<()> {
             .sum();
         println!(
             "{name}: {} items in {} parts, {bytes} bytes, {} pages left out",
-            made.items,
-            made.parts,
-            left_out + made.left_out
+            made.items, made.parts, made.left_out
         );
         differ.print(&name);
         written += 1;
@@ -1312,11 +1338,16 @@ mod tests {
         assert_eq!(
             differ.left_out,
             BTreeMap::from([(
-                "an earlier page has its id, https://openlibrary.org/works/OL3W".to_string(),
+                REPEAT.to_string(),
                 (1, "https://openlibrary.org/works/OL3W".to_string())
             )])
         );
+        assert_eq!(written.left_out, 1, "counted once");
         assert!(!differ.is_empty());
+        assert!(
+            differ.only_repeats(),
+            "a link listed twice is all that differs"
+        );
         let page: Page = serde_json::from_value(json!({
             "set": "books", "url": "https://openlibrary.org/works/OL1W",
             "title": "Cafe\u{301}", "views": 1,
