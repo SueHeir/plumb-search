@@ -12,16 +12,19 @@
 //! This crate is the part of the format that is frozen: the record shapes,
 //! the [`refs`] grammar, the [`urls`] canonical form (`url/1`) and match key,
 //! the value formats in [`value`], the [`canonical`] JSON that is signed,
-//! how a manifest is signed and checked ([`sign`]), and the key [`notes`]
-//! that delegate, hand over and revoke signing keys. It only ever gains
-//! optional keys. It never names a kind, a source or a site: what an
-//! article or a package is belongs to the code that builds or ranks it.
+//! how a manifest is signed and checked ([`sign`]), the key [`notes`] that
+//! delegate, hand over and revoke signing keys, and the [`deny`] list and
+//! how it matches. It only ever gains optional keys. It never names a
+//! source or a site, nor a kind but `deny`, the one the core applies
+//! itself: what an article or a package is belongs to the code that
+//! builds or ranks it.
 //!
 //! Nothing else in the workspace uses this crate yet. It is the first,
 //! additive step of the v0.3.0 data format rework, so v0.2.0 nodes and
 //! today's page sets are unaffected.
 
 pub mod canonical;
+pub mod deny;
 pub mod item;
 pub mod manifest;
 pub mod notes;
@@ -30,6 +33,7 @@ pub mod sign;
 pub mod urls;
 pub mod value;
 
+pub use deny::Denylist;
 pub use item::{Deleted, Edge, Item, Vector};
 pub use manifest::{FieldSpec, FilePart, Manifest};
 pub use notes::Note;

@@ -17,6 +17,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::deny::{Entry, DENY};
 use crate::item::Item;
 use crate::notes::{current_publisher, is_revoked, Note};
 use crate::refs::Ref;
@@ -265,6 +266,13 @@ impl Manifest {
                 "a layer cannot extend {scheme:?} refs"
             );
         }
+        if self.kinds.iter().any(|kind| kind == DENY) {
+            ensure!(
+                self.is_denylist() && self.extends.is_empty(),
+                "{}: a denylist holds denylist entries and nothing else",
+                self.set
+            );
+        }
         for (name, spec) in &self.fields {
             if let Some(same_as) = &spec.same_as {
                 ensure!(
@@ -276,8 +284,16 @@ impl Manifest {
         Ok(())
     }
 
+    /// True for a denylist ([`crate::deny`]): a set whose only kind is
+    /// `deny`.
+    pub fn is_denylist(&self) -> bool {
+        self.kinds.len() == 1 && self.kinds[0] == DENY
+    }
+
     /// The entries of `requires` this version does not understand. A node
-    /// skips a set with any, and says a newer version is needed.
+    /// skips a set with any, and says a newer version is needed. A
+    /// denylist is the exception: a node applies every entry it does
+    /// understand, since skipping the list would fail open.
     pub fn not_understood(&self) -> Vec<&str> {
         self.requires
             .iter()
@@ -291,6 +307,18 @@ impl Manifest {
     /// field against its declared type.
     pub fn check_item(&self, item: &Item) -> Result<()> {
         item.check()?;
+        if self.is_denylist() {
+            if !item.is_deleted() {
+                Entry::from_item(item)?;
+            }
+        } else {
+            ensure!(
+                item.kind != DENY,
+                "item {:?} is a denylist entry, and {} is not a denylist",
+                item.id,
+                self.set
+            );
+        }
         if let Some(target) = &item.extends {
             let scheme = target.to_string();
             let scheme = scheme.split(':').next().unwrap_or_default();
@@ -516,6 +544,48 @@ mod tests {
         value["requires"] = json!(["places-rows/1"]);
         let (manifest, _) = Manifest::from_signed_json(&signed(&mut value, &key), NOW).unwrap();
         assert_eq!(manifest.not_understood(), ["places-rows/1"]);
+    }
+
+    #[test]
+    fn a_denylist_holds_entries_and_nothing_else() {
+        let key = SigningKey::from_bytes(&[3; 32]);
+        let mut value = facts_layer(&key);
+        value["set"] = json!("plumb/denylist");
+        value["extends"] = json!([]);
+        value["fields"] = json!({});
+        value["kinds"] = json!(["deny"]);
+        let (denylist, _) = Manifest::from_signed_json(&signed(&mut value, &key), NOW).unwrap();
+        assert!(denylist.is_denylist());
+
+        let item = |value: Value| -> Item { serde_json::from_value(value).unwrap() };
+        let entry = item(json!({
+            "id": "1", "kind": "deny", "target": "site:example.org",
+            "category": "spam", "added": "2026-10-12"
+        }));
+        denylist.check_item(&entry).unwrap();
+        denylist
+            .check_item(&item(json!({"id": "2", "deleted": {"at": "2026-10-12"}})))
+            .unwrap();
+        let newer = item(json!({
+            "id": "3", "kind": "deny", "target": "blob:sha256-00",
+            "category": "malware", "added": "2026-10-12"
+        }));
+        denylist.check_item(&newer).unwrap();
+        for bad in [
+            json!({"id": "4", "kind": "deny", "target": "url:https://example.org/a",
+                   "category": "csam", "added": "2026-10-12"}),
+            json!({"id": "5", "kind": "article", "title": "A", "url": "https://example.org/"}),
+        ] {
+            assert!(denylist.check_item(&item(bad)).is_err());
+        }
+
+        let (layer, _) =
+            Manifest::from_signed_json(&signed(&mut facts_layer(&key), &key), NOW).unwrap();
+        assert!(!layer.is_denylist());
+        assert!(layer.check_item(&entry).is_err());
+
+        value["kinds"] = json!(["deny", "article"]);
+        assert!(Manifest::from_signed_json(&signed(&mut value, &key), NOW).is_err());
     }
 
     #[test]

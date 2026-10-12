@@ -45,6 +45,11 @@ pub const TRACKING_PARAMS: &[&str] = &[
 /// );
 /// ```
 pub fn canonical_url(input: &str) -> Option<String> {
+    canonical(input).map(String::from)
+}
+
+/// The canonical form of `input`, parsed.
+fn canonical(input: &str) -> Option<Url> {
     let mut url = Url::parse(input.trim()).ok()?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return None;
@@ -53,14 +58,19 @@ pub fn canonical_url(input: &str) -> Option<String> {
         return None;
     }
     url.set_fragment(None);
-    let path = regular_percent_encoding(url.path());
-    url.set_path(&path);
-    match url.query().map(regular_percent_encoding) {
-        Some(query) if query.is_empty() => url.set_query(None),
-        Some(query) => url.set_query(Some(&query)),
-        None => {}
+    if url.path().contains('%') {
+        let path = regular_percent_encoding(url.path());
+        url.set_path(&path);
     }
-    Some(url.into())
+    match url.query() {
+        Some("") => url.set_query(None),
+        Some(query) if query.contains('%') => {
+            let query = regular_percent_encoding(query);
+            url.set_query(Some(&query));
+        }
+        _ => {}
+    }
+    Some(url)
 }
 
 /// True when `url` is already in canonical form.
@@ -78,8 +88,7 @@ pub fn is_canonical(url: &str) -> bool {
 /// );
 /// ```
 pub fn match_key(input: &str) -> Option<String> {
-    let canonical = canonical_url(input)?;
-    let url = Url::parse(&canonical).ok()?;
+    let url = canonical(input)?;
     let host = url.host_str()?;
     let mut key = host.strip_prefix("www.").unwrap_or(host).to_string();
     if let Some(port) = url.port() {

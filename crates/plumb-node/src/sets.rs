@@ -3,10 +3,11 @@
 //!
 //! A set is a folder: `manifest.json` and its parts, `items-001.jsonl.zst`
 //! and on, one item per line, most weighted first. `from-pages` writes one
-//! from an articles file, `sign` signs its manifest with a set-signing key
-//! from `new-key`, and `check` checks a set as a node would before taking
-//! it. Signing is a release step someone takes on purpose: no build signs
-//! by itself.
+//! from an articles file, `denylist` one from a file of denylist entries
+//! (`deny-entry` makes them), `sign` signs its manifest with a set-signing
+//! key from `new-key`, and `check` checks a set as a node would before
+//! taking it. Signing is a release step someone takes on purpose: no build
+//! signs by itself.
 //!
 //! Nothing here changes what a node indexes or sends.
 
@@ -20,10 +21,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use clap::{Args, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
+use plumb_format::deny::{Entry, DENY};
 use plumb_format::manifest::is_set_name;
 use plumb_format::notes::{is_revoked, sign_note, NOTE_FORMAT};
 use plumb_format::sign::sign;
-use plumb_format::{Item, Manifest, Note, PublicKey, FORMAT};
+use plumb_format::urls::{url_sha256, url_sha256_any_query};
+use plumb_format::{FieldSpec, Item, Manifest, Note, PublicKey, FORMAT};
 use plumb_index::items::{page_fields, page_item};
 use plumb_index::pages::Page;
 use serde_json::{json, Map, Value};
@@ -57,6 +60,11 @@ pub enum SetCommand {
     /// Write a page set in today's format (an articles file) as a set of
     /// items, with a manifest still to be signed.
     FromPages(FromPagesArgs),
+    /// Write a denylist from a file of entries, one a line, with a manifest
+    /// still to be signed.
+    Denylist(DenylistArgs),
+    /// Print a denylist entry as one line, to add to an entries file.
+    DenyEntry(DenyEntryArgs),
     /// Sign a set's manifest after checking every part and item.
     Sign(SignArgs),
     /// Check a set as a node does before taking it: its signature, the size
@@ -97,6 +105,55 @@ pub struct FromPagesArgs {
     /// The zstd level of the parts.
     #[arg(long, default_value_t = 19)]
     pub level: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct DenylistArgs {
+    /// The entries, one JSON object a line, from `plumb set deny-entry`.
+    #[arg(long, value_name = "FILE")]
+    pub entries: PathBuf,
+    /// The set's name, `<scope>/<name>`.
+    #[arg(long, default_value = "plumb/denylist")]
+    pub name: String,
+    /// The folder to write. It must not exist yet, or be empty.
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    #[arg(long)]
+    pub title: Option<String>,
+    /// The list's license, an SPDX id. A set without one is never passed
+    /// on.
+    #[arg(long)]
+    pub license: Option<String>,
+    /// The zstd level of the parts.
+    #[arg(long, default_value_t = 19)]
+    pub level: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct DenyEntryArgs {
+    /// Why: `csam`, `copyright`, `privacy`, `court-order`, `terror`,
+    /// `malware`, `spam`.
+    #[arg(long)]
+    pub category: String,
+    /// What it takes off: `url:<URL>`, `prefix:<URL>`, `site:<domain>`,
+    /// `item:<publisher>/<set>/<id>` or `publisher:<key>`.
+    #[arg(long, required_unless_present = "hash_of", conflicts_with = "hash_of")]
+    pub target: Option<String>,
+    /// Take off this page by the hash of its address, so the list never
+    /// spells it out. The only target a `csam` entry may have.
+    #[arg(long, value_name = "URL")]
+    pub hash_of: Option<String>,
+    /// With --hash-of: whatever query the page is given.
+    #[arg(long, requires = "hash_of")]
+    pub any_query: bool,
+    /// A jurisdiction it is for (`US`, `DE`, `EU`). Repeat for more; `*`,
+    /// everywhere, when not given.
+    #[arg(long = "where", value_name = "PLACE")]
+    pub places: Vec<String>,
+    /// Its id in the list. The date and the start of the target's hash
+    /// when not given.
+    #[arg(long)]
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -178,6 +235,20 @@ pub fn run(args: SetArgs) -> Result<()> {
             );
             Ok(())
         }
+        SetCommand::Denylist(args) => {
+            let written = denylist(&args)?;
+            println!(
+                "{}: {} entries in {} parts; sign it with `plumb set sign`",
+                args.out.display(),
+                written.items,
+                written.parts
+            );
+            Ok(())
+        }
+        SetCommand::DenyEntry(args) => {
+            println!("{}", serde_json::to_string(&deny_entry(&args)?)?);
+            Ok(())
+        }
         SetCommand::Sign(args) => {
             let key = read_key(&args.key)?;
             let delegation = args.delegation.as_deref().map(read_json).transpose()?;
@@ -211,6 +282,12 @@ pub fn run(args: SetArgs) -> Result<()> {
                 "{} generation {} by {}: {} items in {} parts, all good",
                 checked.set, checked.generation, checked.publisher, checked.items, checked.parts
             );
+            if checked.newer > 0 {
+                println!(
+                    "{} of its entries are newer than this version, which applies the rest",
+                    checked.newer
+                );
+            }
             Ok(())
         }
         SetCommand::Note(args) => {
@@ -351,7 +428,16 @@ pub fn from_pages(args: &FromPagesArgs) -> Result<Written> {
     if let Some(counts) = &args.weight_counts {
         manifest.insert("weight".into(), json!({"counts": counts, "scale": "log"}));
     }
-    let written = write_set(pages, manifest, &args.out, PART_ENDS, args.level)?;
+    manifest.insert("order".into(), json!("weight"));
+    let items = pages.map(|page| page_item(&page));
+    let written = write_set(
+        items,
+        page_fields(),
+        manifest,
+        &args.out,
+        PART_ENDS,
+        args.level,
+    )?;
     if let Some(err) = read_error {
         // A cut-off file must not become a set that looks whole.
         fs::remove_file(args.out.join(MANIFEST))?;
@@ -364,10 +450,102 @@ pub fn from_pages(args: &FromPagesArgs) -> Result<Written> {
     Ok(written)
 }
 
-/// Writes `pages` as the parts of a set in `out`, with `manifest` (not
-/// yet signed) completed by the parts, kinds and fields.
+/// Writes the entries in `args.entries` as a denylist. Every line must be
+/// an entry this version understands, with an id of its own: a list that
+/// quietly lost an entry would fail open.
+pub fn denylist(args: &DenylistArgs) -> Result<Written> {
+    ensure!(
+        is_set_name(&args.name),
+        "{:?} is not <scope>/<name>",
+        args.name
+    );
+    let text = fs::read_to_string(&args.entries)
+        .with_context(|| format!("reading {}", args.entries.display()))?;
+    let mut ids = HashSet::new();
+    let mut entries = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let at = || format!("{} line {}", args.entries.display(), n + 1);
+        let item: Item = serde_json::from_str(line).with_context(at)?;
+        item.check().with_context(at)?;
+        ensure!(
+            Entry::from_item(&item).with_context(at)?.is_some(),
+            "{}: this version does not understand the entry",
+            at()
+        );
+        ensure!(
+            ids.insert(item.id.clone()),
+            "{}: id {:?} is used before",
+            at(),
+            item.id
+        );
+        entries.push(item);
+    }
+    let mut manifest = Map::new();
+    manifest.insert("format".into(), json!(FORMAT));
+    manifest.insert("set".into(), json!(args.name));
+    manifest.insert("generation".into(), json!(now()));
+    for (key, value) in [("title", &args.title), ("license", &args.license)] {
+        if let Some(value) = value {
+            manifest.insert(key.into(), json!(value));
+        }
+    }
+    let items = entries.into_iter().map(Some);
+    write_set(
+        items,
+        BTreeMap::new(),
+        manifest,
+        &args.out,
+        PART_ENDS,
+        args.level,
+    )
+}
+
+/// The entry `args` describes, checked as a node reads it.
+pub fn deny_entry(args: &DenyEntryArgs) -> Result<Item> {
+    let target = match (&args.target, &args.hash_of) {
+        (Some(target), None) => target.clone(),
+        (None, Some(url)) => {
+            let hashed = if args.any_query {
+                url_sha256_any_query(url)
+            } else {
+                url_sha256(url)
+            };
+            hashed.with_context(|| format!("{url:?} is not an http or https URL"))?
+        }
+        _ => bail!("give one of --target and --hash-of"),
+    };
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let id = args.id.clone().unwrap_or_else(|| {
+        let hash = Sha256::digest(target.as_bytes());
+        let start: String = hash[..6].iter().map(|b| format!("{b:02x}")).collect();
+        format!("{today}-{start}")
+    });
+    let places = if args.places.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        args.places.clone()
+    };
+    let item: Item = serde_json::from_value(json!({
+        "id": id, "kind": DENY, "target": target, "category": args.category,
+        "where": places, "added": today,
+    }))?;
+    item.check()?;
+    ensure!(
+        Entry::from_item(&item)?.is_some(),
+        "this version does not understand {target:?}"
+    );
+    Ok(item)
+}
+
+/// Writes `items` as the parts of a set in `out`, with `manifest` (not
+/// yet signed) completed by the parts, kinds and the fields of `declared`
+/// the items use. A `None`, or an id seen before, is left out.
 fn write_set(
-    pages: impl Iterator<Item = Page>,
+    items_in: impl Iterator<Item = Option<Item>>,
+    declared: BTreeMap<String, FieldSpec>,
     mut manifest: Map<String, Value>,
     out: &Path,
     part_ends: &[u64],
@@ -381,13 +559,12 @@ fn write_set(
         );
     }
     fs::create_dir_all(out).with_context(|| format!("making {}", out.display()))?;
-    let declared = page_fields();
     let (mut ids, mut kinds, mut used) = (HashSet::new(), BTreeSet::new(), BTreeSet::new());
     let mut files = Vec::new();
     let mut part: Option<(String, zstd::Encoder<'static, BufWriter<File>>, u64)> = None;
     let (mut items, mut left_out) = (0u64, 0u64);
-    for page in pages {
-        let Some(item) = page_item(&page).filter(|item| ids.insert(item.id.clone())) else {
+    for item in items_in {
+        let Some(item) = item.filter(|item| ids.insert(item.id.clone())) else {
             left_out += 1;
             continue;
         };
@@ -410,13 +587,12 @@ fn write_set(
     if let Some(open) = part {
         files.push(finish_part(out, open)?);
     }
-    ensure!(items > 0, "no page read as an item");
+    ensure!(items > 0, "no item to write");
     let fields: BTreeMap<_, _> = declared
         .into_iter()
         .filter(|(name, _)| used.contains(name))
         .collect();
     manifest.insert("kinds".into(), json!(kinds));
-    manifest.insert("order".into(), json!("weight"));
     manifest.insert("files".into(), json!(files));
     if !fields.is_empty() {
         manifest.insert("fields".into(), json!(fields));
@@ -450,6 +626,8 @@ pub struct Checked {
     pub publisher: PublicKey,
     pub parts: usize,
     pub items: u64,
+    /// A denylist's entries newer than this version understands.
+    pub newer: u64,
 }
 
 /// Signs the manifest in `dir` with `key`, after measuring each part again
@@ -502,6 +680,14 @@ pub fn sign_set(
     let manifest: Manifest = serde_json::from_value(value.clone())?;
     manifest.check()?;
     let checked = check_parts(dir, &manifest)?;
+    let missing = manifest.not_understood();
+    ensure!(
+        missing.is_empty() && checked.newer == 0,
+        "this version does not understand all of {} ({missing:?} required, {} entries); \
+         sign it with a newer one",
+        manifest.set,
+        checked.newer
+    );
     sign(&mut value, key)?;
     // What a node would read: a delegation that does not cover the set
     // now is refused here, before anything is written.
@@ -526,9 +712,10 @@ pub fn check_set(dir: &Path, trusted: Option<&PublicKey>, notes: &[Note]) -> Res
             manifest.set
         ),
     }
+    // A denylist is read whatever it requires: skipping it would fail open.
     let missing = manifest.not_understood();
     ensure!(
-        missing.is_empty(),
+        missing.is_empty() || manifest.is_denylist(),
         "{} requires {missing:?}, which this version does not read",
         manifest.set
     );
@@ -537,7 +724,7 @@ pub fn check_set(dir: &Path, trusted: Option<&PublicKey>, notes: &[Note]) -> Res
 
 fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
     let mut ids = HashSet::new();
-    let mut items = 0;
+    let (mut items, mut newer) = (0, 0);
     for part in &manifest.files {
         let path = dir.join(&part.path);
         let (bytes, sha256) = measure(&path)?;
@@ -558,6 +745,9 @@ fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
                 "{}: a personal item in a shared set",
                 at()
             );
+            if manifest.is_denylist() && !item.is_deleted() && Entry::from_item(&item)?.is_none() {
+                newer += 1;
+            }
             ensure!(ids.insert(item.id), "{}: an id seen before", at());
             count += 1;
         }
@@ -575,6 +765,7 @@ fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
         publisher: manifest.publisher,
         parts: manifest.files.len(),
         items,
+        newer,
     })
 }
 
@@ -653,7 +844,8 @@ mod tests {
         let Value::Object(manifest) = manifest else {
             unreachable!()
         };
-        write_set(pages.into_iter(), manifest, dir, &[2, 4], 3).unwrap()
+        let items = pages.iter().map(page_item);
+        write_set(items, page_fields(), manifest, dir, &[2, 4], 3).unwrap()
     }
 
     #[test]
@@ -805,6 +997,84 @@ mod tests {
             &root
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_denylist_is_written_signed_and_checked() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = |category: &str, target: Option<&str>, hash_of: Option<&str>| {
+            let args = DenyEntryArgs {
+                category: category.into(),
+                target: target.map(String::from),
+                hash_of: hash_of.map(String::from),
+                any_query: hash_of.is_some_and(|url| url.contains('?')),
+                places: Vec::new(),
+                id: None,
+            };
+            deny_entry(&args).map(|item| serde_json::to_string(&item).unwrap())
+        };
+        let csam = entry("csam", None, Some("http://www.example.org/x?id=1")).unwrap();
+        assert!(!csam.contains("example.org"), "{csam}");
+        assert!(
+            entry("csam", Some("url:https://example.org/x"), None).is_err(),
+            "a csam entry names its page by hash"
+        );
+        assert!(entry("spam", Some("site:Example.org"), None).is_err());
+        let lines = [
+            csam,
+            entry("copyright", Some("site:example.net"), None).unwrap(),
+            entry("malware", Some("prefix:https://example.com/files/"), None).unwrap(),
+        ];
+        let entries = temp.path().join("entries.jsonl");
+        fs::write(&entries, lines.join("\n")).unwrap();
+        let args = |out: &str, entries: &Path| DenylistArgs {
+            entries: entries.to_path_buf(),
+            name: "plumb/denylist".into(),
+            out: temp.path().join(out),
+            title: None,
+            license: Some("CC0-1.0".into()),
+            level: 3,
+        };
+        let written = denylist(&args("list", &entries)).unwrap();
+        assert_eq!((written.items, written.parts), (3, 1));
+        let key = SigningKey::from_bytes(&[5; 32]);
+        sign_set(&temp.path().join("list"), &key, None, None).unwrap();
+        let checked =
+            check_set(&temp.path().join("list"), Some(&PublicKey::of(&key)), &[]).unwrap();
+        assert_eq!((checked.items, checked.newer), (3, 0));
+        assert_eq!(
+            read_manifest(&temp.path().join("list")).unwrap()["kinds"],
+            json!(["deny"])
+        );
+
+        // Two entries with one id, or one this version can't read, never make a list.
+        let twice = temp.path().join("twice.jsonl");
+        fs::write(&twice, format!("{}\n{}", lines[1], lines[1])).unwrap();
+        assert!(denylist(&args("twice", &twice)).is_err());
+        let newer_line = lines[1].replace("site:example.net", "blob:sha256-00");
+        let newer = temp.path().join("newer.jsonl");
+        fs::write(&newer, format!("{}\n{newer_line}", lines[0])).unwrap();
+        assert!(denylist(&args("newer", &newer)).is_err());
+
+        // A list from a newer version is checked, and applied, all the same,
+        // but this version won't sign what it can't read.
+        let dir = temp.path().join("from-newer");
+        let items = [lines[0].as_str(), &newer_line]
+            .map(|line| Some(serde_json::from_str::<Item>(line).unwrap()));
+        let manifest = json!({"format": FORMAT, "set": "plumb/denylist",
+                              "generation": "2026-10-12T04:00:00Z", "license": "CC0-1.0",
+                              "requires": ["deny-blob/1"]});
+        let Value::Object(manifest) = manifest else {
+            unreachable!()
+        };
+        write_set(items.into_iter(), BTreeMap::new(), manifest, &dir, &[], 3).unwrap();
+        assert!(sign_set(&dir, &key, None, None).is_err());
+        let mut value = read_manifest(&dir).unwrap();
+        value["publisher"] = json!(PublicKey::of(&key).to_string());
+        sign(&mut value, &key).unwrap();
+        write_manifest(&dir, &value).unwrap();
+        let checked = check_set(&dir, None, &[]).unwrap();
+        assert_eq!((checked.items, checked.newer), (2, 1));
     }
 
     #[test]

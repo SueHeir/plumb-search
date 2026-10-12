@@ -43,8 +43,8 @@ pub struct Item {
     pub id: String,
     /// What the record is (`site`, `article`, `package`), not what the
     /// thing is. Picks a kind handler when one is installed; the core never
-    /// compares it to a particular value. Needed for things; an extension
-    /// takes its target's.
+    /// compares it to a particular value but `deny` ([`crate::deny`]).
+    /// Needed for things; an extension takes its target's.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
     /// The item this one adds to. Set for extensions, never for things.
