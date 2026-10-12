@@ -6,7 +6,9 @@
 //! Each page becomes one item ([`page_item`]) whose extra fields a page
 //! set's manifest declares with [`page_fields`]. What a page is about
 //! ([`Page::site`]) becomes an `about` edge to that site, and the item's
-//! own `site` is the site its URL is on, as a node works it out.
+//! own `site` is the site its URL is on, as a node works it out. The item
+//! gives the same page back ([`page_of_item`]), so a node can index a page
+//! set it took as items as it indexes the set's articles file.
 //!
 //! Ids follow the format's rule of the source's own stable id: the
 //! Wikidata item of a Wikidata or films page, `<registry>:<name>` of a
@@ -17,6 +19,11 @@
 
 use std::collections::BTreeMap;
 
+use plumb_core::article::{SearchContent, SearchPassage, SearchSymbol, SEARCH_VERSION};
+use plumb_core::facts::Fact;
+use plumb_core::packages::PackageInfo;
+use plumb_core::papers::{ArxivVerification, PaperCorrection, PaperCountKind, PaperMetadata};
+use plumb_core::profiles::Profile;
 use plumb_format::item::{MAX_ITEM_BYTES, MAX_TEXT_CHARS};
 use plumb_format::refs::{is_domain, is_namespace};
 use plumb_format::urls::canonical_url;
@@ -73,6 +80,13 @@ fn site_of_url(url: &str) -> Option<String> {
 /// `page` as an item, or `None` when its URL has no canonical form or the
 /// item fails the format's checks even without its optional fields (an id
 /// longer than the format allows).
+///
+/// [`page_of_item`] gives the page back from it. Where the item's own
+/// members say something differently from the page (a URL not in its
+/// canonical form, a description with a space at its end), the `page`
+/// field says it as the page has it, so the two are the same page member
+/// for member unless the page's text is not text the format allows, or
+/// the item is over the size cap.
 pub fn page_item(page: &Page) -> Option<Item> {
     let mut item = page_stub(page)?;
     item.title = clean(&page.title);
@@ -88,13 +102,7 @@ pub fn page_item(page: &Page) -> Option<Item> {
         .filter(|lang| is_language(lang))
         .map(str::to_string);
     item.weight = Some(page.views as f64);
-    for name in page.aliases.iter().chain(&page.names) {
-        if let Some(name) = clean(name) {
-            if item.title.as_ref() != Some(&name) && !item.names.contains(&name) {
-                item.names.push(name);
-            }
-        }
-    }
+    item.names = names_of(&page.aliases, item.title.iter());
     if let Some(site) = page.site.as_deref() {
         if let Ok(to) = format!("site:{site}").parse() {
             item.edges.push(Edge {
@@ -107,6 +115,21 @@ pub fn page_item(page: &Page) -> Option<Item> {
         }
     }
     add_fields(page, &mut item);
+    // Taking the URL as given can change the language a set implies, so
+    // a second look can find more to keep.
+    for _ in 0..3 {
+        let Some(back) = page_of_item(&item, &page.set) else {
+            break;
+        };
+        let mut given = match item.fields.get("page") {
+            Some(Value::Object(given)) => given.clone(),
+            _ => Map::new(),
+        };
+        if !note_given(&mut given, page, &back) {
+            break;
+        }
+        item.fields.insert("page".into(), Value::Object(given));
+    }
     while too_big(&item) {
         let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) else {
             break;
@@ -114,6 +137,165 @@ pub fn page_item(page: &Page) -> Option<Item> {
         item.fields.remove(*field);
     }
     item.check().is_ok().then_some(item)
+}
+
+/// The page of the page set `set` that [`page_item`] made `item` from,
+/// `None` for an item without a URL.
+pub fn page_of_item(item: &Item, set: &str) -> Option<Page> {
+    let field = |name: &str| item.fields.get(name);
+    let mut page = Page {
+        paper: paper_of(item),
+        set: set.to_string(),
+        url: item.url.clone()?,
+        title: item.title.clone().unwrap_or_default(),
+        description: item.about.clone(),
+        site: about_site(item),
+        views: views_of(item.weight),
+        aliases: item.names.clone(),
+        item: item.ids.get("wd").cloned(),
+        profiles: objects(field("profiles"))
+            .filter_map(|profile| {
+                Some(Profile {
+                    service: member(profile, "service")?,
+                    id: member(profile, "id")?,
+                })
+            })
+            .collect(),
+        website: field("website").and_then(Value::as_str).map(str::to_string),
+        package: field("package")
+            .and_then(Value::as_object)
+            .and_then(package_of),
+        facts: objects(field("facts"))
+            .filter_map(|fact| {
+                Some(Fact {
+                    kind: serde_json::from_value(fact.get("kind")?.clone()).ok()?,
+                    value: member(fact, "value")?,
+                })
+            })
+            .collect(),
+        lead: item.text.clone(),
+        names: texts(field("other_names")),
+        sections: texts(field("sections")),
+        content_language: None,
+        search: search_of(item),
+        item_set: None,
+    };
+    let given = field("page").and_then(Value::as_object);
+    if let Some(given) = given {
+        take_given(&mut page, given);
+    }
+    if given.is_none_or(|given| !given.contains_key("content_language")) {
+        // The item's language, unless it is the one the set implies.
+        if item.lang.as_deref() != page.language() {
+            page.content_language = item.lang.clone();
+        }
+    }
+    Some(page)
+}
+
+/// The members `back` has otherwise than `page`, by their names in a page's
+/// JSON: what [`page_of_item`] did not give back of a page.
+pub fn differing_members(page: &Page, back: &Page) -> Vec<String> {
+    let (Ok(Value::Object(page)), Ok(Value::Object(back))) =
+        (serde_json::to_value(page), serde_json::to_value(back))
+    else {
+        return vec!["page".into()];
+    };
+    let mut names: Vec<String> = page
+        .iter()
+        .filter(|(name, value)| back.get(*name) != Some(value))
+        .map(|(name, _)| name.clone())
+        .chain(
+            back.keys()
+                .filter(|name| !page.contains_key(*name))
+                .cloned(),
+        )
+        .collect();
+    names.sort();
+    names
+}
+
+/// Notes in `given` each member of `page` that `back`, the page its item
+/// gives, has otherwise, as `page` has it. False when there was nothing
+/// new to note.
+fn note_given(given: &mut Map<String, Value>, page: &Page, back: &Page) -> bool {
+    let before = given.clone();
+    let mut text = |name: &str, page: Option<&String>, back: Option<&String>| {
+        if let Some(text) = page.map(|text| normalize_text(text)) {
+            if back != Some(&text) {
+                given.insert(name.into(), Value::from(text));
+            }
+        }
+    };
+    text("url", Some(&page.url), Some(&back.url));
+    text("title", Some(&page.title), Some(&back.title));
+    text(
+        "description",
+        page.description.as_ref(),
+        back.description.as_ref(),
+    );
+    text("site", page.site.as_ref(), back.site.as_ref());
+    text("item", page.item.as_ref(), back.item.as_ref());
+    text("website", page.website.as_ref(), back.website.as_ref());
+    text("lead", page.lead.as_ref(), back.lead.as_ref());
+    text(
+        "content_language",
+        page.content_language.as_ref(),
+        back.content_language.as_ref(),
+    );
+    for (name, page, back) in [
+        ("aliases", &page.aliases, &back.aliases),
+        ("names", &page.names, &back.names),
+        ("sections", &page.sections, &back.sections),
+    ] {
+        let list: Vec<String> = page.iter().map(|text| normalize_text(text)).collect();
+        if list != *back {
+            given.insert(name.into(), json!(list));
+        }
+    }
+    *given != before
+}
+
+/// Sets each member of `page` that `given` says as the page set has it.
+fn take_given(page: &mut Page, given: &Map<String, Value>) {
+    for (name, value) in given {
+        let text = value.as_str().map(str::to_string);
+        match name.as_str() {
+            "url" => page.url = text.unwrap_or_else(|| page.url.clone()),
+            "title" => page.title = text.unwrap_or_else(|| page.title.clone()),
+            "description" => page.description = text,
+            "site" => page.site = text,
+            "item" => page.item = text,
+            "website" => page.website = text,
+            "lead" => page.lead = text,
+            "content_language" => page.content_language = text,
+            "aliases" => page.aliases = texts(Some(value)),
+            "names" => page.names = texts(Some(value)),
+            "sections" => page.sections = texts(Some(value)),
+            _ => {}
+        }
+    }
+}
+
+/// The site an item is about: its `about` edge to a `site:` ref.
+fn about_site(item: &Item) -> Option<String> {
+    item.edges.iter().find_map(|edge| match &edge.to {
+        Ref::Site(domain) if edge.rel == "about" => Some(domain.clone()),
+        _ => None,
+    })
+}
+
+/// `names` cleaned, each once, leaving out those in `taken`.
+fn names_of<'a>(names: &[String], taken: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let mut seen: Vec<String> = taken.cloned().collect();
+    let mut kept = Vec::new();
+    for name in names.iter().filter_map(|name| clean(name)) {
+        if !seen.contains(&name) {
+            seen.push(name.clone());
+            kept.push(name);
+        }
+    }
+    kept
 }
 
 /// What a layer finds `page` by ([`crate::merge::Layers::on`]): the id,
@@ -156,11 +338,13 @@ pub fn page_stub(page: &Page) -> Option<Item> {
     Some(item)
 }
 
-/// What the `fields` of a page set's items are, for its manifest.
+/// What the `fields` of a page set's items are, for its manifest. `page`
+/// holds what [`page_item`] says of a page as the page set has it.
 pub fn page_fields() -> BTreeMap<String, FieldSpec> {
     let object_list = json!({"type": "object", "list": true, "roles": ["show"]});
     serde_json::from_value(json!({
         "website": {"type": "url", "roles": ["show"]},
+        "other_names": {"type": "text", "list": true, "roles": ["search:name"]},
         "profiles": object_list,
         "facts": object_list,
         "package": {"type": "object", "roles": ["show"]},
@@ -169,6 +353,10 @@ pub fn page_fields() -> BTreeMap<String, FieldSpec> {
         "passages": {"type": "object", "list": true, "roles": ["search:body"]},
         "authors": {"type": "text", "list": true, "same_as": "wd:P50", "roles": ["search:about", "show"]},
         "venue": {"type": "text", "same_as": "wd:P1433", "roles": ["show"]},
+        "paper": {"type": "object", "roles": ["show"]},
+        "corrections": {"type": "object", "list": true},
+        "verified_arxiv": {"type": "object"},
+        "page": {"type": "object"},
     }))
     .expect("the page fields are well formed")
 }
@@ -200,6 +388,13 @@ fn add_fields(page: &Page, item: &mut Item) {
             fields.insert("website".into(), json!(website));
         }
     }
+    let taken = item.title.iter().chain(&item.names);
+    let other_names = names_of(&page.names, taken);
+    put_list(
+        fields,
+        "other_names",
+        other_names.into_iter().map(Value::from).collect(),
+    );
     let profiles: Vec<Value> = page
         .profiles
         .iter()
@@ -257,7 +452,7 @@ fn add_fields(page: &Page, item: &mut Item) {
             .iter()
             .map(|p| {
                 object(&[
-                    ("heading", Some(&p.heading)),
+                    ("heading", Some(&p.heading).filter(|h| !h.is_empty())),
                     ("text", Some(&p.text)),
                     ("anchor", p.anchor.as_ref()),
                 ])
@@ -266,29 +461,255 @@ fn add_fields(page: &Page, item: &mut Item) {
         put_list(fields, "passages", passages);
     }
     if let Some(paper) = &page.paper {
-        let authors: Vec<Value> = paper
-            .authors
-            .iter()
-            .filter_map(|a| clean(a))
-            .map(Value::from)
-            .collect();
-        put_list(fields, "authors", authors);
-        if let Some(venue) = paper.venue.as_deref().and_then(clean) {
-            fields.insert("venue".into(), json!(venue));
-        }
+        add_paper(paper, fields);
         item.published = paper.publication_date.clone().filter(|date| is_date(date));
     }
 }
 
-/// An object of the members that have a value, each as text.
+/// A paper's authors and venue as the fields search and show them, and
+/// the rest of what its page set says of it in `paper`, `corrections` and
+/// `verified_arxiv`.
+fn add_paper(paper: &PaperMetadata, fields: &mut BTreeMap<String, Value>) {
+    let authors: Vec<String> = paper.authors.iter().filter_map(|a| clean(a)).collect();
+    put_list(
+        fields,
+        "authors",
+        authors.iter().map(|a| json!(a)).collect(),
+    );
+    let venue = paper.venue.as_deref().and_then(clean);
+    if let Some(venue) = &venue {
+        fields.insert("venue".into(), json!(venue));
+    }
+    let mut rest = Map::new();
+    if authors != paper.authors {
+        rest.insert("authors".into(), text_list(&paper.authors));
+    }
+    if venue != paper.venue {
+        put_text(&mut rest, "venue", paper.venue.as_ref());
+    }
+    for (name, value) in [
+        ("doi", &paper.doi),
+        ("arxiv_id", &paper.arxiv_id),
+        ("openalex_id", &paper.openalex_id),
+        ("publication_date", &paper.publication_date),
+        ("raw_publication_date", &paper.raw_publication_date),
+        ("preprint_date", &paper.preprint_date),
+        ("version_date", &paper.version_date),
+        ("preprint_version_date", &paper.preprint_version_date),
+    ] {
+        put_text(&mut rest, name, value.as_ref());
+    }
+    if let Some(year) = paper.publication_year {
+        rest.insert("publication_year".into(), json!(year));
+    }
+    put_text(
+        &mut rest,
+        "source",
+        Some(&paper.source).filter(|s| !s.is_empty()),
+    );
+    if paper.count_kind != PaperCountKind::default() {
+        if let Ok(kind) = serde_json::to_value(&paper.count_kind) {
+            rest.insert("count_kind".into(), kind);
+        }
+    }
+    if paper.count != 0 {
+        rest.insert("count".into(), json!(paper.count));
+    }
+    if !paper.alternate_urls.is_empty() {
+        rest.insert("alternate_urls".into(), text_list(&paper.alternate_urls));
+    }
+    fields.insert("paper".into(), Value::Object(rest));
+    let corrections: Vec<Value> = paper
+        .corrections
+        .iter()
+        .map(|c| {
+            let mut object = Map::new();
+            for (name, value) in [
+                ("reason", Some(&c.reason).filter(|s| !s.is_empty())),
+                ("source_url", Some(&c.source_url).filter(|s| !s.is_empty())),
+                ("previous_item", c.previous_item.as_ref()),
+                (
+                    "previous_title",
+                    Some(&c.previous_title).filter(|s| !s.is_empty()),
+                ),
+                ("previous_description", c.previous_description.as_ref()),
+                (
+                    "previous_publication_date",
+                    c.previous_publication_date.as_ref(),
+                ),
+                (
+                    "previous_raw_publication_date",
+                    c.previous_raw_publication_date.as_ref(),
+                ),
+            ] {
+                put_text(&mut object, name, value);
+            }
+            if !c.previous_authors.is_empty() {
+                object.insert("previous_authors".into(), text_list(&c.previous_authors));
+            }
+            if let Some(year) = c.previous_publication_year {
+                object.insert("previous_publication_year".into(), json!(year));
+            }
+            Value::Object(object)
+        })
+        .collect();
+    if !corrections.is_empty() {
+        fields.insert("corrections".into(), Value::Array(corrections));
+    }
+    if let Some(verified) = &paper.verified_arxiv {
+        let mut object = Map::new();
+        put_text(&mut object, "id", Some(&verified.id));
+        put_text(&mut object, "title", Some(&verified.title));
+        object.insert("authors".into(), text_list(&verified.authors));
+        put_text(&mut object, "submitted", Some(&verified.submitted));
+        put_text(&mut object, "updated", verified.updated.as_ref());
+        fields.insert("verified_arxiv".into(), Value::Object(object));
+    }
+}
+
+/// The paper [`add_paper`] wrote into `item`'s fields.
+fn paper_of(item: &Item) -> Option<PaperMetadata> {
+    let paper = item.fields.get("paper")?.as_object()?;
+    let text = |name: &str| member(paper, name);
+    let year = |object: &Map<String, Value>, name: &str| {
+        object
+            .get(name)
+            .and_then(Value::as_i64)
+            .and_then(|year| i32::try_from(year).ok())
+    };
+    Some(PaperMetadata {
+        verified_arxiv: item
+            .fields
+            .get("verified_arxiv")
+            .and_then(Value::as_object)
+            .and_then(|verified| {
+                Some(ArxivVerification {
+                    id: member(verified, "id")?,
+                    title: member(verified, "title")?,
+                    authors: texts(verified.get("authors")),
+                    submitted: member(verified, "submitted")?,
+                    updated: member(verified, "updated"),
+                })
+            }),
+        doi: text("doi"),
+        arxiv_id: text("arxiv_id"),
+        openalex_id: text("openalex_id"),
+        authors: texts(paper.get("authors").or(item.fields.get("authors"))),
+        publication_date: text("publication_date"),
+        raw_publication_date: text("raw_publication_date"),
+        publication_year: year(paper, "publication_year"),
+        preprint_date: text("preprint_date"),
+        version_date: text("version_date"),
+        preprint_version_date: text("preprint_version_date"),
+        venue: text("venue").or_else(|| {
+            item.fields
+                .get("venue")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
+        source: text("source").unwrap_or_default(),
+        count_kind: paper
+            .get("count_kind")
+            .and_then(|kind| serde_json::from_value(kind.clone()).ok())
+            .unwrap_or_default(),
+        count: paper.get("count").and_then(Value::as_u64).unwrap_or(0),
+        alternate_urls: texts(paper.get("alternate_urls")),
+        corrections: objects(item.fields.get("corrections"))
+            .map(|c| PaperCorrection {
+                reason: member(c, "reason").unwrap_or_default(),
+                source_url: member(c, "source_url").unwrap_or_default(),
+                previous_item: member(c, "previous_item"),
+                previous_title: member(c, "previous_title").unwrap_or_default(),
+                previous_description: member(c, "previous_description"),
+                previous_authors: texts(c.get("previous_authors")),
+                previous_publication_date: member(c, "previous_publication_date"),
+                previous_raw_publication_date: member(c, "previous_raw_publication_date"),
+                previous_publication_year: year(c, "previous_publication_year"),
+            })
+            .collect(),
+    })
+}
+
+fn package_of(package: &Map<String, Value>) -> Option<PackageInfo> {
+    Some(PackageInfo {
+        registry: member(package, "registry")?,
+        name: member(package, "name")?,
+        version: member(package, "version"),
+        released: member(package, "released"),
+        license: member(package, "license"),
+        docs: member(package, "docs"),
+        repo: member(package, "repo"),
+        homepage: member(package, "homepage"),
+    })
+}
+
+fn search_of(item: &Item) -> Option<SearchContent> {
+    let symbols: Vec<SearchSymbol> = objects(item.fields.get("symbols"))
+        .filter_map(|symbol| {
+            Some(SearchSymbol {
+                identifier: member(symbol, "identifier")?,
+                anchor: member(symbol, "anchor"),
+            })
+        })
+        .collect();
+    let passages: Vec<SearchPassage> = objects(item.fields.get("passages"))
+        .filter_map(|passage| {
+            Some(SearchPassage {
+                heading: member(passage, "heading").unwrap_or_default(),
+                text: member(passage, "text")?,
+                anchor: member(passage, "anchor"),
+            })
+        })
+        .collect();
+    (!symbols.is_empty() || !passages.is_empty()).then_some(SearchContent {
+        version: SEARCH_VERSION,
+        symbols,
+        passages,
+    })
+}
+
+/// An object of the members that have a value, each as text the format
+/// allows, but otherwise as it is: empty text stays.
 fn object(members: &[(&str, Option<&String>)]) -> Value {
     let mut map = Map::new();
     for (name, value) in members {
-        if let Some(value) = value.and_then(|v| clean(v)) {
-            map.insert(name.to_string(), Value::from(value));
-        }
+        put_text(&mut map, name, *value);
     }
     Value::Object(map)
+}
+
+fn put_text(map: &mut Map<String, Value>, name: &str, value: Option<&String>) {
+    if let Some(value) = value {
+        map.insert(name.to_string(), Value::from(normalize_text(value)));
+    }
+}
+
+fn text_list(texts: &[String]) -> Value {
+    texts.iter().map(|text| normalize_text(text)).collect()
+}
+
+/// The objects of a list field.
+fn objects(value: Option<&Value>) -> impl Iterator<Item = &Map<String, Value>> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+}
+
+/// The texts of a list.
+fn texts(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn member(object: &Map<String, Value>, name: &str) -> Option<String> {
+    object.get(name).and_then(Value::as_str).map(str::to_string)
 }
 
 fn put_list(fields: &mut BTreeMap<String, Value>, name: &str, list: Vec<Value>) {
@@ -425,10 +846,7 @@ pub fn item_page(merged: &Merged, view: &SetView) -> Option<Page> {
         .or_else(|| item.about.as_deref().and_then(clean))
         .or_else(|| item.text.as_deref().and_then(clean))
         .map(|line| plumb_core::truncate_chars(&line, MAX_PAGE_ABOUT_CHARS));
-    let site = item.edges.iter().find_map(|edge| match &edge.to {
-        Ref::Site(domain) if edge.rel == "about" => Some(domain.clone()),
-        _ => None,
-    });
+    let site = about_site(item);
     let (mut aliases, mut names) = (Vec::new(), Vec::new());
     for (n, name) in item.names.iter().enumerate() {
         if *name == title {
@@ -634,7 +1052,8 @@ mod tests {
         assert_eq!(item.id, "https://en.wikipedia.org/wiki/U.S._Bancorp");
         assert_eq!(item.kind, "article");
         assert_eq!(item.site.as_deref(), Some("wikipedia.org"));
-        assert_eq!(item.names, ["US Bank", "U.S. Bank"]);
+        assert_eq!(item.names, ["US Bank"]);
+        assert_eq!(item.fields["other_names"], json!(["U.S. Bank"]));
         assert_eq!(item.ids["wd"], "Q739637");
         assert_eq!(item.lang.as_deref(), Some("en"));
         assert_eq!(item.edges[0].to.to_string(), "site:usbank.com");
@@ -649,6 +1068,159 @@ mod tests {
         assert_eq!(
             item.fields["facts"],
             json!([{"kind": "founded", "value": "1863"}])
+        );
+    }
+
+    /// A page of each page set, with everything its set can say of it.
+    fn pages_of_every_set() -> Vec<Page> {
+        let search = json!({"version": 1,
+            "symbols": [{"identifier": "str.split", "anchor": "str.split"}, {"identifier": "len"}],
+            "passages": [{"heading": "Methods", "text": "Return a list of the words.", "anchor": "m"},
+                         {"text": "No heading here."}]});
+        [
+            json!({"set": "wikipedia-en", "url": "https://en.wikipedia.org/wiki/YouTube_Music",
+                "title": "YouTube Music", "description": "Music streaming service",
+                "site": "youtube.com", "views": 81234, "aliases": ["YT Music", "Youtube music"],
+                "names": ["Google Play Music"], "item": "Q28404534",
+                "profiles": [{"service": "x", "id": "youtubemusic"}],
+                "website": "https://music.youtube.com/",
+                "facts": [{"kind": "founded", "value": "2015-11-12"},
+                          {"kind": "owner", "value": "Google"}],
+                "lead": "YouTube Music is a music streaming service."}),
+            json!({"set": "wikipedia-de", "url": "https://de.wikipedia.org/wiki/K%C3%B6ln",
+                "title": "Köln", "views": 9, "content_language": "de"}),
+            json!({"set": "github", "url": "https://github.com/rust-lang/rust",
+                "title": "rust-lang/rust", "description": "Empowering everyone",
+                "site": "rust-lang.org", "views": 100000, "aliases": ["rust"]}),
+            json!({"set": "stackoverflow", "url": "https://stackoverflow.com/questions/11227809",
+                "title": "Why is processing a sorted array faster?", "description": "java c++",
+                "views": 27000, "aliases": ["Branch prediction"], "content_language": "en"}),
+            json!({"set": "stackexchange", "url": "https://diy.stackexchange.com/questions/12345",
+                "title": "How do I fix a leaky tap?", "views": 40}),
+            json!({"set": "books", "url": "https://openlibrary.org/works/OL45804W",
+                "title": "Fantastic Mr Fox", "description": "Roald Dahl", "views": 300,
+                "content_language": "en"}),
+            json!({"set": "podcasts", "url": "https://podcastindex.org/podcast/920666",
+                "title": "Podcasting 2.0", "site": "podcasting2.org", "views": 5,
+                "profiles": [{"service": "youtube-handle", "id": "podcasting20"}]}),
+            json!({"set": "papers",
+                "url": "https://doi.org/10.1002/(SICI)1097-4636(199706)35:4<473::AID-JBM7>3.0.CO;2-B",
+                "title": "Calcium phosphate cements", "description": "Journal of Biomedical Materials Research",
+                "views": 312, "aliases": ["CPC review"],
+                "website": "https://arxiv.org/abs/2001.00001",
+                "paper": {"doi": "10.1002/(SICI)1097-4636(199706)35:4<473::AID-JBM7>3.0.CO;2-B",
+                    "arxiv_id": "2001.00001", "openalex_id": "W2001",
+                    "authors": ["Ada Lovelace", " Charles Babbage "],
+                    "publication_date": "1997-06-01", "raw_publication_date": "June 1997",
+                    "publication_year": 1997, "preprint_date": "2020-01-01",
+                    "version_date": "2020-02-01", "preprint_version_date": "2020-02-01",
+                    "venue": "J. Biomed. Mater. Res.", "source": "openalex",
+                    "count_kind": "citations", "count": 312,
+                    "alternate_urls": ["https://example.org/cpc.pdf"],
+                    "verified_arxiv": {"id": "2001.00001", "title": "Calcium phosphate cements",
+                        "authors": ["Ada Lovelace"], "submitted": "2020-01-01", "updated": null},
+                    "corrections": [{"reason": "title", "source_url": "https://doi.org/x",
+                        "previous_title": "Calcium cements", "previous_authors": ["A. Lovelace"],
+                        "previous_publication_year": 1996}]},
+                "search": search.clone()}),
+            json!({"set": "papers", "url": "https://openalex.org/W99", "title": "An untitled work",
+                "views": 0, "paper": {}}),
+            json!({"set": "wikidata", "url": "https://www.wikidata.org/wiki/Q42",
+                "title": "Douglas Adams", "description": "English author", "site": "douglasadams.com",
+                "views": 140, "aliases": ["Douglas Noël Adams"], "item": "Q42",
+                "profiles": [{"service": "x", "id": "dna"}],
+                "facts": [{"kind": "born", "value": "1952-03-11"}]}),
+            json!({"set": "wiktionary", "url": "https://en.wiktionary.org/wiki/serendipity",
+                "title": "serendipity", "description": "An unsought, fortunate discovery", "views": 77}),
+            json!({"set": "packages", "url": "https://pypi.org/project/requests/",
+                "title": "requests", "description": "HTTP for Humans", "views": 1000,
+                "package": {"registry": "pypi", "name": "requests", "version": "2.32.3",
+                    "released": "2024-05-29", "license": "Apache-2.0",
+                    "docs": "https://requests.readthedocs.io", "repo": "https://github.com/psf/requests",
+                    "homepage": "https://requests.readthedocs.io/en/latest/"}}),
+            json!({"set": "music", "url": "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+                "title": "Bohemian Rhapsody", "description": "Queen", "views": 4000,
+                "profiles": [{"service": "spotify-track", "id": "7tFiyTwD0nx5a1eklYtX2J"}]}),
+            json!({"set": "films", "url": "https://en.wikipedia.org/wiki/Inception",
+                "title": "Inception", "description": "2010 film by Christopher Nolan",
+                "views": 90, "item": "Q25188", "aliases": ["Origen"]}),
+            json!({"set": "films", "url": "https://www.wikidata.org/wiki/Q999999",
+                "title": "Un film", "views": 3, "item": "Q999999", "content_language": "fr"}),
+            json!({"set": "docs",
+                "url": "https://docs.python.org/3/library/stdtypes.html#str.split",
+                "title": "str.split", "description": "Built-in Types", "views": 12,
+                "aliases": ["split"], "sections": ["Text Sequence Type", "String Methods"],
+                "search": search.clone(), "content_language": "en"}),
+            json!({"set": "reference", "url": "https://www.healthline.com/health/sleep",
+                "title": "Sleep", "views": 2, "search": search.clone()}),
+            json!({"set": "subpages", "url": "https://www.bbc.co.uk/sport/football",
+                "title": "Football", "description": "BBC Sport", "views": 1}),
+        ]
+        .into_iter()
+        .map(page)
+        .collect()
+    }
+
+    #[test]
+    fn every_page_set_page_comes_back_from_its_item() {
+        let manifest = manifest("mixed");
+        for page in pages_of_every_set() {
+            let item = page_item(&page).unwrap();
+            manifest.check_item(&item).unwrap();
+            assert_eq!(
+                page_of_item(&item, &page.set).as_ref(),
+                Some(&page),
+                "{}",
+                page.url
+            );
+            // Through the file, as a node reads it.
+            let line = serde_json::to_string(&item).unwrap();
+            let read: Item = serde_json::from_str(&line).unwrap();
+            assert_eq!(page_of_item(&read, &page.set), Some(page));
+        }
+    }
+
+    #[test]
+    fn what_an_items_members_say_otherwise_comes_back_as_the_page_had_it() {
+        let page = page(json!({
+            "set": "wikipedia-en", "url": "https://en.wikipedia.org/wiki/Paris",
+            "title": " Paris", "description": "Capital of France ", "views": 9,
+            "aliases": ["Paris", "City of Light", "City of Light", ""],
+            "names": ["City of Light", "Lutetia"], "website": "https://en.wikipedia.org/wiki/Paris",
+            "content_language": "en", "lead": "", "sections": [" Name "],
+        }));
+        let item = page_item(&page).unwrap();
+        manifest("wikipedia-en").check_item(&item).unwrap();
+        assert_eq!(item.title.as_deref(), Some("Paris"));
+        assert_eq!(item.names, ["City of Light"]);
+        assert_eq!(item.fields["other_names"], json!(["Lutetia"]));
+        assert_eq!(
+            item.fields["page"],
+            json!({"title": " Paris", "description": "Capital of France ",
+                   "aliases": ["Paris", "City of Light", "City of Light", ""],
+                   "names": ["City of Light", "Lutetia"], "lead": "",
+                   "website": "https://en.wikipedia.org/wiki/Paris",
+                   "content_language": "en", "sections": [" Name "]})
+        );
+        assert_eq!(page_of_item(&item, "wikipedia-en"), Some(page));
+
+        // A page with nothing to say otherwise has no `page` field.
+        let plain = pages_of_every_set().remove(0);
+        assert!(!page_item(&plain).unwrap().fields.contains_key("page"));
+
+        // Text the format does not allow comes back as it allows it.
+        let bell = Page {
+            description: Some("Rings\u{7}".into()),
+            ..plain.clone()
+        };
+        let back = page_of_item(&page_item(&bell).unwrap(), &bell.set).unwrap();
+        assert_eq!(back.description.as_deref(), Some("Rings "));
+        assert_eq!(
+            Page {
+                description: plain.description.clone(),
+                ..back
+            },
+            plain
         );
     }
 
@@ -951,8 +1523,8 @@ mod tests {
     }
 
     /// Every row of a real articles file reads as an item that passes the
-    /// format's checks. Set `PLUMB_SET_FILE` to an uncompressed articles
-    /// file and `PLUMB_SET_NAME` to its set.
+    /// format's checks and gives the same page back. Set `PLUMB_SET_FILE`
+    /// to an uncompressed articles file and `PLUMB_SET_NAME` to its set.
     #[test]
     #[ignore]
     fn a_real_set_file() {
@@ -961,7 +1533,8 @@ mod tests {
         let reader = std::io::BufReader::new(std::fs::File::open(path).unwrap());
         let manifest = manifest(&set);
         let (mut pages, mut items, mut ids) = (0, 0, std::collections::HashSet::new());
-        let mut skipped = Vec::new();
+        let (mut skipped, mut given) = (Vec::new(), 0);
+        let mut differ: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for article in plumb_core::article::read_articles(reader, usize::MAX).unwrap() {
             let Some(page) = Page::from_set(&set, article) else {
                 continue;
@@ -977,7 +1550,25 @@ mod tests {
                 println!("{}", serde_json::to_string(&item).unwrap());
             }
             items += 1;
+            if let Some(Value::Object(fields)) = item.fields.get("page") {
+                given += 1;
+                if given <= 5 {
+                    println!("given: {}", Value::Object(fields.clone()));
+                }
+            }
+            let back = page_of_item(&item, &set).unwrap();
+            for name in differing_members(&page, &back) {
+                differ.entry(name).or_default().push(page.url.clone());
+            }
         }
+        for (name, urls) in &differ {
+            println!(
+                "{name} differs on {} pages: {:?}",
+                urls.len(),
+                &urls[..urls.len().min(5)]
+            );
+        }
+        println!("{given} items say part of their page as given");
         println!("{pages} pages, {items} items, skipped {skipped:?}");
         assert!(items > 0);
     }

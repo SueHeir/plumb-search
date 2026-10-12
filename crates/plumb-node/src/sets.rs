@@ -29,7 +29,7 @@ use plumb_format::sign::sign;
 use plumb_format::sites::{read_suffix_list, Rule, SITE_RULE};
 use plumb_format::urls::{url_sha256, url_sha256_any_query};
 use plumb_format::{FieldSpec, Item, Manifest, Note, PublicKey, SiteRules, FORMAT};
-use plumb_index::items::{page_fields, page_item};
+use plumb_index::items::{differing_members, page_fields, page_item, page_of_item};
 use plumb_index::pages::Page;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -260,7 +260,7 @@ pub fn run(args: SetArgs) -> Result<()> {
             Ok(())
         }
         SetCommand::FromPages(args) => {
-            let written = from_pages(&args)?;
+            let (written, differ) = from_pages(&args)?;
             println!(
                 "{}: {} items in {} parts, {} pages left out; sign it with `plumb set sign`",
                 args.out.display(),
@@ -268,6 +268,12 @@ pub fn run(args: SetArgs) -> Result<()> {
                 written.parts,
                 written.left_out
             );
+            if differ.is_empty() {
+                println!("every page comes back the same from its item");
+            }
+            for (member, (pages, first)) in &differ {
+                println!("{member} comes back otherwise on {pages} pages, first {first}");
+            }
             Ok(())
         }
         SetCommand::Denylist(args) => {
@@ -440,7 +446,13 @@ pub struct Written {
     pub left_out: u64,
 }
 
-pub fn from_pages(args: &FromPagesArgs) -> Result<Written> {
+/// Pages whose item gives them back otherwise ([`page_of_item`]), by the
+/// member that differs: how many, and the first one's URL.
+pub type Differ = BTreeMap<String, (u64, String)>;
+
+/// Writes the page set in `args.pages` as a set of items, and says which
+/// pages do not come back the same from their items.
+pub fn from_pages(args: &FromPagesArgs) -> Result<(Written, Differ)> {
     let name = args
         .name
         .clone()
@@ -486,7 +498,19 @@ pub fn from_pages(args: &FromPagesArgs) -> Result<Written> {
         manifest.insert("weight".into(), json!({"counts": counts, "scale": "log"}));
     }
     manifest.insert("order".into(), json!("weight"));
-    let items = pages.map(|page| page_item(&page));
+    let mut differ = Differ::new();
+    let items = pages.map(|page| {
+        let item = page_item(&page)?;
+        let back = page_of_item(&item, &args.set);
+        let members = back.map_or_else(
+            || vec!["page".to_string()],
+            |back| differing_members(&page, &back),
+        );
+        for member in members {
+            differ.entry(member).or_insert((0, page.url.clone())).0 += 1;
+        }
+        Some(item)
+    });
     let written = write_set(
         items,
         page_fields(),
@@ -504,7 +528,7 @@ pub fn from_pages(args: &FromPagesArgs) -> Result<Written> {
             args.out.display()
         );
     }
-    Ok(written)
+    Ok((written, differ))
 }
 
 /// Writes the entries in `args.entries` as a denylist. Every line must be
