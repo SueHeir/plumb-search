@@ -881,7 +881,7 @@ fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
 }
 
 /// A file's size and hex SHA-256.
-fn measure(path: &Path) -> Result<(u64, String)> {
+pub(crate) fn measure(path: &Path) -> Result<(u64, String)> {
     let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 16];

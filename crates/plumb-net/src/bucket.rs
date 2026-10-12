@@ -71,6 +71,26 @@ pub trait BucketSource: Send + Sync + 'static {
         None
     }
 
+    /// The newest signed manifest this node holds of the set `set`, as
+    /// signed, for nodes asking over `/plumb/sets/1` (see [`crate::sets`]);
+    /// `None` when it holds none.
+    fn set_manifest(&self, set: &str) -> Option<String> {
+        let _ = set;
+        None
+    }
+
+    /// The file of the set part whose SHA-256 is `sha256` (lowercase hex),
+    /// when this node holds it.
+    fn set_part_file(&self, sha256: &str) -> Option<std::path::PathBuf> {
+        let _ = sha256;
+        None
+    }
+
+    /// The answer to a request over `/plumb/sets/1`.
+    fn sets_answer(&self, request: &crate::proto::SetsRequest) -> crate::proto::SetsResponse {
+        crate::sets::answer(self, request)
+    }
+
     /// Answers `peer` about a searcher's profile it shares with this node
     /// (see [`crate::proto::ProfileRequest`]). Refused unless the node keeps
     /// profiles.

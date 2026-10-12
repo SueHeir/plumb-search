@@ -120,6 +120,7 @@ mod places;
 mod round;
 pub mod schedule;
 mod shared_vectors;
+mod signed_sets;
 pub(crate) mod store;
 mod trim;
 mod worker;
@@ -222,6 +223,10 @@ pub struct NodeConfig {
     pub retry_wait: Duration,
     /// The longest wait between two tries of failed work.
     pub max_retry_wait: Duration,
+    /// The keys whose signed sets the node takes from the network (see
+    /// [`signed_sets`]): the project's key ([`signed_sets::PROJECT_KEY`])
+    /// by default.
+    pub set_publishers: Vec<plumb_format::PublicKey>,
     /// Join the Plumb network: share crawl work with other nodes and answer
     /// their searches (see [`network`]). Its `dir` is replaced with
     /// `DIR/net`. `None`, the default for now, keeps the node on its own.
@@ -345,6 +350,7 @@ impl NodeConfig {
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
+            set_publishers: vec![signed_sets::project_key()],
             network: None,
             private_search: false,
             share_popularity: false,
@@ -788,6 +794,7 @@ pub struct NodeHandle {
     pages: JoinHandle<()>,
     news: JoinHandle<()>,
     adult: JoinHandle<()>,
+    signed_sets: JoinHandle<()>,
 }
 
 impl NodeHandle {
@@ -841,6 +848,7 @@ impl NodeHandle {
             pages,
             news,
             adult,
+            signed_sets,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -873,6 +881,9 @@ impl NodeHandle {
         }
         if let Err(err) = adult.await {
             warn!("the adult blocklist failed: {err}");
+        }
+        if let Err(err) = signed_sets.await {
+            warn!("signed sets failed: {err}");
         }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
@@ -1046,6 +1057,9 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
             }),
         )
     };
+    let signed_sets = supervise(&inner, "signed sets", |inner| {
+        tokio::spawn(signed_sets::run(inner))
+    });
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -1060,6 +1074,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         pages,
         news,
         adult,
+        signed_sets,
     })
 }
 

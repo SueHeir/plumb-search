@@ -35,6 +35,9 @@
 //!   it on. Answered only for a profile linked with the asking node, so a
 //!   node never learns anything of a profile it was not given. The
 //!   connection is end to end encrypted, relayed or not.
+//! * `/plumb/sets/1`: the newest signed manifest of a set, and a set's
+//!   parts by their hash, from any node, since the asker checks both (see
+//!   [`crate::sets`]). Nodes before v0.3.0 neither ask nor answer.
 //! * `/plumb/leads/1`: the newest [`Lead`]s a node holds, for a node it
 //!   meets, so one that was away catches up (see [`crate::leads`]).
 //! * Gossip topic `plumb/leads/1`: every lead a node shares, as JSON,
@@ -56,6 +59,7 @@ pub const BUCKET_PROTOCOL: &str = "/plumb/bucket/1";
 pub const BATCH_PROTOCOL: &str = "/plumb/batch/1";
 pub const FILL_PROTOCOL: &str = "/plumb/fill/1";
 pub const PAGES_PROTOCOL: &str = "/plumb/pages/1";
+pub const SETS_PROTOCOL: &str = "/plumb/sets/1";
 pub const TRUST_PROTOCOL: &str = "/plumb/trust/1";
 pub const PROFILE_PROTOCOL: &str = "/plumb/profile/1";
 pub const REPORT_PROTOCOL: &str = "/plumb/report/1";
@@ -259,6 +263,32 @@ pub struct PagesResponse {
     pub layers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<crate::pages::SetQuality>,
+}
+
+/// Asks for a signed set or a piece of one (see [`crate::sets`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SetsRequest {
+    /// The newest signed manifest the node holds of the set `set`
+    /// (`plumb/site-rules`).
+    Manifest { set: String },
+    /// `len` bytes from `offset` of the part whose SHA-256 is `sha256`, in
+    /// lowercase hex. At most [`crate::sets::MAX_SET_CHUNK`] are sent.
+    Part {
+        sha256: String,
+        offset: u64,
+        len: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SetsResponse {
+    /// The manifest as signed, or `None` when the node holds no such set.
+    Manifest(Option<String>),
+    /// The part's whole size, 0 when the node holds no such part, and the
+    /// bytes from the offset asked for.
+    Part { size: u64, bytes: ByteBuf },
+    /// Turned away for now: it is serving others, or was asked too often.
+    Busy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

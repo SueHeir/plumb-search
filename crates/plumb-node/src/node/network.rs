@@ -174,6 +174,23 @@ impl BucketSource for ServedIndex {
         crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
     }
 
+    fn set_manifest(&self, set: &str) -> Option<String> {
+        super::signed_sets::held_manifest(&self.0.paths.data, set)
+    }
+
+    fn set_part_file(&self, sha256: &str) -> Option<PathBuf> {
+        super::signed_sets::held_part(&self.0.paths.data, sha256)
+    }
+
+    fn sets_answer(
+        &self,
+        request: &plumb_net::proto::SetsRequest,
+    ) -> plumb_net::proto::SetsResponse {
+        // Not while a set is being put in place.
+        let _mutation = self.0.storage.as_ref().map(|budget| budget.mutation());
+        plumb_net::sets::answer(self, request)
+    }
+
     fn profile(
         &self,
         peer: plumb_net::PeerId,
