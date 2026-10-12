@@ -1278,8 +1278,8 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     }
     let focused_domains: HashSet<&str> = focused.iter().map(|t| t.domain.as_str()).collect();
     // Sites crawled before nodes kept icons or key pages are due again for
-    // them, and so are sites read by an older crawler (see
-    // plumb_crawl::CRAWL_VERSION).
+    // them, and so are sites read by a much older crawler (see
+    // plumb_crawl::REREAD_BELOW).
     let icons = IconStore::new(&inner.paths.icons).with_budget(inner.storage.clone());
     let noted = icons.noted();
     let rest = select_targets_with(
@@ -1485,12 +1485,10 @@ fn first_fetch_catch_up(set: &RoundSites, now: u64, window: u64) -> Vec<&RoundSi
     due
 }
 
-/// Whether a site was last read by an older crawler than this one
-/// ([`plumb_crawl::CRAWL_VERSION`]), so it is due again to be read anew.
-// Never, while the version is still the first one.
-#[allow(clippy::absurd_extreme_comparisons)]
+/// Whether a site was last read by a crawler older than
+/// [`plumb_crawl::REREAD_BELOW`], so it is due again to be read anew.
 fn due_for_rereading(record: &RoundSite) -> bool {
-    last_crawl_answered(record) && record.crawl_version() < plumb_crawl::CRAWL_VERSION
+    last_crawl_answered(record) && record.crawl_version() < plumb_crawl::REREAD_BELOW
 }
 
 /// Counts the sites that look dead ([`crate::dead`]) and, with
@@ -2186,7 +2184,11 @@ mod tests {
         record.crawled_at = Some(10);
         record.crawl_version = plumb_crawl::CRAWL_VERSION;
         assert!(!due_for_rereading(&round(record.clone())));
-        if let Some(older) = plumb_crawl::CRAWL_VERSION.checked_sub(1) {
+        // What 0.2.0 crawlers stamp: not read again before its turn, so
+        // an upgrade from 0.2.0 does not read every site again at once.
+        record.crawl_version = 1;
+        assert!(!due_for_rereading(&round(record.clone())));
+        if let Some(older) = plumb_crawl::REREAD_BELOW.checked_sub(1) {
             record.crawl_version = older;
             assert!(due_for_rereading(&round(record.clone())));
             record.crawl_attempted_at = Some(20);

@@ -4,20 +4,23 @@
 
 ### Search
 
+- `after:`, `before:` and `sort:` act as paper filters only with a value they can use: a date (`2025` or `2025-03-01`) or an order (`newest`, `relevance`). Otherwise the word is searched as it is, as in 0.2.0: "before:sunset lyrics" and "after:party" are searches again, not errors.
 - When a homepage has no valid language declaration, a dominant non-Latin title/description script can exclude it from an incompatible language filter. Short and mixed text stays eligible. Declared languages and full typed site names are preserved. Shared scripts do not identify a language; the fallback takes effect on the next index build.
 
 ### Fixes
 
 - A node hands the memory its threads free back to the system every five minutes instead of only after background work: a crawl round runs for most of an hour, and searches, the network and embedding free memory meanwhile, which sat unused until the system swapped it out. On Linux the node also keeps glibc's allocator to four arenas instead of up to eight per CPU, each keeping what its own threads freed (half an hour after a restart, plumbsearch.org held about 3.5 GB in 75 arena heaps), and gives buffers of 4 MB or more back as soon as they are freed. Building an index of 2.8 million sites then peaks at 1.17 GB instead of 1.31 GB and takes no longer. `MALLOC_ARENA_MAX` and `MALLOC_MMAP_THRESHOLD_` still override these.
+- Searches no longer wait while the node saves its headlines. The save held the headlines while it waited for the storage ledger, which a records fold can hold for minutes, and every search reads the headlines. The news loop also saves off the threads that answer searches.
 
 ### Crawling
 
-- Homepage text is read in blocks. Cookie notices, browser warnings, obvious code and link menus are left out, and repeated blocks are kept once. Brief business details, mathematical prose and descriptions of policy or JavaScript products remain. Generic action labels are used only when no substantive text is available. Crawl version 2 makes nodes read older homepages again, best-known first. Inner-page fetch caches also become stale so the next fetch uses the changed text extraction.
+- Homepage text is read in blocks. Cookie notices, browser warnings, obvious code and link menus are left out, and repeated blocks are kept once. Brief business details, mathematical prose and descriptions of policy or JavaScript products remain. Generic action labels are used only when no substantive text is available. Crawl version 2 stamps the sites read this way, but does not make nodes read every older homepage again at once: a site read by 0.2.0's crawler gets the new text when it is due as usual, so a node upgraded from 0.2.0 does not read its whole web again, and a 0.2.0 crawler's newer crawl of a site does not make it due again on newer nodes. Inner-page fetch caches also become stale so the next fetch uses the changed text extraction.
 
 ### Running a node
 
 - A node that has to build its page index when it starts, as one upgraded from 0.2.0 does, keeps searching the index it already has meanwhile and builds the new one beside it. Wikipedia, Stack Overflow, docs and book results no longer go missing for the build (13 minutes on plumbsearch.org, longer on a desktop), or for half an hour more when it fails. While 0.2.0's index stands in, searches limited to a set, a site, docs, papers or a language other than English find no pages. It is removed once the new one is in use.
 - A node upgraded from 0.2.0 no longer takes in every other crawler's batch it holds again on its first start (up to a fifth of its storage limit, about 12 GB on plumbsearch.org): 0.2.0 took them in as they came. Only the batches of a crawler trusted since 0.2.0 last started are taken in again, whole, as 0.2.0 would have done.
+- A node takes a newer docs, subpages, reference or papers file from a trusted 0.2 node again, as 0.2.0 did, unless its own file holds entries no 0.2 file has (typed search terms, paper details, languages, symbols): 0.2 nodes note what those files hold for Wikipedia and Wikidata only, so a node trusting plumbsearch.org while it runs 0.2 took none of its newer files of those sets.
 
 ### For AI apps
 

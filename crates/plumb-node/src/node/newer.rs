@@ -81,6 +81,11 @@ pub(super) struct Mine {
     /// `--set-updates`), not only [`MAX_GROWTH_PERCENT`] of this one.
     pub may_grow: bool,
     pub quality: Option<SetQuality>,
+    /// Whether 0.2.0 nodes note this set's layers ([`LAYERED_BY_0_2_0`]).
+    /// When they don't, a trusted node that notes none may run 0.2.0: its
+    /// newer file is taken as 0.2.0 took it, unless this one holds entries
+    /// no 0.2.0 file had ([`known_to_0_2_0`]).
+    pub noted_by_0_2_0: bool,
 }
 
 /// The trusted nodes' files of `set`, from asking each connected one that
@@ -147,10 +152,10 @@ pub(super) fn newest<'a>(
             continue;
         }
         let holds_mine = mine.layers.is_empty()
-            || offer
-                .layers
-                .as_ref()
-                .is_some_and(|theirs| mine.layers.iter().all(|kind| theirs.contains(kind)));
+            || match &offer.layers {
+                Some(theirs) => mine.layers.iter().all(|kind| theirs.contains(kind)),
+                None => !mine.noted_by_0_2_0 && mine.layers.iter().all(|k| known_to_0_2_0(k)),
+            };
         if !holds_mine {
             why = "a trusted node's newer file lacks entries this one has";
             continue;
@@ -174,6 +179,17 @@ pub(super) fn newest<'a>(
         }
     }
     best.ok_or(why)
+}
+
+/// The sets of [`LAYERED_SETS`] whose layers 0.2.0 nodes note too; they
+/// note none for the others.
+pub(super) const LAYERED_BY_0_2_0: [&str; 2] = ["wikipedia-en", plumb_index::pages::WIKIDATA_SET];
+
+/// Whether a 0.2 node's set files could hold entries of `kind`: websites,
+/// leads, names, facts, profiles and (since 0.2.1) docs sections. The
+/// others came with typed enrichment after them.
+fn known_to_0_2_0(kind: &str) -> bool {
+    matches!(kind, "website" | "lead" | "name" | "section" | "profiles") || kind.starts_with("f-")
 }
 
 /// Sets whose files carry lines of entries besides their pages, which a
@@ -487,7 +503,44 @@ mod tests {
             layers: layers.iter().map(|s| s.to_string()).collect(),
             may_grow: false,
             quality: None,
+            noted_by_0_2_0: true,
         }
+    }
+
+    #[test]
+    fn a_0_2_0_nodes_file_of_a_set_it_notes_no_layers_of_is_taken_as_0_2_0_took_it() {
+        // 0.2.0 notes no layers of docs, subpages, reference or papers.
+        let docs = |layers: &[&str]| Mine {
+            noted_by_0_2_0: false,
+            ..mine(layers)
+        };
+        let unnoted = [offer(1_000, 5_000, None)];
+        let now = 10_000;
+        assert_eq!(
+            newest(&docs(&["lead", "name", "website"]), &unnoted, now)
+                .unwrap()
+                .modified,
+            5_000
+        );
+        // Entries no 0.2.0 file had still need a note that the newer
+        // file holds them.
+        assert!(newest(&docs(&["lead", "search"]), &unnoted, now).is_err());
+        assert!(newest(&docs(&["lead", "paper"]), &unnoted, now).is_err());
+        assert!(newest(
+            &docs(&["lead", "search"]),
+            &[offer(1_000, 5_000, Some(&["lead", "search"]))],
+            now
+        )
+        .is_ok());
+        // A noted file that lacks them is not taken either way.
+        assert!(newest(
+            &docs(&["lead", "name"]),
+            &[offer(1_000, 5_000, Some(&["lead"]))],
+            now
+        )
+        .is_err());
+        // Sets 0.2.0 notes layers of keep needing a note.
+        assert!(newest(&mine(&["lead", "name"]), &unnoted, now).is_err());
     }
 
     #[test]

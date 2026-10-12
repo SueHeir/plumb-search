@@ -91,31 +91,33 @@ impl PaperQuery {
         for token in tokens {
             if !token.contains(['"', '“', '”']) {
                 if let Some((key, value)) = token.split_once(':') {
+                    // A value that is not a date or an order leaves the
+                    // token a plain word, as it was before these operators
+                    // (v0.2.0): "before:sunset lyrics" is a search, not an
+                    // error.
                     match key.to_ascii_lowercase().as_str() {
                         "after" => {
-                            let bound = PaperBound::parse(value)?;
-                            if parsed.after.is_some_and(|old| old != bound) {
-                                bail!("conflicting paper after bounds; supply one bound");
+                            if let Ok(bound) = PaperBound::parse(value) {
+                                if parsed.after.is_some_and(|old| old != bound) {
+                                    bail!("conflicting paper after bounds; supply one bound");
+                                }
+                                parsed.after = Some(bound);
+                                parsed.constrained = true;
+                                continue;
                             }
-                            parsed.after = Some(bound);
-                            parsed.constrained = true;
-                            continue;
                         }
                         "before" => {
-                            let bound = PaperBound::parse(value)?;
-                            if parsed.before.is_some_and(|old| old != bound) {
-                                bail!("conflicting paper before bounds; supply one bound");
+                            if let Ok(bound) = PaperBound::parse(value) {
+                                if parsed.before.is_some_and(|old| old != bound) {
+                                    bail!("conflicting paper before bounds; supply one bound");
+                                }
+                                parsed.before = Some(bound);
+                                parsed.constrained = true;
+                                continue;
                             }
-                            parsed.before = Some(bound);
-                            parsed.constrained = true;
-                            continue;
                         }
-                        "sort" => {
-                            match value {
-                                "newest" => parsed.newest = true,
-                                "relevance" => parsed.newest = false,
-                                _ => bail!("paper sort must be newest or relevance"),
-                            }
+                        "sort" if matches!(value, "newest" | "relevance") => {
+                            parsed.newest = value == "newest";
                             parsed.constrained = true;
                             continue;
                         }
@@ -228,12 +230,34 @@ mod tests {
             PaperQuery::parse("transformers after:2025 before:2026-02-28 sort:newest").unwrap();
         assert_eq!(query.query, "transformers");
         assert!(query.newest);
-        assert!(PaperQuery::parse("x after:2026-02-29").is_err());
         assert!(PaperQuery::parse("x after:2026 before:2025").is_err());
-        assert!(PaperQuery::parse("x sort:latest").is_err());
         assert!(PaperQuery::parse("after:2025-01-01 after:2025").is_err());
         assert!(PaperQuery::with_options("x", Some("2025 x"), None, None).is_err());
+        assert!(PaperQuery::with_options("x", Some("2026-02-29"), None, None).is_err());
+        assert!(PaperQuery::with_options("x", None, None, Some("latest")).is_err());
         assert_eq!(PaperQuery::parse(&query.text()).unwrap(), query);
+    }
+    #[test]
+    fn operator_words_without_a_valid_value_stay_words() {
+        // v0.2.0 searched these as words; they must not become errors.
+        for text in [
+            "before:sunset lyrics",
+            "Sort:it out",
+            "after:party",
+            "x after:2026-02-29",
+            "x sort:latest",
+            "after: the storm",
+            "BEFORE:",
+        ] {
+            let query = PaperQuery::parse(text).unwrap();
+            assert!(!query.constrained, "{text}");
+            assert_eq!(query.query, text);
+        }
+        // A valid bound next to an invalid one still applies.
+        let query = PaperQuery::parse("after:party after:2025 transformers").unwrap();
+        assert!(query.constrained);
+        assert_eq!(query.query, "after:party transformers");
+        assert_eq!(query.after.unwrap().year, 2025);
     }
     #[test]
     fn paper_years_in_titles_are_not_constraints() {

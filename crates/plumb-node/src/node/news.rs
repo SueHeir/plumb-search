@@ -40,9 +40,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
         if inner.config.news_feeds > 0 && !paused {
             check_due(&inner, now).await;
         }
-        if let Err(err) = inner.news.save() {
-            warn!("cannot save the recent headlines: {err}");
-        }
+        save(&inner).await;
         let wait = inner
             .news
             .next_due()
@@ -58,8 +56,17 @@ pub(super) async fn run(inner: Arc<Inner>) {
             () = tokio::time::sleep(wait) => {}
         }
     }
-    if let Err(err) = inner.news.save() {
-        warn!("cannot save the recent headlines: {err}");
+    save(&inner).await;
+}
+
+/// Saves the headlines off the async threads: the write can wait minutes
+/// for the storage ledger while a records fold holds it.
+async fn save(inner: &Arc<Inner>) {
+    let saving = Arc::clone(inner);
+    match tokio::task::spawn_blocking(move || saving.news.save()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => warn!("cannot save the recent headlines: {err}"),
+        Err(err) => warn!("cannot save the recent headlines: {err}"),
     }
 }
 
