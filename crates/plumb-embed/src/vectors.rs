@@ -754,7 +754,6 @@ mod tests {
             .insert("old.example", [2; 32], &[127, 0, 0])
             .unwrap();
         initial.save(&path).unwrap();
-        let prior = std::fs::read(&path).unwrap();
         let old_bytes = file_bytes(&path).unwrap();
         let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
         let mut mapped = Vectors::load(&path).unwrap();
@@ -763,17 +762,16 @@ mod tests {
             + (0..mapped.len())
                 .map(|row| mapped.row(row).len() as u64)
                 .sum::<u64>();
+        // The limit is a target, as in 0.2.0: the vectors are written past
+        // it, and crawls pause.
         budget.set_limit(budget.status().used_bytes + allocation_for(size) - 1);
-        assert!(mapped
-            .write_file_with_budget(&path, Some(budget.clone()))
-            .is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), prior);
-        assert!(!path.with_extension("bin.part").exists());
-        assert_eq!(budget.status().reserved_bytes, 0);
-        budget.set_limit(u64::MAX);
         let (written, _) = mapped
             .write_file_with_budget(&path, Some(budget.clone()))
             .unwrap();
+        assert!(!path.with_extension("bin.part").exists());
+        assert!(budget.status().backpressure);
+        assert_eq!(budget.status().rejected_writes, 0);
+        budget.set_limit(u64::MAX);
         assert_eq!(mapped.get("old.example").unwrap().1, &[127, 0, 0]);
         assert_eq!(budget.status().reader_held_bytes, old_bytes);
         budget.recount(dir.path()).unwrap();

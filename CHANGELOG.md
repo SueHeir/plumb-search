@@ -16,6 +16,7 @@
 
 ### Running a node
 
+- A node that has to build its page index when it starts, as one upgraded from 0.2.0 does, keeps searching the index it already has meanwhile and builds the new one beside it. Wikipedia, Stack Overflow, docs and book results no longer go missing for the build (13 minutes on plumbsearch.org, longer on a desktop), or for half an hour more when it fails. While 0.2.0's index stands in, searches limited to a set, a site, docs, papers or a language other than English find no pages. It is removed once the new one is in use.
 - A node upgraded from 0.2.0 no longer takes in every other crawler's batch it holds again on its first start (up to a fifth of its storage limit, about 12 GB on plumbsearch.org): 0.2.0 took them in as they came. Only the batches of a crawler trusted since 0.2.0 last started are taken in again, whole, as 0.2.0 would have done.
 
 ## 0.2.1
