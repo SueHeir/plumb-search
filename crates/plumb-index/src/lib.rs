@@ -74,6 +74,7 @@ mod analysis;
 pub mod health;
 pub mod items;
 pub mod learned;
+pub mod merge;
 pub mod pages;
 pub mod places;
 mod query_evidence;
