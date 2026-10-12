@@ -77,9 +77,11 @@ pub(crate) fn set_dir(data: &Path, set: &str) -> Option<PathBuf> {
     is_set_name(set).then(|| data.join(DIR).join(set))
 }
 
-/// The manifest held of `set`, as signed.
+/// The manifest held of `set`, as signed; never a personal set's.
 pub(super) fn held_manifest(data: &Path, set: &str) -> Option<String> {
-    fs::read_to_string(set_dir(data, set)?.join(MANIFEST)).ok()
+    let text = fs::read_to_string(set_dir(data, set)?.join(MANIFEST)).ok()?;
+    let manifest: Manifest = serde_json::from_str(&text).ok()?;
+    manifest.may_share().then_some(text)
 }
 
 /// The held part whose SHA-256 is `sha256`, in whichever set holds it.
@@ -107,6 +109,9 @@ pub(super) fn held_part(data: &Path, sha256: &str) -> Option<PathBuf> {
             let Ok(manifest) = serde_json::from_str::<Manifest>(&text) else {
                 continue;
             };
+            if !manifest.may_share() {
+                continue;
+            }
             if let Some(part) = manifest.files.iter().find(|part| part.sha256 == sha256) {
                 let path = dir.path().join(&part.path);
                 if path.is_file() {
@@ -257,6 +262,7 @@ async fn look(inner: &Inner, net: &NetHandle, set: &str) -> Result<Looked> {
 fn vet(inner: &Inner, set: &str, text: &str) -> Result<(i64, PublicKey)> {
     let (manifest, signer) = Manifest::from_signed_json(text, &now())?;
     ensure!(manifest.set == set, "it is a manifest of {}", manifest.set);
+    ensure!(manifest.may_share(), "it is a personal set");
     let publisher = inner
         .config
         .set_publishers

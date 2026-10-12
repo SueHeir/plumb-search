@@ -153,7 +153,7 @@ pub struct TryPluginArgs {
     pub plugin: PathBuf,
     /// What to search for, keyword included or not, or the address of a
     /// page for a plugin with `pages`.
-    #[arg(required_unless_present_any = ["act", "annotate"], num_args = 1..)]
+    #[arg(required_unless_present_any = ["act", "annotate", "publish"], num_args = 1..)]
     pub query: Vec<String>,
     /// Press one of its buttons instead: the button's data, as JSON (the
     /// `data` of an action in its results), and print what it did.
@@ -164,6 +164,14 @@ pub struct TryPluginArgs {
     /// "site", "about"}`), and print its notes.
     #[arg(long, value_name = "FILE", conflicts_with = "act")]
     pub annotate: Option<PathBuf>,
+    /// Have it build its set instead (`plumb_publish`), and print the
+    /// items the node would keep, those it would refuse and the state the
+    /// plugin would save. Nothing is kept or signed.
+    #[arg(long, conflicts_with_all = ["act", "annotate"])]
+    pub publish: bool,
+    /// With --publish: what the plugin saved on its last run, as JSON.
+    #[arg(long, value_name = "JSON", requires = "publish")]
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Args)]

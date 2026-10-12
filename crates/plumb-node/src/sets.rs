@@ -41,7 +41,9 @@ pub const MANIFEST: &str = "manifest.json";
 
 /// How many items the parts hold, counted from the most weighted: the
 /// first 100,000, up to the first 1,000,000, then the rest.
-const PART_ENDS: &[u64] = &[100_000, 1_000_000];
+pub(crate) const PART_ENDS: &[u64] = &[100_000, 1_000_000];
+/// The zstd level of the parts the node writes itself.
+pub(crate) const LEVEL: i32 = 19;
 
 /// What a set-signing key file starts with.
 const KEY_PREFIX: &str = "ed25519-secret:";
@@ -650,7 +652,7 @@ pub fn deny_entry(args: &DenyEntryArgs) -> Result<Item> {
 /// Writes `items` as the parts of a set in `out`, with `manifest` (not
 /// yet signed) completed by the parts, kinds and the fields of `declared`
 /// the items use. A `None`, or an id seen before, is left out.
-fn write_set(
+pub(crate) fn write_set(
     items_in: impl Iterator<Item = Option<Item>>,
     declared: BTreeMap<String, FieldSpec>,
     mut manifest: Map<String, Value>,
@@ -848,6 +850,31 @@ pub fn read_items(dir: &Path) -> Result<(Manifest, Vec<Item>)> {
     Ok((manifest, items))
 }
 
+/// The items of the set in `dir` whose manifest is `manifest`, one at a
+/// time, as they are. Check the set first ([`check_set`]).
+pub(crate) fn items_in<'a>(
+    dir: &'a Path,
+    manifest: &'a Manifest,
+) -> impl Iterator<Item = Result<Item>> + 'a {
+    manifest.files.iter().flat_map(move |part| {
+        let path = dir.join(&part.path);
+        let lines = File::open(&path)
+            .and_then(zstd::Decoder::new)
+            .map(|decoder| BufReader::new(decoder).lines())
+            .with_context(|| format!("reading {}", path.display()));
+        let (lines, failed) = match lines {
+            Ok(lines) => (Some(lines), None),
+            Err(err) => (None, Some(Err(err))),
+        };
+        failed
+            .into_iter()
+            .chain(lines.into_iter().flatten().map(move |line| {
+                let line = line.with_context(|| format!("reading {}", path.display()))?;
+                Ok(serde_json::from_str::<Item>(&line)?)
+            }))
+    })
+}
+
 fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
     let mut ids = HashSet::new();
     let (mut items, mut newer) = (0, 0);
@@ -867,8 +894,8 @@ fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
             let item: Item = serde_json::from_str(&line).with_context(at)?;
             manifest.check_item(&item).with_context(at)?;
             ensure!(
-                item.may_share(),
-                "{}: a personal item in a shared set",
+                item.may_share() || !manifest.may_share(),
+                "{}: a personal item in a set that may be shared",
                 at()
             );
             if manifest.is_denylist() && !item.is_deleted() && Entry::from_item(&item)?.is_none() {

@@ -116,6 +116,7 @@ pub mod journal;
 mod network;
 pub(crate) mod newer;
 mod news;
+mod own_sets;
 mod pages;
 mod places;
 mod round;
@@ -800,6 +801,7 @@ pub struct NodeHandle {
     news: JoinHandle<()>,
     adult: JoinHandle<()>,
     signed_sets: JoinHandle<()>,
+    own_sets: JoinHandle<()>,
 }
 
 impl NodeHandle {
@@ -854,6 +856,7 @@ impl NodeHandle {
             news,
             adult,
             signed_sets,
+            own_sets,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -889,6 +892,9 @@ impl NodeHandle {
         }
         if let Err(err) = signed_sets.await {
             warn!("signed sets failed: {err}");
+        }
+        if let Err(err) = own_sets.await {
+            warn!("plugins' sets failed: {err}");
         }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
@@ -975,6 +981,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         "Plumb Search {} started",
         env!("CARGO_PKG_VERSION")
     ));
+    let plugins = load_plugins(&inner);
     let settings = WebSettings {
         home: inner.config.country.clone(),
         only_country: inner.config.only_country,
@@ -983,7 +990,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         read_pages_for_all: inner.config.mcp_read_pages,
         findings_for_all: inner.config.mcp_findings,
         page_reader: inner.config.page_reader.clone(),
-        plugins: load_plugins(&inner),
+        plugins: plugins.clone(),
     };
     let app = web::node_router_with(inner.clone(), inner.clone(), settings);
     let https = match inner.config.https_bind {
@@ -1070,6 +1077,9 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     let signed_sets = supervise(&inner, "signed sets", |inner| {
         tokio::spawn(signed_sets::run(inner))
     });
+    let own_sets = supervise(&inner, "plugins' sets", move |inner| {
+        tokio::spawn(own_sets::run(inner, plugins.clone()))
+    });
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -1085,6 +1095,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         news,
         adult,
         signed_sets,
+        own_sets,
     })
 }
 

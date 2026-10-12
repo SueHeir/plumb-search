@@ -5904,3 +5904,60 @@ async fn a_held_denylist_takes_results_off_and_its_csam_entries_stay_when_off() 
     assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
     node.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plugin_that_publishes_builds_its_set_soon_after_the_start() {
+    use plumb_format::PublicKey;
+
+    let dir = seeded_dir();
+    let folder = dir.path().join("plugins").join("news");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("plugin.json"),
+        serde_json::json!({
+            "name": "News",
+            "hosts": ["news.example"],
+            "publish": {"set": "stories", "kinds": ["story"], "every": "1d"},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let items = r#"[{"id":"1","kind":"story","title":"One","url":"https://news.example/1"}]"#;
+    let output = r#"{"state":{"seen":1}}"#;
+    let escape = |text: &str| -> String { text.bytes().map(|b| format!("\\{b:02x}")).collect() };
+    std::fs::write(
+        folder.join("plugin.wasm"),
+        format!(
+            r#"(module
+                (import "plumb" "emit" (func $emit (param i32 i32) (result i32)))
+                (import "plumb" "output" (func $output (param i32 i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 0) "{}")
+                (data (i32.const 1024) "{}")
+                (func (export "plumb_abi") (result i32) (i32.const 3))
+                (func (export "plumb_publish")
+                    (drop (call $emit (i32.const 0) (i32.const {})))
+                    (call $output (i32.const 1024) (i32.const {}))))"#,
+            escape(items),
+            escape(output),
+            items.len(),
+            output.len()
+        ),
+    )
+    .unwrap();
+    let node = start(test_config(dir.path())).await.unwrap();
+    let note = dir.path().join("own-sets/local/stories.run.json");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !note.exists() {
+        assert!(Instant::now() < deadline, "the plugin never ran");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    node.shutdown().await.unwrap();
+    let key = crate::sets::read_key(&dir.path().join("keys/publisher.key")).unwrap();
+    let set = crate::plugins::publish::own_set_dir(dir.path(), "local/stories");
+    let checked = crate::sets::check_set(&set, Some(&PublicKey::of(&key)), &[]).unwrap();
+    assert_eq!(checked.items, 1);
+    let note: serde_json::Value = serde_json::from_slice(&std::fs::read(&note).unwrap()).unwrap();
+    assert_eq!(note["state"], serde_json::json!({"seen": 1}));
+    assert_eq!(note["plugin"], "news");
+}

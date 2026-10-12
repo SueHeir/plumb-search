@@ -324,6 +324,13 @@ impl Manifest {
         self.kinds.len() == 1 && self.kinds[0] == DENY
     }
 
+    /// True when the set may be passed to another node: not labelled
+    /// `personal` as a whole. Only such a set may hold `personal` items,
+    /// and nodes neither send nor take it.
+    pub fn may_share(&self) -> bool {
+        !self.labels.iter().any(|label| label == "personal")
+    }
+
     /// True for a set of site rules ([`crate::sites`]): a set whose only
     /// kind is `site-rule`.
     pub fn is_site_rules(&self) -> bool {
