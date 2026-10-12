@@ -12,9 +12,10 @@
 //! - [`merge`] puts a thing and the extensions on it together. Who wins
 //!   goes by [`Trust`]: the owner's own layers, then the project's, then
 //!   each publisher the owner added, by its [`Weight`]. Extensions never
-//!   change a thing's id, kind, title, URL, site or license (rule 1). Each
-//!   other field comes from the highest ranked source that sets it (rule
-//!   3). Lists are joined in rank order, each entry once, up to a cap
+//!   change a thing's id, kind, title, URL, site or license (rule 1), and
+//!   its site is the one this node works out from its URL
+//!   ([`node_site`]), never the one its publisher wrote. Each other field
+//!   comes from the highest ranked source that sets it (rule 3). Lists are joined in rank order, each entry once, up to a cap
 //!   (rule 2). Vectors count only while they match the text they were made
 //!   from (rule 5). A tombstone takes away only its own entry (rule 6).
 //!   Names keep the weight of their source, which is how much their words
@@ -28,6 +29,8 @@ use plumb_format::value::unix_seconds;
 use plumb_format::{Edge, Item, Manifest, Ref, Vector};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::items::node_site;
 
 /// Names a merged item keeps; more are dropped.
 pub const MAX_NAMES: usize = 50;
@@ -144,15 +147,6 @@ pub struct Sourced<'a> {
     pub source: usize,
 }
 
-/// The site an item is on: worked out from its URL, or the one it names
-/// when it has none.
-fn site_of(item: &Item) -> Option<String> {
-    match &item.url {
-        Some(url) => plumb_core::registrable_domain(url),
-        None => item.site.clone(),
-    }
-}
-
 /// The things a node holds, found by each kind of ref.
 #[derive(Debug, Default)]
 pub struct Join {
@@ -181,7 +175,7 @@ impl Join {
             if let Some(key) = item.url.as_deref().and_then(match_key) {
                 join.urls.entry(key).or_default().push(n);
             }
-            if site_of(item).as_deref() == Some(item.id.as_str()) {
+            if node_site(item).as_deref() == Some(item.id.as_str()) {
                 join.sites.entry(item.id.clone()).or_default().push(n);
             }
             let source = &sources[thing.source];
@@ -344,6 +338,7 @@ pub fn merge(sources: &[Source], thing: Sourced<'_>, on: &[Sourced<'_>]) -> Opti
             weight: None,
             published: None,
             expires: None,
+            site: node_site(thing.item),
             ..thing.item.clone()
         },
         source: thing.source,
@@ -617,7 +612,7 @@ mod tests {
             merged.item.url.as_deref(),
             Some("https://cafe-uno.example/")
         );
-        assert_eq!(merged.item.site, None);
+        assert_eq!(merged.item.site.as_deref(), Some("cafe-uno.example"));
         assert_eq!(merged.item.license, None);
     }
 

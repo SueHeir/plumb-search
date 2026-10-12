@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use plumb_format::item::{MAX_ITEM_BYTES, MAX_TEXT_CHARS};
-use plumb_format::refs::is_namespace;
+use plumb_format::refs::{is_domain, is_namespace};
 use plumb_format::urls::canonical_url;
 use plumb_format::value::{is_date, is_language, normalize_text};
 use plumb_format::{Edge, FieldSpec, Item, Ref};
@@ -53,6 +53,21 @@ pub fn kind_of(page: &Page) -> &'static str {
     }
 }
 
+/// The site a node gives `item`: the site of the host its URL is on, by
+/// the site rules this node uses, whatever its publisher wrote. An item
+/// with no URL keeps the site it names. `None` when that is not a domain,
+/// as for an IP address.
+pub fn node_site(item: &Item) -> Option<String> {
+    match &item.url {
+        Some(url) => site_of_url(url),
+        None => item.site.clone().filter(|site| is_domain(site)),
+    }
+}
+
+fn site_of_url(url: &str) -> Option<String> {
+    plumb_core::registrable_domain(url).filter(|site| is_domain(site))
+}
+
 /// `page` as an item, or `None` when its URL has no canonical form or the
 /// item fails the format's checks even without its optional fields (an id
 /// longer than the format allows).
@@ -66,8 +81,7 @@ pub fn page_item(page: &Page) -> Option<Item> {
         id: id_of(page, wd, &url),
         kind: kind_of(page).to_string(),
         title: clean(&page.title),
-        site: plumb_core::registrable_domain(&url)
-            .filter(|site| plumb_format::refs::is_domain(site)),
+        site: site_of_url(&url),
         about: page.description.as_deref().and_then(clean),
         text: page
             .lead
@@ -411,6 +425,35 @@ mod tests {
         for url in ["ftp://example.com/x", long.as_str()] {
             let page = page(json!({"set": "docs", "url": url, "title": "x", "views": 0}));
             assert_eq!(page_item(&page), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn the_node_works_out_an_items_site_from_its_url() {
+        let item = |value: Value| -> Item { serde_json::from_value(value).unwrap() };
+        let cases = [
+            (
+                json!({"id": "a", "kind": "page", "url": "https://blog.example.org/x",
+                       "site": "elsewhere.example"}),
+                Some("example.org"),
+            ),
+            (
+                json!({"id": "b", "kind": "page", "url": "https://news.ycombinator.com/item"}),
+                Some("news.ycombinator.com"),
+            ),
+            (
+                json!({"id": "c", "kind": "page", "url": "http://192.0.2.1/"}),
+                None,
+            ),
+            (
+                json!({"id": "d", "kind": "note", "site": "python.org"}),
+                Some("python.org"),
+            ),
+            (json!({"id": "e", "kind": "note"}), None),
+        ];
+        for (value, site) in cases {
+            let item = item(value);
+            assert_eq!(node_site(&item).as_deref(), site, "{}", item.id);
         }
     }
 
