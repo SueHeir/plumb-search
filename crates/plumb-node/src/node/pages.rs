@@ -78,14 +78,22 @@ pub(super) fn coverage(inner: &Inner) -> super::PageCoverage {
                 .and_then(|f| serde_json::from_reader(f).ok());
             let file_quality = super::newer::stamp(&file)
                 .and_then(|(modified, size)| plumb_net::pages::read_quality(&file, modified, size));
+            // With no file, the project's item set of it, when held.
+            let held = (!file.is_file())
+                .then(|| HeldPageSet::find(&inner.paths.data, set, &inner.config.set_publishers))
+                .flatten();
             super::SetCoverage {
                 set: set.id.into(),
                 enabled: set.kept(&settings.page_sets, settings.storage_limit_mb) > 0,
                 stored_records: notes
                     .as_ref()
                     .map(|n| n.lines)
-                    .or_else(|| file_quality.as_ref().map(|q| q.records)),
-                transfer_complete: notes.as_ref().map(|n| n.complete),
+                    .or_else(|| file_quality.as_ref().map(|q| q.records))
+                    .or_else(|| held.as_ref().map(|held| held.items)),
+                transfer_complete: notes
+                    .as_ref()
+                    .map(|n| n.complete)
+                    .or_else(|| held.as_ref().map(|held| held.complete)),
                 file_quality,
             }
         })

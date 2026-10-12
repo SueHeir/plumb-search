@@ -2906,6 +2906,13 @@ async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     crate::sets::check_set(&taken, Some(&PublicKey::of(&publisher)), &[]).unwrap();
+    // The panel counts what the item set holds.
+    let coverage = super::pages::coverage(&node.inner);
+    let shown = coverage.sets.iter().find(|set| set.set == "books").unwrap();
+    assert_eq!(
+        (shown.stored_records, shown.transfer_complete),
+        (Some(3), Some(true))
+    );
 
     peer.shutdown().await;
     node.shutdown().await.unwrap();
