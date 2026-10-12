@@ -1,20 +1,20 @@
-//! A node that takes a signed site rules set works out sites by it, in
-//! place of the built-in lists. Its own test binary: the rules a process
-//! uses are set once for good.
+//! A node that takes a site rules set `plumb-tools set` wrote and signed
+//! works out sites by it, in place of the built-in lists. Its own test
+//! binary: the rules a process uses are set once for good.
 
 use std::path::Path;
 use std::process::Command;
 
 use plumb_node::site_rules::{in_use, read_site_rules, use_site_rules};
 
-fn plumb(args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_plumb"))
+fn tools(args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_plumb-tools"))
         .args(args)
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "plumb {args:?}: {}",
+        "plumb-tools {args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
@@ -37,7 +37,7 @@ fn a_node_works_out_sites_by_a_signed_site_rules_set() {
     let hosts = dir.path().join("hosts.txt");
     std::fs::write(&hosts, "https://x.github.io/a\nwww.bbc.co.uk\n").unwrap();
     let (set, key) = (dir.path().join("set"), dir.path().join("set.key"));
-    let printed = plumb(&[
+    let printed = tools(&[
         "set",
         "site-rules",
         "--psl",
@@ -51,10 +51,10 @@ fn a_node_works_out_sites_by_a_signed_site_rules_set() {
         printed.contains("x.github.io: x.github.io -> github.io"),
         "{printed}"
     );
-    let publisher = plumb(&["set", "new-key", "--out", path(&key)]);
-    plumb(&["set", "sign", "--key", path(&key), path(&set)]);
+    let publisher = tools(&["set", "new-key", "--out", path(&key)]);
+    tools(&["set", "sign", "--key", path(&key), path(&set)]);
 
-    let other = plumb(&[
+    let other = tools(&[
         "set",
         "new-key",
         "--out",

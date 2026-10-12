@@ -59,7 +59,7 @@ pub mod records;
 mod relations;
 mod run;
 mod search;
-mod sets;
+pub mod sets;
 pub mod site_rules;
 pub mod sources;
 
@@ -121,7 +121,6 @@ pub fn run(cli: Cli) -> Result<()> {
             args.act.as_deref(),
             args.annotate.as_deref(),
         ),
-        Command::Set(args) => sets::run(args),
         Command::Healthcheck(args) => healthcheck(&args),
     }
 }

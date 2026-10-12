@@ -2831,10 +2831,10 @@ async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
     else {
         unreachable!()
     };
-    let items = pages.iter().map(plumb_index::items::page_item);
-    let fields = plumb_index::items::page_fields();
-    crate::sets::write_set(items, fields, manifest, &books, &[1, 2], 3).unwrap();
-    crate::sets::sign_set(&books, &publisher, None, None).unwrap();
+    let items = pages.iter().map(plumb_tools::page_items::page_item);
+    let fields = plumb_tools::page_items::page_fields();
+    plumb_tools::set::write_set(items, fields, manifest, &books, &[1, 2], 3).unwrap();
+    plumb_tools::set::sign_set(&books, &publisher, None, None).unwrap();
 
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
@@ -2963,7 +2963,7 @@ async fn a_node_takes_signed_sets_from_any_node_but_only_from_trusted_publishers
     let psl = peer_dir.path().join("public_suffix_list.dat");
     std::fs::write(&psl, "com\norg\nuk\nco.uk\n").unwrap();
     let rules = super::signed_sets::set_dir(&held, "plumb/site-rules").unwrap();
-    crate::sets::site_rules(&crate::sets::SiteRulesArgs {
+    plumb_tools::set::site_rules(&plumb_tools::set::SiteRulesArgs {
         psl,
         name: "plumb/site-rules".into(),
         out: rules.clone(),
@@ -2973,9 +2973,9 @@ async fn a_node_takes_signed_sets_from_any_node_but_only_from_trusted_publishers
         level: 3,
     })
     .unwrap();
-    crate::sets::sign_set(&rules, &publisher, None, None).unwrap();
+    plumb_tools::set::sign_set(&rules, &publisher, None, None).unwrap();
     // A denylist signed by a key the node does not trust.
-    let entry = crate::sets::deny_entry(&crate::sets::DenyEntryArgs {
+    let entry = plumb_tools::set::deny_entry(&plumb_tools::set::DenyEntryArgs {
         category: "spam".into(),
         target: Some("site:spam.example".into()),
         hash_of: None,
@@ -2987,7 +2987,7 @@ async fn a_node_takes_signed_sets_from_any_node_but_only_from_trusted_publishers
     let entries = peer_dir.path().join("entries.jsonl");
     std::fs::write(&entries, serde_json::to_string(&entry).unwrap() + "\n").unwrap();
     let denylist = super::signed_sets::set_dir(&held, "plumb/denylist").unwrap();
-    crate::sets::denylist(&crate::sets::DenylistArgs {
+    plumb_tools::set::denylist(&plumb_tools::set::DenylistArgs {
         entries,
         name: "plumb/denylist".into(),
         out: denylist.clone(),
@@ -2996,7 +2996,7 @@ async fn a_node_takes_signed_sets_from_any_node_but_only_from_trusted_publishers
         level: 3,
     })
     .unwrap();
-    crate::sets::sign_set(&denylist, &stranger, None, None).unwrap();
+    plumb_tools::set::sign_set(&denylist, &stranger, None, None).unwrap();
 
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
@@ -5885,18 +5885,18 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
 fn hold_denylist(
     data: &Path,
     publisher: &ed25519_dalek::SigningKey,
-    entries: &[crate::sets::DenyEntryArgs],
+    entries: &[plumb_tools::set::DenyEntryArgs],
 ) {
     let work = tempfile::tempdir().unwrap();
     let mut text = String::new();
     for entry in entries {
-        text += &serde_json::to_string(&crate::sets::deny_entry(entry).unwrap()).unwrap();
+        text += &serde_json::to_string(&plumb_tools::set::deny_entry(entry).unwrap()).unwrap();
         text.push('\n');
     }
     let file = work.path().join("entries.jsonl");
     std::fs::write(&file, text).unwrap();
     let dir = super::signed_sets::set_dir(data, "plumb/denylist").unwrap();
-    crate::sets::denylist(&crate::sets::DenylistArgs {
+    plumb_tools::set::denylist(&plumb_tools::set::DenylistArgs {
         entries: file,
         name: "plumb/denylist".into(),
         out: dir.clone(),
@@ -5905,7 +5905,7 @@ fn hold_denylist(
         level: 3,
     })
     .unwrap();
-    crate::sets::sign_set(&dir, publisher, None, None).unwrap();
+    plumb_tools::set::sign_set(&dir, publisher, None, None).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5914,15 +5914,16 @@ async fn a_held_denylist_takes_results_off_and_its_csam_entries_stay_when_off() 
 
     let dir = seeded_dir();
     let publisher = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
-    let entry =
-        |category: &str, target: Option<&str>, hash_of: Option<&str>| crate::sets::DenyEntryArgs {
+    let entry = |category: &str, target: Option<&str>, hash_of: Option<&str>| {
+        plumb_tools::set::DenyEntryArgs {
             category: category.into(),
             target: target.map(str::to_string),
             hash_of: hash_of.map(str::to_string),
             any_query: false,
             places: Vec::new(),
             id: None,
-        };
+        }
+    };
     hold_denylist(
         dir.path(),
         &publisher,

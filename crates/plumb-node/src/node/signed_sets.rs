@@ -1,5 +1,5 @@
 //! Signed sets in a node: sets in the data format (`plumb-format`) that the
-//! node takes from the network, kept as `plumb set` writes them, in
+//! node takes from the network, kept as `plumb-tools set` writes them, in
 //! `DATA/sets/<scope>/<name>/`, and passed on over `/plumb/sets/1` (see
 //! [`plumb_net::sets`]).
 //!
@@ -7,9 +7,9 @@
 //! manifest of each set it takes ([`TAKEN_SETS`]). It fetches one that is
 //! signed for a publisher it trusts ([`NodeConfig::set_publishers`], the
 //! project's key by default) and is newer than its own, part by part, each
-//! by its hash, from whichever node holds it. It checks the whole set as
-//! `plumb set check` does, and only then puts it in place of the old one.
-//! So a set can come from any node, trusted or not.
+//! by its hash, from whichever node holds it. It checks the whole set
+//! ([`crate::sets::check_set`]), and only then puts it in place of the old
+//! one. So a set can come from any node, trusted or not.
 //!
 //! The denylist is put in use at start and as soon as a newer one is
 //! taken ([`super::denylist`]). The site rules are read at start
@@ -741,11 +741,11 @@ mod tests {
                 "title": format!("Book {n}"), "views": 10 - n,
             }))
             .unwrap();
-            plumb_index::items::page_item(&page)
+            plumb_tools::page_items::page_item(&page)
         });
-        let fields = plumb_index::items::page_fields();
-        crate::sets::write_set(items, fields, manifest, dir, &[1, 2], 3).unwrap();
-        crate::sets::sign_set(dir, key, None, None).unwrap();
+        let fields = plumb_tools::page_items::page_fields();
+        plumb_tools::set::write_set(items, fields, manifest, dir, &[1, 2], 3).unwrap();
+        plumb_tools::set::sign_set(dir, key, None, None).unwrap();
         fs::read_to_string(dir.join(MANIFEST)).unwrap()
     }
 

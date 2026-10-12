@@ -766,7 +766,7 @@ fn file_time(file: &Path) -> i64 {
         .map_or(0, |since| since.as_secs() as i64)
 }
 
-/// The project's item set of a page set, `plumb/<id>` as `plumb set
+/// The project's item set of a page set, `plumb/<id>` as `plumb-tools set
 /// from-pages` names it, held in `DATA/sets/plumb/<id>/`
 /// ([`crate::node::signed_sets`]): its first parts, or all of them. Each
 /// item gives its page back ([`plumb_index::items::page_of_item`]), so the
@@ -1504,7 +1504,7 @@ mod tests {
     fn denied_pages_are_left_out_as_the_index_is_built() {
         use plumb_format::deny::{Denylist, Entry, Switch};
 
-        use crate::sets::{deny_entry, DenyEntryArgs};
+        use plumb_tools::set::{deny_entry, DenyEntryArgs};
 
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path();
@@ -1572,11 +1572,11 @@ mod tests {
         else {
             unreachable!()
         };
-        let items = pages.iter().map(plumb_index::items::page_item);
-        let fields = plumb_index::items::page_fields();
-        crate::sets::write_set(items, fields, manifest, &held, &[1, 2], 3).unwrap();
+        let items = pages.iter().map(plumb_tools::page_items::page_item);
+        let fields = plumb_tools::page_items::page_fields();
+        plumb_tools::set::write_set(items, fields, manifest, &held, &[1, 2], 3).unwrap();
         let key = SigningKey::from_bytes(&[7; 32]);
-        crate::sets::sign_set(&held, &key, None, None).unwrap();
+        plumb_tools::set::sign_set(&held, &key, None, None).unwrap();
         let project = [PublicKey::of(&key)];
         let generation = plumb_format::value::unix_seconds("2026-10-12T04:00:00Z").unwrap();
         let date = |file: &Path, time: i64| {

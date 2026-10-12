@@ -266,7 +266,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::sets::{deny_entry, DenyEntryArgs};
+    use plumb_tools::set::{deny_entry, DenyEntryArgs};
 
     fn list(targets: &[&str]) -> Denylist {
         let mut list = Denylist::new(Switch::On);

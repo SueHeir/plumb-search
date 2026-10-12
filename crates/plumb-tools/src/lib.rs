@@ -2,8 +2,10 @@
 //! page sets ([`fetch`], [`build`]) and map ([`map_fetch`]), measure and
 //! train ranking ([`eval`], [`eval_labels`], [`train_rank`]), and look into
 //! records files and a node's data ([`link_rank`], [`top_sites`],
-//! [`fact_trust`], [`terms`], [`summaries`], [`storage`]). The node itself
-//! is [`plumb_node`].
+//! [`fact_trust`], [`terms`], [`summaries`], [`storage`]). [`set`] writes
+//! and signs sets in the data format, page sets as items with
+//! [`page_items`], which nodes only check and read. The node itself is
+//! [`plumb_node`].
 
 use anyhow::Result;
 
@@ -15,6 +17,9 @@ pub mod fact_trust;
 pub mod fetch;
 pub mod link_rank;
 pub mod map_fetch;
+pub mod page_items;
+pub mod set;
+pub mod site_rules;
 pub mod storage;
 pub mod summaries;
 pub mod terms;
@@ -44,5 +49,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::LinkRank(args) => link_rank::run(&args),
         Command::FactTrust(args) => fact_trust::run(&args),
         Command::TopSites(args) => top_sites::run(&args),
+        Command::Set(args) => set::run(args),
     }
 }
