@@ -200,6 +200,25 @@ pub fn is_timestamp(text: &str) -> bool {
     text.len() == 20 && is_date(text)
 }
 
+/// Seconds since 1970 of a full UTC timestamp ([`is_timestamp`]), or
+/// `None` for anything else.
+pub fn unix_seconds(timestamp: &str) -> Option<i64> {
+    if !is_timestamp(timestamp) {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| timestamp[range].parse::<i64>().ok();
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    // Days from 1970-01-01 to the date, in the proleptic Gregorian calendar.
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let of_era = year - era * 400;
+    let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let of_era_days = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+    let days = era * 146_097 + of_era_days - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
 /// True for a BCP 47 language tag, loosely: a 2 or 3 letter language, then
 /// subtags of 1 to 8 letters and digits (`en`, `pt-BR`, `zh-Hant-TW`).
 pub fn is_language(text: &str) -> bool {
@@ -301,6 +320,16 @@ fn days_in(year: u32, month: u32) -> u32 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unix_seconds_of_timestamps() {
+        assert_eq!(unix_seconds("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(unix_seconds("2000-03-01T00:00:00Z"), Some(951_868_800));
+        assert_eq!(unix_seconds("2026-10-12T06:00:00Z"), Some(1_791_784_800));
+        assert_eq!(unix_seconds("2024-02-29T23:59:59Z"), Some(1_709_251_199));
+        assert_eq!(unix_seconds("2026-10-12"), None);
+        assert_eq!(unix_seconds("2026-02-30T00:00:00Z"), None);
+    }
 
     #[test]
     fn dates() {

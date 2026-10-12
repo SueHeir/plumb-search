@@ -22,13 +22,18 @@ use crate::item::Item;
 use crate::notes::{current_publisher, is_revoked, Note};
 use crate::refs::Ref;
 use crate::sign::{verify, PublicKey};
-use crate::value::{is_timestamp, FieldType};
+use crate::value::{is_timestamp, unix_seconds, FieldType};
 use crate::FORMAT;
 
 /// What this version of the format understands in a manifest's
 /// `requires`. A set that requires anything else is skipped rather than
 /// misread.
 pub const UNDERSTOOD: &[&str] = &[];
+
+/// How far ahead of a node's clock a generation may be: a day, for clocks
+/// that are a little off. A later one is refused, so a set can't be dated
+/// ahead to freeze it.
+pub const MAX_AHEAD_SECONDS: i64 = 86_400;
 
 /// The ref schemes a layer may extend.
 const EXTENDABLE: &[&str] = &["wd", "site", "url", "id", "item", "blob"];
@@ -79,6 +84,11 @@ pub struct Manifest {
     /// For a layer: the ref schemes its entries extend (`wd`, `site`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extends: Vec<String>,
+    /// For a layer: the one base set its parts line up with. Part N then
+    /// holds the entries for that set's part N, so a node that took the
+    /// base's first parts takes the same parts of the layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aligned: Option<String>,
     /// Labels for every item of the set (`adult`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
@@ -170,6 +180,15 @@ impl Manifest {
         let key = verify(&value)?;
         let manifest: Manifest = serde_json::from_value(value)?;
         manifest.check()?;
+        let ahead = unix_seconds(&manifest.generation)
+            .zip(unix_seconds(now))
+            .map(|(generation, now)| generation - now);
+        ensure!(
+            ahead.is_some_and(|ahead| ahead <= MAX_AHEAD_SECONDS),
+            "{} generation {} is dated after {now}",
+            manifest.set,
+            manifest.generation
+        );
         if key != manifest.publisher {
             let delegation = manifest.delegation.as_ref().with_context(|| {
                 format!(
@@ -264,6 +283,13 @@ impl Manifest {
             ensure!(
                 EXTENDABLE.contains(&scheme.as_str()),
                 "a layer cannot extend {scheme:?} refs"
+            );
+        }
+        if let Some(base) = &self.aligned {
+            ensure!(
+                !self.extends.is_empty() && is_set_name(base) && *base != self.set,
+                "{}: aligned {base:?} is not another set this layer extends",
+                self.set
             );
         }
         if self.kinds.iter().any(|kind| kind == DENY) {
@@ -453,6 +479,47 @@ mod tests {
                 Manifest::from_signed_json(&text, NOW).is_err(),
                 "{key_name}"
             );
+        }
+    }
+
+    #[test]
+    fn a_generation_dated_ahead_is_refused() {
+        let key = SigningKey::from_bytes(&[3; 32]);
+        for (generation, taken) in [
+            ("2026-10-12T06:00:00Z", true),
+            ("2026-10-13T06:00:00Z", true),
+            ("2026-10-13T06:00:01Z", false),
+            ("2099-01-01T00:00:00Z", false),
+        ] {
+            let mut value = facts_layer(&key);
+            value["generation"] = json!(generation);
+            let text = signed(&mut value, &key);
+            assert_eq!(
+                Manifest::from_signed_json(&text, NOW).is_ok(),
+                taken,
+                "{generation}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_layer_lines_up_with_one_base() {
+        let key = SigningKey::from_bytes(&[3; 32]);
+        let mut value = facts_layer(&key);
+        value["aligned"] = json!("plumb/wikipedia-en");
+        let (layer, _) = Manifest::from_signed_json(&signed(&mut value, &key), NOW).unwrap();
+        assert_eq!(layer.aligned.as_deref(), Some("plumb/wikipedia-en"));
+
+        for (aligned, extends) in [
+            (json!("plumb/wikidata-facts"), json!(["wd"])),
+            (json!("wikipedia-en"), json!(["wd"])),
+            (json!("plumb/wikipedia-en"), json!([])),
+        ] {
+            let mut value = facts_layer(&key);
+            value["aligned"] = aligned;
+            value["extends"] = extends;
+            value["fields"] = json!({});
+            assert!(Manifest::from_signed_json(&signed(&mut value, &key), NOW).is_err());
         }
     }
 

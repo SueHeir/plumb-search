@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::refs::{is_namespace, Ref};
 use crate::urls::is_canonical;
@@ -74,6 +75,11 @@ pub struct Item {
     /// The snippet, searched as body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The full text the builder read from the page, by hash: a
+    /// `blob:sha256-...` ref. A node never needs the text itself; vectors
+    /// and summaries made from it name the same hash in `of`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Ref>,
     /// A BCP 47 language tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
@@ -189,6 +195,13 @@ impl Item {
                 self.id
             );
         }
+        if let Some(body) = &self.body {
+            ensure!(
+                matches!(body, Ref::Blob(_)),
+                "item {:?}: body {body} is not a blob: ref",
+                self.id
+            );
+        }
         if let Some(site) = &self.site {
             ensure!(
                 crate::refs::is_domain(site),
@@ -256,6 +269,21 @@ impl Item {
             self.id
         );
         Ok(())
+    }
+
+    /// True when `vector`, from this item or a layer on it, was made from
+    /// what the item holds now: its `of` is the SHA-256 of the item's
+    /// `text`, or the hash in its `body`. A node ignores a vector that
+    /// isn't, since the page has changed since.
+    pub fn is_current(&self, vector: &Vector) -> bool {
+        let of_text = self.text.as_deref().map(|text| {
+            Sha256::digest(text.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        });
+        of_text.as_deref() == Some(vector.of.as_str())
+            || matches!(&self.body, Some(Ref::Blob(hex)) if *hex == vector.of)
     }
 
     /// True when the item may be passed to another node: not labelled
@@ -349,6 +377,37 @@ mod tests {
         .unwrap();
         gone.check().unwrap();
         assert!(gone.is_deleted());
+    }
+
+    #[test]
+    fn vectors_hold_while_the_text_or_body_they_came_from_does() {
+        let body = "9f2c3b0e7d6a5f4e3d2c1b0a9f8e7d6c5b4a39281706f5e4d3c2b1a098f7e6d5";
+        let mut item = australia();
+        item.body = Some(format!("blob:sha256-{body}").parse().unwrap());
+        item.check().unwrap();
+        let text = item.text.clone().unwrap();
+        let vector = |of: String| Vector {
+            model: "bge-small-en-v1.5".into(),
+            of,
+            b64: String::new(),
+            other: BTreeMap::new(),
+        };
+        let of_text: String = Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert!(item.is_current(&vector(of_text.clone())));
+        assert!(item.is_current(&vector(body.into())));
+        assert!(!item.is_current(&vector("0".repeat(64))));
+
+        item.text = Some("Australia is a country.".into());
+        item.body = None;
+        assert!(!item.is_current(&vector(of_text)));
+        assert!(!item.is_current(&vector(body.into())));
+
+        let mut not_a_blob = australia();
+        not_a_blob.body = Some(Ref::Wd("Q408".into()));
+        assert!(not_a_blob.check().is_err());
     }
 
     #[test]
