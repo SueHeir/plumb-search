@@ -13,11 +13,12 @@
 //! the [`refs`] grammar, the [`urls`] canonical form (`url/1`) and match key,
 //! the value formats in [`value`], the [`canonical`] JSON that is signed,
 //! how a manifest is signed and checked ([`sign`]), the key [`notes`] that
-//! delegate, hand over and revoke signing keys, and the [`deny`] list and
-//! how it matches. It only ever gains optional keys. It never names a
-//! source or a site, nor a kind but `deny`, the one the core applies
-//! itself: what an article or a package is belongs to the code that
-//! builds or ranks it.
+//! delegate, hand over and revoke signing keys, the [`deny`] list and how
+//! it matches, and how the [`sites`] rules say which site a host is. It
+//! only ever gains optional keys. It never names a source or a site, nor a
+//! kind but `deny` and `site-rule`, the ones the core applies itself: what
+//! an article or a package is belongs to the code that builds or ranks
+//! it.
 //!
 //! Nothing else in the workspace uses this crate yet. It is the first,
 //! additive step of the v0.3.0 data format rework, so v0.2.0 nodes and
@@ -30,6 +31,7 @@ pub mod manifest;
 pub mod notes;
 pub mod refs;
 pub mod sign;
+pub mod sites;
 pub mod urls;
 pub mod value;
 
@@ -39,6 +41,7 @@ pub use manifest::{FieldSpec, FilePart, Manifest};
 pub use notes::Note;
 pub use refs::Ref;
 pub use sign::PublicKey;
+pub use sites::SiteRules;
 pub use value::FieldType;
 
 /// The format every manifest names in its `format` key.

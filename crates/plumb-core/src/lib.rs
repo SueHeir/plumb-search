@@ -48,7 +48,9 @@ pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
-pub use subsites::{parent_domain, subdomain_sites, SITES_VERSION, SUBDOMAIN_SITE_NAMES};
+pub use subsites::{
+    parent_domain, subdomain_sites, use_site_list, SiteList, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
+};
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -990,9 +992,13 @@ pub fn is_valid_host(host: &str) -> bool {
 /// sites of their own ([`subsites`]), that subdomain:
 /// `https://news.ycombinator.com/item` -> `news.ycombinator.com`. Returns
 /// `None` for IP addresses, bare public suffixes like `co.uk`, single-label
-/// hosts like `localhost`, and everything [`host_of`] rejects.
+/// hosts like `localhost`, and everything [`host_of`] rejects. A node
+/// may use other lists ([`use_site_list`]).
 pub fn registrable_domain(input: &str) -> Option<String> {
     let host = host_of(input)?;
+    if let Some(list) = subsites::site_list() {
+        return list.site_of(&host);
+    }
     let domain = psl::domain_str(&host)?;
     Some(subsites::site_of(&host, domain))
 }
@@ -1023,7 +1029,7 @@ pub fn valid_links_to(links: Vec<String>, domain: &str) -> Vec<String> {
 /// `Example.com.` -> `example.com`, `münchen.de` -> `xn--mnchen-3ya.de`,
 /// `www.example.com` -> `example.com`, and junk -> `None`.
 pub fn canonical_domain(domain: &str) -> Option<String> {
-    if is_valid_host(domain) && psl::domain_str(domain) == Some(domain) {
+    if is_valid_host(domain) && subsites::domain_of(domain) == Some(domain) {
         return Some(domain.to_string());
     }
     registrable_domain(domain)
@@ -1161,7 +1167,7 @@ pub fn reverse_host(reversed: &str) -> String {
 /// `usbank.com` -> `usbank`, `bbc.co.uk` -> `bbc`.
 pub fn domain_label(domain: &str) -> String {
     let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
-    match psl::suffix_str(&domain) {
+    match subsites::suffix_of(&domain) {
         Some(suffix) if domain.len() > suffix.len() + 1 && domain.ends_with(suffix) => {
             domain[..domain.len() - suffix.len() - 1].to_string()
         }

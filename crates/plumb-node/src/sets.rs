@@ -4,7 +4,8 @@
 //! A set is a folder: `manifest.json` and its parts, `items-001.jsonl.zst`
 //! and on, one item per line, most weighted first. `from-pages` writes one
 //! from an articles file, `denylist` one from a file of denylist entries
-//! (`deny-entry` makes them), `sign` signs its manifest with a set-signing
+//! (`deny-entry` makes them), `site-rules` one of the rules that say which
+//! site a host is on, `sign` signs its manifest with a set-signing
 //! key from `new-key`, and `check` checks a set as a node would before
 //! taking it. Signing is a release step someone takes on purpose: no build
 //! signs by itself.
@@ -25,12 +26,15 @@ use plumb_format::deny::{Entry, DENY};
 use plumb_format::manifest::is_set_name;
 use plumb_format::notes::{is_revoked, sign_note, NOTE_FORMAT};
 use plumb_format::sign::sign;
+use plumb_format::sites::{read_suffix_list, Rule, SITE_RULE};
 use plumb_format::urls::{url_sha256, url_sha256_any_query};
-use plumb_format::{FieldSpec, Item, Manifest, Note, PublicKey, FORMAT};
+use plumb_format::{FieldSpec, Item, Manifest, Note, PublicKey, SiteRules, FORMAT};
 use plumb_index::items::{page_fields, page_item};
 use plumb_index::pages::Page;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+
+use crate::site_rules::{built_in_rules, hosts_to_check, moved_sites, Moved};
 
 /// The manifest's file name in a set's folder.
 pub const MANIFEST: &str = "manifest.json";
@@ -65,6 +69,10 @@ pub enum SetCommand {
     Denylist(DenylistArgs),
     /// Print a denylist entry as one line, to add to an entries file.
     DenyEntry(DenyEntryArgs),
+    /// Write the rules that say which site a host is on, from a Public
+    /// Suffix List file and the built-in subsite lists, with a manifest
+    /// still to be signed, and list the hosts whose site they move.
+    SiteRules(SiteRulesArgs),
     /// Sign a set's manifest after checking every part and item.
     Sign(SignArgs),
     /// Check a set as a node does before taking it: its signature, the size
@@ -124,6 +132,31 @@ pub struct DenylistArgs {
     /// on.
     #[arg(long)]
     pub license: Option<String>,
+    /// The zstd level of the parts.
+    #[arg(long, default_value_t = 19)]
+    pub level: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct SiteRulesArgs {
+    /// The Public Suffix List, `public_suffix_list.dat`.
+    #[arg(long, value_name = "FILE")]
+    pub psl: PathBuf,
+    /// The set's name, `<scope>/<name>`.
+    #[arg(long, default_value = "plumb/site-rules")]
+    pub name: String,
+    /// The folder to write. It must not exist yet, or be empty.
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    #[arg(long)]
+    pub title: Option<String>,
+    /// The set's license, an SPDX id: the suffix list's own by default.
+    #[arg(long, default_value = "MPL-2.0")]
+    pub license: String,
+    /// More hosts or URLs to check, one a line, besides those the rules
+    /// name.
+    #[arg(long, value_name = "FILE")]
+    pub hosts: Option<PathBuf>,
     /// The zstd level of the parts.
     #[arg(long, default_value_t = 19)]
     pub level: i32,
@@ -247,6 +280,28 @@ pub fn run(args: SetArgs) -> Result<()> {
         }
         SetCommand::DenyEntry(args) => {
             println!("{}", serde_json::to_string(&deny_entry(&args)?)?);
+            Ok(())
+        }
+        SetCommand::SiteRules(args) => {
+            let (written, checked, moved) = site_rules(&args)?;
+            println!(
+                "{}: {} rules in {} parts; sign it with `plumb set sign`",
+                args.out.display(),
+                written.items,
+                written.parts
+            );
+            println!(
+                "{checked} hosts checked, {} on a site other than the built-in lists give",
+                moved.len()
+            );
+            for moved in moved.iter().take(50) {
+                println!(
+                    "  {}: {} -> {}",
+                    moved.host,
+                    moved.built_in.as_deref().unwrap_or("(no site)"),
+                    moved.by_rules.as_deref().unwrap_or("(no site)")
+                );
+            }
             Ok(())
         }
         SetCommand::Sign(args) => {
@@ -503,6 +558,58 @@ pub fn denylist(args: &DenylistArgs) -> Result<Written> {
     )
 }
 
+/// Writes the rules of the Public Suffix List in `args.psl` and the
+/// built-in subsite lists as a site rules set, then checks the hosts the
+/// rules name, and those in `args.hosts`, against the built-in lists.
+/// Returns what it wrote, how many hosts it checked and those whose site
+/// the set moves.
+pub fn site_rules(args: &SiteRulesArgs) -> Result<(Written, usize, Vec<Moved>)> {
+    ensure!(
+        is_set_name(&args.name),
+        "{:?} is not <scope>/<name>",
+        args.name
+    );
+    let text =
+        fs::read_to_string(&args.psl).with_context(|| format!("reading {}", args.psl.display()))?;
+    let mut rules = read_suffix_list(&text).with_context(|| args.psl.display().to_string())?;
+    rules.extend(built_in_rules());
+    let mut hosts = hosts_to_check(&rules);
+    if let Some(path) = &args.hosts {
+        let text =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        hosts.extend(
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(String::from),
+        );
+    }
+    let set: SiteRules = rules.iter().cloned().collect();
+    let moved = moved_sites(&set, hosts.iter().map(String::as_str));
+    let mut manifest = Map::new();
+    manifest.insert("format".into(), json!(FORMAT));
+    manifest.insert("set".into(), json!(args.name));
+    manifest.insert("generation".into(), json!(now()));
+    manifest.insert("license".into(), json!(args.license));
+    if let Some(title) = &args.title {
+        manifest.insert("title".into(), json!(title));
+    }
+    let items = rules.iter().map(|rule| {
+        let item: Item = serde_json::from_value(json!({"id": rule.to_string(), "kind": SITE_RULE}))
+            .expect("a rule is an item");
+        Some(item)
+    });
+    let written = write_set(
+        items,
+        BTreeMap::new(),
+        manifest,
+        &args.out,
+        PART_ENDS,
+        args.level,
+    )?;
+    Ok((written, hosts.len(), moved))
+}
+
 /// The entry `args` describes, checked as a node reads it.
 pub fn deny_entry(args: &DenyEntryArgs) -> Result<Item> {
     let target = match (&args.target, &args.hash_of) {
@@ -626,7 +733,8 @@ pub struct Checked {
     pub publisher: PublicKey,
     pub parts: usize,
     pub items: u64,
-    /// A denylist's entries newer than this version understands.
+    /// A denylist's entries, or a site rules set's rules, newer than this
+    /// version understands.
     pub newer: u64,
 }
 
@@ -748,6 +856,9 @@ fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
             if manifest.is_denylist() && !item.is_deleted() && Entry::from_item(&item)?.is_none() {
                 newer += 1;
             }
+            if manifest.is_site_rules() && !item.is_deleted() && Rule::from_item(&item)?.is_none() {
+                newer += 1;
+            }
             ensure!(ids.insert(item.id), "{}: an id seen before", at());
             count += 1;
         }
@@ -792,7 +903,7 @@ fn measure(path: &Path) -> Result<(u64, String)> {
 }
 
 /// The time now as a UTC timestamp, as the format writes them.
-fn now() -> String {
+pub(crate) fn now() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 

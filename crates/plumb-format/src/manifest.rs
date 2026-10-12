@@ -22,6 +22,7 @@ use crate::item::Item;
 use crate::notes::{current_publisher, is_revoked, Note};
 use crate::refs::Ref;
 use crate::sign::{verify, PublicKey};
+use crate::sites::{Rule, SITE_RULE};
 use crate::value::{is_timestamp, unix_seconds, FieldType};
 use crate::FORMAT;
 
@@ -299,6 +300,13 @@ impl Manifest {
                 self.set
             );
         }
+        if self.kinds.iter().any(|kind| kind == SITE_RULE) {
+            ensure!(
+                self.is_site_rules() && self.extends.is_empty(),
+                "{}: a site rules set holds site rules and nothing else",
+                self.set
+            );
+        }
         for (name, spec) in &self.fields {
             if let Some(same_as) = &spec.same_as {
                 ensure!(
@@ -314,6 +322,12 @@ impl Manifest {
     /// `deny`.
     pub fn is_denylist(&self) -> bool {
         self.kinds.len() == 1 && self.kinds[0] == DENY
+    }
+
+    /// True for a set of site rules ([`crate::sites`]): a set whose only
+    /// kind is `site-rule`.
+    pub fn is_site_rules(&self) -> bool {
+        self.kinds.len() == 1 && self.kinds[0] == SITE_RULE
     }
 
     /// The entries of `requires` this version does not understand. A node
@@ -341,6 +355,18 @@ impl Manifest {
             ensure!(
                 item.kind != DENY,
                 "item {:?} is a denylist entry, and {} is not a denylist",
+                item.id,
+                self.set
+            );
+        }
+        if self.is_site_rules() {
+            if !item.is_deleted() {
+                Rule::from_item(item)?;
+            }
+        } else {
+            ensure!(
+                item.kind != SITE_RULE,
+                "item {:?} is a site rule, and {} is not a site rules set",
                 item.id,
                 self.set
             );
