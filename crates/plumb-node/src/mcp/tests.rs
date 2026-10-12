@@ -2826,7 +2826,8 @@ fn check_lookalike_uses_indexed_public_owner_evidence_and_abstains_on_alternates
             .check_lookalike(alternate, &SearchOptions::default())
             .unwrap();
         assert_eq!(answer["verdict"], "suspected", "{answer}");
-        assert_eq!(answer["lookalike"], false);
+        // Unverified is not safe for credentials, as in 0.2.0.
+        assert_eq!(answer["lookalike"], true);
         assert!(answer["site"].is_null());
         assert!(answer["affiliation"].is_null());
     }
@@ -2869,7 +2870,7 @@ fn check_lookalike_preserves_impersonation_and_unverified_tenant_controls() {
             .check_lookalike(host, &SearchOptions::default())
             .unwrap();
         assert_eq!(answer["verdict"], "suspected", "{host}: {answer}");
-        assert_eq!(answer["lookalike"], false);
+        assert_eq!(answer["lookalike"], true);
         assert_eq!(answer["suspected"], true);
     }
 }
@@ -3385,4 +3386,83 @@ fn official_site_cached_docs_require_indexed_owner_or_complete_destination_evide
             assert_eq!(answer["url"], "https://brindle.docs.test/");
         }
     }
+}
+
+#[test]
+fn official_site_article_settles_owners_that_share_a_name() {
+    let mcp = scripted(|_| {
+        let mut company = titled(
+            "microsoft.com",
+            "Microsoft – AI, Cloud, Productivity, Computing, Gaming & Apps",
+            0.9,
+            true,
+        );
+        company.official = true;
+        let mut registry = titled("nic.microsoft", "Microsoft", 0.2, true);
+        registry.official = true;
+        results(
+            vec![company, registry],
+            vec![article("Microsoft", Some("microsoft.com"), None)],
+        )
+    });
+    let answer = official(&mcp, "Microsoft");
+    assert_eq!(answer["found"], true, "{answer}");
+    assert_eq!(answer["domain"], "microsoft.com");
+}
+
+#[test]
+fn official_site_owner_read_far_more_than_its_namesakes_is_chosen() {
+    for (town_demand, found) in [(0.3, true), (0.75, false)] {
+        let mcp = scripted(move |_| {
+            let mut bank = titled(
+                "chase.com",
+                "Chase Bank: Credit Cards, Mortgages, Banking, Auto | Chase.com",
+                0.9,
+                true,
+            );
+            bank.official = true;
+            bank.demand = Some(0.8);
+            let mut town = titled("chase.example", "Chase, British Columbia", 0.1, true);
+            town.official = true;
+            town.demand = Some(town_demand);
+            results(vec![bank, town], Vec::new())
+        });
+        let answer = official(&mcp, "Chase login");
+        assert_eq!(answer["found"], found, "{answer}");
+        if found {
+            assert_eq!(answer["domain"], "chase.com");
+            assert_eq!(answer["confidence"], "medium");
+        } else {
+            assert_eq!(answer["status"], "ambiguous");
+        }
+    }
+}
+
+#[test]
+fn official_site_names_the_owner_of_its_first_words_when_the_site_shows_the_rest() {
+    let mcp = scripted(|query| {
+        let mut brand = titled("brita.com", "BRITA", 0.9, true);
+        brand.official = true;
+        brand.description = Some("Water filters and filtered water bottles.".into());
+        let pages = if query == "Brita" {
+            vec![article("Brita", Some("brita.com"), None)]
+        } else {
+            Vec::new()
+        };
+        results(vec![brand], pages)
+    });
+    let answer = official(&mcp, "Brita water filter");
+    assert_eq!(answer["found"], true, "{answer}");
+    assert_eq!(answer["domain"], "brita.com");
+    assert_eq!(answer["confidence"], "low");
+    assert!(
+        answer["why"][0].as_str().unwrap().contains("\"Brita\""),
+        "{answer}"
+    );
+
+    let answer = official(&mcp, "Brita stock price");
+    assert!(
+        !answer["why"].to_string().contains("first word"),
+        "{answer}"
+    );
 }

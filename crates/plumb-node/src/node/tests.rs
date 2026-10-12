@@ -3966,7 +3966,9 @@ async fn enabling_and_changing_quota_preserves_inflight_reservations_and_search(
     assert_eq!(budget.status().limit_bytes, MB);
     assert_eq!(budget.status().reserved_bytes, 1_500_000);
     assert!(budget.status().backpressure);
-    assert!(budget.reserve(8192, false).is_err());
+    // Past the limit writes go on, as in 0.2.0; crawls pause.
+    drop(budget.reserve(8192, false).unwrap());
+    assert!(node.inner.pause().is_some());
     assert!(!search(node.addr(), "chase").await.is_empty());
     settings.storage_limit_mb = 5;
     node.inner.change_settings(settings.clone()).unwrap();
@@ -3983,7 +3985,7 @@ async fn enabling_and_changing_quota_preserves_inflight_reservations_and_search(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn inbox_quota_rejection_preserves_raw_prefix_credits_and_ready_search() {
+async fn the_inbox_past_the_storage_limit_still_takes_records() {
     let dir = seeded_dir();
     let node = start(test_config(dir.path())).await.unwrap();
     wait_for(node.addr(), "initial index", ready_and_idle).await;
@@ -3996,12 +3998,16 @@ async fn inbox_quota_rejection_preserves_raw_prefix_credits_and_ready_search() {
     let budget = node.inner.storage.as_ref().unwrap();
     budget.recount(dir.path()).unwrap();
     budget.set_limit(budget.status().used_bytes);
+    // The limit is a target, as in 0.2.0: records peers sent are kept.
     let record = SiteRecord::new("waiting.example");
-    assert!(super::network::append_inbox(&node.inner, &[record]).is_err());
-    assert_eq!(std::fs::read(&node.inner.paths.inbox).unwrap(), prefix);
+    super::network::append_inbox(&node.inner, &[record]).unwrap();
+    let inbox = std::fs::read(&node.inner.paths.inbox).unwrap();
+    assert!(inbox.starts_with(prefix));
+    assert!(String::from_utf8_lossy(&inbox).contains("waiting.example"));
     assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
     assert_eq!(std::fs::read(credits).unwrap(), b"preserve saved credits");
     assert_eq!(budget.status().reserved_bytes, 0);
+    assert_eq!(budget.status().rejected_writes, 0);
     assert!(budget.status().backpressure);
     assert!(!search(node.addr(), "chase").await.is_empty());
     node.shutdown().await.unwrap();
@@ -4059,12 +4065,11 @@ async fn replaced_page_index_stays_charged_and_searchable_until_held_reader_clos
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn raw_replacements_and_implicit_folds_admit_peak_room_before_mutation() {
+async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
     let dir = seeded_dir();
     let node = start(test_config(dir.path())).await.unwrap();
     wait_for(node.addr(), "initial index", ready_and_idle).await;
     let budget = node.inner.storage.clone().unwrap();
-    let raw = std::fs::read(&node.inner.paths.records).unwrap();
     let mut large = SiteRecord::new("quota-fold.example");
     large.description = Some("large protected journal ".repeat(50_000));
     crate::records::RecordStore::open(&node.inner.paths.records)
@@ -4072,8 +4077,6 @@ async fn raw_replacements_and_implicit_folds_admit_peak_room_before_mutation() {
             record: large.clone(),
         }])
         .unwrap();
-    let journal = crate::records::journal_path(&node.inner.paths.records);
-    let journal_bytes = std::fs::read(&journal).unwrap();
     plumb_core::storage::create_directory(&node.inner.paths.net, Some(&budget)).unwrap();
     super::network::append_inbox(&node.inner, &[SiteRecord::new("protected-inbox.example")])
         .unwrap();
@@ -4081,49 +4084,38 @@ async fn raw_replacements_and_implicit_folds_admit_peak_room_before_mutation() {
     budget.recount(dir.path()).unwrap();
     let used = budget.status().used_bytes;
     budget.set_limit(used + 8192);
-    assert!(super::worker::save_seed_records(&node.inner, std::slice::from_ref(&large)).is_err());
-    assert!(super::round::RoundSites::load_with_budget(
+    // The limit is a target, as in 0.2.0: the rewrites and folds a node
+    // makes, those that trim it back under the limit among them, run past
+    // it rather than leave the node stuck over it.
+    super::worker::save_seed_records(&node.inner, std::slice::from_ref(&large)).unwrap();
+    super::round::RoundSites::load_with_budget(
         &node.inner.paths.records,
         crate::about::Topics::default(),
         super::trim::Keep::default(),
-        Some(budget.clone())
+        Some(budget.clone()),
     )
-    .is_err());
-    assert!(
-        crate::outline::outline_with_budget(&node.inner.paths.records, Some(budget.clone()))
-            .is_err()
-    );
+    .unwrap();
+    crate::outline::outline_with_budget(&node.inner.paths.records, Some(budget.clone())).unwrap();
     let vectors = std::sync::RwLock::new(plumb_embed::Vectors::new([0; 32], 4));
-    assert!(crate::meaning::sites_to_embed_from_file(
+    crate::meaning::sites_to_embed_from_file(
         &vectors,
         &node.inner.paths.records,
         1,
         32,
-        Some(budget.clone())
+        Some(budget.clone()),
     )
-    .is_err());
-    assert!(crate::meaning::wanted_texts(
+    .unwrap();
+    crate::meaning::wanted_texts(
         &vectors,
         &node.inner.paths.records,
         32,
-        Some(budget.clone())
+        Some(budget.clone()),
     )
-    .is_err());
-    assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
-    assert_eq!(std::fs::read(&journal).unwrap(), journal_bytes);
+    .unwrap();
     assert_eq!(std::fs::read(&node.inner.paths.inbox).unwrap(), inbox);
-    assert_eq!(budget.status().used_bytes, used);
     assert_eq!(budget.status().reserved_bytes, 0);
+    assert_eq!(budget.status().rejected_writes, 0);
     assert!(!search(node.addr(), "chase").await.is_empty());
-    budget.set_limit(used + 8 * MB);
-    assert!(
-        crate::outline::outline_with_budget(&node.inner.paths.records, Some(budget.clone()))
-            .unwrap()
-            .is_some()
-    );
-    assert!(!journal.exists());
-    assert_eq!(std::fs::read(&node.inner.paths.inbox).unwrap(), inbox);
-    assert_eq!(budget.status().reserved_bytes, 0);
     node.shutdown().await.unwrap();
 }
 
@@ -4206,15 +4198,11 @@ fn two_inbox_absorptions_cross_the_real_fold_threshold_under_receiving_contentio
         if at == 3 {
             append(at);
         }
-        let denied_before = budget.status().rejected_writes;
         assert_eq!(
             super::network::absorb_inbox(&inner).unwrap(),
             RECORDS as u64
         );
-        assert!(
-            budget.status().rejected_writes > denied_before,
-            "must exercise the exact fallback"
-        );
+        assert_eq!(budget.status().rejected_writes, 0);
         assert!(!crate::records::journal_path(&path).exists());
         assert!(!inner.paths.inbox.exists());
         assert!(!inner.paths.absorbing.exists());
@@ -4247,8 +4235,7 @@ fn two_inbox_absorptions_cross_the_real_fold_threshold_under_receiving_contentio
     }
     drop(stop_sampling);
     sampler.join().unwrap();
-    assert!(ledger_peak.load(Ordering::SeqCst) <= limit);
-    assert!(disk_peak.load(Ordering::SeqCst) <= limit);
+    // The limit is a target: the peaks are reported, not bounded by it.
     eprintln!(
         "two absorption peaks: ledger={}, linked+reader-held={}, cap={limit}",
         ledger_peak.load(Ordering::SeqCst),
@@ -4264,7 +4251,7 @@ fn two_inbox_absorptions_cross_the_real_fold_threshold_under_receiving_contentio
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_quota_cut_cleans_staging_and_retries_without_restart() {
+async fn a_page_set_cut_past_the_storage_limit_still_runs() {
     let dir = seeded_dir();
     let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
     let file = set.file(dir.path());
@@ -4310,19 +4297,14 @@ async fn a_failed_quota_cut_cleans_staging_and_retries_without_restart() {
     }
     let budget = node.inner.storage.clone().unwrap();
     budget.set_limit(budget.status().used_bytes + 8192);
+    // The limit is a target, as in 0.2.0: a cut, which makes room, runs
+    // past it.
     let mut kept = std::collections::HashSet::new();
-    assert!(super::pages::cut_if_longer(&node.inner, set, 2, &[], &mut kept).is_err());
-    let part = PathBuf::from(format!("{}.part", file.display()));
-    assert!(
-        !part.exists(),
-        "failed cut left a part that blocks create_new"
-    );
-    assert_eq!(std::fs::read(&file).unwrap(), original);
-    assert_eq!(set.file_notes(dir.path()).unwrap().lines, 3);
-    assert_eq!(budget.status().reserved_bytes, 0);
-    budget.set_limit(budget.status().used_bytes + 4 * MB);
     super::pages::cut_if_longer(&node.inner, set, 2, &[], &mut kept).unwrap();
+    let part = PathBuf::from(format!("{}.part", file.display()));
     assert!(!part.exists());
+    assert_eq!(budget.status().reserved_bytes, 0);
+    assert_eq!(budget.status().rejected_writes, 0);
     assert!(!super::newer::prev_path(&file).exists());
     assert_eq!(set.file_notes(dir.path()).unwrap().lines, 2);
     assert!(std::fs::read(&file).unwrap().len() < original.len());
@@ -4331,7 +4313,7 @@ async fn a_failed_quota_cut_cleans_staging_and_retries_without_restart() {
 }
 
 #[test]
-fn counted_raw_output_stays_inside_actual_allocation_room_at_the_quota_boundary() {
+fn a_fold_past_the_limit_installs_its_output_and_keeps_the_old_reader_charged() {
     use sha2::Digest;
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
@@ -4339,7 +4321,6 @@ fn counted_raw_output_stays_inside_actual_allocation_room_at_the_quota_boundary(
     let record = |i: usize, at: u64| {
         let mut r = SiteRecord::new(format!("site-{i}.example"));
         r.url = Some(format!("https://site-{i}.example/"));
-        r.title = Some(format!("Retained crawl {i}"));
         r.description = Some("x".repeat(4 * 1024));
         r.crawled_at = Some(at);
         r
@@ -4362,15 +4343,13 @@ fn counted_raw_output_stays_inside_actual_allocation_room_at_the_quota_boundary(
     std::fs::write(&absorbing, [1; 384 * 1024]).unwrap();
     let logical = std::fs::metadata(&path).unwrap().len();
     let raw_before = sha2::Sha256::digest(std::fs::read(&path).unwrap());
-    let journal_before = std::fs::read(&journal).unwrap();
     let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
     let other = budget.reserve(64 * 1024, false).unwrap();
-    // Fixed to the meaningful failing source-resource reproducer, including
-    // the held old generation and separate receive allowance.
-    let cap = 291_287_040;
-    budget.set_limit(cap);
+    // Less room than the fold's output: the limit is a target, as in 0.2.0,
+    // and the fold that keeps a node near it is not refused for it.
+    budget.set_limit(budget.status().used_bytes + logical / 2);
     // An actual descriptor plus its registered lease keeps the previous raw
-    // generation charged if the bounded rewrite succeeds.
+    // generation charged once the rewrite is installed.
     let (reader, lease) = {
         let _mutation = budget.mutation();
         (
@@ -4378,70 +4357,36 @@ fn counted_raw_output_stays_inside_actual_allocation_room_at_the_quota_boundary(
             budget.read_lease(&path),
         )
     };
-    let mut peak = 0;
-    let mut peak_charged = 0;
-    let mut stage_allocated = 0;
-    let mut initial_sparse_stage = None;
     let mut store = crate::records::RecordStore::open(&path).with_budget(Some(budget.clone()));
-    let result = store.fold_with_check(|| {
-        let status = budget.status();
-        let actual = plumb_core::storage::directory_bytes(dir.path()).unwrap()
-            + status.reader_held_bytes
-            + other.bytes();
-        peak = peak.max(actual);
-        peak_charged = peak_charged.max(status.used_bytes + status.reserved_bytes);
-        for e in std::fs::read_dir(dir.path()).unwrap() {
-            let p = e.unwrap().path();
-            if p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with(".records.jsonl.")
-            {
-                initial_sparse_stage.get_or_insert((
-                    std::fs::metadata(&p).unwrap().len(),
-                    plumb_core::storage::file_bytes(&p).unwrap(),
-                ));
-                stage_allocated = stage_allocated.max(plumb_core::storage::file_bytes(&p).unwrap());
-            }
-        }
-        anyhow::ensure!(
-            actual <= cap,
-            "actual allocation crossed quota before installation"
-        );
-        Ok(())
-    });
-    eprintln!("raw allocation boundary logical={logical} admitted={} actual_stage={stage_allocated} actual_plus_queued_peak={peak} charged_plus_reserved_peak={peak_charged} cap={cap} result={result:?}", plumb_core::storage::allocation_for(logical));
+    assert_eq!(
+        store.fold().unwrap(),
+        crate::outline::Folded::Records(32_768)
+    );
     assert_eq!(std::fs::read(&absorbing).unwrap(), [1; 384 * 1024]);
-    if result.is_err() {
-        assert_eq!(
-            sha2::Sha256::digest(std::fs::read(&path).unwrap()),
-            raw_before
-        );
-        assert_eq!(std::fs::read(&journal).unwrap(), journal_before);
-        assert_eq!(budget.status().reader_held_bytes, 0);
-    } else {
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), logical);
-        assert!(!journal.exists());
-        assert!(budget.status().reader_held_bytes > 0);
-    }
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), logical);
+    assert_ne!(
+        sha2::Sha256::digest(std::fs::read(&path).unwrap()),
+        raw_before
+    );
+    assert!(!journal.exists());
     assert!(
         std::fs::read_dir(dir.path()).unwrap().all(|e| !e
             .unwrap()
             .file_name()
             .to_string_lossy()
             .starts_with(".records.jsonl.")),
-        "failure left an uncharged staging file"
+        "the fold left a staging file"
     );
-    assert_eq!(budget.status().reserved_bytes, other.bytes());
     let status = budget.status();
-    peak = peak.max(
-        plumb_core::storage::directory_bytes(dir.path()).unwrap()
-            + status.reader_held_bytes
-            + other.bytes(),
+    assert_eq!(status.reserved_bytes, other.bytes());
+    assert_eq!(status.reader_held_bytes, logical);
+    assert_eq!(status.rejected_writes, 0);
+    assert!(status.backpressure);
+    assert_eq!(
+        status.used_bytes,
+        plumb_core::storage::directory_bytes(dir.path()).unwrap() + logical
     );
-    peak_charged = peak_charged.max(status.used_bytes + status.reserved_bytes);
-    eprintln!("raw allocation retained-reader phase actual={peak} charged={peak_charged} held={} sparse_initial={initial_sparse_stage:?}", status.reader_held_bytes);
-    if result.is_ok() {
+    {
         use std::io::BufRead;
         let mut line = String::new();
         std::io::BufReader::new(reader.try_clone().unwrap())
@@ -4456,26 +4401,17 @@ fn counted_raw_output_stays_inside_actual_allocation_room_at_the_quota_boundary(
         let new: SiteRecord = serde_json::from_str(&line).unwrap();
         assert_eq!(new.crawled_at, Some(2));
     }
-    assert!(
-        stage_allocated <= plumb_core::storage::allocation_for(logical),
-        "the staged file exceeded its own admitted allocation"
-    );
-    // A cleaned-up final count cannot excuse an earlier staging overshoot.
-    assert!(
-        peak <= cap,
-        "allocated output exceeded its admitted room during writing"
-    );
-    assert!(peak_charged <= cap);
     drop(reader);
     drop(lease);
     drop(other);
     assert_eq!(budget.status().reserved_bytes, 0);
+    assert_eq!(budget.status().reader_held_bytes, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_acknowledgment() {
     use plumb_net::assign::{epoch_of, MAX_SHARE_PPM};
-    use plumb_net::batch::{Batch, MAX_RECORD_BYTES};
+    use plumb_net::batch::Batch;
     use plumb_net::store::BatchStore;
     use sha2::Digest;
     use std::io::Write;
@@ -4548,7 +4484,15 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         ));
     }
     drop(legacy);
-    std::fs::write(dir.path().join("net/trusted-applied"), crawler.to_string()).unwrap();
+    // 0.2.0's note names another crawler: this one became trusted after
+    // 0.2.0 last started, so its batches were never taken in whole and are
+    // all sent again.
+    let other = plumb_net::load_or_create_key(&key_dir.path().join("other.key")).unwrap();
+    std::fs::write(
+        dir.path().join("net/trusted-applied"),
+        other.public().to_peer_id().to_string(),
+    )
+    .unwrap();
     let mut config = test_config(dir.path());
     config.take_new_sites = true;
     let rank = RankConfig::default();
@@ -4672,8 +4616,9 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         .as_ref()
         .expect("replay delivery admission")
         .bytes();
-    assert_eq!(initial_delivery_bytes, vec![first_bytes; 6]);
-    let full_queue_bytes = first_bytes.checked_mul(6).expect("six delivery admissions");
+    assert_eq!(first_bytes, initial_delivery_bytes[0]);
+    // Each of the six held admissions is its own batch's encoded length.
+    let full_queue_bytes: u64 = initial_delivery_bytes.iter().sum();
     // Hold actual receiver I/O, while its owned reservation and the producer's
     // fifth pending batch remain live. The raw worker resumes an absorbing file.
     let (locked, ready) = tokio::sync::oneshot::channel();
@@ -4714,12 +4659,6 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let old_one =
-        plumb_core::storage::allocation_for((PER_BATCH * 2 * (MAX_RECORD_BYTES + 4096)) as u64);
-    assert!(
-        limit - budget.status().used_bytes - old_one * 6
-            < plumb_core::storage::allocation_for(std::fs::metadata(&path).unwrap().len())
-    );
     let (old_reader, old_lease) = {
         let _mutation = budget.mutation();
         (
@@ -4838,7 +4777,6 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
             }
             let status = budget.status();
             peak = peak.max(status.used_bytes + status.reserved_bytes);
-            anyhow::ensure!(peak <= limit, "admission exceeded the fixed cap");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         consumer.await?;
@@ -4858,7 +4796,8 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
             anyhow::ensure!(batches.join(format!("{id}.delivered-trusted")).is_file(), "delivery was not durably acknowledged");
         }
         anyhow::ensure!(plumb_net::credits::Ledger::open(&dir.path().join("net/credits"))?.account(&crawler) == credits, "replay awarded credits");
-        eprintln!("full replay progress: deliveries={BATCHES}, records={RECORDS}, queued={full_queue_bytes}, old-six-allowances={}, observed ledger peak={peak}, cap={limit}", old_one * 6);
+        // The limit is a target, as in 0.2.0: the peak is reported, not bounded by it.
+        eprintln!("full replay progress: deliveries={BATCHES}, records={RECORDS}, queued={full_queue_bytes}, observed ledger peak={peak}, limit={limit}");
         Ok::<_, anyhow::Error>(())
     }.await;
     stop.send(true).unwrap();
@@ -4901,8 +4840,6 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
     // an unexplained residual; do not force equality with a final recount.
     assert!(status.used_bytes >= actual);
     assert!(status.used_bytes - actual <= residual_bound);
-    assert!(evidence.physical_plus_queued_peak <= limit);
-    assert!(evidence.charged_plus_reserved_peak <= limit);
     assert_eq!(evidence.uncovered_peak, 0);
     let (restarted, mut replayed) = plumb_net::start(net_config, source).await.unwrap();
     assert!(
@@ -5335,33 +5272,13 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
                 .unwrap();
             assert_eq!(budget.status().reserved_bytes, 0);
         } else {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while budget.status().rejected_writes == rejected {
-                assert!(
-                    Instant::now() < deadline,
-                    "receiver did not try to grow its owned admission"
-                );
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            assert!(!pending.is_finished());
-            assert_eq!(budget.status().reserved_bytes, 8192);
-            assert!(
-                !inner.paths.inbox.exists(),
-                "quota failure must precede every inbox write"
-            );
-            assert!(!marker.exists());
-            assert_eq!(std::fs::read(&signed_path).unwrap(), signed);
-            assert_eq!(
-                plumb_net::credits::Ledger::open(&credit_dir)
-                    .unwrap()
-                    .account(&source_id),
-                credited
-            );
-            plumb_core::storage::remove_file(&expendable, Some(&budget)).unwrap();
+            // Past the limit the receiver's admission grows rather than
+            // waits, as in 0.2.0, whose limit was a target.
             tokio::time::timeout(Duration::from_secs(10), pending)
                 .await
                 .unwrap()
                 .unwrap();
+            assert_eq!(budget.status().rejected_writes, rejected);
             assert_eq!(
                 read_jsonl::<SiteRecord>(&inner.paths.inbox).unwrap().len(),
                 1

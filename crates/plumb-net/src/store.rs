@@ -341,6 +341,30 @@ impl BatchStore {
         self.ids.contains(id)
     }
 
+    /// The crawler key of each batch held, protobuf-encoded.
+    pub(crate) fn held_crawlers(&self) -> Vec<(Hash, Vec<u8>)> {
+        self.headers
+            .iter()
+            .map(|(id, header)| (*id, header.header.crawler.clone()))
+            .collect()
+    }
+
+    /// Whether any batch held has a delivery marker: the store has been
+    /// kept by a version that writes them.
+    pub(crate) fn has_delivery_markers(&self) -> bool {
+        fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.starts_with("delivered-"))
+            })
+    }
+
     pub(crate) fn delivery_ack(&self, id: &Hash, trusted: bool) -> DeliveryAck {
         let mode = if trusted { "trusted" } else { "agreed" };
         DeliveryAck {
@@ -379,28 +403,10 @@ impl BatchStore {
             .as_ref()
             .is_some_and(|limits| limits.own == batch.header.header.crawler);
         if !own {
-            if let Some(limit) = self.limits.as_ref().and_then(|limits| limits.bytes) {
-                ensure!(
-                    self.allocated
-                        .saturating_sub(self.foreign_allocated)
-                        .saturating_add(staging)
-                        <= limit,
-                    "batch and protected own bytes exceed storage quota"
-                );
-            }
-            if let Some(budget) = self.storage() {
-                ensure!(
-                    staging.saturating_add(delivery_bytes) <= budget.status().limit_bytes,
-                    "batch and inbox exceed storage quota"
-                );
-            }
-            self.make_room(staging.saturating_add(delivery_bytes));
-            if let Some(limit) = self.limits.as_ref().and_then(|limits| limits.bytes) {
-                ensure!(
-                    self.allocated.saturating_add(staging) <= limit,
-                    "batch storage backpressure: own or retained bytes leave no room"
-                );
-            }
+            // Older batches make room, but the storage limit is a target, as
+            // in 0.2.0: a batch is taken even when the node's own batches
+            // fill their share, so its records still reach the inbox.
+            self.make_room(staging);
         }
         let budget = self.storage().cloned();
         let _mutation = budget.as_ref().map(|budget| budget.mutation());
@@ -476,7 +482,7 @@ impl BatchStore {
             return;
         };
         let local_target = limits.bytes.map(|limit| limit.saturating_sub(needed));
-        self.prune_until(local_target, &limits.own, needed);
+        self.prune_until(local_target, &limits.own);
     }
 
     /// The batch with id `id`, if held.
@@ -622,10 +628,10 @@ impl BatchStore {
     /// take no more than `bytes` on disk. The batches crawled with `own`, this
     /// node's key, stay: no other node may hold them yet.
     pub fn prune_to_bytes(&mut self, bytes: u64, own: &[u8]) {
-        self.prune_until(Some(bytes), own, 0);
+        self.prune_until(Some(bytes), own);
     }
 
-    fn prune_until(&mut self, target: Option<u64>, own: &[u8], needed: u64) {
+    fn prune_until(&mut self, target: Option<u64>, own: &[u8]) {
         // The ordered metadata is maintained on insert/remove: no directory
         // scan or sort for each batch in a catch-up burst.
         let configured = self.limits.as_ref().is_some_and(|limits| limits.own == own);
@@ -640,16 +646,10 @@ impl BatchStore {
         };
         let mut failed = BTreeSet::new();
         loop {
-            let fits_local = target.is_none_or(|bytes| self.allocated <= bytes);
-            let fits_total = self.storage().is_none_or(|budget| {
-                let status = budget.status();
-                status
-                    .used_bytes
-                    .saturating_add(status.reserved_bytes)
-                    .saturating_add(needed)
-                    <= status.limit_bytes
-            });
-            if fits_local && fits_total {
+            // Only the batches' own share: the storage limit is a target
+            // the node trims records to, as in 0.2.0, and other crawlers'
+            // batches are not deleted to make room under it.
+            if target.is_none_or(|bytes| self.allocated <= bytes) {
                 break;
             }
             let candidates = if configured {
@@ -908,7 +908,13 @@ mod tests {
                 .insert(&quota_batch(&foreign, now - 100 + i, i))
                 .unwrap();
         }
-        let size = file_bytes(&store.path(&mine.id())).unwrap();
+        // Room for three of the largest: batch sizes differ by a few bytes.
+        let size = store
+            .ids_oldest_first()
+            .iter()
+            .map(|id| file_bytes(&store.path(id)).unwrap())
+            .max()
+            .unwrap();
         drop(store);
         for name in [
             "records.jsonl",
@@ -953,19 +959,23 @@ mod tests {
         let own = Keypair::generate_ed25519();
         let foreign = Keypair::generate_ed25519();
         let budget = StorageBudget::open(dir.path(), 128 * 1024).unwrap();
+        let mine = quota_batch(&own, now - 200, 0);
+        let size = serde_json::to_vec(&quota_batch(&foreign, now, 999))
+            .unwrap()
+            .len() as u64;
+        let limit = 4 * size + size / 8;
         let mut store = BatchStore::open_retained(
             &dir.path().join("batches"),
             true,
-            limits(&own, 32 * 1024, now, Some(budget.clone())),
+            limits(&own, limit, now, Some(budget.clone())),
         )
         .unwrap();
-        let mine = quota_batch(&own, now - 200, 0);
         store.insert(&mine).unwrap();
         let mut last = mine.clone();
         for i in 1..100 {
             last = quota_batch(&foreign, now - 100 + i, i);
             store.insert(&last).unwrap();
-            assert!(store.allocated_bytes() <= 32 * 1024);
+            assert!(store.allocated_bytes() <= limit);
             assert!(store.len() <= 4 && store.crawls.len() <= 4);
             assert!(store.contains(&mine.id()));
             assert!(crate::storage::directory_bytes(dir.path()).unwrap() <= 128 * 1024);
@@ -979,29 +989,39 @@ mod tests {
     }
 
     #[test]
-    fn own_only_overage_survives_restart_and_blocks_foreign_writes() {
+    fn own_only_overage_survives_restart_and_foreign_batches_are_still_taken() {
         let dir = tempfile::tempdir().unwrap();
         let now = 1_790_000_000;
         let own = Keypair::generate_ed25519();
         let foreign = Keypair::generate_ed25519();
         let mut store = BatchStore::open(dir.path()).unwrap();
+        let mut size = 0;
         for i in 0..4 {
-            store.insert(&quota_batch(&own, now - 20 + i, i)).unwrap();
+            let batch = quota_batch(&own, now - 20 + i, i);
+            store.insert(&batch).unwrap();
+            size = size.max(file_bytes(&store.path(&batch.id())).unwrap());
         }
         drop(store);
-        let budget = StorageBudget::open(dir.path(), 16 * 1024).unwrap();
+        let budget = StorageBudget::open(dir.path(), 3 * size).unwrap();
         let mut store = BatchStore::open_retained(
             dir.path(),
             true,
-            limits(&own, 8192, now, Some(budget.clone())),
+            limits(&own, 2 * size, now, Some(budget.clone())),
         )
         .unwrap();
         assert_eq!(store.len(), 4);
-        assert!(store.insert(&quota_batch(&foreign, now, 10)).is_err());
-        store.insert(&quota_batch(&own, now, 11)).unwrap();
-        assert_eq!(store.len(), 5);
         assert!(budget.status().backpressure);
+        // Past the limit a foreign batch is still taken, so its records
+        // reach the inbox as in 0.2.0; the next one makes it go.
+        let first = quota_batch(&foreign, now, 10);
+        store.insert(&first).unwrap();
+        assert!(store.contains(&first.id()));
+        store.insert(&quota_batch(&foreign, now, 12)).unwrap();
+        assert!(!store.contains(&first.id()));
+        store.insert(&quota_batch(&own, now, 11)).unwrap();
+        assert_eq!(store.len(), 6);
         assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(budget.status().rejected_writes, 0);
     }
 
     #[test]

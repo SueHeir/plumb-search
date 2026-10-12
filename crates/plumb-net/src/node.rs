@@ -1211,6 +1211,7 @@ pub async fn start(
         storage.clone(),
     ));
     let (store, agreement, replay) = {
+        let net_dir = config.dir.clone();
         let dir = config.dir.join("batches");
         let trusted = config.trusted_peers.clone();
         let follow = config.follow_crawls;
@@ -1224,6 +1225,7 @@ pub async fn start(
         tokio::task::spawn_blocking(move || -> Result<_> {
             let store = BatchStore::open_retained(&dir, follow, limits)?;
             let (agreement, replay) = if follow {
+                mark_legacy_deliveries(&store, &net_dir, peer_id, &trusted);
                 replay_agreement(&store, peer_id, &trusted)
             } else {
                 // Nothing is passed on, so nothing is sent again either:
@@ -2443,9 +2445,9 @@ impl Task {
         epoch: u64,
         now: u64,
     ) -> Result<Option<Hash>> {
-        // Already signed Own batches must remain durable, but fresh crawls
-        // acquire headroom before signing. This reservation remains held while
-        // the store writes, so other producers cannot consume it meanwhile.
+        // Fresh crawls reserve their headroom before signing. This
+        // reservation remains held while the store writes, so the ledger
+        // counts it meanwhile.
         let budget = self.lock_store().storage().cloned();
         let _headroom = if let Some(budget) = budget {
             let mut size = crate::storage::ByteCount {
@@ -4892,6 +4894,58 @@ fn crawler_views(store: &BatchStore, me: PeerId, trusted: &[PeerId], now: u64) -
     crawlers
 }
 
+/// The trusted crawlers whose held batches 0.2.0 had taken in whole, one
+/// peer id a line, written by 0.2.0 at every start.
+const TRUST_APPLIED_FILE: &str = "trusted-applied";
+
+/// Marks the batches a node held under 0.2.0 delivered. 0.2.0 passed each
+/// batch's records on as it took the batch in, and kept no marker of it,
+/// so without this the first start after an upgrade sent every held batch
+/// again ([`resend_pending`]): up to a fifth of the storage limit, about
+/// 12 GB on plumbsearch.org. A crawler trusted since 0.2.0's last start is
+/// not in its [`TRUST_APPLIED_FILE`]: its batches stay unmarked and are
+/// sent again whole, as 0.2.0 would have done. Only a store with no
+/// markers at all is marked, so a node that never ran 0.2.0 (no such
+/// file), or whose store a newer version has kept since (markers), is left
+/// as it is; batches taken in since are marked as they are delivered.
+fn mark_legacy_deliveries(
+    store: &BatchStore,
+    dir: &std::path::Path,
+    me: PeerId,
+    trusted: &[PeerId],
+) {
+    let applied = dir.join(TRUST_APPLIED_FILE);
+    if !applied.exists() || store.has_delivery_markers() {
+        return;
+    }
+    let applied: HashSet<PeerId> = std::fs::read_to_string(&applied)
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|id| id.parse().ok())
+        .collect();
+    let mut marked = 0usize;
+    for (id, crawler) in store.held_crawlers() {
+        let Ok(crawler) =
+            libp2p::identity::PublicKey::try_decode_protobuf(&crawler).map(|key| key.to_peer_id())
+        else {
+            continue;
+        };
+        let is_trusted = trusted.contains(&crawler);
+        if crawler == me || (is_trusted && !applied.contains(&crawler)) {
+            continue;
+        }
+        if let Err(err) = store.delivery_ack(&id, is_trusted).acknowledge() {
+            // Those left unmarked are sent again, as before this.
+            warn!("cannot mark the batches held from 0.2.0 delivered: {err:#}");
+            return;
+        }
+        marked += 1;
+    }
+    if marked > 0 {
+        info!("marked {marked} batches held from 0.2.0 as delivered");
+    }
+}
+
 /// Rebuild agreement without awarding its already-counted credits again.
 /// Preserve the startup order for a second, bounded pass recovering deliveries.
 fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> (Agreement, Vec<Hash>) {
@@ -5208,97 +5262,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_replay_shutdown_cancels_both_quota_and_receiver_waits() {
-        for full_quota in [true, false] {
-            let dir = tempfile::tempdir().unwrap();
-            let now = now_unix();
-            let key = Keypair::generate_ed25519();
-            let crawler = key.public().to_peer_id();
-            let batches = dir.path().join("batches");
-            let mut legacy = BatchStore::open(&batches).unwrap();
-            for n in 0..6 {
-                let mut record = SiteRecord::new(format!("shutdown-replay-{n}.example"));
-                record.title = Some("Pending legacy delivery".into());
-                record.crawled_at = Some(now);
-                legacy
-                    .insert(
-                        &Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-                            .unwrap()
-                            .unwrap(),
-                    )
-                    .unwrap();
-            }
-            drop(legacy);
-            let source = Arc::new(
-                crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
-            );
-            let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
-            let mut config = NetConfig::new(dir.path().to_owned());
-            config.listen.clear();
-            config.upnp = false;
-            config.local_discovery = false;
-            config.round_every = None;
-            config.trusted_peers = vec![crawler];
-            config.storage_budget = Some(budget.clone());
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            if full_quota {
-                // Tighten after retention: an initially full legacy store is
-                // correctly pruned before replay and cannot exercise this wait.
-                let store = Mutex::new(
-                    BatchStore::open_retained(
-                        &batches,
-                        true,
-                        StoreLimits {
-                            own: Vec::new(),
-                            bytes: None,
-                            now,
-                            epochs: crate::store::RETAIN_EPOCHS,
-                            storage: Some(budget.clone()),
-                        },
-                    )
-                    .unwrap(),
-                );
-                let ids = store.lock().unwrap().ids_oldest_first();
-                budget.set_limit(1);
-                let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let cancelled = stopped.clone();
-                let (tx, rx) = mpsc::channel(RECORD_DELIVERIES);
-                let producer = tokio::task::spawn_blocking(move || {
-                    resend_pending(&store, &ids, &tx, PeerId::random(), &[crawler], &cancelled)
-                });
-                while budget.status().rejected_writes == 0 {
-                    assert!(std::time::Instant::now() < deadline);
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                stopped.store(true, std::sync::atomic::Ordering::SeqCst);
-                tokio::time::timeout(std::time::Duration::from_secs(2), producer)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(rx.is_empty());
-            } else {
-                let (handle, records) = start(config, source).await.unwrap();
-                while records.len() != RECORD_DELIVERIES {
-                    assert!(std::time::Instant::now() < deadline);
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                tokio::time::timeout(std::time::Duration::from_secs(2), handle.shutdown())
-                    .await
-                    .unwrap();
-                assert!(handle
-                    .replay_stopped
-                    .load(std::sync::atomic::Ordering::SeqCst));
-                drop(records);
-            }
-            while budget.status().reserved_bytes != 0 {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "cancelled replay retained its reservation"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            assert_eq!(BatchStore::open(&batches).unwrap().len(), 6);
+    async fn startup_replay_shutdown_cancels_the_receiver_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_unix();
+        let key = Keypair::generate_ed25519();
+        let crawler = key.public().to_peer_id();
+        let batches = dir.path().join("batches");
+        let mut legacy = BatchStore::open(&batches).unwrap();
+        for n in 0..6 {
+            let mut record = SiteRecord::new(format!("shutdown-replay-{n}.example"));
+            record.title = Some("Pending legacy delivery".into());
+            record.crawled_at = Some(now);
+            legacy
+                .insert(
+                    &Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
         }
+        drop(legacy);
+        let source = Arc::new(
+            crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
+        );
+        let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let mut config = NetConfig::new(dir.path().to_owned());
+        config.listen.clear();
+        config.upnp = false;
+        config.local_discovery = false;
+        config.round_every = None;
+        config.trusted_peers = vec![crawler];
+        config.storage_budget = Some(budget.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (handle, records) = start(config, source).await.unwrap();
+        while records.len() != RECORD_DELIVERIES {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle.shutdown())
+            .await
+            .unwrap();
+        assert!(handle
+            .replay_stopped
+            .load(std::sync::atomic::Ordering::SeqCst));
+        drop(records);
+        while budget.status().reserved_bytes != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled replay retained its reservation"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(BatchStore::open(&batches).unwrap().len(), 6);
     }
 
     #[tokio::test]
@@ -5364,7 +5379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_scope_change_refused_by_quota_keeps_the_previous_marker() {
+    async fn a_scope_change_past_the_storage_limit_is_saved() {
         let dir = tempfile::tempdir().unwrap();
         let source = Arc::new(
             crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
@@ -5406,30 +5421,30 @@ mod tests {
         assert!(used > 0);
         budget.set_limit(used);
         config.search_scope = SearchScope::Trusted;
-        let rejected_before_restart = budget.status().rejected_writes;
-        let (handle, records) = start(config.clone(), source.clone()).await.unwrap();
-        let recounted = handle.recount().await.unwrap();
-        assert!(recounted.epochs.is_empty());
-        assert_eq!(std::fs::read(&table_path).unwrap(), old_table);
-        assert!(!table_path.with_extension("tmp").exists());
-        assert_eq!(std::fs::read(dir.path().join(SCOPE_FILE)).unwrap(), old);
-        assert!(budget.status().rejected_writes > rejected_before_restart);
-        assert_eq!(budget.status().reserved_bytes, 0);
-        assert_eq!(
-            budget.status().used_bytes,
-            crate::storage::directory_bytes(dir.path()).unwrap()
-        );
-        handle.shutdown().await;
-        drop(records);
-        // A later configuration with room can retry the preserved marker.
-        budget.set_limit(u64::MAX);
+        // The limit is a target, as in 0.2.0: a node at it still saves a
+        // changed scope rather than keep the old one.
         let (handle, records) = start(config, source).await.unwrap();
+        handle.recount().await.unwrap();
+        assert_ne!(std::fs::read(dir.path().join(SCOPE_FILE)).unwrap(), old);
         assert_eq!(
             std::fs::read_to_string(dir.path().join(SCOPE_FILE)).unwrap(),
             "trusted"
         );
         handle.shutdown().await;
         drop(records);
+        // Saves are no longer refused, so one startup began can still be
+        // finishing.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while table_path.with_extension("tmp").exists() || budget.status().reserved_bytes != 0 {
+            assert!(std::time::Instant::now() < deadline, "a save never ended");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let _mutation = budget.mutation();
+        assert_eq!(budget.status().rejected_writes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            crate::storage::directory_bytes(dir.path()).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -5521,7 +5536,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_waits_when_its_actual_serialized_delivery_cannot_fit() {
+    fn replay_past_the_storage_limit_still_delivers() {
         let dir = tempfile::tempdir().unwrap();
         let key = Keypair::generate_ed25519();
         let crawler = key.public().to_peer_id();
@@ -5564,17 +5579,16 @@ mod tests {
         let producer = std::thread::spawn(move || {
             resend_pending(&store, &[id], &tx, me, &[crawler], &cancelled);
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while budget.status().rejected_writes == 0 {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(rx.try_recv().is_err());
-        assert_eq!(budget.status().reserved_bytes, 0);
-        stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The limit is a target, as in 0.2.0: the delivery is not held
+        // back for it; crawls pause instead.
+        let delivery = rx.blocking_recv().unwrap();
+        assert_eq!(delivery.records, confirmed);
+        assert!(budget.status().backpressure);
+        assert_eq!(budget.status().rejected_writes, 0);
         producer.join().unwrap();
+        drop((delivery, stopped));
+        assert_eq!(budget.status().reserved_bytes, 0);
         assert_eq!(std::fs::read(path).unwrap(), signed);
-        assert!(!batches.join(format!("{id}.delivered-trusted")).exists());
         assert_eq!(
             budget.status().used_bytes,
             crate::storage::directory_bytes(dir.path()).unwrap()
@@ -5667,6 +5681,78 @@ mod tests {
             );
             assert!(store.lock().unwrap().get(&id).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn batches_held_under_0_2_0_are_not_sent_again_after_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_unix();
+        let me = PeerId::random();
+        // Trusted and taken in whole by 0.2.0; not trusted; trusted since
+        // 0.2.0's last start.
+        let keys: Vec<Keypair> = (0..3).map(|_| Keypair::generate_ed25519()).collect();
+        let ids: Vec<PeerId> = keys.iter().map(|k| k.public().to_peer_id()).collect();
+        let trusted = [ids[0], ids[2]];
+        let sign = |key: &Keypair, domain: &str| {
+            let mut record = SiteRecord::new(domain);
+            record.title = Some(domain.into());
+            record.body_text = Some("Handmade leather shoes".into());
+            record.crawled_at = Some(now);
+            Batch::sign(key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+                .unwrap()
+                .unwrap()
+        };
+        let held = [
+            sign(&keys[0], "applied.example"),
+            sign(&keys[1], "other.example"),
+            sign(&keys[2], "newly.example"),
+        ];
+        let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
+        for batch in &held {
+            store.insert(batch).unwrap();
+        }
+        std::fs::write(dir.path().join(TRUST_APPLIED_FILE), ids[0].to_string()).unwrap();
+        mark_legacy_deliveries(&store, dir.path(), me, &trusted);
+        assert!(store.delivery_ack(&held[0].id(), true).acknowledged());
+        assert!(store.delivery_ack(&held[1].id(), false).acknowledged());
+        assert!(!store.delivery_ack(&held[2].id(), true).acknowledged());
+        // Only the newly trusted crawler's batch is sent again, whole.
+        let (_, replay) = replay_agreement(&store, me, &trusted);
+        let shared = Mutex::new(store);
+        let (tx, mut rx) = mpsc::channel(RECORD_DELIVERIES);
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        resend_pending(&shared, &replay, &tx, me, &trusted, &stopped);
+        let sent = rx.try_recv().unwrap();
+        assert_eq!(sent.records[0].domain, "newly.example");
+        assert!(rx.try_recv().is_err());
+        // Once only: a batch taken in later waits for its own marker.
+        let mut store = shared.into_inner().unwrap();
+        let later = sign(&keys[0], "later.example");
+        store.insert(&later).unwrap();
+        mark_legacy_deliveries(&store, dir.path(), me, &trusted);
+        assert!(!store.delivery_ack(&later.id(), true).acknowledged());
+
+        // A store kept with markers already (a node that ran an earlier
+        // build of this version) is left as it is.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
+        for batch in &held[..2] {
+            store.insert(batch).unwrap();
+        }
+        store
+            .delivery_ack(&held[1].id(), false)
+            .acknowledge()
+            .unwrap();
+        std::fs::write(dir.path().join(TRUST_APPLIED_FILE), ids[0].to_string()).unwrap();
+        mark_legacy_deliveries(&store, dir.path(), me, &trusted);
+        assert!(!store.delivery_ack(&held[0].id(), true).acknowledged());
+
+        // So is a node that never ran 0.2.0.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
+        store.insert(&held[0]).unwrap();
+        mark_legacy_deliveries(&store, dir.path(), me, &trusted);
+        assert!(!store.delivery_ack(&held[0].id(), true).acknowledged());
     }
 
     #[test]

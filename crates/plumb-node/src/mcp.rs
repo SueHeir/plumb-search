@@ -80,6 +80,13 @@ const DIRECT_SEARCH_LIMIT: usize = 3;
 const MAX_SEARCH_LIMIT: usize = 25;
 /// Other candidates `official_site` lists.
 const ALTERNATIVES: usize = 3;
+/// How much more read ([`Hit::demand`], a log scale) the article about one
+/// owner of a shared name must be than any other owner's for `official_site`
+/// to take it as the one meant: about ten times the reads.
+const DOMINANT_DEMAND: f32 = 0.12;
+/// Most of a name's first words `official_site` looks up when nothing
+/// establishes a site for the whole name.
+const PREFIX_LOOKUPS: usize = 2;
 /// Most searches one `check_lookalike` runs.
 const MAX_LOOKALIKE_SEARCHES: usize = 6;
 /// Longest description returned, in characters.
@@ -598,6 +605,17 @@ impl Mcp {
 
     /// `official_site`: the site the name names, best first.
     pub fn official_site(&self, name: &str, options: &SearchOptions) -> Result<Value> {
+        self.official_site_of(name, options, true)
+    }
+
+    /// [`Mcp::official_site`], falling back to the name's first words when
+    /// `prefixes` and nothing establishes a site for the whole name.
+    fn official_site_of(
+        &self,
+        name: &str,
+        options: &SearchOptions,
+        prefixes: bool,
+    ) -> Result<Value> {
         let intent = identity::Intent::of(name);
         let country_conflict = intent.country.filter(|country| {
             options.country.as_deref().is_some_and(|preference| preference != *country)
@@ -729,6 +747,8 @@ impl Mcp {
         let mut package_home = None;
         let mut package_ambiguity = None;
         let mut verified_destination = false;
+        // The destination is the website of the article the name names.
+        let mut named_article = false;
         let mut confidence;
         match about_site {
             Some((page, site)) if site == top.domain => {
@@ -736,6 +756,7 @@ impl Mcp {
                     "Wikidata gives it as the official website of {}.",
                     page.title
                 ));
+                named_article = true;
                 // MathWorld is mathworld.wolfram.com, not wolfram.com.
                 let (site_domain, site_url) = article_website(page, site);
                 if site_domain != top.domain {
@@ -780,6 +801,7 @@ impl Mcp {
                 did_you_mean = None;
                 confidence = "high";
                 verified_destination = true;
+                named_article = true;
             }
             _ => {
                 if official(top) {
@@ -1097,17 +1119,52 @@ impl Mcp {
             }
         }
         // "Python docs" is docs.python.org, a site of its own.
-        let owner_domains: std::collections::BTreeSet<_> = results
+        let owners: Vec<&Hit> = results
             .hits
             .iter()
             .filter(|hit| official(hit) && intent.supports_site(hit))
+            .collect();
+        let owner_domains: std::collections::BTreeSet<_> = owners
+            .iter()
             .filter_map(|hit| registrable_domain(&hit.url))
             .collect();
-        // An explicit address identifies the destination. An unqualified
-        // shared name does not identify one of several documented owners,
-        // even if popularity or a same-name package favors one candidate.
-        let owner_ambiguity =
-            registrable_domain(&intent.entity).is_none() && owner_domains.len() > 1;
+        // One documented owner can still be the one a shared name means:
+        // the one whose article is read far more than any other owner's
+        // (Chase the bank, not the town of Chase).
+        let dominant = registrable_domain(&pick.url).is_some_and(|picked| {
+            owner_domains.contains(&picked)
+                && pick.demand.is_some_and(|read| {
+                    owners.iter().all(|owner| {
+                        registrable_domain(&owner.url).as_ref() == Some(&picked)
+                            || owner.demand.unwrap_or(0.0) + DOMINANT_DEMAND <= read
+                    })
+                })
+        });
+        // An explicit address identifies the destination, and so does the
+        // website of the article the name names: Wikipedia gives
+        // "Microsoft" to the company, not to the .microsoft registry.
+        // Otherwise an unqualified shared name does not identify one of
+        // several documented owners, even if a same-name package or a
+        // site's links favor one candidate.
+        let shared = registrable_domain(&intent.entity).is_none()
+            && owner_domains.len() > 1
+            && !named_article;
+        let owner_ambiguity = shared && !dominant;
+        if shared && dominant {
+            if confidence == "high" {
+                confidence = "medium";
+            }
+            why.push(format!(
+                "Other documented owners share the name ({}); the article about this one is \
+                 read far more.",
+                owner_domains
+                    .iter()
+                    .filter(|owner| registrable_domain(&pick.url).as_ref() != Some(*owner))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         let ambiguous = owner_ambiguity || package_ambiguity.is_some();
         let bound = (verified_destination || intent.supports_site(pick)) && !ambiguous;
         if ambiguous {
@@ -1170,6 +1227,21 @@ impl Mcp {
         if let Some(ambiguity) = package_ambiguity {
             why.push(ambiguity);
         }
+        // A site that shows the whole name may be its own thing (the Chess
+        // Programming Wiki is not chess.com); otherwise the name may be an
+        // owner and what is wanted of it: "Home Depot coupons".
+        if prefixes
+            && !bound
+            && !ambiguous
+            && !results.hits.iter().any(|hit| intent.matches_site(hit))
+        {
+            if let Some(mut answer) =
+                self.prefix_site(name, &intent, &results.hits, &pages, wants_docs, options)?
+            {
+                answer["country_conflict"] = json!(country_conflict);
+                return Ok(answer);
+            }
+        }
         Ok(json!({
             "name": name,
             "found": bound,
@@ -1185,6 +1257,94 @@ impl Mcp {
             "did_you_mean": did_you_mean,
             "country_conflict": country_conflict,
         }))
+    }
+
+    /// The official site of the longest of `name`'s first words that surely
+    /// has one, for a name nothing establishes a site for: "Home Depot
+    /// coupons" is homedepot.com, the site of the Home Depot. Only first
+    /// words a result shows are looked up, at most [`PREFIX_LOOKUPS`] of
+    /// them, and the answer stays low confidence: the rest of the name may
+    /// be a page or service of the site, or another thing.
+    fn prefix_site(
+        &self,
+        name: &str,
+        intent: &identity::Intent,
+        hits: &[Hit],
+        pages: &[PlacedPage],
+        wants_docs: bool,
+        options: &SearchOptions,
+    ) -> Result<Option<Value>> {
+        let words: Vec<&str> = intent.entity.split_whitespace().collect();
+        // The name's own spelling of the words, when it starts with them.
+        let asked: Vec<&str> = name.split_whitespace().collect();
+        let spelled = |end: usize| {
+            if asked.len() >= end
+                && asked[..end]
+                    .iter()
+                    .zip(&words[..end])
+                    .all(|(asked, word)| asked.to_lowercase() == **word)
+            {
+                asked[..end].join(" ")
+            } else {
+                words[..end].join(" ")
+            }
+        };
+        let mut looked = 0;
+        for end in (1..words.len()).rev() {
+            let last = plumb_core::normalize_text(words[end - 1]);
+            if last.trim().is_empty() || plumb_core::is_function_word(last.trim()) {
+                continue;
+            }
+            let prefix = spelled(end);
+            let part = identity::Intent::of(&prefix);
+            if !hits.iter().any(|hit| part.matches_site(hit))
+                && !pages
+                    .iter()
+                    .any(|placed| part.matches_article(&placed.hit.page))
+            {
+                continue;
+            }
+            if looked == PREFIX_LOOKUPS {
+                break;
+            }
+            looked += 1;
+            let lookup = if wants_docs {
+                format!("{prefix} docs")
+            } else {
+                prefix.clone()
+            };
+            let mut answer = self.official_site_of(&lookup, options, false)?;
+            if answer["found"] != true || answer["confidence"] != "high" {
+                continue;
+            }
+            // The site must say something of the rest of the name, or the
+            // rest may name another thing: the tz database is no newspaper.
+            let rest = words[end..].join(" ");
+            let domain = answer["domain"].as_str().unwrap_or_default();
+            let mut texts: Vec<&str> = ["title", "description"]
+                .iter()
+                .filter_map(|field| answer[*field].as_str())
+                .collect();
+            for hit in hits.iter().filter(|hit| hit.domain == domain) {
+                texts.extend(hit.title.as_deref());
+                texts.extend(hit.description.as_deref());
+                texts.extend(hit.key_pages.iter().map(|page| page.label.as_str()));
+            }
+            if !mentions_any(&texts, &rest) {
+                continue;
+            }
+            let mut why = vec![json!(format!(
+                "No site shows the whole name. This is the official site of {prefix:?}, its \
+                 first {}; {rest:?} may be a page or service of it, or something else.",
+                if end == 1 { "word" } else { "words" }
+            ))];
+            why.extend(answer["why"].as_array().cloned().unwrap_or_default());
+            answer["name"] = json!(name);
+            answer["confidence"] = json!("low");
+            answer["why"] = Value::Array(why);
+            return Ok(Some(answer));
+        }
+        Ok(None)
     }
 
     /// The site whose address is an abbreviation in `name` of two words or
@@ -1360,7 +1520,10 @@ impl Mcp {
             "host": host,
             "domain": domain,
             "verdict": verdict,
-            "lookalike": verdict == "lookalike",
+            // True for a suspected look-alike too, as 0.2.0 said of an
+            // exact name on another ending: apps that check this before
+            // entering credentials keep stopping at paypal.co.
+            "lookalike": matches!(verdict, "lookalike" | "suspected"),
             "suspected": verdict == "suspected",
             "reasons": reasons,
             "imitates": matches!(verdict, "lookalike" | "suspected").then(|| imitated.as_ref().map(brief)).flatten(),
@@ -2613,7 +2776,8 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
                  another (paypal-login.us, twiter.com). Returns a verdict (official, known_site, \
                  little_known, lookalike, suspected or unknown), the reasons from indexed \
                  evidence, and the real site it resembles. Suspected means affiliation \
-                 is unverified and impersonation is not established. \
+                 is unverified and impersonation is not established; lookalike is true \
+                 for both. \
                  Use it before entering credentials or trusting a link.",
             "inputSchema": {
                 "type": "object",
@@ -3337,6 +3501,25 @@ fn asks_for_docs(asked: &str) -> bool {
     asked
         .split_whitespace()
         .any(|word| matches!(word.to_lowercase().as_str(), "docs" | "documentation"))
+}
+
+/// Whether any of `texts` has a word of `words` other than a function
+/// word or one of two letters, as written or without a plural's "s".
+fn mentions_any(texts: &[&str], words: &str) -> bool {
+    let stem = |word: &str| word.strip_suffix('s').unwrap_or(word).to_string();
+    let shown: std::collections::HashSet<String> = texts
+        .iter()
+        .flat_map(|text| {
+            plumb_core::normalize_text(text)
+                .split_whitespace()
+                .map(stem)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    plumb_core::normalize_text(words)
+        .split_whitespace()
+        .filter(|word| word.chars().count() > 2 && !plumb_core::is_function_word(word))
+        .any(|word| shown.contains(&stem(word)))
 }
 
 /// Letters and digits only, lowercase.

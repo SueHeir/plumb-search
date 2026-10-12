@@ -356,22 +356,23 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn guarded_adult_replacement_keeps_prior_list_when_headroom_is_missing() {
+    fn adult_list_replacement_past_the_storage_limit_is_saved() {
         let dir = tempfile::tempdir().unwrap();
         let file = list_path(dir.path());
         save_shared(&file, b"adult.example\n", 1_700_000_000).unwrap();
-        let prior = std::fs::read(&file).unwrap();
         let budget = plumb_core::storage::StorageBudget::open(dir.path(), 1).unwrap();
-        assert!(save_shared_with_budget(
+        // The limit is a target, as in 0.2.0: the newer list is kept.
+        save_shared_with_budget(
             &file,
             b"new-adult.example\n",
             1_700_000_001,
-            Some(budget.clone())
+            Some(budget.clone()),
         )
-        .is_err());
-        assert_eq!(std::fs::read(&file).unwrap(), prior);
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"new-adult.example\n");
         assert!(!file.with_extension("txt.tmp").exists());
         assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(budget.status().rejected_writes, 0);
     }
 
     use super::*;
