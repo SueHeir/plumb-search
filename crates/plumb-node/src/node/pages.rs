@@ -155,6 +155,10 @@ pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
         // the whole file would be built again at once.
         let near = super::places::known_homes(&inner);
         let counts = wanted_counts(&settings.page_sets, settings.storage_limit_mb);
+        let held_sets = inner
+            .held_page_sets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         // Only a node with a storage limit cuts its files: a server's are
         // handed on to other nodes whole.
         for &(set, pages) in counts.iter().filter(|_| settings.storage_limit_mb > 0) {
@@ -255,6 +259,7 @@ pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
                 }
             }
         }
+        drop(held_sets);
         retired_readers.retain(|reader| reader.strong_count() > 0);
         if retired_readers.is_empty() {
             remove_other_indexes_with_budget(
@@ -309,14 +314,21 @@ fn keep_files(inner: &Inner, done: &AtomicBool) {
                 if fetch_failed.contains_key(set.id) {
                     continue;
                 }
-                // Taken as the project's item set ([`super::signed_sets`]).
-                if HeldPageSet::find(&inner.paths.data, set, &inner.config.set_publishers)
-                    .is_some_and(|held| held.holds(pages))
-                {
-                    continue;
+                // Taken as the project's item set ([`super::signed_sets`]):
+                // only a file made after that generation is worth taking.
+                let held = {
+                    let _held = inner
+                        .held_page_sets
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    HeldPageSet::find(&inner.paths.data, set, &inner.config.set_publishers)
                 }
+                .filter(|held| held.holds(pages))
+                .map(|held| held.generation);
                 let near = near_of(&settings, near.as_deref(), set, pages);
-                if let Err(err) = fetch_if_needed(inner, &net, set, pages, &near, &mut checked) {
+                if let Err(err) =
+                    fetch_if_needed(inner, &net, set, pages, &near, held, &mut checked)
+                {
                     warn!("page set {}: {err:#}", set.id);
                     fetch_failed.insert(set.id, Instant::now());
                 }
@@ -408,25 +420,31 @@ fn fetch_if_needed(
     set: &SetInfo,
     pages: u64,
     near: &[(f64, f64)],
+    items_made: Option<i64>,
     checked: &mut HashMap<&'static str, Instant>,
 ) -> Result<()> {
     let data = &inner.paths.data;
     let notes = set.file_notes(data);
     let now = now_unix();
     let near_key = crate::places::near_key(near);
+    let looked_lately = || {
+        checked
+            .get(set.id)
+            .is_some_and(|at| at.elapsed() < super::newer::CHECK_EVERY)
+    };
+    // The pages are there as items: a file newer than them is looked for
+    // as often as a newer file is.
+    if items_made.is_some() && looked_lately() {
+        return Ok(());
+    }
     let reason = match notes {
+        None if items_made.is_some() => "a file newer than its items",
         None => "none yet",
         Some(n) if !n.complete && near_key != 0 && n.near != near_key => {
             "places near other towns wanted"
         }
         Some(n) if !n.complete && n.lines < pages => "more pages wanted",
-        Some(_)
-            if checked
-                .get(set.id)
-                .is_some_and(|at| at.elapsed() < super::newer::CHECK_EVERY) =>
-        {
-            return Ok(())
-        }
+        Some(_) if looked_lately() => return Ok(()),
         Some(_) => "a newer file",
     };
     // `--set-updates off`, or a list without this set: a set the node has
@@ -441,10 +459,18 @@ fn fetch_if_needed(
         return Ok(());
     }
     // What each trusted node has, and the file worth taking.
-    let Some(offers) = super::newer::offers(inner, net, set.id)? else {
+    let Some(mut offers) = super::newer::offers(inner, net, set.id)? else {
         debug!("page set {}: no trusted node serves page sets", set.id);
         return Ok(());
     };
+    if let Some(made) = items_made {
+        checked.insert(set.id, Instant::now());
+        offers.retain(|offer| i64::try_from(offer.modified).is_ok_and(|modified| modified > made));
+        if offers.is_empty() {
+            debug!("page set {}: no file newer than its items", set.id);
+            return Ok(());
+        }
+    }
     let chosen = match notes {
         Some(n) if reason == "a newer file" => {
             checked.insert(set.id, Instant::now());

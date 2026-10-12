@@ -925,7 +925,9 @@ impl Wanted {
         publishers: &[plumb_format::PublicKey],
     ) -> Self {
         let staged = SetInfo::find(plumb_index::pages::REFERENCE2_SET).unwrap();
-        let use_staged = staged.kept(sets, storage_limit_mb) > 0 && reference_stage_ready(data_dir);
+        let use_staged = staged.kept(sets, storage_limit_mb) > 0
+            && (reference_stage_ready(data_dir)
+                || reference_items_ready(data_dir, staged, publishers));
         Wanted {
             sets: SETS
                 .iter()
@@ -1043,6 +1045,24 @@ fn reference_stage_ready(data_dir: &Path) -> bool {
     let legacy = SetInfo::find(plumb_index::pages::REFERENCE_SET).unwrap();
     legacy.file_notes(data_dir).is_none_or(|old| {
         old.lines != u64::MAX && notes.lines.saturating_mul(100) >= old.lines.saturating_mul(90)
+    })
+}
+
+/// [`reference_stage_ready`] for the project's item set of the staged
+/// reference set, held whole in place of its file.
+fn reference_items_ready(
+    data_dir: &Path,
+    staged: &SetInfo,
+    publishers: &[plumb_format::PublicKey],
+) -> bool {
+    let Some(held) = HeldPageSet::find(data_dir, staged, publishers)
+        .filter(|held| held.complete && held.items > 0)
+    else {
+        return false;
+    };
+    let legacy = SetInfo::find(plumb_index::pages::REFERENCE_SET).unwrap();
+    legacy.file_notes(data_dir).is_none_or(|old| {
+        old.lines != u64::MAX && held.items.saturating_mul(100) >= old.lines.saturating_mul(90)
     })
 }
 

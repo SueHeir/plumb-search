@@ -361,7 +361,8 @@ fn parts_for(manifest: &Manifest, pages: u64) -> usize {
 /// Removes the parts of the project's item set of `set` held past the
 /// first that hold `pages` pages, as a page set file is cut to its first
 /// pages: the node keeps no more, and they take room for nothing. They
-/// are taken again when more are wanted.
+/// are taken again when more are wanted. Called with the node's
+/// `held_page_sets` held.
 pub(super) fn trim_page_set(inner: &Inner, set: &SetInfo, pages: u64) -> Result<()> {
     let data = &inner.paths.data;
     let Some(held) = HeldPageSet::find(data, set, &inner.config.set_publishers) else {
@@ -435,12 +436,22 @@ async fn look_page_set(
 /// The generation (Unix seconds) of the manifest `text` and the trusted
 /// publisher it is signed for, when it is a good manifest of `set`.
 fn vet(inner: &Inner, set: &str, text: &str) -> Result<(i64, PublicKey)> {
+    vet_for(&inner.config.set_publishers, set, text)
+}
+
+/// [`vet`] for a node that takes sets from `publishers`.
+fn vet_for(publishers: &[PublicKey], set: &str, text: &str) -> Result<(i64, PublicKey)> {
     let (manifest, signer) = Manifest::from_signed_json(text, &now())?;
     ensure!(manifest.set == set, "it is a manifest of {}", manifest.set);
     ensure!(manifest.may_share(), "it is a personal set");
-    let publisher = inner
-        .config
-        .set_publishers
+    // Taken, it would fail its check after every part was fetched.
+    let not_understood = manifest.not_understood();
+    ensure!(
+        not_understood.is_empty(),
+        "this version can't read it: it requires {}",
+        not_understood.join(", ")
+    );
+    let publisher = publishers
         .iter()
         .find(|publisher| manifest.trusted(&signer, publisher, &[]).is_ok())
         .with_context(|| format!("{} is no publisher this node trusts", manifest.publisher))?;
@@ -474,22 +485,19 @@ async fn take(
     let staging = beside(&dir, "new");
     let budget = inner.storage.clone();
     let (manifest, _) = Manifest::from_signed_json(text, &now())?;
-    {
-        let (staging, budget) = (staging.clone(), budget.clone());
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            // A folder left by a look that stopped is this job's own.
-            storage::remove_directory(&staging, budget.as_deref())?;
-            storage::create_directory(&staging, budget.as_ref())
-        })
-        .await??;
-    }
+    let fetched = {
+        let (staging, budget, files) = (staging.clone(), budget.clone(), manifest.files.clone());
+        tokio::task::spawn_blocking(move || keep_fetched(&staging, &files, budget)).await??
+    };
     let mut parts = 0;
     for part in manifest.files.iter().take(want.parts) {
         if inner.stopping() {
             bail!("the node is stopping");
         }
         let dest = staging.join(&part.path);
-        if let Some(held) = held_part(&data, &part.sha256) {
+        if fetched.contains(&part.path) {
+            // Fetched by a look that stopped before it was swapped in.
+        } else if let Some(held) = held_part(&data, &part.sha256) {
             let (dest, budget) = (dest.clone(), budget.clone());
             tokio::task::spawn_blocking(move || copy(&held, &dest, budget)).await??;
         } else if let Err(err) = fetch_part(inner, net, part, &dest, from).await {
@@ -506,6 +514,11 @@ async fn take(
     }
     let text = text.to_string();
     let budget_for_check = budget.clone();
+    // A page set's index may be read from it ([`HeldPageSet`]).
+    let held_page_sets = set
+        .strip_prefix("plumb/")
+        .and_then(SetInfo::find)
+        .map(|_| inner.held_page_sets.clone());
     tokio::task::spawn_blocking(move || -> Result<()> {
         storage::write_atomic(
             &staging.join(MANIFEST),
@@ -515,10 +528,50 @@ async fn take(
             None,
         )?;
         check_first_parts(&staging, Some(&publisher), &[], parts)?;
+        let _held = held_page_sets.as_ref().map(|held| {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         swap(&dir, &staging, budget_for_check.as_deref())
     })
     .await??;
     Ok(Looked::Took(manifest.generation))
+}
+
+/// Readies `staging` for the parts `files` of a set: keeps each part a
+/// look that stopped fetched whole into it, removes anything else, and
+/// says which parts it kept.
+fn keep_fetched(
+    staging: &Path,
+    files: &[FilePart],
+    budget: Option<Arc<StorageBudget>>,
+) -> Result<std::collections::HashSet<String>> {
+    let mut kept = std::collections::HashSet::new();
+    if !staging.is_dir() {
+        storage::remove_directory(staging, budget.as_deref())?;
+        storage::create_directory(staging, budget.as_ref())?;
+        return Ok(kept);
+    }
+    for entry in fs::read_dir(staging)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let whole = files.iter().any(|part| {
+            part.path == name
+                && fs::metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() == part.bytes)
+                && measure(&path).is_ok_and(|(_, sha256)| sha256 == part.sha256)
+        });
+        if whole {
+            kept.insert(name.to_string());
+        } else if path.is_dir() {
+            storage::remove_directory(&path, budget.as_deref())?;
+        } else {
+            storage::remove_file(&path, budget.as_deref())?;
+        }
+    }
+    Ok(kept)
 }
 
 /// Fetches `part` into `dest`, from `first` when it holds it, else from
@@ -667,4 +720,89 @@ fn beside(dir: &Path, suffix: &str) -> PathBuf {
     name.push(".");
     name.push(suffix);
     PathBuf::from(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use serde_json::{json, Value};
+
+    /// A signed set of `plumb/books` with three items in three parts.
+    fn books(dir: &Path, key: &SigningKey) -> String {
+        let Value::Object(manifest) = json!({"format": plumb_format::FORMAT, "set": "plumb/books",
+            "generation": "2026-10-12T04:00:00Z", "license": "CC0-1.0"})
+        else {
+            unreachable!()
+        };
+        let items = (1..=3).map(|n| {
+            let page: Page = serde_json::from_value(json!({
+                "set": "books", "url": format!("https://openlibrary.org/works/OL{n}W"),
+                "title": format!("Book {n}"), "views": 10 - n,
+            }))
+            .unwrap();
+            plumb_index::items::page_item(&page)
+        });
+        let fields = plumb_index::items::page_fields();
+        crate::sets::write_set(items, fields, manifest, dir, &[1, 2], 3).unwrap();
+        crate::sets::sign_set(dir, key, None, None).unwrap();
+        fs::read_to_string(dir.join(MANIFEST)).unwrap()
+    }
+
+    #[test]
+    fn a_generation_this_version_cant_read_is_not_taken() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let project = [PublicKey::of(&key)];
+        let readable = books(&temp.path().join("a"), &key);
+        assert_eq!(
+            vet_for(&project, "plumb/books", &readable).unwrap().1,
+            project[0]
+        );
+        let stranger = [PublicKey::of(&SigningKey::from_bytes(&[8; 32]))];
+        assert!(vet_for(&stranger, "plumb/books", &readable).is_err());
+        assert!(vet_for(&project, "plumb/films", &readable).is_err());
+        // The next generation needs what this version lacks.
+        let mut value: Value = serde_json::from_str(&readable).unwrap();
+        value["generation"] = json!("2026-10-13T04:00:00Z");
+        value["requires"] = json!(["x-new-thing"]);
+        value.as_object_mut().unwrap().remove("signature");
+        plumb_format::sign::sign(&mut value, &key).unwrap();
+        let unreadable = serde_json::to_string(&value).unwrap();
+        let err = vet_for(&project, "plumb/books", &unreadable).unwrap_err();
+        assert!(format!("{err:#}").contains("x-new-thing"), "{err:#}");
+    }
+
+    #[test]
+    fn parts_a_stopped_look_fetched_whole_are_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let set = temp.path().join("set");
+        let text = books(&set, &key);
+        let (manifest, _) = Manifest::from_signed_json(&text, &now()).unwrap();
+        let staging = temp.path().join("set.new");
+        fs::create_dir_all(&staging).unwrap();
+        // The first part whole, the second cut short, and a stray file.
+        let [first, second, _] = &manifest.files[..] else {
+            panic!("{:?}", manifest.files);
+        };
+        fs::copy(set.join(&first.path), staging.join(&first.path)).unwrap();
+        let bytes = fs::read(set.join(&second.path)).unwrap();
+        fs::write(staging.join(&second.path), &bytes[..bytes.len() / 2]).unwrap();
+        fs::write(staging.join("manifest.json"), "{}").unwrap();
+        let kept = keep_fetched(&staging, &manifest.files, None).unwrap();
+        assert_eq!(kept, [first.path.clone()].into_iter().collect());
+        let mut left: Vec<String> = fs::read_dir(&staging)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, std::slice::from_ref(&first.path));
+        // With no folder, one is made.
+        let fresh = temp.path().join("fresh.new");
+        assert!(keep_fetched(&fresh, &manifest.files, None)
+            .unwrap()
+            .is_empty());
+        assert!(fresh.is_dir());
+    }
 }

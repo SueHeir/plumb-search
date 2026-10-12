@@ -1355,6 +1355,10 @@ struct Inner {
     /// The page sets whose file is being downloaded or cut, so the two
     /// never write the same file at once.
     set_files_busy: Mutex<std::collections::HashSet<&'static str>>,
+    /// Held while the page index is worked out and built from the
+    /// project's item sets of page sets, and while one is swapped in or
+    /// trimmed, so a build never reads two generations of a set, or none.
+    held_page_sets: Arc<Mutex<()>>,
     /// Set once the index was rebuilt to add missing buckets.
     buckets_rebuilt: AtomicBool,
     /// The results opened this week, when sharing popularity.
@@ -1592,6 +1596,7 @@ impl Inner {
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
             set_files_busy: Mutex::default(),
+            held_page_sets: Arc::default(),
             buckets_rebuilt: AtomicBool::new(false),
             picks: Mutex::new(None),
             settings: Mutex::new(opened.settings),

@@ -24,10 +24,10 @@ use plumb_core::facts::Fact;
 use plumb_core::packages::PackageInfo;
 use plumb_core::papers::{ArxivVerification, PaperCorrection, PaperCountKind, PaperMetadata};
 use plumb_core::profiles::Profile;
-use plumb_format::item::{MAX_ITEM_BYTES, MAX_TEXT_CHARS};
+use plumb_format::item::{MAX_ID_BYTES, MAX_ITEM_BYTES, MAX_TEXT_CHARS};
 use plumb_format::refs::{is_domain, is_namespace};
-use plumb_format::urls::canonical_url;
-use plumb_format::value::{is_date, is_language, normalize_text};
+use plumb_format::urls::{canonical_url, url_sha256};
+use plumb_format::value::{check_text, is_date, is_language, normalize_text};
 use plumb_format::{Edge, FieldSpec, Item, Ref};
 use serde_json::{json, Map, Value};
 
@@ -78,17 +78,21 @@ fn site_of_url(url: &str) -> Option<String> {
 }
 
 /// `page` as an item, or `None` when its URL has no canonical form or the
-/// item fails the format's checks even without its optional fields (an id
-/// longer than the format allows).
+/// item fails the format's checks even without its optional fields (over
+/// the size cap); [`page_item_or_why`] says which.
 ///
 /// [`page_of_item`] gives the page back from it. Where the item's own
 /// members say something differently from the page (a URL not in its
-/// canonical form, a description with a space at its end), the `page`
-/// field says it as the page has it, so the two are the same page member
-/// for member unless the page's text is not text the format allows, or
-/// the item is over the size cap.
+/// canonical form, a description with a space at its end, text not in
+/// NFC), the `page` field says it as the page has it, so the two are the
+/// same page member for member unless the item is over the size cap.
 pub fn page_item(page: &Page) -> Option<Item> {
-    let mut item = page_stub(page)?;
+    page_item_or_why(page).ok()
+}
+
+/// [`page_item`], or why `page` can't be an item.
+pub fn page_item_or_why(page: &Page) -> Result<Item, String> {
+    let mut item = page_stub(page).ok_or("its URL has no canonical form")?;
     item.title = clean(&page.title);
     item.site = item.url.as_deref().and_then(site_of_url);
     item.about = page.description.as_deref().and_then(clean);
@@ -132,11 +136,12 @@ pub fn page_item(page: &Page) -> Option<Item> {
     }
     while too_big(&item) {
         let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) else {
-            break;
+            return Err(format!("it is over {MAX_ITEM_BYTES} bytes as an item"));
         };
         item.fields.remove(*field);
     }
-    item.check().is_ok().then_some(item)
+    item.check().map_err(|err| format!("{err:#}"))?;
+    Ok(item)
 }
 
 /// The page of the page set `set` that [`page_item`] made `item` from,
@@ -220,10 +225,33 @@ pub fn differing_members(page: &Page, back: &Page) -> Vec<String> {
 /// new to note.
 fn note_given(given: &mut Map<String, Value>, page: &Page, back: &Page) -> bool {
     let before = given.clone();
+    let mut escaped = texts(given.get(ESCAPED));
+    // Text the format does not allow is written escaped, and its member
+    // listed in `escaped`.
+    let mut put = |name: &str, values: &[&String], list: bool| {
+        let plain = values.iter().all(|text| check_text(text).is_ok());
+        let mut values = values.iter().map(|text| {
+            Value::from(if plain {
+                text.to_string()
+            } else {
+                escape(text)
+            })
+        });
+        let value = if list {
+            Value::Array(values.collect())
+        } else {
+            values.next().unwrap_or_default()
+        };
+        given.insert(name.into(), value);
+        escaped.retain(|member| member != name);
+        if !plain {
+            escaped.push(name.to_string());
+        }
+    };
     let mut text = |name: &str, page: Option<&String>, back: Option<&String>| {
-        if let Some(text) = page.map(|text| normalize_text(text)) {
-            if back != Some(&text) {
-                given.insert(name.into(), Value::from(text));
+        if let Some(text) = page {
+            if back != Some(text) {
+                put(name, &[text], false);
             }
         }
     };
@@ -248,18 +276,106 @@ fn note_given(given: &mut Map<String, Value>, page: &Page, back: &Page) -> bool 
         ("names", &page.names, &back.names),
         ("sections", &page.sections, &back.sections),
     ] {
-        let list: Vec<String> = page.iter().map(|text| normalize_text(text)).collect();
-        if list != *back {
-            given.insert(name.into(), json!(list));
+        if page != back {
+            put(name, &page.iter().collect::<Vec<_>>(), true);
         }
+    }
+    escaped.sort();
+    if escaped.is_empty() {
+        given.remove(ESCAPED);
+    } else {
+        given.insert(ESCAPED.into(), json!(escaped));
     }
     *given != before
 }
 
+/// The member of an item's `page` field that lists the members written
+/// escaped ([`escape`]).
+const ESCAPED: &str = "escaped";
+
+/// Text the format does not allow (not in NFC, or with control characters
+/// but newlines) written so that it does: `\\` for `\`, and `\u{hex}` for
+/// a control character or one NFC could change or join to the character
+/// before it. [`unescape`] gives the text back.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\\' {
+            out.push_str("\\\\");
+        } else if (c.is_control() && c != '\n') || !stays_in_nfc(c) {
+            out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The text [`escape`] wrote as `text`, `None` when it is not one.
+fn unescape(text: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            '\\' => out.push('\\'),
+            'u' if chars.next()? == '{' => {
+                let hex: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                if hex.is_empty() || hex.len() > 6 {
+                    return None;
+                }
+                out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Whether NFC leaves `c` as it is whatever is around it: a starter that
+/// NFC neither changes nor joins to the character before it.
+fn stays_in_nfc(c: char) -> bool {
+    use unicode_normalization::char::canonical_combining_class;
+    use unicode_normalization::{is_nfc_quick, IsNormalized};
+    canonical_combining_class(c) == 0 && is_nfc_quick(std::iter::once(c)) == IsNormalized::Yes
+}
+
+/// `text` with each control character, and each character NFC could
+/// change or join to the one before it, written as `\u{hex}`, to show
+/// how two texts that look alike differ.
+pub fn visible(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if (c.is_control() && c != '\n') || !stays_in_nfc(c) {
+                format!("\\u{{{:x}}}", u32::from(c))
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Sets each member of `page` that `given` says as the page set has it.
 fn take_given(page: &mut Page, given: &Map<String, Value>) {
+    let escaped = texts(given.get(ESCAPED));
+    let text_of = |name: &str, text: &str| {
+        if escaped.iter().any(|member| member == name) {
+            unescape(text)
+        } else {
+            Some(text.to_string())
+        }
+    };
     for (name, value) in given {
-        let text = value.as_str().map(str::to_string);
+        let text = value.as_str().and_then(|text| text_of(name, text));
+        let list = || -> Vec<String> {
+            texts(Some(value))
+                .iter()
+                .filter_map(|text| text_of(name, text))
+                .collect()
+        };
         match name.as_str() {
             "url" => page.url = text.unwrap_or_else(|| page.url.clone()),
             "title" => page.title = text.unwrap_or_else(|| page.title.clone()),
@@ -269,9 +385,9 @@ fn take_given(page: &mut Page, given: &Map<String, Value>) {
             "website" => page.website = text,
             "lead" => page.lead = text,
             "content_language" => page.content_language = text,
-            "aliases" => page.aliases = texts(Some(value)),
-            "names" => page.names = texts(Some(value)),
-            "sections" => page.sections = texts(Some(value)),
+            "aliases" => page.aliases = list(),
+            "names" => page.names = list(),
+            "sections" => page.sections = list(),
             _ => {}
         }
     }
@@ -377,8 +493,12 @@ fn id_of(page: &Page, wd: Option<&str>, url: &str) -> String {
         }),
         _ => None,
     }
-    .filter(|id| !id.is_empty())
-    .unwrap_or_else(|| url.to_string())
+    .filter(|id| !id.is_empty() && id.len() <= MAX_ID_BYTES)
+    .unwrap_or_else(|| match url_sha256(url) {
+        // An id may be no longer than the format allows.
+        Some(hashed) if url.len() > MAX_ID_BYTES => hashed,
+        _ => url.to_string(),
+    })
 }
 
 fn add_fields(page: &Page, item: &mut Item) {
@@ -1208,20 +1328,58 @@ mod tests {
         let plain = pages_of_every_set().remove(0);
         assert!(!page_item(&plain).unwrap().fields.contains_key("page"));
 
-        // Text the format does not allow comes back as it allows it.
-        let bell = Page {
+        // Text the format does not allow comes back too, escaped in `page`.
+        let odd = Page {
+            title: "Cafe\u{301} \\ Bar".into(),
             description: Some("Rings\u{7}".into()),
+            aliases: vec!["\u{18}".into(), "Cafe\u{301}".into()],
             ..plain.clone()
         };
-        let back = page_of_item(&page_item(&bell).unwrap(), &bell.set).unwrap();
-        assert_eq!(back.description.as_deref(), Some("Rings "));
+        let item = page_item(&odd).unwrap();
+        manifest(&odd.set).check_item(&item).unwrap();
+        assert_eq!(item.title.as_deref(), Some("Caf\u{e9} \\ Bar"));
+        assert_eq!(item.about.as_deref(), Some("Rings"));
+        assert_eq!(item.names, ["Caf\u{e9}"]);
         assert_eq!(
-            Page {
-                description: plain.description.clone(),
-                ..back
-            },
-            plain
+            item.fields["page"]["escaped"],
+            json!(["aliases", "description", "title"])
         );
+        assert_eq!(item.fields["page"]["title"], json!("Cafe\\u{301} \\\\ Bar"));
+        assert_eq!(page_of_item(&item, &odd.set), Some(odd));
+    }
+
+    #[test]
+    fn escaped_text_is_text_the_format_allows_and_comes_back() {
+        for text in [
+            "plain",
+            "Cafe\u{301}",
+            "e\u{323}\u{301}",
+            "\u{1100}\u{1161}",
+            "\u{212b}ngstr\u{f6}m",
+            "a\\u{41} \\",
+            "\u{7}\tline\n",
+        ] {
+            let escaped = escape(text);
+            plumb_format::value::check_text(&escaped).unwrap();
+            assert_eq!(unescape(&escaped).as_deref(), Some(text), "{escaped}");
+        }
+        assert_eq!(escape("Caf\u{e9}"), "Caf\u{e9}", "NFC text stays as it is");
+        assert_eq!(visible("Cafe\u{301}"), "Cafe\\u{301}");
+        for bad in ["\\x", "\\u{}", "\\u{110000}", "\\"] {
+            assert_eq!(unescape(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_page_with_a_url_too_long_for_an_id_is_named_by_its_hash() {
+        let long = page(json!({
+            "set": "docs", "url": format!("https://docs.example.org/{}", "a".repeat(300)),
+            "title": "A long page", "views": 1,
+        }));
+        let item = page_item(&long).unwrap();
+        assert!(item.id.starts_with("url-sha256:"), "{}", item.id);
+        assert_eq!(page_stub(&long).unwrap().id, item.id);
+        assert_eq!(page_of_item(&item, "docs"), Some(long));
     }
 
     #[test]
@@ -1291,12 +1449,16 @@ mod tests {
     }
 
     #[test]
-    fn pages_without_a_web_address_or_with_too_long_an_id_are_skipped() {
-        let long = format!("https://example.com/{}", "a".repeat(300));
-        for url in ["ftp://example.com/x", long.as_str()] {
-            let page = page(json!({"set": "docs", "url": url, "title": "x", "views": 0}));
-            assert_eq!(page_item(&page), None, "{url}");
-        }
+    fn pages_without_a_web_address_are_skipped() {
+        let page = page(
+            json!({"set": "docs", "url": "ftp://example.com/x", "title": "x",
+                               "views": 0}),
+        );
+        assert_eq!(page_item(&page), None);
+        assert_eq!(
+            page_item_or_why(&page),
+            Err("its URL has no canonical form".to_string())
+        );
     }
 
     #[test]

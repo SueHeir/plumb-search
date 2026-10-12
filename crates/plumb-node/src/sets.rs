@@ -30,7 +30,7 @@ use plumb_format::sign::sign;
 use plumb_format::sites::{read_suffix_list, Rule, SITE_RULE};
 use plumb_format::urls::{url_sha256, url_sha256_any_query};
 use plumb_format::{FieldSpec, Item, Manifest, Note, PublicKey, SiteRules, FORMAT};
-use plumb_index::items::{differing_members, page_fields, page_item, page_of_item};
+use plumb_index::items::{differing_members, page_fields, page_item_or_why, page_of_item, visible};
 use plumb_index::pages::Page;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -284,19 +284,12 @@ pub fn run(args: SetArgs) -> Result<()> {
         }
         SetCommand::FromPages(args) => {
             let (written, differ) = from_pages(&args)?;
+            let name = args.out.display().to_string();
             println!(
-                "{}: {} items in {} parts, {} pages left out; sign it with `plumb set sign`",
-                args.out.display(),
-                written.items,
-                written.parts,
-                written.left_out
+                "{name}: {} items in {} parts; sign it with `plumb set sign`",
+                written.items, written.parts,
             );
-            if differ.is_empty() {
-                println!("every page comes back the same from its item");
-            }
-            for (member, (pages, first)) in &differ {
-                println!("{member} comes back otherwise on {pages} pages, first {first}");
-            }
+            differ.print(&name);
             Ok(())
         }
         SetCommand::PageSets(args) => page_sets(&args),
@@ -470,9 +463,75 @@ pub struct Written {
     pub left_out: u64,
 }
 
-/// Pages whose item gives them back otherwise ([`page_of_item`]), by the
-/// member that differs: how many, and the first one's URL.
-pub type Differ = BTreeMap<String, (u64, String)>;
+/// What of a page set does not come over to its items.
+#[derive(Debug, Default)]
+pub struct Differ {
+    /// Pages whose item gives them back otherwise ([`page_of_item`]), by
+    /// the member that differs.
+    pub members: BTreeMap<String, Differs>,
+    /// Pages left out, by why: how many, and the first one's URL.
+    pub left_out: BTreeMap<String, (u64, String)>,
+}
+
+/// Pages one member comes back otherwise on: how many, and the first one,
+/// with that member as the page has it and as its item gives it back.
+#[derive(Debug)]
+pub struct Differs {
+    pub pages: u64,
+    pub url: String,
+    pub page: String,
+    pub back: String,
+}
+
+impl Differ {
+    /// Whether every page comes back the same from its item.
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty() && self.left_out.is_empty()
+    }
+
+    /// Says what of the set `name` does not come over, or that all of it
+    /// does.
+    pub fn print(&self, name: &str) {
+        if self.is_empty() {
+            println!("{name}: every page comes back the same from its item");
+        }
+        let mut left_out: Vec<_> = self.left_out.iter().collect();
+        left_out.sort_by_key(|(_, (pages, _))| std::cmp::Reverse(*pages));
+        for (why, (pages, first)) in left_out.iter().take(10) {
+            println!("{name}: {pages} pages left out, first {first}: {why}");
+        }
+        if left_out.len() > 10 {
+            println!(
+                "{name}: and pages left out for {} other reasons",
+                left_out.len() - 10
+            );
+        }
+        for (member, differs) in &self.members {
+            println!(
+                "{name}: {member} comes back otherwise on {} pages, first {}: {} as {}",
+                differs.pages, differs.url, differs.page, differs.back
+            );
+        }
+    }
+
+    fn leave_out(&mut self, why: String, url: &str) {
+        self.left_out.entry(why).or_insert((0, url.to_string())).0 += 1;
+    }
+}
+
+/// `page`'s member `name` as JSON, with what NFC could change shown
+/// ([`visible`]), cut to 300 characters.
+fn member_of(page: Option<&Page>, name: &str) -> String {
+    let value = page
+        .and_then(|page| serde_json::to_value(page).ok())
+        .and_then(|page| page.get(name).cloned())
+        .unwrap_or(Value::Null);
+    let text = visible(&value.to_string());
+    match text.char_indices().nth(300) {
+        Some((at, _)) => format!("{}...", &text[..at]),
+        None => text,
+    }
+}
 
 /// Writes the page set in `args.pages` as a set of items, and says which
 /// pages do not come back the same from their items.
@@ -522,16 +581,39 @@ pub fn from_pages(args: &FromPagesArgs) -> Result<(Written, Differ)> {
         manifest.insert("weight".into(), json!({"counts": counts, "scale": "log"}));
     }
     manifest.insert("order".into(), json!("weight"));
-    let mut differ = Differ::new();
+    let mut differ = Differ::default();
+    let mut ids = HashSet::new();
     let items = pages.map(|page| {
-        let item = page_item(&page)?;
+        let item = match page_item_or_why(&page) {
+            Ok(item) => item,
+            Err(why) => {
+                differ.leave_out(why, &page.url);
+                return None;
+            }
+        };
+        if !ids.insert(id_hash(&item.id)) {
+            differ.leave_out(
+                format!("an earlier page has its id, {}", item.id),
+                &page.url,
+            );
+            return None;
+        }
         let back = page_of_item(&item, &args.set);
-        let members = back.map_or_else(
+        let members = back.as_ref().map_or_else(
             || vec!["page".to_string()],
-            |back| differing_members(&page, &back),
+            |back| differing_members(&page, back),
         );
         for member in members {
-            differ.entry(member).or_insert((0, page.url.clone())).0 += 1;
+            let differs = differ
+                .members
+                .entry(member.clone())
+                .or_insert_with(|| Differs {
+                    pages: 0,
+                    url: page.url.clone(),
+                    page: member_of(Some(&page), &member),
+                    back: member_of(back.as_ref(), &member),
+                });
+            differs.pages += 1;
         }
         Some(item)
     });
@@ -626,6 +708,7 @@ pub fn page_sets(args: &PageSetsArgs) -> Result<()> {
             level: args.level,
         };
         let (made, differ) = from_pages(&from).with_context(|| format!("writing {name}"))?;
+        let left_out: u64 = differ.left_out.values().map(|(pages, _)| pages).sum();
         let bytes: u64 = fs::read_dir(&from.out)?
             .flatten()
             .filter_map(|entry| entry.metadata().ok())
@@ -633,14 +716,11 @@ pub fn page_sets(args: &PageSetsArgs) -> Result<()> {
             .sum();
         println!(
             "{name}: {} items in {} parts, {bytes} bytes, {} pages left out",
-            made.items, made.parts, made.left_out
+            made.items,
+            made.parts,
+            left_out + made.left_out
         );
-        if differ.is_empty() {
-            println!("{name}: every page comes back the same from its item");
-        }
-        for (member, (pages, first)) in &differ {
-            println!("{name}: {member} comes back otherwise on {pages} pages, first {first}");
-        }
+        differ.print(&name);
         written += 1;
     }
     ensure!(
@@ -1143,6 +1223,7 @@ fn write_manifest(dir: &Path, manifest: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plumb_index::items::page_item;
 
     #[test]
     fn a_nodes_page_sets_are_written_as_the_projects_item_sets() {
@@ -1190,6 +1271,59 @@ mod tests {
         assert_eq!((checked.set.as_str(), checked.items), ("plumb/books", 1));
         // Written again only into empty folders.
         assert!(page_sets(&args).is_err());
+    }
+
+    #[test]
+    fn what_does_not_come_over_to_the_items_is_said_with_why() {
+        use plumb_core::article::{write_article, Article, ARTICLES_HEADER};
+
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("books.tsv.gz");
+        let mut text = ARTICLES_HEADER.as_bytes().to_vec();
+        for (title, item) in [
+            ("Cafe\u{301} society", "OL1W"),
+            ("Ring \u{7}the bell", "OL2W"),
+            ("Twice", "OL3W"),
+            ("Twice again", "OL3W"),
+        ] {
+            let article = Article {
+                title: title.into(),
+                views: 9,
+                item: Some(item.into()),
+                ..Article::default()
+            };
+            write_article(&mut text, &article).unwrap();
+        }
+        fs::write(&file, text).unwrap();
+        let args = FromPagesArgs {
+            pages: file,
+            set: "books".into(),
+            name: None,
+            out: temp.path().join("out"),
+            title: None,
+            license: Some("CC0-1.0".into()),
+            attribution: None,
+            weight_counts: None,
+            level: 3,
+        };
+        let (written, differ) = from_pages(&args).unwrap();
+        assert_eq!(written.items, 3);
+        assert!(differ.members.is_empty(), "{:?}", differ.members);
+        assert_eq!(
+            differ.left_out,
+            BTreeMap::from([(
+                "an earlier page has its id, https://openlibrary.org/works/OL3W".to_string(),
+                (1, "https://openlibrary.org/works/OL3W".to_string())
+            )])
+        );
+        assert!(!differ.is_empty());
+        let page: Page = serde_json::from_value(json!({
+            "set": "books", "url": "https://openlibrary.org/works/OL1W",
+            "title": "Cafe\u{301}", "views": 1,
+        }))
+        .unwrap();
+        assert_eq!(member_of(Some(&page), "title"), "\"Cafe\\u{301}\"");
+        assert_eq!(member_of(None, "title"), "null");
     }
 
     fn docs_pages(count: usize) -> Vec<Page> {
