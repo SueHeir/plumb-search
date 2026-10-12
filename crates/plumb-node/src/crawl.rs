@@ -104,7 +104,7 @@ const OFFLINE_WAITS: [Duration; 4] = [
 /// What choosing homepages to crawl reads of a site: a whole
 /// [`SiteRecord`], or the little a node keeps of each site during a crawl
 /// round (see `crate::node`).
-pub(crate) trait CrawlSite {
+pub trait CrawlSite {
     /// The canonical domain.
     fn domain(&self) -> &str;
     /// Where the homepage was last reached ([`SiteRecord::url`]).
@@ -353,7 +353,7 @@ fn by_score<S: CrawlSite>(a: &(f32, &S), b: &(f32, &S)) -> std::cmp::Ordering {
 /// The homepage of `record` to fetch: `https://<domain>/`, falling back to
 /// the record's `url` (where the homepage was last reached, after
 /// redirects) when that gets no answer.
-pub(crate) fn target_for(record: &impl CrawlSite) -> CrawlTarget {
+pub fn target_for(record: &impl CrawlSite) -> CrawlTarget {
     CrawlTarget {
         known_url: record.url().map(str::to_owned),
         ..CrawlTarget::new(record.domain())

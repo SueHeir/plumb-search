@@ -7,10 +7,10 @@ it. This asks Claude for one sentence about each of the best-known ones and
 keeps it in the record's `summary` field, which is searched like a
 description (only while the site has none) and goes into its vector.
 
-    plumb summaries pick --records records.jsonl --top 10000 --out picks.jsonl
+    plumb-tools summaries pick --records records.jsonl --top 10000 --out picks.jsonl
     python3 tools/summaries/summarize.py --picks picks.jsonl --out summaries.jsonl --direct 20
     python3 tools/summaries/summarize.py --picks picks.jsonl --out summaries.jsonl
-    plumb summaries apply --summaries summaries.jsonl --records records.jsonl \
+    plumb-tools summaries apply --summaries summaries.jsonl --records records.jsonl \
         --out records-summaries.jsonl
 
 `--direct 20` asks for 20 sites only and prints them, to read a sample

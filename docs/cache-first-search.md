@@ -21,7 +21,7 @@ The existing 12-hour freshness window becomes a refresh threshold rather than a 
 The read-only sizing command separates useful record payload from indexes, models, icons and peer data:
 
 ```sh
-plumb storage --data /path/to/plumb-data --json > storage-report.json
+plumb-tools storage --data /path/to/plumb-data --json > storage-report.json
 ```
 
 It is safe to run on a live node. It does not reconfigure, refresh or delete the node. The report contains aggregate byte counts, full/slim main-record sizes and bucket membership distributions. It excludes symlinks and special files, bounds malformed input, and does not open identity, token or history files. It measures logical lengths, not allocated blocks; records are sized without replaying their journal. A live directory is not an atomic snapshot, and an incomplete report exits with an error after showing its omissions.

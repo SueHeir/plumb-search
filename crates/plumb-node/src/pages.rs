@@ -3,7 +3,7 @@
 //! [`plumb_index::pages`]).
 //!
 //! Each set is a file in `DIR/pages/sets/`, most read pages first, which
-//! `plumb fetch-pages` makes from public dumps. How many of each set's
+//! `plumb-tools fetch-pages` makes from public dumps. How many of each set's
 //! pages a node keeps is a setting ([`PageSets`]): off, a number of the
 //! most read ones, all of them, or automatic, which follows the storage
 //! limit (100,000 Wikipedia articles, about 10 MB, under 1 GB; a million,
@@ -241,7 +241,7 @@ impl SetInfo {
 
 impl SetInfo {
     /// What is known of the set's file in `data_dir`, `None` when there is
-    /// none. A file with no notes (made by `plumb fetch-pages`) is whole.
+    /// none. A file with no notes (made by `plumb-tools fetch-pages`) is whole.
     pub fn file_notes(&self, data_dir: &Path) -> Option<SetFileNotes> {
         let file = self.file(data_dir);
         if !file.is_file() {

@@ -145,7 +145,7 @@ The seed downloads go through a proxy set in the usual variables (`HTTPS_PROXY`,
 
 ### Search history and About you
 
-The desktop app, and `plumb run --search-history`, keep a search history for each browser that searches the node: the home page lists your past searches, sites you opened before are labelled and come first the next time you search, and `/history` lists and clears it. Each browser gets its own profile (a cookie), so people sharing a node see only their own. The node also learns from your clicks: places and their map that you keep passing by for searches like one you make are folded to one line (opening one brings them back), "Recent" headlines you keep reading come unfolded, and sites you pass over every time, never picking them, move down a little. A site you opened from far down the page counts for more than one you opened first, since fewer people read that far: the node counts how often results are opened at each place on the page (counts only, under a salted fingerprint of the search and site, with no profile, search or site in them, in `history/positions.json`) and works out from them how much each place is looked at. A browser can also choose "Use my searches to train Plumb's ranking" in the gear (off unless chosen): its short searches (no e-mail address or long number) and the sites opened for them are then kept, with no profile, in `history/click-labels.json`, and `plumb click-labels --data DIR --out labels.jsonl --queries labels.tsv` writes them out with how much each site is wanted once corrected for its place, plus a queries file of the searches whose clicks clearly pick one site, for `plumb eval --features-out` and `plumb train-rank`. They are kept apart from the history, so clearing the history does not remove them; delete the file to. `/history` shows what it learned and forgets it on request. You can also tell it outright: "Edit these results" on a results page shows small buttons to put a result higher or lower for that search, hide it from that search, or fold the places or headlines for that search or every search like it. And `/tune` ("Tune your search") takes you through five random searches on the real results page in edit mode, then learns from the results you move up or down and hide what you like in general, such as official sites, encyclopedias, forums, code, video, shops, social media, news, government and school sites, small or well-known sites, and maps and headlines. Every search leans that way, and results say "You like code and software docs" when that is why they moved up. All three choices are in the settings gear; the node-wide switch is "Remember searches" on the panel. Leave it off on a public server.
+The desktop app, and `plumb run --search-history`, keep a search history for each browser that searches the node: the home page lists your past searches, sites you opened before are labelled and come first the next time you search, and `/history` lists and clears it. Each browser gets its own profile (a cookie), so people sharing a node see only their own. The node also learns from your clicks: places and their map that you keep passing by for searches like one you make are folded to one line (opening one brings them back), "Recent" headlines you keep reading come unfolded, and sites you pass over every time, never picking them, move down a little. A site you opened from far down the page counts for more than one you opened first, since fewer people read that far: the node counts how often results are opened at each place on the page (counts only, under a salted fingerprint of the search and site, with no profile, search or site in them, in `history/positions.json`) and works out from them how much each place is looked at. A browser can also choose "Use my searches to train Plumb's ranking" in the gear (off unless chosen): its short searches (no e-mail address or long number) and the sites opened for them are then kept, with no profile, in `history/click-labels.json`, and `plumb click-labels --data DIR --out labels.jsonl --queries labels.tsv` writes them out with how much each site is wanted once corrected for its place, plus a queries file of the searches whose clicks clearly pick one site, for `plumb-tools eval --features-out` and `plumb-tools train-rank`. They are kept apart from the history, so clearing the history does not remove them; delete the file to. `/history` shows what it learned and forgets it on request. You can also tell it outright: "Edit these results" on a results page shows small buttons to put a result higher or lower for that search, hide it from that search, or fold the places or headlines for that search or every search like it. And `/tune` ("Tune your search") takes you through five random searches on the real results page in edit mode, then learns from the results you move up or down and hide what you like in general, such as official sites, encyclopedias, forums, code, video, shops, social media, news, government and school sites, small or well-known sites, and maps and headlines. Every search leans that way, and results say "You like code and software docs" when that is why they moved up. All three choices are in the settings gear; the node-wide switch is "Remember searches" on the panel. Leave it off on a public server.
 
 The same nodes have an "About you" page (`/about`, linked from the settings gear) where each browser can list its interests, sites it always wants first, and sites it never wants to see. Results that match an interest move up a little and say which interest they match, so "rust" leans towards the language for a programmer and the game for a gamer. Like the history, it stays on the node for that browser only and is applied after results are found, so it is never part of a search sent to other nodes.
 
@@ -177,9 +177,12 @@ The settings gear has **Safe search** (off, moderate or strict; `safe=` in the a
 
 The `fixtures/` folder holds a small, made-up dataset in the same formats as the real sources, so the whole pipeline runs offline.
 
+The node is `plumb`; making page sets, seeding records by hand and measuring ranking are in a second program, `plumb-tools`, which a node never runs.
+
 ```sh
 cargo build --release
 alias plumb=./target/release/plumb
+alias plumb-tools=./target/release/plumb-tools
 
 plumb ingest --tranco fixtures/tranco.csv \
              --cc-ranks fixtures/cc-domain-ranks.txt \
@@ -188,7 +191,7 @@ plumb ingest --tranco fixtures/tranco.csv \
              --out data/records.jsonl
 plumb index --records data/records.jsonl --index data/index
 plumb search --index data/index us bank
-plumb eval --index data/index --queries fixtures/brand_queries.tsv
+plumb-tools eval --index data/index --queries fixtures/brand_queries.tsv
 plumb serve --index data/index        # then open http://127.0.0.1:8080
 ```
 
@@ -206,7 +209,7 @@ The seed data comes from four public sources. They are only needed to get starte
 ```sh
 # 1. Download Tranco, the Common Crawl domain ranks and the Wikidata list.
 #    Pick a web graph release name from https://commoncrawl.org/web-graphs
-plumb fetch-data --dir data --cc-release <release-name>
+plumb-tools fetch-data --dir data --cc-release <release-name>
 
 # 2. Optional: download a few WAT files. Each crawl lists its WAT files in
 #    https://data.commoncrawl.org/crawl-data/<CC-MAIN-YYYY-WW>/wat.paths.gz;
@@ -231,7 +234,7 @@ plumb crawl --records data/records.jsonl --top 10000
 
 # 5. Build the index and run the brand-name test.
 plumb index --records data/records.jsonl --index data/index
-plumb eval --index data/index --queries eval/brand_queries.tsv
+plumb-tools eval --index data/index --queries eval/brand_queries.tsv
 ```
 
 To refresh the seed data later, run steps 1 and 3 again with `--records data/records.jsonl` added to step 3. Titles, link text and crawl times carry over, while ranks and official-site marks come only from the new files, so a domain that has expired and changed hands does not keep the trust it had.
@@ -253,7 +256,7 @@ score = α · link_score + trust · ((1 − α) · text_score + name_bonus)
 
 `α` defaults to 0.35 and can be changed with `--alpha`.
 
-Besides its names, title, description and headings, a site is also found by up to 30 search terms that each crawl picks from the whole homepage text with [YAKE](https://github.com/LIAAD/yake), a statistical keyword extractor (no model, a few milliseconds a page). They count for less than names. `plumb fetch-text` and `plumb terms` measure other choices on saved pages without crawling again.
+Besides its names, title, description and headings, a site is also found by up to 30 search terms that each crawl picks from the whole homepage text with [YAKE](https://github.com/LIAAD/yake), a statistical keyword extractor (no model, a few milliseconds a page). They count for less than names. `plumb-tools fetch-text` and `plumb-tools terms` measure other choices on saved pages without crawling again.
 
 ### Trying ranking changes on real searches
 
@@ -268,7 +271,7 @@ A node can try ranking changes on a share of its own searches and compare what p
 ]}
 ```
 
-`rank` takes the same knobs as `plumb eval --rank`. Experiments in one layer never share a search; experiments in different layers overlap independently, and a knob belongs to one layer. `diversion` is `query` (the same search always falls the same way) or `browser` (each browser with a search history profile sees one ranking). The node counts, for each experiment and nothing finer, its searches, how many had a result opened, and at which place, in `experiments-results.json`. `plumb experiments --data DIR` compares each experiment with its layer's control, with 95% confidence intervals. Start with two experiments that change nothing (an A/A test): their intervals should take in 0.
+`rank` takes the same knobs as `plumb-tools eval --rank`. Experiments in one layer never share a search; experiments in different layers overlap independently, and a knob belongs to one layer. `diversion` is `query` (the same search always falls the same way) or `browser` (each browser with a search history profile sees one ranking). The node counts, for each experiment and nothing finer, its searches, how many had a result opened, and at which place, in `experiments-results.json`. `plumb experiments --data DIR` compares each experiment with its layer's control, with 95% confidence intervals. Start with two experiments that change nothing (an A/A test): their intervals should take in 0.
 
 ### Search by meaning (optional)
 

@@ -15,7 +15,7 @@
 //! official site with the country this node knows it for, and links to
 //! Wikipedia and Wikidata. Nothing in it is loaded from elsewhere.
 //!
-//! When the article's lead is held (`plumb fetch-leads`), the box shows
+//! When the article's lead is held (`plumb-tools fetch-leads`), the box shows
 //! its first sentences too, and a query that asks what something is
 //! ("what is a manatee", "define photosynthesis", "who was ada lovelace")
 //! is answered above the results with the first sentence of the article
@@ -155,7 +155,7 @@ pub(crate) struct ShownProfile {
 
 /// An official profile the query asks for ("mrbeast youtube"), shown first.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct ProfileAnswer {
+pub struct ProfileAnswer {
     /// Whose it is: the article's title.
     pub of: String,
     pub service: &'static str,
@@ -331,7 +331,7 @@ pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
 /// before the service ("mrbeast" of "mrbeast youtube"), and for lyrics
 /// those words as a song too, since a song is only found when asked for
 /// as one ("bohemian rhapsody song" for "bohemian rhapsody lyrics").
-pub(crate) fn profile_lookups(query: &str) -> Vec<String> {
+pub fn profile_lookups(query: &str) -> Vec<String> {
     let Some((services, name)) = services_asked(query) else {
         return Vec::new();
     };
@@ -347,7 +347,7 @@ pub(crate) fn profile_lookups(query: &str) -> Vec<String> {
 /// name a Wikipedia article or a song or album in `pages` (found for those
 /// words) that has a profile there. A song with no page on Genius has its
 /// lyrics searched for there, by its title and artist.
-pub(crate) fn profile_answer(query: &str, pages: &[PlacedPage]) -> Option<ProfileAnswer> {
+pub fn profile_answer(query: &str, pages: &[PlacedPage]) -> Option<ProfileAnswer> {
     pages
         .iter()
         .filter(|placed| {
@@ -690,7 +690,7 @@ pub(crate) fn resolve_entity<'a>(
 
 /// Legacy displayed-page selection retained for evaluator compatibility.
 /// User-facing adapters resolve entities before rendering their facts.
-pub(crate) fn fact_answer(
+pub fn fact_answer(
     asked: &plumb_core::facts::FactQuestion,
     pages: &[PlacedPage],
     now: u64,

@@ -15,7 +15,7 @@
 //! ```
 //!
 //! - An experiment changes ranking knobs ([`plumb_index::RankConfig`], the
-//!   same JSON `plumb eval --rank` takes) for a share of searches. One
+//!   same JSON `plumb-tools eval --rank` takes) for a share of searches. One
 //!   with no changes is the control the others are compared with: the one
 //!   named `control`, else the first that changes nothing.
 //! - Each search falls into one bucket of 1,000 in each layer, and each

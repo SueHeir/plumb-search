@@ -207,7 +207,7 @@ pub(super) const LAYERED_SETS: [&str; 7] = [
 /// The kinds of entries on the lines of profiles of an articles file (see
 /// `plumb_core::article`): `website`, `lead`, `name`, each fact (`f-capital`)
 /// and `profiles` for any service, sorted.
-pub(crate) fn layers_of(path: &Path) -> Result<Vec<String>> {
+pub fn layers_of(path: &Path) -> Result<Vec<String>> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(flate2::read::MultiGzDecoder::new(file));
     let mut kinds = std::collections::BTreeSet::new();
@@ -276,7 +276,7 @@ pub(super) fn layers(set: &str, path: &Path) -> Vec<String> {
 }
 
 /// A file's time (Unix seconds) and size.
-pub(crate) fn stamp(path: &Path) -> Option<(u64, u64)> {
+pub fn stamp(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let modified = meta
         .modified()
@@ -296,7 +296,7 @@ pub(super) fn set_time(path: &Path, modified: u64) -> Result<()> {
 }
 
 /// `<file>.prev`.
-pub(crate) fn prev_path(file: &Path) -> PathBuf {
+pub fn prev_path(file: &Path) -> PathBuf {
     let mut name = file.as_os_str().to_owned();
     name.push(".prev");
     PathBuf::from(name)
@@ -304,7 +304,7 @@ pub(crate) fn prev_path(file: &Path) -> PathBuf {
 
 /// Puts the downloaded `part` in place of `file`, keeping the file it
 /// replaces as `<file>.prev`, and gives it its maker's time `modified`.
-pub(crate) fn install(part: &Path, file: &Path, modified: u64) -> Result<()> {
+pub fn install(part: &Path, file: &Path, modified: u64) -> Result<()> {
     install_using(
         part,
         file,

@@ -16,7 +16,7 @@ fahrenheit 451 ray bradbury	https://openlibrary.org/works/OL103123W
 
 # Added 2026-10-06: well-known books, each with the most-read Open
 # Library work of that title (at least three times as read as the next;
-# looked up with plumb check-labels --find).
+# looked up with plumb-tools check-labels --find).
 to kill a mockingbird book	https://openlibrary.org/works/OL3140822W
 the catcher in the rye	https://openlibrary.org/works/OL3335245W
 brave new world aldous huxley	https://openlibrary.org/works/OL64365W
