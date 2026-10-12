@@ -731,12 +731,12 @@ mod tests {
         let mut ledger = ledger.with_budget(Some(budget.clone()));
         ledger.accounts.get_mut(&peer).unwrap().earned = 20;
         ledger.dirty = true;
-        assert!(ledger.save().is_err());
-        assert_eq!(fs::read(dir.path().join(LEDGER_FILE)).unwrap(), prior);
-        assert!(ledger.dirty);
-        budget.set_limit(1024 * 1024);
+        // The limit is a target, as in 0.2.0: credits are saved past it.
         ledger.save().unwrap();
+        assert_ne!(fs::read(dir.path().join(LEDGER_FILE)).unwrap(), prior);
         assert!(!ledger.dirty);
+        assert_eq!(budget.status().rejected_writes, 0);
+        budget.set_limit(1024 * 1024);
         let wallet = Wallet::open(dir.path())
             .unwrap()
             .with_budget(Some(budget.clone()));

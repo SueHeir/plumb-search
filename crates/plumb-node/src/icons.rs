@@ -182,31 +182,28 @@ fn shard(domain: &str) -> u8 {
 #[cfg(test)]
 pub(crate) mod tests {
     #[test]
-    fn guarded_icon_burst_preserves_existing_bytes_and_never_exceeds_quota() {
+    fn icons_past_the_storage_limit_are_saved_and_counted() {
         use plumb_core::storage::{allocation_for, directory_bytes, StorageBudget};
         let dir = tempfile::tempdir().unwrap();
         let store = super::IconStore::new(dir.path().join("icons"));
         store.put("kept.example", Some(&[1; 1024])).unwrap();
         let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
         let store = store.with_budget(Some(budget.clone()));
+        // The limit is a target, as in 0.2.0: crawls pause at it, but an
+        // icon a crawl brought is kept.
         budget.set_limit(budget.status().used_bytes + allocation_for(1024) - 1);
-        assert!(store.put("kept.example", Some(&[2; 1024])).is_err());
-        assert_eq!(store.get("kept.example").unwrap(), vec![1; 1024]);
+        store.put("kept.example", Some(&[2; 1024])).unwrap();
+        assert_eq!(store.get("kept.example").unwrap(), vec![2; 1024]);
         assert_eq!(budget.status().reserved_bytes, 0);
-        budget.set_limit(128 * 1024);
-        let mut blocked = false;
+        budget.set_limit(64 * 1024);
         for i in 0..100 {
-            if store
+            store
                 .put(&format!("burst-{i}.example"), Some(&[3; 1024]))
-                .is_err()
-            {
-                blocked = true;
-            }
-            assert!(directory_bytes(dir.path()).unwrap() <= budget.status().limit_bytes);
+                .unwrap();
             assert!(budget.status().used_bytes >= directory_bytes(dir.path()).unwrap());
         }
-        assert!(blocked);
-        assert_eq!(store.get("kept.example").unwrap(), vec![1; 1024]);
+        assert!(budget.status().backpressure);
+        assert_eq!(budget.status().rejected_writes, 0);
         assert_eq!(budget.status().reserved_bytes, 0);
     }
 

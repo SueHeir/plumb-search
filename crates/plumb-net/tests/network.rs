@@ -1220,7 +1220,7 @@ async fn catchup_resumes_after_slow_delivery_without_relisting_or_maintenance() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_own_publication_stops_before_signing_when_protected_storage_is_full() {
+async fn fresh_own_publication_past_the_storage_limit_is_still_published() {
     let node = Node::start_config(
         tempfile::tempdir().unwrap(),
         false,
@@ -1234,10 +1234,14 @@ async fn fresh_own_publication_stops_before_signing_when_protected_storage_is_fu
     .await;
     let mut record = SiteRecord::new("protected-own.example");
     record.crawled_at = Some(now_unix());
-    assert!(node.handle.publish(vec![record]).await.is_err());
-    assert_eq!(node.handle.status().batches_published, 0);
-    assert_eq!(node.handle.status().batches_held, 0);
-    assert!(node.handle.storage_budget().unwrap().status().backpressure);
+    // The limit is a target, as in 0.2.0: crawls pause at it, but a crawl
+    // already made is published.
+    assert!(node.handle.publish(vec![record]).await.unwrap().is_some());
+    assert_eq!(node.handle.status().batches_published, 1);
+    assert_eq!(node.handle.status().batches_held, 1);
+    let storage = node.handle.storage_budget().unwrap().status();
+    assert!(storage.backpressure);
+    assert_eq!(storage.rejected_writes, 0);
     node.handle.shutdown().await;
 }
 
