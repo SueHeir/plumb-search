@@ -18,6 +18,10 @@
 
 - A node that has to build its page index when it starts, as one upgraded from 0.2.0 does, keeps searching the index it already has meanwhile and builds the new one beside it. Wikipedia, Stack Overflow, docs and book results no longer go missing for the build (13 minutes on plumbsearch.org, longer on a desktop), or for half an hour more when it fails. While 0.2.0's index stands in, searches limited to a set, a site, docs, papers or a language other than English find no pages. It is removed once the new one is in use.
 
+### For AI apps
+
+- `check_lookalike` says `lookalike: true` for a `suspected` address too (another site's exact name on another ending or host, with no owner evidence either way), as 0.2.0 did: an app that checks `lookalike` before entering credentials still stops at `paypal.co`. `verdict` and `suspected` tell the two apart.
+
 ## 0.2.1
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.2.1), and the Docker image is `ghcr.io/sueheir/plumb-search:0.2.1` (also `:0.2` and `:latest`).
