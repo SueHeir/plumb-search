@@ -6,6 +6,7 @@
 use plumb_core::normalize_text;
 use serde::{Deserialize, Serialize};
 
+use crate::pages::{LearnedPlace, PlacedPage};
 use crate::{Hit, WELL_KNOWN_LINK_SCORE};
 
 /// How many health authorities go first.
@@ -373,6 +374,58 @@ pub(crate) fn authorities_first(
     hits.truncate(limit);
 }
 
+/// The sources a medical `query` asks for ([`named_sources`]) first among
+/// the sites again, once the learned ranking has had its say: it lists a
+/// homepage [`authorities_first`] put in under the authorities ("NHS
+/// paracetamol for children dose" had nhs.uk fourth). Pages listed on
+/// their own keep their places, and the moved sites trade scores so that
+/// scores still go down the list, as [`crate::learned::reorder`] leaves
+/// them.
+pub fn sources_lead(query: &str, hits: &mut Vec<Hit>, placed: &mut [PlacedPage]) {
+    if plumb_core::Operators::parse(query).any()
+        || crate::typed_domain(query).is_some()
+        || !is_medical(query)
+    {
+        return;
+    }
+    let mut lead: Vec<usize> = Vec::new();
+    for domain in named_sources(query) {
+        if let Some(at) = hits.iter().position(|hit| same_site(&hit.domain, &domain)) {
+            if !lead.contains(&at) {
+                lead.push(at);
+            }
+        }
+    }
+    let mut new_hits: Vec<Hit> = lead.iter().map(|&at| hits[at].clone()).collect();
+    new_hits.extend(
+        hits.iter()
+            .enumerate()
+            .filter(|(at, _)| !lead.contains(at))
+            .map(|(_, hit)| hit.clone()),
+    );
+    let Some(moved) = new_hits
+        .iter()
+        .zip(hits.iter())
+        .rposition(|(new, old)| new.domain != old.domain)
+        .map(|last| last + 1)
+    else {
+        return;
+    };
+    let mut scores: Vec<f32> = new_hits[..moved].iter().map(|hit| hit.score).collect();
+    scores.sort_by(|a, b| b.total_cmp(a));
+    for (hit, score) in new_hits.iter_mut().zip(scores) {
+        hit.score = score;
+    }
+    *hits = new_hits;
+    for page in placed.iter_mut().filter(|page| page.under.is_none()) {
+        if matches!(page.hit.learned, Some(LearnedPlace::Before(_))) {
+            if let Some(site) = hits.get(page.at) {
+                page.hit.learned = Some(LearnedPlace::Before(site.domain.clone()));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,5 +729,78 @@ mod tests {
         assert_eq!(domains(&hits), ["pizzahut.com"]);
         authorities_first("flu symptoms", None, &mut hits, 5, &|_| None);
         assert_eq!(domains(&hits), ["pizzahut.com"]);
+    }
+    #[test]
+    fn named_sources_lead_again_after_the_learned_order() {
+        use crate::pages::{Page, PageHit};
+        let ranked = |domain: &str, score: f32| {
+            let mut hit = hit(domain, false, 0.6);
+            hit.score = score;
+            hit
+        };
+        let listed = || {
+            vec![
+                ranked("clevelandclinic.org", 0.9),
+                ranked("medlineplus.gov", 0.8),
+                ranked("mayoclinic.org", 0.7),
+                ranked("www.nhs.uk", 0.6),
+                ranked("pedi-stat.com", 0.5),
+            ]
+        };
+        let page = PlacedPage {
+            hit: PageHit {
+                page: Page::from_reference(plumb_core::Article {
+                    item: Some("https://www.verywellhealth.com/paracetamol-dose".to_string()),
+                    title: "Paracetamol dose for children".to_string(),
+                    ..Default::default()
+                })
+                .unwrap(),
+                score: 0.9,
+                named: false,
+                popularity: 0.5,
+                whole: false,
+                learned: Some(LearnedPlace::Before("clevelandclinic.org".to_string())),
+            },
+            at: 0,
+            under: None,
+        };
+        let mut hits = listed();
+        let mut placed = vec![page.clone()];
+        sources_lead(
+            "NHS paracetamol for children dose age weight",
+            &mut hits,
+            &mut placed,
+        );
+        assert_eq!(
+            domains(&hits),
+            [
+                "www.nhs.uk",
+                "clevelandclinic.org",
+                "medlineplus.gov",
+                "mayoclinic.org",
+                "pedi-stat.com"
+            ]
+        );
+        let scores: Vec<f32> = hits.iter().map(|hit| hit.score).collect();
+        assert_eq!(scores, [0.9, 0.8, 0.7, 0.6, 0.5]);
+        // The page listed above the sites stays above them.
+        assert_eq!(placed[0].at, 0);
+        assert_eq!(
+            placed[0].hit.learned,
+            Some(LearnedPlace::Before("www.nhs.uk".to_string()))
+        );
+
+        // No source asked for, an operator, or not medical: as it was.
+        for query in [
+            "paracetamol for children dose age weight",
+            "paracetamol dose site:nhs.uk",
+            "nhs jobs",
+        ] {
+            let mut hits = listed();
+            let mut placed = vec![page.clone()];
+            sources_lead(query, &mut hits, &mut placed);
+            assert_eq!(domains(&hits), domains(&listed()), "{query}");
+            assert_eq!(placed, vec![page.clone()], "{query}");
+        }
     }
 }
