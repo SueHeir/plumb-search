@@ -14,11 +14,11 @@ use crate::{CrawlOutcome, CrawlResult};
 /// crawls as [`SiteRecord::crawl_version`]. Raise it when a change to what
 /// crawls read makes the sites read before worth reading again: a better
 /// way to pick a homepage's words (the terms that go with its body text),
-/// say. Nodes then crawl the sites last read by an older version again,
-/// best link score first, in the share of each round that goes to sites due
-/// again (see `plumb_node::crawl`), so the whole web of a node is read anew
-/// most-known sites first, without waiting the month its sites are
-/// otherwise due after.
+/// say. Nodes then crawl the sites last read by a version older than
+/// [`REREAD_BELOW`] again, best link score first, in the share of each
+/// round that goes to sites due again (see `plumb_node::crawl`), so the
+/// whole web of a node is read anew most-known sites first, without
+/// waiting the month its sites are otherwise due after.
 ///
 /// 0 is how crawlers read homepages up to 2026-10-06 (title, description,
 /// headings, the first 100 words of visible text, key pages, links); 1
@@ -27,6 +27,14 @@ use crate::{CrawlOutcome, CrawlResult};
 /// made of links, "Learn more" buttons) out of the visible text
 /// (`boilerplate.rs`).
 pub const CRAWL_VERSION: u32 = 2;
+
+/// Sites last read by a crawler older than this are read again ahead of
+/// their turn (see [`CRAWL_VERSION`]). It stays at 1, as in 0.2.0, until
+/// 0.3.0: at 2, a node upgraded from 0.2.0 would read every site it has
+/// again at once, and a trusted 0.2.0 crawler's fresher crawl of a site
+/// (version 1) would make it due again on every newer node. Sites read
+/// by version 1 get version 2's text when they come due as usual.
+pub const REREAD_BELOW: u32 = 1;
 
 /// Turns crawl results into records to merge into a
 /// [`plumb_core::RecordSet`]: one record per fetched homepage (url, title,
