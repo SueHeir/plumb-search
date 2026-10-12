@@ -6,6 +6,7 @@
 
 - `after:`, `before:` and `sort:` act as paper filters only with a value they can use: a date (`2025` or `2025-03-01`) or an order (`newest`, `relevance`). Otherwise the word is searched as it is, as in 0.2.0: "before:sunset lyrics" and "after:party" are searches again, not errors.
 - When a homepage has no valid language declaration, a dominant non-Latin title/description script can exclude it from an incompatible language filter. Short and mixed text stays eligible. Declared languages and full typed site names are preserved. Shared scripts do not identify a language; the fallback takes effect on the next index build.
+- A health search that names its own source ("how long is the flu contagious CDC", "lisinopril MedlinePlus", "acetaminophen dose healthychildren.org") keeps that source where it ranks, instead of getting MedlinePlus, Mayo Clinic and Cleveland Clinic homepages put above it. A health search that names no source still lists them first.
 
 ### Fixes
 
