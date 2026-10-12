@@ -596,10 +596,14 @@ fn observe(
         options.country.as_deref(),
     );
     if typed.is_none() {
-        if let Some(route) = route {
-            crate::sources::lead_with(&mut found.hits, &mut placed, &route, |d| {
+        match route {
+            Some(route) => crate::sources::lead_with(&mut found.hits, &mut placed, &route, |d| {
                 setup.searcher.site(d).ok().flatten()
-            });
+            }),
+            None if !ops.any() => {
+                plumb_index::health::sources_lead(words, &mut found.hits, &mut placed)
+            }
+            None => {}
         }
     }
     let mut serialized = rows(&found.hits, &placed);

@@ -781,11 +781,12 @@ fn evaluate(
         // node lists them.
         let route =
             crate::sources::route(&searched, answer_kind(&searched), args.country.as_deref());
-        if let Some(route) = &route {
-            if pages.is_none() {
-                crate::sources::lead_with(&mut hits, &mut [], route, |domain| {
+        if pages.is_none() {
+            match &route {
+                Some(route) => crate::sources::lead_with(&mut hits, &mut [], route, |domain| {
                     searcher.site(domain).ok().flatten()
-                });
+                }),
+                None => plumb_index::health::sources_lead(&searched, &mut hits, &mut []),
             }
         }
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
@@ -832,10 +833,13 @@ fn evaluate(
                         &mut placed,
                     );
                 }
-                if let Some(route) = &route {
-                    crate::sources::lead_with(&mut lifted, &mut placed, route, |domain| {
-                        searcher.site(domain).ok().flatten()
-                    });
+                match &route {
+                    Some(route) => {
+                        crate::sources::lead_with(&mut lifted, &mut placed, route, |domain| {
+                            searcher.site(domain).ok().flatten()
+                        })
+                    }
+                    None => plumb_index::health::sources_lead(&searched, &mut lifted, &mut placed),
                 }
                 if let Some(features) = features.as_deref_mut() {
                     let closeness = |domain: &str| {

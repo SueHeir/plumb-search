@@ -179,6 +179,9 @@ pub(crate) fn route_sources(
         return;
     }
     let Some(route) = crate::sources::route(query, answer, country) else {
+        // The source a health search names, first whatever the learned
+        // order did.
+        plumb_index::health::sources_lead(query, &mut results.hits, &mut results.pages);
         return;
     };
     let keep = results.hits.len().max(limit);
