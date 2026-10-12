@@ -9,12 +9,14 @@
 //! What the denylist denies is left out before anything is indexed, the
 //! layers included. Each thing becomes a page as its set says
 //! ([`plumb_index::items::item_page`]): its title, the line under it and
-//! where it is listed.
+//! where it is listed. The layers are laid on the pages of today's page
+//! sets too ([`PageLayers`]), which count as the project's.
 //!
 //! Whose a set is decides how its layers rank: the owner's own sets,
 //! then the project's, then any other publisher the owner trusts for sets
 //! ([`super::NodeConfig::set_publishers`]), in the order given.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,7 +27,7 @@ use plumb_format::deny::{Denylist, DENY};
 use plumb_format::manifest::is_set_name;
 use plumb_format::sites::SITE_RULE;
 use plumb_format::{Item, Manifest, PublicKey};
-use plumb_index::items::{item_page, Place, SetView};
+use plumb_index::items::{item_page, layered_page, page_item, page_stub, Place, SetView};
 use plumb_index::merge::{merge, Layers, Source, Sourced, Trust, Weight};
 use plumb_index::pages::Page;
 use tracing::warn;
@@ -188,8 +190,10 @@ fn item_set(
 pub struct ItemPages {
     /// Each set's pages, most read first, set after set.
     pub pages: Vec<Page>,
-    /// Extensions held and merged onto what they name.
-    pub layers: usize,
+    /// The extensions held, merged onto what they name.
+    pub layers: Layers,
+    /// The sets read, which [`ItemPages::layers`] point into.
+    pub sources: Vec<Source>,
     /// Things and extensions the denylist left out.
     pub denied: usize,
     /// Sets that failed their check or could not be read, with why.
@@ -246,7 +250,6 @@ pub fn pages(sets: &[ItemSetFile], denylist: Option<&Denylist>) -> ItemPages {
         }
     }
     let layers = Layers::new(extensions);
-    out.layers = layers.len();
     for (n, (file, manifest)) in readable.iter().enumerate() {
         if failed[n].is_some() {
             continue;
@@ -289,7 +292,77 @@ pub fn pages(sets: &[ItemSetFile], denylist: Option<&Denylist>) -> ItemPages {
             out.failed.push((file.set.clone(), why));
         }
     }
+    out.layers = layers;
+    out.sources = sources;
     out
+}
+
+/// The layers of item sets, laid on the pages of today's page sets as they
+/// are indexed. A page set counts as the project's set `plumb/<id>`, as
+/// `plumb set from-pages` names it, so a layer can name its pages by
+/// `item:` as well as by URL or Wikidata id. A page no layer names is
+/// indexed as it is.
+#[derive(Debug)]
+pub struct PageLayers {
+    layers: Layers,
+    sources: Vec<Source>,
+    /// How many pages layers changed.
+    laid: Cell<usize>,
+}
+
+impl PageLayers {
+    /// The layers `read` holds, `None` when it holds none.
+    pub fn of(read: &mut ItemPages) -> Option<PageLayers> {
+        (!read.layers.is_empty()).then(|| PageLayers {
+            layers: std::mem::take(&mut read.layers),
+            sources: std::mem::take(&mut read.sources),
+            laid: Cell::new(0),
+        })
+    }
+
+    /// Adds the page set `id`, made at `modified` (Unix seconds), and
+    /// gives what its pages are laid on with.
+    pub fn page_set(&mut self, id: &str, modified: i64) -> usize {
+        self.sources.push(Source {
+            publisher: project_key().to_string(),
+            set: format!("plumb/{id}"),
+            generation: modified,
+            trust: Trust::Project,
+            same_as: Default::default(),
+            labels: Vec::new(),
+        });
+        self.sources.len() - 1
+    }
+
+    /// `page`, of the page set `source` ([`PageLayers::page_set`]), with
+    /// the layers that name it merged on.
+    pub fn lay(&self, page: Page, source: usize) -> Page {
+        let named = page_stub(&page).is_some_and(|stub| {
+            let stub = Sourced {
+                item: &stub,
+                source,
+            };
+            !self.layers.on(&self.sources, stub).is_empty()
+        });
+        let Some(item) = named.then(|| page_item(&page)).flatten() else {
+            return page;
+        };
+        let thing = Sourced {
+            item: &item,
+            source,
+        };
+        let on = self.layers.on(&self.sources, thing);
+        let Some(merged) = merge(&self.sources, thing, &on) else {
+            return page;
+        };
+        self.laid.set(self.laid.get() + 1);
+        layered_page(page, &merged)
+    }
+
+    /// How many pages layers changed so far.
+    pub fn laid(&self) -> usize {
+        self.laid.get()
+    }
 }
 
 fn read_manifest(dir: &Path) -> Result<Manifest> {
@@ -450,7 +523,7 @@ mod tests {
         denylist.add(Entry::from_item(&entry).unwrap().unwrap());
         let read = pages(&found, Some(&denylist));
         assert!(read.failed.is_empty(), "{:?}", read.failed);
-        assert_eq!((read.layers, read.denied), (1, 1));
+        assert_eq!((read.layers.len(), read.denied), (1, 1));
         let listed: Vec<(&str, &str)> = read
             .pages
             .iter()
@@ -466,6 +539,22 @@ mod tests {
         assert!(story.is_asked());
         assert!(!read.pages[1].is_asked());
 
+        // The layers are laid on today's page sets too.
+        let mut read = read;
+        let mut layers = PageLayers::of(&mut read).unwrap();
+        let wiki = layers.page_set("wikipedia-en", 0);
+        let page = |url: &str| -> Page {
+            serde_json::from_value(json!({
+                "set": "wikipedia-en", "url": url, "title": "A page", "views": 10,
+            }))
+            .unwrap()
+        };
+        let named = layers.lay(page("https://news.example/a"), wiki);
+        assert_eq!(named.names, ["Alpha story"]);
+        let other = page("https://news.example/other");
+        assert_eq!(layers.lay(other.clone(), wiki), other);
+        assert_eq!(layers.laid(), 1);
+
         // A set that fails its check is left out; the others are read.
         let part = held.join("pub/notes/items-001.jsonl.zst");
         let mut bytes = std::fs::read(&part).unwrap();
@@ -476,5 +565,52 @@ mod tests {
         assert_eq!(read.failed[0].0, "pub/notes");
         assert_eq!(read.pages.len(), 2, "both stories, with no denylist");
         assert!(read.pages[0].names.is_empty());
+    }
+
+    #[test]
+    fn a_held_layer_names_a_page_of_the_page_sets() {
+        use plumb_core::article::{article_url, write_article, Article, ARTICLES_HEADER};
+
+        use crate::pages::{open_or_build, open_or_build_with, PageSets, SetInfo, Wanted};
+
+        let data = tempfile::tempdir().unwrap();
+        let data = data.path();
+        let file = SetInfo::find("wikipedia-en").unwrap().file(data);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let mut text = ARTICLES_HEADER.as_bytes().to_vec();
+        for (title, views) in [("Marie Curie", 900), ("Pierre Curie", 300)] {
+            let article = Article {
+                title: title.to_string(),
+                views,
+                ..Article::default()
+            };
+            write_article(&mut text, &article).unwrap();
+        }
+        std::fs::write(file, text).unwrap();
+        let publisher = SigningKey::from_bytes(&[2; 32]);
+        signed(
+            &data.join(DIR).join("pub/nicknames"),
+            "pub/nicknames",
+            &publisher,
+            json!({"license": "CC0-1.0", "extends": ["url"]}),
+            &[json!({"id": "n", "names": ["Radium pioneer"],
+                     "extends": format!("url:{}", article_url("en", "Marie Curie"))})],
+        );
+        let found = |searcher: &plumb_index::pages::PageSearcher| -> Vec<String> {
+            let hits = searcher.search("radium pioneer", 5).unwrap();
+            hits.into_iter().map(|hit| hit.page.title).collect()
+        };
+
+        let wanted = Wanted::new(data, &PageSets::default(), 0);
+        let (key, searcher) = open_or_build(data, &wanted).unwrap().unwrap();
+        assert!(found(&searcher).is_empty());
+        let wanted = wanted.with_items(find(data, None, &[PublicKey::of(&publisher)]));
+        assert_eq!(wanted.items.len(), 1);
+        let (layered, searcher) = open_or_build_with(data, &wanted, None, None)
+            .unwrap()
+            .unwrap();
+        assert_ne!(layered, key);
+        assert_eq!(searcher.num_pages(), 2, "a layer adds no page");
+        assert_eq!(found(&searcher), ["Marie Curie"]);
     }
 }

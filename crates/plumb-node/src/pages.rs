@@ -25,6 +25,8 @@ use plumb_index::pages::{Page, PageSearcher};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::node::item_sets::PageLayers;
+
 /// Directory of page sets and their index in a data directory.
 pub const PAGES_DIR: &str = "pages";
 /// Directory of the set files, in [`PAGES_DIR`].
@@ -865,8 +867,40 @@ pub fn open_or_build_with(
         return Ok(Some((key, searcher)));
     }
     let started = std::time::Instant::now();
+    // The item sets first: their layers are laid on the page sets' pages.
+    let (mut item_pages, mut layers) = (Vec::new(), None);
+    if !wanted.items.is_empty() {
+        let mut read = crate::node::item_sets::pages(&wanted.items, denylist);
+        for (set, why) in &read.failed {
+            warn!("item set {set} left out of the page index: {why}");
+        }
+        info!(
+            "indexing {} pages of {} item sets ({} layer entries, {} denied)",
+            read.pages.len(),
+            wanted.items.len() - read.failed.len(),
+            read.layers.len(),
+            read.denied
+        );
+        layers = PageLayers::of(&mut read);
+        item_pages = read.pages;
+    }
+    let sources: Vec<Option<usize>> = wanted
+        .sets
+        .iter()
+        .map(|(set, file, _)| {
+            let modified = std::fs::metadata(file)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_secs() as i64);
+            layers
+                .as_mut()
+                .map(|layers| layers.page_set(set.id, modified))
+        })
+        .collect();
+    let layers = layers.map(std::rc::Rc::new);
     let mut pages: Box<dyn Iterator<Item = Page>> = Box::new(std::iter::empty());
-    for (set, file, count) in &wanted.sets {
+    for ((set, file, count), source) in wanted.sets.iter().zip(sources) {
         info!("indexing page set {} from {}", set.id, file.display());
         let _mutation = budget.as_ref().map(|budget| budget.mutation());
         let lease = budget.as_ref().map(|budget| budget.read_lease(file));
@@ -874,28 +908,26 @@ pub fn open_or_build_with(
             pages: Box::new(set.read(file, *count)?),
             _lease: lease,
         };
-        pages = Box::new(pages.chain(read));
+        pages = match (layers.clone(), source) {
+            (Some(layers), Some(source)) => {
+                Box::new(pages.chain(read.map(move |page| layers.lay(page, source))))
+            }
+            _ => Box::new(pages.chain(read)),
+        };
     }
-    if !wanted.items.is_empty() {
-        let read = crate::node::item_sets::pages(&wanted.items, denylist);
-        for (set, why) in &read.failed {
-            warn!("item set {set} left out of the page index: {why}");
-        }
-        info!(
-            "indexing {} pages of {} item sets ({} layer entries merged, {} denied)",
-            read.pages.len(),
-            wanted.items.len() - read.failed.len(),
-            read.layers,
-            read.denied
-        );
-        pages = Box::new(pages.chain(read.pages));
-    }
+    pages = Box::new(pages.chain(item_pages));
     let stats = plumb_index::pages::build_page_index_with_budget(&dir, pages, budget)?;
     info!(
         "built the page index of {} pages in {:.1}s",
         stats.pages,
         started.elapsed().as_secs_f32()
     );
+    if let Some(layers) = layers {
+        info!(
+            "layers of item sets changed {} pages of the page sets",
+            thousands(layers.laid() as u64)
+        );
+    }
     Ok(Some((key, PageSearcher::open(&dir)?)))
 }
 

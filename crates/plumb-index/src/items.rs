@@ -74,39 +74,26 @@ fn site_of_url(url: &str) -> Option<String> {
 /// item fails the format's checks even without its optional fields (an id
 /// longer than the format allows).
 pub fn page_item(page: &Page) -> Option<Item> {
-    let url = canonical_url(&page.url)?;
-    let wd = page
-        .item
+    let mut item = page_stub(page)?;
+    item.title = clean(&page.title);
+    item.site = item.url.as_deref().and_then(site_of_url);
+    item.about = page.description.as_deref().and_then(clean);
+    item.text = page
+        .lead
         .as_deref()
-        .filter(|item| format!("wd:{item}").parse::<Ref>().is_ok());
-    let mut item = Item {
-        id: id_of(page, wd, &url),
-        kind: kind_of(page).to_string(),
-        title: clean(&page.title),
-        site: site_of_url(&url),
-        about: page.description.as_deref().and_then(clean),
-        text: page
-            .lead
-            .as_deref()
-            .and_then(clean)
-            .map(|lead| lead.chars().take(MAX_TEXT_CHARS).collect()),
-        lang: page
-            .language()
-            .filter(|lang| is_language(lang))
-            .map(str::to_string),
-        weight: Some(page.views as f64),
-        url: Some(url),
-        ..Item::default()
-    };
+        .and_then(clean)
+        .map(|lead| lead.chars().take(MAX_TEXT_CHARS).collect());
+    item.lang = page
+        .language()
+        .filter(|lang| is_language(lang))
+        .map(str::to_string);
+    item.weight = Some(page.views as f64);
     for name in page.aliases.iter().chain(&page.names) {
         if let Some(name) = clean(name) {
             if item.title.as_ref() != Some(&name) && !item.names.contains(&name) {
                 item.names.push(name);
             }
         }
-    }
-    if let Some(wd) = wd {
-        item.ids.insert("wd".into(), wd.to_string());
     }
     if let Some(site) = page.site.as_deref() {
         if let Ok(to) = format!("site:{site}").parse() {
@@ -127,6 +114,46 @@ pub fn page_item(page: &Page) -> Option<Item> {
         item.fields.remove(*field);
     }
     item.check().is_ok().then_some(item)
+}
+
+/// What a layer finds `page` by ([`crate::merge::Layers::on`]): the id,
+/// kind, URL and outside ids of [`page_item`], without the rest, which
+/// takes far longer to make.
+pub fn page_stub(page: &Page) -> Option<Item> {
+    let url = canonical_url(&page.url)?;
+    let wd = page
+        .item
+        .as_deref()
+        .filter(|item| format!("wd:{item}").parse::<Ref>().is_ok());
+    let mut item = Item {
+        id: id_of(page, wd, &url),
+        kind: kind_of(page).to_string(),
+        url: Some(url),
+        ..Item::default()
+    };
+    if let Some(wd) = wd {
+        item.ids.insert("wd".into(), wd.to_string());
+    }
+    if let Some(package) = page
+        .package
+        .as_ref()
+        .filter(|package| is_namespace(&package.registry))
+    {
+        item.ids
+            .insert(package.registry.clone(), package.name.clone());
+    }
+    if let Some(paper) = &page.paper {
+        for (namespace, id) in [
+            ("doi", paper.doi.as_deref().map(str::to_lowercase)),
+            ("arxiv", paper.arxiv_id.clone()),
+            ("openalex", paper.openalex_id.clone()),
+        ] {
+            if let Some(id) = id.filter(|id| !id.is_empty()) {
+                item.ids.insert(namespace.into(), id);
+            }
+        }
+    }
+    Some(item)
 }
 
 /// What the `fields` of a page set's items are, for its manifest.
@@ -212,10 +239,6 @@ fn add_fields(page: &Page, item: &mut Item) {
                 ("homepage", package.homepage.as_ref()),
             ]),
         );
-        if is_namespace(&package.registry) {
-            item.ids
-                .insert(package.registry.clone(), package.name.clone());
-        }
     }
     if let Some(search) = &page.search {
         let symbols: Vec<Value> = search
@@ -252,15 +275,6 @@ fn add_fields(page: &Page, item: &mut Item) {
         put_list(fields, "authors", authors);
         if let Some(venue) = paper.venue.as_deref().and_then(clean) {
             fields.insert("venue".into(), json!(venue));
-        }
-        for (namespace, id) in [
-            ("doi", paper.doi.as_deref().map(str::to_lowercase)),
-            ("arxiv", paper.arxiv_id.clone()),
-            ("openalex", paper.openalex_id.clone()),
-        ] {
-            if let Some(id) = id.filter(|id| !id.is_empty()) {
-                item.ids.insert(namespace.into(), id);
-            }
         }
         item.published = paper.publication_date.clone().filter(|date| is_date(date));
     }
@@ -441,10 +455,7 @@ pub fn item_page(merged: &Merged, view: &SetView) -> Option<Page> {
         title,
         description,
         site,
-        views: item
-            .weight
-            .filter(|weight| weight.is_finite() && *weight > 0.0)
-            .map_or(0, |weight| weight.round().min(u64::MAX as f64) as u64),
+        views: views_of(item.weight),
         aliases,
         item: item.ids.get("wd").cloned(),
         profiles: Vec::new(),
@@ -462,6 +473,61 @@ pub fn item_page(merged: &Merged, view: &SetView) -> Option<Page> {
             ask,
         }),
     })
+}
+
+/// `page`, of today's page sets, with what the layers merged onto it
+/// ([`page_item`], then [`crate::merge::merge`]) add: the description,
+/// views, Wikidata item or language of a layer that ranks above the page's
+/// own set, and the names layers add, split as [`item_page`] splits them.
+/// Everything else stays as the page has it, so a page no layer names
+/// comes back the same.
+pub fn layered_page(mut page: Page, merged: &Merged) -> Page {
+    let item = &merged.item;
+    let from_layer = |name: &str| {
+        merged
+            .sources
+            .get(name)
+            .is_some_and(|source| *source != merged.source)
+    };
+    if from_layer("about") {
+        if let Some(about) = item.about.as_deref().and_then(clean) {
+            page.description = Some(plumb_core::truncate_chars(&about, MAX_PAGE_ABOUT_CHARS));
+        }
+    }
+    if from_layer("weight") {
+        page.views = views_of(item.weight);
+    }
+    if from_layer("ids.wd") {
+        page.item = item.ids.get("wd").cloned();
+    }
+    if from_layer("lang") {
+        if let Some(lang) = item.lang.as_deref().and_then(plumb_core::language_code) {
+            page.content_language = Some(lang);
+        }
+    }
+    let mut known: std::collections::HashSet<String> = std::iter::once(&page.title)
+        .chain(&page.aliases)
+        .chain(&page.names)
+        .map(|name| name.to_lowercase())
+        .collect();
+    for (name, weight) in item.names.iter().zip(&merged.name_weights) {
+        if !known.insert(name.to_lowercase()) {
+            continue;
+        }
+        if *weight >= 1.0 {
+            page.aliases.push(name.clone());
+        } else {
+            page.names.push(name.clone());
+        }
+    }
+    page
+}
+
+/// A page's views for an item's `weight`.
+fn views_of(weight: Option<f64>) -> u64 {
+    weight
+        .filter(|weight| weight.is_finite() && *weight > 0.0)
+        .map_or(0, |weight| weight.round().min(u64::MAX as f64) as u64)
 }
 
 /// `template` with each `{name}` slot filled from `merged`: its `title`,
@@ -611,6 +677,12 @@ mod tests {
             .map(|page| {
                 let item = page_item(page).unwrap();
                 manifest.check_item(&item).unwrap();
+                // Layers find a page by its stub as by its item.
+                let stub = page_stub(page).unwrap();
+                assert_eq!(
+                    (&stub.id, &stub.url, &stub.ids),
+                    (&item.id, &item.url, &item.ids)
+                );
                 item.id
             })
             .collect();
@@ -708,6 +780,71 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    #[test]
+    fn a_layer_changes_only_what_it_gives_of_a_page_set_page() {
+        use crate::merge::{merge, Source, Sourced, Trust};
+        let mut sources = sources();
+        sources.push(Source {
+            publisher: "ed25519:project".into(),
+            set: "plumb/wikipedia-en".into(),
+            generation: 1,
+            trust: Trust::Project,
+            same_as: BTreeMap::new(),
+            labels: Vec::new(),
+        });
+        let adams = page(json!({
+            "set": "wikipedia-en", "url": "https://en.wikipedia.org/wiki/Douglas_Adams",
+            "title": "Douglas Adams", "description": "English author", "views": 5000,
+            "aliases": ["DNA"], "item": "Q42", "lead": "Douglas Noël Adams was an English author.",
+        }));
+        let thing = page_item(&adams).unwrap();
+        let merged_with = |layers: &[(Item, usize)]| {
+            let on: Vec<Sourced<'_>> = layers
+                .iter()
+                .map(|(layer, source)| Sourced {
+                    item: layer,
+                    source: *source,
+                })
+                .collect();
+            let thing = Sourced {
+                item: &thing,
+                source: 2,
+            };
+            layered_page(adams.clone(), &merge(&sources, thing, &on).unwrap())
+        };
+        assert_eq!(merged_with(&[]), adams, "no layer, no change");
+
+        // An outside publisher adds a name, which counts for less, and
+        // can't change the project's description.
+        let outside = item(json!({"id": "x", "extends": "wd:Q42",
+                                  "names": ["Hitchhiker author", "dna"], "about": "Not this"}));
+        let page = merged_with(&[(outside.clone(), 1)]);
+        assert_eq!(page.names, ["Hitchhiker author"]);
+        assert_eq!(page.description, adams.description);
+        assert_eq!(
+            Page {
+                names: Vec::new(),
+                ..page
+            },
+            adams
+        );
+
+        // The owner ranks above the project.
+        let mine = item(
+            json!({"id": "o", "extends": "url:https://en.wikipedia.org/wiki/Douglas_Adams",
+                               "names": ["Doug"], "about": "My favourite author", "weight": 9000}),
+        );
+        let page = merged_with(&[(outside, 1), (mine, 0)]);
+        assert_eq!(page.description.as_deref(), Some("My favourite author"));
+        assert_eq!(page.views, 9000);
+        assert_eq!(page.aliases, ["DNA", "Doug"]);
+        assert_eq!(page.names, ["Hitchhiker author"]);
+        assert_eq!(
+            (page.lead, page.item, page.title),
+            (adams.lead, adams.item, adams.title)
+        );
     }
 
     #[test]

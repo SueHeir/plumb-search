@@ -293,6 +293,12 @@ missing). Where a set's items come up depends on its `place`:
   search starts or ends with one of the `ask` words, and then first. "hn rust"
   lists the Hacker News stories about Rust, and "rust" alone does not.
 
+An item that `extends` another is not a result of its own. What it adds is laid
+on what it names, in the node's other sets and in its page sets (Wikipedia,
+docs, papers): its `names` find that page too, and since your own sets rank
+above the project's, its `about` becomes the line under the page's title and
+its `weight` the page's popularity.
+
 Anyone who can search the node sees these results, as with a plugin's other
 results, and that includes a `personal` set's: put a plugin that builds one on
 the node of the computer you browse on.
