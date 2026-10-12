@@ -18,11 +18,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
 use plumb_format::manifest::is_set_name;
+use plumb_format::notes::{is_revoked, sign_note, NOTE_FORMAT};
 use plumb_format::sign::sign;
-use plumb_format::{Item, Manifest, PublicKey, FORMAT};
+use plumb_format::{Item, Manifest, Note, PublicKey, FORMAT};
 use plumb_index::items::{page_fields, page_item};
 use plumb_index::pages::Page;
 use serde_json::{json, Map, Value};
@@ -61,6 +62,10 @@ pub enum SetCommand {
     /// Check a set as a node does before taking it: its signature, the size
     /// and hash of every part, and every item.
     Check(CheckArgs),
+    /// Sign a key note: let another key sign some sets for a while
+    /// (`delegate`), name the key that publishes from now on (`handover`),
+    /// or withdraw a key (`revoke`).
+    Note(NoteArgs),
 }
 
 #[derive(Debug, Args)]
@@ -104,6 +109,10 @@ pub struct SignArgs {
     /// The generation this one replaces, when one was published before.
     #[arg(long, value_name = "TIMESTAMP")]
     pub prev: Option<String>,
+    /// Sign for another publisher, with its delegation to this key (from
+    /// `plumb set note delegate`). Without it, the key's own key publishes.
+    #[arg(long, value_name = "FILE")]
+    pub delegation: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -114,6 +123,41 @@ pub struct CheckArgs {
     /// any good signature passes and the publisher is printed.
     #[arg(long, value_name = "KEY")]
     pub publisher: Option<String>,
+    /// A handover or revocation note to apply, as a node that holds it
+    /// would. Repeat for more.
+    #[arg(long = "note", value_name = "FILE")]
+    pub notes: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct NoteArgs {
+    pub kind: NoteKind,
+    /// The key that signs the note: the publisher's for a delegation, the
+    /// old key for a handover, and for a revocation the key itself or the
+    /// publisher that delegated to it.
+    #[arg(long, value_name = "FILE")]
+    pub key: PathBuf,
+    /// The key the note is about (`ed25519:...`). A revocation without it
+    /// revokes the signing key itself.
+    #[arg(long, value_name = "KEY")]
+    pub to: Option<String>,
+    /// For a delegation: a set name or `<scope>/<start>*` it covers. Repeat
+    /// for more.
+    #[arg(long = "sets", value_name = "PATTERN")]
+    pub sets: Vec<String>,
+    /// For a delegation: when it ends, a UTC timestamp. Renew it before.
+    #[arg(long, value_name = "TIMESTAMP")]
+    pub until: Option<String>,
+    /// Where to save the note. An existing file is never overwritten.
+    #[arg(long, value_name = "FILE")]
+    pub out: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum NoteKind {
+    Delegate,
+    Handover,
+    Revoke,
 }
 
 pub fn run(args: SetArgs) -> Result<()> {
@@ -136,12 +180,14 @@ pub fn run(args: SetArgs) -> Result<()> {
         }
         SetCommand::Sign(args) => {
             let key = read_key(&args.key)?;
-            let checked = sign_set(&args.dir, &key, args.prev.as_deref())?;
+            let delegation = args.delegation.as_deref().map(read_json).transpose()?;
+            let checked = sign_set(&args.dir, &key, args.prev.as_deref(), delegation)?;
             println!(
-                "signed {} generation {} as {}: {} items",
+                "signed {} generation {} as {}, published by {}: {} items",
                 checked.set,
                 checked.generation,
                 PublicKey::of(&key),
+                checked.publisher,
                 checked.items
             );
             Ok(())
@@ -152,14 +198,73 @@ pub fn run(args: SetArgs) -> Result<()> {
                 .as_deref()
                 .map(str::parse::<PublicKey>)
                 .transpose()?;
-            let checked = check_set(&args.dir, publisher.as_ref())?;
+            let notes = args
+                .notes
+                .iter()
+                .map(|path| {
+                    Note::from_signed_value(&read_json(path)?)
+                        .with_context(|| format!("{} is not a good key note", path.display()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let checked = check_set(&args.dir, publisher.as_ref(), &notes)?;
             println!(
                 "{} generation {} by {}: {} items in {} parts, all good",
                 checked.set, checked.generation, checked.publisher, checked.items, checked.parts
             );
             Ok(())
         }
+        SetCommand::Note(args) => {
+            let key = read_key(&args.key)?;
+            let note = write_note(&args, &key)?;
+            println!(
+                "{}: {} note by {} about {}",
+                args.out.display(),
+                note.kind,
+                note.by,
+                note.key
+            );
+            Ok(())
+        }
     }
+}
+
+/// Signs the note `args` asks for with `key` and saves it.
+pub fn write_note(args: &NoteArgs, key: &SigningKey) -> Result<Note> {
+    let by = PublicKey::of(key);
+    let about = match (&args.to, args.kind) {
+        (Some(to), _) => to.parse::<PublicKey>()?,
+        (None, NoteKind::Revoke) => by,
+        (None, _) => bail!("say which key the note is about with --to"),
+    };
+    let kind = match args.kind {
+        NoteKind::Delegate => "delegate",
+        NoteKind::Handover => "handover",
+        NoteKind::Revoke => "revoke",
+    };
+    let mut value = json!({
+        "format": NOTE_FORMAT,
+        "kind": kind,
+        "by": by.to_string(),
+        "key": about.to_string(),
+        "issued": now(),
+    });
+    if !args.sets.is_empty() {
+        value["sets"] = json!(args.sets);
+    }
+    if let Some(until) = &args.until {
+        value["until"] = json!(until);
+    }
+    sign_note(&mut value, key)?;
+    let note = Note::from_signed_value(&value)?;
+    let mut text = serde_json::to_string_pretty(&value)?;
+    text.push('\n');
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&args.out)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .with_context(|| format!("writing {} (it must not exist yet)", args.out.display()))?;
+    Ok(note)
 }
 
 /// Makes a set-signing key and saves it at `path`, readable by its owner
@@ -233,10 +338,7 @@ pub fn from_pages(args: &FromPagesArgs) -> Result<Written> {
     let mut manifest = Map::new();
     manifest.insert("format".into(), json!(FORMAT));
     manifest.insert("set".into(), json!(name));
-    manifest.insert(
-        "generation".into(),
-        json!(chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-    );
+    manifest.insert("generation".into(), json!(now()));
     for (key, value) in [
         ("title", &args.title),
         ("license", &args.license),
@@ -350,17 +452,39 @@ pub struct Checked {
     pub items: u64,
 }
 
-/// Signs the manifest in `dir` with `key` as its publisher, after
-/// measuring each part again and checking every item, so a signature never
-/// covers a set that a node would refuse.
-pub fn sign_set(dir: &Path, key: &SigningKey, prev: Option<&str>) -> Result<Checked> {
+/// Signs the manifest in `dir` with `key`, after measuring each part again
+/// and checking every item, so a signature never covers a set that a node
+/// would refuse. `key` publishes the set, or with `delegation` (a note
+/// from the publisher to `key`) signs it for the publisher.
+pub fn sign_set(
+    dir: &Path,
+    key: &SigningKey,
+    prev: Option<&str>,
+    delegation: Option<Value>,
+) -> Result<Checked> {
     let mut value = read_manifest(dir)?;
     let map = value
         .as_object_mut()
         .context("the manifest is not a JSON object")?;
     map.remove("signature");
     map.remove("signed_by");
-    map.insert("publisher".into(), json!(PublicKey::of(key).to_string()));
+    map.remove("delegation");
+    let signer = PublicKey::of(key);
+    match delegation {
+        Some(delegation) => {
+            let note = Note::from_signed_value(&delegation).context("the delegation")?;
+            ensure!(
+                note.kind == "delegate" && note.key == signer,
+                "the delegation is not to {signer}"
+            );
+            map.insert("publisher".into(), json!(note.by.to_string()));
+            map.insert("signed_by".into(), json!(signer.to_string()));
+            map.insert("delegation".into(), delegation);
+        }
+        None => {
+            map.insert("publisher".into(), json!(signer.to_string()));
+        }
+    }
     if let Some(prev) = prev {
         map.insert("prev".into(), json!(prev));
     }
@@ -379,24 +503,28 @@ pub fn sign_set(dir: &Path, key: &SigningKey, prev: Option<&str>) -> Result<Chec
     manifest.check()?;
     let checked = check_parts(dir, &manifest)?;
     sign(&mut value, key)?;
+    // What a node would read: a delegation that does not cover the set
+    // now is refused here, before anything is written.
+    Manifest::from_signed_json(&serde_json::to_string(&value)?, &now())?;
     write_manifest(dir, &value)?;
     Ok(checked)
 }
 
 /// Checks the set in `dir`: its manifest's signature and rules, then each
-/// part's size, hash and count, and every item. With `publisher`, the set
-/// must be published by that key.
-pub fn check_set(dir: &Path, publisher: Option<&PublicKey>) -> Result<Checked> {
+/// part's size, hash and count, and every item. With `trusted`, the set
+/// must be published by that key or the key it handed over to in `notes`.
+/// A signer revoked in `notes` is refused either way.
+pub fn check_set(dir: &Path, trusted: Option<&PublicKey>, notes: &[Note]) -> Result<Checked> {
     let text = fs::read_to_string(dir.join(MANIFEST))
         .with_context(|| format!("reading {}", dir.join(MANIFEST).display()))?;
-    let (manifest, _) = Manifest::from_signed_json(&text)?;
-    if let Some(publisher) = publisher {
-        ensure!(
-            manifest.publisher == *publisher,
-            "{} is published by {}, not {publisher}",
-            manifest.set,
-            manifest.publisher
-        );
+    let (manifest, signer) = Manifest::from_signed_json(&text, &now())?;
+    match trusted {
+        Some(trusted) => manifest.trusted(&signer, trusted, notes)?,
+        None => ensure!(
+            !is_revoked(&signer, &manifest.publisher, notes),
+            "{signer}, which signed {}, is revoked",
+            manifest.set
+        ),
     }
     let missing = manifest.not_understood();
     ensure!(
@@ -472,6 +600,16 @@ fn measure(path: &Path) -> Result<(u64, String)> {
     Ok((bytes, hex))
 }
 
+/// The time now as a UTC timestamp, as the format writes them.
+fn now() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+fn read_json(path: &Path) -> Result<Value> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))
+}
+
 fn read_manifest(dir: &Path) -> Result<Value> {
     let path = dir.join(MANIFEST);
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -534,17 +672,17 @@ mod tests {
             }
         );
         assert!(
-            check_set(&dir, None).is_err(),
+            check_set(&dir, None, &[]).is_err(),
             "an unsigned set does not pass"
         );
 
         let key = new_key(&key_path).unwrap();
         assert!(new_key(&key_path).is_err(), "a key is never overwritten");
         assert_eq!(read_key(&key_path).unwrap(), key);
-        let signed = sign_set(&dir, &key, None).unwrap();
+        let signed = sign_set(&dir, &key, None, None).unwrap();
         assert_eq!((signed.items, signed.parts), (5, 3));
 
-        let checked = check_set(&dir, Some(&PublicKey::of(&key))).unwrap();
+        let checked = check_set(&dir, Some(&PublicKey::of(&key)), &[]).unwrap();
         assert_eq!(checked.set, "plumb/docs");
         assert_eq!(checked.items, 5);
         let manifest = read_manifest(&dir).unwrap();
@@ -554,7 +692,7 @@ mod tests {
         assert_eq!(manifest["files"][0]["count"], json!(2));
 
         let other = SigningKey::from_bytes(&[9; 32]);
-        assert!(check_set(&dir, Some(&PublicKey::of(&other))).is_err());
+        assert!(check_set(&dir, Some(&PublicKey::of(&other)), &[]).is_err());
     }
 
     #[test]
@@ -564,8 +702,8 @@ mod tests {
         let signed_set = |name: &str, pages: usize| {
             let dir = temp.path().join(name);
             written(&dir, docs_pages(pages));
-            sign_set(&dir, &key, Some("2026-10-05T04:00:00Z")).unwrap();
-            check_set(&dir, None).unwrap();
+            sign_set(&dir, &key, Some("2026-10-05T04:00:00Z"), None).unwrap();
+            check_set(&dir, None, &[]).unwrap();
             dir
         };
 
@@ -573,7 +711,7 @@ mod tests {
         let mut manifest = read_manifest(&dir).unwrap();
         manifest["title"] = json!("Something else");
         write_manifest(&dir, &manifest).unwrap();
-        let err = check_set(&dir, None).unwrap_err();
+        let err = check_set(&dir, None, &[]).unwrap_err();
         assert!(format!("{err:#}").contains("signature"), "{err:#}");
 
         let (dir, other) = (signed_set("swapped", 3), signed_set("other", 1));
@@ -582,10 +720,91 @@ mod tests {
             dir.join("items-002.jsonl.zst"),
         )
         .unwrap();
-        let err = check_set(&dir, None).unwrap_err();
+        let err = check_set(&dir, None, &[]).unwrap_err();
         assert!(format!("{err:#}").contains("hash"), "{err:#}");
-        let err = sign_set(&dir, &key, None).unwrap_err();
+        let err = sign_set(&dir, &key, None, None).unwrap_err();
         assert!(format!("{err:#}").contains("seen before"), "{err:#}");
+    }
+
+    #[test]
+    fn a_builder_signs_for_the_project_with_its_delegation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (root, builder) = (
+            SigningKey::from_bytes(&[1; 32]),
+            SigningKey::from_bytes(&[2; 32]),
+        );
+        let (root_key, builder_key) = (PublicKey::of(&root), PublicKey::of(&builder));
+        let note = |kind, key: &SigningKey, to: Option<PublicKey>, sets: &[&str], name: &str| {
+            let args = NoteArgs {
+                kind,
+                key: PathBuf::new(),
+                to: to.map(|key| key.to_string()),
+                sets: sets.iter().map(|s| s.to_string()).collect(),
+                until: (kind == NoteKind::Delegate).then(|| "2099-01-01T00:00:00Z".to_string()),
+                out: temp.path().join(name),
+            };
+            write_note(&args, key).unwrap();
+            read_json(&args.out).unwrap()
+        };
+        let delegation = note(
+            NoteKind::Delegate,
+            &root,
+            Some(builder_key),
+            &["plumb/doc*"],
+            "delegation.json",
+        );
+        let dir = temp.path().join("set");
+        written(&dir, docs_pages(2));
+
+        let checked = sign_set(&dir, &builder, None, Some(delegation.clone())).unwrap();
+        assert_eq!(checked.publisher, root_key);
+        let manifest = read_manifest(&dir).unwrap();
+        assert_eq!(manifest["signed_by"], json!(builder_key.to_string()));
+        check_set(&dir, Some(&root_key), &[]).unwrap();
+        assert!(check_set(&dir, Some(&builder_key), &[]).is_err());
+
+        let revoked = note(NoteKind::Revoke, &builder, None, &[], "revoke.json");
+        let revoked = Note::from_signed_value(&revoked).unwrap();
+        assert!(check_set(&dir, Some(&root_key), std::slice::from_ref(&revoked)).is_err());
+        assert!(check_set(&dir, None, &[revoked]).is_err());
+
+        // A delegation to another key, or for other sets, signs nothing.
+        let stranger = SigningKey::from_bytes(&[3; 32]);
+        assert!(sign_set(&dir, &stranger, None, Some(delegation)).is_err());
+        let elsewhere = note(
+            NoteKind::Delegate,
+            &root,
+            Some(builder_key),
+            &["plumb/wikipedia-*"],
+            "elsewhere.json",
+        );
+        assert!(sign_set(&dir, &builder, None, Some(elsewhere)).is_err());
+        check_set(&dir, Some(&root_key), &[]).unwrap();
+
+        // After a handover, the old key's sets are no longer taken.
+        let handover = note(
+            NoteKind::Handover,
+            &root,
+            Some(builder_key),
+            &[],
+            "handover.json",
+        );
+        let handover = Note::from_signed_value(&handover).unwrap();
+        assert!(check_set(&dir, Some(&root_key), std::slice::from_ref(&handover)).is_err());
+        sign_set(&dir, &builder, None, None).unwrap();
+        check_set(&dir, Some(&root_key), &[handover]).unwrap();
+        assert!(write_note(
+            &NoteArgs {
+                kind: NoteKind::Handover,
+                key: PathBuf::new(),
+                to: None,
+                sets: Vec::new(),
+                until: None,
+                out: temp.path().join("nowhere.json"),
+            },
+            &root
+        )
+        .is_err());
     }
 
     #[test]
@@ -596,7 +815,7 @@ mod tests {
         let part = dir.join("items-001.jsonl.zst");
         let bad = r#"{"id":"x","kind":"docs-page","url":"https://Example.com/"}"#;
         fs::write(&part, zstd::encode_all(bad.as_bytes(), 3).unwrap()).unwrap();
-        let err = sign_set(&dir, &SigningKey::from_bytes(&[4; 32]), None).unwrap_err();
+        let err = sign_set(&dir, &SigningKey::from_bytes(&[4; 32]), None, None).unwrap_err();
         assert!(format!("{err:#}").contains("line 1"), "{err:#}");
         assert!(read_manifest(&dir).unwrap().get("signature").is_none());
     }

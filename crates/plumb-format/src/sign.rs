@@ -8,7 +8,9 @@
 //! followed by its canonical JSON ([`crate::canonical`]) without its
 //! `signature` key. The leading words keep a set signature from ever
 //! passing for another kind of signature, such as a crawl batch's
-//! (`plumb-batch-v1\0`). Keys and signatures are written in unpadded
+//! (`plumb-batch-v1\0`). Key notes ([`crate::notes`]) are signed the same
+//! way under `plumb-note/1\0`, so a note never passes for a manifest nor a
+//! manifest for a note. Keys and signatures are written in unpadded
 //! base64url, keys as `ed25519:<key>`.
 
 use std::fmt;
@@ -25,6 +27,9 @@ use crate::canonical::canonical_json;
 
 /// What every set signature covers before the manifest itself.
 pub const SET_CONTEXT: &[u8] = b"plumb-set/1\0";
+
+/// What every key note's signature covers before the note itself.
+pub const NOTE_CONTEXT: &[u8] = b"plumb-note/1\0";
 
 /// A publisher's or signer's Ed25519 public key.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,14 +91,7 @@ impl<'de> Deserialize<'de> for PublicKey {
 
 /// The exact bytes a manifest's signature covers.
 pub fn signed_bytes(manifest: &Value) -> Result<Vec<u8>> {
-    let mut unsigned = manifest
-        .as_object()
-        .context("a manifest is a JSON object")?
-        .clone();
-    unsigned.remove("signature");
-    let mut bytes = SET_CONTEXT.to_vec();
-    bytes.extend_from_slice(canonical_json(&Value::Object(unsigned))?.as_bytes());
-    Ok(bytes)
+    bytes_under(SET_CONTEXT, manifest)
 }
 
 /// The key a manifest says signed it: `signed_by`, or `publisher` when it
@@ -110,24 +108,54 @@ pub fn signer(manifest: &Value) -> Result<PublicKey> {
 /// Signs `manifest` with `key`, setting its `signature`. `key` must be the
 /// manifest's [`signer`].
 pub fn sign(manifest: &mut Value, key: &SigningKey) -> Result<()> {
-    ensure!(
-        signer(manifest)? == PublicKey::of(key),
-        "the manifest names another key as its signer"
-    );
-    let signature = key.sign(&signed_bytes(manifest)?);
-    let encoded = URL_SAFE_NO_PAD.encode(signature.to_bytes());
-    manifest
-        .as_object_mut()
-        .context("a manifest is a JSON object")?
-        .insert("signature".to_string(), Value::String(encoded));
-    Ok(())
+    let named = signer(manifest)?;
+    sign_under(SET_CONTEXT, manifest, &named, key)
 }
 
 /// Checks `manifest`'s signature, and returns the key that made it.
 pub fn verify(manifest: &Value) -> Result<PublicKey> {
     let key = signer(manifest)?;
-    let Some(encoded) = manifest.get("signature").and_then(Value::as_str) else {
-        bail!("the manifest is not signed");
+    verify_under(SET_CONTEXT, manifest, &key).context("the manifest's signature")?;
+    Ok(key)
+}
+
+/// `context` followed by the canonical JSON of `value` without its
+/// `signature`.
+fn bytes_under(context: &[u8], value: &Value) -> Result<Vec<u8>> {
+    let mut unsigned = value
+        .as_object()
+        .context("a signed document is a JSON object")?
+        .clone();
+    unsigned.remove("signature");
+    let mut bytes = context.to_vec();
+    bytes.extend_from_slice(canonical_json(&Value::Object(unsigned))?.as_bytes());
+    Ok(bytes)
+}
+
+/// Signs `value` under `context` with `key`, which must be `named`.
+pub(crate) fn sign_under(
+    context: &[u8],
+    value: &mut Value,
+    named: &PublicKey,
+    key: &SigningKey,
+) -> Result<()> {
+    ensure!(
+        *named == PublicKey::of(key),
+        "the document names another key as its signer"
+    );
+    let signature = key.sign(&bytes_under(context, value)?);
+    let encoded = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+    value
+        .as_object_mut()
+        .context("a signed document is a JSON object")?
+        .insert("signature".to_string(), Value::String(encoded));
+    Ok(())
+}
+
+/// Checks that `key` signed `value` under `context`.
+pub(crate) fn verify_under(context: &[u8], value: &Value, key: &PublicKey) -> Result<()> {
+    let Some(encoded) = value.get("signature").and_then(Value::as_str) else {
+        bail!("it is not signed");
     };
     let bytes: [u8; 64] = URL_SAFE_NO_PAD
         .decode(encoded)
@@ -135,9 +163,12 @@ pub fn verify(manifest: &Value) -> Result<PublicKey> {
         .and_then(|bytes| bytes.try_into().ok())
         .context("the signature is not 64 bytes of unpadded base64url")?;
     key.verifying_key()?
-        .verify_strict(&signed_bytes(manifest)?, &Signature::from_bytes(&bytes))
-        .context("the signature does not match the manifest")?;
-    Ok(key)
+        .verify_strict(
+            &bytes_under(context, value)?,
+            &Signature::from_bytes(&bytes),
+        )
+        .context("the signature does not match")?;
+    Ok(())
 }
 
 #[cfg(test)]

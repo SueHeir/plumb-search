@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::item::Item;
+use crate::notes::{current_publisher, is_revoked, Note};
 use crate::refs::Ref;
 use crate::sign::{verify, PublicKey};
 use crate::value::{is_timestamp, FieldType};
@@ -42,6 +43,10 @@ pub struct Manifest {
     /// The key that signed this generation, when not the publisher's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_by: Option<PublicKey>,
+    /// The publisher's signed note that lets `signed_by` sign this set
+    /// ([`crate::notes`]), as it was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Value>,
     /// When this generation was built, a UTC timestamp. A node takes a
     /// generation only when it is later than the one it has.
     pub generation: String,
@@ -153,18 +158,59 @@ pub struct FieldSpec {
 
 impl Manifest {
     /// Reads a manifest from JSON, checking its signature and its rules.
-    /// Returns it with the key that signed it.
-    pub fn from_signed_json(text: &str) -> Result<(Manifest, PublicKey)> {
+    /// Returns it with the key that signed it. A manifest signed by another
+    /// key than its publisher's must carry the publisher's delegation to
+    /// that key, covering its set at `now`, a UTC timestamp.
+    ///
+    /// Whether to take it is a separate question: see [`Manifest::trusted`].
+    pub fn from_signed_json(text: &str, now: &str) -> Result<(Manifest, PublicKey)> {
+        ensure!(is_timestamp(now), "now {now:?} is not a UTC timestamp");
         let value: Value = serde_json::from_str(text).context("the manifest is not JSON")?;
         let key = verify(&value)?;
         let manifest: Manifest = serde_json::from_value(value)?;
         manifest.check()?;
-        ensure!(
-            manifest.signed_by.is_none() || manifest.signed_by == Some(manifest.publisher),
-            "{} is signed by another key for its publisher; delegated signing is not supported yet",
-            manifest.set
-        );
+        if key != manifest.publisher {
+            let delegation = manifest.delegation.as_ref().with_context(|| {
+                format!(
+                    "{} is signed by {key}, not its publisher, and carries no delegation",
+                    manifest.set
+                )
+            })?;
+            let note = Note::from_signed_value(delegation).context("the delegation")?;
+            ensure!(
+                note.kind == "delegate" && note.by == manifest.publisher && note.key == key,
+                "the delegation is not from {} to {key}",
+                manifest.publisher
+            );
+            ensure!(
+                note.delegates(&manifest.set, now),
+                "the delegation does not cover {} at {now}",
+                manifest.set
+            );
+        }
         Ok((manifest, key))
+    }
+
+    /// Checks that a node that trusts `trusted` and holds the handovers and
+    /// revocations in `notes` takes this manifest, signed by `signer`: its
+    /// publisher must be the key `trusted` hands over to, and `signer` must
+    /// not be revoked.
+    pub fn trusted(&self, signer: &PublicKey, trusted: &PublicKey, notes: &[Note]) -> Result<()> {
+        let publisher = current_publisher(trusted, notes).with_context(|| {
+            format!("a key handed over from {trusted} was handed over to two keys")
+        })?;
+        ensure!(
+            self.publisher == publisher,
+            "{} is published by {}, not {publisher}",
+            self.set,
+            self.publisher
+        );
+        ensure!(
+            !is_revoked(signer, &self.publisher, notes),
+            "{signer}, which signed {}, is revoked",
+            self.set
+        );
+        Ok(())
     }
 
     /// Checks the rules every manifest keeps.
@@ -291,6 +337,7 @@ mod tests {
     use serde_json::json;
 
     const HASH: &str = "9f2c3b0e7d6a5f4e3d2c1b0a9f8e7d6c5b4a39281706f5e4d3c2b1a098f7e6d5";
+    const NOW: &str = "2026-10-12T06:00:00Z";
 
     fn facts_layer(key: &SigningKey) -> Value {
         json!({
@@ -309,7 +356,7 @@ mod tests {
                 "population": {"type": "number", "same_as": "wd:P1082", "roles": ["show", "answer", "filter"]}
             },
             "hints": {"facts": {"best_rank_only": true}},
-            "delegation": "kept, though this version does not read it"
+            "endorsement": "kept, though this version does not read it"
         })
     }
 
@@ -322,11 +369,11 @@ mod tests {
     fn reads_a_signed_layer() {
         let key = SigningKey::from_bytes(&[3; 32]);
         let text = signed(&mut facts_layer(&key), &key);
-        let (manifest, signer) = Manifest::from_signed_json(&text).unwrap();
+        let (manifest, signer) = Manifest::from_signed_json(&text, NOW).unwrap();
         assert_eq!(signer, PublicKey::of(&key));
         assert_eq!(manifest.set, "plumb/wikidata-facts");
         assert_eq!(manifest.fields["capital"].field_type, FieldType::Ref);
-        assert!(manifest.other.contains_key("delegation"));
+        assert!(manifest.other.contains_key("endorsement"));
         assert!(manifest.not_understood().is_empty());
 
         let entry: Item = serde_json::from_value(json!({
@@ -357,7 +404,7 @@ mod tests {
     fn unsigned_or_broken_manifests_are_refused() {
         let key = SigningKey::from_bytes(&[3; 32]);
         let unsigned = serde_json::to_string(&facts_layer(&key)).unwrap();
-        assert!(Manifest::from_signed_json(&unsigned).is_err());
+        assert!(Manifest::from_signed_json(&unsigned, NOW).is_err());
 
         let breakages: [(&str, Value); 6] = [
             ("format", json!("plumb-set/2")),
@@ -374,18 +421,92 @@ mod tests {
             let mut value = facts_layer(&key);
             value[key_name] = bad;
             let text = signed(&mut value, &key);
-            assert!(Manifest::from_signed_json(&text).is_err(), "{key_name}");
+            assert!(
+                Manifest::from_signed_json(&text, NOW).is_err(),
+                "{key_name}"
+            );
         }
     }
 
     #[test]
-    fn delegated_signing_waits() {
-        let root = SigningKey::from_bytes(&[3; 32]);
-        let builder = SigningKey::from_bytes(&[4; 32]);
-        let mut value = facts_layer(&root);
-        value["signed_by"] = json!(PublicKey::of(&builder).to_string());
-        let text = signed(&mut value, &builder);
-        assert!(Manifest::from_signed_json(&text).is_err());
+    fn delegated_signing() {
+        use crate::notes::tests::note;
+        let (root, builder) = (
+            SigningKey::from_bytes(&[3; 32]),
+            SigningKey::from_bytes(&[4; 32]),
+        );
+        let (root_key, builder_key) = (PublicKey::of(&root), PublicKey::of(&builder));
+        let until = "2027-01-10T00:00:00Z";
+        let by_builder = |delegation: Option<Value>| {
+            let mut value = facts_layer(&root);
+            value["signed_by"] = json!(builder_key.to_string());
+            if let Some(delegation) = delegation {
+                value["delegation"] = delegation;
+            }
+            signed(&mut value, &builder)
+        };
+        let delegation = note(
+            "delegate",
+            3,
+            4,
+            json!({"sets": ["plumb/wikidata-*"], "until": until}),
+        );
+
+        let text = by_builder(Some(delegation.clone()));
+        let (manifest, signer) = Manifest::from_signed_json(&text, NOW).unwrap();
+        assert_eq!((manifest.publisher, signer), (root_key, builder_key));
+        manifest.trusted(&signer, &root_key, &[]).unwrap();
+        assert!(Manifest::from_signed_json(&text, "2027-01-10T00:00:01Z").is_err());
+
+        let other_sets = note(
+            "delegate",
+            3,
+            4,
+            json!({"sets": ["plumb/docs"], "until": until}),
+        );
+        let from_stranger = note(
+            "delegate",
+            5,
+            4,
+            json!({"sets": ["plumb/wikidata-*"], "until": until}),
+        );
+        let not_a_delegation = note("handover", 3, 4, json!({}));
+        for refused in [
+            None,
+            Some(other_sets),
+            Some(from_stranger),
+            Some(not_a_delegation),
+        ] {
+            assert!(Manifest::from_signed_json(&by_builder(refused), NOW).is_err());
+        }
+        let mut edited = delegation;
+        edited["sets"] = json!(["plumb/*"]);
+        assert!(Manifest::from_signed_json(&by_builder(Some(edited)), NOW).is_err());
+
+        let revoked = Note::from_signed_value(&note("revoke", 3, 4, json!({}))).unwrap();
+        assert!(manifest.trusted(&signer, &root_key, &[revoked]).is_err());
+        assert!(manifest.trusted(&signer, &builder_key, &[]).is_err());
+    }
+
+    #[test]
+    fn a_handover_moves_trust_to_the_new_key() {
+        use crate::notes::tests::note;
+        let (old, new) = (
+            SigningKey::from_bytes(&[3; 32]),
+            SigningKey::from_bytes(&[4; 32]),
+        );
+        let old_key = PublicKey::of(&old);
+        let handover = Note::from_signed_value(&note("handover", 3, 4, json!({}))).unwrap();
+        let (by_new, signer) =
+            Manifest::from_signed_json(&signed(&mut facts_layer(&new), &new), NOW).unwrap();
+        assert!(by_new.trusted(&signer, &old_key, &[]).is_err());
+        by_new
+            .trusted(&signer, &old_key, std::slice::from_ref(&handover))
+            .unwrap();
+        let (by_old, signer) =
+            Manifest::from_signed_json(&signed(&mut facts_layer(&old), &old), NOW).unwrap();
+        by_old.trusted(&signer, &old_key, &[]).unwrap();
+        assert!(by_old.trusted(&signer, &old_key, &[handover]).is_err());
     }
 
     #[test]
@@ -393,7 +514,7 @@ mod tests {
         let key = SigningKey::from_bytes(&[3; 32]);
         let mut value = facts_layer(&key);
         value["requires"] = json!(["places-rows/1"]);
-        let (manifest, _) = Manifest::from_signed_json(&signed(&mut value, &key)).unwrap();
+        let (manifest, _) = Manifest::from_signed_json(&signed(&mut value, &key), NOW).unwrap();
         assert_eq!(manifest.not_understood(), ["places-rows/1"]);
     }
 

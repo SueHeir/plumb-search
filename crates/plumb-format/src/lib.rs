@@ -12,7 +12,8 @@
 //! This crate is the part of the format that is frozen: the record shapes,
 //! the [`refs`] grammar, the [`urls`] canonical form (`url/1`) and match key,
 //! the value formats in [`value`], the [`canonical`] JSON that is signed,
-//! and how a manifest is signed and checked ([`sign`]). It only ever gains
+//! how a manifest is signed and checked ([`sign`]), and the key [`notes`]
+//! that delegate, hand over and revoke signing keys. It only ever gains
 //! optional keys. It never names a kind, a source or a site: what an
 //! article or a package is belongs to the code that builds or ranks it.
 //!
@@ -23,6 +24,7 @@
 pub mod canonical;
 pub mod item;
 pub mod manifest;
+pub mod notes;
 pub mod refs;
 pub mod sign;
 pub mod urls;
@@ -30,6 +32,7 @@ pub mod value;
 
 pub use item::{Deleted, Edge, Item, Vector};
 pub use manifest::{FieldSpec, FilePart, Manifest};
+pub use notes::Note;
 pub use refs::Ref;
 pub use sign::PublicKey;
 pub use value::FieldType;
