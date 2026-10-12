@@ -31,8 +31,6 @@ pub mod build_info;
 pub mod cli;
 pub mod clicks;
 pub mod country;
-pub mod eval;
-pub mod eval_labels;
 pub mod experiments;
 pub mod findings;
 pub mod history;
@@ -44,33 +42,25 @@ pub mod node;
 pub mod pages;
 pub mod places;
 pub mod plugins;
-pub mod storage;
 pub mod sync;
 pub mod tls;
-pub mod train_rank;
 pub mod web;
 pub mod websearch;
 
 mod assembly;
-mod crawl;
+pub mod crawl;
 mod dead;
-mod fact_trust;
-mod fetch;
 mod icons;
 mod ingest;
-mod limits;
-mod link_rank;
+pub mod limits;
 pub mod news;
-mod outline;
-mod records;
+pub mod outline;
+pub mod records;
 mod relations;
 mod run;
 mod search;
 mod sets;
 pub mod sources;
-mod summaries;
-mod terms;
-mod top_sites;
 
 use cli::{Cli, Command};
 
@@ -110,35 +100,19 @@ pub fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string(&build_info::current())?);
             Ok(())
         }
-        Command::Run(args) => run::run(args),
-        Command::FetchData(args) => fetch::run(args),
-        Command::FetchPages(args) => fetch::run_pages(args),
-        Command::FetchMap(args) => map::fetch::run(args),
-        Command::FetchProfiles(args) => fetch::run_profiles(args),
-        Command::FetchFacts(args) => fetch::run_facts(args),
-        Command::FetchLeads(args) => fetch::run_leads(args),
+        Command::Run(args) => run::run(*args),
         Command::Ingest(args) => ingest::run(args),
         Command::Crawl(args) => crawl::run(args),
         Command::Index(args) => search::run_index(args),
         Command::Search(args) => search::run_search(args),
         Command::Spelling(args) => search::run_spelling(&args),
         Command::Serve(args) => web::run(args),
-        Command::Eval(args) => eval::run(args),
-        Command::CheckLabels(args) => eval_labels::run(args),
-        Command::TrainRank(args) => train_rank::run(args),
         Command::Embed(args) => meaning::run_embed(args),
-        Command::FetchText(args) => terms::run_fetch_text(args),
-        Command::Terms(args) => terms::run_terms(args),
-        Command::Summaries(args) => summaries::run(args),
         Command::RemoteControl(args) => run::remote_control(args),
-        Command::Storage(args) => storage::run(args),
         Command::DeadSites(args) => dead::run(&args),
         Command::Experiments(args) => experiments::run(&args),
         Command::ClickLabels(args) => clicks::run(&args),
-        Command::LinkRank(args) => link_rank::run(&args),
-        Command::FactTrust(args) => fact_trust::run(&args),
         Command::Relations(args) => relations::run(&args),
-        Command::TopSites(args) => top_sites::run(&args),
         Command::Mcp(args) => mcp::run(args),
         Command::TryPlugin(args) => plugins::try_plugin(
             &args.plugin,
@@ -181,7 +155,7 @@ fn healthcheck(args: &cli::HealthcheckArgs) -> Result<()> {
 
 /// A multi-threaded Tokio runtime. Only the commands that do network I/O
 /// need one; `crawl` keeps one for all its batches.
-pub(crate) fn runtime() -> Result<tokio::runtime::Runtime> {
+pub fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -189,7 +163,7 @@ pub(crate) fn runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 /// Runs `future` to completion on a new [`runtime`].
-pub(crate) fn block_on<F: Future>(future: F) -> Result<F::Output> {
+pub fn block_on<F: Future>(future: F) -> Result<F::Output> {
     Ok(runtime()?.block_on(future))
 }
 
@@ -296,7 +270,7 @@ const MMAP_THRESHOLD: std::os::raw::c_int = 4 << 20;
 /// longer, and leaves 5 MB behind instead of 140 MB once freed memory is
 /// handed back. Runs before the node starts its threads. Does nothing on
 /// other systems.
-pub(crate) fn set_up_allocator() {
+pub fn set_up_allocator() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         use std::os::raw::c_int;

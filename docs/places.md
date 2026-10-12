@@ -33,7 +33,7 @@ Places are named shops, restaurants, cafés, bars, banks, pharmacies, hospitals,
 ## Making the file
 
 ```sh
-plumb fetch-pages --set places --osm planet-latest.osm.pbf --data /path/to/node-data
+plumb-tools fetch-pages --set places --osm planet-latest.osm.pbf --data /path/to/node-data
 ```
 
 `--osm` reads an OpenStreetMap extract (`.osm.pbf`): the whole planet (about 90 GB, from planet.openstreetmap.org) or a country or state from download.geofabrik.de. Without `--osm`, `--work DIR` downloads the planet there. The file, `DIR/pages/sets/places.tsv.gz`, is sorted with cities first, then towns, places with a Wikidata item, suburbs, places with a website or brand, villages and neighbourhoods, and then everything else, so the first N places are the best known N.
@@ -57,7 +57,7 @@ The **Page sets** part of the panel can also turn places off or keep a number of
 The node draws each map as SVG from `DIR/pages/sets/map.pmtiles` (`plumb serve --map FILE` without a node), a slim cut of the [Protomaps basemap](https://docs.protomaps.com/basemaps/downloads) of OpenStreetMap: land, water, parks and woods, roads and railways (no tunnels, driveways or footpaths) and the names of towns and neighbourhoods, nothing else. It picks the zoom whose detail suits the map's size, from the whole city down to every street, and where the file has no tiles that deep it uses the deepest it has. A map adds 10 to 80 KB to the page, the most in old city centres.
 
 ```sh
-plumb fetch-map --data /path/to/node-data --world-zoom 8 --zoom 14 --near 39.74,-104.99 --near 40.02,-105.27
+plumb-tools fetch-map --data /path/to/node-data --world-zoom 8 --zoom 14 --near 39.74,-104.99 --near 40.02,-105.27
 ```
 
 `fetch-map` reads the basemap over HTTP with range requests, so only the tiles kept are downloaded: every tile of the world up to `--world-zoom`, and up to `--zoom` within `--km` (50) of each `--near` point. `--from` takes a downloaded `.pmtiles` file or another address instead of yesterday's daily build, and `--dry-run` says how much it would read, zoom by zoom, without downloading tiles. Slimming leaves about a fifth of each tile (Florence's centre: 3.9 MB of tiles to 0.7 MB). Each zoom is about twice the size of the one before; the whole basemap to zoom 15 is about 120 GB.

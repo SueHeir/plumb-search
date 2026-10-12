@@ -7,7 +7,7 @@
 # news subjects.
 #
 # Run it with the Wikipedia page set, for example:
-#   plumb eval --index data/index --queries eval/topic_queries.tsv \
+#   plumb-tools eval --index data/index --queries eval/topic_queries.tsv \
 #     --pages data/pages/sets/wikipedia-en.tsv.gz
 news	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
 world news	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com

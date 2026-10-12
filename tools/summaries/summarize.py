@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""One sentence about each site `plumb summaries pick` wrote, from Claude.
+"""One sentence about each site `plumb-tools summaries pick` wrote, from Claude.
 
-    plumb summaries pick --records records.jsonl --top 10000 --out picks.jsonl
+    plumb-tools summaries pick --records records.jsonl --top 10000 --out picks.jsonl
     python3 tools/summaries/summarize.py --picks picks.jsonl --out summaries.jsonl
-    plumb summaries apply --summaries summaries.jsonl --records records.jsonl \
+    plumb-tools summaries apply --summaries summaries.jsonl --records records.jsonl \
         --out records-summaries.jsonl
 
 By default the sites go to Claude Code (`claude -p`, signed in with a
@@ -121,7 +121,7 @@ def read_jsonl(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--picks", required=True, help="file `plumb summaries pick` wrote")
+    parser.add_argument("--picks", required=True, help="file `plumb-tools summaries pick` wrote")
     parser.add_argument("--out", required=True, help="summaries file, appended to")
     parser.add_argument("--direct", type=int, metavar="N",
                         help="ask for the first N sites one at a time and print them")

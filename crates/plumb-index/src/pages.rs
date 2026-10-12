@@ -997,7 +997,7 @@ pub const PAPERS_SET: &str = "papers";
 /// under its own website.
 pub const WIKIDATA_SET: &str = "wikidata";
 /// The set of English words and what they mean, from Wiktionary
-/// ([`plumb_core::article`] files made by `plumb fetch-pages --set
+/// ([`plumb_core::article`] files made by `plumb-tools fetch-pages --set
 /// wiktionary`). Never listed among the results: a word is only looked up
 /// ([`PageSearcher::definition`]) for a search that asks what it means.
 pub const WIKTIONARY_SET: &str = "wiktionary";

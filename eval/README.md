@@ -1,6 +1,6 @@
 # Test searches
 
-Every ranking change is measured with these files: `plumb eval` searches
+Every ranking change is measured with these files: `plumb-tools eval` searches
 for each query and checks where the expected answer lands. Each file holds
 one kind of search, so a change that helps one kind and hurts another
 shows up.
@@ -51,7 +51,7 @@ Every answer can be checked: a domain is the organization's own site, a
 page is in the page set the file names, and a fact is Wikidata's. Before
 adding page answers, run
 
-    plumb check-labels --queries eval/question_queries.tsv \
+    plumb-tools check-labels --queries eval/question_queries.tsv \
       --pages stackoverflow.tsv.gz
 
 which prints each expected page's title (to see it is the page the search
@@ -65,8 +65,8 @@ of the lowercased query), so adding queries never moves one from half to
 half. Tune ranking changes on one half and check them on the other, so a
 change that only fits these exact searches shows up:
 
-    plumb eval --index DIR --queries eval/brand_queries.tsv --half tune
-    plumb eval --index DIR --queries eval/brand_queries.tsv --half held-out
+    plumb-tools eval --index DIR --queries eval/brand_queries.tsv --half tune
+    plumb-tools eval --index DIR --queries eval/brand_queries.tsv --half held-out
 
 Without `--half`, both halves are measured.
 
@@ -82,11 +82,11 @@ held-out half still says how well it does on searches it never saw.
 
 To train it again after the searches or the ranking change:
 
-    plumb eval --index DIR --queries eval/ai_queries.tsv ... \
+    plumb-tools eval --index DIR --queries eval/ai_queries.tsv ... \
       --pages ... --limit 20 --features-out features.jsonl
-    plumb eval --index DIR --queries eval/typo_queries.tsv \
+    plumb-tools eval --index DIR --queries eval/typo_queries.tsv \
       --follow-suggestions --limit 20 --features-out features-typo.jsonl
-    plumb train-rank --features features.jsonl --features features-typo.jsonl \
+    plumb-tools train-rank --features features.jsonl --features features-typo.jsonl \
       --out crates/plumb-index/src/learned_model.json
 
 Searches are embedded after the model's search instruction by default
@@ -108,7 +108,7 @@ every loss, trees or net, landed at 74-75% top-1 in 5-fold
 cross-validation and 76-77% on the held-out half, while only 81.5% of
 held-out searches have an expected result in the first ten rows at all.
 The order within the first ten is close to what the rows allow; the
-misses are mostly searches whose answer is not among them. `plumb train-rank --judge builtin` measures the
+misses are mostly searches whose answer is not among them. `plumb-tools train-rank --judge builtin` measures the
 model nodes use. To compare with the hand-made order in a full eval, use a
 sweep line `hand	{"learned": false}`. `--rerank-model DIR` (with
 `--features-out`) also scores the first 20 results with a cross-encoder
@@ -121,14 +121,14 @@ put an `embedding-server.json` in DIR (see `plumb_embed::SERVER_FILE`)
 with the server's `/v1/embeddings` address, the model's name, and
 optionally `dim` (values kept, for Matryoshka models) and the model's
 `query_prefix` and `text_prefix`. `plumb embed --model DIR` then makes the
-sites' vectors with it and `plumb eval --model DIR --vectors FILE` embeds
+sites' vectors with it and `plumb-tools eval --model DIR --vectors FILE` embeds
 the searches with it, so a model Plumb cannot run yet (llama.cpp's
 `llama-server --embedding`) can be measured before anyone ports it. Server
 vectors are for evals only; nodes keep the pinned model.
 
 ## Reproducible contracts and one combined batch
 
-`plumb eval --report run.jsonl --eval-time UNIX` extends the existing evaluator.
+`plumb-tools eval --report run.jsonl --eval-time UNIX` extends the existing evaluator.
 TSV suites still use the original query hash; `--acceptance file.jsonl` uses a
 stable **family** hash, or an explicit `tune`/`held-out` split. All paraphrases
 of a family must share a split, including across files. Acceptance files cannot

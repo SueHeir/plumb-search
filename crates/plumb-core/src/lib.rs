@@ -155,7 +155,7 @@ pub struct SiteRecord {
     /// One sentence saying what the site is, written by a language model
     /// for a well-known site that has no words of its own here (no
     /// description, homepage text, terms or Wikidata/Wikipedia text; see
-    /// `plumb summaries`). Searched like the description, and only while
+    /// `plumb-tools summaries`). Searched like the description, and only while
     /// the site has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,

@@ -326,7 +326,7 @@ async fn append_facts(partial: &Path, json: &[u8]) -> Result<()> {
 /// Runs `query`, trying again after HTTP 429 or 5xx, a cut-off answer and
 /// failed connections, waiting `pacing.retry_wait`, doubling; returns the
 /// SPARQL JSON answer.
-pub(crate) async fn sparql_json(
+pub async fn sparql_json(
     client: &reqwest::Client,
     endpoint: &str,
     query: &str,

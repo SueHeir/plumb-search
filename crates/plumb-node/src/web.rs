@@ -93,7 +93,7 @@ use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::plugins::PluginResults;
 use crate::websearch::{bang_url, Engine, WebSettings};
 
-pub(crate) mod answers;
+pub mod answers;
 mod control;
 mod history;
 mod link;
@@ -3051,7 +3051,7 @@ fn homepage_url(domain: &str) -> Option<String> {
 }
 
 /// `12345` -> `12,345`.
-pub(crate) fn group_thousands(n: u64) -> String {
+pub fn group_thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -8749,8 +8749,6 @@ mod tests {
         assert_eq!((first.shown, first.opened), (1, 1));
         let tsv = std::fs::read_to_string(&queries).unwrap();
         assert!(tsv.ends_with("us bank\tusbank-login-help.com\n"), "{tsv}");
-        let parsed = crate::eval::parse_queries(&tsv).unwrap();
-        assert_eq!(parsed[0].expected, ["usbank-login-help.com"]);
     }
 
     /// A ready node with a data folder, where experiments are set up.

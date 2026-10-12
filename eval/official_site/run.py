@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded official_site/lookalike/facts contracts; full RPCs, never LLM grades.
 
-TSV callers retain their old format. JSONL uses plumb eval's family contracts.
+TSV callers retain their old format. JSONL uses plumb-tools eval's family contracts.
 --responses re-scores saved full responses offline. --out saves complete request,
 response, target build, response bytes and timing, so truncation cannot hide a
 bad decision. A JSON summary separates labels and false identity accusations.

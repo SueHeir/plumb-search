@@ -1,0 +1,47 @@
+[package]
+name = "plumb-tools"
+description = "Plumb Search's tools: make the project's page sets and map, measure and train ranking, look into records files."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "plumb-tools"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+bzip2 = "0.6.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+flate2 = "1.1.10"
+futures-util = "0.3.34"
+osmpbf = "0.3.8"
+plumb-answer = { version = "0.2.1", path = "../plumb-answer" }
+plumb-core = { version = "0.2.1", path = "../plumb-core" }
+plumb-crawl = { version = "0.2.1", path = "../plumb-crawl" }
+plumb-embed = { version = "0.2.1", path = "../plumb-embed" }
+plumb-index = { version = "0.2.1", path = "../plumb-index" }
+plumb-ingest = { version = "0.2.1", path = "../plumb-ingest" }
+plumb-net = { version = "0.2.1", path = "../plumb-net" }
+plumb-node = { version = "0.2.1", path = "../plumb-node" }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["bzip2", "ppmd"] }
+sha2 = "0.10.9"
+tar = "0.4.46"
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1.44"
+url = "2.5.8"
+zstd = "0.13.3"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.5", features = ["process", "fs"] }
+
+[dev-dependencies]
+axum = "0.8.9"

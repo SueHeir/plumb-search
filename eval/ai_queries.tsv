@@ -5,7 +5,7 @@
 # must not pull a look-alike (chase-login-help.com) above the real site.
 #
 # Run it against an index built from real data, for example:
-#   plumb eval --index data/index --queries eval/ai_queries.tsv
+#   plumb-tools eval --index data/index --queries eval/ai_queries.tsv
 #
 # Format: query<TAB>expected_domain[,another_ok_domain]. Only registrable
 # domains count, so docs.python.org is python.org and aws.amazon.com is

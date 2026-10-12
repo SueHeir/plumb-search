@@ -5,7 +5,7 @@
 //!
 //! The tiles are a slim cut of the Protomaps basemap (OpenStreetMap data,
 //! ODbL) in one PMTiles file, `DIR/pages/sets/map.pmtiles`, made by
-//! `plumb fetch-map`: the whole world at low zooms, and street detail
+//! `plumb-tools fetch-map`: the whole world at low zooms, and street detail
 //! around chosen points. Where the file has no detail the map is drawn
 //! from the deepest tiles it has there; with no file the pins are drawn
 //! alone, as before. See docs/places.md.
@@ -18,7 +18,6 @@ use anyhow::{ensure, Result};
 use tracing::{info, warn};
 
 pub mod draw;
-pub mod fetch;
 pub mod mvt;
 pub mod pmtiles;
 
@@ -62,7 +61,7 @@ impl BaseMap {
 type Opened = (SystemTime, u64, Option<Arc<BaseMap>>);
 
 /// A map file that is opened when first needed and again when it
-/// changes, so a new one from `plumb fetch-map` is used within a search.
+/// changes, so a new one from `plumb-tools fetch-map` is used within a search.
 pub struct MapFile {
     path: PathBuf,
     open: Mutex<Option<Opened>>,
