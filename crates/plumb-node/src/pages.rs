@@ -12,7 +12,8 @@
 //! A set can come instead as the project's item set of it, `plumb/<id>`,
 //! held in `DIR/sets/plumb/<id>/` ([`HeldPageSet`]). Its items give the
 //! same pages back, and it is read in place of the file when the node
-//! holds as many of its pages that way, or has no file.
+//! holds as many of its pages that way and the file is no newer, or has
+//! no file.
 //!
 //! The pages kept are indexed together in `DIR/pages/index-<key>/`, where
 //! the key names the sets, their files or item sets and how many pages of
@@ -760,14 +761,20 @@ impl SetSource {
     /// the item set's generation.
     fn made(&self) -> i64 {
         match self {
-            SetSource::File(file) => std::fs::metadata(file)
-                .and_then(|meta| meta.modified())
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |since| since.as_secs() as i64),
+            SetSource::File(file) => file_time(file),
             SetSource::Items(held) => held.generation,
         }
     }
+}
+
+/// A file's time in Unix seconds, 0 when it can't be read. A set file
+/// taken from another node has its maker's time.
+fn file_time(file: &Path) -> i64 {
+    std::fs::metadata(file)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_secs() as i64)
 }
 
 /// The project's item set of a page set, `plumb/<id>` as `plumb set
@@ -908,7 +915,9 @@ impl Wanted {
 
     /// [`Wanted::new`], reading a set from the project's item set of it
     /// ([`HeldPageSet`]), signed by one of `publishers`, when the node
-    /// holds as many of its pages that way, or has no file of it.
+    /// holds as many of its pages that way and its file is no newer than
+    /// that generation, or has no file of it. A newer file is one the
+    /// publisher installed and has not yet written as items.
     pub fn taking(
         data_dir: &Path,
         sets: &PageSets,
@@ -937,8 +946,10 @@ impl Wanted {
                     }
                     let file = set.file(data_dir);
                     let file = plumb_net::pages::generation_file(&file).unwrap_or(file);
-                    let held = HeldPageSet::find(data_dir, set, publishers)
-                        .filter(|held| held.holds(pages) || !file.is_file());
+                    let held = HeldPageSet::find(data_dir, set, publishers).filter(|held| {
+                        !file.is_file()
+                            || (held.holds(pages) && held.generation >= file_time(&file))
+                    });
                     let source = match held {
                         Some(held) => SetSource::Items(held),
                         None if file.is_file() => SetSource::File(file),
@@ -1612,6 +1623,14 @@ mod tests {
         let key = SigningKey::from_bytes(&[7; 32]);
         crate::sets::sign_set(&held, &key, None, None).unwrap();
         let project = [PublicKey::of(&key)];
+        let generation = plumb_format::value::unix_seconds("2026-10-12T04:00:00Z").unwrap();
+        let date = |file: &Path, time: i64| {
+            let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(time as u64);
+            let file = std::fs::File::options().write(true).open(file).unwrap();
+            file.set_modified(time).unwrap();
+        };
+        // The file the item set was written from.
+        date(&file, generation - 3600);
 
         let from_file = Wanted::new(data, &PageSets::default(), 0);
         assert_eq!(from_file.sets[0].1, SetSource::File(file.clone()));
@@ -1641,6 +1660,14 @@ mod tests {
         let indexed = pages_of(&from_items);
         assert_eq!(indexed.len(), 3);
         assert_eq!(indexed, pages_of(&from_file), "the same pages either way");
+        // A file newer than the item set, as when the publisher installs
+        // the next one, is read in its place.
+        date(&file, generation + 3600);
+        assert_eq!(
+            Wanted::taking(data, &PageSets::default(), 0, &project).sets[0].1,
+            SetSource::File(file.clone()),
+        );
+        date(&file, generation - 3600);
 
         // Holding only its first parts: read when they hold what is kept,
         // or when there is no file.
