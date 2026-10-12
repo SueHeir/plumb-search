@@ -29,7 +29,7 @@ use tracing::{debug, info, warn};
 use super::{Inner, NodeSettings};
 use crate::pages::{
     index_dir, notes_path, open_or_build_with, remove_other_indexes_with_budget, stand_in,
-    thousands, wanted_counts, SetFileCutter, SetFileNotes, SetInfo, Wanted,
+    thousands, wanted_counts, HeldPageSet, SetFileCutter, SetFileNotes, SetInfo, Wanted,
 };
 
 /// How often the job looks for changed settings or set files.
@@ -296,6 +296,12 @@ fn keep_files(inner: &Inner, done: &AtomicBool) {
                     break;
                 }
                 if fetch_failed.contains_key(set.id) {
+                    continue;
+                }
+                // Taken as the project's item set ([`super::signed_sets`]).
+                if HeldPageSet::find(&inner.paths.data, set, &inner.config.set_publishers)
+                    .is_some_and(|held| held.holds(pages))
+                {
                     continue;
                 }
                 let near = near_of(&settings, near.as_deref(), set, pages);

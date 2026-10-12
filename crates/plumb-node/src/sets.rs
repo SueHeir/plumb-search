@@ -813,7 +813,7 @@ pub fn sign_set(
     }
     let manifest: Manifest = serde_json::from_value(value.clone())?;
     manifest.check()?;
-    let checked = check_parts(dir, &manifest)?;
+    let checked = check_parts(dir, &manifest, usize::MAX)?;
     let missing = manifest.not_understood();
     ensure!(
         missing.is_empty() && checked.newer == 0,
@@ -835,6 +835,18 @@ pub fn sign_set(
 /// must be published by that key or the key it handed over to in `notes`.
 /// A signer revoked in `notes` is refused either way.
 pub fn check_set(dir: &Path, trusted: Option<&PublicKey>, notes: &[Note]) -> Result<Checked> {
+    check_first_parts(dir, trusted, notes, usize::MAX)
+}
+
+/// [`check_set`] for a node that holds only the first `parts` parts of a
+/// set, as it may of a page set: the manifest is checked whole, and the
+/// parts it holds.
+pub fn check_first_parts(
+    dir: &Path,
+    trusted: Option<&PublicKey>,
+    notes: &[Note],
+    parts: usize,
+) -> Result<Checked> {
     let text = fs::read_to_string(dir.join(MANIFEST))
         .with_context(|| format!("reading {}", dir.join(MANIFEST).display()))?;
     let (manifest, signer) = Manifest::from_signed_json(&text, &now())?;
@@ -853,7 +865,7 @@ pub fn check_set(dir: &Path, trusted: Option<&PublicKey>, notes: &[Note]) -> Res
         "{} requires {missing:?}, which this version does not read",
         manifest.set
     );
-    check_parts(dir, &manifest)
+    check_parts(dir, &manifest, parts)
 }
 
 /// The manifest and the items of the set in `dir`, part by part, as they
@@ -899,10 +911,18 @@ pub(crate) fn items_in<'a>(
     })
 }
 
-fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
+/// 64 bits of an id's SHA-256, for telling ids apart.
+fn id_hash(id: &str) -> u64 {
+    let digest = Sha256::digest(id.as_bytes());
+    u64::from_le_bytes(digest[..8].try_into().expect("8 bytes"))
+}
+
+fn check_parts(dir: &Path, manifest: &Manifest, parts: usize) -> Result<Checked> {
+    // Ids by hash: a page set's millions of ids would take hundreds of
+    // megabytes as text.
     let mut ids = HashSet::new();
     let (mut items, mut newer) = (0, 0);
-    for part in &manifest.files {
+    for part in manifest.files.iter().take(parts) {
         let path = dir.join(&part.path);
         let (bytes, sha256) = measure(&path)?;
         ensure!(
@@ -928,7 +948,7 @@ fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
             if manifest.is_site_rules() && !item.is_deleted() && Rule::from_item(&item)?.is_none() {
                 newer += 1;
             }
-            ensure!(ids.insert(item.id), "{}: an id seen before", at());
+            ensure!(ids.insert(id_hash(&item.id)), "{}: an id seen before", at());
             count += 1;
         }
         ensure!(
@@ -943,7 +963,7 @@ fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
         set: manifest.set.clone(),
         generation: manifest.generation.clone(),
         publisher: manifest.publisher,
-        parts: manifest.files.len(),
+        parts: manifest.files.len().min(parts),
         items,
         newer,
     })
