@@ -245,52 +245,76 @@ pub(crate) fn is_medical(query: &str) -> bool {
         || words.iter().any(|w| ["depression", "anxiety"].contains(w)) && words.len() <= 3
 }
 
-/// Whether `query` asks a source of its own: it has an address in it
-/// ("acetaminophen dose healthychildren.org") or the name in the address
-/// of a listed site ("how long is the flu contagious CDC" for
-/// www.cdc.gov, "mayo clinic plantar fasciitis" for mayoclinic.org). A
-/// medical word is what is asked about, not a source: "diabetes" doesn't
-/// ask diabetes.org.
-fn names_a_source(query: &str, hits: &[Hit]) -> bool {
-    // An address ends in letters: "0.5mg" and "e.g." are not one.
-    let address = |word: &str| {
-        let word = word.trim_end_matches(|c: char| !c.is_alphanumeric());
-        word.rsplit_once('.')
-            .is_some_and(|(_, end)| end.len() > 1 && end.chars().all(|c| c.is_ascii_alphabetic()))
-            && plumb_core::registrable_domain(word).is_some()
-    };
-    if query.split_whitespace().any(address) {
-        return true;
-    }
-    let normalized = normalize_text(query);
-    let words: Vec<&str> = normalized.split(' ').collect();
-    let names: Vec<String> = words
-        .iter()
-        .map(|word| word.to_string())
-        .chain(words.windows(2).map(|pair| pair.concat()))
+/// Health sources searchers ask for by name, by the domain the index has
+/// them under: "how long is the flu contagious CDC", "lisinopril
+/// MedlinePlus". Lowercase names match the folded query; a name with
+/// capitals matches only as written, so "who" in a question is not WHO.
+const SOURCES: &[(&str, &[&str])] = &[
+    ("cdc.gov", &["cdc"]),
+    ("www.nhs.uk", &["nhs"]),
+    ("medlineplus.gov", &["medlineplus", "medline plus"]),
+    ("mayoclinic.org", &["mayoclinic", "mayo clinic"]),
+    (
+        "clevelandclinic.org",
+        &["clevelandclinic", "cleveland clinic"],
+    ),
+    ("who.int", &["WHO", "world health organization"]),
+    ("webmd.com", &["webmd"]),
+    ("healthline.com", &["healthline"]),
+    ("healthychildren.org", &["healthychildren"]),
+    ("nih.gov", &["NIH"]),
+    ("fda.gov", &["FDA"]),
+    ("ecdc.europa.eu", &["ecdc"]),
+];
+
+/// The sites `query` asks for as its source, by domain: a health source
+/// it names ([`SOURCES`]) or an address typed in it ("acetaminophen dose
+/// healthychildren.org"). Doses and abbreviations ("0.5mg", "e.g.") are
+/// not addresses.
+fn named_sources(query: &str) -> Vec<String> {
+    let folded = format!(" {} ", normalize_text(query));
+    let words: Vec<&str> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
         .collect();
-    hits.iter().any(|hit| {
-        let host = hit.domain.trim_start_matches("www.");
-        let label = plumb_core::domain_label(host);
-        // A site at a public suffix of its own (nhs.uk) goes by its first label.
-        let name = if label == host {
-            host.split('.').next()
-        } else {
-            label.rsplit('.').next()
+    let mut named: Vec<String> = SOURCES
+        .iter()
+        .filter(|(_, names)| {
+            names.iter().any(|name| {
+                if name.chars().any(|c| c.is_ascii_uppercase()) {
+                    words.contains(name)
+                } else {
+                    folded.contains(&format!(" {name} "))
+                }
+            })
+        })
+        .map(|(domain, _)| domain.to_string())
+        .collect();
+    for word in query.split_whitespace() {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+        let ends_in_letters = word
+            .rsplit_once('.')
+            .is_some_and(|(_, end)| end.len() > 1 && end.chars().all(|c| c.is_ascii_alphabetic()));
+        if let Some(host) = plumb_core::host_of(word).filter(|_| ends_in_letters) {
+            let domain = plumb_core::registrable_domain(&host).unwrap_or(host);
+            if !named.iter().any(|known| same_site(known, &domain)) {
+                named.push(domain);
+            }
         }
-        .unwrap_or_default();
-        name.len() > 2
-            && names.iter().any(|word| word == name)
-            && !MEDICAL_WORDS.contains(&name)
-            && !crate::PILL_SHOP_DRUGS.contains(&name)
-    })
+    }
+    named
+}
+
+/// Whether two index domains are one site, with or without `www.`.
+fn same_site(a: &str, b: &str) -> bool {
+    a.trim_start_matches("www.") == b.trim_start_matches("www.")
 }
 
 /// `hits` for a medical `query` with the health authorities first, under
 /// a well-known site the query names (diabetes.org for "diabetes"):
-/// those already listed move up, the others come from `site`. At most
-/// `limit` hits stay. A query that asks a source of its own
-/// ([`names_a_source`]) keeps its hits as they are.
+/// those already listed move up, the others come from `site`. A source
+/// the query asks for ([`named_sources`]) goes above them, from `site`
+/// too when it isn't listed. At most `limit` hits stay.
 pub(crate) fn authorities_first(
     query: &str,
     country: Option<&str>,
@@ -298,11 +322,29 @@ pub(crate) fn authorities_first(
     limit: usize,
     site: &dyn Fn(&str) -> Option<Hit>,
 ) {
-    if limit == 0 || !is_medical(query) || names_a_source(query, hits) {
+    if limit == 0 || crate::typed_domain(query).is_some() || !is_medical(query) {
         return;
+    }
+    let mut sources = Vec::new();
+    for domain in named_sources(query) {
+        match hits.iter().position(|hit| same_site(&hit.domain, &domain)) {
+            Some(at) => sources.push(hits.remove(at)),
+            None => {
+                if let Some(mut fallback) = site(&domain) {
+                    fallback.missing_words = true;
+                    sources.push(fallback);
+                }
+            }
+        }
     }
     let mut first = Vec::new();
     for domain in authorities(country).iter().take(AUTHORITIES) {
+        if sources
+            .iter()
+            .any(|hit: &Hit| same_site(&hit.domain, domain))
+        {
+            continue;
+        }
         match hits.iter().position(|hit| hit.domain == *domain) {
             Some(at) => first.push(hits.remove(at)),
             None => {
@@ -315,17 +357,19 @@ pub(crate) fn authorities_first(
             }
         }
     }
-    if first.is_empty() {
+    if first.is_empty() && sources.is_empty() {
         return;
     }
     // Preserve useful indexed authority guidance ahead of generic
     // authority homepages. Country/source order still breaks ties.
     first.sort_by_key(|hit| std::cmp::Reverse(!hit.missing_words && hit.text_score >= 0.75));
     let at = usize::from(
-        hits.first()
-            .is_some_and(|hit| hit.named && hit.link_score >= WELL_KNOWN_LINK_SCORE),
+        sources.is_empty()
+            && hits
+                .first()
+                .is_some_and(|hit| hit.named && hit.link_score >= WELL_KNOWN_LINK_SCORE),
     );
-    hits.splice(at..at, first);
+    hits.splice(at..at, sources.into_iter().chain(first));
     hits.truncate(limit);
 }
 
@@ -534,44 +578,90 @@ mod tests {
             ["diabetes.org", "www.nhs.uk", "medlineplus.gov"]
         );
 
-        // A query that asks its own source keeps it first, with no
-        // authority homepages above it.
+        // A source the search asks for goes first, with the authorities
+        // under it, and comes from the index when it isn't listed.
         for query in [
             "how long is the flu contagious CDC",
             "cdc.gov how flu spreads contagious period",
-            "flu cdc.gov",
+            "flu www.cdc.gov/flu",
             "flu facts (cdc.gov)",
         ] {
-            let mut hits = vec![
-                hit("flu.example", false, 0.3),
-                hit("www.cdc.gov", false, 0.8),
-            ];
-            authorities_first(query, None, &mut hits, 5, &site);
-            assert_eq!(domains(&hits), ["flu.example", "www.cdc.gov"], "{query}");
+            for listed in [true, false] {
+                let mut hits = vec![hit("flu.example", false, 0.3)];
+                if listed {
+                    hits.push(hit("cdc.gov", false, 0.8));
+                }
+                authorities_first(query, None, &mut hits, 5, &site);
+                assert_eq!(
+                    domains(&hits),
+                    [
+                        "cdc.gov",
+                        "medlineplus.gov",
+                        "mayoclinic.org",
+                        "clevelandclinic.org",
+                        "flu.example"
+                    ],
+                    "{query}"
+                );
+            }
         }
         for (query, source) in [
             ("is it a cold the flu or COVID-19 NHS", "www.nhs.uk"),
+            ("lisinopril, site: nhs.uk", "www.nhs.uk"),
             ("mayo clinic plantar fasciitis symptoms", "mayoclinic.org"),
+            ("lisinopril MedlinePlus drug information", "medlineplus.gov"),
             (
                 "acetaminophen fever pain children healthychildren.org",
                 "healthychildren.org",
             ),
             ("WHO diabetes fact sheet", "who.int"),
             ("webmd lisinopril ibuprofen interaction", "webmd.com"),
+            ("lisinopril ibuprofen interaction drugs.com", "drugs.com"),
         ] {
-            let mut hits = vec![hit(source, false, 0.6)];
-            authorities_first(query, Some("US"), &mut hits, 5, &site);
-            assert_eq!(domains(&hits), [source], "{query}");
+            let mut hits = vec![
+                hit("lisinoprilgo7.com", false, 0.1),
+                hit(source, false, 0.6),
+            ];
+            authorities_first(query, Some("US"), &mut hits, 5, &|_| None);
+            let listed = domains(&hits);
+            assert_eq!(listed[0], source, "{query}");
+            assert_eq!(listed.last(), Some(&"lisinoprilgo7.com"), "{query}");
         }
-        // A medical word in an address is the topic, not a source asked
-        // for, and a dose is not an address.
+        // A source asked for that the index doesn't have: as before.
+        let mut hits = vec![hit("pir.org", false, 0.3)];
+        authorities_first(
+            "acetaminophen dose healthychildren.org",
+            None,
+            &mut hits,
+            4,
+            &|domain| (domain != "healthychildren.org").then(|| hit(domain, false, 0.6)),
+        );
+        assert_eq!(
+            domains(&hits),
+            [
+                "medlineplus.gov",
+                "mayoclinic.org",
+                "clevelandclinic.org",
+                "pir.org"
+            ]
+        );
+        // Words that are some site's address name ask for no source,
+        // nor does "who" in a question, a dose or an abbreviation.
         for query in [
             "diabetes symptoms",
+            "how to tell if it's a cold or COVID-19 loss of smell",
+            "measles vaccine coverage global rate first dose",
+            "who should take metformin",
             "melatonin 0.5mg dose",
             "ibuprofen 2.5ml dosage",
             "flu symptoms, e.g. fever",
         ] {
-            let mut hits = vec![hit("diabetes.org", false, 0.7)];
+            assert!(named_sources(query).is_empty(), "{query}");
+            let mut hits = vec![
+                hit("covid19.com.ua", false, 0.7),
+                hit("first.org", false, 0.7),
+                hit("who.int", false, 0.7),
+            ];
             authorities_first(query, None, &mut hits, 3, &site);
             assert_eq!(
                 domains(&hits),
