@@ -341,6 +341,30 @@ impl BatchStore {
         self.ids.contains(id)
     }
 
+    /// The crawler key of each batch held, protobuf-encoded.
+    pub(crate) fn held_crawlers(&self) -> Vec<(Hash, Vec<u8>)> {
+        self.headers
+            .iter()
+            .map(|(id, header)| (*id, header.header.crawler.clone()))
+            .collect()
+    }
+
+    /// Whether any batch held has a delivery marker: the store has been
+    /// kept by a version that writes them.
+    pub(crate) fn has_delivery_markers(&self) -> bool {
+        fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.starts_with("delivered-"))
+            })
+    }
+
     pub(crate) fn delivery_ack(&self, id: &Hash, trusted: bool) -> DeliveryAck {
         let mode = if trusted { "trusted" } else { "agreed" };
         DeliveryAck {
