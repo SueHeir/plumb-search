@@ -17,7 +17,12 @@
 ### Running a node
 
 - A node that has to build its page index when it starts, as one upgraded from 0.2.0 does, keeps searching the index it already has meanwhile and builds the new one beside it. Wikipedia, Stack Overflow, docs and book results no longer go missing for the build (13 minutes on plumbsearch.org, longer on a desktop), or for half an hour more when it fails. While 0.2.0's index stands in, searches limited to a set, a site, docs, papers or a language other than English find no pages. It is removed once the new one is in use.
+- A node upgraded from 0.2.0 no longer takes in every other crawler's batch it holds again on its first start (up to a fifth of its storage limit, about 12 GB on plumbsearch.org): 0.2.0 took them in as they came. Only the batches of a crawler trusted since 0.2.0 last started are taken in again, whole, as 0.2.0 would have done.
 - A node takes a newer docs, subpages, reference or papers file from a trusted 0.2 node again, as 0.2.0 did, unless its own file holds entries no 0.2 file has (typed search terms, paper details, languages, symbols): 0.2 nodes note what those files hold for Wikipedia and Wikidata only, so a node trusting plumbsearch.org while it runs 0.2 took none of its newer files of those sets.
+
+### For AI apps
+
+- `check_lookalike` says `lookalike: true` for a `suspected` address too (another site's exact name on another ending or host, with no owner evidence either way), as 0.2.0 did: an app that checks `lookalike` before entering credentials still stops at `paypal.co`. `verdict` and `suspected` tell the two apart.
 
 ## 0.2.1
 
