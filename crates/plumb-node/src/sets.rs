@@ -3,7 +3,8 @@
 //!
 //! A set is a folder: `manifest.json` and its parts, `items-001.jsonl.zst`
 //! and on, one item per line, most weighted first. `from-pages` writes one
-//! from an articles file, `denylist` one from a file of denylist entries
+//! from an articles file, `page-sets` the project's set of each page set a
+//! node holds, `denylist` one from a file of denylist entries
 //! (`deny-entry` makes them), `site-rules` one of the rules that say which
 //! site a host is on, `sign` signs its manifest with a set-signing
 //! key from `new-key`, and `check` checks a set as a node would before
@@ -66,6 +67,10 @@ pub enum SetCommand {
     /// Write a page set in today's format (an articles file) as a set of
     /// items, with a manifest still to be signed.
     FromPages(FromPagesArgs),
+    /// Write each page set a node holds whole as the project's item set of
+    /// it, `plumb/<id>`, with the license and attribution the project
+    /// picked for it, each with a manifest still to be signed.
+    PageSets(PageSetsArgs),
     /// Write a denylist from a file of entries, one a line, with a manifest
     /// still to be signed.
     Denylist(DenylistArgs),
@@ -112,6 +117,24 @@ pub struct FromPagesArgs {
     /// What the items' weight counts: `page views, last 7 days`.
     #[arg(long, value_name = "TEXT")]
     pub weight_counts: Option<String>,
+    /// The zstd level of the parts.
+    #[arg(long, default_value_t = 19)]
+    pub level: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct PageSetsArgs {
+    /// The node's data folder, whose `pages/sets/` holds the files. They
+    /// are only read.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
+    /// Where to write the sets, each in `<DIR>/plumb/<id>/`, which must
+    /// not exist yet or be empty.
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// Only these sets, separated by commas.
+    #[arg(long, value_delimiter = ',')]
+    pub only: Vec<String>,
     /// The zstd level of the parts.
     #[arg(long, default_value_t = 19)]
     pub level: i32,
@@ -276,6 +299,7 @@ pub fn run(args: SetArgs) -> Result<()> {
             }
             Ok(())
         }
+        SetCommand::PageSets(args) => page_sets(&args),
         SetCommand::Denylist(args) => {
             let written = denylist(&args)?;
             println!(
@@ -529,6 +553,103 @@ pub fn from_pages(args: &FromPagesArgs) -> Result<(Written, Differ)> {
         );
     }
     Ok((written, differ))
+}
+
+/// The license, the attribution and what the weight counts of the
+/// project's page set `id`, as the project picked them (`licenses.md` in
+/// the design notes): a set takes the license of what it is made from, and
+/// what is read off public pages is `LicenseRef-plumb-crawl`.
+pub fn page_set_terms(id: &str) -> (&'static str, Option<&'static str>, Option<&'static str>) {
+    use plumb_index::pages::{
+        BOOKS_SET, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET, PAPERS_SET, PODCASTS_SET,
+        STACKEXCHANGE_SET, STACKOVERFLOW_SET, WIKIDATA_SET, WIKTIONARY_SET,
+    };
+    match id {
+        set if set.starts_with("wikipedia-") => (
+            "CC-BY-SA-4.0",
+            Some("From Wikipedia ({url})"),
+            Some("page views"),
+        ),
+        STACKOVERFLOW_SET | STACKEXCHANGE_SET => {
+            ("CC-BY-SA-4.0", Some("From Stack Exchange ({url})"), None)
+        }
+        WIKTIONARY_SET => ("CC-BY-SA-4.0", Some("From Wiktionary ({url})"), None),
+        PACKAGES_SET => (
+            "CC-BY-SA-4.0",
+            Some("From ecosyste.ms"),
+            Some("downloads, as a share of its registry's most downloaded package"),
+        ),
+        WIKIDATA_SET | FILMS_SET => ("CC0-1.0", Some("From Wikidata"), Some("sitelinks")),
+        BOOKS_SET => ("CC0-1.0", Some("From Open Library"), None),
+        MUSIC_SET => ("CC0-1.0", Some("From MusicBrainz"), Some("listeners")),
+        PAPERS_SET => ("CC0-1.0", Some("From OpenAlex"), Some("citations")),
+        PODCASTS_SET => ("LicenseRef-podcast-index", Some("From Podcast Index"), None),
+        GITHUB_SET => ("LicenseRef-plumb-crawl", None, Some("stars")),
+        // Docs, reference and subpages: read off the pages themselves.
+        _ => ("LicenseRef-plumb-crawl", None, None),
+    }
+}
+
+/// Writes each page set whose whole file is in `args.data` as the
+/// project's item set of it, and says how each went.
+pub fn page_sets(args: &PageSetsArgs) -> Result<()> {
+    let mut written = 0;
+    for set in crate::pages::SETS {
+        if !Page::has_reader(set.id)
+            || !(args.only.is_empty() || args.only.iter().any(|id| id == set.id))
+        {
+            continue;
+        }
+        let file = set.file(&args.data);
+        let file = plumb_net::pages::generation_file(&file).unwrap_or(file);
+        if !file.is_file() {
+            continue;
+        }
+        if set
+            .file_notes(&args.data)
+            .is_some_and(|notes| !notes.complete)
+        {
+            println!("{}: left out: the node holds only part of it", set.id);
+            continue;
+        }
+        let (license, attribution, weight_counts) = page_set_terms(set.id);
+        let name = format!("plumb/{}", set.id);
+        let from = FromPagesArgs {
+            pages: file,
+            set: set.id.to_string(),
+            name: Some(name.clone()),
+            out: args.out.join(&name),
+            title: Some(set.name.to_string()),
+            license: Some(license.to_string()),
+            attribution: attribution.map(str::to_string),
+            weight_counts: weight_counts.map(str::to_string),
+            level: args.level,
+        };
+        let (made, differ) = from_pages(&from).with_context(|| format!("writing {name}"))?;
+        let bytes: u64 = fs::read_dir(&from.out)?
+            .flatten()
+            .filter_map(|entry| entry.metadata().ok())
+            .map(|meta| meta.len())
+            .sum();
+        println!(
+            "{name}: {} items in {} parts, {bytes} bytes, {} pages left out",
+            made.items, made.parts, made.left_out
+        );
+        if differ.is_empty() {
+            println!("{name}: every page comes back the same from its item");
+        }
+        for (member, (pages, first)) in &differ {
+            println!("{name}: {member} comes back otherwise on {pages} pages, first {first}");
+        }
+        written += 1;
+    }
+    ensure!(
+        written > 0,
+        "no whole page set file in {}",
+        args.data.display()
+    );
+    println!("sign each with `plumb set sign <DIR> --key <KEY>`, then check it");
+    Ok(())
 }
 
 /// Writes the entries in `args.entries` as a denylist. Every line must be
@@ -1022,6 +1143,54 @@ fn write_manifest(dir: &Path, manifest: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_nodes_page_sets_are_written_as_the_projects_item_sets() {
+        use plumb_core::article::{write_article, Article, ARTICLES_HEADER};
+
+        let temp = tempfile::tempdir().unwrap();
+        let (data, out) = (temp.path().join("data"), temp.path().join("out"));
+        let sets = crate::pages::sets_dir(&data);
+        fs::create_dir_all(&sets).unwrap();
+        for (file, title, item) in [
+            ("wikipedia-en.tsv.gz", "Marie Curie", Some("Q7186")),
+            ("books.tsv.gz", "Fantastic Mr Fox", Some("OL45804W")),
+        ] {
+            let mut text = ARTICLES_HEADER.as_bytes().to_vec();
+            let article = Article {
+                title: title.into(),
+                views: 9,
+                item: item.map(str::to_string),
+                ..Article::default()
+            };
+            write_article(&mut text, &article).unwrap();
+            fs::write(sets.join(file), text).unwrap();
+        }
+        let args = PageSetsArgs {
+            data,
+            out: out.clone(),
+            only: Vec::new(),
+            level: 3,
+        };
+        page_sets(&args).unwrap();
+        let read = |id: &str| -> Value {
+            serde_json::from_str(&fs::read_to_string(out.join(id).join(MANIFEST)).unwrap()).unwrap()
+        };
+        let wikipedia = read("plumb/wikipedia-en");
+        assert_eq!(wikipedia["license"], "CC-BY-SA-4.0");
+        assert_eq!(wikipedia["title"], "English Wikipedia articles");
+        assert_eq!(wikipedia["kinds"], json!(["article"]));
+        let books = read("plumb/books");
+        assert_eq!(books["license"], "CC0-1.0");
+        assert_eq!(books["attribution"], "From Open Library");
+        assert!(!out.join("plumb/docs").exists());
+        let key = SigningKey::from_bytes(&[3; 32]);
+        sign_set(&out.join("plumb/books"), &key, None, None).unwrap();
+        let checked = check_set(&out.join("plumb/books"), Some(&PublicKey::of(&key)), &[]).unwrap();
+        assert_eq!((checked.set.as_str(), checked.items), ("plumb/books", 1));
+        // Written again only into empty folders.
+        assert!(page_sets(&args).is_err());
+    }
 
     fn docs_pages(count: usize) -> Vec<Page> {
         (0..count)
