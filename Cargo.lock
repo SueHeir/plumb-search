@@ -6007,6 +6007,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "plumb-format"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "unicode-normalization",
+ "url",
+]
+
+[[package]]
 name = "plumb-index"
 version = "0.2.1"
 dependencies = [
