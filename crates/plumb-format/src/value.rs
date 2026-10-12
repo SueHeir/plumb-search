@@ -16,7 +16,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use unicode_normalization::is_nfc;
+use unicode_normalization::{is_nfc, UnicodeNormalization};
 
 use crate::refs::Ref;
 use crate::urls::is_canonical;
@@ -222,6 +222,14 @@ pub fn check_text(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// `text` made fit for an item: in Unicode NFC, with every control
+/// character but a newline made a space.
+pub fn normalize_text(text: &str) -> String {
+    text.nfc()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect()
+}
+
 fn check_geo(value: &Value) -> Result<()> {
     let map = value
         .as_object()
@@ -378,5 +386,13 @@ mod tests {
         FieldType::Object
             .check_field(false, &json!({"v": "3.1", "name": "release"}))
             .unwrap();
+    }
+
+    #[test]
+    fn normalized_text_passes() {
+        let text = normalize_text("Cafe\u{301}\tbar\nbaz\u{7}");
+        assert_eq!(text, "Caf\u{e9} bar\nbaz ");
+        check_text(&text).unwrap();
+        assert!(check_text("Cafe\u{301}").is_err());
     }
 }

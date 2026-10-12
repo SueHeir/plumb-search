@@ -6029,6 +6029,7 @@ dependencies = [
  "idna",
  "levenshtein_automata",
  "plumb-core",
+ "plumb-format",
  "serde",
  "serde_json",
  "stable_deref_trait",

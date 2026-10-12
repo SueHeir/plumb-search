@@ -72,6 +72,7 @@ use tantivy::directory::Directory;
 
 mod analysis;
 pub mod health;
+pub mod items;
 pub mod learned;
 pub mod pages;
 pub mod places;
