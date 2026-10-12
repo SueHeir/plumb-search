@@ -830,6 +830,24 @@ pub fn check_set(dir: &Path, trusted: Option<&PublicKey>, notes: &[Note]) -> Res
     check_parts(dir, &manifest)
 }
 
+/// The manifest and the items of the set in `dir`, part by part, as they
+/// are. Check the set first ([`check_set`]): this reads what is there.
+pub fn read_items(dir: &Path) -> Result<(Manifest, Vec<Item>)> {
+    let text = fs::read_to_string(dir.join(MANIFEST))
+        .with_context(|| format!("reading {}", dir.join(MANIFEST).display()))?;
+    let (manifest, _) = Manifest::from_signed_json(&text, &now())?;
+    let mut items = Vec::new();
+    for part in &manifest.files {
+        let path = dir.join(&part.path);
+        let reader = BufReader::new(zstd::Decoder::new(File::open(&path)?)?);
+        for line in reader.lines() {
+            let line = line.with_context(|| format!("reading {}", path.display()))?;
+            items.push(serde_json::from_str::<Item>(&line)?);
+        }
+    }
+    Ok((manifest, items))
+}
+
 fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
     let mut ids = HashSet::new();
     let (mut items, mut newer) = (0, 0);

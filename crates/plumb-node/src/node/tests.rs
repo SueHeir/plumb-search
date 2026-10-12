@@ -5803,3 +5803,104 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
         );
     }
 }
+
+/// Writes a denylist of `entries` into `data`, signed by `publisher`.
+fn hold_denylist(
+    data: &Path,
+    publisher: &ed25519_dalek::SigningKey,
+    entries: &[crate::sets::DenyEntryArgs],
+) {
+    let work = tempfile::tempdir().unwrap();
+    let mut text = String::new();
+    for entry in entries {
+        text += &serde_json::to_string(&crate::sets::deny_entry(entry).unwrap()).unwrap();
+        text.push('\n');
+    }
+    let file = work.path().join("entries.jsonl");
+    std::fs::write(&file, text).unwrap();
+    let dir = super::signed_sets::set_dir(data, "plumb/denylist").unwrap();
+    crate::sets::denylist(&crate::sets::DenylistArgs {
+        entries: file,
+        name: "plumb/denylist".into(),
+        out: dir.clone(),
+        title: None,
+        license: Some("CC0-1.0".into()),
+        level: 3,
+    })
+    .unwrap();
+    crate::sets::sign_set(&dir, publisher, None, None).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_denylist_takes_results_off_and_its_csam_entries_stay_when_off() {
+    use plumb_format::PublicKey;
+
+    let dir = seeded_dir();
+    let publisher = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+    let entry =
+        |category: &str, target: Option<&str>, hash_of: Option<&str>| crate::sets::DenyEntryArgs {
+            category: category.into(),
+            target: target.map(str::to_string),
+            hash_of: hash_of.map(str::to_string),
+            any_query: false,
+            places: Vec::new(),
+            id: None,
+        };
+    hold_denylist(
+        dir.path(),
+        &publisher,
+        &[
+            entry("copyright", Some("site:usbank.com"), None),
+            entry("csam", None, Some("https://chase.com/")),
+        ],
+    );
+    let config = |on: bool| {
+        let mut config = test_config(dir.path());
+        config.set_publishers = vec![PublicKey::of(&publisher)];
+        config.project_denylist = on;
+        config
+    };
+    let domains = |hits: Vec<Hit>| -> Vec<String> { hits.into_iter().map(|h| h.domain).collect() };
+
+    let node = start(config(true)).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    let found = domains(search(addr, "us+bank").await);
+    assert!(!found.iter().any(|d| d == "usbank.com"), "{found:?}");
+    let found = domains(search(addr, "chase").await);
+    assert!(!found.iter().any(|d| d == "chase.com"), "{found:?}");
+    // Only what an entry names goes.
+    let found = domains(search(addr, "chase+center").await);
+    assert_eq!(
+        found.first().map(String::as_str),
+        Some("chasecenter.com"),
+        "{found:?}"
+    );
+    let (_, _, body) = get(addr, "/search?q=us+bank").await;
+    assert!(!body.contains("usbank.com"), "{body}");
+    node.shutdown().await.unwrap();
+
+    // Turned off, only the csam entry applies.
+    let node = start(config(false)).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the index", ready_and_idle).await;
+    assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
+    let found = domains(search(addr, "chase").await);
+    assert!(!found.iter().any(|d| d == "chase.com"), "{found:?}");
+    node.shutdown().await.unwrap();
+
+    // A list no publisher the node trusts signed is not applied.
+    let stranger = ed25519_dalek::SigningKey::from_bytes(&[10; 32]);
+    std::fs::remove_dir_all(super::signed_sets::set_dir(dir.path(), "plumb/denylist").unwrap())
+        .unwrap();
+    hold_denylist(
+        dir.path(),
+        &stranger,
+        &[entry("copyright", Some("site:usbank.com"), None)],
+    );
+    let node = start(config(true)).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the index", ready_and_idle).await;
+    assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
+    node.shutdown().await.unwrap();
+}

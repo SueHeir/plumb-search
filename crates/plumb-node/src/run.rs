@@ -98,6 +98,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     config.search_history |= args.search_history;
     config.focus_topics = args.focus;
     config.seed_from_network = !args.seed_from_outside;
+    config.project_denylist = !args.no_project_denylist;
     if let Some(updates) = args.set_updates {
         config.set_updates = updates;
     }

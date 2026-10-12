@@ -108,6 +108,7 @@ use crate::websearch::{Engine, WebSettings};
 mod adult;
 pub mod backup;
 pub mod control;
+mod denylist;
 mod embedding;
 pub mod features;
 mod fill;
@@ -227,6 +228,9 @@ pub struct NodeConfig {
     /// [`signed_sets`]): the project's key ([`signed_sets::PROJECT_KEY`])
     /// by default.
     pub set_publishers: Vec<plumb_format::PublicKey>,
+    /// Apply the project's denylist (see [`denylist`]). Off, its `csam`
+    /// entries still apply. On by default.
+    pub project_denylist: bool,
     /// Join the Plumb network: share crawl work with other nodes and answer
     /// their searches (see [`network`]). Its `dir` is replaced with
     /// `DIR/net`. `None`, the default for now, keeps the node on its own.
@@ -351,6 +355,7 @@ impl NodeConfig {
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
             set_publishers: vec![signed_sets::project_key()],
+            project_denylist: true,
             network: None,
             private_search: false,
             share_popularity: false,
@@ -961,6 +966,11 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
             .await??,
     );
     let inner = Arc::new(Inner::new(config, rank, opened, stopped.clone(), storage));
+    // Before anything is shown.
+    {
+        let inner = inner.clone();
+        tokio::task::spawn_blocking(move || inner.load_denylist()).await?;
+    }
     inner.journal.info(format!(
         "Plumb Search {} started",
         env!("CARGO_PKG_VERSION")
@@ -1352,6 +1362,8 @@ struct Inner {
     news: crate::news::NewsStore,
     /// The adult blocklist, once loaded.
     adult: RwLock<Option<Arc<adult::AdultList>>>,
+    /// The project's denylist, once the node holds one.
+    denylist: RwLock<Option<Arc<plumb_format::deny::Denylist>>>,
 }
 
 /// Failed work the panel can have tried again now.
@@ -1572,6 +1584,7 @@ impl Inner {
             map: crate::map::MapFile::new(crate::map::file(&map_data)),
             news,
             adult: RwLock::new(None),
+            denylist: RwLock::new(None),
         }
     }
 
@@ -2165,7 +2178,7 @@ impl SearchBackend for Inner {
     }
 
     fn site(&self, domain: &str) -> Option<Hit> {
-        self.current()?.backend().site(domain)
+        self.unless_denied_site(self.current()?.backend().site(domain))
     }
 
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
@@ -2173,11 +2186,11 @@ impl SearchBackend for Inner {
     }
 
     fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
-        pages::known_song(self, query, options)
+        self.unless_denied(pages::known_song(self, query, options))
     }
 
     fn definition(&self, name: &str) -> Option<plumb_index::pages::Page> {
-        pages::definition(self, name)
+        self.unless_denied(pages::definition(self, name))
     }
 
     fn entities(
@@ -2186,7 +2199,7 @@ impl SearchBackend for Inner {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<Vec<plumb_index::pages::PageHit>> {
-        pages::entities(self, query, limit, options)
+        Ok(self.drop_denied_pages(pages::entities(self, query, limit, options)?))
     }
 
     fn pages_of(
@@ -2197,7 +2210,7 @@ impl SearchBackend for Inner {
         docs: bool,
         keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
     ) -> Vec<plumb_index::pages::PageHit> {
-        pages::pages_of(self, query, limit, options, docs, keep)
+        self.drop_denied_pages(pages::pages_of(self, query, limit, options, docs, keep))
     }
 
     fn papers(
@@ -2206,7 +2219,7 @@ impl SearchBackend for Inner {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<Vec<plumb_index::pages::PageHit>> {
-        pages::papers(self, query, limit, options)
+        Ok(self.drop_denied_pages(pages::papers(self, query, limit, options)?))
     }
 
     fn paper_coverage(&self) -> Option<plumb_index::pages::PaperCoverage> {
@@ -2230,7 +2243,7 @@ impl Inner {
     ) -> Result<SearchResults> {
         let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
         if paper.constrained {
-            let found = pages::papers(self, &paper, limit, options)?;
+            let found = self.drop_denied_pages(pages::papers(self, &paper, limit, options)?);
             return Ok(SearchResults {
                 pages: found
                     .into_iter()
@@ -2255,6 +2268,11 @@ impl Inner {
         let wanted = match adult {
             Some(_) => limit + adult::MARGIN,
             None => limit,
+        };
+        // And the denylist's, which takes sites off for everyone.
+        let wanted = match self.denylist() {
+            Some(list) if !list.is_empty() => wanted + denylist::MARGIN,
+            _ => wanted,
         };
         let run = |options: &SearchOptions| -> Result<SearchResults> {
             Ok(match network::handle(self).map(|net| net.popularity()) {
@@ -2295,8 +2313,10 @@ impl Inner {
         if let Some(adult) = &adult {
             results.hits.retain(|hit| !adult.contains(&hit.domain));
         }
+        self.drop_denied(&mut results);
         results.hits.truncate(limit);
         pages::add_pages(self, query, options, &mut results);
+        self.drop_denied(&mut results);
         Ok(results)
     }
 }
@@ -2359,7 +2379,11 @@ impl StatusSource for Inner {
     }
 
     fn recent(&self, query: &str, top: Option<(&str, bool)>) -> Option<crate::news::Recent> {
-        self.news.recent(query, top, now_unix())
+        let mut recent = self.news.recent(query, top, now_unix())?;
+        recent
+            .headlines
+            .retain(|headline| !self.denies(&headline.url));
+        Some(recent)
     }
 
     fn features(&self) -> features::FeatureSettings {

@@ -2,18 +2,16 @@
 //! lists as rules, reading a signed set and putting it in their place, and
 //! the hosts whose site a set of rules would move.
 
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::OnceLock;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 use plumb_core::subsites::{NOT_SITES, SUBDOMAIN_SITES, UMBRELLA_DOMAINS};
 use plumb_core::SiteList;
 use plumb_format::sites::Rule;
-use plumb_format::{Item, Manifest, Note, PublicKey, SiteRules};
+use plumb_format::{Note, PublicKey, SiteRules};
 
-use crate::sets::{check_set, now, MANIFEST};
+use crate::sets::{check_set, read_items};
 
 /// The site lists built into `plumb-core` as rules: subsites, umbrella
 /// domains and the labels that are never sites under one. The suffix list
@@ -47,25 +45,14 @@ pub struct ReadRules {
 /// it handed over to in `notes`.
 pub fn read_site_rules(dir: &Path, trusted: &PublicKey, notes: &[Note]) -> Result<ReadRules> {
     check_set(dir, Some(trusted), notes)?;
-    let text = fs::read_to_string(dir.join(MANIFEST))?;
-    let (manifest, _) = Manifest::from_signed_json(&text, &now())?;
+    let (manifest, items) = read_items(dir)?;
     ensure!(
         manifest.is_site_rules(),
         "{} is not a site rules set",
         manifest.set
     );
     let mut rules = SiteRules::new();
-    let mut newer = 0;
-    for part in &manifest.files {
-        let path = dir.join(&part.path);
-        let reader = BufReader::new(zstd::Decoder::new(File::open(&path)?)?);
-        let mut items = Vec::new();
-        for line in reader.lines() {
-            let line = line.with_context(|| format!("reading {}", path.display()))?;
-            items.push(serde_json::from_str::<Item>(&line)?);
-        }
-        newer += rules.add_items(&items).1.len();
-    }
+    let newer = rules.add_items(&items).1.len();
     let hashes: Vec<&str> = manifest
         .files
         .iter()

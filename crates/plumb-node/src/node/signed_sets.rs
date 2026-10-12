@@ -11,7 +11,8 @@
 //! `plumb set check` does, and only then puts it in place of the old one.
 //! So a set can come from any node, trusted or not.
 //!
-//! Only the site rules are read from here so far, at start
+//! The denylist is put in use at start and as soon as a newer one is
+//! taken ([`super::denylist`]). The site rules are read at start
 //! ([`use_held_site_rules`]): a set taken while the node runs is used from
 //! its next start.
 //!
@@ -33,6 +34,7 @@ use plumb_net::sets::{is_part_hash, MAX_SET_CHUNK};
 use plumb_net::{NetHandle, PeerId};
 use tracing::{debug, info, warn};
 
+use super::denylist::DENYLIST;
 use super::{network, Inner};
 use crate::sets::{check_set, measure, now, MANIFEST};
 use crate::site_rules::{self, read_site_rules, use_site_rules};
@@ -43,7 +45,7 @@ use crate::site_rules::{self, read_site_rules, use_site_rules};
 pub const PROJECT_KEY: &str = "ed25519:MMrfl7-ASNz-h2d2f0ru1EWjAws59Ls3D5TbdfJS98c";
 
 /// The sets every node takes, the denylist first.
-pub(super) const TAKEN_SETS: &[&str] = &["plumb/denylist", SITE_RULES];
+pub(super) const TAKEN_SETS: &[&str] = &[DENYLIST, SITE_RULES];
 
 /// The folder of the signed sets in the data directory.
 const DIR: &str = "sets";
@@ -184,6 +186,12 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 Ok(Looked::Took(generation)) => {
                     met = true;
                     info!("took {set} generation {generation}");
+                    // The denylist applies at once; the site rules from
+                    // the next start.
+                    if *set == DENYLIST {
+                        let inner = inner.clone();
+                        let _ = tokio::task::spawn_blocking(move || inner.load_denylist()).await;
+                    }
                 }
                 Err(err) => {
                     met = true;
