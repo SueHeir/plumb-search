@@ -1383,8 +1383,9 @@ struct Inner {
     news: crate::news::NewsStore,
     /// The adult blocklist, once loaded.
     adult: RwLock<Option<Arc<adult::AdultList>>>,
-    /// The project's denylist, once the node holds one.
-    denylist: RwLock<Option<Arc<plumb_format::deny::Denylist>>>,
+    /// The project's denylist, once the node holds one, with its stamp
+    /// ([`denylist::read_held`]).
+    denylist: RwLock<Option<(Arc<plumb_format::deny::Denylist>, String)>>,
 }
 
 /// Failed work the panel can have tried again now.

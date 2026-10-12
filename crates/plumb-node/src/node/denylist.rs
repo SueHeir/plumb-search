@@ -13,8 +13,9 @@
 //! `csam` entries apply anyway. A result a `csam` entry takes off is
 //! logged by the entry's id, never by its address.
 //!
-//! Not yet: leaving denied pages out of the indexes as they are built, and
-//! out of what the node passes on to other nodes.
+//! The page index leaves out what the list denies as it is built, so it is
+//! built again when the list changes ([`super::pages`]). Not yet: leaving
+//! denied records out of what the node passes on to other nodes.
 //!
 //! [`NodeConfig::project_denylist`]: super::NodeConfig::project_denylist
 
@@ -39,12 +40,13 @@ pub(super) const DENYLIST: &str = "plumb/denylist";
 pub(super) const MARGIN: usize = 10;
 
 /// The denylist held in `data`, as one of `publishers` signed it, with the
-/// owner's `switch`; `None` when the node holds none.
+/// owner's `switch`, and its stamp: its generation and the switch, which
+/// change whenever what it denies does. `None` when the node holds none.
 pub(super) fn read_held(
     data: &Path,
     publishers: &[PublicKey],
     switch: Switch,
-) -> Result<Option<Denylist>> {
+) -> Result<Option<(Denylist, String)>> {
     let Some(dir) = set_dir(data, DENYLIST).filter(|dir| dir.join(crate::sets::MANIFEST).is_file())
     else {
         return Ok(None);
@@ -75,7 +77,12 @@ pub(super) fn read_held(
                 ""
             }
         );
-        return Ok(Some(list));
+        let stamp = format!(
+            "{}:{}",
+            manifest.generation,
+            if switch == Switch::Off { "off" } else { "on" }
+        );
+        return Ok(Some((list, stamp)));
     }
     match failed {
         Some(err) => Err(err.context("the denylist held is not one this node trusts")),
@@ -86,6 +93,15 @@ pub(super) fn read_held(
 impl Inner {
     /// The denylist in use, once the node holds one.
     pub(super) fn denylist(&self) -> Option<Arc<Denylist>> {
+        self.denylist
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(list, _)| list.clone())
+    }
+
+    /// The denylist in use with its stamp ([`read_held`]).
+    pub(super) fn denylist_stamped(&self) -> Option<(Arc<Denylist>, String)> {
         self.denylist
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -101,11 +117,11 @@ impl Inner {
             Switch::Off
         };
         match read_held(&self.paths.data, &self.config.set_publishers, switch) {
-            Ok(Some(list)) => {
+            Ok(Some((list, stamp))) => {
                 *self
                     .denylist
                     .write()
-                    .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(list));
+                    .unwrap_or_else(PoisonError::into_inner) = Some((Arc::new(list), stamp));
             }
             Ok(None) => {}
             Err(err) => warn!("{err:#}"),

@@ -741,6 +741,9 @@ pub struct Wanted {
     /// The item sets taken in with the page sets
     /// ([`crate::node::item_sets`]).
     pub items: Vec<crate::node::item_sets::ItemSetFile>,
+    /// The stamp of the denylist the pages are built without, when the
+    /// node holds one.
+    pub denylist: Option<String>,
 }
 
 impl Wanted {
@@ -770,6 +773,7 @@ impl Wanted {
                 })
                 .collect(),
             items: Vec::new(),
+            denylist: None,
         }
     }
 
@@ -778,9 +782,18 @@ impl Wanted {
         Wanted { items, ..self }
     }
 
+    /// These pages without what the denylist of `stamp` denies.
+    pub fn with_denylist(self, stamp: Option<String>) -> Self {
+        Wanted {
+            denylist: stamp,
+            ..self
+        }
+    }
+
     /// Names the index of these pages: changes when a set, its file (size
-    /// or time) or its count changes, or an item set or what it holds. With
-    /// no item sets it is the key of the page sets alone.
+    /// or time) or its count changes, an item set or what it holds, or the
+    /// denylist. With no item sets and no denylist it is the key of the
+    /// page sets alone.
     pub fn key(&self) -> Option<String> {
         if self.sets.is_empty() && self.items.is_empty() {
             return None;
@@ -806,6 +819,9 @@ impl Wanted {
                 "|items:{}:{}:{}",
                 items.set, items.publisher, items.stamp
             ));
+        }
+        if let Some(denylist) = &self.denylist {
+            text.push_str(&format!("|denylist:{denylist}"));
         }
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(text.as_bytes());
@@ -851,8 +867,7 @@ pub fn open_or_build_with_budget(
     open_or_build_with(data_dir, wanted, budget, None)
 }
 
-/// [`open_or_build_with_budget`], leaving out of the item sets what
-/// `denylist` denies.
+/// [`open_or_build_with_budget`], leaving out what `denylist` denies.
 pub fn open_or_build_with(
     data_dir: &Path,
     wanted: &Wanted,
@@ -899,7 +914,21 @@ pub fn open_or_build_with(
         })
         .collect();
     let layers = layers.map(std::rc::Rc::new);
-    let mut pages: Box<dyn Iterator<Item = Page>> = Box::new(std::iter::empty());
+    let denied = std::cell::Cell::new(0usize);
+    let allowed = |page: &Page| {
+        let Some(denial) = denylist.and_then(|list| list.denies_url(&page.url)) else {
+            return true;
+        };
+        if denial.is_locked() {
+            warn!(
+                "denylist entry {} ({}) left a page out of the page index",
+                denial.id, denial.category
+            );
+        }
+        denied.set(denied.get() + 1);
+        false
+    };
+    let mut pages: Box<dyn Iterator<Item = Page> + '_> = Box::new(std::iter::empty());
     for ((set, file, count), source) in wanted.sets.iter().zip(sources) {
         info!("indexing page set {} from {}", set.id, file.display());
         let _mutation = budget.as_ref().map(|budget| budget.mutation());
@@ -907,7 +936,8 @@ pub fn open_or_build_with(
         let read = HoldingPages {
             pages: Box::new(set.read(file, *count)?),
             _lease: lease,
-        };
+        }
+        .filter(allowed);
         pages = match (layers.clone(), source) {
             (Some(layers), Some(source)) => {
                 Box::new(pages.chain(read.map(move |page| layers.lay(page, source))))
@@ -926,6 +956,12 @@ pub fn open_or_build_with(
         info!(
             "layers of item sets changed {} pages of the page sets",
             thousands(layers.laid() as u64)
+        );
+    }
+    if denied.get() > 0 {
+        info!(
+            "the denylist left {} pages of the page sets out",
+            thousands(denied.get() as u64)
         );
     }
     Ok(Some((key, PageSearcher::open(&dir)?)))
@@ -1300,6 +1336,54 @@ mod tests {
         assert_eq!(serde_json::from_str::<PageSets>(&json).unwrap(), sets);
         assert_eq!(thousands(1_000_000), "1,000,000");
         assert_eq!(PageSetSize::Top(100_000).words(), "100,000 most read");
+    }
+
+    #[test]
+    fn denied_pages_are_left_out_as_the_index_is_built() {
+        use plumb_format::deny::{Denylist, Entry, Switch};
+
+        use crate::sets::{deny_entry, DenyEntryArgs};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        write_set(data, &[("Marie Curie", 900), ("Pierre Curie", 300)]);
+        let mut list = Denylist::new(Switch::On);
+        for (category, target, hash_of) in [
+            (
+                "copyright",
+                Some(plumb_core::article::article_url("en", "Pierre Curie")),
+                None,
+            ),
+            // A csam entry is logged by its id only.
+            (
+                "csam",
+                None,
+                Some("https://example.com/never-seen".to_string()),
+            ),
+        ] {
+            let entry = deny_entry(&DenyEntryArgs {
+                category: category.into(),
+                target: target.map(|url| format!("url:{url}")),
+                hash_of,
+                any_query: false,
+                places: Vec::new(),
+                id: None,
+            })
+            .unwrap();
+            list.add(Entry::from_item(&entry).unwrap().unwrap());
+        }
+        let wanted = Wanted::new(data, &PageSets::default(), 0);
+        let (key, searcher) = open_or_build(data, &wanted).unwrap().unwrap();
+        assert_eq!(searcher.num_pages(), 2);
+        let wanted = wanted.with_denylist(Some("2026-10-12T00:00:00Z:on".into()));
+        let (denied, searcher) = open_or_build_with(data, &wanted, None, Some(&list))
+            .unwrap()
+            .unwrap();
+        assert_ne!(denied, key, "a denylist names its own index");
+        assert_eq!(searcher.num_pages(), 1);
+        let hits = searcher.search("curie", 5).unwrap();
+        let titles: Vec<&str> = hits.iter().map(|hit| hit.page.title.as_str()).collect();
+        assert_eq!(titles, ["Marie Curie"]);
     }
 
     #[test]

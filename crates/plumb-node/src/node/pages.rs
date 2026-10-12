@@ -38,9 +38,10 @@ const LOOK_EVERY: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const LOOK_EVERY: Duration = Duration::from_millis(200);
 /// Least time between two builds of the page index for changes inside
-/// item sets it already holds, such as a plugin's hourly run: the whole
-/// index is built again each time. A set added or taken away is built in
-/// at once.
+/// item sets it already holds, such as a plugin's hourly run, or for a new
+/// denylist, which already applies to what the node shows: the whole index
+/// is built again each time. A set added or taken away is built in at
+/// once.
 #[cfg(not(test))]
 const ITEM_CHANGES_EVERY: Duration = Duration::from_secs(6 * 3600);
 #[cfg(test)]
@@ -172,12 +173,15 @@ pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
             &inner.config.set_publishers,
         ));
         let item_sets: Vec<String> = wanted.items.iter().map(|items| items.set.clone()).collect();
+        let denylist = inner.denylist_stamped();
+        let wanted = wanted.with_denylist(denylist.as_ref().map(|(_, stamp)| stamp.clone()));
         let key = wanted.key();
         let current = inner.page_key();
         let retry_later = failed
             .as_ref()
             .is_some_and(|(k, at)| Some(k) == key.as_ref() && at.elapsed() < RETRY_WAIT);
-        // Only what is inside the item sets changed: that waits a while.
+        // Only what is inside the item sets, or the denylist, changed: that
+        // waits a while.
         let items_wait = built.as_ref().is_some_and(|(sets_key, sets, at)| {
             current.is_some()
                 && *sets_key == page_sets_key
@@ -202,12 +206,11 @@ pub(super) fn run(inner: Arc<Inner>, own_sets: Vec<String>) {
                 *inner.pages.write().unwrap_or_else(PoisonError::into_inner) =
                     Some((older, Arc::new(searcher)));
             }
-            let denylist = inner.denylist();
             match open_or_build_with(
                 &inner.paths.data,
                 &wanted,
                 inner.storage.clone(),
-                denylist.as_deref(),
+                denylist.as_ref().map(|(list, _)| list.as_ref()),
             ) {
                 Ok(found) => {
                     built = Some((page_sets_key, item_sets, Instant::now()));
