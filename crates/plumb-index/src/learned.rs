@@ -392,19 +392,26 @@ fn unsupported(hit: &Hit, placed: &[PlacedPage]) -> bool {
             .any(|p| p.hit.named && p.under.as_deref() == Some(hit.domain.as_str()))
 }
 
-/// The site rows `sites`, in the model's order, with each one `bare` says
-/// only popularity speaks for moved down until every other site above it
-/// in the hand-made order (a lower row) is listed. The others keep their
-/// order.
-fn after_supported(sites: Vec<usize>, bare: impl Fn(usize) -> bool) -> Vec<usize> {
-    let supported: Vec<usize> = sites.iter().copied().filter(|&row| !bare(row)).collect();
+/// The site rows `sites`, in the model's order, with each one `waits`
+/// says moved down until every site `leads` says that was above it in the
+/// hand-made order (a lower row) is listed. The others keep their order.
+fn after_leading(
+    sites: Vec<usize>,
+    waits: impl Fn(usize) -> bool,
+    leads: impl Fn(usize) -> bool,
+) -> Vec<usize> {
+    let leading: Vec<usize> = sites
+        .iter()
+        .copied()
+        .filter(|&row| leads(row) && !waits(row))
+        .collect();
     let mut listed = Vec::with_capacity(sites.len());
     let mut waiting = Vec::new();
     for row in sites {
         waiting.push(row);
         while let Some(at) = waiting
             .iter()
-            .position(|&row| !bare(row) || supported.iter().all(|s| *s > row || listed.contains(s)))
+            .position(|&row| !waits(row) || leading.iter().all(|s| *s > row || listed.contains(s)))
         {
             listed.push(waiting.remove(at));
         }
@@ -473,7 +480,17 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
         Listed::Site(i) => page_site != Some(i) && unsupported(&hits[i], placed),
         Listed::Page(_) => false,
     };
-    let mut sites = after_supported(sites, bare).into_iter();
+    let sites = after_leading(sites, bare, |row| !bare(row));
+    // Nor a site that lacks some of the query's words past one the whole
+    // query names: "denver public library" put denvergov.org, which has
+    // only "denver", before denverlibrary.org.
+    let site = |row: usize| match rows[row] {
+        Listed::Site(i) => Some(&hits[i]),
+        Listed::Page(_) => None,
+    };
+    let partial = |row: usize| site(row).is_some_and(|hit| hit.missing_words);
+    let named = |row: usize| site(row).is_some_and(|hit| hit.named);
+    let mut sites = after_leading(sites, partial, named).into_iter();
     for row in &mut order {
         if matches!(rows[*row], Listed::Site(_)) {
             *row = sites.next().expect("site slot");
@@ -753,6 +770,34 @@ mod tests {
         let first = Some(popular(0.014, Some(0.0)));
         let order = order_of(first, site("x.com", 0.0, false), Vec::new());
         assert_eq!(order[0], "thenation.com");
+    }
+
+    #[test]
+    fn a_site_with_part_of_the_query_passes_no_site_it_names() {
+        let query = "denver public library";
+        let order_of = |missing_words: bool, library_score: f32| {
+            let mut library = site("denverlibrary.org", library_score, true);
+            library.link_score = 0.46;
+            let mut city = site("denvergov.org", 0.5, false);
+            city.text_score = 0.26;
+            city.link_score = 0.6;
+            city.missing_words = missing_words;
+            let mut hits = vec![library, city, site("other.com", 0.1, false)];
+            hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+            let mut placed = place_pages(query, &hits, Vec::new());
+            reorder(&popular_first_model(), query, &mut hits, &mut placed);
+            hits.into_iter().map(|hit| hit.domain).collect::<Vec<_>>()
+        };
+        // Ranked above it by hand, the library stays above the city's
+        // site, which has only "denver".
+        assert_eq!(
+            order_of(true, 1.1)[..2],
+            ["denverlibrary.org", "denvergov.org"]
+        );
+        // A site with all the words is still the model's to lift, and one
+        // ranked above the library by hand keeps its place.
+        assert_eq!(order_of(false, 1.1)[0], "denvergov.org");
+        assert_eq!(order_of(true, 0.4)[0], "denvergov.org");
     }
 
     #[test]
