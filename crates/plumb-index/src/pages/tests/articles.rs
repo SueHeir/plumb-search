@@ -9,6 +9,8 @@ fn words_that_say_what_is_wanted_keep_the_name() {
         page("Galileo Galilei", 90_000, &["Galileo"]),
         page("Batch normalization", 20_000, &[]),
         page("Ariana Grande", 300_000, &[]),
+        page("Hiccup", 60_000, &["Hiccups"]),
+        page("Refrigerator", 70_000, &["Fridge"]),
         Page::from_paper(Article {
             title: "Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift".into(),
             description: Some("Paper by Sergey Ioffe et al., 2015".into()),
@@ -32,6 +34,11 @@ fn words_that_say_what_is_wanted_keep_the_name() {
     assert_eq!(
         first("ariana grande age"),
         Some(("Ariana Grande".into(), true))
+    );
+    assert_eq!(first("what causes hiccups"), Some(("Hiccup".into(), true)));
+    assert_eq!(
+        first("how does a refrigerator work"),
+        Some(("Refrigerator".into(), true))
     );
     let (title, named) = first("batch normalization paper").unwrap();
     assert!(
@@ -190,6 +197,26 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         hinted_name("What is a manubrium?"),
         Some(("manubrium".into(), Hint::Any))
     );
+    for (query, name) in [
+        ("what does asap stand for", "asap"),
+        ("What does NASA stand for?", "nasa"),
+        ("what’s a roth ira", "roth ira"),
+        ("what's kombucha", "kombucha"),
+        ("what is the meaning of serendipity", "serendipity"),
+        ("what causes hiccups", "hiccups"),
+        ("what causes the northern lights", "northern lights"),
+        ("how does a refrigerator work", "refrigerator"),
+        ("how do vaccines work", "vaccines"),
+    ] {
+        assert_eq!(
+            hinted_name(query),
+            Some((name.into(), Hint::Any)),
+            "{query:?}"
+        );
+    }
+    assert_eq!(hinted_name("whats app"), None);
+    assert_eq!(hinted_name("how does it work"), None);
+    assert_eq!(hinted_name("how do i make pancakes"), None);
 }
 
 #[test]

@@ -753,8 +753,11 @@ pub(crate) fn fact_answer_from_page(
 }
 
 /// Words before a name that ask what it is: "what is a" of "what is a
-/// manatee".
+/// manatee". "what's" is read as "what is"; "whats" is not, since "whats
+/// app" is a misspelled name.
 const DEFINITION_LEADS: &[&str] = &[
+    "what is the meaning of ",
+    "what is the definition of ",
     "what is a ",
     "what is an ",
     "what is the ",
@@ -775,16 +778,38 @@ const DEFINITION_LEADS: &[&str] = &[
 /// "photosynthesis definition".
 const DEFINITION_TAILS: &[&str] = &[" definition", " meaning", " defined", " explained"];
 
+/// Words after "what does" and a name that ask what it means or is: "what
+/// does lol mean", "what does nasa stand for", "what does a cpa do".
+const DOES_TAILS: &[&str] = &[" mean", " stand for", " stands for", " do"];
+
 /// The name `query` asks what it is: "manatee" of "what is a manatee?",
-/// "photosynthesis" of "define photosynthesis". `None` for a query that
-/// asks nothing so, or more than that ("what is the capital of france"
-/// asks a fact, "what is my ip" about the searcher).
+/// "photosynthesis" of "define photosynthesis", "nasa" of "what does nasa
+/// stand for". `None` for a query that asks nothing so, or more than that
+/// ("what is the capital of france" asks a fact, "what is my ip" about the
+/// searcher).
 pub(crate) fn definition_asked(query: &str) -> Option<String> {
     let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches(['?', '.', '!']))
-        .to_lowercase();
-    let name = DEFINITION_LEADS
-        .iter()
-        .find_map(|lead| q.strip_prefix(lead))
+        .to_lowercase()
+        .replace('’', "'");
+    let q = match q.strip_prefix("what's ") {
+        Some(rest) => format!("what is {rest}"),
+        None => q,
+    };
+    let does = q.strip_prefix("what does ").and_then(|rest| {
+        let name = DOES_TAILS.iter().find_map(|tail| rest.strip_suffix(tail))?;
+        Some(
+            ["a ", "an ", "the "]
+                .iter()
+                .find_map(|article| name.strip_prefix(article))
+                .unwrap_or(name),
+        )
+    });
+    let name = does
+        .or_else(|| {
+            DEFINITION_LEADS
+                .iter()
+                .find_map(|lead| q.strip_prefix(lead))
+        })
         .or_else(|| {
             DEFINITION_TAILS
                 .iter()
@@ -802,6 +827,9 @@ pub(crate) fn definition_asked(query: &str) -> Option<String> {
                     | "i"
                     | "you"
                     | "we"
+                    | "it"
+                    | "this"
+                    | "that"
                     | "of"
                     | "in"
                     | "for"
@@ -841,12 +869,15 @@ pub(crate) fn definition_answer(pages: &[PlacedPage]) -> Option<plumb_answer::An
 }
 
 /// Whether `query` asks what a word means rather than what a thing is:
-/// "define anadromous", "prioritize meaning". Such a query is answered
-/// from Wiktionary first, others from Wikipedia first.
+/// "define anadromous", "prioritize meaning", "what does gdp stand for".
+/// Such a query is answered from Wiktionary first, others from Wikipedia
+/// first.
 pub(crate) fn asks_word(query: &str) -> bool {
     let q = query.to_lowercase();
-    q.split_whitespace()
-        .any(|word| matches!(word, "define" | "definition" | "meaning" | "means" | "mean"))
+    q.contains(" stand for")
+        || q.contains(" stands for")
+        || q.split_whitespace()
+            .any(|word| matches!(word, "define" | "definition" | "meaning" | "means" | "mean"))
 }
 
 /// What the Wiktionary word `page` means, as an answer: "(adjective) Of
@@ -1098,8 +1129,24 @@ mod tests {
             definition_asked("who was ada lovelace").as_deref(),
             Some("ada lovelace")
         );
+        // However it is asked.
+        for (query, name) in [
+            ("what does lol mean", "lol"),
+            ("What does NASA stand for?", "nasa"),
+            ("what does a cpa do", "cpa"),
+            ("what's a roth ira", "roth ira"),
+            ("what’s kombucha", "kombucha"),
+            ("what is the meaning of serendipity", "serendipity"),
+            ("what is the definition of inflation", "inflation"),
+        ] {
+            assert_eq!(definition_asked(query).as_deref(), Some(name), "{query}");
+        }
         assert_eq!(definition_asked("what is my ip"), None);
         assert_eq!(definition_asked("what is the capital of france"), None);
+        assert_eq!(definition_asked("what's the capital of france"), None);
+        assert_eq!(definition_asked("what does it mean"), None);
+        assert_eq!(definition_asked("what does my name mean"), None);
+        assert_eq!(definition_asked("whats app"), None);
         assert_eq!(definition_asked("manatee"), None);
         let mut manatee = article("West Indian manatee", "species of mammal", None);
         manatee.page.lead = Some(
@@ -1133,6 +1180,7 @@ mod tests {
     fn words_answer_what_they_mean() {
         assert!(asks_word("define anadromous"));
         assert!(asks_word("prioritize meaning"));
+        assert!(asks_word("what does gdp stand for"));
         assert!(!asks_word("what is a manatee"));
         let word = Page::from_word(plumb_core::Article {
             title: "anadromous".into(),

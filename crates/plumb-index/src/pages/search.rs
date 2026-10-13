@@ -33,13 +33,16 @@ pub(crate) enum Hint {
     Any,
 }
 
-/// Words before a name that ask about it.
+/// Words before a name that ask about it. "What's" is read as "what is";
+/// "whats" is not, since "whats app" is a misspelled name.
 const HINT_LEADS: &[&str] = &[
     "who is ",
     "who was ",
     "who are ",
     "who were ",
     "tell me about ",
+    "what is the meaning of ",
+    "what is the definition of ",
     "what is a ",
     "what is an ",
     "what is the ",
@@ -54,6 +57,21 @@ const HINT_LEADS: &[&str] = &[
     "info about ",
     "information about ",
     "facts about ",
+    "what causes a ",
+    "what causes an ",
+    "what causes the ",
+    "what causes ",
+];
+
+/// Words before a name that, with " work" after it, ask how it works:
+/// "how does a refrigerator work". Alone they start any question ("how do
+/// i make pancakes").
+const WORKS_LEADS: &[&str] = &[
+    "how does a ",
+    "how does an ",
+    "how does the ",
+    "how does ",
+    "how do ",
 ];
 
 /// Words after a name that say what about it is wanted.
@@ -81,6 +99,8 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" mean", Hint::Any),
     (" means", Hint::Any),
     (" definition", Hint::Any),
+    (" stand for", Hint::Any),
+    (" stands for", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
 ];
@@ -89,10 +109,20 @@ const HINT_TAILS: &[(&str, Hint)] = &[
 /// wanted, and what kind of page they ask for: "lululemon" of "lululemon
 /// wikipedia". `None` when there are none, or nothing else.
 pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
-    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?')).to_lowercase();
-    let mut name = q.as_str();
+    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?'))
+        .to_lowercase()
+        .replace('’', "'");
+    let asked = q
+        .strip_prefix("what's ")
+        .map(|rest| format!("what is {rest}"));
+    let mut name = asked.as_deref().unwrap_or(&q);
     let mut hint = None;
-    if let Some(rest) = HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)) {
+    let works = WORKS_LEADS
+        .iter()
+        .find_map(|lead| name.strip_prefix(lead)?.strip_suffix(" work"))
+        .filter(|rest| !matches!(*rest, "it" | "this" | "that" | "they" | "these" | "those"));
+    if let Some(rest) = works.or_else(|| HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)))
+    {
         name = rest;
         hint = Some(Hint::Any);
     }
