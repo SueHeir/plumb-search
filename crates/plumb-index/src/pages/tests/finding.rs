@@ -574,16 +574,27 @@ fn names_are_not_taken_for_slips() {
     add("Saute", 3);
     add("Argument", 200);
     add("Arguement", 3);
+    add("Scale", 200);
+    add("Scald", 3);
     pages.push(page("Htop", 10, &[]));
-    let word = |title: &str, description: &str| {
-        Page::from_word(Article {
-            title: title.into(),
-            description: Some(description.into()),
-            ..Article::default()
-        })
+    pages.push(Page::from_word(Article {
+        title: "saute".into(),
+        description: Some("(verb) To fry quickly in a little fat.".into()),
+        ..Article::default()
+    }));
+    let article = |title: &str, name: &str| {
+        Page::from_article(
+            "en",
+            Article {
+                title: title.into(),
+                names: vec![name.into()],
+                ..Article::default()
+            },
+        )
     };
-    pages.push(word("saute", "(verb) To fry quickly in a little fat."));
-    pages.push(word("arguement", "(noun) Misspelling of argument."));
+    pages.push(article("Burn", "Scald"));
+    // Wikipedia redirects the misspelling to the article.
+    pages.push(article("Argument", "Arguement"));
     let (_dir, searcher) = searcher(&pages);
     let model = crate::spell_model::Model::with_rules(
         &[
@@ -592,6 +603,7 @@ fn names_are_not_taken_for_slips() {
             ("t", "o", 0.001),
             ("c", "t", 0.001),
             ("u", "ue", 0.01),
+            ("e", "d", 0.001),
         ],
         1e-6,
     );
@@ -610,8 +622,10 @@ fn names_are_not_taken_for_slips() {
     assert_eq!(suggest("ETIAS"), None);
     // An article is named by it.
     assert_eq!(suggest("htop"), None);
-    // Wiktionary has it, and not only as a misspelling.
+    assert_eq!(suggest("scald"), None);
+    // Wiktionary has it.
     assert_eq!(suggest("saute"), None);
+    // It is a near spelling of the article's title.
     assert_eq!(suggest("arguement").as_deref(), Some("argument"));
 }
 

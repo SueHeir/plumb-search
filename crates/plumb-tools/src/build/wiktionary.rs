@@ -10,9 +10,9 @@
 //! ("(adjective) Of fish, migrating up rivers from the sea to breed in
 //! fresh water."), and its views how much Wiktionary says of it (senses and
 //! translations), so the best-known words come first. Senses that only
-//! point at another word ("plural of mouse", "misspelling of argument"),
-//! and obsolete and archaic ones when there are others, are left out; so
-//! are proper names, which Wikipedia covers.
+//! point at another word ("plural of mouse"), and obsolete and archaic
+//! ones when there are others, are left out; so are proper names, which
+//! Wikipedia covers.
 
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -93,11 +93,7 @@ fn first_sense(senses: &[Sense]) -> Option<String> {
     let defining: Vec<&Sense> = senses
         .iter()
         .filter(|s| s.form_of.is_empty() && s.alt_of.is_empty())
-        .filter(|s| {
-            !s.tags
-                .iter()
-                .any(|t| t == "form-of" || t == "alt-of" || t == "misspelling")
-        })
+        .filter(|s| !s.tags.iter().any(|t| t == "form-of" || t == "alt-of"))
         .filter(|s| s.glosses.iter().any(|g| !g.trim().is_empty()))
         .collect();
     let usual = defining
@@ -209,7 +205,6 @@ mod tests {
             r#"{"word": "free", "pos": "verb", "lang_code": "en", "senses": [{"glosses": ["To make free."]}]}"#,
             r#"{"word": "cat", "pos": "noun", "lang_code": "en", "senses": [{"glosses": ["Terms relating to animals.", "A mammal of the family Felidae."]}]}"#,
             r#"{"word": "mice", "pos": "noun", "lang_code": "en", "senses": [{"glosses": ["plural of mouse"], "form_of": [{"word": "mouse"}], "tags": ["form-of", "plural"]}]}"#,
-            r#"{"word": "arguement", "pos": "noun", "lang_code": "en", "senses": [{"glosses": ["Misspelling of argument."], "tags": ["misspelling"]}]}"#,
             r#"{"word": "Paris", "pos": "name", "lang_code": "en", "senses": [{"glosses": ["The capital of France."]}]}"#,
             r#"{"word": "frei", "pos": "adj", "lang_code": "de", "senses": [{"glosses": ["free"]}]}"#,
         ]
