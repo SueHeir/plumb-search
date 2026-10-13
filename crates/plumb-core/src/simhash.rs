@@ -2,13 +2,10 @@
 //! apart from sites that only share a few words ("Detecting Near-Duplicates
 //! for Web Crawling", Manku, Jain and Das Sarma, Google, WWW 2007).
 //!
-//! Each run of [`SHINGLE_WORDS`] words is hashed to 64 bits, and bit `i` of
-//! the fingerprint is set when more of the runs have bit `i` set than not.
-//! Texts that share most of their runs get fingerprints that differ in few
-//! bits; Google's crawl took 3 bits of 64 as "the same page".
-
-/// Words in each run hashed.
-pub const SHINGLE_WORDS: usize = 2;
+//! Each word is hashed to 64 bits, and bit `i` of the fingerprint is set
+//! when more of the words have bit `i` set than not. Texts that share most
+//! of their words get fingerprints that differ in few bits; Google's crawl
+//! took 3 bits of 64 as "the same page".
 
 /// Fewest words a text needs for a fingerprint: shorter texts ("Welcome",
 /// a one-line splash) are alike by chance.

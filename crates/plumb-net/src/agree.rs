@@ -124,12 +124,6 @@ pub struct Score {
 }
 
 impl Score {
-    /// Agreements out of judgements, counting one of each in advance so a
-    /// new crawler starts at one half.
-    pub fn weight(&self) -> f64 {
-        (f64::from(self.agreed) + 1.0) / (f64::from(self.agreed + self.disagreed) + 2.0)
-    }
-
     pub fn distrusted(&self) -> bool {
         self.agreed + self.disagreed >= MIN_JUDGED
             && f64::from(self.agreed) / f64::from(self.agreed + self.disagreed) < MIN_AGREEMENT

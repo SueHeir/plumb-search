@@ -115,6 +115,7 @@ impl History {
     }
 
     /// Notes that `domain` was opened for `query`.
+    #[cfg(test)]
     pub fn add_opened(&mut self, query: &str, domain: &str, at: u64) {
         self.add_opened_weighted(query, domain, at, None);
     }
@@ -155,6 +156,7 @@ impl History {
     }
 
     /// Whether `domain` was opened from any search.
+    #[cfg(test)]
     pub fn was_opened(&self, domain: &str) -> bool {
         self.opened.iter().any(|o| o.domain == domain)
     }

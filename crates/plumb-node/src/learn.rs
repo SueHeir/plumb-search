@@ -506,7 +506,6 @@ impl Taste {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rating {
     Like,
-    Neither,
     Dislike,
 }
 
@@ -931,7 +930,6 @@ impl Learned {
         let add = |liked: &mut f32, disliked: &mut f32| match rating {
             Rating::Like => *liked = (*liked + weight).max(0.0),
             Rating::Dislike => *disliked = (*disliked + weight).max(0.0),
-            Rating::Neither => {}
         };
         let judged = self.judged();
         add(&mut judged.liked, &mut judged.disliked);
@@ -988,6 +986,7 @@ impl Learned {
     /// Notes that `block`, shown in `context`, was useful or not on the
     /// tuning page: counts as that many shows for every search showing it
     /// that way.
+    #[cfg(test)]
     pub fn rate_block(&mut self, block: Block, context: &str, useful: bool, at: u64) {
         let key = format!("c {context}");
         self.bump(block, key.clone(), false, at);

@@ -76,6 +76,7 @@ impl Journal {
     }
 
     /// A log kept only in memory.
+    #[cfg(test)]
     pub fn in_memory() -> Journal {
         Journal {
             path: None,
