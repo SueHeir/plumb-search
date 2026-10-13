@@ -383,24 +383,7 @@ const SOURCES: &[(&str, &[&str])] = &[
 /// not addresses. A typed address keeps its own host unless it only adds
 /// "www.": ecdc.europa.eu is not europa.eu, whose homepage is the EU's.
 fn named_sources(query: &str) -> Vec<String> {
-    let folded = format!(" {} ", normalize_text(query));
-    let words: Vec<&str> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect();
-    let mut named: Vec<String> = SOURCES
-        .iter()
-        .filter(|(_, names)| {
-            names.iter().any(|name| {
-                if name.chars().any(|c| c.is_ascii_uppercase()) {
-                    words.contains(name)
-                } else {
-                    folded.contains(&format!(" {name} "))
-                }
-            })
-        })
-        .map(|(domain, _)| domain.to_string())
-        .collect();
+    let mut named = sources_named(query, false);
     for word in query.split_whitespace() {
         let word = word.trim_matches(|c: char| !c.is_alphanumeric());
         let word = word.strip_prefix("site:").unwrap_or(word);
@@ -417,6 +400,50 @@ fn named_sources(query: &str) -> Vec<String> {
         }
     }
     named
+}
+
+/// The health sources ([`SOURCES`]) `query` names, by domain; `later`
+/// leaves out one named by its first word.
+fn sources_named(query: &str, later: bool) -> Vec<String> {
+    let folded = normalize_text(query);
+    let folded = if later {
+        folded.split_once(' ').map_or("", |(_, rest)| rest)
+    } else {
+        &folded
+    };
+    let folded = format!(" {folded} ");
+    let words: Vec<&str> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .skip(usize::from(later))
+        .collect();
+    SOURCES
+        .iter()
+        .filter(|(_, names)| {
+            names.iter().any(|name| {
+                if name.chars().any(|c| c.is_ascii_uppercase()) {
+                    words.contains(name)
+                } else {
+                    folded.contains(&format!(" {name} "))
+                }
+            })
+        })
+        .map(|(domain, _)| domain.to_string())
+        .collect()
+}
+
+/// The sources `query` asks for: in a medical search all it names
+/// ([`named_sources`]); in any other, a health source named after its
+/// first word ("sprained ankle NHS", "vapes FDA regulation"). One named
+/// first is the search's own name, which ranking lists already ("nhs
+/// jobs" may want jobs.nhs.uk), and the learned order no longer lifts
+/// one named later only for being popular.
+fn asked_sources(query: &str, medical: bool) -> Vec<String> {
+    if medical {
+        named_sources(query)
+    } else {
+        sources_named(query, true)
+    }
 }
 
 /// Whether two index domains are one site, with or without `www.`.
@@ -445,10 +472,10 @@ fn names_site(query: &str, hit: &Hit, common: &dyn Fn(&str) -> bool) -> bool {
 /// `hits` for a medical `query` with the health authorities first, under
 /// a well-known site the query names (diabetes.org for "diabetes"):
 /// those already listed move up, the others come from `site`. A source
-/// the query asks for ([`named_sources`]) goes above them, from `site`
-/// too when it isn't listed, and so does a listed site it names by a word
-/// that is neither medical nor `common` ([`names_site`]). At most `limit`
-/// hits stay.
+/// the query asks for ([`asked_sources`], in any search) goes above them,
+/// from `site` too when it isn't listed, and so does a listed site a
+/// medical query names by a word that is neither medical nor `common`
+/// ([`names_site`]). At most `limit` hits stay.
 pub(crate) fn authorities_first(
     query: &str,
     country: Option<&str>,
@@ -457,11 +484,13 @@ pub(crate) fn authorities_first(
     site: &dyn Fn(&str) -> Option<Hit>,
     common: &dyn Fn(&str) -> bool,
 ) {
-    if limit == 0 || crate::names::typed_domain(query).is_some() || !is_medical(query) {
+    let medical = is_medical(query);
+    let asked = asked_sources(query, medical);
+    if limit == 0 || crate::names::typed_domain(query).is_some() || !medical && asked.is_empty() {
         return;
     }
     let mut sources = Vec::new();
-    for domain in named_sources(query) {
+    for domain in asked {
         match hits.iter().position(|hit| same_site(&hit.domain, &domain)) {
             Some(at) => sources.push(hits.remove(at)),
             None => {
@@ -472,13 +501,16 @@ pub(crate) fn authorities_first(
             }
         }
     }
-    let (named, rest) = std::mem::take(hits)
-        .into_iter()
-        .partition::<Vec<Hit>, _>(|hit| names_site(query, hit, common));
-    *hits = rest;
-    sources.extend(named);
     let mut first = Vec::new();
-    for domain in authorities(country).iter().take(AUTHORITIES) {
+    if medical {
+        let (named, rest) = std::mem::take(hits)
+            .into_iter()
+            .partition::<Vec<Hit>, _>(|hit| names_site(query, hit, common));
+        *hits = rest;
+        sources.extend(named);
+    }
+    let authorities: &[&str] = if medical { authorities(country) } else { &[] };
+    for domain in authorities.iter().take(AUTHORITIES) {
         if sources
             .iter()
             .any(|hit: &Hit| same_site(&hit.domain, domain))
@@ -513,28 +545,26 @@ pub(crate) fn authorities_first(
     hits.truncate(limit);
 }
 
-/// The sources a medical `query` asks for ([`named_sources`]) and the
-/// sites it names by a word neither medical nor `common` ([`names_site`])
-/// first among the sites again, once the learned ranking has had its say:
-/// it lists a homepage [`authorities_first`] put in under the authorities
-/// ("NHS paracetamol for children dose" had nhs.uk fourth). Pages listed on
-/// their own keep their places, and the moved sites trade scores so that
-/// scores still go down the list, as [`crate::learned::reorder`] leaves
-/// them.
+/// The sources `query` asks for ([`asked_sources`]) and, in a medical
+/// search, the sites it names by a word neither medical nor `common`
+/// ([`names_site`]) first among the sites again, once the learned ranking
+/// has had its say: it lists a homepage [`authorities_first`] put in under
+/// the authorities ("NHS paracetamol for children dose" had nhs.uk
+/// fourth). Pages listed on their own keep their places, and the moved
+/// sites trade scores so that scores still go down the list, as
+/// [`crate::learned::reorder`] leaves them.
 pub fn sources_lead(
     query: &str,
     hits: &mut Vec<Hit>,
     placed: &mut [PlacedPage],
     common: &dyn Fn(&str) -> bool,
 ) {
-    if plumb_core::Operators::parse(query).any()
-        || crate::names::typed_domain(query).is_some()
-        || !is_medical(query)
-    {
+    if plumb_core::Operators::parse(query).any() || crate::names::typed_domain(query).is_some() {
         return;
     }
+    let medical = is_medical(query);
     let mut lead: Vec<usize> = Vec::new();
-    for domain in named_sources(query) {
+    for domain in asked_sources(query, medical) {
         if let Some(at) = hits.iter().position(|hit| same_site(&hit.domain, &domain)) {
             if !lead.contains(&at) {
                 lead.push(at);
@@ -542,7 +572,7 @@ pub fn sources_lead(
         }
     }
     for (at, hit) in hits.iter().enumerate() {
-        if !lead.contains(&at) && names_site(query, hit, common) {
+        if medical && !lead.contains(&at) && names_site(query, hit, common) {
             lead.push(at);
         }
     }
@@ -1157,6 +1187,52 @@ mod tests {
             sources_lead(query, &mut hits, &mut placed, &|_| true);
             assert_eq!(domains(&hits), domains(&listed()), "{query}");
             assert_eq!(placed, vec![page.clone()], "{query}");
+        }
+    }
+
+    #[test]
+    fn a_health_source_named_after_other_words_leads_any_search() {
+        let site = |domain: &str| Some(hit(domain, false, 0.6));
+        let listed = || {
+            ["foothealthfacts.org", "footcaremd.org"]
+                .map(|domain| hit(domain, false, 0.3))
+                .to_vec()
+        };
+        for (query, source) in [
+            ("sprained ankle NHS", "www.nhs.uk"),
+            ("vapes FDA regulation nicotine", "fda.gov"),
+            ("seafood during pregnancy FDA advice", "fda.gov"),
+            ("air quality guidelines WHO", "who.int"),
+        ] {
+            assert!(!is_medical(query), "{query}");
+            // First, and without the authorities a medical search gets.
+            let mut hits = listed();
+            authorities_first(query, None, &mut hits, 8, &site, &|_| false);
+            assert_eq!(
+                domains(&hits),
+                [source, "foothealthfacts.org", "footcaremd.org"],
+                "{query}"
+            );
+            // First again after the learned order.
+            let mut hits = listed();
+            hits.push(hit(source, false, 0.3));
+            sources_lead(query, &mut hits, &mut [], &|_| false);
+            assert_eq!(domains(&hits)[0], source, "{query}");
+        }
+        // Named first, a source is the search's own name; "who" is not
+        // WHO; and outside medical searches a plain word lifts no site.
+        for query in ["nhs jobs", "who founded netflix", "ankle braces footcaremd"] {
+            let mut hits = listed();
+            authorities_first(query, None, &mut hits, 8, &site, &|_| false);
+            assert_eq!(domains(&hits), domains(&listed()), "{query}");
+            let mut hits = listed();
+            hits.push(hit("www.nhs.uk", false, 0.3));
+            sources_lead(query, &mut hits, &mut [], &|_| false);
+            assert_eq!(
+                domains(&hits),
+                ["foothealthfacts.org", "footcaremd.org", "www.nhs.uk"],
+                "{query}"
+            );
         }
     }
 }
