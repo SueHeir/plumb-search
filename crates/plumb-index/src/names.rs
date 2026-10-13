@@ -9,7 +9,7 @@ use tantivy::postings::Postings;
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{DocAddress, DocSet, TantivyDocument, Term, TERMINATED};
 
-use crate::query::{matching_docs, ParsedQuery};
+use crate::query::{matching_docs, ParsedQuery, COMPARISON_WORDS};
 use crate::{
     analysis, spell, RankConfig, Searcher, FILLER_WORDS, LINK_NAME_SHARE, MAX_QUERY_WORDS,
 };
@@ -181,8 +181,8 @@ impl Searcher {
     /// words anywhere in it ("hilton" in "back bay hilton", "wix" in
     /// "ecommerce wix"), unless the run goes on into more words as one
     /// phrase ("cricket" in "the cricket and the ant", "guess" in "guess
-    /// the states game"). A run of one function or filler word names
-    /// nothing. The second set has only the sites named by an alias.
+    /// the states game"). A run of one function, filler or comparison word
+    /// names nothing. The second set has only the sites named by an alias.
     pub(crate) fn names_inside(
         &self,
         searcher: &tantivy::Searcher,
@@ -201,7 +201,11 @@ impl Searcher {
             for end in start..tokens.len() {
                 key.push_str(&tokens[end]);
                 let one = end == start;
-                if one && (is_function_word(&key) || FILLER_WORDS.contains(&key.as_str())) {
+                if one
+                    && (is_function_word(&key)
+                        || FILLER_WORDS.contains(&key.as_str())
+                        || COMPARISON_WORDS.contains(&key.as_str()))
+                {
                     continue;
                 }
                 let goes_on = tokens

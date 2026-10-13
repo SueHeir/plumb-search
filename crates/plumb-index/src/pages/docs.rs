@@ -12,7 +12,7 @@ use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{TantivyDocument, Term};
 
 use super::placing::operators_allow;
-use super::scoring::{scoped_query, truncate_keeping_inner_pages};
+use super::scoring::{scoped_query, site_pages_after_named_article, truncate_keeping_inner_pages};
 use super::sites::squash;
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, CANDIDATES, DOCS_SET, PARTIAL_MATCH,
@@ -54,6 +54,7 @@ impl PageSearcher {
         hits.retain(|hit| {
             operators_allow(ops, &hit.page) && docs_exact_query_allows(&hit.page, words)
         });
+        site_pages_after_named_article(&mut hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
         Ok(hits)
@@ -279,18 +280,6 @@ impl PageSearcher {
     }
 }
 
-/// Whether `hit` is a docs page found by its words that must come after
-/// the best of `sites`: "python package index" wants pypi.org first, and
-/// "bash parameter expansion" anything but expansion.com. Only the docs'
-/// own site may come after it, as python.org for docs.python.org's
-/// "python sorting techniques".
-pub(crate) fn docs_kept_below(hit: &PageHit, sites: &[crate::Hit]) -> bool {
-    docs_found_by_words(hit)
-        && sites
-            .first()
-            .is_some_and(|best| !docs_of(&hit.page, &best.domain))
-}
-
 /// Whether the docs page `hit` is just what `query` names in code's own
 /// spelling ("Object.keys", "std::vector", "useState"), and the best of
 /// `sites` is not called that, as jquery.com is for "jQuery". Such a page
@@ -329,16 +318,6 @@ fn written_as_code(query: &str) -> bool {
                 && chars
                     .windows(2)
                     .any(|w| w[0].is_lowercase() && w[1].is_uppercase()))
-}
-
-/// Whether the docs page `page` is on `domain` or one of its subdomains.
-fn docs_of(page: &Page, domain: &str) -> bool {
-    plumb_core::host_of(&page.url).is_some_and(|host| {
-        host == domain
-            || host
-                .strip_suffix(domain)
-                .is_some_and(|sub| sub.ends_with('.'))
-    })
 }
 
 /// Whether `query` asks about something in the docs of the docs page
