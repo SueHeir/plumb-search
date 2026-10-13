@@ -1391,7 +1391,9 @@ pub fn text_script(text: &str) -> Option<&'static str> {
 /// only keeps the candidate, it does not establish its language. Unlisted
 /// languages and scripts fail open rather than excluding uncertain text.
 pub fn language_fits(wanted: &str, site: &str) -> bool {
-    let site = site.strip_prefix(GUESSED).unwrap_or(site);
+    if let Some(guessed) = site.strip_prefix(GUESSED) {
+        return wanted == guessed || !language_words::tells(wanted);
+    }
     if site.starts_with(|c: char| c.is_ascii_uppercase()) {
         if !matches!(
             site,
@@ -1441,8 +1443,9 @@ pub fn written_outside(language: &str, query: &str) -> bool {
 
 /// Marks a language [`site_language`] tells from a site's common words
 /// rather than its declaration ("~de"). [`language_fits`] takes it as that
-/// language; the shares of declared languages a search's words are judged
-/// by leave it out, since their limits were set on declarations alone.
+/// language, for the languages the words can tell; the shares of declared
+/// languages a search's words are judged by leave it out, since their
+/// limits were set on declarations alone.
 pub const GUESSED: char = '~';
 
 /// Keep valid declared language metadata authoritative. Only missing or
@@ -1621,6 +1624,8 @@ mod tests {
         assert_eq!(site_language(Some("en"), german).as_deref(), Some("en"));
         assert!(language_fits("de", "~de"));
         assert!(!language_fits("en", "~de"));
+        // A Danish site may be taken for German: unlisted languages keep it.
+        assert!(language_fits("da", "~de"));
     }
 
     #[test]

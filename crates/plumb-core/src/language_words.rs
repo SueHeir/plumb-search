@@ -1,58 +1,59 @@
 //! The language of a text in Latin letters, told by its common words, for
 //! a site that does not declare its own ([`crate::site_language`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-/// Words nearly every sentence of a language has and no other listed
-/// language uses, so one alone points to it: not "en", "de" or "con",
+/// Words nearly every sentence of a language has and other listed
+/// languages rarely use, so one alone points to it: not "en", "de" or "con",
 /// which several languages share, nor "do" or "per", which are English too.
+/// Nor words often found in English names: "los" and "las" (Los Angeles,
+/// Las Vegas), "nuevo" (Nuevo Laredo), "chez" (Chez Panisse), "est" (Est.
+/// 1887).
 const COMMON_WORDS: &[(&str, &str)] = &[
     (
         "en",
-        "the and of with your our you from this that are be by more about how what have has \
-         their they which when where welcome official free find",
+        "the and of with your our you from this that are be by more about how what have has their \
+         they which when where welcome official free find",
     ),
     (
         "es",
-        "el los las y más sus nuestro nuestra nuestros también usted encuentra servicios \
-         productos mejor mejores nuevo nueva noticias información inicio bienvenidos tus",
+        "y más sus nuestro nuestra nuestros nuestras también usted encuentra servicios productos \
+         mejor mejores noticias información inicio bienvenidos tus hoy muy días años aquí ahora \
+         cómo qué ofrecemos precios tienda pero puedes podrás descubre hacer están tiempo envío",
     ),
     (
         "pt",
-        "os em nas não seu sua ao pelo pela você nosso nossa também seus suas serviços \
-         produtos melhor notícias informações início uma",
+        "em não seu sua ao pelo pela você nosso nossa também seus suas serviços produtos melhor \
+         notícias informações início uma muito maior fazer confira",
     ),
     (
         "fr",
-        "les et pour une est avec sur au aux dans vous nous votre vos notre cette qui sont ou \
-         pas tous toutes chez découvrez accueil bienvenue entreprise produits meilleur \
-         nouveau actualités",
+        "les et pour une avec sur aux dans vous nous votre vos notre cette sont tous toutes \
+         découvrez accueil bienvenue entreprise produits meilleur nouveau actualités depuis très \
+         être également trouvez retrouvez réservez ligne",
     ),
     (
         "de",
-        "der und für mit von zu dem ist ein eine einen auf im bei sie wir ihr ihre nicht auch \
-         zum zur über aus oder sind unsere unser ihren sich wird werden startseite willkommen \
-         unternehmen angebote",
+        "der und für mit von zu ist ein eine einen auf im bei sie wir ihr ihre nicht auch zum zur \
+         über aus oder sind unsere unser ihren sich wird werden startseite willkommen unternehmen \
+         angebote",
     ),
     (
         "it",
-        "il della dei delle degli che sono alla nel nella gli più anche tutti tutte tuo tua \
-         nostro nostra nostri sito azienda prodotti migliori notizie benvenuti scopri",
+        "della dei delle degli che sono nel nella gli più anche tutti tutte tuo tua nostro nostra \
+         nostri sito azienda prodotti migliori notizie benvenuti scopri questo oggi molto",
     ),
     (
         "nl",
-        "het een voor op zijn bij uw ons onze ook naar uit aan jouw wij welkom bedrijf \
-         producten nieuws",
+        "het een voor op zijn bij ons onze ook naar uit aan jouw wij welkom bedrijf producten \
+         nieuws niet deze heeft wordt",
     ),
-    (
-        "sv",
-        "och för att ett ni är inte våra vår välkommen företag",
-    ),
+    ("sv", "och för att ett är inte våra vår välkommen företag"),
     ("pl", "się jest dla od oraz że jak przez są witamy strona"),
     (
         "tr",
-        "ve bir ile için bu çok olarak daha veya hakkında anasayfa",
+        "ve bir ile için çok olarak daha veya hakkında anasayfa tüm büyük yeni nasıl",
     ),
     (
         "id",
@@ -75,17 +76,30 @@ fn common_words() -> &'static HashMap<&'static str, usize> {
     })
 }
 
+/// Whether [`language_by_words`] can tell `language`: a site it takes for
+/// German may be Danish, so it says nothing about languages not listed.
+pub(crate) fn tells(language: &str) -> bool {
+    COMMON_WORDS.iter().any(|(code, _)| *code == language)
+}
+
 /// The language `text` is in, when its [`COMMON_WORDS`] say so clearly:
-/// [`MIN_WORDS`] or more of one language's, and more than twice as many
-/// as of any other. `None` for a short text, a name or a mix ("Hotel
-/// Casa del Mar | Beachfront rooms"), which say too little.
+/// [`MIN_WORDS`] or more different words of one language's, and more than
+/// twice as many as of any other. `None` for a short text, a name or a mix
+/// ("Hotel Casa del Mar | Beachfront rooms"), which say too little. A word
+/// keeps its apostrophe, so "we've" is not the Turkish "ve", and one in
+/// capitals ("IL", "ET", "AU") is an abbreviation, not counted.
 pub(crate) fn language_by_words(text: &str) -> Option<&'static str> {
     let words = common_words();
+    let found: HashSet<(&str, usize)> = text
+        .split(|c: char| !(c.is_alphabetic() || is_apostrophe(c)))
+        .map(|word| word.trim_matches(is_apostrophe))
+        .filter(|word| word.chars().nth(1).is_none() || word.chars().any(char::is_lowercase))
+        .filter_map(|word| words.get_key_value(word.to_lowercase().as_str()))
+        .map(|(&word, &i)| (word, i))
+        .collect();
     let mut counts = [0; COMMON_WORDS.len()];
-    for word in text.split(|c: char| !c.is_alphabetic()) {
-        if let Some(&i) = words.get(word.to_lowercase().as_str()) {
-            counts[i] += 1;
-        }
+    for (_, i) in found {
+        counts[i] += 1;
     }
     let (best, &most) = counts.iter().enumerate().max_by_key(|&(_, n)| n)?;
     let next = counts
@@ -96,6 +110,10 @@ pub(crate) fn language_by_words(text: &str) -> Option<&'static str> {
         .max()
         .unwrap_or(0);
     (most >= MIN_WORDS && most > 2 * next).then_some(COMMON_WORDS[best].0)
+}
+
+fn is_apostrophe(c: char) -> bool {
+    matches!(c, '\'' | '\u{2019}')
 }
 
 #[cfg(test)]
@@ -130,8 +148,8 @@ mod tests {
                 "de",
             ),
             (
-                "CNN Brasil | Notícias Ao Vivo do Brasil e do Mundo. Pense bem, pense CNN, \
-                 notícias ao vivo e fatos da política nacional",
+                "Brazil. O gov.br reúne, em um só lugar, serviços para o cidadão e \
+                 informações sobre a atuação de todas as áreas do governo",
                 "pt",
             ),
             (
@@ -154,6 +172,17 @@ mod tests {
             "Los Angeles Times",
             // A French title over an English description.
             "Le Monde: actualités et toutes les infos | The news of the world",
+            // One word three times, or English names and abbreviations.
+            "Las Vegas Hotels | Las Vegas Shows & Las Vegas Deals",
+            "Naperville, IL Dentist | Family Dentistry in Naperville, IL - Aurora, IL",
+            "Best NAS for Home | NAS Drives, NAS OS Reviews",
+            "AUS vs IND Live Score | IND vs AUS 3rd Test | AUS tour of India",
+            "Los Angeles to Las Vegas | El Paso to Los Alamos",
+            "We've got it, you've seen it, they've loved it",
+            "Smith et al. 2019 | Notre Dame Journal of Formal Logic | Est. 1960",
+            "Pour House Bar & Grill | Est. 2005 | Live Music Fri 9 PM ET",
+            "Bar Pas Mal | Wine Bar Est. 2015 | Chez Nous Bistro",
+            "Taqueria Siempre Muy Bueno | Nuevo Tacos",
         ] {
             assert_eq!(language_by_words(text), None, "{text}");
         }

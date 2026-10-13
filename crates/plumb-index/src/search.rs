@@ -103,9 +103,9 @@ impl Searcher {
         self.reader.searcher().doc_freq(&term).is_ok_and(|n| n > 0)
     }
 
-    /// The language `domain`'s homepage says it is in
-    /// ([`plumb_core::SiteRecord::language`]), when the index holds the site
-    /// and knows it.
+    /// The language of `domain`'s homepage as the index keeps it
+    /// ([`plumb_core::site_language`]), when the index holds the site and
+    /// knows it.
     pub fn language(&self, domain: &str) -> Option<String> {
         let searcher = self.reader.searcher();
         let term = Term::from_field_text(self.fields.domain, domain);
