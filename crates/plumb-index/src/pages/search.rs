@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use plumb_core::paper_query::PaperQuery;
 use plumb_core::{registrable_domain, Operators};
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
@@ -321,7 +321,11 @@ impl PageSearcher {
     /// one the model learned and is likelier than the word with how much
     /// commoner the near word is weighed by [`PAGE_SLIP_WEIGHT`]; that
     /// holds for a word the pages know too ("recieve", "definately").
-    /// `None` when no word changes.
+    /// A word typed in capitals is kept, and so is a word that names
+    /// something ([`PageSearcher::names_something`]) when it would only be
+    /// taken for a slip; a word hardly any page has is a slip of a far
+    /// commoner one even so ("anubas" is a beetle). `None` when no word
+    /// changes.
     pub fn suggest_spelling(
         &self,
         query: &str,
@@ -333,11 +337,24 @@ impl PageSearcher {
             Ok(searcher.doc_freq(&Term::from_field_text(self.fields.words, word))?)
         };
         let typed = analysis::tokens(&self.words, query);
+        // Names and abbreviations: "ETIAS" is not "elias", nor "OLED" "old".
+        let capitals: HashSet<String> = query
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|part| {
+                part.chars().filter(|c| c.is_alphabetic()).count() > 1
+                    && !part.chars().any(char::is_lowercase)
+            })
+            .flat_map(|part| analysis::tokens(&self.words, part))
+            .collect();
         let mut fixed = typed.clone();
         for word in &mut fixed {
             let chars = word.chars().count();
             let edits = crate::spell::max_edits(chars);
-            if edits == 0 || !word.chars().all(char::is_alphabetic) || site_known(word) {
+            if edits == 0
+                || !word.chars().all(char::is_alphabetic)
+                || site_known(word)
+                || capitals.contains(word.as_str())
+            {
                 continue;
             }
             let known = self.knows_word(word)?;
@@ -346,7 +363,8 @@ impl PageSearcher {
             }
             let typed_docs = docs(word)?;
             let needed = MIN_PAGE_FIX_PAGES.max(PAGE_FIX_RATIO.saturating_mul(typed_docs));
-            let mut best: Option<(f64, String)> = None;
+            // The likeliest fix, and whether it is only a slip people make.
+            let mut best: Option<(f64, String, bool)> = None;
             for (term, distance) in
                 crate::spell::near_terms(&searcher, self.fields.words, word, edits)?
             {
@@ -364,6 +382,7 @@ impl PageSearcher {
                     None => -7.0 * f64::from(distance),
                 };
                 let likelihood = cost + (term_docs as f64).ln();
+                let mut only_a_slip = false;
                 if let Some(model) = model {
                     let commoner = (term_docs as f64 / typed_docs.max(1) as f64).ln();
                     // As likely as the word typed, a word no page has
@@ -374,13 +393,16 @@ impl PageSearcher {
                     if !rare && !slip {
                         continue;
                     }
+                    only_a_slip = !rare;
                 }
-                if best.as_ref().is_none_or(|(b, _)| likelihood > *b) {
-                    best = Some((likelihood, term));
+                if best.as_ref().is_none_or(|(b, ..)| likelihood > *b) {
+                    best = Some((likelihood, term, only_a_slip));
                 }
             }
-            if let Some((_, term)) = best {
-                *word = term;
+            if let Some((_, term, only_a_slip)) = best {
+                if !(only_a_slip && self.names_something(word, &typed)?) {
+                    *word = term;
+                }
             }
         }
         Ok((fixed != typed).then(|| crate::Spelling {
@@ -388,6 +410,45 @@ impl PageSearcher {
             site: None,
             applied: false,
         }))
+    }
+
+    /// Whether `word`, typed among `words`, is the name of something rather
+    /// than a slip, however near a commoner word it is: Wiktionary has it as
+    /// a word ("saute", "renter"), an English Wikipedia article is named by
+    /// it ("Everlong", "htop"), or a page's name has it with another word
+    /// typed ("Jean Meeus", "Baidu Baike").
+    fn names_something(&self, word: &str, words: &[String]) -> Result<bool> {
+        let searcher = self.reader.searcher();
+        let term = |field, text: &str| -> Box<dyn Query> {
+            Box::new(TermQuery::new(
+                Term::from_field_text(field, text),
+                IndexRecordOption::Basic,
+            ))
+        };
+        let found = |clauses: Vec<Box<dyn Query>>| -> Result<bool> {
+            let query = BooleanQuery::new(clauses.into_iter().map(|q| (Occur::Must, q)).collect());
+            Ok(searcher.search(&query, &Count)? > 0)
+        };
+        if searcher.doc_freq(&Term::from_field_text(self.fields.word, word))? > 0
+            || found(vec![
+                term(self.fields.keys, word),
+                self.scope_term("set:wikipedia-en"),
+            ])?
+        {
+            return Ok(true);
+        }
+        for other in words {
+            if other != word
+                && !plumb_core::is_function_word(other)
+                && found(vec![
+                    term(self.fields.words, word),
+                    term(self.fields.words, other),
+                ])?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Named entity candidates before site blending or learned placement.
