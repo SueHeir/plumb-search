@@ -25,11 +25,31 @@
 //!   name, so they go even when that name is the query ("ebay"). Those
 //!   with no description to tell them by go by their names (312bet29.com).
 //!   One the query names stays: "lazybar" finds lazybaraustralia.com.
+//! - Little-known sites offering a help line's number in their title
+//!   ([`offers_help_line`]): "Epson Printer Support Number
+//!   +1-844-932-1846" on epsonprintersupportpro.us came first for "epson
+//!   printer support" and "canon printer support number". A company's own
+//!   line is on its own site; tech-support scams wait for callers on sites
+//!   like these. Only a search spelling the whole name finds one.
 
 use plumb_core::{asks_to_sign_in, is_sign_in_page, names_label, normalize_text, spells_label};
 
 use crate::names::is_reserved_name;
 use crate::{health, Hit, WELL_KNOWN_LINK_SCORE};
+
+/// What a help line's number is called, after [`normalize_text`] and
+/// before "number" or "phone number": "Epson Printer Support Number",
+/// "QuickBooks Customer Service Phone Number".
+const HELP_LINES: &[&str] = &[
+    "support",
+    "customer service",
+    "customer care",
+    "helpline",
+    "help line",
+    "help desk",
+    "helpdesk",
+    "toll free",
+];
 
 /// Words, after [`normalize_text`], that only online gambling sites use.
 const GAMBLING_WORDS: &[&str] = &[
@@ -139,6 +159,12 @@ pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
     {
         return true;
     }
+    if little_known
+        && offers_help_line(hit.title.as_deref(), hit.description.as_deref())
+        && !spells_label(query, &hit.domain)
+    {
+        return true;
+    }
     if named {
         return false;
     }
@@ -171,6 +197,39 @@ pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
             && (is_sign_in_page(&hit.url, title)
                 || (asks_to_sign_in(query) && says_nothing_meaning_found()))
             && !names_label(query, &hit.domain))
+}
+
+/// Whether `title` offers a help line's number to call: it calls it one
+/// of [`HELP_LINES`] ("Epson Printer Support Number +1-844-932-1846"),
+/// and it or `description` gives the number.
+pub(crate) fn offers_help_line(title: Option<&str>, description: Option<&str>) -> bool {
+    let calls_it = |title: &str| {
+        let title = format!(" {} ", normalize_text(title));
+        HELP_LINES.iter().any(|line| {
+            title.contains(&format!(" {line} number "))
+                || title.contains(&format!(" {line} phone number "))
+        })
+    };
+    title.is_some_and(calls_it)
+        && [title, description]
+            .into_iter()
+            .flatten()
+            .any(has_phone_number)
+}
+
+/// Whether `text` holds a phone number: ten digits or more with only
+/// spaces, dashes, dots, brackets or a plus between them
+/// ("+1-844-932-1846", "(954) 726-9525").
+fn has_phone_number(text: &str) -> bool {
+    let mut digits = 0;
+    text.chars().any(|ch| {
+        if ch.is_ascii_digit() {
+            digits += 1;
+        } else if !matches!(ch, ' ' | '-' | '.' | '(' | ')' | '+') {
+            digits = 0;
+        }
+        digits >= 10
+    })
 }
 
 /// Whether `query` names `hit`'s site: spells a whole label of it
