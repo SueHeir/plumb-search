@@ -1,8 +1,8 @@
-//! Sign-in pages and gambling spam of sites a search does not name are
-//! left out.
+//! Sign-in pages, gambling spam and app installers of sites a search
+//! does not name are left out.
 
 use super::*;
-use crate::junk::{is_gambling, is_gambling_address};
+use crate::junk::{is_gambling, is_gambling_address, offers_apk};
 
 /// A site found only by meaning, whose homepage is at `url`.
 fn at(domain: &str, url: &str, title: Option<&str>) -> SiteRecord {
@@ -246,5 +246,64 @@ fn gambling_sites_are_told_by_their_words() {
         "judi2024.com",
     ] {
         assert!(!is_gambling_address(domain), "{domain}");
+    }
+}
+
+#[test]
+fn app_installers_are_left_out_unless_asked_for() {
+    let records = [
+        site(
+            "kinemaster.example",
+            Some("KineMaster - Video Editor"),
+            Some("Edit videos on your phone."),
+            &["KineMaster"],
+            &[("kinemaster", 300)],
+            popular(3_000, 2_000),
+        ),
+        site(
+            "kinemastermodapk.example",
+            Some("Kinemaster Mod APK without Watermark Download 2026"),
+            Some("KineMaster Mod APK lets you unlock premium features for free."),
+            &[],
+            &[("kinemaster", 40)],
+            obscure(90_000, 30),
+        ),
+        // The app's own site, which hands out its installer.
+        site(
+            "snaptube.example",
+            Some("Snaptube: Download Videos and Music for Free"),
+            Some("Download the Snaptube APK for Android."),
+            &[],
+            &[("snaptube", 40)],
+            obscure(90_000, 30),
+        ),
+        site(
+            "snaptubes.example",
+            Some("Snaptube Latest Version Download and Update"),
+            Some("Download Snaptube latest version APK."),
+            &[],
+            &[("snaptube", 20)],
+            obscure(120_000, 10),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let found =
+        |query: &str| domains(&searcher.search_with(query, 10, &keep_all()).unwrap()).join(" ");
+    assert_eq!(found("kinemaster"), "kinemaster.example");
+    assert!(found("kinemaster mod apk").contains("kinemastermodapk.example"));
+    assert_eq!(found("snaptube"), "snaptube.example");
+    for text in [
+        "Kinemaster MOD APK Download Latest Version Without Watermark",
+        "GB WhatsApp APK Download Latest Version Updated Oct 2026",
+        "Baixar Snaptube Grátis: Snaptube APK Download Atualizado",
+    ] {
+        assert!(offers_apk([Some(text)]), "{text:?}");
+    }
+    for text in [
+        "APKPure",
+        "Napkin folding for dinner parties",
+        "Android app development",
+    ] {
+        assert!(!offers_apk([Some(text)]), "{text:?}");
     }
 }

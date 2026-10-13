@@ -25,6 +25,12 @@
 //!   name, so they go even when that name is the query ("ebay"). Those
 //!   with no description to tell them by go by their names (312bet29.com).
 //!   One the query names stays: "lazybar" finds lazybaraustralia.com.
+//! - Little-known sites handing out Android apps' installers (APKs),
+//!   most of them changed to unlock what the app charges for
+//!   ("Kinemaster MOD APK Download", "GB WhatsApp APK Download"), for a
+//!   search that does not ask for one ([`offers_apk`]). Such copies are
+//!   how malware reaches phones, and an app's own site or store is well
+//!   known or official, or is named by the search ("snaptube").
 
 use plumb_core::{asks_to_sign_in, is_sign_in_page, names_label, normalize_text, spells_label};
 
@@ -127,16 +133,32 @@ const GAMBLING_QUERY_WORDS: &[&str] = &[
     "wager",
 ];
 
+/// Words of a search that asks for an app's installer or a changed copy
+/// of it: "minecraft apk", "kinemaster mod".
+const APK_QUERY_WORDS: &[&str] = &[
+    "apk", "apks", "mod", "mods", "modded", "hack", "hacked", "crack", "cracked",
+];
+
 /// Whether `hit` stays out of the results of `query`, which `named` says
 /// names it in full.
 pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
     let little_known = hit.link_score < WELL_KNOWN_LINK_SCORE && !hit.official;
-    if little_known
-        && (is_gambling([hit.title.as_deref(), hit.description.as_deref()])
-            || (hit.description.is_none() && is_gambling_address(&hit.domain)))
-        && !asks_about_gambling(query)
-        && !named_by(query, hit)
-    {
+    let texts = [hit.title.as_deref(), hit.description.as_deref()];
+    let gambling = || {
+        (is_gambling(texts) || (hit.description.is_none() && is_gambling_address(&hit.domain)))
+            && !asks_about_gambling(query)
+            && !named_by(query, hit)
+    };
+    // Not `named_by`: "kinemaster" names kinemastermodapk.com, titled
+    // "Kinemaster MOD APK".
+    let apk = || {
+        offers_apk(texts)
+            && !normalize_text(query)
+                .split(' ')
+                .any(|word| APK_QUERY_WORDS.contains(&word))
+            && !spells_label(query, &hit.domain)
+    };
+    if little_known && (gambling() || apk()) {
         return true;
     }
     if named {
@@ -203,6 +225,17 @@ pub(crate) fn is_gambling<'a>(texts: impl IntoIterator<Item = Option<&'a str>>) 
                     && ((word.len() >= 6 && word.ends_with("toto"))
                         || (word.len() >= 5 && word.ends_with("qq")))
             })
+    })
+}
+
+/// Whether `texts` offer an Android app's installer, an APK: "Kinemaster
+/// MOD APK Download Latest Version", "Download the Snaptube APK for
+/// Android". APKPure, a store, is one word.
+pub(crate) fn offers_apk<'a>(texts: impl IntoIterator<Item = Option<&'a str>>) -> bool {
+    texts.into_iter().flatten().any(|text| {
+        normalize_text(text)
+            .split(' ')
+            .any(|word| word == "apk" || word == "apks")
     })
 }
 
