@@ -190,6 +190,33 @@ impl PageSearcher {
                 }
             }
         }
+        // A repository's short name is one word of its names, not a key:
+        // "adguard home" names AdGuardHome. Searched apart too, and only
+        // among repositories: many pages say "notebook", and they must not
+        // crowd out the article "note book" names.
+        if words.len() > 1 {
+            let short_name = BooleanQuery::new(vec![
+                (Occur::Must, self.scope_term(&format!("set:{GITHUB_SET}"))),
+                (
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.fields.words, &joined),
+                        IndexRecordOption::Basic,
+                    )),
+                ),
+            ]);
+            let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
+                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+            for (_, address) in searcher.search(
+                self.language_query(scoped_query(&short_name, scope).as_ref())
+                    .as_ref(),
+                &most_read,
+            )? {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
         // Packages, only ever found when the query asks for one: "serde
         // crate", "latest version of requests python".
         let package_query = plumb_core::packages::package_query(query);
@@ -350,50 +377,9 @@ impl PageSearcher {
             .filter(|stem| !unknown.contains(stem))
             .cloned()
             .collect();
-        // Articles whose title is some of the query and the rest says more
-        // about it: "titanic sinking", "radium discovery marie curie",
-        // "catholic homily". They lack the query's other words, so nothing
-        // above finds them; [`PageSearcher::name_match`] scores them by the
-        // share of the query their title is.
-        let mut by_title_inside = HashSet::new();
-        // Other pages found only so are left out. This comes after every
-        // other way pages are found, so "only so" means it.
-        let mut only_inside = HashSet::new();
-        let mut inside_keys = HashSet::new();
-        for start in 0..words.len() {
-            for end in start + 1..=words.len() {
-                let span = &words[start..end];
-                if span.len() == words.len()
-                    || span.iter().all(|word| {
-                        crate::is_function_word(word) || ASKING_WORDS.contains(&word.as_str())
-                    })
-                {
-                    continue;
-                }
-                let Some(key) = analysis::tokens(&self.joined, &span.join(" ")).pop() else {
-                    continue;
-                };
-                let named = TermQuery::new(
-                    Term::from_field_text(self.fields.keys, &key),
-                    IndexRecordOption::Basic,
-                );
-                inside_keys.insert(key);
-                let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
-                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
-                for (_, address) in searcher.search(
-                    self.language_query(scoped_query(&named, scope).as_ref())
-                        .as_ref(),
-                    &most_read,
-                )? {
-                    if !addresses.contains(&address) {
-                        addresses.push(address);
-                        only_inside.insert(address);
-                    }
-                    by_title_inside.insert(address);
-                }
-            }
-        }
+        let inside = self.named_inside(&searcher, &words, scope, &mut addresses)?;
         let mut hits = Vec::new();
+        let mut described_repos = super::repos::DescribedRepos::default();
         for address in addresses {
             let document: TantivyDocument = searcher.doc(address)?;
             let Some(stored) = document
@@ -434,25 +420,17 @@ impl PageSearcher {
             if page.set == MUSIC_SET && !asked_by_title {
                 continue;
             }
-            // Its title in full, or another name: "queen tour" is not
-            // about Queen (album).
-            let article_inside = page.is_article()
-                && by_title_inside.contains(&address)
-                && std::iter::once(&page.title)
-                    .chain(&page.aliases)
-                    .any(|name| {
-                        analysis::tokens(&self.joined, name)
-                            .pop()
-                            .is_some_and(|key| inside_keys.contains(&key))
-                    });
-            if !article_inside
+            // Named by part of the query, by its title or another name in
+            // full: "queen tour" is not about Queen (album).
+            let span = inside.span(&page, &self.joined);
+            let left_out = span.is_none()
                 && (by_title_first.contains(&address) && !asked_by_title
                     || film_title_first.contains(&address)
-                        && !(asked_as_film || asked_by_title && page.is_article()))
-            {
-                continue;
-            }
-            if only_inside.contains(&address) && !article_inside && !asked_by_title {
+                        && !(asked_as_film || asked_by_title && page.is_article())
+                    || inside.only.contains(&address) && !asked_by_title);
+            let repo_described =
+                self.repo_described(&page, popularity, &words, &mut described_repos);
+            if left_out && repo_described.is_none() {
                 continue;
             }
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
@@ -470,9 +448,15 @@ impl PageSearcher {
                     name = name
                         .max(LEAD_MATCH * (0.5 + 0.5 * lead / best_lead.max(f32::MIN_POSITIVE)));
                 }
+                if let Some(span) = span {
+                    name = name.max(self.inside_match(&page, span, &described));
+                }
             }
-            if name <= 0.0 {
+            if name <= 0.0 && repo_described.is_none() {
                 continue;
+            }
+            if let Some(key) = repo_described.filter(|_| !named) {
+                described_repos.keep(hits.len(), key, left_out || name <= 0.0);
             }
             let mut score = name * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity);
             if !page.may_lead() {
@@ -489,6 +473,7 @@ impl PageSearcher {
                 learned: None,
             });
         }
+        described_repos.name(&mut hits);
         match words.as_slice() {
             [word] => self.name_by_surname(word, &joined, &mut hits),
             [title, name @ ..] => self.name_by_title(title, name, &joined, &mut hits),
@@ -498,6 +483,136 @@ impl PageSearcher {
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
         Ok(hits)
+    }
+
+    /// Finds the pages named by part of the query, adding them to
+    /// `addresses`: articles whose title is some of the query and the rest
+    /// says more about it ("titanic sinking", "radium discovery marie
+    /// curie", "catholic homily"), repositories by the words of their names
+    /// ("frp reverse proxy", [`PageSearcher::repo_described`]) and docs
+    /// pages by their product and title ("python asyncio tutorial"). They lack the query's other words, so nothing
+    /// else finds them. A part is any run of the query's `words` but the
+    /// whole query, as long as it is not only function or asking words.
+    fn named_inside(
+        &self,
+        searcher: &tantivy::Searcher,
+        words: &[String],
+        scope: Option<&dyn Query>,
+        addresses: &mut Vec<tantivy::DocAddress>,
+    ) -> Result<Inside> {
+        let mut inside = Inside::default();
+        let most_read = || {
+            TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
+                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc)
+        };
+        let word = |text: &str| -> Box<dyn Query> {
+            Box::new(TermQuery::new(
+                Term::from_field_text(self.fields.words, text),
+                IndexRecordOption::Basic,
+            ))
+        };
+        for start in 0..words.len() {
+            for end in start + 1..=words.len() {
+                let span = &words[start..end];
+                if span.len() == words.len()
+                    || span.iter().all(|word| {
+                        crate::is_function_word(word) || ASKING_WORDS.contains(&word.as_str())
+                    })
+                {
+                    continue;
+                }
+                let Some(key) = analysis::tokens(&self.joined, &span.join(" ")).pop() else {
+                    continue;
+                };
+                let mut lanes: Vec<Box<dyn Query>> = vec![Box::new(TermQuery::new(
+                    Term::from_field_text(self.fields.keys, &key),
+                    IndexRecordOption::Basic,
+                ))];
+                // A repository's short name is words of its names, not a
+                // key: "frp", "rust-cache". Only short runs with a word
+                // few pages have, so a run of common words costs nothing.
+                let rarest = span
+                    .iter()
+                    .map(|w| searcher.doc_freq(&Term::from_field_text(self.fields.words, w)))
+                    .collect::<tantivy::Result<Vec<u64>>>()?
+                    .into_iter()
+                    .min()
+                    .unwrap_or(0);
+                if span.len() <= super::repos::NAME_WORDS && rarest <= REPO_NAME_PAGES {
+                    let named = BooleanQuery::new(vec![
+                        (Occur::Should, word(&key)),
+                        (
+                            Occur::Should,
+                            Box::new(BooleanQuery::new(
+                                span.iter().map(|w| (Occur::Must, word(w))).collect(),
+                            )),
+                        ),
+                    ]);
+                    lanes.push(Box::new(BooleanQuery::new(vec![
+                        (Occur::Must, self.scope_term(&format!("set:{GITHUB_SET}"))),
+                        (Occur::Must, Box::new(named)),
+                    ])));
+                }
+                for lane in lanes {
+                    for (_, address) in searcher.search(
+                        self.language_query(scoped_query(lane.as_ref(), scope).as_ref())
+                            .as_ref(),
+                        &most_read(),
+                    )? {
+                        // Other pages found only so are left out. This
+                        // comes after every other way pages are found, so
+                        // "only so" means it.
+                        if !addresses.contains(&address) {
+                            addresses.push(address);
+                            inside.only.insert(address);
+                        }
+                    }
+                }
+                let longest = inside.keys.entry(key).or_default();
+                if span.len() > longest.len() {
+                    *longest = span.to_vec();
+                }
+            }
+        }
+        Ok(inside)
+    }
+
+    /// How well the article or docs page `page`, named by `span`, part of
+    /// the query, matches the whole of it, whose words are `stems`
+    /// ([`PageSearcher::described_words`]): [`ALIAS_MATCH`] times the share
+    /// of them its name has, a word only what it says of itself has
+    /// counting [`DESCRIBED_WORD`]. Nothing when that is half or less:
+    /// such a name leaves most of the query unsaid. "terry stafford death"
+    /// is the singer, but "london hotels" is not the article London.
+    fn inside_match(&self, page: &Page, span: &[String], stems: &[String]) -> f32 {
+        if stems.is_empty() {
+            return 0.0;
+        }
+        let named: HashSet<String> = self.question_words(&span.join(" ")).into_iter().collect();
+        let mut said = page.about().or_else(|| page.topic()).unwrap_or_else(|| {
+            std::iter::once(&page.title)
+                .chain(&page.aliases)
+                .chain(&page.description)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+        if let Some(lead) = &page.lead {
+            said.push(' ');
+            said.push_str(lead);
+        }
+        let said: HashSet<String> = self.question_words(&said).into_iter().collect();
+        let in_name = stems.iter().filter(|stem| named.contains(*stem)).count();
+        let only_said = stems
+            .iter()
+            .filter(|stem| !named.contains(*stem) && said.contains(*stem))
+            .count();
+        let share = (in_name as f32 + DESCRIBED_WORD * only_said as f32) / stems.len() as f32;
+        if share > 0.5 {
+            ALIAS_MATCH * share
+        } else {
+            0.0
+        }
     }
 
     /// Whether the query `words` are a film's or show's title followed by
@@ -984,7 +1099,7 @@ impl PageSearcher {
 }
 
 /// Marks `hit` named by the query and scores it as if by an alias.
-fn name_by_alias(hit: &mut PageHit) {
+pub(super) fn name_by_alias(hit: &mut PageHit) {
     hit.named = true;
     hit.score = ALIAS_MATCH * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity);
 }
@@ -1012,6 +1127,43 @@ fn fold_films(hits: Vec<PageHit>) -> Vec<PageHit> {
         }
     }
     kept
+}
+
+/// Most pages whose names have the rarest word of a part of a query looked
+/// up as a repository's name ([`PageSearcher::named_inside`]).
+const REPO_NAME_PAGES: u64 = 100_000;
+
+/// The parts of a query that may name a page ([`PageSearcher::named_inside`]).
+#[derive(Default)]
+struct Inside {
+    /// Each part's key ([`analysis::joined_analyzer`]) and words, the
+    /// longest part of a key.
+    keys: HashMap<String, Vec<String>>,
+    /// Pages found only by a part, left out unless it names them.
+    only: HashSet<tantivy::DocAddress>,
+}
+
+impl Inside {
+    /// The longest part of the query that names `page` in full: the title
+    /// or another name of an article, or another name of a docs page, whose
+    /// title alone names nothing ("Glossary"). Repositories are told apart
+    /// by what they say of themselves ([`PageSearcher::repo_described`]),
+    /// and pages of other sets share their titles with too much to be
+    /// named so.
+    fn span(&self, page: &Page, joined: &tantivy::tokenizer::TextAnalyzer) -> Option<&[String]> {
+        let names: Vec<&String> = if page.is_article() {
+            std::iter::once(&page.title).chain(&page.aliases).collect()
+        } else if page.set == DOCS_SET {
+            page.aliases.iter().collect()
+        } else {
+            return None;
+        };
+        names
+            .into_iter()
+            .filter_map(|name| self.keys.get(&analysis::tokens(joined, name).pop()?))
+            .max_by_key(|span| span.len())
+            .map(Vec::as_slice)
+    }
 }
 
 /// How far below the article the query names [`site_pages_after_named_article`]
