@@ -28,7 +28,7 @@
 //! * A node started with
 //!   [`NodeConfig::publish_records`](super::NodeConfig::publish_records)
 //!   also shares the homepages crawled into another records file, such as
-//!   one a `plumb crawl` is filling ([`publish_records`]): every
+//!   one a `plumb-tools crawl` is filling ([`publish_records`]): every
 //!   [`PUBLISH_RECORDS_EVERY`] it publishes those crawled since last time
 //!   (within the last [`PUBLISH_MAX_AGE_DAYS`] days, as other nodes take no
 //!   older batches) and folds them into its own records too.

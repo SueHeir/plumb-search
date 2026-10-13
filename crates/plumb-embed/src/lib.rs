@@ -18,7 +18,6 @@
 
 mod gemma;
 mod model;
-pub mod relations;
 mod rerank;
 mod server;
 mod text;
@@ -32,7 +31,6 @@ pub use model::{
     model_id, quantize, write_test_model, Embedder, ModelId, MAX_TOKENS, MODEL_BASE_URL,
     MODEL_FILES, MODEL_NAME,
 };
-pub use relations::{Relation, Relations, RELATIONS_FILE_NAME};
 pub use rerank::{Reranker, RERANK_MAX_TOKENS};
 pub use server::SERVER_FILE;
 pub use text::{site_text, site_text_words, text_hash, TextHash, MAX_LINK_TEXTS, MAX_TEXT_WORDS};

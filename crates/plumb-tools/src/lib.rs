@@ -1,20 +1,30 @@
 //! `plumb-tools`: the commands a node never runs. They make the project's
 //! page sets ([`fetch`], [`build`]) and map ([`map_fetch`]), measure and
-//! train ranking ([`eval`], [`eval_labels`], [`train_rank`]), and look into
-//! records files and a node's data ([`link_rank`], [`top_sites`],
-//! [`fact_trust`], [`terms`], [`summaries`], [`storage`]). The node itself
-//! is [`plumb_node`].
+//! train ranking ([`eval`], [`eval_labels`], [`train_rank`]), do a node's
+//! work by hand ([`crawl`], [`search`], [`embed`]), and look into records
+//! files and a node's data ([`link_rank`], [`top_sites`], [`fact_trust`],
+//! [`terms`], [`summaries`], [`storage`], [`dead_sites`]). [`pir`] is the
+//! table a private information retrieval server would answer from, which
+//! no node runs yet, and [`relations`] an experiment in following Wikidata
+//! facts by arithmetic on article vectors. The node itself is
+//! [`plumb_node`].
 
 use anyhow::Result;
 
 pub mod build;
 pub mod cli;
+pub mod crawl;
+pub mod dead_sites;
+pub mod embed;
 pub mod eval;
 pub mod eval_labels;
 pub mod fact_trust;
 pub mod fetch;
 pub mod link_rank;
 pub mod map_fetch;
+pub mod pir;
+pub mod relations;
+pub mod search;
 pub mod storage;
 pub mod summaries;
 pub mod terms;
@@ -44,5 +54,13 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::LinkRank(args) => link_rank::run(&args),
         Command::FactTrust(args) => fact_trust::run(&args),
         Command::TopSites(args) => top_sites::run(&args),
+        Command::Crawl(args) => crawl::run(args),
+        Command::Index(args) => search::run_index(args),
+        Command::Search(args) => search::run_search(args),
+        Command::Spelling(args) => search::run_spelling(&args),
+        Command::Embed(args) => embed::run(args),
+        Command::DeadSites(args) => dead_sites::run(&args),
+        Command::Relations(args) => relations::run(&args),
+        Command::Relate(args) => relations::run_relate(&args),
     }
 }

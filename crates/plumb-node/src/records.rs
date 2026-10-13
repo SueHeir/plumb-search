@@ -8,7 +8,7 @@
 //! before the crawl goes on, and folds the journal into the file
 //! ([`RecordStore::compact`]) only once the journal has grown to a quarter of
 //! the file's size (at least [`MIN_COMPACT_BYTES`], at most
-//! [`MAX_JOURNAL_BYTES`]), and when `plumb crawl` ends. [`load_records`] replays a journal it finds, so whatever an
+//! [`MAX_JOURNAL_BYTES`]), and when `plumb-tools crawl` ends. [`load_records`] replays a journal it finds, so whatever an
 //! interrupted crawl saved is kept.
 //!
 //! The file is always replaced whole and atomically, by way of a temporary
@@ -44,7 +44,7 @@ pub(crate) const MAX_JOURNAL_BYTES: u64 = 128 << 20;
 #[serde(tag = "op", rename_all = "snake_case")]
 // Most changes are merges, so boxing the record would only add allocations.
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum Change {
+pub enum Change {
     /// Merges a record into the set, as [`RecordSet::upsert`] does.
     Merge { record: SiteRecord },
     /// Merges a crawl another node shared, as [`RecordSet::upsert_shared`]
@@ -141,7 +141,7 @@ impl Change {
 }
 
 /// `records.jsonl` -> `records.jsonl.journal`.
-pub(crate) fn journal_path(records: &Path) -> PathBuf {
+pub fn journal_path(records: &Path) -> PathBuf {
     let mut name = records
         .file_name()
         .map_or_else(|| "records".into(), |name| name.to_os_string());
@@ -258,7 +258,7 @@ fn replay_journal(path: &Path, set: &mut RecordSet) -> Result<()> {
 /// Saves the changes a crawl makes to a records file: appends them to the
 /// file's journal, and rewrites the file once the journal has grown enough.
 #[derive(Debug)]
-pub(crate) struct RecordStore {
+pub struct RecordStore {
     path: PathBuf,
     journal_path: PathBuf,
     /// Opened for appending when the first change is saved.
@@ -276,7 +276,7 @@ impl RecordStore {
     /// A store for the records file at `path`. A journal already there must
     /// have been replayed into the set the crawl changes, as
     /// [`load_records`] does: new changes are added to it.
-    pub(crate) fn open(path: &Path) -> Self {
+    pub fn open(path: &Path) -> Self {
         let journal_path = journal_path(path);
         RecordStore {
             path: path.to_path_buf(),
@@ -303,7 +303,7 @@ impl RecordStore {
     }
 
     /// Appends `changes` to the journal and flushes them to disk.
-    pub(crate) fn save(&mut self, changes: &[Change]) -> Result<()> {
+    pub fn save(&mut self, changes: &[Change]) -> Result<()> {
         if changes.is_empty() {
             return Ok(());
         }
@@ -384,7 +384,7 @@ impl RecordStore {
 
     /// Writes every record of `set` to the file, best link score first,
     /// then deletes the journal. Returns how many records were written.
-    pub(crate) fn compact(&mut self, set: &RecordSet) -> Result<usize> {
+    pub fn compact(&mut self, set: &RecordSet) -> Result<usize> {
         // Closed first: Windows cannot delete a file that is open.
         self.journal = None;
         let written = if let Some(budget) = self.budget.clone() {

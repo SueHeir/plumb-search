@@ -1594,59 +1594,6 @@ fn search_keeps_to_the_site_asked_for() {
     }
 }
 
-#[test]
-fn relate_is_answered_here_and_offered_with_the_tools() {
-    let dir = tempfile::tempdir().unwrap();
-    crate::relations::tests::write_store(dir.path());
-    let store = crate::relations::RelationStore::load(dir.path(), None).unwrap();
-    let call = |args: Value| {
-        relate_here(
-            &store,
-            &json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
-                     "params": { "name": "relate", "arguments": args } }),
-        )
-        .unwrap()
-    };
-    let answer = call(json!({ "subject": "Fiji", "relation": "Capital", "limit": 1 }));
-    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(
-        text.starts_with("capital of Fiji, likeliest first:\nSuva ("),
-        "{text}"
-    );
-    assert!(text.ends_with("a learned guess) [Wikidata K5]"), "{text}");
-    let answer = call(json!({ "subject": "France", "relation": "capital", "object": "Paris" }));
-    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(
-        text.starts_with("capital of France: Paris has probability"),
-        "{text}"
-    );
-    assert!(text.ends_with("(stated in Wikidata)."), "{text}");
-    let answer = call(json!({ "subject": "France", "relation": "spouse" }));
-    assert_eq!(answer["result"]["isError"], true);
-    // Other tools are not answered here.
-    assert!(relate_here(
-        &store,
-        &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                 "params": { "name": "search", "arguments": { "query": "x" } } }),
-    )
-    .is_none());
-
-    let mut listed = json!({ "jsonrpc": "2.0", "id": 2, "result": { "tools": [] } });
-    offer_relate(
-        &store,
-        &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
-        &mut listed,
-    );
-    assert_eq!(listed["result"]["tools"][0]["name"], "relate");
-    let description = listed["result"]["tools"][0]["description"]
-        .as_str()
-        .unwrap();
-    assert!(
-        description.ends_with("Relations: capital."),
-        "{description}"
-    );
-}
-
 /// Answers each query with what `answer` gives for it.
 struct Scripted(Box<dyn Fn(&str) -> SearchResults + Send + Sync>);
 

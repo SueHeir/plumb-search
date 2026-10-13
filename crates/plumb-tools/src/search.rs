@@ -1,19 +1,96 @@
-//! `plumb index` and `plumb search`.
+//! `plumb-tools index`, `search` and `spelling`: a node's index built and
+//! searched by hand.
 
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use clap::Args;
 use plumb_core::truncate_chars;
 use plumb_index::{build_index, Hit, SearchOptions, Searcher};
+use plumb_node::cli::{parse_alpha, parse_country, parse_positive, MeaningArgs};
+use plumb_node::meaning::MeaningIndex;
+use plumb_node::rank_config;
+use plumb_node::records::load_records;
 
-use crate::cli::{IndexArgs, SearchArgs, SpellingArgs};
-use crate::meaning::MeaningIndex;
-use crate::rank_config;
-use crate::records::load_records;
+#[derive(Debug, Args)]
+pub struct IndexArgs {
+    /// Records file to index (JSON lines).
+    #[arg(long, value_name = "PATH")]
+    pub records: PathBuf,
+    /// Index directory; an index already there is replaced.
+    #[arg(long, value_name = "DIR")]
+    pub index: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct SpellingArgs {
+    /// Index directory.
+    #[arg(long, value_name = "DIR")]
+    pub index: PathBuf,
+    /// How many of the learned slips to list, likeliest first.
+    #[arg(long, value_name = "N", default_value_t = 40)]
+    pub rules: usize,
+    /// A typo and the word meant, as `typed:meant` (`amtrack:amtrak`): how
+    /// likely the slip is and how common each word is. May be repeated.
+    #[arg(long, value_name = "TYPED:MEANT")]
+    pub pair: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// Site index directory, or a page index with --paper.
+    #[arg(long, value_name = "DIR")]
+    pub index: PathBuf,
+    /// Number of results.
+    #[arg(long, value_name = "N", default_value_t = 10, value_parser = parse_positive)]
+    pub limit: usize,
+    /// Weight of the popularity prior in the ranking, from 0 to 1
+    /// [default: the index's default].
+    #[arg(long, value_name = "A", value_parser = parse_alpha)]
+    pub alpha: Option<f32>,
+    /// Print the hits as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Search only papers in a locally built page index.
+    #[arg(long)]
+    pub paper: bool,
+    /// Inclusive publication lower bound, YYYY or YYYY-MM-DD.
+    #[arg(long, requires = "paper")]
+    pub after: Option<String>,
+    /// Inclusive publication upper bound, YYYY or YYYY-MM-DD.
+    #[arg(long, requires = "paper")]
+    pub before: Option<String>,
+    /// Paper ordering; newest preserves relevance tiers.
+    #[arg(long, requires = "paper", value_parser = ["relevance", "newest"])]
+    pub order: Option<String>,
+    /// Home country, a two-letter code such as US or DE: its sites rank a
+    /// little higher, other countries' a little lower [default: none].
+    #[arg(long, value_name = "CODE", value_parser = parse_country)]
+    pub country: Option<String>,
+    /// Leave out other countries' sites (needs --country).
+    #[arg(long, requires = "country")]
+    pub only_country: bool,
+    /// Search for the query without suggesting a spelling.
+    #[arg(long)]
+    pub exact: bool,
+    #[command(flatten)]
+    pub meaning: MeaningArgs,
+    /// A places file (places.tsv.gz from `fetch-pages --set places`): also
+    /// list the places the query asks for. Indexed next to it on first use.
+    #[arg(long, value_name = "PATH")]
+    pub places: Option<PathBuf>,
+    /// The town "near me" means, with --places.
+    #[arg(long, value_name = "TOWN", requires = "places")]
+    pub town: Option<String>,
+    /// What to search for, e.g. `us bank`.
+    #[arg(required = true, value_name = "QUERY")]
+    pub query: Vec<String>,
+}
 
 pub fn run_index(args: IndexArgs) -> Result<()> {
     // Read a record at a time when the file holds each site once, under
-    // its canonical domain, as files written by plumb do: a whole set takes
+    // its canonical domain, as files written by a node do: a whole set takes
     // gigabytes. This never changes the file: a journal next to it, of a
     // node's crawl, is folded into a copy that is removed when done.
     let dir = match args.records.parent() {
@@ -26,14 +103,19 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         .tempfile_in(dir)
         .with_context(|| format!("making a file in {}", dir.display()))?
         .into_temp_path();
-    let outlines = crate::outline::outline_copy(&args.records, &copy)
+    let outlines = plumb_node::outline::outline_copy(&args.records, &copy)
         .with_context(|| format!("reading records {}", args.records.display()))?;
     if let Some((records, outlines)) = outlines {
-        let built =
-            crate::outline::build_index(records, outlines, &args.index, None, 0, None, &mut |_| {
-                Ok(())
-            })
-            .with_context(|| format!("building the index in {}", args.index.display()))?;
+        let built = plumb_node::outline::build_index(
+            records,
+            outlines,
+            &args.index,
+            None,
+            0,
+            None,
+            &mut |_| Ok(()),
+        )
+        .with_context(|| format!("building the index in {}", args.index.display()))?;
         println!(
             "indexed {} sites from {} into {}",
             built.docs,
@@ -58,7 +140,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     Ok(())
 }
 
-/// `plumb spelling`: what the index's spelling model learned.
+/// `plumb-tools spelling`: what the index's spelling model learned.
 pub fn run_spelling(args: &SpellingArgs) -> Result<()> {
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
@@ -171,7 +253,7 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
             .map(|m| m as &dyn plumb_index::Meaning),
     )?;
     let places = match &args.places {
-        Some(file) => crate::places::open_file(file)?.search(
+        Some(file) => plumb_node::places::open_file(file)?.search(
             &query,
             args.town.as_deref(),
             args.country.as_deref(),

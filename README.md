@@ -177,7 +177,7 @@ The settings gear has **Safe search** (off, moderate or strict; `safe=` in the a
 
 The `fixtures/` folder holds a small, made-up dataset in the same formats as the real sources, so the whole pipeline runs offline.
 
-The node is `plumb`; making page sets, seeding records by hand and measuring ranking are in a second program, `plumb-tools`, which a node never runs.
+The node is `plumb`. Making page sets, building and searching an index by hand and measuring ranking are in a second program, `plumb-tools`, which a node never runs.
 
 ```sh
 cargo build --release
@@ -189,8 +189,8 @@ plumb ingest --tranco fixtures/tranco.csv \
              --wat fixtures/sample.wat \
              --wikidata fixtures/wikidata-official-sites.tsv \
              --out data/records.jsonl
-plumb index --records data/records.jsonl --index data/index
-plumb search --index data/index us bank
+plumb-tools index --records data/records.jsonl --index data/index
+plumb-tools search --index data/index us bank
 plumb-tools eval --index data/index --queries fixtures/brand_queries.tsv
 plumb serve --index data/index        # then open http://127.0.0.1:8080
 ```
@@ -230,10 +230,10 @@ plumb ingest --tranco data/tranco-top-1m.csv.zip \
 #    folded into records.jsonl at the end, so an interrupted crawl keeps what
 #    it fetched. If this machine reaches the internet only through a proxy,
 #    add --use-system-proxy.
-plumb crawl --records data/records.jsonl --top 10000
+plumb-tools crawl --records data/records.jsonl --top 10000
 
 # 5. Build the index and run the brand-name test.
-plumb index --records data/records.jsonl --index data/index
+plumb-tools index --records data/records.jsonl --index data/index
 plumb-tools eval --index data/index --queries eval/brand_queries.tsv
 ```
 
@@ -275,11 +275,11 @@ A node can try ranking changes on a share of its own searches and compare what p
 
 ### Search by meaning (optional)
 
-A query that names no site ("electric car maker") can also be matched by meaning. `plumb embed` turns each site's text (names, title, description, Wikidata's description, homepage headings and the start of the homepage text, at most 100 words) into 384 one-byte numbers with a small embedding model, [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5), run in Rust with [candle](https://github.com/huggingface/candle). The model (130 MB) is downloaded on first use. The same text gives the same vector on any machine, so nodes can check each other's.
+A query that names no site ("electric car maker") can also be matched by meaning. `plumb-tools embed` turns each site's text (names, title, description, Wikidata's description, homepage headings and the start of the homepage text, at most 100 words) into 384 one-byte numbers with a small embedding model, [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5), run in Rust with [candle](https://github.com/huggingface/candle). The model (130 MB) is downloaded on first use. The same text gives the same vector on any machine, so nodes can check each other's.
 
 ```sh
-plumb embed --records data/records.jsonl --model data/model --vectors data/vectors.bin
-plumb search --index data/index --model data/model --vectors data/vectors.bin electric car maker
+plumb-tools embed --records data/records.jsonl --model data/model --vectors data/vectors.bin
+plumb-tools search --index data/index --model data/model --vectors data/vectors.bin electric car maker
 ```
 
 A node does this on its own with `plumb run --search-by-meaning` (the desktop app, `--profile desktop` and the Docker image's default command have it on): it downloads the model into `DIR/model`, embeds sites in the background after each index build (best-ranked first, saving every 10,000), and uses the vectors as they come. For a million sites the vectors file is about 430 MB, which searches read in place, mapped into memory, so the system can drop those pages when memory runs short and read them again rather than swap them out (Windows reads the file into memory instead); besides the file the vectors take about 20 MB. `search`, `serve` and `eval` take `--model` and `--vectors`. With them, queries that a site is named by in full, or that name a kind of site ("banks"), rank as before; for the rest, the 50 sites nearest in meaning join the candidates and 70% of `text_score` becomes how close each site is in meaning. Embedding a million sites takes several hours on a desktop CPU; run it again after a crawl and only sites whose text changed are embedded again. The crate docs in `crates/plumb-index` describe the details and tuning knobs.

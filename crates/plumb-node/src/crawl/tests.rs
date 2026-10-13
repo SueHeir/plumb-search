@@ -8,7 +8,7 @@ use plumb_core::{read_jsonl, write_jsonl};
 use plumb_crawl::{CrawledPage, OutLink, PageMeta};
 
 use super::*;
-use crate::records::journal_path;
+use crate::records::{journal_path, load_records};
 
 const DAY: u64 = SECONDS_PER_DAY;
 const WINDOW: u64 = 30 * DAY;
@@ -800,89 +800,6 @@ fn the_journal_is_folded_in_as_it_grows() {
     assert_eq!(journal_seen, [true, true, true]);
     let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
     assert!(file.iter().all(|r| r.crawled_at.is_some()));
-}
-
-fn crawl_args(records: &Path, out: Option<&Path>, top: usize) -> CrawlArgs {
-    CrawlArgs {
-        records: records.to_path_buf(),
-        top,
-        skip_crawled_within_days: 30,
-        concurrency: 16,
-        dns_lookups: 32,
-        out: out.map(Path::to_path_buf),
-        use_system_proxy: false,
-    }
-}
-
-#[test]
-fn plumb_crawl_writes_the_whole_file_at_the_end() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("records.jsonl");
-    write_jsonl(&path, &sites(30)).unwrap();
-    crawl_file(&crawl_args(&path, None, 10), |batch| {
-        batch.iter().map(|t| fetched(&t.domain, 1, &[])).collect()
-    })
-    .unwrap();
-    assert!(!journal_path(&path).exists());
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-    assert_eq!(file.iter().filter(|r| r.crawled_at.is_some()).count(), 10);
-
-    // To another file, which starts from the records read.
-    let out = dir.path().join("out.jsonl");
-    std::fs::write(journal_path(&out), "{\"op\":\"stale\"}\n").unwrap();
-    crawl_file(&crawl_args(&path, Some(&out), 5), |batch| {
-        batch.iter().map(|t| fetched(&t.domain, 2, &[])).collect()
-    })
-    .unwrap();
-    assert!(!journal_path(&out).exists());
-    let copy: Vec<SiteRecord> = read_jsonl(&out).unwrap();
-    assert_eq!(copy.iter().filter(|r| r.crawled_at.is_some()).count(), 15);
-    let input: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-    assert_eq!(input, file, "the input is left alone");
-
-    // An interrupted crawl's journal is picked up and folded in.
-    let mut store = RecordStore::open(&path);
-    let mut late = SiteRecord::new("late.com");
-    late.title = Some("Saved before a crash".into());
-    store.save(&[Change::Merge { record: late }]).unwrap();
-    drop(store);
-    crawl_file(&crawl_args(&path, None, 0), |_| unreachable!()).unwrap();
-    assert!(!journal_path(&path).exists());
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-    assert!(file.iter().any(|r| r.domain == "late.com"));
-}
-
-#[test]
-fn plumb_crawl_stops_when_the_network_is_down() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("records.jsonl");
-    write_jsonl(&path, &sites(30)).unwrap();
-    let err = crawl_file(&crawl_args(&path, None, 30), |batch| {
-        batch.iter().map(|t| failed(&t.domain)).collect()
-    })
-    .unwrap_err()
-    .to_string();
-    assert!(
-        err.starts_with(
-            "stopped crawling: 30 of 30 homepages that should have answered could not be \
-             fetched"
-        ),
-        "{err}"
-    );
-    assert!(err.contains("--use-system-proxy"), "{err}");
-    // Nothing was marked, and the file is whole.
-    assert!(!journal_path(&path).exists());
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
-    assert_eq!(file, sites(30));
-
-    let mut args = crawl_args(&path, None, 30);
-    args.use_system_proxy = true;
-    let err = crawl_file(&args, |batch| {
-        batch.iter().map(|t| failed(&t.domain)).collect()
-    })
-    .unwrap_err()
-    .to_string();
-    assert!(!err.contains("--use-system-proxy"), "{err}");
 }
 
 #[test]

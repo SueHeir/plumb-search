@@ -249,7 +249,7 @@ pub fn open_or_build_with_budget(
 }
 
 /// Opens the index of the places file `file` (all of it), built next to
-/// it on first use: for `plumb serve` and `plumb search`.
+/// it on first use: for `plumb serve` and `plumb-tools search`.
 pub fn open_file(file: &Path) -> Result<PlaceSearcher> {
     let key = key(&WantedPlaces {
         file: file.to_path_buf(),

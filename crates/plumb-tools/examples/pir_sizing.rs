@@ -3,14 +3,14 @@
 //! distributions, never a record or a bucket number.
 //!
 //! ```text
-//! cargo run --release -p plumb-node --example pir_sizing -- DATA/indexes/ID/buckets
+//! cargo run --release -p plumb-tools --example pir_sizing -- DATA/indexes/ID/buckets
 //! ```
 //!
 //! Given a records file (`records.jsonl`) instead of a buckets directory,
 //! it builds the buckets in a temporary directory first.
 //!
 //! `--build-lean OUT` instead builds the lean PIR snapshot itself
-//! ([`plumb_net::pir::lean`]) in `OUT`, a 512 MiB table.
+//! ([`plumb_tools::pir::lean`]) in `OUT`, a 512 MiB table.
 //!
 //! `--write-records VARIANT FILE` instead writes the records file, cut
 //! down, to build an index from and compare search quality.
@@ -33,8 +33,8 @@ use plumb_core::keys::{
     bucket_of, lean_record, piece_of, record_keys, slim_record, PIECES_PER_BUCKET,
 };
 use plumb_core::SiteRecord;
-use plumb_net::pir::snapshot::Layout;
 use plumb_net::BucketTable;
+use plumb_tools::pir::snapshot::Layout;
 use serde_json::json;
 
 /// Rows the probe's `upstream-16k` profile takes, and their size.
@@ -153,7 +153,7 @@ fn main() -> Result<()> {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_secs();
-            let (snapshot, report) = plumb_net::pir::lean::build(&out, &table, now, 7 * 86_400)?;
+            let (snapshot, report) = plumb_tools::pir::lean::build(&out, &table, now, 7 * 86_400)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({

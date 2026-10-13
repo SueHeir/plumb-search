@@ -31,10 +31,9 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
+use plumb_embed::ModelId;
 
-use crate::ModelId;
-
-/// File name of a node's relation maps.
+/// File name of the relation maps.
 pub const RELATIONS_FILE_NAME: &str = "relations.bin";
 
 const MAGIC: &[u8; 8] = b"PLUMBREL";
