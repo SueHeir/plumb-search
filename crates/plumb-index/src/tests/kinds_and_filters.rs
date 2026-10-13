@@ -614,6 +614,63 @@ fn safe_search_and_language_leave_sites_out() {
 }
 
 #[test]
+fn a_query_in_another_script_than_the_language_keeps_its_sites() {
+    let mut rakuten = site(
+        "rakuten.example",
+        Some("楽天市場 | ショッピング"),
+        None,
+        &[],
+        &[],
+        ranked(50, 50_000),
+    );
+    rakuten.language = Some("ja".into());
+    let records = [
+        rakuten,
+        // Says no language, but its title is Arabic.
+        site(
+            "aljazeera.example",
+            Some("الجزيرة نت: آخر أخبار اليوم"),
+            None,
+            &[],
+            &[],
+            ranked(60, 50_000),
+        ),
+        site(
+            "bankru.example",
+            Some("Bank Россия — официальный сайт банка"),
+            None,
+            &[],
+            &[],
+            ranked(755, 5_000),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let english = SearchOptions {
+        language: Some("en".into()),
+        ..SearchOptions::default()
+    };
+    let found = |query: &str| {
+        let hits = searcher
+            .search_full(query, 10, &RankConfig::default(), &english)
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    // English chosen, but the query is written in the sites' script.
+    assert_eq!(found("楽天市場"), ["rakuten.example"]);
+    assert_eq!(found("الجزيرة"), ["aljazeera.example"]);
+    assert_eq!(found("россия"), ["bankru.example"]);
+    // A query in Latin letters keeps the filter.
+    assert!(found("bank").is_empty());
+    assert_eq!(english.language_for("bank"), Some("en"));
+    assert_eq!(english.language_for("楽天"), None);
+    assert_eq!(english.for_query("楽天").language, None);
+}
+
+#[test]
 fn search_operators_narrow_the_results() {
     let mut records = corpus();
     records.push(site(
