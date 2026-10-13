@@ -733,7 +733,27 @@ impl PageSearcher {
                     }
                 }
             }
-            Hint::Any => {}
+            // A plural that names no article but namesakes with a
+            // qualifier asks about what its singular names: "what are
+            // clouds" is about Cloud, not "Clouds (2020 film)", and "what
+            // are solar panels" about Solar panel.
+            Hint::Any => {
+                let qualified =
+                    |hit: &PageHit| super::base_title(&hit.page.title) != hit.page.title;
+                let last = name.rsplit(' ').next().unwrap_or_default();
+                let plural =
+                    plumb_core::other_number(last).is_some_and(|one| one.len() < last.len());
+                if plural && found.iter().all(|hit| !hit.named || qualified(hit)) {
+                    if let Some(singular) = last_word_in_other_number(&name) {
+                        let named = self.search_once(&singular, limit, scope)?;
+                        found.extend(
+                            named.into_iter().filter(|hit| {
+                                hit.named && hit.page.is_article() && !qualified(hit)
+                            }),
+                        );
+                    }
+                }
+            }
         }
         Ok(Some(found))
     }
