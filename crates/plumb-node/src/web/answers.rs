@@ -418,6 +418,33 @@ const KIND_LISTINGS: &[(&[&str], &[&str])] = &[
     (&["steam", "igdb"], &["game"]),
 ];
 
+/// Services holding an account of someone's own: a person's, a group's or
+/// an organization's.
+const ACCOUNTS: &[&str] = &[
+    "instagram",
+    "x",
+    "tiktok",
+    "facebook",
+    "threads",
+    "bluesky",
+    "mastodon",
+    "twitch",
+    "linkedin",
+    "linkedin-company",
+    "soundcloud",
+    "patreon",
+];
+
+/// Facts only a person (born) or a group or organization (founded, its
+/// founders, its CEO or headquarters) has.
+const HOLDER_FACTS: &[plumb_core::facts::FactKind] = &[
+    plumb_core::facts::FactKind::Born,
+    plumb_core::facts::FactKind::Founded,
+    plumb_core::facts::FactKind::Founder,
+    plumb_core::facts::FactKind::Ceo,
+    plumb_core::facts::FactKind::Headquarters,
+];
+
 /// Where a description stops saying what its page is and goes on to who
 /// made it or what it is part of.
 const DESCRIPTION_HEAD_ENDS: &[&str] = &[
@@ -461,14 +488,34 @@ fn kind_named<'a>(name: &'a str, kinds: &[&str]) -> Option<&'a str> {
 /// god's. Looked up with its kind ("top gun movie"), only a work called
 /// so, since a search names every film of the title then, and the film
 /// called Top Gun is looked up by its name alone ([`profile_lookups`]).
+/// For an account ([`ACCOUNTS`]), only a person, group or organization
+/// when some are: "drake instagram" is the rapper's, not the name list's,
+/// and "pink instagram" the singer's, not the colour's.
 /// The kind asked for decides, never which namesake has the profile.
 pub fn profile_candidates(
     query: &str,
     name: &str,
     mut candidates: Vec<plumb_index::pages::PageHit>,
 ) -> Vec<plumb_index::pages::PageHit> {
-    let Some(kinds) = services_asked(query).and_then(|(services, _)| listed_kinds(&services))
-    else {
+    let Some((services, _)) = services_asked(query) else {
+        return candidates;
+    };
+    if services
+        .iter()
+        .all(|service| ACCOUNTS.contains(&service.key))
+    {
+        let holder = |hit: &plumb_index::pages::PageHit| {
+            hit.page
+                .facts
+                .iter()
+                .any(|fact| HOLDER_FACTS.contains(&fact.kind))
+        };
+        if candidates.iter().any(holder) {
+            candidates.retain(holder);
+        }
+        return candidates;
+    }
+    let Some(kinds) = listed_kinds(&services) else {
         return candidates;
     };
     if kind_named(name, kinds).is_some() {
@@ -2130,6 +2177,92 @@ mod tests {
             "top gun movie cast",
             &EntityResolution::Unresolved
         ));
+    }
+
+    #[test]
+    fn an_account_is_a_person_s_group_s_or_organization_s() {
+        use plumb_core::facts::FactKind::{self, Born, Founded};
+        let entity = |title: &str, description: &str, item: &str, facts: &[(FactKind, &str)]| {
+            let mut hit = with_facts(article(title, description, None), facts);
+            hit.page.item = Some(item.into());
+            hit.named = true;
+            hit
+        };
+        let resolved = |query: &str, name: &str, candidates: Vec<PageHit>| match resolve_entity(
+            name,
+            &profile_candidates(query, name, candidates),
+            None,
+        ) {
+            EntityResolution::Resolved(page) => Some(page.title.clone()),
+            _ => None,
+        };
+        let drake = vec![
+            entity(
+                "Drake (musician)",
+                "Canadian rapper and singer (born 1986)",
+                "Q33240",
+                &[(Born, "1986-10-24")],
+            ),
+            entity("Drake (given name)", "Name list", "Q1254221", &[]),
+        ];
+        // Both named by "drake", so neither without the account asked for.
+        assert!(matches!(
+            resolve_entity("drake", &drake, None),
+            EntityResolution::Ambiguous(_)
+        ));
+        assert_eq!(
+            resolved("drake instagram", "drake", drake).as_deref(),
+            Some("Drake (musician)")
+        );
+        // Over a namesake with the very title: the colour has no account.
+        let pink = vec![
+            entity("Pink", "Pale tint of red", "Q51101", &[]),
+            entity(
+                "Pink (singer)",
+                "American singer and songwriter (born 1979)",
+                "Q160009",
+                &[(Born, "1979-09-08")],
+            ),
+        ];
+        assert_eq!(
+            resolved("pink instagram", "pink", pink.clone()).as_deref(),
+            Some("Pink (singer)")
+        );
+        // A band has its founding.
+        let queen = vec![
+            entity(
+                "Queen (band)",
+                "British rock band",
+                "Q15862",
+                &[(Founded, "1970")],
+            ),
+            entity("Queen regnant", "Female monarch", "Q16511993", &[]),
+        ];
+        assert_eq!(
+            resolved("queen x", "queen", queen).as_deref(),
+            Some("Queen (band)")
+        );
+        // YouTube also has a song's video, so every namesake stays.
+        assert_eq!(profile_candidates("pink youtube", "pink", pink).len(), 2);
+        // With no person, group or organization, nothing is left out.
+        let office = vec![
+            entity(
+                "The Office (American TV series)",
+                "American mockumentary sitcom",
+                "Q23831",
+                &[],
+            ),
+            entity(
+                "The Office (British TV series)",
+                "British mockumentary sitcom",
+                "Q1052839",
+                &[],
+            ),
+        ];
+        assert_eq!(
+            profile_candidates("the office instagram", "the office", office).len(),
+            2
+        );
     }
 
     #[test]
