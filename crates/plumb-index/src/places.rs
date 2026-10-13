@@ -89,9 +89,27 @@ const NEAR_ME: &[&[&str]] = &[
     &["close", "to", "me"],
     &["near", "my", "location"],
     &["in", "my", "area"],
+    &["in", "the", "area"],
+    &["near", "here"],
+    &["around", "here"],
 ];
 /// Words that say where, in "pizza in denver".
 const WHERE_WORDS: &[&[&str]] = &[&["in"], &["near"], &["around"], &["close", "to"], &["at"]];
+/// What may follow "in" or "at" without naming a place: "tallest building
+/// in the world", "coffee in the morning", "pizza at home".
+const NOWHERE: &[&str] = &[
+    "world",
+    "whole world",
+    "universe",
+    "morning",
+    "afternoon",
+    "evening",
+    "night",
+    "weekend",
+    "summer",
+    "winter",
+    "home",
+];
 /// Kinds of town a query may name without "in" or "near": "denver
 /// pizza", "barber brooklyn".
 const GUESSED_TOWNS: &[&str] = &["place=city", "place=borough"];
@@ -101,6 +119,7 @@ const WHEN: &[&[&str]] = &[
     &["open", "late"],
     &["open", "today"],
     &["open", "24", "hours"],
+    &["open", "at", "night"],
     &["24", "hours"],
     &["24", "7"],
     &["now"],
@@ -232,6 +251,9 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
                 let mut place = &words[end..];
                 if place.first().is_some_and(|w| w == "the") && place.len() > 1 {
                     place = &place[1..];
+                }
+                if NOWHERE.contains(&place.join(" ").as_str()) {
+                    return Vec::new();
                 }
                 return vec![PlaceQuery {
                     what,
@@ -1340,6 +1362,17 @@ mod tests {
             Some(("pharmacy".into(), Near::Me))
         );
         assert_eq!(query("pizza tonight"), Some(("pizza".into(), Near::Me)));
+        assert_eq!(
+            query("restaurants open at night"),
+            Some(("restaurants".into(), Near::Me))
+        );
+        for here in [
+            "coffee near here",
+            "coffee around here",
+            "coffee in the area",
+        ] {
+            assert_eq!(query(here), Some(("coffee".into(), Near::Me)), "{here}");
+        }
         // Not for words that are no kind of place.
         assert_eq!(query("chrome open now"), None);
         assert_eq!(query("news today"), None);
@@ -1364,6 +1397,13 @@ mod tests {
             "best time to visit seattle",
             "capital of washington",
             "capital of singapore",
+            // Nowhere, after "in" or "at".
+            "tallest building in the world",
+            "best pizza in the world",
+            "largest library in the whole world",
+            "coffee in the morning",
+            "museums in winter",
+            "pizza at home",
         ] {
             assert_eq!(query(plain), None, "{plain}");
         }
