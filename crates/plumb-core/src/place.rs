@@ -383,7 +383,15 @@ pub fn normalize_region(region: &str) -> String {
     US_STATES
         .iter()
         .chain(CANADIAN_PROVINCES)
-        .find(|(_, full)| crate::normalize_text(full) == name)
+        .find(|(_, full)| {
+            // A name of two parts is often given as its first:
+            // "Newfoundland" for Newfoundland and Labrador.
+            let full = crate::normalize_text(full);
+            full == name
+                || full
+                    .strip_prefix(&name)
+                    .is_some_and(|rest| rest.starts_with(" and "))
+        })
         .map_or(region, |(code, _)| (*code).to_string())
 }
 
@@ -837,6 +845,8 @@ mod tests {
         assert_eq!(normalize_region("Québec"), "QC");
         assert_eq!(normalize_region("ON"), "ON");
         assert_eq!(normalize_region("Bayern"), "Bayern");
+        assert_eq!(normalize_region("Newfoundland"), "NL");
+        assert_eq!(normalize_region("Labrador"), "Labrador");
     }
 
     #[test]

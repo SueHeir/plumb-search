@@ -964,11 +964,12 @@ impl PlaceSearcher {
         // still is ("new york", "quebec"), and "washington" is the capital
         // too.
         let whole = words.join(" ");
+        let region = normalize_region(&whole);
         let named_state = US_STATES
             .iter()
             .map(|state| (state, "US"))
             .chain(CANADIAN_PROVINCES.iter().map(|province| (province, "CA")))
-            .find(|((_, name), _)| normalize_text(name) == whole)
+            .find(|((code, _), _)| *code == region)
             .map(|((code, _), country)| (*code, country));
         // A town first, however the words split ("boulder co" is Boulder in
         // Colorado before it is a gym called Boulder & Co.), then any place.
@@ -2157,6 +2158,8 @@ mod tests {
             city("Washington", 690_000, "DC", "US", 38.90, -77.04),
             at("Hotel Florida", "tourism=hotel", 3.321, -76.231),
             city("Ontario", 175_000, "CA", "US", 34.06, -117.65),
+            city("Newfoundland", 1_000, "NJ", "US", 41.04, -74.43),
+            city("St. John's", 110_000, "NL", "CA", 47.56, -52.71),
             // As a places file that read no provinces has it.
             Place {
                 region: None,
@@ -2165,7 +2168,7 @@ mod tests {
             },
         ]);
         let (_dir, searcher) = index(fixtures);
-        for state in ["florida", "Montana", "ontario"] {
+        for state in ["florida", "Montana", "ontario", "newfoundland"] {
             let found = searcher.resolve(state, Some("US"), None).unwrap();
             assert_eq!(found.status, LocationStatus::MissingLocation, "{state}");
             assert!(found.candidates.is_empty(), "{state}");
@@ -2191,6 +2194,9 @@ mod tests {
         );
         let california = searcher.locate("ontario ca", None).unwrap().unwrap();
         assert_eq!(california.region.as_deref(), Some("CA"));
+        // A province is often called by the first part of its name.
+        let found = searcher.locate("st johns newfoundland", None).unwrap();
+        assert_eq!(found.unwrap().name, "St. John's");
     }
 
     #[test]
