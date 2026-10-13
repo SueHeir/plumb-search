@@ -988,31 +988,18 @@ pub fn load_or_create_key(path: &std::path::Path) -> Result<Keypair> {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating {}", parent.display()))?;
             }
-            let tmp = path.with_extension("tmp");
-            write_private(&tmp, &bytes)?;
-            std::fs::rename(&tmp, path).with_context(|| format!("saving {}", path.display()))?;
+            plumb_core::storage::write_atomic_private(
+                path,
+                &path.with_extension("tmp"),
+                &bytes,
+                None,
+            )
+            .with_context(|| format!("saving {}", path.display()))?;
             info!("made a new node key in {}", path.display());
             Ok(key)
         }
         Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
     }
-}
-
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[derive(NetworkBehaviour)]

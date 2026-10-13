@@ -255,24 +255,8 @@ fn is_backup_name(name: &str) -> bool {
 
 /// Writes `bytes` to `path` in one go, readable by its owner only.
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-    let tmp = crate::temp_path_for(path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let written = options.open(&tmp).and_then(|mut file| {
-        file.write_all(bytes)?;
-        file.sync_all()
-    });
-    if let Err(err) = written.and_then(|()| std::fs::rename(&tmp, path)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err).with_context(|| format!("writing {}", path.display()));
-    }
-    Ok(())
+    plumb_core::storage::write_atomic_private(path, &crate::temp_path_for(path), bytes, None)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]

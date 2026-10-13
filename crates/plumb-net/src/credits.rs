@@ -283,17 +283,14 @@ impl Ledger {
                 .collect(),
         };
         let bytes = serde_json::to_vec(&file).context("encoding the ledger")?;
-        if let Some(budget) = &self.budget {
-            plumb_core::storage::write_atomic(
-                path,
-                &path.with_extension("quota.tmp"),
-                &bytes,
-                Some(budget),
-                None,
-            )?;
-        } else {
-            write_atomic(path, &bytes, false)?;
-        }
+        plumb_core::storage::write_atomic(
+            path,
+            &path.with_extension("quota.tmp"),
+            &bytes,
+            self.budget.as_ref(),
+            None,
+        )
+        .with_context(|| format!("saving {}", path.display()))?;
         self.dirty = false;
         Ok(())
     }
@@ -362,7 +359,14 @@ impl Issuer {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 let server = VoprfServer::<Ristretto255>::new(&mut OsRng)
                     .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-                write_atomic(&key_path, &server.serialize(), true)?;
+                let part = key_path.with_extension("tmp");
+                plumb_core::storage::write_atomic_private(
+                    &key_path,
+                    &part,
+                    &server.serialize(),
+                    None,
+                )
+                .with_context(|| format!("saving {}", key_path.display()))?;
                 server
             }
             Err(err) => return Err(err).with_context(|| format!("reading {}", key_path.display())),
@@ -609,17 +613,13 @@ impl Wallet {
             return Ok(());
         };
         let bytes = serde_json::to_vec(&self.issuers).context("encoding the wallet")?;
-        if let Some(budget) = &self.budget {
-            plumb_core::storage::write_atomic_private(
-                path,
-                &path.with_extension("quota.tmp"),
-                &bytes,
-                Some(budget),
-            )?;
-            Ok(())
-        } else {
-            write_atomic(path, &bytes, true)
-        }
+        plumb_core::storage::write_atomic_private(
+            path,
+            &path.with_extension("quota.tmp"),
+            &bytes,
+            self.budget.as_ref(),
+        )
+        .with_context(|| format!("saving {}", path.display()))
     }
 }
 
@@ -670,26 +670,6 @@ pub struct CreditsAtPeer {
     pub credits: i64,
     /// Its work counts there, so it can have tokens for them.
     pub counts: bool,
-}
-
-fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    if private {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    #[cfg(not(unix))]
-    let _ = private;
-    let mut file = options
-        .open(&tmp)
-        .with_context(|| format!("creating {}", tmp.display()))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("saving {}", path.display()))
 }
 
 #[cfg(test)]

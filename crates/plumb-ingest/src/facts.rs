@@ -112,19 +112,6 @@ fn is_item_id(item: &str) -> bool {
     item.len() > 1 && item.starts_with('Q') && item[1..].bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Asks the SPARQL `endpoint` for the facts of the items of the official
-/// websites files `sites_files`, as [`download_site_facts_with`] does
-/// without a mirror.
-pub async fn download_site_facts(
-    client: &reqwest::Client,
-    endpoint: &str,
-    dir: &Path,
-    sites_files: &[PathBuf],
-    pacing: WikidataPacing,
-) -> Result<PathBuf> {
-    download_site_facts_with(client, None, endpoint, dir, sites_files, pacing).await
-}
-
 /// Items per query to a mirror such as QLever's: 20,000 took 13 seconds
 /// there on 2026-10-09, no longer than 2,000.
 pub const MIRROR_FACTS_BATCH: usize = 20_000;

@@ -4198,88 +4198,6 @@ fn docs_asked(page: &Page, query: &str) -> bool {
         .is_some_and(|site| plumb_core::docs::asks_about(site, query))
 }
 
-/// Most docs sites [`PageSearcher::search_naming_docs`] searches by name.
-const MAX_NAMED_DOCS: usize = 3;
-/// The first pages found for a search's words that [`docs_sites_wanted`]
-/// reads for the docs they ask about.
-const DOCS_HINT_PAGES: usize = 20;
-/// How many of them must ask about a docs site for it to be wanted.
-const DOCS_HINT_AGREE: usize = 2;
-
-/// The docs sites whose pages a search for `words` wants without naming
-/// what their docs are of, so that none of their pages is found by its
-/// words alone ([`docs_asked`]): those on the hosts its `site:` operators
-/// `ops` name ("asyncio site:docs.python.org"), and, for a search for
-/// docs pages alone (`docs`) with no `site:`, those that most of the
-/// first pages `found` for its words ask about, as questions tagged
-/// python do for "asyncio". None whose product `words` names already.
-pub fn docs_sites_wanted(
-    ops: &Operators,
-    words: &str,
-    docs: bool,
-    found: &[PageHit],
-) -> Vec<&'static plumb_core::docs::DocsSite> {
-    use plumb_core::docs::{asks_about, DOCS_SITES};
-    if words.trim().is_empty() || DOCS_SITES.iter().any(|site| asks_about(site, words)) {
-        return Vec::new();
-    }
-    if !ops.sites.is_empty() {
-        // A host, not a top-level domain: "site:org" names no docs.
-        let on_sites = |host: &str| {
-            ops.sites.iter().any(|site| {
-                site.contains('.')
-                    && (host == site
-                        || host
-                            .strip_suffix(site.as_str())
-                            .is_some_and(|sub| sub.ends_with('.')))
-            })
-        };
-        return DOCS_SITES
-            .iter()
-            .filter(|site| {
-                site.roots
-                    .iter()
-                    .filter_map(|root| host_of(root))
-                    .any(|host| on_sites(&host))
-            })
-            .take(MAX_NAMED_DOCS)
-            .collect();
-    }
-    if !docs {
-        return Vec::new();
-    }
-    let counts: Vec<usize> = DOCS_SITES
-        .iter()
-        .map(|site| {
-            found
-                .iter()
-                .take(DOCS_HINT_PAGES)
-                .filter(|hit| {
-                    let text = format!(
-                        "{} {}",
-                        hit.page.title,
-                        hit.page.description.as_deref().unwrap_or("")
-                    );
-                    asks_about(site, &text)
-                })
-                .count()
-        })
-        .collect();
-    let most = counts.iter().copied().max().unwrap_or(0);
-    if most < DOCS_HINT_AGREE {
-        return Vec::new();
-    }
-    // Questions tagged javascript and reactjs ask about MDN and React
-    // alike: both are searched.
-    DOCS_SITES
-        .iter()
-        .zip(counts)
-        .filter(|(_, count)| *count == most)
-        .map(|(site, _)| site)
-        .take(MAX_NAMED_DOCS)
-        .collect()
-}
-
 /// `words` with what `site`'s docs are of named first, as its pages'
 /// other names are ("Python asyncio"), by its product's name or else by
 /// a word that asks about it ("dotnet" for .NET).
@@ -5649,31 +5567,6 @@ mod tests {
         // .NET's pages are named "dotnet …" too.
         let dotnet = plumb_core::docs::site("dotnet").unwrap();
         assert_eq!(naming_docs(dotnet, "linq"), "dotnet linq");
-        // Questions about JavaScript and React ask about both docs; one
-        // question alone says too little.
-        let tagged = |tags: &str, item: &str| PageHit {
-            page: question("useState not updating", item, tags),
-            score: 1.0,
-            named: false,
-            popularity: 1.0,
-            whole: false,
-            learned: None,
-        };
-        let none = Operators::default();
-        let keys = |found: &[PageHit]| -> Vec<&str> {
-            docs_sites_wanted(&none, "usestate", true, found)
-                .iter()
-                .map(|site| site.key)
-                .collect()
-        };
-        let both = [
-            tagged("javascript, reactjs", "1"),
-            tagged("javascript, reactjs, react-hooks", "2"),
-        ];
-        assert_eq!(keys(&both), ["mdn", "react"]);
-        assert!(keys(&both[..1]).is_empty());
-        assert!(docs_sites_wanted(&none, "usestate", false, &both).is_empty());
-        assert!(docs_sites_wanted(&none, "react usestate", true, &both).is_empty());
     }
 
     #[test]
