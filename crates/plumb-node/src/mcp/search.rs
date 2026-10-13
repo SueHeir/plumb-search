@@ -192,7 +192,12 @@ impl Mcp {
             query,
             i64::try_from(now).unwrap_or(i64::MAX),
             self.rates.as_ref(),
-        );
+        )
+        .or_else(|| {
+            let town = plumb_answer::asked_town(query)?;
+            let place = self.backend.locate(&town, options.country.as_deref())?;
+            crate::web::answers::time_in_place(&place)
+        });
         crate::assembly::route_sources(
             query,
             answer.as_ref().map(|a| a.kind),
