@@ -402,6 +402,7 @@ mod tests {
             ("https://www.pnc.com/en/?utm_source=pncbank", false),
             ("https://www.computerworld.com/au/", false),
             ("https://www.bungie.net/7/en/Destiny", true),
+            ("https://www.nba.com/celtics/", true),
             ("https://accounts.google.com/ServiceLogin?continue=x", true),
             ("https://validate.perfdrive.com/?ssa=1", true),
             ("https://starcraft2.blizzard.com/", true),
