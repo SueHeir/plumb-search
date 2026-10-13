@@ -1271,6 +1271,7 @@ pub async fn start(
         topic,
         report_topic,
         store: store.clone(),
+        storage: storage.clone(),
         reports: Arc::new(Mutex::new(reports)),
         popularity: popularity.clone(),
         recount: false,
@@ -1938,6 +1939,10 @@ struct Task {
     topic: gossipsub::IdentTopic,
     report_topic: gossipsub::IdentTopic,
     store: Arc<Mutex<BatchStore>>,
+    /// The storage ledger the store charges, kept here so the swarm task
+    /// reads it without the store's lock, which work off the task holds
+    /// across whole batch writes.
+    storage: Option<Arc<StorageBudget>>,
     reports: Arc<Mutex<ReportStore>>,
     popularity: Arc<RwLock<Arc<PopularityTable>>>,
     /// New reports came in since the last count.
@@ -2414,7 +2419,7 @@ impl Task {
         // Fresh crawls reserve their headroom before signing. This
         // reservation remains held while the store writes, so the ledger
         // counts it meanwhile.
-        let budget = self.lock_store().storage().cloned();
+        let budget = self.storage.clone();
         let _headroom = if let Some(budget) = budget {
             let mut size = crate::storage::ByteCount {
                 bytes: 0,
@@ -2681,12 +2686,19 @@ impl Task {
         }
         if ticks.is_multiple_of(60) {
             let now = now_unix();
-            let mut store = self.lock_store();
-            store.prune_keeping(now, self.config.keep_batches_days);
-            if let Some(bytes) = self.config.keep_batches_bytes {
-                store.prune_to_bytes(bytes, &self.key.public().encode_protobuf());
-            }
-            drop(store);
+            // Off the swarm task: a store that follows crawls reads each
+            // batch it drops, and a day's worth expires at once.
+            let store = self.store.clone();
+            let days = self.config.keep_batches_days;
+            let bytes = self.config.keep_batches_bytes;
+            let own = self.key.public().encode_protobuf();
+            tokio::task::spawn_blocking(move || {
+                let mut store = store.locked();
+                store.prune_keeping(now, days);
+                if let Some(bytes) = bytes {
+                    store.prune_to_bytes(bytes, &own);
+                }
+            });
             self.agreement.prune(now);
             let agreement = self.agreement.status();
             self.with_status(|s| s.agreement = agreement);
@@ -2720,7 +2732,7 @@ impl Task {
         let reports = self.reports.clone();
         let popularity = self.popularity.clone();
         let path = self.config.dir.join(POPULARITY_FILE);
-        let storage = self.lock_store().storage().cloned();
+        let storage = self.storage.clone();
         let tx = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
             // Counted with the store let go: STAR counting takes a while.
@@ -4732,7 +4744,7 @@ impl Task {
             tokens_spent: self.tokens_spent.load(std::sync::atomic::Ordering::Relaxed),
             tokens_held: 0,
         };
-        let storage = self.lock_store().storage().map(|budget| budget.status());
+        let storage = self.storage.as_ref().map(|budget| budget.status());
         let ingest_backpressure = self.ingest_blocked
             || self.records.capacity() == 0
             || storage.is_some_and(|s| s.backpressure);
