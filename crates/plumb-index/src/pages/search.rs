@@ -76,14 +76,54 @@ const MEASURES: &[&str] = &[
     "tall", "old", "big", "long", "deep", "high", "far", "wide", "large", "heavy",
 ];
 
-/// What a question of how something works or how big it is asks about:
-/// "refrigerator" of "how does a refrigerator work", "eiffel tower" of
-/// "how tall is the eiffel tower". `None` for other questions ("how do i
-/// make pancakes", where "how do" starts any question) and for "it".
+/// Questions that name what they ask about between a lead and a tail:
+/// "refrigerator" of "how does a refrigerator work", "metabolism" of "how
+/// metabolism works", "meiosis" of "where does meiosis occur", "coffee" of
+/// "is coffee bad for you". The first pair a question has decides.
+const ASKED_BETWEEN: &[(&[&str], &[&str])] = &[
+    (&["how does ", "how do "], &[" work"]),
+    (&["how "], &[" works", " work"]),
+    (
+        &["where does ", "where do "],
+        &[" take place", " occur", " happen", " come from"],
+    ),
+    (
+        &["is ", "are "],
+        &[
+            " good for you",
+            " bad for you",
+            " healthy",
+            " safe",
+            " beneficial",
+            " harmful",
+            " dangerous",
+            " effective",
+        ],
+    ),
+    (&["does ", "do "], &[" really work", " work"]),
+];
+
+/// Words that make what a question names a clause or a pronoun, not a
+/// name: "how do i make it work", "how many hours do nurses work".
+const NOT_NAMES: &[&str] = &[
+    "it", "this", "that", "they", "these", "those", "you", "i", "we", "he", "she", "to", "do",
+    "does", "did", "is", "are", "can", "should", "many", "much", "long", "often",
+];
+
+/// The most words a question's name has: more are a clause.
+const MAX_ASKED_WORDS: usize = 4;
+
+/// What a question of how something works, how big it is, where it
+/// happens or whether it is good for you asks about: "refrigerator" of
+/// "how does a refrigerator work", "eiffel tower" of "how tall is the
+/// eiffel tower". `None` for other questions ("how do i make pancakes",
+/// where "how do" starts any question), for "it", and for more than
+/// [`MAX_ASKED_WORDS`] words.
 fn asked_how(q: &str) -> Option<&str> {
-    let works = ["how does ", "how do "]
-        .iter()
-        .find_map(|lead| q.strip_prefix(lead)?.strip_suffix(" work"));
+    let between = ASKED_BETWEEN.iter().find_map(|(leads, tails)| {
+        let rest = leads.iter().find_map(|lead| q.strip_prefix(lead))?;
+        tails.iter().find_map(|tail| rest.strip_suffix(tail))
+    });
     let measured = || {
         let (measure, rest) = q.strip_prefix("how ")?.split_once(' ')?;
         let rest = ["is ", "are ", "was "]
@@ -91,12 +131,14 @@ fn asked_how(q: &str) -> Option<&str> {
             .find_map(|verb| rest.strip_prefix(verb))?;
         MEASURES.contains(&measure).then_some(rest)
     };
-    let about = works.or_else(measured)?;
+    let about = between.or_else(measured)?;
     let about = ["a ", "an ", "the "]
         .iter()
         .find_map(|article| about.strip_prefix(article))
         .unwrap_or(about);
-    (!matches!(about, "it" | "this" | "that" | "they" | "these" | "those")).then_some(about)
+    let words = || about.split(' ');
+    (words().count() <= MAX_ASKED_WORDS && !words().any(|word| NOT_NAMES.contains(&word)))
+        .then_some(about)
 }
 
 /// Words after a name that say what about it is wanted.

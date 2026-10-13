@@ -276,6 +276,17 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("how big is texas", "texas"),
         ("where is machu picchu", "machu picchu"),
         ("how many people live in tokyo", "tokyo"),
+        ("how metabolism works", "metabolism"),
+        ("how the stock market works", "stock market"),
+        ("how vaccines work", "vaccines"),
+        ("where does photosynthesis take place", "photosynthesis"),
+        ("where does meiosis occur", "meiosis"),
+        ("where do babies come from", "babies"),
+        ("is coffee bad for you", "coffee"),
+        ("is intermittent fasting healthy", "intermittent fasting"),
+        ("are eggs good for you", "eggs"),
+        ("does creatine work", "creatine"),
+        ("do charcoal masks really work", "charcoal masks"),
     ] {
         assert_eq!(
             hinted_name(query),
@@ -288,6 +299,20 @@ fn articles_are_found_by_what_they_say_of_themselves() {
     assert_eq!(hinted_name("how long is it"), None);
     assert_eq!(hinted_name("how long does it take to boil an egg"), None);
     assert_eq!(hinted_name("how do i make pancakes"), None);
+    // A pronoun or a clause between the words is not a name.
+    for query in [
+        "how it works",
+        "does it work",
+        "is it safe",
+        "is this website safe",
+        "do you work",
+        "how do i make it work",
+        "how to make money work",
+        "how many hours do nurses work",
+        "is the new bridge over the river safe",
+    ] {
+        assert_eq!(hinted_name(query), None, "{query:?}");
+    }
 }
 
 #[test]
