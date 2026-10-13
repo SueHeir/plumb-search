@@ -345,7 +345,8 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
             .flat_map(|word| analysis::tokens(&STEMS, &word))
             .collect()
     };
-    let asked: HashSet<String> = words(query).into_iter().collect();
+    let query_words = words(query);
+    let asked: HashSet<String> = query_words.iter().cloned().collect();
     let fewest = asked.len().min(2);
     if fewest == 0 {
         return false;
@@ -382,12 +383,17 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
         // ovarian cyst" for "Will an ovarian cyst cause back pain? What to
         // know". Two words side by side are enough in a short title,
         // "epley's maneuver" for "Epley Maneuver (Canalith Repositioning
-        // Procedure)"; a longer one with a name is mostly news, "hulk
+        // Procedure)", as is a longer query but for its last word, often
+        // the kind of thing it is: "lemon drop cocktail" for "Lemon drop
+        // martini recipe". A longer title with them is mostly news, "hulk
         // hogan" for "Hulk Hogan's Daughter Brooke Welcomes Twins". A
         // subpage's long title with them is more often a big site's news or
         // press release.
-        let pair = asked.len() == 2 && held && title.len() <= REFERENCE_PAIR_TITLE_WORDS;
-        let whole = reference && shared == asked.len() && (asked.len() >= 3 || pair);
+        let lead = &query_words[..query_words.len() - 1];
+        let pair = title.len() <= REFERENCE_PAIR_TITLE_WORDS
+            && (asked.len() == 2 && held
+                || lead.len() >= 2 && in_order.windows(lead.len()).any(|run| run == lead));
+        let whole = reference && (shared == asked.len() && asked.len() >= 3 || pair);
         whole || shared >= fewest && shared as f32 >= share * title.len() as f32
     };
     // Or of its title before a subtitle, "Declaration of Independence" in

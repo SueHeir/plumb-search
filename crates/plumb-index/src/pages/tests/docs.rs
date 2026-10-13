@@ -306,6 +306,9 @@ fn reference_pages_are_listed_only_when_asked_for() {
                 "Epley Maneuver (Canalith Repositioning Procedure)",
             ),
             ("ribeye steak", "Charcoal-Grilled Ribeye Steak Recipe"),
+            // A short title with all but the query's last word.
+            ("lemon drop cocktail", "Lemon drop martini recipe"),
+            ("time zone converter", "Time Zone Calculator"),
         ] {
             assert!(allowed(set, query, title), "{set} {query}: {title}");
         }
@@ -324,6 +327,10 @@ fn reference_pages_are_listed_only_when_asked_for() {
                 "The Great Gatsby Questions for Study and Discussion",
             ),
             ("leaking faucet repair", "Faucet installation cost"),
+            (
+                "fifa world cup schedule",
+                "FIFA World Cup 2026 travel guide",
+            ),
             // From the 1,000-search review on hpc, where each was first.
             (
                 "work australia",
