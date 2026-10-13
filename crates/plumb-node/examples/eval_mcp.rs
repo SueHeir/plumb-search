@@ -147,6 +147,7 @@ impl FrozenBackend {
                 &mut results.pages,
             );
         }
+        plumb_index::asked_state_first(query, &mut results.hits);
         if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.as_deref()) {
             plumb_index::suggested_site_second(&mut results.hits, site);
         }

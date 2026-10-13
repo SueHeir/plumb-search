@@ -258,6 +258,8 @@ score = α · link_score + trust · ((1 − α) · text_score + name_bonus)
 
 `α` defaults to 0.35 and can be changed with `--alpha`.
 
+A search for a county that ends in its state ("franklin county sheriff ohio") lists the sites that say they are in another state, by name, postal code or domain, after the rest: two dozen states have a Franklin County.
+
 Besides its names, title, description and headings, a site is also found by up to 30 search terms that each crawl picks from the whole homepage text with [YAKE](https://github.com/LIAAD/yake), a statistical keyword extractor (no model, a few milliseconds a page). They count for less than names. `plumb-tools fetch-text` and `plumb-tools terms` measure other choices on saved pages without crawling again.
 
 ### Trying ranking changes on real searches

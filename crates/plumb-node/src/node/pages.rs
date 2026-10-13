@@ -1312,6 +1312,9 @@ pub(super) fn add_pages(
                     &mut results.pages,
                 );
             }
+            // A county search that ends in its state lists that state's
+            // county before its namesakes elsewhere.
+            plumb_index::asked_state_first(query, &mut results.hits);
             // The learned order knows nothing of spelling: the site a
             // suggestion names stays second.
             if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.clone()) {
