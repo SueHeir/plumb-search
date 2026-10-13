@@ -460,3 +460,60 @@ fn what_is_asked_about_a_person_finds_their_article() {
         Some(("lebron james".into(), Hint::Person))
     );
 }
+
+#[test]
+fn what_is_asked_about_an_event_finds_its_article() {
+    let described = |title: &str, aliases: &[&str], description: &str| {
+        let mut page = page(title, 50_000, aliases);
+        page.description = Some(description.into());
+        page
+    };
+    let (_dir, s) = searcher(&[
+        described(
+            "UEFA Champions League",
+            &["Champions League"],
+            "European association football tournament",
+        ),
+        described(
+            "Los Angeles Lakers",
+            &["Lakers"],
+            "National Basketball Association team",
+        ),
+        described(
+            "Coachella Valley Music and Arts Festival",
+            &["Coachella"],
+            "Annual music and arts festival in Indio, California",
+        ),
+        described(
+            "2026 FIFA World Cup",
+            &["2026 World Cup"],
+            "Football tournament in North America",
+        ),
+        described("Glastonbury", &[], "Town in Somerset, England"),
+        described("Bus", &[], "Large road vehicle for carrying passengers"),
+        described("Truth", &[], "Being in accord with fact or reality"),
+        described("Truth table", &[], "Mathematical table used in logic"),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title.clone())
+            .collect()
+    };
+    assert_eq!(
+        named("champions league schedule"),
+        ["UEFA Champions League"]
+    );
+    assert_eq!(named("lakers live scores"), ["Los Angeles Lakers"]);
+    assert_eq!(
+        named("coachella lineup"),
+        ["Coachella Valley Music and Arts Festival"]
+    );
+    assert_eq!(named("world cup 2026 tickets"), ["2026 FIFA World Cup"]);
+    // Only an event, team or venue, and not when a page is called the
+    // whole query.
+    assert!(named("glastonbury lineup").is_empty());
+    assert!(named("bus schedule").is_empty());
+    assert_eq!(named("truth table"), ["Truth table"]);
+}

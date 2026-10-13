@@ -16,6 +16,7 @@ use super::building::schema;
 use super::page::is_item_id;
 use super::placing::is_year;
 use super::scoring::truncate_keeping_inner_pages;
+use super::sites::describes_an_event;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
     KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET, POPULARITY_SCALE,
@@ -33,6 +34,9 @@ pub(crate) enum Hint {
     /// A person of that name, of whom something is asked: "obama
     /// daughters", "picasso paintings".
     Person,
+    /// An event, competition, team or venue of that name, of which
+    /// something is asked: "lakers schedule", "coachella lineup".
+    Event,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
     /// Only pages the name names: what a fact question asks about. "madrid
@@ -164,6 +168,28 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" albums", Hint::Person),
     (" paintings", Hint::Person),
     (" inventions", Hint::Person),
+    // What people ask of an event, competition, team or venue, whose
+    // article is not called by these words. Longer tails first.
+    (" schedule", Hint::Event),
+    (" fixtures", Hint::Event),
+    (" standings", Hint::Event),
+    (" table", Hint::Event),
+    (" live scores", Hint::Event),
+    (" live score", Hint::Event),
+    (" scores", Hint::Event),
+    (" score", Hint::Event),
+    (" results", Hint::Event),
+    (" bracket", Hint::Event),
+    (" tickets", Hint::Event),
+    (" lineup", Hint::Event),
+    (" roster", Hint::Event),
+    (" squad", Hint::Event),
+    (" highlights", Hint::Event),
+    (" live stream", Hint::Event),
+    (" odds", Hint::Event),
+    (" draw", Hint::Event),
+    (" predictions", Hint::Event),
+    (" start time", Hint::Event),
     (" cast", Hint::Any),
     (" author", Hint::Any),
     (" movie", Hint::Any),
@@ -652,6 +678,15 @@ impl PageSearcher {
             Hint::Person => {
                 let called = hits.iter().any(|hit| hit.named);
                 found.retain(|hit| !called && hit.named && hit.page.is_person());
+            }
+            // Only an event, competition, team or venue, and not when a
+            // page is called the whole query: "truth table" is not about
+            // a truth, nor "tax bracket" about a tax.
+            Hint::Event => {
+                let called = hits.iter().any(|hit| hit.named);
+                found.retain(|hit| {
+                    !called && hit.named && describes_an_event(hit.page.description.as_deref())
+                });
             }
             Hint::Named => found.retain(|hit| hit.named),
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
