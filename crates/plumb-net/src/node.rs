@@ -1252,6 +1252,12 @@ pub async fn start(
             config.trusted_peers.clone(),
         );
         let stopped = replay_stopped.clone();
+        if !replay.is_empty() {
+            info!(
+                "replaying {} held batches to pass on records not yet delivered",
+                replay.len()
+            );
+        }
         tokio::task::spawn_blocking(move || {
             resend_pending(&store, &replay, &records, peer_id, &trusted, &stopped)
         });
@@ -4863,10 +4869,13 @@ const TRUST_APPLIED_FILE: &str = "trusted-applied";
 /// again ([`resend_pending`]): up to a fifth of the storage limit, about
 /// 12 GB on plumbsearch.org. A crawler trusted since 0.2.0's last start is
 /// not in its [`TRUST_APPLIED_FILE`]: its batches stay unmarked and are
-/// sent again whole, as 0.2.0 would have done. Only a store with no
-/// markers at all is marked, so a node that never ran 0.2.0 (no such
-/// file), or whose store a newer version has kept since (markers), is left
-/// as it is; batches taken in since are marked as they are delivered.
+/// sent again whole, as 0.2.0 would have done. 0.2.0 writes the file at
+/// every start, so only a store it ran on last is marked: one with no
+/// marker newer than the file. A node that never ran 0.2.0 (no such
+/// file), or whose store a newer version has kept since, is left as it
+/// is; batches taken in since are marked as they are delivered. A node
+/// taken back to 0.2.0 and upgraded again has the batches 0.2.0 took in
+/// meanwhile marked too.
 fn mark_legacy_deliveries(
     store: &BatchStore,
     dir: &std::path::Path,
@@ -4874,7 +4883,13 @@ fn mark_legacy_deliveries(
     trusted: &[PeerId],
 ) {
     let applied = dir.join(TRUST_APPLIED_FILE);
-    if !applied.exists() || store.has_delivery_markers() {
+    let Ok(started) = applied.metadata().and_then(|m| m.modified()) else {
+        return;
+    };
+    if store
+        .newest_delivery_marker()
+        .is_some_and(|newest| newest >= started)
+    {
         return;
     }
     let applied: HashSet<PeerId> = std::fs::read_to_string(&applied)
@@ -4906,12 +4921,16 @@ fn mark_legacy_deliveries(
 }
 
 /// Rebuild agreement without awarding its already-counted credits again.
-/// Preserve the startup order for a second, bounded pass recovering deliveries.
+/// Also returns the batches held, oldest first, up to the last one whose
+/// records may not have been delivered, for [`resend_pending`] to replay:
+/// none unless the node stopped with deliveries in flight or trusts a
+/// crawler anew, so it doesn't normally build a second agreement.
 fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> (Agreement, Vec<Hash>) {
     let now = now_unix();
-    let replay = store.ids_oldest_first();
+    let mut replay = store.ids_oldest_first();
     let mut agreement = Agreement::new(me, trusted.iter().copied());
-    for id in &replay {
+    let mut pending = 0;
+    for (n, id) in replay.iter().enumerate() {
         let batch = match store.get(id) {
             Ok(Some(batch)) => batch,
             Ok(None) => continue,
@@ -4924,15 +4943,24 @@ fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> (Agre
         let Ok(crawler) = batch.check(made) else {
             continue;
         };
+        let is_trusted = trusted.contains(&crawler);
         let records = if crawler == me {
             accept_own_batch(&batch, &crawler, made)
-        } else if trusted.contains(&crawler) {
+        } else if is_trusted {
             accept_trusted_batch(&batch, &crawler, made)
         } else {
             accept_batch(&batch, &crawler, made)
         };
-        agreement.observe(crawler, records, made);
+        let confirmed = agreement.observe(crawler, records, made);
+        // Records resend_pending would send again.
+        if crawler != me
+            && !store.delivery_ack(id, is_trusted).acknowledged()
+            && (!confirmed.is_empty() || (is_trusted && !accept_news(&batch, made).is_empty()))
+        {
+            pending = n + 1;
+        }
     }
+    replay.truncate(pending);
     agreement.prune(now);
     agreement.take_verdicts();
     (agreement, replay)
@@ -5636,6 +5664,35 @@ mod tests {
     }
 
     #[test]
+    fn a_start_replays_only_up_to_the_last_batch_not_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_unix();
+        let key = Keypair::generate_ed25519();
+        let crawler = key.public().to_peer_id();
+        let me = PeerId::random();
+        let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            let mut record = SiteRecord::new(format!("site-{n}.example"));
+            record.title = Some(format!("Site {n}"));
+            record.crawled_at = Some(now - 3 + n);
+            let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now - 3 + n)
+                .unwrap()
+                .unwrap();
+            store.insert(&batch).unwrap();
+            ids.push(batch.id());
+        }
+        let replay = |store: &BatchStore| replay_agreement(store, me, &[crawler]).1;
+        assert_eq!(replay(&store), ids, "nothing delivered yet");
+        for id in &ids[1..] {
+            store.delivery_ack(id, true).acknowledge().unwrap();
+        }
+        assert_eq!(replay(&store), ids[..1]);
+        store.delivery_ack(&ids[0], true).acknowledge().unwrap();
+        assert!(replay(&store).is_empty(), "all delivered: no second replay");
+    }
+
+    #[test]
     fn legacy_no_ack_replay_is_bounded_and_preserves_signed_batch_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let now = now_unix();
@@ -5772,20 +5829,32 @@ mod tests {
         mark_legacy_deliveries(&store, dir.path(), me, &trusted);
         assert!(!store.delivery_ack(&later.id(), true).acknowledged());
 
-        // A store kept with markers already (a node that ran an earlier
-        // build of this version) is left as it is.
+        // A store a newer version has kept since 0.2.0 last started is
+        // left as it is.
         let dir = tempfile::tempdir().unwrap();
         let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
         for batch in &held[..2] {
             store.insert(batch).unwrap();
         }
+        let applied = dir.path().join(TRUST_APPLIED_FILE);
+        std::fs::write(&applied, ids[0].to_string()).unwrap();
+        let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        let set_written = |at| {
+            let file = std::fs::File::options().write(true).open(&applied).unwrap();
+            file.set_modified(at).unwrap();
+        };
+        set_written(hour_ago);
         store
             .delivery_ack(&held[1].id(), false)
             .acknowledge()
             .unwrap();
-        std::fs::write(dir.path().join(TRUST_APPLIED_FILE), ids[0].to_string()).unwrap();
         mark_legacy_deliveries(&store, dir.path(), me, &trusted);
         assert!(!store.delivery_ack(&held[0].id(), true).acknowledged());
+        // Unless it was taken back to 0.2.0 since: what that took in is
+        // marked as well.
+        set_written(std::time::SystemTime::now() + Duration::from_secs(60));
+        mark_legacy_deliveries(&store, dir.path(), me, &trusted);
+        assert!(store.delivery_ack(&held[0].id(), true).acknowledged());
 
         // So is a node that never ran 0.2.0.
         let dir = tempfile::tempdir().unwrap();
