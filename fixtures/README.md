@@ -50,9 +50,9 @@ so `.gitattributes` stops git from converting them.
 cargo run -p plumb-node -- ingest --tranco fixtures/tranco.csv \
     --cc-ranks fixtures/cc-domain-ranks.txt --wat fixtures/sample.wat \
     --wikidata fixtures/wikidata-official-sites.tsv --out data/fixtures/records.jsonl
-cargo run -p plumb-node -- index --records data/fixtures/records.jsonl --index data/fixtures/index
-cargo run -p plumb-node -- search --index data/fixtures/index us bank
-cargo run -p plumb-node -- eval --index data/fixtures/index --queries fixtures/brand_queries.tsv --min-top1 0.9
+cargo run -p plumb-tools -- index --records data/fixtures/records.jsonl --index data/fixtures/index
+cargo run -p plumb-tools -- search --index data/fixtures/index us bank
+cargo run -p plumb-tools -- eval --index data/fixtures/index --queries fixtures/brand_queries.tsv --min-top1 0.9
 cargo run -p plumb-node -- serve --index data/fixtures/index
 ```
 

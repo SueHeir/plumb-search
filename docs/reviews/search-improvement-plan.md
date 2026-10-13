@@ -99,7 +99,7 @@ After a compact baseline, prioritize the user-visible work as follows. The numbe
 | Lookalike detection lacks verified cross-domain affiliation | `check_lookalike` searches a registrable domain and names, then compares it to better-known domains without an affiliation graph | Legitimate alternate domains need evidence; an unknown same-brand domain must not be accepted by resemblance alone. |
 | Quality controls already exist | `health.rs` moves health authorities; `is_pill_shop` demotes some low-link-score drug domains | Extend and measure these controls; do not add a second disconnected health whitelist. |
 
-Source paths above are relative to `crates/`. Existing `plumb eval --recall` already distinguishes missing index content, retrieval losses, and placement losses. Extend it instead of building a competing evaluator.
+Source paths above are relative to `crates/`. Existing `plumb-tools eval --recall` already distinguishes missing index content, retrieval losses, and placement losses. Extend it instead of building a competing evaluator.
 
 ## Delivery order
 
