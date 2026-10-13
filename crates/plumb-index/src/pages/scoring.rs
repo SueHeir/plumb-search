@@ -24,6 +24,46 @@ use super::{
 };
 use crate::analysis;
 
+/// Words a Wikipedia article's short description ends a work's kind
+/// with, before "by" and its maker, each with the words a search may say
+/// it is with: "1997 studio album by Radiohead".
+const WORKS: &[(&str, &[&str])] = &[
+    ("album", &["album"]),
+    ("ep", &["ep", "album"]),
+    ("mixtape", &["mixtape", "album"]),
+    ("soundtrack", &["soundtrack", "album"]),
+    ("song", &["song"]),
+    ("single", &["single", "song"]),
+    ("novel", &["novel", "book"]),
+    ("novella", &["novella", "book"]),
+    ("book", &["book"]),
+    ("film", plumb_core::films::FILM_WORDS),
+    ("play", &["play"]),
+    ("poem", &["poem"]),
+    ("painting", &["painting"]),
+    ("opera", &["opera"]),
+    ("musical", &["musical"]),
+];
+
+/// Who made the work a Wikipedia article whose short description is
+/// `description` is on, and the words a search may say what it is with:
+/// "Radiohead" and "album" of "1997 studio album by Radiohead". `None`
+/// unless the word before "by" is a work's kind ([`WORKS`]) and nothing
+/// before it ties the article to another one's work: "Protagonist of 1949
+/// novel by George Orwell" is a character, not the novel.
+fn made_by(description: &str) -> Option<(&str, &'static [&'static str])> {
+    let (what, by) = description.rsplit_once(" by ")?;
+    let what: Vec<String> = what.split_whitespace().map(str::to_lowercase).collect();
+    let (kind, before) = what.split_last()?;
+    if before.iter().any(|word| plumb_core::is_function_word(word)) {
+        return None;
+    }
+    WORKS
+        .iter()
+        .find(|(work, _)| work == kind)
+        .map(|(_, asked)| (by.trim(), *asked))
+}
+
 impl PageSearcher {
     pub(crate) fn search_once(
         &self,
@@ -125,7 +165,8 @@ impl PageSearcher {
         // when it is asked for so.
         let mut by_title_first = HashSet::new();
         // Films and shows by a title of one word too: "inception 2010".
-        // Other pages found so must be films asked for so.
+        // Other pages found so must be films, or articles on works, asked
+        // for so: "1989 by taylor swift".
         let mut film_title_first = HashSet::new();
         for end in 1..words.len() {
             let Some(key) = analysis::tokens(&self.joined, &words[..end].join(" ")).pop() else {
@@ -406,7 +447,8 @@ impl PageSearcher {
                     });
             if !article_inside
                 && (by_title_first.contains(&address) && !asked_by_title
-                    || film_title_first.contains(&address) && !asked_as_film)
+                    || film_title_first.contains(&address)
+                        && !(asked_as_film || asked_by_title && page.is_article()))
             {
                 continue;
             }
@@ -645,33 +687,39 @@ impl PageSearcher {
         best
     }
 
-    /// Whether the query `words` are a book's, podcast's or paper's title
-    /// followed by words of its author's name or by what it is ("book",
-    /// "novel", "podcast", "paper"): "dune frank herbert", "the great gatsby
-    /// book", "hardcore history podcast", "random forests breiman". A
-    /// paper's year and venue may follow too, and a paper's whole title of
-    /// [`PAPER_TITLE_WORDS`] words or more asks for it alone.
+    /// Whether the query `words` are a book's, podcast's, paper's, song's
+    /// or album's title followed by words of its author's name or by what
+    /// it is ("book", "novel", "podcast", "paper"), or both: "dune frank
+    /// herbert", "the great gatsby book", "nevermind nirvana album",
+    /// "hardcore history podcast", "random forests breiman". A paper's
+    /// year and venue may follow too, and a paper's whole title of
+    /// [`PAPER_TITLE_WORDS`] words or more asks for it alone. A Wikipedia
+    /// article on a work ([`made_by`]) is asked for so too, by its title
+    /// or another name: "1984 george orwell" for Nineteen Eighty-Four.
     pub(crate) fn book_match(&self, page: &Page, words: &[String]) -> bool {
-        let (byline, kinds): (&str, &[&str]) = match page.set.as_str() {
-            BOOKS_SET => ("Book by ", &["book", "novel"]),
-            PODCASTS_SET => ("Podcast by ", &["podcast"]),
-            PAPERS_SET => ("Paper by ", &["paper"]),
-            MUSIC_SET if page.is_song() => ("Song by ", &["song"]),
-            MUSIC_SET => ("Album by ", &["album"]),
+        let description = page.description.as_deref().unwrap_or("");
+        let byline = |byline: &str| description.strip_prefix(byline).unwrap_or("");
+        let (by, kinds): (&str, &[&str]) = match page.set.as_str() {
+            BOOKS_SET => (byline("Book by "), &["book", "novel"]),
+            PODCASTS_SET => (byline("Podcast by "), &["podcast"]),
+            PAPERS_SET => (byline("Paper by "), &["paper"]),
+            MUSIC_SET if page.is_song() => (byline("Song by "), &["song"]),
+            MUSIC_SET => (byline("Album by "), &["album"]),
+            _ if page.is_article() => match made_by(description) {
+                Some(work) => work,
+                None => return false,
+            },
             _ => return false,
         };
-        let by = page
-            .description
-            .as_deref()
-            .and_then(|d| d.strip_prefix(byline))
-            .unwrap_or("");
         // "Book by AUTHOR, YEAR", "Podcast by AUTHOR · CATEGORY", "Paper by
-        // AUTHOR et al., YEAR, VENUE".
+        // AUTHOR et al., YEAR, VENUE", "1997 studio album by ARTIST".
         let author = if page.set == PAPERS_SET {
             by.split(", ")
                 .collect::<Vec<_>>()
                 .join(" ")
                 .replace(" et al.", "")
+        } else if page.is_article() {
+            by.to_string()
         } else {
             let by = by.split(" · ").next().unwrap_or(by);
             by.rsplit_once(", ")
@@ -687,49 +735,57 @@ impl PageSearcher {
         let artist = analysis::tokens(&self.words, main);
         let author: HashSet<String> = analysis::tokens(&self.words, &author).into_iter().collect();
         // The title, or the title without its subtitle: "Frankenstein" for
-        // "Frankenstein; or, The Modern Prometheus".
+        // "Frankenstein; or, The Modern Prometheus". An article's without
+        // what tells it from its namesakes ("1989 (Taylor Swift album)"),
+        // and its other names.
         let short = page.title.split([':', ';']).next().unwrap_or("");
-        [page.title.as_str(), short]
-            .into_iter()
-            .enumerate()
-            .any(|(i, title)| {
-                let title = analysis::tokens(&self.words, title);
-                // Songs and albums are as often asked for artist first:
-                // "vampire weekend step", "nirvana nevermind album",
-                // "beatles hey jude".
-                let unthe = match artist.as_slice() {
-                    [the, rest @ ..] if the == "the" && !rest.is_empty() => rest,
-                    artist => artist,
-                };
-                if page.set == MUSIC_SET && !artist.is_empty() && !title.is_empty() {
-                    if let Some(rest) = words
-                        .strip_prefix(artist.as_slice())
-                        .or_else(|| words.strip_prefix(unthe))
-                        .and_then(|rest| rest.strip_prefix(title.as_slice()))
-                    {
-                        if rest.is_empty()
-                            || matches!(rest, [word] if kinds.contains(&word.as_str()))
-                        {
-                            return true;
-                        }
+        let mut titles = vec![page.title.as_str(), short];
+        if page.is_article() {
+            titles.push(base_title(&page.title));
+            titles.extend(page.aliases.iter().map(|alias| base_title(alias)));
+        }
+        titles.into_iter().enumerate().any(|(i, title)| {
+            let title = analysis::tokens(&self.words, title);
+            // Songs, albums and other works are as often asked for
+            // artist first: "vampire weekend step", "nirvana nevermind
+            // album", "beatles hey jude", "radiohead ok computer".
+            let unthe = match artist.as_slice() {
+                [the, rest @ ..] if the == "the" && !rest.is_empty() => rest,
+                artist => artist,
+            };
+            if (page.set == MUSIC_SET || page.is_article())
+                && !artist.is_empty()
+                && !title.is_empty()
+            {
+                if let Some(rest) = words
+                    .strip_prefix(artist.as_slice())
+                    .or_else(|| words.strip_prefix(unthe))
+                    .and_then(|rest| rest.strip_prefix(title.as_slice()))
+                {
+                    if rest.is_empty() || matches!(rest, [word] if kinds.contains(&word.as_str())) {
+                        return true;
                     }
                 }
-                let rest = match words.strip_prefix(title.as_slice()) {
-                    Some([]) => {
-                        return page.set == PAPERS_SET && i == 0 && title.len() >= PAPER_TITLE_WORDS
-                    }
-                    Some(rest) if !title.is_empty() => rest,
-                    _ => return false,
-                };
-                // "hey jude by the beatles".
-                let rest = match rest {
-                    [by, rest @ ..] if by == "by" && !rest.is_empty() => rest,
-                    rest => rest,
-                };
-                rest.iter().all(|word| author.contains(word))
-                    || matches!(rest, [word] if kinds.contains(&word.as_str()))
-            })
-            || (page.set == PODCASTS_SET && self.podcast_named(page, words))
+            }
+            let rest = match words.strip_prefix(title.as_slice()) {
+                Some([]) => {
+                    return page.set == PAPERS_SET && i == 0 && title.len() >= PAPER_TITLE_WORDS
+                }
+                Some(rest) if !title.is_empty() => rest,
+                _ => return false,
+            };
+            // "hey jude by the beatles", "dune book", "nevermind nirvana
+            // album": the maker, what the work is, or both.
+            let rest = match rest {
+                [by, rest @ ..] if by == "by" && !rest.is_empty() => rest,
+                rest => rest,
+            };
+            let maker = match rest {
+                [maker @ .., kind] if kinds.contains(&kind.as_str()) => maker,
+                rest => rest,
+            };
+            maker.iter().all(|word| author.contains(word))
+        }) || (page.set == PODCASTS_SET && self.podcast_named(page, words))
     }
 
     /// Whether `words` are the end of a podcast's title, two words or more,
