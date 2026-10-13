@@ -183,9 +183,9 @@ pub(super) fn run(inner: Arc<Inner>) {
         });
         if key != current && !retry_later && !list_wait {
             // At a start that has to build the index, the one the last
-            // start or 0.2.0 left is searched until then: an upgrade's
-            // build of every page takes minutes on a server and longer
-            // on a desktop. It is removed once the new one is in use.
+            // start left is searched until then: an upgrade's build of
+            // every page takes minutes on a server and longer on a
+            // desktop. It is removed once the new one is in use.
             let building = key
                 .as_deref()
                 .filter(|key| current.is_none() && !index_dir(&inner.paths.data, key).exists());

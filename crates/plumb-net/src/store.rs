@@ -339,32 +339,6 @@ impl BatchStore {
         self.ids.contains(id)
     }
 
-    /// The crawler key of each batch held, protobuf-encoded.
-    pub(crate) fn held_crawlers(&self) -> Vec<(Hash, Vec<u8>)> {
-        self.headers
-            .iter()
-            .map(|(id, header)| (*id, header.header.crawler.clone()))
-            .collect()
-    }
-
-    /// When the newest delivery marker was written, if any: when a version
-    /// that writes them last kept the store.
-    pub(crate) fn newest_delivery_marker(&self) -> Option<std::time::SystemTime> {
-        fs::read_dir(&self.dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.starts_with("delivered-"))
-            })
-            .filter_map(|entry| entry.metadata().ok()?.modified().ok())
-            .max()
-    }
-
     pub(crate) fn delivery_ack(&self, id: &Hash, trusted: bool) -> DeliveryAck {
         let mode = if trusted { "trusted" } else { "agreed" };
         DeliveryAck {
