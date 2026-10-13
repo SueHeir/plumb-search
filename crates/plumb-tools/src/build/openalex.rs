@@ -374,6 +374,81 @@ fn year_of(paper: &Article) -> Option<u64> {
         .ok()
 }
 
+/// Gives papers their arXiv DOI and year where their own DOI is a later
+/// copy's: OpenAlex dates the DOI two or more years after the arXiv
+/// original it holds as the same work, and the DOI names no venue, as a
+/// repository's re-upload does. A journal or conference DOI names its venue
+/// and stays, as does one dated close to the preprint, and so does a paper
+/// whose arXiv DOI another paper already has. Says how many changed.
+fn date_by_arxiv_originals(papers: &mut [Article]) -> usize {
+    let mut taken: std::collections::HashSet<String> = papers
+        .iter()
+        .filter_map(|paper| Some(paper.item.as_deref()?.to_ascii_lowercase()))
+        .collect();
+    let mut changed = 0;
+    for paper in papers {
+        let Some((doi, first, year)) =
+            later_copy(paper).filter(|(doi, ..)| taken.insert(doi.clone()))
+        else {
+            continue;
+        };
+        if let Some(description) = &mut paper.description {
+            // With no venue, the year ends the description.
+            if let Some(rest) = description.strip_suffix(&format!(", {year}")) {
+                *description = format!("{rest}, {first}");
+            }
+        }
+        paper.item = Some(doi.clone());
+        paper.website = None;
+        if let Some(meta) = &mut paper.paper {
+            meta.doi = Some(doi);
+            meta.publication_year = Some(first);
+            meta.publication_date = None;
+            meta.raw_publication_date = None;
+        }
+        changed += 1;
+    }
+    changed
+}
+
+/// The arXiv DOI and year of a paper whose own DOI is a later copy's (see
+/// [`date_by_arxiv_originals`]), and the year OpenAlex gave it.
+fn later_copy(paper: &Article) -> Option<(String, i32, i32)> {
+    let meta = paper.paper.as_ref()?;
+    let item = paper.item.as_deref()?;
+    let arxiv = meta.arxiv_id.as_deref()?;
+    let year = meta.publication_year?;
+    let first = arxiv_year(arxiv)?;
+    (item.starts_with("10.")
+        && !item.starts_with(ARXIV_DOI)
+        && meta.venue.is_none()
+        && year >= first + 2)
+        .then(|| (format!("{ARXIV_DOI}{arxiv}"), first, year))
+}
+
+/// The year an arXiv identifier was given ("1706.03762" in 2017,
+/// "hep-th/9711200" in 1997), for identifiers of the two forms that are
+/// also their DOI's suffix.
+fn arxiv_year(id: &str) -> Option<i32> {
+    let digits = |s: &str, lengths: &[usize]| {
+        lengths.contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
+    };
+    let yymm = match id.split_once('/') {
+        // Until 2007: archive/YYMMNNN.
+        Some((archive, number)) => (!archive.is_empty()
+            && archive.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+            && digits(number, &[7]))
+        .then(|| &number[..4])?,
+        // Since: YYMM.NNNNN.
+        None => {
+            let (month, number) = id.split_once('.')?;
+            (digits(month, &[4]) && digits(number, &[4, 5])).then_some(month)?
+        }
+    };
+    let year: i32 = yymm[..2].parse().ok()?;
+    Some(if year >= 91 { 1900 + year } else { 2000 + year })
+}
+
 /// Whether a paper's citations could be real in `this_year`: no more than
 /// [`MAX_CITATIONS_A_YEAR`] for each year since it came out.
 fn plausible(paper: &Article, this_year: u64) -> bool {
@@ -592,6 +667,12 @@ pub async fn fetch_papers(
         }
         tokio::time::sleep(PAUSE).await;
     }
+    // After the loop, so papers carried on from an earlier run are
+    // looked at too.
+    let copies = date_by_arxiv_originals(&mut articles);
+    if copies > 0 {
+        info!("gave {copies} papers their arXiv DOI and year in place of a later copy's");
+    }
     let now = this_year();
     let before = articles.len();
     articles.retain(|paper| plausible(paper, now));
@@ -774,6 +855,84 @@ mod tests {
         // Without a year nothing can be said.
         assert!(plausible(&paper("Paper", 5_000_000), 2026));
         assert!(this_year() >= 2026);
+    }
+
+    #[test]
+    fn a_later_copys_doi_gives_way_to_the_arxiv_original() {
+        let paper = |doi: &str, year: i32, venue: Option<&str>, arxiv: Option<&str>| {
+            let mut locations = vec![serde_json::json!({"landing_page_url": doi})];
+            if let Some(id) = arxiv {
+                locations.push(serde_json::json!({"is_oa": true,
+                    "landing_page_url": format!("http://arxiv.org/abs/{id}"),
+                    "source": {"display_name": "arXiv (Cornell University)"}}));
+            }
+            let work: Work = serde_json::from_value(serde_json::json!({
+                "id": "https://openalex.org/W2626778328", "doi": doi,
+                "display_name": "A paper", "publication_year": year,
+                "publication_date": format!("{year}-11-12"), "cited_by_count": 24_356,
+                "authorships": [{"author": {"display_name": "Ashish Vaswani"}},
+                                {"author": {"display_name": "Noam Shazeer"}}],
+                "primary_location": {"landing_page_url": doi,
+                    "source": venue.map(|name| serde_json::json!({"display_name": name}))},
+                "locations": locations
+            }))
+            .unwrap();
+            work.to_article().unwrap()
+        };
+        // A repository's upload of an arXiv paper eight years on, which
+        // OpenAlex took for the paper's own DOI.
+        let copy = paper(
+            "https://doi.org/10.65215/2q58a426",
+            2025,
+            None,
+            Some("1706.03762"),
+        );
+        // A DOI that names its venue, one dated close to its preprint, and
+        // one with no arXiv original stay.
+        let kept = [
+            paper(
+                "https://doi.org/10.1/journal",
+                2019,
+                Some("A Journal"),
+                Some("1611.00001"),
+            ),
+            paper(
+                "https://doi.org/10.3115/v1/w14-4012",
+                2014,
+                None,
+                Some("1409.1259"),
+            ),
+            paper("https://doi.org/10.57702/zp44cu3g", 2024, None, None),
+        ];
+        let mut papers = vec![copy.clone()];
+        papers.extend(kept.iter().cloned());
+        assert_eq!(date_by_arxiv_originals(&mut papers), 1);
+        assert_eq!(papers[1..], kept);
+        let fixed = &papers[0];
+        assert_eq!(fixed.item.as_deref(), Some("10.48550/arxiv.1706.03762"));
+        assert_eq!(
+            fixed.description.as_deref(),
+            Some("Paper by Ashish Vaswani et al., 2017")
+        );
+        assert_eq!(fixed.website, None);
+        let meta = fixed.paper.as_ref().unwrap();
+        assert_eq!(meta.doi.as_deref(), Some("10.48550/arxiv.1706.03762"));
+        assert_eq!(meta.arxiv_id.as_deref(), Some("1706.03762"));
+        assert_eq!(meta.publication_year, Some(2017));
+        assert_eq!(meta.publication_date, None);
+        crate::build::paper_validation::validate_consistency(&papers).unwrap();
+        // Once is enough, and an arXiv DOI another paper has is left to it,
+        // so no two papers share one.
+        assert_eq!(date_by_arxiv_originals(&mut papers), 0);
+        let mut both = vec![copy.clone(), copy.clone()];
+        assert_eq!(date_by_arxiv_originals(&mut both), 1);
+        assert_eq!(both[1], copy);
+        assert_eq!(arxiv_year("hep-th/9711200"), Some(1997));
+        assert_eq!(arxiv_year("cs/0101001"), Some(2001));
+        assert_eq!(arxiv_year("2410.12345"), Some(2024));
+        // A subject class is not part of the DOI.
+        assert_eq!(arxiv_year("math.AG/0211159"), None);
+        assert_eq!(arxiv_year("1706"), None);
     }
 
     #[test]
