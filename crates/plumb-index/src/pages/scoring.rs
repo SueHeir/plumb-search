@@ -642,14 +642,14 @@ impl PageSearcher {
     }
 
     /// How well the article or docs page `page`, named by `span`, part of
-    /// the query, matches the whole of it, whose words are `stems`
-    /// ([`PageSearcher::described_words`]): [`ALIAS_MATCH`] times the share
-    /// of them its name has, a word only what it says of itself has
-    /// counting [`DESCRIBED_WORD`]. Nothing when that is half or less:
+    /// the query, matches the whole of it, whose words are `described`
+    /// ([`PageSearcher::described_words`]), by stem: [`ALIAS_MATCH`] times
+    /// the share of them its name has, a word only what it says of itself
+    /// has counting [`DESCRIBED_WORD`]. Nothing when that is half or less:
     /// such a name leaves most of the query unsaid. "terry stafford death"
     /// is the singer, but "london hotels" is not the article London.
-    fn inside_match(&self, page: &Page, span: &[String], stems: &[String]) -> f32 {
-        if stems.is_empty() {
+    fn inside_match(&self, page: &Page, span: &[String], described: &[Described]) -> f32 {
+        if described.is_empty() {
             return 0.0;
         }
         let named: HashSet<String> = self.question_words(&span.join(" ")).into_iter().collect();
@@ -666,12 +666,15 @@ impl PageSearcher {
             said.push_str(lead);
         }
         let said: HashSet<String> = self.question_words(&said).into_iter().collect();
-        let in_name = stems.iter().filter(|stem| named.contains(*stem)).count();
-        let only_said = stems
+        let in_name = described
             .iter()
-            .filter(|stem| !named.contains(*stem) && said.contains(*stem))
+            .filter(|word| named.contains(&word.stem))
             .count();
-        let share = (in_name as f32 + DESCRIBED_WORD * only_said as f32) / stems.len() as f32;
+        let only_said = described
+            .iter()
+            .filter(|word| !named.contains(&word.stem) && said.contains(&word.stem))
+            .count();
+        let share = (in_name as f32 + DESCRIBED_WORD * only_said as f32) / described.len() as f32;
         if share > 0.5 {
             ALIAS_MATCH * share
         } else {
