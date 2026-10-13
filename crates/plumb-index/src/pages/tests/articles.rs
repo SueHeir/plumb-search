@@ -284,3 +284,41 @@ fn words_are_only_looked_up() {
     assert_eq!(s.definition("awol").unwrap().unwrap().title, "AWOL");
     assert_eq!(s.definition("freedom").unwrap(), None);
 }
+
+#[test]
+fn what_is_asked_about_a_person_finds_their_article() {
+    let person = |title: &str, views: u64, aliases: &[&str]| {
+        let mut page = page(title, views, aliases);
+        page.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1961-08-04".into(),
+        }];
+        page
+    };
+    let (_dir, s) = searcher(&[
+        person("Barack Obama", 900_000, &["Obama"]),
+        person("Pablo Picasso", 400_000, &["Picasso"]),
+        page("Picasso (crater)", 9_000, &[]),
+        person("Steve Jobs", 700_000, &[]),
+        person("Black (singer)", 20_000, &[]),
+        page("Black Death", 300_000, &[]),
+        page("Christmas", 500_000, &[]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title.clone())
+            .collect()
+    };
+    assert_eq!(named("obama daughters"), ["Barack Obama"]);
+    assert_eq!(named("picasso paintings"), ["Pablo Picasso"]);
+    assert_eq!(named("steve jobs cause of death"), ["Steve Jobs"]);
+    // Only a person, and not when a page is called the whole query.
+    assert_eq!(named("black death"), ["Black Death"]);
+    assert!(named("christmas songs").is_empty());
+    assert_eq!(
+        hinted_name("Lebron James kids"),
+        Some(("lebron james".into(), Hint::Person))
+    );
+}

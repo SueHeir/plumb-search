@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
+use plumb_core::facts::FactKind;
 use plumb_core::paper_query::PaperQuery;
 use plumb_core::{registrable_domain, Operators};
 use tantivy::collector::TopDocs;
@@ -31,6 +32,9 @@ pub(crate) enum Hint {
     Paper,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
+    /// A person of that name, of whom something is asked: "obama
+    /// daughters", "picasso paintings".
+    Person,
 }
 
 /// Words before a name that ask about it.
@@ -73,6 +77,37 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" net worth", Hint::Any),
     (" wife", Hint::Any),
     (" husband", Hint::Any),
+    // What people ask about a person, which a person's article answers but
+    // whose words it is not called by. "Cause of death" before "death".
+    (" cause of death", Hint::Person),
+    (" death", Hint::Person),
+    (" kids", Hint::Person),
+    (" children", Hint::Person),
+    (" daughter", Hint::Person),
+    (" daughters", Hint::Person),
+    (" son", Hint::Person),
+    (" sons", Hint::Person),
+    (" parents", Hint::Person),
+    (" mother", Hint::Person),
+    (" father", Hint::Person),
+    (" siblings", Hint::Person),
+    (" family", Hint::Person),
+    (" girlfriend", Hint::Person),
+    (" boyfriend", Hint::Person),
+    (" education", Hint::Person),
+    (" nationality", Hint::Person),
+    (" religion", Hint::Person),
+    (" awards", Hint::Person),
+    (" stats", Hint::Person),
+    (" movies", Hint::Person),
+    (" films", Hint::Person),
+    (" books", Hint::Person),
+    (" novels", Hint::Person),
+    (" poems", Hint::Person),
+    (" songs", Hint::Person),
+    (" albums", Hint::Person),
+    (" paintings", Hint::Person),
+    (" inventions", Hint::Person),
     (" cast", Hint::Any),
     (" author", Hint::Any),
     (" movie", Hint::Any),
@@ -106,6 +141,11 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     let name = name.trim();
     let hint = hint?;
     (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
+}
+
+/// Whether `page` is about a person: it has a birth date.
+fn is_person(page: &Page) -> bool {
+    page.facts.iter().any(|fact| fact.kind == FactKind::Born)
 }
 
 /// Least listeners of a song or album that [`PageSearcher::known_song`]
@@ -512,6 +552,13 @@ impl PageSearcher {
                 }
             }
             Hint::Any => {}
+            // Only a person the name names, and not when a page is called
+            // the whole query: "black death" is not about the singer Black,
+            // nor "christmas songs" about Christmas.
+            Hint::Person => {
+                let called = hits.iter().any(|hit| hit.named);
+                found.retain(|hit| !called && hit.named && is_person(&hit.page));
+            }
         }
         for hit in found {
             // Found both ways, a page keeps its better score and whatever
