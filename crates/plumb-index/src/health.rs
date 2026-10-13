@@ -187,6 +187,35 @@ const MEDICAL_WORDS: &[&str] = &[
     "endometriosis",
     "uti",
     "adhd",
+    "tuberculosis",
+    "sclerosis",
+    "glaucoma",
+    "cataracts",
+    "osteoporosis",
+    "cirrhosis",
+    "fibrosis",
+    "scoliosis",
+    "epilepsy",
+    "autism",
+    "parkinsons",
+    "tinnitus",
+    "apnea",
+    "sepsis",
+    "leukemia",
+    "anaemia",
+    "malaria",
+    "cholera",
+    "dengue",
+    "rabies",
+    "tetanus",
+    "mumps",
+    "rubella",
+    "norovirus",
+    "rsv",
+    "mpox",
+    "acne",
+    "rosacea",
+    "hemorrhoids",
     // Common drugs (the pill-shop names count too, see `is_medical`).
     "ibuprofen",
     "acetaminophen",
@@ -205,6 +234,50 @@ const MEDICAL_WORDS: &[&str] = &[
     "insulin",
     "benadryl",
     "melatonin",
+    "ozempic",
+    "wegovy",
+    "semaglutide",
+    "mounjaro",
+    "tirzepatide",
+    "warfarin",
+    "eliquis",
+    "statin",
+    "statins",
+    "losartan",
+    "cetirizine",
+    "zyrtec",
+    "loratadine",
+    "claritin",
+    "fluoxetine",
+    "escitalopram",
+    "trazodone",
+    "bupropion",
+    "adderall",
+    "naloxone",
+    "fentanyl",
+    "heroin",
+    "epipen",
+    "antibiotic",
+    "antibiotics",
+];
+
+/// Words that say a longer search is about an illness, whatever the
+/// illness is called: "lyme disease", "bipolar disorder", "down
+/// syndrome", "vitamin d deficiency". Alone they may be a film or a band.
+const ILLNESS_WORDS: &[&str] = &[
+    "disease",
+    "diseases",
+    "disorder",
+    "disorders",
+    "syndrome",
+    "infection",
+    "infections",
+    "deficiency",
+    "allergy",
+    "allergies",
+    "vaccine",
+    "vaccines",
+    "vaccination",
 ];
 
 /// Phrases that make a search a medical one.
@@ -220,11 +293,22 @@ const MEDICAL_PHRASES: &[&str] = &[
     "treatment for",
     "how to treat",
     "signs of",
+    "acid reflux",
+    "food poisoning",
+    "chest pain",
+    "back pain",
+    "blood clot",
 ];
 
 /// Searches with these are about something else: the economy, a film, a
 /// band.
-const NOT_MEDICAL: &[&str] = &["great depression", "flu game", "shot of", "cancer zodiac"];
+const NOT_MEDICAL: &[&str] = &[
+    "great depression",
+    "flu game",
+    "shot of",
+    "cancer zodiac",
+    "china syndrome",
+];
 
 /// Whether `query` asks about an illness, a symptom or a drug.
 pub(crate) fn is_medical(query: &str) -> bool {
@@ -238,7 +322,11 @@ pub(crate) fn is_medical(query: &str) -> bool {
     }
     let words: Vec<&str> = query.split(' ').collect();
     words.iter().any(|word| {
-        MEDICAL_WORDS.contains(word) || PILL_SHOP_DRUGS.contains(word)
+        MEDICAL_WORDS.contains(word)
+            || PILL_SHOP_DRUGS.contains(word)
+            || words.len() > 1 && ILLNESS_WORDS.contains(word)
+            // An inflammation: hepatitis, meningitis, colitis.
+            || word.len() > 5 && word.ends_with("itis")
     }) || MEDICAL_PHRASES
         .iter()
         .any(|phrase| padded.contains(&format!(" {phrase} ")))
@@ -529,6 +617,19 @@ mod tests {
             "Migraine",
             "tramadol",
             "signs of a concussion",
+            "lyme disease",
+            "bipolar disorder",
+            "down syndrome",
+            "vitamin d deficiency",
+            "hepatitis b",
+            "multiple sclerosis",
+            "tuberculosis",
+            "parkinson's disease",
+            "sleep apnea",
+            "acid reflux",
+            "ozempic",
+            "bridging fibrosis",
+            "what does heroin do",
         ] {
             assert!(is_medical(query), "{query}");
         }
@@ -538,6 +639,10 @@ mod tests {
             "side quest",
             "pizza in seattle",
             "depression era glass prices in ohio",
+            "disorder",
+            "the china syndrome",
+            "academia",
+            "mitosis vs meiosis",
         ] {
             assert!(!is_medical(query), "{query}");
         }
