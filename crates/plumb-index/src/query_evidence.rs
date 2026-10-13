@@ -7,9 +7,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tantivy::{DocAddress, Term};
 
-use crate::{
-    bm25_of, is_function_word, without_intent_words, Clauses, Fields, ParsedQuery, FILLER_WORDS,
-};
+use crate::query::Clauses;
+use crate::query::ParsedQuery;
+use crate::rank::bm25_of;
+use crate::{is_function_word, without_intent_words, Fields, FILLER_WORDS};
 
 /// Evidence for one site in [`crate::CandidatePool`], before pruning,
 /// spelling replacement, source routing, or learned reordering. In
