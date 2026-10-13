@@ -413,6 +413,68 @@ fn questions_are_found_in_their_duplicates_words() {
 }
 
 #[test]
+fn a_title_and_a_name_name_the_living_holder_over_past_ones() {
+    use plumb_core::facts::{Fact, FactKind};
+    let holder = |title: &str, views: u64, description: &str, died: Option<&str>| {
+        let mut holder = page(title, views, &[]);
+        holder.description = Some(description.into());
+        holder.facts = std::iter::once((FactKind::Born, "1600"))
+            .chain(died.map(|year| (FactKind::Died, year)))
+            .map(|(kind, value)| Fact {
+                kind,
+                value: value.into(),
+            })
+            .collect();
+        holder
+    };
+    let (_dir, s) = searcher(&[
+        holder(
+            "Charles III",
+            110_755,
+            "King of the United Kingdom since 2022",
+            None,
+        ),
+        holder(
+            "Charles I of England",
+            36_925,
+            "King of England, Scotland and Ireland from 1625 to 1649",
+            Some("1649"),
+        ),
+        holder(
+            "Charles II of England",
+            34_747,
+            "King of England, Scotland, and Ireland from 1660 to 1685",
+            Some("1685"),
+        ),
+        page("King Charles (musician)", 124, &[]),
+        holder(
+            "Elizabeth II",
+            124_534,
+            "Queen of the United Kingdom from 1952 to 2022",
+            Some("2022"),
+        ),
+        holder(
+            "Elizabeth I",
+            66_242,
+            "Queen of England and Ireland from 1558 to 1603",
+            Some("1603"),
+        ),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("king charles")[0], "Charles III");
+    // Two queens of the name, neither living.
+    assert!(!named("queen elizabeth")
+        .iter()
+        .any(|title| title.starts_with("Elizabeth")));
+}
+
+#[test]
 fn whole_questions_lead() {
     let question = Page::from_question(Article {
         title: "How do I delete a Git branch locally and remotely?".into(),
