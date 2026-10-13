@@ -565,6 +565,62 @@ fn a_name_some_little_site_has_does_not_keep_namesakes_of_its_words() {
 }
 
 #[test]
+fn a_domain_that_only_spells_the_query_leaves_it_to_meaning() {
+    let found = |namesake: SiteRecord| {
+        let records = vec![
+            namesake,
+            site(
+                "gmail.com",
+                Some("Gmail"),
+                Some("Mail from Google."),
+                &["Gmail"],
+                &[],
+                popular(5, 90_000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let meaning = near_and_far(&[("gmail.com", 1.0)], &[("email-provider.eu", 0.1)]);
+        let hits = searcher
+            .search_meaning(
+                "email provider",
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let bare = site(
+        "email-provider.eu",
+        None,
+        None,
+        &[],
+        &[],
+        obscure(900_000, 2),
+    );
+    // Never linked to, the domain is a namesake of the words: the query
+    // still describes what it wants, and meaning finds it.
+    let described = found(bare.clone());
+    assert!(
+        described.contains(&"gmail.com".to_string()),
+        "{described:?}"
+    );
+    assert!(
+        described.contains(&"email-provider.eu".to_string()),
+        "{described:?}"
+    );
+    // The official site of something called that is what it names.
+    let mut official = bare;
+    official.about = Some("company".to_string());
+    assert_eq!(found(official), ["email-provider.eu"]);
+}
+
+#[test]
 fn an_official_site_is_named_inside_by_its_wikidata_name_only() {
     let bank = Signals {
         official_site: true,

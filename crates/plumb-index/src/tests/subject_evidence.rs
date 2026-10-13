@@ -559,9 +559,11 @@ fn a_bare_full_query_domain_does_not_supply_a_partial_names_missing_subject() {
         .iter()
         .find(|hit| hit.domain == "aster.example")
         .unwrap();
-    assert_eq!(
+    // Nobody knows aster-lunar-nebula.example by that name, so it does not
+    // make the query a name: meaning still counts in the text score.
+    assert_ne!(
         unadjusted.text_score, without_meaning.text_score,
-        "a full-name rival still disables semantic score blending"
+        "a bare full-name rival does not disable semantic score blending"
     );
 }
 
