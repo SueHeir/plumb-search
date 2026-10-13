@@ -496,6 +496,7 @@ fn a_word_or_two_of_a_longer_search_is_no_answer() {
     // keeps it.
     assert!(found("australia grasshopper cricket", &nowhere, &now).contains(&cricket));
     assert_eq!(found("cricket scores", &nowhere, &now)[0], "cricket.com.au");
+    assert!(found("www.cricket", &nowhere, &now).contains(&cricket));
 }
 
 #[test]
