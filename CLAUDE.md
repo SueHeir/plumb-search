@@ -7,6 +7,7 @@ Plumb is a peer-to-peer web search engine in Rust. Most of this code is written 
 - **The node** is what `plumb run` and the Docker image run: plumb-node and the crates it links (plumb-core, plumb-format, plumb-answer, plumb-ingest, plumb-crawl, plumb-index, plumb-embed, plumb-net, plumb-plugin). It should stay small enough for an LLM to read, so keep it compact.
 - **plumb-tools** holds whatever a node never runs: building and signing sets, evals, ranking training, fetchers and research commands. If only an operator or an eval runs it, it goes there.
 - plumb-private is the browser side of private search (WebAssembly), plumb-desktop is the Tauri app, and `plugins/` holds WASM plugins.
+- `zotero/` is the Zotero plugin, in JavaScript since Zotero runs nothing else. It talks to a node only through `/api/search`, so keep that answer's shape (`assembled.rows`, `pages`, `hits`) readable by it, or change both. Its `README.md` says how to test it.
 
 ## Before pushing
 

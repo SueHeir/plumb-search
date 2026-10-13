@@ -15,6 +15,54 @@ fn song(title: &str, by: &str, item: &str, listeners: u64) -> Page {
 }
 
 #[test]
+fn a_work_in_a_series_is_named_by_its_own_title() {
+    let work = |title: &str, views| {
+        let mut page = page(title, views, &[]);
+        page.description = Some("video game or film".into());
+        page
+    };
+    let (_dir, s) = searcher(&[
+        work("The Legend of Zelda: Tears of the Kingdom", 300_000),
+        work("Spider-Man: No Way Home", 900_000),
+        work("No Way Home (1996 film)", 2_000),
+        work("Star Wars: Episode I – The Phantom Menace", 500_000),
+        work("Mission: Impossible", 400_000),
+        work("Pokémon: The Movie 2000", 50_000),
+        work("Kingdom Hearts", 200_000),
+    ]);
+    for (query, title) in [
+        (
+            "tears of the kingdom",
+            "The Legend of Zelda: Tears of the Kingdom",
+        ),
+        ("no way home", "Spider-Man: No Way Home"),
+        (
+            "the phantom menace",
+            "Star Wars: Episode I – The Phantom Menace",
+        ),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert!(
+            hits[0].named && hits[0].page.title == title,
+            "{query}: {hits:?}"
+        );
+    }
+    // The namesake of that title is still named too.
+    let hits = s.search("no way home", 5).unwrap();
+    assert!(hits
+        .iter()
+        .any(|hit| hit.named && hit.page.title == "No Way Home (1996 film)"));
+    // One word after the colon, or none but stop words and a kind of work,
+    // says too little.
+    for query in ["impossible", "the movie"] {
+        assert!(
+            s.search(query, 5).unwrap().iter().all(|hit| !hit.named),
+            "{query}"
+        );
+    }
+}
+
+#[test]
 fn songs_and_albums_are_found_by_their_name_and_artist() {
     let jude = song(
         "Hey Jude",
