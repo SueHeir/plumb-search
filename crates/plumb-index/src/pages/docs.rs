@@ -13,6 +13,7 @@ use tantivy::{TantivyDocument, Term};
 
 use super::placing::operators_allow;
 use super::scoring::{scoped_query, truncate_keeping_inner_pages};
+use super::sites::squash;
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, CANDIDATES, DOCS_SET, PARTIAL_MATCH,
     POPULARITY_SCALE, POPULARITY_SHARE, QUESTION_QUERY_WORDS, QUESTION_SHARE,
@@ -288,6 +289,60 @@ pub(crate) fn docs_kept_below(hit: &PageHit, sites: &[crate::Hit]) -> bool {
         && sites
             .first()
             .is_some_and(|best| !docs_of(&hit.page, &best.domain))
+}
+
+/// Whether the docs page `hit` is just what `query` names in code's own
+/// spelling ("Object.keys", "std::vector", "useState"), and the best of
+/// `sites` is not called that, as jquery.com is for "jQuery". Such a page
+/// leads: nobody types `Promise.all` for aclu.org or `std::vector` for
+/// vector.dev, the sites that share a word with it. The page must hold
+/// the whole name, so "macOS" is not `std::os::macos`.
+pub(crate) fn docs_named_as_code(hit: &PageHit, query: &str, sites: &[crate::Hit]) -> bool {
+    let query = query.trim();
+    let Some(symbol) = canonical_docs_symbol(query) else {
+        return false;
+    };
+    let head = hit
+        .page
+        .title
+        .split(" — ")
+        .next()
+        .unwrap_or(&hit.page.title);
+    let rich = hit.page.search.as_ref().and_then(SearchContent::bounded);
+    let holds = std::iter::once(head)
+        .chain(rich.iter().flat_map(|search| {
+            search
+                .symbols
+                .iter()
+                .map(|symbol| symbol.identifier.as_str())
+        }))
+        .any(|name| canonical_docs_symbol(name).as_ref() == Some(&symbol));
+    let name = squash(query);
+    hit.page.set == DOCS_SET
+        && written_as_code(query)
+        && holds
+        && strong_docs_symbol(&hit.page, query)
+        && !sites.first().is_some_and(|best| {
+            squash(&best.domain) == name
+                || squash(best.domain.split('.').next().unwrap_or("")) == name
+        })
+}
+
+/// Whether `query` is one name written as code: with call parentheses,
+/// `::`, a `.` or `_` inside it ("read_csv"), or a capital after a small
+/// first letter ("useState"). "malloc" and "vector" may be words.
+fn written_as_code(query: &str) -> bool {
+    let chars: Vec<char> = query.chars().collect();
+    !query.contains(char::is_whitespace)
+        && (query.ends_with("()")
+            || query.contains("::")
+            || chars.windows(3).any(|w| {
+                w[0].is_alphanumeric() && matches!(w[1], '.' | '_') && w[2].is_alphanumeric()
+            })
+            || chars.first().is_some_and(|c| c.is_lowercase())
+                && chars
+                    .windows(2)
+                    .any(|w| w[0].is_lowercase() && w[1].is_uppercase()))
 }
 
 /// Whether the docs page `page` is on `domain` or one of its subdomains.
