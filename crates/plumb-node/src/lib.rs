@@ -57,7 +57,8 @@ pub mod news;
 pub mod outline;
 pub mod records;
 mod run;
-mod sets;
+pub mod sets;
+pub mod site_rules;
 pub mod sources;
 
 use cli::{Cli, Command};
@@ -111,7 +112,6 @@ pub fn run(cli: Cli) -> Result<()> {
             args.act.as_deref(),
             args.annotate.as_deref(),
         ),
-        Command::Set(args) => sets::run(args),
         Command::Healthcheck(args) => healthcheck(&args),
     }
 }

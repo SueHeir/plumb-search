@@ -18,6 +18,13 @@
 //! A subdomain site inherits its parent domain's popularity ranks when the
 //! seed records are built, as the rank lists only know registrable domains
 //! (see [`subdomain_sites`]).
+//!
+//! These lists and the Public Suffix List are built in. A node may use a
+//! [`SiteList`] in their place instead, such as a site rules set the
+//! project signs ([`use_site_list`]), so that they change without a
+//! release.
+
+use std::sync::OnceLock;
 
 /// The version of [`SUBDOMAIN_SITES`], [`SUBDOMAIN_SITE_NAMES`],
 /// [`UMBRELLA_DOMAINS`] and of how seed data is read: bump it when they
@@ -152,7 +159,7 @@ pub const UMBRELLA_DOMAINS: &[&str] = &[
 ];
 
 /// Subdomains that are never a site of their own under an umbrella domain.
-const NOT_SITES: &[&str] = &["www", "m", "www2", "mobile"];
+pub const NOT_SITES: &[&str] = &["www", "m", "www2", "mobile"];
 
 /// The site of `host` (lowercase, no trailing dot), whose registrable
 /// domain is `domain`: a [`SUBDOMAIN_SITES`] entry it is or is under, the
@@ -188,15 +195,67 @@ pub(crate) fn site_of(host: &str, domain: &str) -> String {
 /// Each of the [`SUBDOMAIN_SITES`] with its registrable domain, whose
 /// popularity ranks it gets: rank lists only name registrable domains.
 pub fn subdomain_sites() -> impl Iterator<Item = (&'static str, &'static str)> {
-    SUBDOMAIN_SITES
-        .iter()
-        .filter_map(|site| Some((*site, psl::domain_str(site)?)))
+    let sites: Vec<&'static str> = match site_list() {
+        Some(list) => list.subsites(),
+        None => SUBDOMAIN_SITES.to_vec(),
+    };
+    sites
+        .into_iter()
+        .filter_map(|site| Some((site, domain_of(site)?)))
 }
 
 /// The registrable domain `site` is a subdomain of, when it is a site on
 /// a subdomain (see [`crate::registrable_domain`]).
 pub fn parent_domain(site: &str) -> Option<&str> {
-    psl::domain_str(site).filter(|domain| *domain != site)
+    domain_of(site).filter(|domain| *domain != site)
+}
+
+/// Site rules a node uses in place of the built-in ones: the Public Suffix
+/// List, [`SUBDOMAIN_SITES`], [`UMBRELLA_DOMAINS`] and [`NOT_SITES`].
+/// Hosts are lowercase ASCII with no trailing dot.
+pub trait SiteList: Send + Sync {
+    /// The public suffix of `host`: `co.uk` for `news.bbc.co.uk`, and all
+    /// of it when it is one.
+    fn suffix<'h>(&self, host: &'h str) -> &'h str;
+    /// The site of `host`, or `None` when it is a public suffix.
+    fn site_of(&self, host: &str) -> Option<String>;
+    /// The hosts that are sites of their own although they are
+    /// subdomains, as [`SUBDOMAIN_SITES`].
+    fn subsites(&self) -> Vec<&str>;
+}
+
+static SITE_LIST: OnceLock<Box<dyn SiteList>> = OnceLock::new();
+
+/// Makes `list` say which site every host is from now on, in place of the
+/// built-in lists. Once only, at start, before any site is worked out:
+/// false, leaving the list in use, when one already is.
+pub fn use_site_list(list: Box<dyn SiteList>) -> bool {
+    SITE_LIST.set(list).is_ok()
+}
+
+/// The list [`use_site_list`] put in place of the built-in ones.
+pub(crate) fn site_list() -> Option<&'static dyn SiteList> {
+    SITE_LIST.get().map(|list| list.as_ref())
+}
+
+/// The public suffix of `host`, as [`SiteList::suffix`].
+pub(crate) fn suffix_of(host: &str) -> Option<&str> {
+    match site_list() {
+        Some(list) => Some(list.suffix(host)),
+        None => psl::suffix_str(host),
+    }
+}
+
+/// The registrable domain of `host`: its public suffix and one label more,
+/// or `None` when it is a public suffix.
+pub(crate) fn domain_of(host: &str) -> Option<&str> {
+    let Some(list) = site_list() else {
+        return psl::domain_str(host);
+    };
+    let suffix = list.suffix(host);
+    let rest = host.strip_suffix(suffix)?.strip_suffix('.')?;
+    let start = rest.rfind('.').map_or(0, |dot| dot + 1);
+    Some(&host[start..])
 }
 
 #[cfg(test)]

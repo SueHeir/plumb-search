@@ -100,6 +100,9 @@ use crate::reports::ReportStore;
 use crate::rounds::{Pace, PendingBuckets, RoundStatus, ROUND_EVERY};
 use crate::scope::{Friends, SearchScope, MAX_SHARED_TRUST};
 use crate::search::{BucketPeer, NetSearch};
+use crate::sets::{
+    SetsAnswer, MAX_MANIFEST_BYTES, MAX_SETS_SERVING, MAX_SET_CHUNK, SETS_REQUESTS_PER_MINUTE,
+};
 use crate::storage::{allocation_for, Reservation, StorageBudget, StorageStatus};
 use crate::store::{read_held_with_budget, BatchStore, CrawlerView, StoreLimits, RETAIN_EPOCHS};
 
@@ -474,6 +477,8 @@ type FillReply = oneshot::Sender<Result<Option<FillPage>>>;
 
 /// Where the answer to a page set request goes.
 type PagesReply = oneshot::Sender<Result<Option<PagesChunk>>>;
+/// Where the answer to a signed set request goes.
+type SetsReply = oneshot::Sender<Result<Option<SetsAnswer>>>;
 type ProfileReply = oneshot::Sender<Result<ProfileResponse>>;
 
 enum Command {
@@ -507,6 +512,12 @@ enum Command {
         peer: Option<PeerId>,
         skip: Vec<PeerId>,
         reply: PagesReply,
+    },
+    Sets {
+        request: SetsRequest,
+        peer: Option<PeerId>,
+        skip: Vec<PeerId>,
+        reply: SetsReply,
     },
     Profile {
         peer: PeerId,
@@ -874,6 +885,27 @@ impl NetHandle {
         answer.await.context("the network task stopped")?
     }
 
+    /// Asks a connected node that serves signed sets (see [`crate::sets`])
+    /// `request`: `peer` when given (the node a part's download started
+    /// from), else one not in `skip`, nodes this node trusts first. `None`
+    /// when no such node is connected. The answer comes from any node, so
+    /// the asker checks it: the manifest's signature, each part's hash.
+    pub async fn ask_sets(
+        &self,
+        request: SetsRequest,
+        peer: Option<PeerId>,
+        skip: &[PeerId],
+    ) -> Result<Option<SetsAnswer>> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Sets {
+            request,
+            peer,
+            skip: skip.to_vec(),
+            reply,
+        })?;
+        answer.await.context("the network task stopped")?
+    }
+
     /// Asks `peer` about a searcher's profile (see [`ProfileRequest`]),
     /// dialling it first when it is not connected.
     pub async fn ask_profile(
@@ -1024,6 +1056,7 @@ struct Behaviour {
     credits: request_response::cbor::Behaviour<CreditRequest, CreditResponse>,
     fill: request_response::cbor::Behaviour<FillRequest, FillResponse>,
     pages: request_response::cbor::Behaviour<PagesRequest, PagesResponse>,
+    sets: request_response::cbor::Behaviour<SetsRequest, SetsResponse>,
     trust: request_response::cbor::Behaviour<TrustRequest, TrustResponse>,
     profile: request_response::cbor::Behaviour<ProfileRequest, ProfileResponse>,
     leads: request_response::cbor::Behaviour<LeadRequest, LeadResponse>,
@@ -1317,6 +1350,10 @@ pub async fn start(
         lists_serving: 0,
         pages_asked: HashMap::new(),
         pages_asking: HashMap::new(),
+        sets_peers: HashSet::new(),
+        sets_serving: 0,
+        sets_asked: HashMap::new(),
+        sets_asking: HashMap::new(),
         profile_serving: 0,
         profile_asking: HashMap::new(),
         gateway,
@@ -1706,6 +1743,15 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                     [(StreamProtocol::new(PAGES_PROTOCOL), ProtocolSupport::Full)],
                     request_config.clone(),
                 ),
+                sets: request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::default()
+                        .set_request_size_maximum(1024)
+                        .set_response_size_maximum(
+                            u64::from(MAX_SET_CHUNK).max(MAX_MANIFEST_BYTES as u64) + 64 * 1024,
+                        ),
+                    [(StreamProtocol::new(SETS_PROTOCOL), ProtocolSupport::Full)],
+                    request_config.clone(),
+                ),
                 trust: request_response::Behaviour::with_codec(
                     request_response::cbor::codec::Codec::default()
                         .set_request_size_maximum(64)
@@ -1753,6 +1799,7 @@ enum Answer {
     Report(ResponseChannel<ReportResponse>, ReportResponse),
     Fill(ResponseChannel<FillResponse>, FillResponse),
     Pages(ResponseChannel<PagesResponse>, PagesResponse),
+    Sets(ResponseChannel<SetsResponse>, SetsResponse),
     Profile(ResponseChannel<ProfileResponse>, ProfileResponse),
     /// Picks counted in a recount of the reports.
     Popularity(usize),
@@ -2021,6 +2068,14 @@ struct Task {
     pages_asked: HashMap<PeerId, (u64, u32)>,
     /// Our page set requests not yet answered.
     pages_asking: HashMap<OutboundRequestId, PagesReply>,
+    /// Connected nodes that serve signed sets, trusted or not.
+    sets_peers: HashSet<PeerId>,
+    /// Signed set requests being answered.
+    sets_serving: usize,
+    /// Signed set requests answered for each node, and the minute counted.
+    sets_asked: HashMap<PeerId, (u64, u32)>,
+    /// Our signed set requests not yet answered.
+    sets_asking: HashMap<OutboundRequestId, SetsReply>,
     /// Profile requests being answered (see [`MAX_PROFILE_SERVING`]).
     profile_serving: usize,
     /// Our profile requests not yet answered.
@@ -2297,6 +2352,33 @@ impl Task {
                     .send_request(&peer, request);
                 self.pages_asking.insert(id, reply);
             }
+            Command::Sets {
+                request,
+                peer,
+                skip,
+                reply,
+            } => {
+                let peer = match peer {
+                    Some(peer) => Some(peer).filter(|p| self.sets_peers.contains(p)),
+                    None => {
+                        let open = |p: &&PeerId| !skip.contains(p);
+                        let trusted = |p: &&PeerId| self.config.trusted_peers.contains(p);
+                        let mut peers = self.sets_peers.iter().filter(open);
+                        self.sets_peers
+                            .iter()
+                            .filter(open)
+                            .find(trusted)
+                            .or_else(|| peers.next())
+                            .copied()
+                    }
+                };
+                let Some(peer) = peer else {
+                    let _ = reply.send(Ok(None));
+                    return;
+                };
+                let id = self.swarm.behaviour_mut().sets.send_request(&peer, request);
+                self.sets_asking.insert(id, reply);
+            }
             Command::Profile {
                 peer,
                 request,
@@ -2520,6 +2602,14 @@ impl Task {
                     .swarm
                     .behaviour_mut()
                     .pages
+                    .send_response(channel, response);
+            }
+            Answer::Sets(channel, response) => {
+                self.sets_serving = self.sets_serving.saturating_sub(1);
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .sets
                     .send_response(channel, response);
             }
             Answer::Profile(channel, response) => {
@@ -2748,6 +2838,8 @@ impl Task {
                     self.fill_peers.remove(&peer_id);
                     self.pages_peers.remove(&peer_id);
                     self.pages_asked.remove(&peer_id);
+                    self.sets_peers.remove(&peer_id);
+                    self.sets_asked.remove(&peer_id);
                     self.trust_listing.remove(&peer_id);
                     self.fill_asked.remove(&peer_id);
                     // Asked again on coming back, for what it sent meanwhile.
@@ -2839,6 +2931,7 @@ impl Task {
             BehaviourEvent::Credits(event) => self.on_credit_event(event),
             BehaviourEvent::Fill(event) => self.on_fill_event(event),
             BehaviourEvent::Pages(event) => self.on_pages_event(event),
+            BehaviourEvent::Sets(event) => self.on_sets_event(event),
             BehaviourEvent::Trust(event) => self.on_trust_event(event),
             BehaviourEvent::Profile(event) => self.on_profile_event(event),
             BehaviourEvent::Leads(event) => self.on_lead_event(event),
@@ -2995,6 +3088,9 @@ impl Task {
         }
         if supports(PAGES_PROTOCOL) && self.config.trusted_peers.contains(&peer) {
             self.pages_peers.insert(peer);
+        }
+        if supports(SETS_PROTOCOL) {
+            self.sets_peers.insert(peer);
         }
         if supports(TRUST_PROTOCOL)
             && self.config.trusted_peers.contains(&peer)
@@ -3413,6 +3509,7 @@ impl Task {
                 self.lists_serving += 1;
                 let store = self.store.clone();
                 let tx = self.answers_tx.clone();
+                let source = self.source.clone();
                 tokio::task::spawn_blocking(move || {
                     let response = match request {
                         // Read and parsed with the store let go: a batch
@@ -3425,10 +3522,17 @@ impl Task {
                             let batch = held.map_or(Ok(None), |path| {
                                 read_held_with_budget(&path, budget.as_deref())
                             });
-                            BatchResponse::Batch(batch.unwrap_or_else(|err| {
+                            let batch = batch.unwrap_or_else(|err| {
                                 warn!("cannot read a batch: {err:#}");
                                 None
-                            }))
+                            });
+                            // Signed, it can't be passed on without what
+                            // the denylist takes off: the asker gets it
+                            // from another node, or not at all.
+                            BatchResponse::Batch(
+                                batch
+                                    .filter(|batch| !holds_denied(source.as_ref(), &batch.records)),
+                            )
                         }
                         BatchRequest::List { since_epoch } => BatchResponse::Headers(
                             store
@@ -3983,6 +4087,10 @@ impl Task {
                 return None;
             }
         };
+        if self.source.denies(&lead.url) {
+            debug!("refused a lead the denylist takes off");
+            return None;
+        }
         match self.leads.insert(lead, reporter, now) {
             Ok(inserted) => Some(inserted),
             Err(err) => {
@@ -3998,8 +4106,9 @@ impl Task {
         let Ok(lead) = serde_json::from_slice::<Lead>(data) else {
             return gossipsub::MessageAcceptance::Reject;
         };
-        if lead.expired(now_unix()) {
-            // It may have expired on the way.
+        // It may have expired on the way; and a node with another
+        // denylist, or none, did nothing wrong in passing it on.
+        if lead.expired(now_unix()) || self.source.denies(&lead.url) {
             return gossipsub::MessageAcceptance::Ignore;
         }
         match self.take_lead(lead) {
@@ -4038,7 +4147,8 @@ impl Task {
                 message: request_response::Message::Request { channel, .. },
                 ..
             } => {
-                let leads = self.leads.list(MAX_LISTED_LEADS);
+                let mut leads = self.leads.list(MAX_LISTED_LEADS);
+                leads.retain(|lead| !self.source.denies(&lead.url));
                 let _ = self
                     .swarm
                     .behaviour_mut()
@@ -4307,6 +4417,77 @@ impl Task {
             }
             _ => {}
         }
+    }
+
+    fn on_sets_event(&mut self, event: request_response::Event<SetsRequest, SetsResponse>) {
+        match event {
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+                ..
+            } => {
+                if !self.admit_sets(peer) {
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .sets
+                        .send_response(channel, SetsResponse::Busy);
+                    return;
+                }
+                self.sets_serving += 1;
+                let source = self.source.clone();
+                let tx = self.answers_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let response = source.sets_answer(&request);
+                    let _ = tx.send(Answer::Sets(channel, response));
+                });
+            }
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                ..
+            } => {
+                if let Some(reply) = self.sets_asking.remove(&request_id) {
+                    let _ = reply.send(Ok(Some(SetsAnswer { peer, response })));
+                }
+            }
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                if let Some(reply) = self.sets_asking.remove(&request_id) {
+                    let _ = reply.send(Err(anyhow::anyhow!("{peer} did not answer: {error}")));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether to answer a signed set request from `peer`: as for page
+    /// sets ([`Self::admit_pages`]), with counts of their own.
+    fn admit_sets(&mut self, peer: PeerId) -> bool {
+        if !self.config.answer_searches || self.sets_serving >= MAX_SETS_SERVING {
+            return false;
+        }
+        let minute = now_unix() / 60;
+        let asked = self.sets_asked.entry(peer).or_insert((minute, 0));
+        if asked.0 != minute {
+            *asked = (minute, 0);
+        }
+        if asked.1 >= SETS_REQUESTS_PER_MINUTE {
+            return false;
+        }
+        asked.1 += 1;
+        true
     }
 
     /// Profile requests are answered by the node's front end (see
@@ -4994,6 +5175,37 @@ fn is_loopback(addr: &Multiaddr) -> bool {
 
 /// A relayed address whose relay is `relay`.
 /// The relay a circuit address goes through, if it is one.
+/// True when the lines of a batch name a site, homepage, key page or
+/// headline the node's denylist takes off ([`BucketSource::denies`]): a
+/// record, an icon or a site's headlines.
+fn holds_denied(source: &dyn BucketSource, lines: &[String]) -> bool {
+    if !source.denying() {
+        return false;
+    }
+    lines.iter().any(|line| {
+        let Ok(line) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        let text = |value: &serde_json::Value, key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let sites = ["domain", "icon_of", "news_of"]
+            .iter()
+            .filter_map(|key| text(&line, key))
+            .map(|domain| format!("https://{domain}/"));
+        let pages = ["key_pages", "items"]
+            .iter()
+            .filter_map(|key| line.get(*key)?.as_array())
+            .flatten()
+            .filter_map(|page| text(page, "url"));
+        let mut urls = sites.chain(text(&line, "url")).chain(pages);
+        urls.any(|url| source.denies(&url))
+    })
+}
+
 fn relay_of(addr: &Multiaddr) -> Option<PeerId> {
     let mut previous = None;
     for p in addr.iter() {
@@ -5037,6 +5249,41 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_batch_naming_what_the_denylist_takes_off_is_not_relayed() {
+        struct Denying(Option<&'static str>);
+        impl BucketSource for Denying {
+            fn bucket(&self, _bucket: u32) -> Option<Vec<String>> {
+                None
+            }
+            fn denying(&self) -> bool {
+                self.0.is_some()
+            }
+            fn denies(&self, url: &str) -> bool {
+                self.0 == Some(url)
+            }
+        }
+        let lines: Vec<String> = [
+            r#"{"domain":"example.com","url":"https://www.example.com/","key_pages":[{"label":"Docs","url":"https://example.com/docs"}]}"#,
+            r#"{"icon_of":"icons.example","png":"AAAA"}"#,
+            r#"{"news_of":"news.example","items":[{"title":"A","url":"https://news.example/a","at":1}]}"#,
+            "not a record",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert!(!holds_denied(&Denying(None), &lines), "no list");
+        assert!(!holds_denied(&Denying(Some("https://other.org/")), &lines));
+        for denied in [
+            "https://example.com/",
+            "https://www.example.com/",
+            "https://example.com/docs",
+            "https://icons.example/",
+            "https://news.example/a",
+        ] {
+            assert!(holds_denied(&Denying(Some(denied)), &lines), "{denied}");
+        }
+    }
 
     #[test]
     fn empty_startup_lists_retry_with_bounded_peers_attempts_and_backoff() {

@@ -1,28 +1,33 @@
 //! Site vectors handed from node to node, so a node that turns search by
 //! meaning on (or gets a new model) need not embed millions of sites on its
-//! own CPUs: it takes the vectors a trusted node made with the same model.
+//! own CPUs: it takes the vectors another node made with the same model.
 //!
-//! The vectors file goes over the page set protocol (`plumb_net::pages`),
-//! as the set `vectors-<model id in hex>`: a node answers only when its own
-//! vectors file was made by that model, and nodes that know nothing of
-//! this answer that they have no such set. Like page sets, vectors are
-//! taken only from trusted nodes. A node keeps a vector it is given only
-//! when it was made from the very text the node has for that site (the
-//! text's hash matches), so a vector is never kept for other text.
+//! They come as the project's signed set of that model's vectors
+//! ([`vectors_set`]), from any node that holds it, over `/plumb/sets/1`
+//! ([`super::signed_sets`]). The node reads it into its own vectors file
+//! and removes it. While no node has the set, a trusted node's vectors
+//! file comes over the page set protocol (`plumb_net::pages`), as
+//! `vectors-<model id in hex>`: a node answers only when its own vectors
+//! file was made by that model, and nodes that know nothing of this answer
+//! that they have no such set. Either way a node keeps a vector only when
+//! it was made from the very text the node has for that site (the text's
+//! hash matches), so a vector is never kept for other text.
 
 use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use plumb_embed::{ModelId, Vectors};
+use plumb_embed::{ModelId, TextHash, Vectors};
+use plumb_format::Ref;
 use plumb_net::pages::MAX_PAGES_CHUNK;
 use plumb_net::NetHandle;
 use tracing::{debug, info, warn};
 
-use super::control::hex_encode;
+use super::control::{hex_decode, hex_encode};
+use super::signed_sets::Looked;
 use super::Inner;
-use crate::meaning::{wanted_texts, MeaningIndex};
+use crate::meaning::{vectors_set, wanted_texts, MeaningIndex};
 
 /// The start of the set name vectors go by.
 const SET_PREFIX: &str = "vectors-";
@@ -56,7 +61,7 @@ pub(super) enum Taken {
     Kept(usize),
 }
 
-/// Takes the vectors a trusted node made with this node's model, and keeps
+/// Takes the vectors another node made with this node's model, and keeps
 /// those made from the text this node has for sites lacking an up-to-date
 /// vector.
 pub(super) fn take(
@@ -65,21 +70,86 @@ pub(super) fn take(
     meaning: &MeaningIndex,
     vectors_path: &Path,
 ) -> Result<Taken> {
+    if let Some(pause) = inner.download_pause() {
+        debug!("site vectors not downloaded now: {}", pause.reason);
+        return Ok(Taken::Kept(0));
+    }
+    if let Some(kept) = take_set(inner, net, meaning, vectors_path)? {
+        return Ok(Taken::Kept(kept));
+    }
     let model = meaning.embedder().id();
     let dim = meaning.embedder().dim();
-    let set = set_name(&model);
     let part = inner.paths.data.join(PART_FILE);
-    let downloaded = download(inner, net, &set, &part);
+    let downloaded = download(inner, net, &set_name(&model), &part);
     let result = downloaded.and_then(|got| match got {
         Download::NoNode => Ok(Taken::NoNode),
         Download::NoFile => Ok(Taken::Kept(0)),
         Download::From(peer) => {
-            keep(inner, meaning, &part, model, dim, vectors_path, &peer).map(Taken::Kept)
+            let (their_model, their_dim, _) = Vectors::read_header(&part)?;
+            if their_model != model || their_dim != dim {
+                bail!("{peer} sent vectors of another model");
+            }
+            let read = |each: &mut Each| Vectors::for_each_in(&part, each).map(drop);
+            keep(inner, meaning, vectors_path, &peer, read).map(Taken::Kept)
         }
     });
     let _ = plumb_core::storage::remove_file(&part, inner.storage.as_deref());
     result
 }
+
+/// Takes the signed set of the vectors this node's model makes, when a
+/// node has one a trusted publisher signed that is newer than any this
+/// node holds, and keeps the vectors this node wants from it; `None` when
+/// it took none. A set taken is removed once read: the vectors kept are in
+/// the node's own file. One the node holds already, as its publisher's
+/// own node does to hand it on, is left as it is.
+fn take_set(
+    inner: &Inner,
+    net: &NetHandle,
+    meaning: &MeaningIndex,
+    vectors_path: &Path,
+) -> Result<Option<usize>> {
+    let set = vectors_set(&meaning.embedder().id());
+    let runtime = tokio::runtime::Handle::current();
+    match runtime.block_on(super::signed_sets::look(inner, net, &set)) {
+        Ok(Looked::Took(_)) => {}
+        Ok(_) => return Ok(None),
+        Err(err) => {
+            warn!("search by meaning: taking {set}: {err:#}");
+            return Ok(None);
+        }
+    }
+    let dir = super::signed_sets::set_dir(&inner.paths.data, &set).context("not a set name")?;
+    let (model, dim) = (
+        hex_encode(&meaning.embedder().id()),
+        meaning.embedder().dim(),
+    );
+    let read = |each: &mut Each| {
+        crate::sets::for_each_item(&dir, |item| {
+            let Some(Ref::Site(domain)) = &item.extends else {
+                return Ok(());
+            };
+            for vector in item.vectors.iter().filter(|vector| vector.model == model) {
+                let of = hex_decode(&vector.of)
+                    .ok()
+                    .and_then(|of| of.try_into().ok());
+                let values = vector.values().filter(|values| values.len() == dim);
+                if let (Some(of), Some(values)) = (of, values) {
+                    each(domain, &of, &values)?;
+                }
+            }
+            Ok(())
+        })
+        .map(drop)
+    };
+    let kept = keep(inner, meaning, vectors_path, &set, read);
+    let _ = plumb_core::storage::remove_directory(&dir, inner.storage.as_deref());
+    kept.map(Some)
+}
+
+/// What hands [`keep`] each vector read: its site, the hash of the text
+/// it was made from, and its values.
+type Each<'a> = dyn FnMut(&str, &TextHash, &[i8]) -> Result<()> + 'a;
 
 enum Download {
     NoNode,
@@ -93,10 +163,6 @@ enum Download {
 fn download(inner: &Inner, net: &NetHandle, set: &str, part: &Path) -> Result<Download> {
     use std::io::Write;
 
-    if let Some(pause) = inner.download_pause() {
-        debug!("site vectors not downloaded now: {}", pause.reason);
-        return Ok(Download::NoFile);
-    }
     let runtime = tokio::runtime::Handle::current();
     let mut lacking = Vec::new();
     let first = loop {
@@ -176,20 +242,14 @@ fn download(inner: &Inner, net: &NetHandle, set: &str, part: &Path) -> Result<Do
     Ok(Download::From(from.to_string()))
 }
 
-/// Keeps the vectors in the downloaded file `part` that this node wants.
+/// Keeps the vectors `read` hands over, from `from`, that this node wants.
 fn keep(
     inner: &Inner,
     meaning: &MeaningIndex,
-    part: &Path,
-    model: ModelId,
-    dim: usize,
     vectors_path: &Path,
     from: &str,
+    read: impl FnOnce(&mut Each) -> Result<()>,
 ) -> Result<usize> {
-    let (their_model, their_dim, _) = Vectors::read_header(part)?;
-    if their_model != model || their_dim != dim {
-        bail!("{from} sent vectors of another model");
-    }
     let wanted = {
         let _records = inner.hold_records();
         wanted_texts(
@@ -214,7 +274,7 @@ fn keep(
         }
         anyhow::Ok(())
     };
-    Vectors::for_each_in(part, |domain, hash, vector| {
+    read(&mut |domain, hash, vector| {
         if wanted.get(domain) == Some(hash) {
             taken.push((domain.to_string(), *hash, vector.to_vec()));
             if taken.len() >= PUT_IN_AT_ONCE {
@@ -232,7 +292,7 @@ fn keep(
         wanted.len()
     );
     inner.journal.info(format!(
-        "Search by meaning: {} site vectors taken from a node you trust",
+        "Search by meaning: {} site vectors taken from another node",
         crate::web::group_thousands(kept as u64)
     ));
     Ok(kept)

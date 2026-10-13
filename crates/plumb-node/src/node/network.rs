@@ -125,6 +125,14 @@ struct Published {
 struct ServedIndex(Arc<Inner>);
 
 impl BucketSource for ServedIndex {
+    fn denying(&self) -> bool {
+        self.0.denylist().is_some()
+    }
+
+    fn denies(&self, url: &str) -> bool {
+        self.0.denies(url)
+    }
+
     fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
         let index = self.0.current()?;
         let table = index.buckets.as_ref()?;
@@ -168,10 +176,27 @@ impl BucketSource for ServedIndex {
             return super::adult::shared_file(&self.0.paths.data);
         }
         if set == super::pages::MAP_SET {
-            let file = crate::map::file(&self.0.paths.data);
-            return file.is_file().then_some(file);
+            // The newer of the map file and the map held as a set.
+            return self.0.map.newest().map(|(path, _, _)| path);
         }
         crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
+    }
+
+    fn set_manifest(&self, set: &str) -> Option<String> {
+        super::signed_sets::held_manifest(&self.0.paths.data, set)
+    }
+
+    fn set_part_file(&self, sha256: &str) -> Option<PathBuf> {
+        super::signed_sets::held_part(&self.0.paths.data, sha256)
+    }
+
+    fn sets_answer(
+        &self,
+        request: &plumb_net::proto::SetsRequest,
+    ) -> plumb_net::proto::SetsResponse {
+        // Not while a set is being put in place.
+        let _mutation = self.0.storage.as_ref().map(|budget| budget.mutation());
+        plumb_net::sets::answer(self, request)
     }
 
     fn profile(
@@ -312,6 +337,7 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
             if receiver.config.crawl_only {
                 batch.clear();
             }
+            receiver.drop_denied_records(&mut batch);
             // Feed checks and raw crawls have separate durable destinations.
             let (news, mut batch): (Vec<_>, Vec<_>) =
                 batch.into_iter().partition(|r| !r.news.is_empty());
@@ -495,6 +521,7 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
                 }
             })?;
             crawled.sort_by_key(|r| r.crawled_at);
+            inner.drop_denied_records(&mut crawled);
             anyhow::Ok(crawled)
         })
         .await

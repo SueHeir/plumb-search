@@ -108,6 +108,7 @@ use crate::websearch::{Engine, WebSettings};
 mod adult;
 pub mod backup;
 pub mod control;
+mod denylist;
 mod embedding;
 pub mod features;
 mod fill;
@@ -120,6 +121,7 @@ mod places;
 mod round;
 pub mod schedule;
 mod shared_vectors;
+pub(crate) mod signed_sets;
 pub(crate) mod store;
 mod trim;
 mod worker;
@@ -222,6 +224,13 @@ pub struct NodeConfig {
     pub retry_wait: Duration,
     /// The longest wait between two tries of failed work.
     pub max_retry_wait: Duration,
+    /// The keys whose signed sets the node takes from the network (see
+    /// [`signed_sets`]): the project's key ([`signed_sets::PROJECT_KEY`])
+    /// by default.
+    pub set_publishers: Vec<plumb_format::PublicKey>,
+    /// Apply the project's denylist (see [`denylist`]). Off, its `csam`
+    /// entries still apply. On by default.
+    pub project_denylist: bool,
     /// Join the Plumb network: share crawl work with other nodes and answer
     /// their searches (see [`network`]). Its `dir` is replaced with
     /// `DIR/net`. `None`, the default for now, keeps the node on its own.
@@ -345,6 +354,8 @@ impl NodeConfig {
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
+            set_publishers: vec![signed_sets::project_key()],
+            project_denylist: true,
             network: None,
             private_search: false,
             share_popularity: false,
@@ -788,6 +799,7 @@ pub struct NodeHandle {
     pages: JoinHandle<()>,
     news: JoinHandle<()>,
     adult: JoinHandle<()>,
+    signed_sets: JoinHandle<()>,
 }
 
 impl NodeHandle {
@@ -841,6 +853,7 @@ impl NodeHandle {
             pages,
             news,
             adult,
+            signed_sets,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -873,6 +886,9 @@ impl NodeHandle {
         }
         if let Err(err) = adult.await {
             warn!("the adult blocklist failed: {err}");
+        }
+        if let Err(err) = signed_sets.await {
+            warn!("signed sets failed: {err}");
         }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
@@ -950,6 +966,11 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
             .await??,
     );
     let inner = Arc::new(Inner::new(config, rank, opened, stopped.clone(), storage));
+    // Before anything is shown.
+    {
+        let inner = inner.clone();
+        tokio::task::spawn_blocking(move || inner.load_denylist()).await?;
+    }
     inner.journal.info(format!(
         "Plumb Search {} started",
         env!("CARGO_PKG_VERSION")
@@ -1046,6 +1067,9 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
             }),
         )
     };
+    let signed_sets = supervise(&inner, "signed sets", |inner| {
+        tokio::spawn(signed_sets::run(inner))
+    });
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -1060,6 +1084,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         pages,
         news,
         adult,
+        signed_sets,
     })
 }
 
@@ -1164,6 +1189,8 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
         Ok(false) => {}
         Err(err) => warn!("{err:#}"),
     }
+    // Before any site is worked out.
+    signed_sets::use_held_site_rules(&paths.data, &config.set_publishers);
     let mut saved =
         store::load_state(&paths).unwrap_or_else(|| SavedState::fresh(config.initial_crawl));
 
@@ -1307,6 +1334,10 @@ struct Inner {
     /// The page sets whose file is being downloaded or cut, so the two
     /// never write the same file at once.
     set_files_busy: Mutex<std::collections::HashSet<&'static str>>,
+    /// Held while the page index is worked out and built from the
+    /// project's item sets of page sets, and while one is swapped in or
+    /// trimmed, so a build never reads two generations of a set, or none.
+    held_page_sets: Arc<Mutex<()>>,
     /// Set once the index was rebuilt to add missing buckets.
     buckets_rebuilt: AtomicBool,
     /// The results opened this week, when sharing popularity.
@@ -1335,6 +1366,9 @@ struct Inner {
     news: crate::news::NewsStore,
     /// The adult blocklist, once loaded.
     adult: RwLock<Option<Arc<adult::AdultList>>>,
+    /// The project's denylist, once the node holds one, with its stamp
+    /// ([`denylist::read_held`]).
+    denylist: RwLock<Option<(Arc<plumb_format::deny::Denylist>, String)>>,
 }
 
 /// Failed work the panel can have tried again now.
@@ -1505,6 +1539,8 @@ impl Inner {
         let backoff = worker::Backoff::new(config.retry_wait, config.max_retry_wait);
         let journal = journal::Journal::open(&opened.paths.data).with_budget(storage.clone());
         let map_data = opened.paths.data.clone();
+        let map = crate::map::MapFile::new(crate::map::file(&map_data))
+            .with_held_set(map_data, config.set_publishers.clone());
         let fill_state = fill::FillState::load(&opened.paths.net);
         let news = crate::news::NewsStore::open(&opened.paths.news).with_budget(storage.clone());
         Inner {
@@ -1541,6 +1577,7 @@ impl Inner {
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
             set_files_busy: Mutex::default(),
+            held_page_sets: Arc::default(),
             buckets_rebuilt: AtomicBool::new(false),
             picks: Mutex::new(None),
             settings: Mutex::new(opened.settings),
@@ -1552,9 +1589,10 @@ impl Inner {
             meaning_retry: AtomicBool::new(false),
             pages: RwLock::new(None),
             places: RwLock::new(None),
-            map: crate::map::MapFile::new(crate::map::file(&map_data)),
+            map,
             news,
             adult: RwLock::new(None),
+            denylist: RwLock::new(None),
         }
     }
 
@@ -2148,7 +2186,7 @@ impl SearchBackend for Inner {
     }
 
     fn site(&self, domain: &str) -> Option<Hit> {
-        self.current()?.backend().site(domain)
+        self.unless_denied_site(self.current()?.backend().site(domain))
     }
 
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
@@ -2156,11 +2194,11 @@ impl SearchBackend for Inner {
     }
 
     fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
-        pages::known_song(self, query, options)
+        self.unless_denied(pages::known_song(self, query, options))
     }
 
     fn definition(&self, name: &str) -> Option<plumb_index::pages::Page> {
-        pages::definition(self, name)
+        self.unless_denied(pages::definition(self, name))
     }
 
     fn entities(
@@ -2169,7 +2207,7 @@ impl SearchBackend for Inner {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<Vec<plumb_index::pages::PageHit>> {
-        pages::entities(self, query, limit, options)
+        Ok(self.drop_denied_pages(pages::entities(self, query, limit, options)?))
     }
 
     fn pages_of(
@@ -2180,7 +2218,7 @@ impl SearchBackend for Inner {
         docs: bool,
         keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
     ) -> Vec<plumb_index::pages::PageHit> {
-        pages::pages_of(self, query, limit, options, docs, keep)
+        self.drop_denied_pages(pages::pages_of(self, query, limit, options, docs, keep))
     }
 
     fn papers(
@@ -2189,7 +2227,7 @@ impl SearchBackend for Inner {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<Vec<plumb_index::pages::PageHit>> {
-        pages::papers(self, query, limit, options)
+        Ok(self.drop_denied_pages(pages::papers(self, query, limit, options)?))
     }
 
     fn paper_coverage(&self) -> Option<plumb_index::pages::PaperCoverage> {
@@ -2213,7 +2251,7 @@ impl Inner {
     ) -> Result<SearchResults> {
         let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
         if paper.constrained {
-            let found = pages::papers(self, &paper, limit, options)?;
+            let found = self.drop_denied_pages(pages::papers(self, &paper, limit, options)?);
             return Ok(SearchResults {
                 pages: found
                     .into_iter()
@@ -2238,6 +2276,11 @@ impl Inner {
         let wanted = match adult {
             Some(_) => limit + adult::MARGIN,
             None => limit,
+        };
+        // And the denylist's, which takes sites off for everyone.
+        let wanted = match self.denylist() {
+            Some(list) if !list.is_empty() => wanted + denylist::MARGIN,
+            _ => wanted,
         };
         let run = |options: &SearchOptions| -> Result<SearchResults> {
             Ok(match network::handle(self).map(|net| net.popularity()) {
@@ -2278,8 +2321,10 @@ impl Inner {
         if let Some(adult) = &adult {
             results.hits.retain(|hit| !adult.contains(&hit.domain));
         }
+        self.drop_denied(&mut results);
         results.hits.truncate(limit);
         pages::add_pages(self, query, options, &mut results);
+        self.drop_denied(&mut results);
         Ok(results)
     }
 }
@@ -2287,6 +2332,10 @@ impl Inner {
 impl StatusSource for Inner {
     fn status(&self) -> Status {
         Inner::status(self)
+    }
+
+    fn denies(&self, url: &str) -> bool {
+        Inner::denies(self, url)
     }
 
     fn network(&self) -> Option<Arc<plumb_net::NetHandle>> {
@@ -2342,7 +2391,11 @@ impl StatusSource for Inner {
     }
 
     fn recent(&self, query: &str, top: Option<(&str, bool)>) -> Option<crate::news::Recent> {
-        self.news.recent(query, top, now_unix())
+        let mut recent = self.news.recent(query, top, now_unix())?;
+        recent
+            .headlines
+            .retain(|headline| !self.denies(&headline.url));
+        Some(recent)
     }
 
     fn features(&self) -> features::FeatureSettings {

@@ -53,6 +53,19 @@ pub trait BucketSource: Send + Sync + 'static {
         None
     }
 
+    /// Whether this node applies a denylist ([`BucketSource::denies`]).
+    fn denying(&self) -> bool {
+        false
+    }
+
+    /// True when this node's denylist takes off the page at `url`. It
+    /// neither keeps nor lists such a lead, and relays no batch that names
+    /// such a site, homepage, key page or headline.
+    fn denies(&self, url: &str) -> bool {
+        let _ = url;
+        false
+    }
+
     /// The icon this node holds for `domain`, as base64 PNG, sent with the
     /// site's record to a node filling its space; `None` when it has none.
     fn icon(&self, domain: &str) -> Option<String> {
@@ -69,6 +82,26 @@ pub trait BucketSource: Send + Sync + 'static {
     fn page_set_file(&self, set: &str) -> Option<std::path::PathBuf> {
         let _ = set;
         None
+    }
+
+    /// The newest signed manifest this node holds of the set `set`, as
+    /// signed, for nodes asking over `/plumb/sets/1` (see [`crate::sets`]);
+    /// `None` when it holds none.
+    fn set_manifest(&self, set: &str) -> Option<String> {
+        let _ = set;
+        None
+    }
+
+    /// The file of the set part whose SHA-256 is `sha256` (lowercase hex),
+    /// when this node holds it.
+    fn set_part_file(&self, sha256: &str) -> Option<std::path::PathBuf> {
+        let _ = sha256;
+        None
+    }
+
+    /// The answer to a request over `/plumb/sets/1`.
+    fn sets_answer(&self, request: &crate::proto::SetsRequest) -> crate::proto::SetsResponse {
+        crate::sets::answer(self, request)
     }
 
     /// Answers `peer` about a searcher's profile it shares with this node

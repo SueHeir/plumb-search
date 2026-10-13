@@ -22,13 +22,18 @@ use crate::item::Item;
 use crate::notes::{current_publisher, is_revoked, Note};
 use crate::refs::Ref;
 use crate::sign::{verify, PublicKey};
+use crate::sites::{Rule, SITE_RULE};
 use crate::value::{is_timestamp, unix_seconds, FieldType};
 use crate::FORMAT;
 
 /// What this version of the format understands in a manifest's
 /// `requires`. A set that requires anything else is skipped rather than
 /// misread.
-pub const UNDERSTOOD: &[&str] = &[];
+pub const UNDERSTOOD: &[&str] = &[BLOB_PARTS];
+
+/// What a set with blob parts ([`FilePart::blob`]) requires, so a version
+/// that would read their bytes as items skips the set instead.
+pub const BLOB_PARTS: &str = "blob-parts";
 
 /// How far ahead of a node's clock a generation may be: a day, for clocks
 /// that are a little off. A later one is refused, so a set can't be dated
@@ -140,6 +145,12 @@ pub struct FilePart {
     pub bytes: u64,
     /// The hex SHA-256 of the file as stored, after compression.
     pub sha256: String,
+    /// True for a part that is bytes, not items: a file an item of the set
+    /// names by hash (`blob:sha256-<sha256>`), such as a map. It holds no
+    /// items, so its `count` is 0, and the manifest requires
+    /// [`BLOB_PARTS`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blob: bool,
     #[serde(flatten)]
     pub other: BTreeMap<String, Value>,
 }
@@ -278,6 +289,14 @@ impl Manifest {
                 "{}: sha256 is not 64 lower-case hex digits",
                 part.path
             );
+            if part.blob {
+                ensure!(part.count == 0, "{}: a blob part holds no items", part.path);
+                ensure!(
+                    self.requires.iter().any(|feature| feature == BLOB_PARTS),
+                    "{} has a blob part but does not require {BLOB_PARTS}",
+                    self.set
+                );
+            }
         }
         for scheme in &self.extends {
             ensure!(
@@ -299,6 +318,13 @@ impl Manifest {
                 self.set
             );
         }
+        if self.kinds.iter().any(|kind| kind == SITE_RULE) {
+            ensure!(
+                self.is_site_rules() && self.extends.is_empty(),
+                "{}: a site rules set holds site rules and nothing else",
+                self.set
+            );
+        }
         for (name, spec) in &self.fields {
             if let Some(same_as) = &spec.same_as {
                 ensure!(
@@ -314,6 +340,19 @@ impl Manifest {
     /// `deny`.
     pub fn is_denylist(&self) -> bool {
         self.kinds.len() == 1 && self.kinds[0] == DENY
+    }
+
+    /// True when the set may be passed to another node: not labelled
+    /// `personal` as a whole. Only such a set may hold `personal` items,
+    /// and nodes neither send nor take it.
+    pub fn may_share(&self) -> bool {
+        !self.labels.iter().any(|label| label == "personal")
+    }
+
+    /// True for a set of site rules ([`crate::sites`]): a set whose only
+    /// kind is `site-rule`.
+    pub fn is_site_rules(&self) -> bool {
+        self.kinds.len() == 1 && self.kinds[0] == SITE_RULE
     }
 
     /// The entries of `requires` this version does not understand. A node
@@ -341,6 +380,18 @@ impl Manifest {
             ensure!(
                 item.kind != DENY,
                 "item {:?} is a denylist entry, and {} is not a denylist",
+                item.id,
+                self.set
+            );
+        }
+        if self.is_site_rules() {
+            if !item.is_deleted() {
+                Rule::from_item(item)?;
+            }
+        } else {
+            ensure!(
+                item.kind != SITE_RULE,
+                "item {:?} is a site rule, and {} is not a site rules set",
                 item.id,
                 self.set
             );
@@ -611,6 +662,30 @@ mod tests {
         value["requires"] = json!(["places-rows/1"]);
         let (manifest, _) = Manifest::from_signed_json(&signed(&mut value, &key), NOW).unwrap();
         assert_eq!(manifest.not_understood(), ["places-rows/1"]);
+    }
+
+    #[test]
+    fn a_blob_part_holds_no_items_and_is_required() {
+        let key = SigningKey::from_bytes(&[3; 32]);
+        let map = |count: u64, requires: Value| {
+            json!({
+                "format": "plumb-set/1", "set": "plumb/map", "publisher": PublicKey::of(&key).to_string(),
+                "generation": "2026-10-11T05:00:00Z", "kinds": ["map-tiles"], "requires": requires,
+                "files": [{"path": "items-001.jsonl.zst", "count": 1, "bytes": 180, "sha256": HASH},
+                          {"path": "map.pmtiles", "count": count, "bytes": 11380000000u64, "sha256": HASH, "blob": true}],
+            })
+        };
+        let text = signed(&mut map(0, json!([BLOB_PARTS])), &key);
+        let (manifest, _) = Manifest::from_signed_json(&text, NOW).unwrap();
+        assert!(manifest.files[1].blob && !manifest.files[0].blob);
+        assert!(manifest.not_understood().is_empty());
+        assert!(!serde_json::to_string(&manifest.files[0])
+            .unwrap()
+            .contains("blob"));
+        for bad in [map(5, json!([BLOB_PARTS])), map(0, json!([]))] {
+            let text = signed(&mut bad.clone(), &key);
+            assert!(Manifest::from_signed_json(&text, NOW).is_err(), "{bad}");
+        }
     }
 
     #[test]

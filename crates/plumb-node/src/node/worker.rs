@@ -33,15 +33,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{
-    now_unix, parent_domain, RecordSet, SiteRecord, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
-};
+#[cfg(doc)]
+use plumb_core::SITES_VERSION;
+use plumb_core::{now_unix, parent_domain, RecordSet, SiteRecord, SUBDOMAIN_SITE_NAMES};
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_index::build_index_with_budget;
 use plumb_ingest::{
     attach_facts, attach_intros, download, facts, intros, kind_sites, load_cc_domain_ranks,
     load_intros, load_misread_official_sites, load_site_facts, load_tranco,
-    load_wikidata_official_sites, Builder,
+    load_wikidata_official_sites, Builder, OfficialSite,
 };
 use tokio::runtime::Handle;
 use tracing::{info, warn};
@@ -238,7 +238,7 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         rebuild(inner, true).await?;
         return Ok(Next::Continue);
     }
-    if saved.sites_version < SITES_VERSION && !saved.quick_start {
+    if saved.sites_changed() && !saved.quick_start {
         refold_seed(inner).await?;
         return Ok(Next::Continue);
     }
@@ -508,7 +508,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             saved.wikidata_missing = wikidata_missing;
             saved.quick_start = false;
             saved.index_stale = true;
-            saved.sites_version = SITES_VERSION;
+            saved.sites_current();
         })?;
         info!(
             "folded the seed data into the records: {} sites (there were {before})",
@@ -545,7 +545,7 @@ async fn complete_seed_from_network(inner: &Arc<Inner>) -> Result<bool> {
         inner.update_saved(|saved| {
             saved.wikidata_missing = false;
             saved.quick_start = false;
-            saved.sites_version = SITES_VERSION;
+            saved.sites_current();
         })
     })
     .await?;
@@ -560,17 +560,18 @@ async fn complete_seed_from_network(inner: &Arc<Inner>) -> Result<bool> {
 }
 
 /// Brings records made before the lists of sites on subdomains, or before
-/// email addresses were refused as websites ([`SITES_VERSION`]), up to
-/// date from the seed files already on disk, without downloading anything:
-/// sites such as scholar.google.com, which were part of their parent
-/// domain, get records of their own with their official names, and claims
-/// misread from email addresses are taken back. Only the few records that
-/// change are read from the seed files; the changes go into the records'
-/// journal ([`subdomain_changes`]) and the index is rebuilt as after a
-/// crawl, so this needs no more memory than a rebuild. A node stopped part
-/// way does it again on its next start: the changes come out the same.
+/// email addresses were refused as websites ([`SITES_VERSION`]), or with
+/// other site rules ([`crate::site_rules`]), up to date from the seed
+/// files already on disk, without downloading anything: sites such as
+/// scholar.google.com, which were part of their parent domain, get records
+/// of their own with their official names, and claims misread from email
+/// addresses are taken back. Only the few records that change are read
+/// from the seed files; the changes go into the records' journal
+/// ([`subdomain_changes`]) and the index is rebuilt as after a crawl, so
+/// this needs no more memory than a rebuild. A node stopped part way does
+/// it again on its next start: the changes come out the same.
 async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
-    info!("the lists of sites on subdomains changed: updating the records from the seed data");
+    info!("the lists of sites changed: updating the records from the seed data");
     blocking(inner, |inner| {
         let changes = subdomain_changes(&inner.paths.seed)?;
         let n = changes.len();
@@ -582,7 +583,7 @@ async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
                 .save(&changes)?;
         }
         inner.update_saved(|saved| {
-            saved.sites_version = SITES_VERSION;
+            saved.sites_current();
             saved.index_stale |= n > 0;
         })?;
         info!("updated the records from the seed data: {n} changes");
@@ -594,24 +595,46 @@ async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
 /// The changes [`refold_seed`] makes, from the Wikidata files in `seed`:
 /// for each claim misread from an email address
 /// ([`plumb_ingest::OfficialSite::misread`]), taking it back and merging
-/// the domain's own claims again; for each subdomain site with a claim or
-/// a built-in name ([`SUBDOMAIN_SITE_NAMES`]), its record, made where its
-/// parent domain has one ([`Change::SubdomainSite`]).
+/// the domain's own claims again; for each claim the site rules in use
+/// give another site than the built-in lists do ([`moved_from`]), the
+/// same, taking it back off the site the built-in lists gave it, and its
+/// record; for each subdomain site with a claim or a built-in name
+/// ([`SUBDOMAIN_SITE_NAMES`]), its record, made where its parent domain
+/// has one ([`Change::SubdomainSite`]).
+///
+/// A site that earlier rules made but the rules in use do not keeps its
+/// record until the seed is folded in whole again.
 fn subdomain_changes(seed: &Path) -> Result<Vec<Change>> {
     let files = [
         seed.join(download::WIKIDATA_FILE_NAME),
         seed.join(kind_sites::KIND_SITES_FILE_NAME),
     ];
     let files: Vec<&PathBuf> = files.iter().filter(|path| path.is_file()).collect();
-    let mut misread = Vec::new();
+    let mut taken_back = Vec::new();
     for path in &files {
-        misread.extend(
+        taken_back.extend(
             load_misread_official_sites(path)?
                 .into_iter()
                 .filter(|site| site.is_root_homepage()),
         );
     }
-    let misread_domains: HashSet<&str> = misread.iter().map(|site| site.domain.as_str()).collect();
+    // Claims the built-in lists put on another site, with that site.
+    let mut moved: Vec<(OfficialSite, String)> = Vec::new();
+    if crate::site_rules::in_use().is_some() {
+        for path in &files {
+            moved.extend(
+                load_wikidata_official_sites(path)?
+                    .into_iter()
+                    .filter_map(|site| moved_from(&site).map(|from| (site, from))),
+            );
+        }
+    }
+    // Sites that get their own claims merged again.
+    let retaken: HashSet<&str> = taken_back
+        .iter()
+        .map(|site| site.domain.as_str())
+        .chain(moved.iter().map(|(_, from)| from.as_str()))
+        .collect();
     let mut sites = Vec::new();
     for path in &files {
         sites.extend(
@@ -619,21 +642,26 @@ fn subdomain_changes(seed: &Path) -> Result<Vec<Change>> {
                 .into_iter()
                 .filter(|site| {
                     parent_domain(&site.domain).is_some()
-                        || misread_domains.contains(site.domain.as_str())
+                        || retaken.contains(site.domain.as_str())
+                        || moved_from(site).is_some()
                 }),
         );
     }
+    taken_back.extend(moved.into_iter().map(|(mut site, from)| {
+        site.domain = from;
+        site
+    }));
     let facts = seed.join(facts::FACTS_FILE_NAME);
-    if facts.is_file() && !(sites.is_empty() && misread.is_empty()) {
+    if facts.is_file() && !(sites.is_empty() && taken_back.is_empty()) {
         let facts = load_site_facts(&facts)?;
         attach_facts(&mut sites, &facts);
-        attach_facts(&mut misread, &facts);
+        attach_facts(&mut taken_back, &facts);
     }
     let intros = seed.join(intros::INTROS_FILE_NAME);
     if intros.is_file() && !sites.is_empty() {
         attach_intros(&mut sites, &load_intros(&intros)?);
     }
-    let mut changes: Vec<Change> = misread
+    let mut changes: Vec<Change> = taken_back
         .iter()
         .map(|site| Change::TakeBack {
             domain: site.domain.clone(),
@@ -658,6 +686,14 @@ fn subdomain_changes(seed: &Path) -> Result<Vec<Change>> {
         changes.push(Change::SubdomainSite { record });
     }
     Ok(changes)
+}
+
+/// The site the built-in lists give `site`'s claim, when the site rules
+/// in use ([`crate::site_rules`]) give it another: a site of its own on a
+/// name the Public Suffix List gained, say, where the built-in lists made
+/// it part of its parent.
+fn moved_from(site: &OfficialSite) -> Option<String> {
+    plumb_core::built_in_site(&site.host).filter(|built_in| *built_in != site.domain)
 }
 
 /// Takes back what Wikidata claims that earlier versions misread gave the
@@ -1079,6 +1115,7 @@ impl Fetcher for NodeFetcher<'_> {
                 // check throws away holds few records anyway.
                 let mut records = plumb_crawl::to_records(&results);
                 crate::icons::attach(&mut records, &results);
+                inner.drop_denied_records(&mut records);
                 if let Err(err) = net.publish(records).await {
                     warn!("cannot publish crawl results to the network: {err:#}");
                 }
@@ -1594,12 +1631,18 @@ fn save_icons(icons: &IconStore, results: &[CrawlResult]) {
 /// Builds an index of `records` in a new numbered directory and opens it.
 pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingIndex> {
     // Sites judged dead stay in the records, out of the index and the
-    // buckets other nodes take.
-    let records: Vec<&SiteRecord> = records
+    // buckets other nodes take. So do what the denylist denies.
+    let denylist = inner.denylist();
+    let records: Vec<std::borrow::Cow<'_, SiteRecord>> = records
         .iter()
         .map(Borrow::borrow)
         .filter(|record| record.gone_at.is_none())
+        .filter_map(|record| match &denylist {
+            Some(list) => super::denylist::allowed_record(list, record),
+            None => Some(std::borrow::Cow::Borrowed(record)),
+        })
         .collect();
+    let records: Vec<&SiteRecord> = records.iter().map(AsRef::as_ref).collect();
     let records = records.as_slice();
     let id = store::next_index_id(&inner.paths);
     let dir = inner.paths.index(id);
@@ -1941,6 +1984,100 @@ impl Backoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Set in the copy of the test binary that
+    /// [`claims_the_site_rules_move_are_taken_back_and_get_records`] runs,
+    /// since the site rules a process uses are set once for good.
+    const IN_OWN_PROCESS: &str = "PLUMB_TEST_SITE_RULES_IN_USE";
+
+    #[test]
+    fn claims_the_site_rules_move_are_taken_back_and_get_records() {
+        if std::env::var_os(IN_OWN_PROCESS).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "node::worker::tests::claims_the_site_rules_move_are_taken_back_and_get_records",
+                    "--test-threads=1",
+                ])
+                .env(IN_OWN_PROCESS, "1")
+                .output()
+                .unwrap();
+            let printed = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{printed}");
+            assert!(printed.contains("1 passed"), "{printed}");
+            return;
+        }
+        let seed = tempfile::tempdir().unwrap();
+        std::fs::write(
+            seed.path().join(download::WIKIDATA_FILE_NAME),
+            "item\tlabel\twebsite\n\
+             Q1\tFoo App\thttps://foo.plumbtest.app/\n\
+             Q2\tPlumb Test\thttps://plumbtest.app/\n\
+             Q3\tExample Blog\thttps://blog.example.org/\n\
+             Q4\tExample Org\thttps://www.example.org/\n\
+             Q5\tExample\thttps://www.example.com/\n",
+        )
+        .unwrap();
+        // The changes to these test sites, taking back first.
+        let domains = |changes: &[Change]| -> Vec<String> {
+            changes
+                .iter()
+                .filter_map(|change| match change {
+                    Change::TakeBack { domain, .. } => Some(format!("back {domain}")),
+                    Change::Merge { record } => Some(record.domain.clone()),
+                    Change::SubdomainSite { record } => Some(format!("sub {}", record.domain)),
+                    _ => None,
+                })
+                .filter(|domain| domain.contains("example") || domain.contains("plumbtest"))
+                .collect()
+        };
+        // With no rules in use, the built-in lists, nothing moves.
+        assert!(domains(&subdomain_changes(seed.path()).unwrap()).is_empty());
+
+        // Rules that make plumbtest.app a public suffix, as the Public
+        // Suffix List does when a host lets people make sites under it,
+        // and blog.example.org a site of its own.
+        let mut rules =
+            plumb_format::sites::read_suffix_list("com\norg\napp\nplumbtest.app\n").unwrap();
+        rules.extend(crate::site_rules::built_in_rules());
+        rules.push(plumb_format::sites::Rule::Subsite(
+            "blog.example.org".into(),
+        ));
+        assert!(crate::site_rules::use_site_rules(
+            crate::site_rules::ReadRules {
+                rules: rules.into_iter().collect(),
+                newer: 0,
+                hash: "ab".repeat(32),
+            }
+        ));
+        assert_eq!(
+            plumb_core::registrable_domain("https://foo.plumbtest.app/").as_deref(),
+            Some("foo.plumbtest.app")
+        );
+        let changes = subdomain_changes(seed.path()).unwrap();
+        let mut changed = domains(&changes);
+        // Each claim is taken back off the site the built-in lists made it
+        // part of, which gets its own claims again (plumbtest.app has none
+        // now: it is no site), and gets a record of its own.
+        assert_eq!(changed[..2], ["back plumbtest.app", "back example.org"]);
+        changed.sort();
+        assert_eq!(
+            changed,
+            [
+                "back example.org",
+                "back plumbtest.app",
+                "example.org",
+                "foo.plumbtest.app",
+                "sub blog.example.org",
+            ]
+        );
+        assert!(changes.contains(&Change::TakeBack {
+            domain: "plumbtest.app".into(),
+            names: vec!["Foo App".into()],
+        }));
+        let state = SavedState::default();
+        assert!(state.sites_changed());
+    }
 
     #[test]
     fn slow_builds_wait_longer_for_the_next() {

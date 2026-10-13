@@ -96,6 +96,10 @@ pub enum Command {
     /// kind and at 100k, 250k, 500k... sites, and optionally a copy cut
     /// down to the best of them. The records file is left as it is.
     TopSites(TopSitesArgs),
+    /// Sets in the data format: make one from a page set, a denylist or the
+    /// site rules, sign it with a set-signing key, or check one as a node
+    /// would.
+    Set(crate::set::SetArgs),
 }
 
 #[derive(Debug, Args)]

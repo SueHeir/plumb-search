@@ -56,7 +56,7 @@ use crate::manifest::Manifest;
 use crate::refs::{is_domain, is_namespace, Ref};
 use crate::sign::PublicKey;
 use crate::urls::{is_canonical, match_key, URL_VERSION};
-use crate::value::is_date;
+use crate::value::{hex, is_date};
 
 /// The kind of every denylist entry, and the only kind of a denylist.
 pub const DENY: &str = "deny";
@@ -541,10 +541,6 @@ fn hex32(text: &str) -> Option<[u8; 32]> {
         *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
     }
     Some(out)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

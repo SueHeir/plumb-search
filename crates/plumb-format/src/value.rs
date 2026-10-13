@@ -169,6 +169,11 @@ pub fn unwrapped(value: &Value, field_type: FieldType) -> Result<&Value> {
     Ok(inner)
 }
 
+/// `bytes` in lowercase hex, as the format writes hashes.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// True for `YYYY`, `YYYY-MM`, `YYYY-MM-DD` and `YYYY-MM-DDTHH:MM:SSZ`.
 pub fn is_date(text: &str) -> bool {
     let (day, time) = match text.split_once('T') {

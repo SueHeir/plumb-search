@@ -10,7 +10,9 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::RecordSet;
-use plumb_embed::{site_text_words, text_hash, Embedder, Vectors, MODEL_FILES, MODEL_NAME};
+use plumb_embed::{
+    site_text_words, text_hash, Embedder, ModelId, Vectors, MODEL_FILES, MODEL_NAME,
+};
 use plumb_index::Meaning;
 use tracing::{info, warn};
 
@@ -24,6 +26,14 @@ const NEAREST: usize = 1_000;
 pub const SAVE_EVERY: usize = 10_000;
 /// Vectors made between progress reports.
 const REPORT_EVERY: usize = 1_000;
+
+/// The signed set of the site vectors `model` made (`plumb-tools set
+/// vectors`): `plumb/vectors-` and the first 16 hex digits of the model's
+/// id, since a set name holds 64 characters at most.
+pub fn vectors_set(model: &ModelId) -> String {
+    let start: String = model[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("plumb/vectors-{start}")
+}
 
 /// A model and the vectors it made, for ranking by meaning. The vectors can
 /// grow while searches use them.

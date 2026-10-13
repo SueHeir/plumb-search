@@ -11,6 +11,12 @@
 //! copy it came from, so it ages as that one does and the nodes that
 //! build from the source still download it once a week.
 //!
+//! The project also publishes the list as a signed set, [`ADULT_SITES`]:
+//! a layer that labels each site `adult`, taken like the denylist
+//! ([`super::signed_sets`]). A node that holds a fresh one keeps its
+//! sites as its list, dated by the set's generation, and asks no node for
+//! the file.
+//!
 //! [`SeedSources::adult_list_url`]: super::SeedSources::adult_list_url
 
 use std::collections::hash_map::DefaultHasher;
@@ -32,6 +38,9 @@ use super::{network, Inner};
 /// The name nodes ask each other for the list by, over the page set
 /// protocol.
 pub(super) const SHARED_NAME: &str = "adult-domains";
+
+/// The project's adult list as a signed set.
+pub(super) const ADULT_SITES: &str = "plumb/adult-sites";
 
 /// The list's folder in the data directory.
 const DIR: &str = "safe";
@@ -112,6 +121,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
         info!("safe search leaves out {} adult sites", list.len());
         inner.set_adult(list);
     }
+    inner.adult_from_set();
     let url = inner.config.sources.adult_list_url.clone();
     let started = std::time::Instant::now();
     let mut stopped = inner.stopped.clone();
@@ -339,7 +349,66 @@ async fn refresh(
     .context("the list task failed")?
 }
 
+/// The adult list set held in `data`, with its generation (Unix seconds),
+/// when a publisher the node trusts signed it.
+fn held_set(data: &Path, publishers: &[plumb_format::PublicKey]) -> Option<(PathBuf, u64)> {
+    let (dir, manifest) = super::signed_sets::held_trusted(data, ADULT_SITES, publishers)?;
+    let generation = plumb_format::value::unix_seconds(&manifest.generation)?;
+    Some((dir, generation.max(0) as u64))
+}
+
+/// The sites the adult list set in `dir` names.
+fn set_sites(dir: &Path) -> Option<Vec<String>> {
+    let (_, items) = crate::sets::read_items(dir).ok()?;
+    let domains = items
+        .iter()
+        .filter(|item| !item.is_deleted() && item.labels.iter().any(|label| label == "adult"))
+        .filter_map(|item| match &item.extends {
+            Some(plumb_format::Ref::Site(domain)) => Some(domain.clone()),
+            _ => None,
+        })
+        .collect();
+    Some(domains)
+}
+
 impl Inner {
+    /// Makes the adult list set held the node's list when it is newer than
+    /// the list's file: saved as the file, dated by its generation.
+    pub(super) fn adult_from_set(&self) {
+        let data = &self.paths.data;
+        let Some((dir, generation)) = held_set(data, &self.config.set_publishers) else {
+            return;
+        };
+        let file_time = std::fs::metadata(list_path(data))
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_secs());
+        // Before reading the set's items, which are the whole list.
+        if generation <= file_time {
+            return;
+        }
+        let Some(domains) = set_sites(&dir) else {
+            return;
+        };
+        let text = domains.join("\n") + "\n";
+        match save_shared_with_budget(
+            &list_path(data),
+            text.as_bytes(),
+            generation,
+            self.storage.clone(),
+        ) {
+            Ok(list) => {
+                info!(
+                    "safe search leaves out {} adult sites, from {ADULT_SITES}",
+                    list.len()
+                );
+                self.set_adult(list);
+            }
+            Err(err) => warn!("{ADULT_SITES}: {err:#}"),
+        }
+    }
+
     fn set_adult(&self, list: AdultList) {
         *self.adult.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(list));
     }
@@ -376,6 +445,38 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_held_adult_set_names_its_sites_when_a_trusted_publisher_signed_it() {
+        use ed25519_dalek::SigningKey;
+        use plumb_format::PublicKey;
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("porn-nl.txt");
+        std::fs::write(&list, "0.0.0.0 adult.example\nnot a site\nother.example\n").unwrap();
+        let out = super::super::signed_sets::set_dir(dir.path(), ADULT_SITES).unwrap();
+        plumb_tools::set::adult_sites(&plumb_tools::set::AdultSitesArgs {
+            list,
+            name: ADULT_SITES.into(),
+            out: out.clone(),
+            license: "Unlicense".into(),
+            attribution: "From the Block List Project".into(),
+            level: 3,
+        })
+        .unwrap();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        plumb_tools::set::sign_set(&out, &key, None, None).unwrap();
+        let (held, generation) = held_set(dir.path(), &[PublicKey::of(&key)]).unwrap();
+        let mut domains = set_sites(&held).unwrap();
+        domains.sort();
+        assert_eq!(domains, ["adult.example", "other.example"]);
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(now.abs_diff(generation) < 600, "{generation}");
+        let stranger = PublicKey::of(&SigningKey::from_bytes(&[8; 32]));
+        assert!(held_set(dir.path(), &[stranger]).is_none());
+    }
 
     #[test]
     fn the_list_holds_whole_sites() {

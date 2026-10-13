@@ -1,624 +1,26 @@
-//! `plumb set`: sets in the data format ([`plumb_format`]) made from
-//! today's page sets, signed and checked.
+//! Reading sets in the data format ([`plumb_format`]): checking one as a
+//! node does before taking it, and reading its items.
 //!
 //! A set is a folder: `manifest.json` and its parts, `items-001.jsonl.zst`
-//! and on, one item per line, most weighted first. `from-pages` writes one
-//! from an articles file, `denylist` one from a file of denylist entries
-//! (`deny-entry` makes them), `sign` signs its manifest with a set-signing
-//! key from `new-key`, and `check` checks a set as a node would before
-//! taking it. Signing is a release step someone takes on purpose: no build
-//! signs by itself.
-//!
-//! Nothing here changes what a node indexes or sends.
+//! and on, one item per line, most weighted first. `plumb-tools set`
+//! writes and signs them; a node only checks and reads them.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
 
-use anyhow::{bail, ensure, Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
-use clap::{Args, Subcommand, ValueEnum};
-use ed25519_dalek::SigningKey;
-use plumb_format::deny::{Entry, DENY};
-use plumb_format::manifest::is_set_name;
-use plumb_format::notes::{is_revoked, sign_note, NOTE_FORMAT};
-use plumb_format::sign::sign;
-use plumb_format::urls::{url_sha256, url_sha256_any_query};
-use plumb_format::{FieldSpec, Item, Manifest, Note, PublicKey, FORMAT};
-use plumb_index::items::{page_fields, page_item};
-use plumb_index::pages::Page;
-use serde_json::{json, Map, Value};
+use anyhow::{ensure, Context, Result};
+use plumb_format::deny::Entry;
+use plumb_format::notes::is_revoked;
+use plumb_format::sites::Rule;
+use plumb_format::{Item, Manifest, Note, PublicKey};
 use sha2::{Digest, Sha256};
 
 /// The manifest's file name in a set's folder.
 pub const MANIFEST: &str = "manifest.json";
 
-/// How many items the parts hold, counted from the most weighted: the
-/// first 100,000, up to the first 1,000,000, then the rest.
-const PART_ENDS: &[u64] = &[100_000, 1_000_000];
-
-/// What a set-signing key file starts with.
-const KEY_PREFIX: &str = "ed25519-secret:";
-
-#[derive(Debug, Args)]
-pub struct SetArgs {
-    #[command(subcommand)]
-    pub command: SetCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum SetCommand {
-    /// Make a key for signing sets, kept apart from any node key, and print
-    /// its public key.
-    NewKey {
-        /// Where to save it. An existing file is never overwritten.
-        #[arg(long, value_name = "FILE")]
-        out: PathBuf,
-    },
-    /// Write a page set in today's format (an articles file) as a set of
-    /// items, with a manifest still to be signed.
-    FromPages(FromPagesArgs),
-    /// Write a denylist from a file of entries, one a line, with a manifest
-    /// still to be signed.
-    Denylist(DenylistArgs),
-    /// Print a denylist entry as one line, to add to an entries file.
-    DenyEntry(DenyEntryArgs),
-    /// Sign a set's manifest after checking every part and item.
-    Sign(SignArgs),
-    /// Check a set as a node does before taking it: its signature, the size
-    /// and hash of every part, and every item.
-    Check(CheckArgs),
-    /// Sign a key note: let another key sign some sets for a while
-    /// (`delegate`), name the key that publishes from now on (`handover`),
-    /// or withdraw a key (`revoke`).
-    Note(NoteArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct FromPagesArgs {
-    /// The articles file, `.tsv` or `.tsv.gz`, most read first.
-    #[arg(long, value_name = "FILE")]
-    pub pages: PathBuf,
-    /// Its page set: `wikipedia-en`, `docs`, `music`...
-    #[arg(long)]
-    pub set: String,
-    /// The set's name in the format, `<scope>/<name>`. `plumb/<set>` when
-    /// not given.
-    #[arg(long)]
-    pub name: Option<String>,
-    /// The folder to write. It must not exist yet, or be empty.
-    #[arg(long, value_name = "DIR")]
-    pub out: PathBuf,
-    #[arg(long)]
-    pub title: Option<String>,
-    /// The set's license, an SPDX id (`CC-BY-SA-4.0`).
-    #[arg(long)]
-    pub license: Option<String>,
-    /// How results from it credit their source: `From Wikipedia ({url})`.
-    #[arg(long)]
-    pub attribution: Option<String>,
-    /// What the items' weight counts: `page views, last 7 days`.
-    #[arg(long, value_name = "TEXT")]
-    pub weight_counts: Option<String>,
-    /// The zstd level of the parts.
-    #[arg(long, default_value_t = 19)]
-    pub level: i32,
-}
-
-#[derive(Debug, Args)]
-pub struct DenylistArgs {
-    /// The entries, one JSON object a line, from `plumb set deny-entry`.
-    #[arg(long, value_name = "FILE")]
-    pub entries: PathBuf,
-    /// The set's name, `<scope>/<name>`.
-    #[arg(long, default_value = "plumb/denylist")]
-    pub name: String,
-    /// The folder to write. It must not exist yet, or be empty.
-    #[arg(long, value_name = "DIR")]
-    pub out: PathBuf,
-    #[arg(long)]
-    pub title: Option<String>,
-    /// The list's license, an SPDX id. A set without one is never passed
-    /// on.
-    #[arg(long)]
-    pub license: Option<String>,
-    /// The zstd level of the parts.
-    #[arg(long, default_value_t = 19)]
-    pub level: i32,
-}
-
-#[derive(Debug, Args)]
-pub struct DenyEntryArgs {
-    /// Why: `csam`, `copyright`, `privacy`, `court-order`, `terror`,
-    /// `malware`, `spam`.
-    #[arg(long)]
-    pub category: String,
-    /// What it takes off: `url:<URL>`, `prefix:<URL>`, `site:<domain>`,
-    /// `item:<publisher>/<set>/<id>` or `publisher:<key>`.
-    #[arg(long, required_unless_present = "hash_of", conflicts_with = "hash_of")]
-    pub target: Option<String>,
-    /// Take off this page by the hash of its address, so the list never
-    /// spells it out. The only target a `csam` entry may have.
-    #[arg(long, value_name = "URL")]
-    pub hash_of: Option<String>,
-    /// With --hash-of: whatever query the page is given.
-    #[arg(long, requires = "hash_of")]
-    pub any_query: bool,
-    /// A jurisdiction it is for (`US`, `DE`, `EU`). Repeat for more; `*`,
-    /// everywhere, when not given.
-    #[arg(long = "where", value_name = "PLACE")]
-    pub places: Vec<String>,
-    /// Its id in the list. The date and the start of the target's hash
-    /// when not given.
-    #[arg(long)]
-    pub id: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct SignArgs {
-    /// The set's folder.
-    pub dir: PathBuf,
-    /// The set-signing key, from `plumb set new-key`.
-    #[arg(long, value_name = "FILE")]
-    pub key: PathBuf,
-    /// The generation this one replaces, when one was published before.
-    #[arg(long, value_name = "TIMESTAMP")]
-    pub prev: Option<String>,
-    /// Sign for another publisher, with its delegation to this key (from
-    /// `plumb set note delegate`). Without it, the key's own key publishes.
-    #[arg(long, value_name = "FILE")]
-    pub delegation: Option<PathBuf>,
-}
-
-#[derive(Debug, Args)]
-pub struct CheckArgs {
-    /// The set's folder.
-    pub dir: PathBuf,
-    /// The key the set must be published by (`ed25519:...`). Without it,
-    /// any good signature passes and the publisher is printed.
-    #[arg(long, value_name = "KEY")]
-    pub publisher: Option<String>,
-    /// A handover or revocation note to apply, as a node that holds it
-    /// would. Repeat for more.
-    #[arg(long = "note", value_name = "FILE")]
-    pub notes: Vec<PathBuf>,
-}
-
-#[derive(Debug, Args)]
-pub struct NoteArgs {
-    pub kind: NoteKind,
-    /// The key that signs the note: the publisher's for a delegation, the
-    /// old key for a handover, and for a revocation the key itself or the
-    /// publisher that delegated to it.
-    #[arg(long, value_name = "FILE")]
-    pub key: PathBuf,
-    /// The key the note is about (`ed25519:...`). A revocation without it
-    /// revokes the signing key itself.
-    #[arg(long, value_name = "KEY")]
-    pub to: Option<String>,
-    /// For a delegation: a set name or `<scope>/<start>*` it covers. Repeat
-    /// for more.
-    #[arg(long = "sets", value_name = "PATTERN")]
-    pub sets: Vec<String>,
-    /// For a delegation: when it ends, a UTC timestamp. Renew it before.
-    #[arg(long, value_name = "TIMESTAMP")]
-    pub until: Option<String>,
-    /// Where to save the note. An existing file is never overwritten.
-    #[arg(long, value_name = "FILE")]
-    pub out: PathBuf,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum NoteKind {
-    Delegate,
-    Handover,
-    Revoke,
-}
-
-pub fn run(args: SetArgs) -> Result<()> {
-    match args.command {
-        SetCommand::NewKey { out } => {
-            let key = new_key(&out)?;
-            println!("{}", PublicKey::of(&key));
-            Ok(())
-        }
-        SetCommand::FromPages(args) => {
-            let written = from_pages(&args)?;
-            println!(
-                "{}: {} items in {} parts, {} pages left out; sign it with `plumb set sign`",
-                args.out.display(),
-                written.items,
-                written.parts,
-                written.left_out
-            );
-            Ok(())
-        }
-        SetCommand::Denylist(args) => {
-            let written = denylist(&args)?;
-            println!(
-                "{}: {} entries in {} parts; sign it with `plumb set sign`",
-                args.out.display(),
-                written.items,
-                written.parts
-            );
-            Ok(())
-        }
-        SetCommand::DenyEntry(args) => {
-            println!("{}", serde_json::to_string(&deny_entry(&args)?)?);
-            Ok(())
-        }
-        SetCommand::Sign(args) => {
-            let key = read_key(&args.key)?;
-            let delegation = args.delegation.as_deref().map(read_json).transpose()?;
-            let checked = sign_set(&args.dir, &key, args.prev.as_deref(), delegation)?;
-            println!(
-                "signed {} generation {} as {}, published by {}: {} items",
-                checked.set,
-                checked.generation,
-                PublicKey::of(&key),
-                checked.publisher,
-                checked.items
-            );
-            Ok(())
-        }
-        SetCommand::Check(args) => {
-            let publisher = args
-                .publisher
-                .as_deref()
-                .map(str::parse::<PublicKey>)
-                .transpose()?;
-            let notes = args
-                .notes
-                .iter()
-                .map(|path| {
-                    Note::from_signed_value(&read_json(path)?)
-                        .with_context(|| format!("{} is not a good key note", path.display()))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let checked = check_set(&args.dir, publisher.as_ref(), &notes)?;
-            println!(
-                "{} generation {} by {}: {} items in {} parts, all good",
-                checked.set, checked.generation, checked.publisher, checked.items, checked.parts
-            );
-            if checked.newer > 0 {
-                println!(
-                    "{} of its entries are newer than this version, which applies the rest",
-                    checked.newer
-                );
-            }
-            Ok(())
-        }
-        SetCommand::Note(args) => {
-            let key = read_key(&args.key)?;
-            let note = write_note(&args, &key)?;
-            println!(
-                "{}: {} note by {} about {}",
-                args.out.display(),
-                note.kind,
-                note.by,
-                note.key
-            );
-            Ok(())
-        }
-    }
-}
-
-/// Signs the note `args` asks for with `key` and saves it.
-pub fn write_note(args: &NoteArgs, key: &SigningKey) -> Result<Note> {
-    let by = PublicKey::of(key);
-    let about = match (&args.to, args.kind) {
-        (Some(to), _) => to.parse::<PublicKey>()?,
-        (None, NoteKind::Revoke) => by,
-        (None, _) => bail!("say which key the note is about with --to"),
-    };
-    let kind = match args.kind {
-        NoteKind::Delegate => "delegate",
-        NoteKind::Handover => "handover",
-        NoteKind::Revoke => "revoke",
-    };
-    let mut value = json!({
-        "format": NOTE_FORMAT,
-        "kind": kind,
-        "by": by.to_string(),
-        "key": about.to_string(),
-        "issued": now(),
-    });
-    if !args.sets.is_empty() {
-        value["sets"] = json!(args.sets);
-    }
-    if let Some(until) = &args.until {
-        value["until"] = json!(until);
-    }
-    sign_note(&mut value, key)?;
-    let note = Note::from_signed_value(&value)?;
-    let mut text = serde_json::to_string_pretty(&value)?;
-    text.push('\n');
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&args.out)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .with_context(|| format!("writing {} (it must not exist yet)", args.out.display()))?;
-    Ok(note)
-}
-
-/// Makes a set-signing key and saves it at `path`, readable by its owner
-/// only.
-pub fn new_key(path: &Path) -> Result<SigningKey> {
-    let mut seed = [0u8; 32];
-    getrandom::fill(&mut seed).map_err(|err| anyhow::anyhow!("no randomness: {err}"))?;
-    let key = SigningKey::from_bytes(&seed);
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("making {} (it must not exist yet)", path.display()))?;
-    writeln!(file, "{KEY_PREFIX}{}", URL_SAFE_NO_PAD.encode(seed))?;
-    file.sync_all()?;
-    Ok(key)
-}
-
-/// Reads a key saved by [`new_key`].
-pub fn read_key(path: &Path) -> Result<SigningKey> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let seed: [u8; 32] = text
-        .trim()
-        .strip_prefix(KEY_PREFIX)
-        .and_then(|encoded| URL_SAFE_NO_PAD.decode(encoded).ok())
-        .and_then(|bytes| bytes.try_into().ok())
-        .with_context(|| format!("{} is not a set-signing key", path.display()))?;
-    Ok(SigningKey::from_bytes(&seed))
-}
-
-/// What [`from_pages`] wrote.
-#[derive(Debug, PartialEq)]
-pub struct Written {
-    pub items: u64,
-    pub parts: usize,
-    /// Pages that gave no item, or the same id as a page before them.
-    pub left_out: u64,
-}
-
-pub fn from_pages(args: &FromPagesArgs) -> Result<Written> {
-    let name = args
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("plumb/{}", args.set));
-    ensure!(is_set_name(&name), "{name:?} is not <scope>/<name>");
-    ensure!(
-        Page::has_reader(&args.set),
-        "{} is not a page set this version reads",
-        args.set
-    );
-    let reader = plumb_ingest::open_maybe_gz(&args.pages)?;
-    let mut read_error = None;
-    let lines = reader
-        .lines()
-        .map_while(|line| line.map_err(|err| read_error = Some(err)).ok());
-    let mut bad = 0u64;
-    let pages = plumb_core::article::articles_of(lines).filter_map(|(n, article)| match article {
-        // Files made before fetch-pages left it out.
-        Ok(article) if article.title == "Main Page" => None,
-        Ok(article) => Page::from_set(&args.set, article),
-        Err(err) => {
-            bad += 1;
-            if bad <= 3 {
-                tracing::warn!("{} line {n}: {err:#}", args.pages.display());
-            }
-            None
-        }
-    });
-    let mut manifest = Map::new();
-    manifest.insert("format".into(), json!(FORMAT));
-    manifest.insert("set".into(), json!(name));
-    manifest.insert("generation".into(), json!(now()));
-    for (key, value) in [
-        ("title", &args.title),
-        ("license", &args.license),
-        ("attribution", &args.attribution),
-    ] {
-        if let Some(value) = value {
-            manifest.insert(key.into(), json!(value));
-        }
-    }
-    if let Some(counts) = &args.weight_counts {
-        manifest.insert("weight".into(), json!({"counts": counts, "scale": "log"}));
-    }
-    manifest.insert("order".into(), json!("weight"));
-    let items = pages.map(|page| page_item(&page));
-    let written = write_set(
-        items,
-        page_fields(),
-        manifest,
-        &args.out,
-        PART_ENDS,
-        args.level,
-    )?;
-    if let Some(err) = read_error {
-        // A cut-off file must not become a set that looks whole.
-        fs::remove_file(args.out.join(MANIFEST))?;
-        bail!(
-            "reading {}: {err}; {} has no manifest",
-            args.pages.display(),
-            args.out.display()
-        );
-    }
-    Ok(written)
-}
-
-/// Writes the entries in `args.entries` as a denylist. Every line must be
-/// an entry this version understands, with an id of its own: a list that
-/// quietly lost an entry would fail open.
-pub fn denylist(args: &DenylistArgs) -> Result<Written> {
-    ensure!(
-        is_set_name(&args.name),
-        "{:?} is not <scope>/<name>",
-        args.name
-    );
-    let text = fs::read_to_string(&args.entries)
-        .with_context(|| format!("reading {}", args.entries.display()))?;
-    let mut ids = HashSet::new();
-    let mut entries = Vec::new();
-    for (n, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let at = || format!("{} line {}", args.entries.display(), n + 1);
-        let item: Item = serde_json::from_str(line).with_context(at)?;
-        item.check().with_context(at)?;
-        ensure!(
-            Entry::from_item(&item).with_context(at)?.is_some(),
-            "{}: this version does not understand the entry",
-            at()
-        );
-        ensure!(
-            ids.insert(item.id.clone()),
-            "{}: id {:?} is used before",
-            at(),
-            item.id
-        );
-        entries.push(item);
-    }
-    let mut manifest = Map::new();
-    manifest.insert("format".into(), json!(FORMAT));
-    manifest.insert("set".into(), json!(args.name));
-    manifest.insert("generation".into(), json!(now()));
-    for (key, value) in [("title", &args.title), ("license", &args.license)] {
-        if let Some(value) = value {
-            manifest.insert(key.into(), json!(value));
-        }
-    }
-    let items = entries.into_iter().map(Some);
-    write_set(
-        items,
-        BTreeMap::new(),
-        manifest,
-        &args.out,
-        PART_ENDS,
-        args.level,
-    )
-}
-
-/// The entry `args` describes, checked as a node reads it.
-pub fn deny_entry(args: &DenyEntryArgs) -> Result<Item> {
-    let target = match (&args.target, &args.hash_of) {
-        (Some(target), None) => target.clone(),
-        (None, Some(url)) => {
-            let hashed = if args.any_query {
-                url_sha256_any_query(url)
-            } else {
-                url_sha256(url)
-            };
-            hashed.with_context(|| format!("{url:?} is not an http or https URL"))?
-        }
-        _ => bail!("give one of --target and --hash-of"),
-    };
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let id = args.id.clone().unwrap_or_else(|| {
-        let hash = Sha256::digest(target.as_bytes());
-        let start: String = hash[..6].iter().map(|b| format!("{b:02x}")).collect();
-        format!("{today}-{start}")
-    });
-    let places = if args.places.is_empty() {
-        vec!["*".to_string()]
-    } else {
-        args.places.clone()
-    };
-    let item: Item = serde_json::from_value(json!({
-        "id": id, "kind": DENY, "target": target, "category": args.category,
-        "where": places, "added": today,
-    }))?;
-    item.check()?;
-    ensure!(
-        Entry::from_item(&item)?.is_some(),
-        "this version does not understand {target:?}"
-    );
-    Ok(item)
-}
-
-/// Writes `items` as the parts of a set in `out`, with `manifest` (not
-/// yet signed) completed by the parts, kinds and the fields of `declared`
-/// the items use. A `None`, or an id seen before, is left out.
-fn write_set(
-    items_in: impl Iterator<Item = Option<Item>>,
-    declared: BTreeMap<String, FieldSpec>,
-    mut manifest: Map<String, Value>,
-    out: &Path,
-    part_ends: &[u64],
-    level: i32,
-) -> Result<Written> {
-    if out.exists() {
-        ensure!(
-            fs::read_dir(out)?.next().is_none(),
-            "{} is not empty",
-            out.display()
-        );
-    }
-    fs::create_dir_all(out).with_context(|| format!("making {}", out.display()))?;
-    let (mut ids, mut kinds, mut used) = (HashSet::new(), BTreeSet::new(), BTreeSet::new());
-    let mut files = Vec::new();
-    let mut part: Option<(String, zstd::Encoder<'static, BufWriter<File>>, u64)> = None;
-    let (mut items, mut left_out) = (0u64, 0u64);
-    for item in items_in {
-        let Some(item) = item.filter(|item| ids.insert(item.id.clone())) else {
-            left_out += 1;
-            continue;
-        };
-        if part.is_none() {
-            let path = format!("items-{:03}.jsonl.zst", files.len() + 1);
-            let file = File::create(out.join(&path))?;
-            part = Some((path, zstd::Encoder::new(BufWriter::new(file), level)?, 0));
-        }
-        let (_, encoder, count) = part.as_mut().expect("a part is open");
-        serde_json::to_writer(&mut *encoder, &item)?;
-        encoder.write_all(b"\n")?;
-        *count += 1;
-        items += 1;
-        kinds.insert(item.kind);
-        used.extend(item.fields.into_keys());
-        if part_ends.contains(&items) {
-            files.push(finish_part(out, part.take().expect("a part is open"))?);
-        }
-    }
-    if let Some(open) = part {
-        files.push(finish_part(out, open)?);
-    }
-    ensure!(items > 0, "no item to write");
-    let fields: BTreeMap<_, _> = declared
-        .into_iter()
-        .filter(|(name, _)| used.contains(name))
-        .collect();
-    manifest.insert("kinds".into(), json!(kinds));
-    manifest.insert("files".into(), json!(files));
-    if !fields.is_empty() {
-        manifest.insert("fields".into(), json!(fields));
-    }
-    write_manifest(out, &Value::Object(manifest))?;
-    Ok(Written {
-        items,
-        parts: files.len(),
-        left_out,
-    })
-}
-
-fn finish_part(
-    out: &Path,
-    (path, encoder, count): (String, zstd::Encoder<'static, BufWriter<File>>, u64),
-) -> Result<Value> {
-    let file = encoder
-        .finish()?
-        .into_inner()
-        .map_err(|err| err.into_error())?;
-    file.sync_all()?;
-    let (bytes, sha256) = measure(&out.join(&path))?;
-    Ok(json!({"path": path, "count": count, "bytes": bytes, "sha256": sha256}))
-}
-
-/// What [`sign_set`] and [`check_set`] found.
+/// What [`check_set`] found.
 #[derive(Debug)]
 pub struct Checked {
     pub set: String,
@@ -626,74 +28,9 @@ pub struct Checked {
     pub publisher: PublicKey,
     pub parts: usize,
     pub items: u64,
-    /// A denylist's entries newer than this version understands.
+    /// A denylist's entries, or a site rules set's rules, newer than this
+    /// version understands.
     pub newer: u64,
-}
-
-/// Signs the manifest in `dir` with `key`, after measuring each part again
-/// and checking every item, so a signature never covers a set that a node
-/// would refuse. `key` publishes the set, or with `delegation` (a note
-/// from the publisher to `key`) signs it for the publisher.
-pub fn sign_set(
-    dir: &Path,
-    key: &SigningKey,
-    prev: Option<&str>,
-    delegation: Option<Value>,
-) -> Result<Checked> {
-    let mut value = read_manifest(dir)?;
-    let map = value
-        .as_object_mut()
-        .context("the manifest is not a JSON object")?;
-    map.remove("signature");
-    map.remove("signed_by");
-    map.remove("delegation");
-    let signer = PublicKey::of(key);
-    match delegation {
-        Some(delegation) => {
-            let note = Note::from_signed_value(&delegation).context("the delegation")?;
-            ensure!(
-                note.kind == "delegate" && note.key == signer,
-                "the delegation is not to {signer}"
-            );
-            map.insert("publisher".into(), json!(note.by.to_string()));
-            map.insert("signed_by".into(), json!(signer.to_string()));
-            map.insert("delegation".into(), delegation);
-        }
-        None => {
-            map.insert("publisher".into(), json!(signer.to_string()));
-        }
-    }
-    if let Some(prev) = prev {
-        map.insert("prev".into(), json!(prev));
-    }
-    if let Some(files) = map.get_mut("files").and_then(Value::as_array_mut) {
-        for part in files {
-            let path = part
-                .get("path")
-                .and_then(Value::as_str)
-                .context("a part has no path")?;
-            let (bytes, sha256) = measure(&dir.join(path))?;
-            part["bytes"] = json!(bytes);
-            part["sha256"] = json!(sha256);
-        }
-    }
-    let manifest: Manifest = serde_json::from_value(value.clone())?;
-    manifest.check()?;
-    let checked = check_parts(dir, &manifest)?;
-    let missing = manifest.not_understood();
-    ensure!(
-        missing.is_empty() && checked.newer == 0,
-        "this version does not understand all of {} ({missing:?} required, {} entries); \
-         sign it with a newer one",
-        manifest.set,
-        checked.newer
-    );
-    sign(&mut value, key)?;
-    // What a node would read: a delegation that does not cover the set
-    // now is refused here, before anything is written.
-    Manifest::from_signed_json(&serde_json::to_string(&value)?, &now())?;
-    write_manifest(dir, &value)?;
-    Ok(checked)
 }
 
 /// Checks the set in `dir`: its manifest's signature and rules, then each
@@ -701,6 +38,18 @@ pub fn sign_set(
 /// must be published by that key or the key it handed over to in `notes`.
 /// A signer revoked in `notes` is refused either way.
 pub fn check_set(dir: &Path, trusted: Option<&PublicKey>, notes: &[Note]) -> Result<Checked> {
+    check_first_parts(dir, trusted, notes, usize::MAX)
+}
+
+/// [`check_set`] for a node that holds only the first `parts` parts of a
+/// set, as it may of a page set: the manifest is checked whole, and the
+/// parts it holds.
+pub fn check_first_parts(
+    dir: &Path,
+    trusted: Option<&PublicKey>,
+    notes: &[Note],
+    parts: usize,
+) -> Result<Checked> {
     let text = fs::read_to_string(dir.join(MANIFEST))
         .with_context(|| format!("reading {}", dir.join(MANIFEST).display()))?;
     let (manifest, signer) = Manifest::from_signed_json(&text, &now())?;
@@ -719,13 +68,53 @@ pub fn check_set(dir: &Path, trusted: Option<&PublicKey>, notes: &[Note]) -> Res
         "{} requires {missing:?}, which this version does not read",
         manifest.set
     );
-    check_parts(dir, &manifest)
+    check_parts(dir, &manifest, parts)
 }
 
-fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
+/// The manifest and the items of the set in `dir`, part by part, as they
+/// are, leaving out blob parts. Check the set first ([`check_set`]): this
+/// reads what is there.
+pub fn read_items(dir: &Path) -> Result<(Manifest, Vec<Item>)> {
+    let mut items = Vec::new();
+    let manifest = for_each_item(dir, |item| {
+        items.push(item);
+        Ok(())
+    })?;
+    Ok((manifest, items))
+}
+
+/// [`read_items`] an item at a time, for a set too big to hold.
+pub fn for_each_item(dir: &Path, mut each: impl FnMut(Item) -> Result<()>) -> Result<Manifest> {
+    let text = fs::read_to_string(dir.join(MANIFEST))
+        .with_context(|| format!("reading {}", dir.join(MANIFEST).display()))?;
+    let (manifest, _) = Manifest::from_signed_json(&text, &now())?;
+    for part in manifest.files.iter().filter(|part| !part.blob) {
+        let path = dir.join(&part.path);
+        let reader = BufReader::new(zstd::Decoder::new(File::open(&path)?)?);
+        for line in reader.lines() {
+            let line = line.with_context(|| format!("reading {}", path.display()))?;
+            each(serde_json::from_str::<Item>(&line)?)?;
+        }
+    }
+    Ok(manifest)
+}
+
+/// 64 bits of an id's SHA-256, for telling ids apart.
+pub fn id_hash(id: &str) -> u64 {
+    let digest = Sha256::digest(id.as_bytes());
+    u64::from_le_bytes(digest[..8].try_into().expect("8 bytes"))
+}
+
+/// Checks the first `parts` parts of the set `manifest` describes, in
+/// `dir`: each part's size, hash and count, and every item, whether or
+/// not the manifest is signed yet. A blob part is checked by its size and
+/// hash alone.
+pub fn check_parts(dir: &Path, manifest: &Manifest, parts: usize) -> Result<Checked> {
+    // Ids by hash: a page set's millions of ids would take hundreds of
+    // megabytes as text.
     let mut ids = HashSet::new();
     let (mut items, mut newer) = (0, 0);
-    for part in &manifest.files {
+    for part in manifest.files.iter().take(parts) {
         let path = dir.join(&part.path);
         let (bytes, sha256) = measure(&path)?;
         ensure!(
@@ -733,6 +122,10 @@ fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
             "{} is not the file the manifest names (size or hash differs)",
             part.path
         );
+        if part.blob {
+            // Bytes an item names by hash, not items: its hash is its check.
+            continue;
+        }
         let reader = BufReader::new(zstd::Decoder::new(File::open(&path)?)?);
         let mut count = 0;
         for (n, line) in reader.lines().enumerate() {
@@ -741,14 +134,17 @@ fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
             let item: Item = serde_json::from_str(&line).with_context(at)?;
             manifest.check_item(&item).with_context(at)?;
             ensure!(
-                item.may_share(),
-                "{}: a personal item in a shared set",
+                item.may_share() || !manifest.may_share(),
+                "{}: a personal item in a set that may be shared",
                 at()
             );
             if manifest.is_denylist() && !item.is_deleted() && Entry::from_item(&item)?.is_none() {
                 newer += 1;
             }
-            ensure!(ids.insert(item.id), "{}: an id seen before", at());
+            if manifest.is_site_rules() && !item.is_deleted() && Rule::from_item(&item)?.is_none() {
+                newer += 1;
+            }
+            ensure!(ids.insert(id_hash(&item.id)), "{}: an id seen before", at());
             count += 1;
         }
         ensure!(
@@ -763,14 +159,14 @@ fn check_parts(dir: &Path, manifest: &Manifest) -> Result<Checked> {
         set: manifest.set.clone(),
         generation: manifest.generation.clone(),
         publisher: manifest.publisher,
-        parts: manifest.files.len(),
+        parts: manifest.files.len().min(parts),
         items,
         newer,
     })
 }
 
 /// A file's size and hex SHA-256.
-fn measure(path: &Path) -> Result<(u64, String)> {
+pub fn measure(path: &Path) -> Result<(u64, String)> {
     let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 16];
@@ -792,301 +188,6 @@ fn measure(path: &Path) -> Result<(u64, String)> {
 }
 
 /// The time now as a UTC timestamp, as the format writes them.
-fn now() -> String {
+pub fn now() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
-
-fn read_json(path: &Path) -> Result<Value> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))
-}
-
-fn read_manifest(dir: &Path) -> Result<Value> {
-    let path = dir.join(MANIFEST);
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))
-}
-
-/// Writes the manifest beside its parts, replacing the old one only once
-/// the new one is whole.
-fn write_manifest(dir: &Path, manifest: &Value) -> Result<()> {
-    let path = dir.join(MANIFEST);
-    let partial = dir.join(".manifest.json.partial");
-    let mut text = serde_json::to_string_pretty(manifest)?;
-    text.push('\n');
-    fs::write(&partial, text)?;
-    fs::rename(&partial, &path).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn docs_pages(count: usize) -> Vec<Page> {
-        (0..count)
-            .map(|n| {
-                serde_json::from_value(json!({
-                    "set": "docs",
-                    "url": format!("https://docs.python.org/3/library/m{n}.html"),
-                    "title": format!("Module {n}"),
-                    "views": 1000 - n,
-                    "sections": ["Functions"],
-                }))
-                .unwrap()
-            })
-            .collect()
-    }
-
-    fn written(dir: &Path, pages: Vec<Page>) -> Written {
-        let manifest = json!({"format": FORMAT, "set": "plumb/docs",
-                              "generation": "2026-10-12T04:00:00Z", "license": "CC-BY-4.0"});
-        let Value::Object(manifest) = manifest else {
-            unreachable!()
-        };
-        let items = pages.iter().map(page_item);
-        write_set(items, page_fields(), manifest, dir, &[2, 4], 3).unwrap()
-    }
-
-    #[test]
-    fn written_signed_and_checked() {
-        let temp = tempfile::tempdir().unwrap();
-        let (dir, key_path) = (temp.path().join("set"), temp.path().join("set.key"));
-        let mut pages = docs_pages(5);
-        pages.push(pages[0].clone());
-        let written = written(&dir, pages);
-        assert_eq!(
-            written,
-            Written {
-                items: 5,
-                parts: 3,
-                left_out: 1
-            }
-        );
-        assert!(
-            check_set(&dir, None, &[]).is_err(),
-            "an unsigned set does not pass"
-        );
-
-        let key = new_key(&key_path).unwrap();
-        assert!(new_key(&key_path).is_err(), "a key is never overwritten");
-        assert_eq!(read_key(&key_path).unwrap(), key);
-        let signed = sign_set(&dir, &key, None, None).unwrap();
-        assert_eq!((signed.items, signed.parts), (5, 3));
-
-        let checked = check_set(&dir, Some(&PublicKey::of(&key)), &[]).unwrap();
-        assert_eq!(checked.set, "plumb/docs");
-        assert_eq!(checked.items, 5);
-        let manifest = read_manifest(&dir).unwrap();
-        assert_eq!(manifest["kinds"], json!(["docs-page"]));
-        assert_eq!(manifest["fields"]["sections"]["type"], json!("text"));
-        assert!(manifest["fields"].get("authors").is_none());
-        assert_eq!(manifest["files"][0]["count"], json!(2));
-
-        let other = SigningKey::from_bytes(&[9; 32]);
-        assert!(check_set(&dir, Some(&PublicKey::of(&other)), &[]).is_err());
-    }
-
-    #[test]
-    fn tampering_is_caught() {
-        let temp = tempfile::tempdir().unwrap();
-        let key = SigningKey::from_bytes(&[4; 32]);
-        let signed_set = |name: &str, pages: usize| {
-            let dir = temp.path().join(name);
-            written(&dir, docs_pages(pages));
-            sign_set(&dir, &key, Some("2026-10-05T04:00:00Z"), None).unwrap();
-            check_set(&dir, None, &[]).unwrap();
-            dir
-        };
-
-        let dir = signed_set("edited", 3);
-        let mut manifest = read_manifest(&dir).unwrap();
-        manifest["title"] = json!("Something else");
-        write_manifest(&dir, &manifest).unwrap();
-        let err = check_set(&dir, None, &[]).unwrap_err();
-        assert!(format!("{err:#}").contains("signature"), "{err:#}");
-
-        let (dir, other) = (signed_set("swapped", 3), signed_set("other", 1));
-        fs::copy(
-            other.join("items-001.jsonl.zst"),
-            dir.join("items-002.jsonl.zst"),
-        )
-        .unwrap();
-        let err = check_set(&dir, None, &[]).unwrap_err();
-        assert!(format!("{err:#}").contains("hash"), "{err:#}");
-        let err = sign_set(&dir, &key, None, None).unwrap_err();
-        assert!(format!("{err:#}").contains("seen before"), "{err:#}");
-    }
-
-    #[test]
-    fn a_builder_signs_for_the_project_with_its_delegation() {
-        let temp = tempfile::tempdir().unwrap();
-        let (root, builder) = (
-            SigningKey::from_bytes(&[1; 32]),
-            SigningKey::from_bytes(&[2; 32]),
-        );
-        let (root_key, builder_key) = (PublicKey::of(&root), PublicKey::of(&builder));
-        let note = |kind, key: &SigningKey, to: Option<PublicKey>, sets: &[&str], name: &str| {
-            let args = NoteArgs {
-                kind,
-                key: PathBuf::new(),
-                to: to.map(|key| key.to_string()),
-                sets: sets.iter().map(|s| s.to_string()).collect(),
-                until: (kind == NoteKind::Delegate).then(|| "2099-01-01T00:00:00Z".to_string()),
-                out: temp.path().join(name),
-            };
-            write_note(&args, key).unwrap();
-            read_json(&args.out).unwrap()
-        };
-        let delegation = note(
-            NoteKind::Delegate,
-            &root,
-            Some(builder_key),
-            &["plumb/doc*"],
-            "delegation.json",
-        );
-        let dir = temp.path().join("set");
-        written(&dir, docs_pages(2));
-
-        let checked = sign_set(&dir, &builder, None, Some(delegation.clone())).unwrap();
-        assert_eq!(checked.publisher, root_key);
-        let manifest = read_manifest(&dir).unwrap();
-        assert_eq!(manifest["signed_by"], json!(builder_key.to_string()));
-        check_set(&dir, Some(&root_key), &[]).unwrap();
-        assert!(check_set(&dir, Some(&builder_key), &[]).is_err());
-
-        let revoked = note(NoteKind::Revoke, &builder, None, &[], "revoke.json");
-        let revoked = Note::from_signed_value(&revoked).unwrap();
-        assert!(check_set(&dir, Some(&root_key), std::slice::from_ref(&revoked)).is_err());
-        assert!(check_set(&dir, None, &[revoked]).is_err());
-
-        // A delegation to another key, or for other sets, signs nothing.
-        let stranger = SigningKey::from_bytes(&[3; 32]);
-        assert!(sign_set(&dir, &stranger, None, Some(delegation)).is_err());
-        let elsewhere = note(
-            NoteKind::Delegate,
-            &root,
-            Some(builder_key),
-            &["plumb/wikipedia-*"],
-            "elsewhere.json",
-        );
-        assert!(sign_set(&dir, &builder, None, Some(elsewhere)).is_err());
-        check_set(&dir, Some(&root_key), &[]).unwrap();
-
-        // After a handover, the old key's sets are no longer taken.
-        let handover = note(
-            NoteKind::Handover,
-            &root,
-            Some(builder_key),
-            &[],
-            "handover.json",
-        );
-        let handover = Note::from_signed_value(&handover).unwrap();
-        assert!(check_set(&dir, Some(&root_key), std::slice::from_ref(&handover)).is_err());
-        sign_set(&dir, &builder, None, None).unwrap();
-        check_set(&dir, Some(&root_key), &[handover]).unwrap();
-        assert!(write_note(
-            &NoteArgs {
-                kind: NoteKind::Handover,
-                key: PathBuf::new(),
-                to: None,
-                sets: Vec::new(),
-                until: None,
-                out: temp.path().join("nowhere.json"),
-            },
-            &root
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn a_denylist_is_written_signed_and_checked() {
-        let temp = tempfile::tempdir().unwrap();
-        let entry = |category: &str, target: Option<&str>, hash_of: Option<&str>| {
-            let args = DenyEntryArgs {
-                category: category.into(),
-                target: target.map(String::from),
-                hash_of: hash_of.map(String::from),
-                any_query: hash_of.is_some_and(|url| url.contains('?')),
-                places: Vec::new(),
-                id: None,
-            };
-            deny_entry(&args).map(|item| serde_json::to_string(&item).unwrap())
-        };
-        let csam = entry("csam", None, Some("http://www.example.org/x?id=1")).unwrap();
-        assert!(!csam.contains("example.org"), "{csam}");
-        assert!(
-            entry("csam", Some("url:https://example.org/x"), None).is_err(),
-            "a csam entry names its page by hash"
-        );
-        assert!(entry("spam", Some("site:Example.org"), None).is_err());
-        let lines = [
-            csam,
-            entry("copyright", Some("site:example.net"), None).unwrap(),
-            entry("malware", Some("prefix:https://example.com/files/"), None).unwrap(),
-        ];
-        let entries = temp.path().join("entries.jsonl");
-        fs::write(&entries, lines.join("\n")).unwrap();
-        let args = |out: &str, entries: &Path| DenylistArgs {
-            entries: entries.to_path_buf(),
-            name: "plumb/denylist".into(),
-            out: temp.path().join(out),
-            title: None,
-            license: Some("CC0-1.0".into()),
-            level: 3,
-        };
-        let written = denylist(&args("list", &entries)).unwrap();
-        assert_eq!((written.items, written.parts), (3, 1));
-        let key = SigningKey::from_bytes(&[5; 32]);
-        sign_set(&temp.path().join("list"), &key, None, None).unwrap();
-        let checked =
-            check_set(&temp.path().join("list"), Some(&PublicKey::of(&key)), &[]).unwrap();
-        assert_eq!((checked.items, checked.newer), (3, 0));
-        assert_eq!(
-            read_manifest(&temp.path().join("list")).unwrap()["kinds"],
-            json!(["deny"])
-        );
-
-        // Two entries with one id, or one this version can't read, never make a list.
-        let twice = temp.path().join("twice.jsonl");
-        fs::write(&twice, format!("{}\n{}", lines[1], lines[1])).unwrap();
-        assert!(denylist(&args("twice", &twice)).is_err());
-        let newer_line = lines[1].replace("site:example.net", "blob:sha256-00");
-        let newer = temp.path().join("newer.jsonl");
-        fs::write(&newer, format!("{}\n{newer_line}", lines[0])).unwrap();
-        assert!(denylist(&args("newer", &newer)).is_err());
-
-        // A list from a newer version is checked, and applied, all the same,
-        // but this version won't sign what it can't read.
-        let dir = temp.path().join("from-newer");
-        let items = [lines[0].as_str(), &newer_line]
-            .map(|line| Some(serde_json::from_str::<Item>(line).unwrap()));
-        let manifest = json!({"format": FORMAT, "set": "plumb/denylist",
-                              "generation": "2026-10-12T04:00:00Z", "license": "CC0-1.0",
-                              "requires": ["deny-blob/1"]});
-        let Value::Object(manifest) = manifest else {
-            unreachable!()
-        };
-        write_set(items.into_iter(), BTreeMap::new(), manifest, &dir, &[], 3).unwrap();
-        assert!(sign_set(&dir, &key, None, None).is_err());
-        let mut value = read_manifest(&dir).unwrap();
-        value["publisher"] = json!(PublicKey::of(&key).to_string());
-        sign(&mut value, &key).unwrap();
-        write_manifest(&dir, &value).unwrap();
-        let checked = check_set(&dir, None, &[]).unwrap();
-        assert_eq!((checked.items, checked.newer), (2, 1));
-    }
-
-    #[test]
-    fn a_bad_item_is_never_signed() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("set");
-        written(&dir, docs_pages(1));
-        let part = dir.join("items-001.jsonl.zst");
-        let bad = r#"{"id":"x","kind":"docs-page","url":"https://Example.com/"}"#;
-        fs::write(&part, zstd::encode_all(bad.as_bytes(), 3).unwrap()).unwrap();
-        let err = sign_set(&dir, &SigningKey::from_bytes(&[4; 32]), None, None).unwrap_err();
-        assert!(format!("{err:#}").contains("line 1"), "{err:#}");
-        assert!(read_manifest(&dir).unwrap().get("signature").is_none());
-    }
 }

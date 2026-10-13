@@ -1262,6 +1262,30 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     node.shutdown().await.unwrap();
     assert_eq!(check(), sites);
 
+    // Records made with a site rules set the node no longer uses are
+    // brought up to date the same way, and the lists in use noted.
+    let mut saved = store::load_state(&paths).unwrap();
+    saved.site_rules = Some("ab".repeat(32));
+    store::save_state(&paths, &saved).unwrap();
+    assert!(saved.sites_changed());
+    let index_before = names(&dir.path().join("indexes"));
+    let mut config = test_config(dir.path());
+    config.sources = offline.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the records updated for the rules", |s| {
+        ready_and_idle(s)
+            && s.index
+                .as_ref()
+                .is_some_and(|index| !index_before.contains(index))
+    })
+    .await;
+    node.shutdown().await.unwrap();
+    let saved = store::load_state(&paths).unwrap();
+    assert_eq!(saved.site_rules, None);
+    assert!(!saved.sites_changed());
+    assert_eq!(check(), sites);
+
     // Nothing to fold in a directory with no node yet.
     assert!(!request_reseed(tempfile::tempdir().unwrap().path()).unwrap());
 }
@@ -2759,6 +2783,456 @@ async fn a_node_takes_the_adult_blocklist_from_a_trusted_node_before_its_source(
     node.shutdown().await.unwrap();
 }
 
+/// A node's buckets plus the signed sets in a data folder.
+struct WithSignedSets(plumb_net::BucketTable, PathBuf);
+
+impl plumb_net::BucketSource for WithSignedSets {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn set_manifest(&self, set: &str) -> Option<String> {
+        super::signed_sets::held_manifest(&self.1, set)
+    }
+
+    fn set_part_file(&self, sha256: &str) -> Option<PathBuf> {
+        super::signed_sets::held_part(&self.1, sha256)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let held = peer_dir.path().join("held");
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    // The books page set as the project's item set, a book a part.
+    let pages: Vec<plumb_index::pages::Page> = ["Lighthouse keeping", "Fresnel lenses", "Foghorns"]
+        .iter()
+        .zip([30, 20, 10])
+        .enumerate()
+        .map(|(n, (title, views))| {
+            serde_json::from_value(serde_json::json!({
+                "set": "books", "url": format!("https://openlibrary.org/works/OL{n}W"),
+                "title": title, "description": "A lighthouse keeper", "views": views,
+            }))
+            .unwrap()
+        })
+        .collect();
+    let books = super::signed_sets::set_dir(&held, "plumb/books").unwrap();
+    let serde_json::Value::Object(manifest) = serde_json::json!({"format": plumb_format::FORMAT,
+        "set": "plumb/books", "generation": "2026-10-12T04:00:00Z", "license": "CC0-1.0"})
+    else {
+        unreachable!()
+    };
+    let items = pages.iter().map(plumb_tools::page_items::page_item);
+    let fields = plumb_tools::page_items::page_fields();
+    plumb_tools::set::write_set(items, fields, manifest, &books, &[1, 2], 3).unwrap();
+    plumb_tools::set::sign_set(&books, &publisher, None, None).unwrap();
+
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) =
+        plumb_net::start(peer_config, Arc::new(WithSignedSets(table, held.clone())))
+            .await
+            .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    config.settings.page_sets = crate::pages::PageSets::parse("books=2").unwrap();
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = Vec::new();
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+
+    let taken = super::signed_sets::set_dir(dir.path(), "plumb/books").unwrap();
+    let indexed = |node: &NodeHandle| {
+        node.inner
+            .pages
+            .read()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |(_, searcher)| searcher.num_pages())
+    };
+    // The first two parts hold the two pages kept.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while indexed(&node) != 2 {
+        assert!(Instant::now() < deadline, "the books never came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(taken.join("items-002.jsonl.zst").is_file());
+    assert!(!taken.join("items-003.jsonl.zst").exists());
+    let found = node
+        .inner
+        .pages
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .1
+        .search("fresnel lenses", 5)
+        .unwrap();
+    assert_eq!(found[0].page, pages[1], "the page its item gives back");
+    assert!(
+        !crate::pages::SetInfo::find("books")
+            .unwrap()
+            .file(dir.path())
+            .exists(),
+        "no articles file taken besides"
+    );
+
+    // Keeping more pages takes the rest of the generation held.
+    let mut settings = node.inner.settings();
+    settings.page_sets = crate::pages::PageSets::parse("books=all").unwrap();
+    node.inner.change_settings(settings).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while indexed(&node) != 3 {
+        assert!(Instant::now() < deadline, "the third part never came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    crate::sets::check_set(&taken, Some(&PublicKey::of(&publisher)), &[]).unwrap();
+    // The panel counts what the item set holds.
+    let coverage = super::pages::coverage(&node.inner);
+    let shown = coverage.sets.iter().find(|set| set.set == "books").unwrap();
+    assert_eq!(
+        (shown.stored_records, shown.transfer_complete),
+        (Some(3), Some(true))
+    );
+
+    // Under a storage limit, keeping fewer pages drops the parts past them.
+    let mut settings = node.inner.settings();
+    settings.storage_limit_mb = 1024;
+    settings.page_sets = crate::pages::PageSets::parse("books=1").unwrap();
+    node.inner.change_settings(settings).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while indexed(&node) != 1 {
+        assert!(Instant::now() < deadline, "the parts past the first stayed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(taken.join("items-001.jsonl.zst").is_file());
+    assert!(!taken.join("items-002.jsonl.zst").exists());
+    assert!(!taken.join("items-003.jsonl.zst").exists());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_keeps_the_adult_list_set_it_holds_as_its_list() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let dir = seeded_dir();
+    let list = dir.path().join("porn-nl.txt");
+    std::fs::write(&list, "adult.example\nother.example\n").unwrap();
+    let out = super::signed_sets::set_dir(dir.path(), super::adult::ADULT_SITES).unwrap();
+    plumb_tools::set::adult_sites(&plumb_tools::set::AdultSitesArgs {
+        list,
+        name: super::adult::ADULT_SITES.into(),
+        out: out.clone(),
+        license: "Unlicense".into(),
+        attribution: "From the Block List Project".into(),
+        level: 3,
+    })
+    .unwrap();
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    plumb_tools::set::sign_set(&out, &publisher, None, None).unwrap();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    let node = start(config).await.unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !node
+        .inner
+        .adult_list()
+        .is_some_and(|list| list.contains("www.adult.example"))
+    {
+        assert!(Instant::now() < deadline, "the set never became the list");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Kept as the list's file, dated by the set's generation.
+    let kept = dir.path().join("safe").join("adult-domains.txt");
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "adult.example\nother.example\n"
+    );
+    let (manifest, _) = crate::sets::read_items(&out).unwrap();
+    let generation = plumb_format::value::unix_seconds(&manifest.generation).unwrap();
+    assert_eq!(
+        super::newer::stamp(&kept).unwrap().0,
+        u64::try_from(generation).unwrap()
+    );
+    node.shutdown().await.unwrap();
+}
+
+/// A node's buckets and signed sets, sending `served` for the map's part:
+/// the map with its first half zeroed, so only a node that goes on from
+/// the half it fetched before gets the map whole.
+struct WithMapSet(plumb_net::BucketTable, PathBuf, PathBuf);
+
+impl plumb_net::BucketSource for WithMapSet {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn set_manifest(&self, set: &str) -> Option<String> {
+        super::signed_sets::held_manifest(&self.1, set)
+    }
+
+    fn set_part_file(&self, sha256: &str) -> Option<PathBuf> {
+        let part = super::signed_sets::held_part(&self.1, sha256)?;
+        Some(if part.ends_with(crate::map::MAP_FILE) {
+            self.2.clone()
+        } else {
+            part
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_the_map_as_a_set_going_on_from_what_it_fetched() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let at = |path: &Path, seconds: u64| super::newer::set_time(path, seconds).unwrap();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let held = peer_dir.path().join("held");
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    let made = tempfile::tempdir().unwrap();
+    let source = crate::map::tests::sample_map(made.path());
+    at(&source, 1_790_000_000);
+    let out = super::signed_sets::set_dir(&held, super::signed_sets::MAP).unwrap();
+    plumb_tools::set::map(&plumb_tools::set::MapArgs {
+        pmtiles: source.clone(),
+        name: super::signed_sets::MAP.into(),
+        out: out.clone(),
+        license: "ODbL-1.0".into(),
+        attribution: "© OpenStreetMap contributors".into(),
+    })
+    .unwrap();
+    plumb_tools::set::sign_set(&out, &publisher, None, None).unwrap();
+    let map = std::fs::read(&source).unwrap();
+    let half = map.len() / 2;
+    let mut zeroed = map.clone();
+    zeroed[..half].fill(0);
+    let served = peer_dir.path().join("served.pmtiles");
+    std::fs::write(&served, &zeroed).unwrap();
+
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) = plumb_net::start(
+        peer_config,
+        Arc::new(WithMapSet(table, held.clone(), served)),
+    )
+    .await
+    .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dir = seeded_dir();
+    // An older map file, and the first half of the set's map from a take
+    // that stopped.
+    let file = crate::map::file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::copy(&source, &file).unwrap();
+    at(&file, 1_780_000_000);
+    let staging = dir
+        .path()
+        .join(super::signed_sets::DIR)
+        .join("plumb")
+        .join("map.new");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join(crate::map::MAP_FILE), &map[..half]).unwrap();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = Vec::new();
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+
+    // Taken, the set's map replaces the older file.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while file.exists() {
+        assert!(Instant::now() < deadline, "the map never came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let taken = super::signed_sets::set_dir(dir.path(), super::signed_sets::MAP)
+        .unwrap()
+        .join(crate::map::MAP_FILE);
+    assert_eq!(std::fs::read(&taken).unwrap(), map);
+    // Dated by its generation, as the file it was made from.
+    assert_eq!(super::newer::stamp(&taken).unwrap().0, 1_790_000_000);
+    assert_eq!(node.inner.map.newest().unwrap().0, taken);
+    assert!(node.inner.map.get().is_some());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_signed_sets_from_any_node_but_only_from_trusted_publishers() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let held = peer_dir.path().join("held");
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    let stranger = SigningKey::from_bytes(&[8; 32]);
+    // Site rules signed by the publisher the node trusts.
+    let psl = peer_dir.path().join("public_suffix_list.dat");
+    std::fs::write(&psl, "com\norg\nuk\nco.uk\n").unwrap();
+    let rules = super::signed_sets::set_dir(&held, "plumb/site-rules").unwrap();
+    plumb_tools::set::site_rules(&plumb_tools::set::SiteRulesArgs {
+        psl,
+        name: "plumb/site-rules".into(),
+        out: rules.clone(),
+        title: None,
+        license: "MPL-2.0".into(),
+        hosts: None,
+        level: 3,
+    })
+    .unwrap();
+    plumb_tools::set::sign_set(&rules, &publisher, None, None).unwrap();
+    // A denylist signed by a key the node does not trust.
+    let entry = plumb_tools::set::deny_entry(&plumb_tools::set::DenyEntryArgs {
+        category: "spam".into(),
+        target: Some("site:spam.example".into()),
+        hash_of: None,
+        any_query: false,
+        places: Vec::new(),
+        id: None,
+    })
+    .unwrap();
+    let entries = peer_dir.path().join("entries.jsonl");
+    std::fs::write(&entries, serde_json::to_string(&entry).unwrap() + "\n").unwrap();
+    let denylist = super::signed_sets::set_dir(&held, "plumb/denylist").unwrap();
+    plumb_tools::set::denylist(&plumb_tools::set::DenylistArgs {
+        entries,
+        name: "plumb/denylist".into(),
+        out: denylist.clone(),
+        title: None,
+        license: Some("CC0-1.0".into()),
+        level: 3,
+    })
+    .unwrap();
+    plumb_tools::set::sign_set(&denylist, &stranger, None, None).unwrap();
+
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) =
+        plumb_net::start(peer_config, Arc::new(WithSignedSets(table, held.clone())))
+            .await
+            .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    // Not a node it trusts: what it sends is checked instead.
+    net.trusted_peers = Vec::new();
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+
+    let taken = super::signed_sets::set_dir(dir.path(), "plumb/site-rules").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !taken.join(crate::sets::MANIFEST).is_file() {
+        assert!(Instant::now() < deadline, "the site rules never came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let checked = crate::sets::check_set(&taken, Some(&PublicKey::of(&publisher)), &[]).unwrap();
+    assert_eq!(checked.set, "plumb/site-rules");
+    assert_eq!(
+        std::fs::read(taken.join(crate::sets::MANIFEST)).unwrap(),
+        std::fs::read(rules.join(crate::sets::MANIFEST)).unwrap()
+    );
+    // The denylist is looked at first in each look, and never taken.
+    let refused = super::signed_sets::set_dir(dir.path(), "plumb/denylist").unwrap();
+    assert!(!refused.exists());
+    assert!(!dir.path().join("sets/plumb/site-rules.new").exists());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_set_file_being_downloaded_is_not_cut_at_the_same_time() {
     let dir = seeded_dir();
@@ -3299,6 +3773,22 @@ impl plumb_net::BucketSource for WithVectors {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() {
+    takes_site_vectors(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_site_vectors_from_their_signed_set_from_any_node() {
+    takes_site_vectors(true).await;
+}
+
+/// A node turning search by meaning on takes the vectors another node made
+/// with its model, from a trusted node's vectors file or, `as_set`, from
+/// the signed set of them that any node holds, and keeps only those made
+/// from the text it has for a site.
+async fn takes_site_vectors(as_set: bool) {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
     let dir = seeded_dir();
     let model_dir = dir.path().join(MeaningModel::Small.dir_name());
     plumb_embed::write_test_model(&model_dir).unwrap();
@@ -3321,6 +3811,22 @@ async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() 
     let peer_dir = tempfile::tempdir().unwrap();
     let file = peer_dir.path().join(plumb_embed::VECTORS_FILE_NAME);
     theirs.save(&file).unwrap();
+    let held = peer_dir.path().join("held");
+    let set = crate::meaning::vectors_set(&model);
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    if as_set {
+        let out = super::signed_sets::set_dir(&held, &set).unwrap();
+        let args = plumb_tools::set::VectorsArgs {
+            vectors: file.clone(),
+            name: None,
+            out: out.clone(),
+            license: "CC0-1.0".into(),
+            attribution: "From a test".into(),
+            level: 3,
+        };
+        assert_eq!(plumb_tools::set::vectors(&args).unwrap().1, set);
+        plumb_tools::set::sign_set(&out, &publisher, None, None).unwrap();
+    }
     assert_eq!(
         shared_vectors::servable(peer_dir.path(), &shared_vectors::set_name(&model)),
         Some(file.clone())
@@ -3349,10 +3855,12 @@ async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() 
     peer_config.upnp = false;
     peer_config.local_discovery = false;
     peer_config.round_every = None;
-    let source = WithVectors(table, file, shared_vectors::set_name(&model));
-    let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
-        .await
-        .unwrap();
+    let source: Arc<dyn plumb_net::BucketSource> = if as_set {
+        Arc::new(WithSignedSets(table, held))
+    } else {
+        Arc::new(WithVectors(table, file, shared_vectors::set_name(&model)))
+    };
+    let (peer, _records) = plumb_net::start(peer_config, source).await.unwrap();
     let peer_addr: plumb_net::Multiaddr = loop {
         if let Some(addr) = peer.status().listening.first() {
             break addr.parse().unwrap();
@@ -3362,6 +3870,7 @@ async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() 
 
     let mut config = test_config(dir.path());
     config.search_by_meaning = true;
+    config.set_publishers = vec![PublicKey::of(&publisher)];
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
     net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -3369,7 +3878,8 @@ async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() 
     net.local_discovery = false;
     net.round_every = None;
     net.fill = false;
-    net.trusted_peers = vec![peer_id];
+    // The set needs no trusted node, only a trusted publisher.
+    net.trusted_peers = if as_set { Vec::new() } else { vec![peer_id] };
     net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
     config.network = Some(net);
     let node = start(config).await.unwrap();
@@ -3395,6 +3905,9 @@ async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() 
     assert_eq!(vectors.get(&same.domain), Some((&hash, &marker[..])));
     assert_ne!(vectors.get(&other.domain).unwrap().1, &marker[..]);
     assert!(vectors.get("unknown-to-it.org").is_none());
+    // Read into the node's own file, the set is not kept.
+    let taken = super::signed_sets::set_dir(dir.path(), &set).unwrap();
+    assert!(!taken.exists() && !taken.with_extension("new").exists());
 
     peer.shutdown().await;
     node.shutdown().await.unwrap();
@@ -5581,4 +6094,106 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
             (before.confirmed, before.earned)
         );
     }
+}
+
+/// Writes a denylist of `entries` into `data`, signed by `publisher`.
+fn hold_denylist(
+    data: &Path,
+    publisher: &ed25519_dalek::SigningKey,
+    entries: &[plumb_tools::set::DenyEntryArgs],
+) {
+    let work = tempfile::tempdir().unwrap();
+    let mut text = String::new();
+    for entry in entries {
+        text += &serde_json::to_string(&plumb_tools::set::deny_entry(entry).unwrap()).unwrap();
+        text.push('\n');
+    }
+    let file = work.path().join("entries.jsonl");
+    std::fs::write(&file, text).unwrap();
+    let dir = super::signed_sets::set_dir(data, "plumb/denylist").unwrap();
+    plumb_tools::set::denylist(&plumb_tools::set::DenylistArgs {
+        entries: file,
+        name: "plumb/denylist".into(),
+        out: dir.clone(),
+        title: None,
+        license: Some("CC0-1.0".into()),
+        level: 3,
+    })
+    .unwrap();
+    plumb_tools::set::sign_set(&dir, publisher, None, None).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_denylist_takes_results_off_and_its_csam_entries_stay_when_off() {
+    use plumb_format::PublicKey;
+
+    let dir = seeded_dir();
+    let publisher = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+    let entry = |category: &str, target: Option<&str>, hash_of: Option<&str>| {
+        plumb_tools::set::DenyEntryArgs {
+            category: category.into(),
+            target: target.map(str::to_string),
+            hash_of: hash_of.map(str::to_string),
+            any_query: false,
+            places: Vec::new(),
+            id: None,
+        }
+    };
+    hold_denylist(
+        dir.path(),
+        &publisher,
+        &[
+            entry("copyright", Some("site:usbank.com"), None),
+            entry("csam", None, Some("https://chase.com/")),
+        ],
+    );
+    let config = |on: bool| {
+        let mut config = test_config(dir.path());
+        config.set_publishers = vec![PublicKey::of(&publisher)];
+        config.project_denylist = on;
+        config
+    };
+    let domains = |hits: Vec<Hit>| -> Vec<String> { hits.into_iter().map(|h| h.domain).collect() };
+
+    let node = start(config(true)).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    let found = domains(search(addr, "us+bank").await);
+    assert!(!found.iter().any(|d| d == "usbank.com"), "{found:?}");
+    let found = domains(search(addr, "chase").await);
+    assert!(!found.iter().any(|d| d == "chase.com"), "{found:?}");
+    // Only what an entry names goes.
+    let found = domains(search(addr, "chase+center").await);
+    assert_eq!(
+        found.first().map(String::as_str),
+        Some("chasecenter.com"),
+        "{found:?}"
+    );
+    let (_, _, body) = get(addr, "/search?q=us+bank").await;
+    assert!(!body.contains("usbank.com"), "{body}");
+    node.shutdown().await.unwrap();
+
+    // Turned off, only the csam entry applies.
+    let node = start(config(false)).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the index", ready_and_idle).await;
+    assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
+    let found = domains(search(addr, "chase").await);
+    assert!(!found.iter().any(|d| d == "chase.com"), "{found:?}");
+    node.shutdown().await.unwrap();
+
+    // A list no publisher the node trusts signed is not applied.
+    let stranger = ed25519_dalek::SigningKey::from_bytes(&[10; 32]);
+    std::fs::remove_dir_all(super::signed_sets::set_dir(dir.path(), "plumb/denylist").unwrap())
+        .unwrap();
+    hold_denylist(
+        dir.path(),
+        &stranger,
+        &[entry("copyright", Some("site:usbank.com"), None)],
+    );
+    let node = start(config(true)).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the index", ready_and_idle).await;
+    assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
+    node.shutdown().await.unwrap();
 }

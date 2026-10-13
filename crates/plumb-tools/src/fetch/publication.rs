@@ -957,7 +957,7 @@ mod tests {
         let snapshot =
             plumb_node::pages::Wanted::new(dir.path(), &plumb_node::pages::PageSets::default(), 0);
         let snapshot_key = snapshot.key();
-        let snapshot_file = snapshot.sets[0].1.clone();
+        let snapshot_file = snapshot.sets[0].1.file().unwrap().to_path_buf();
         assert_ne!(
             snapshot_file, dest,
             "index builds read immutable generations"

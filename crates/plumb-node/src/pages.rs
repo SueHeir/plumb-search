@@ -9,10 +9,16 @@
 //! limit (100,000 Wikipedia articles, about 10 MB, under 1 GB; a million,
 //! about 100 MB, under 8 GB; all of them otherwise).
 //!
+//! A set can come instead as the project's item set of it, `plumb/<id>`,
+//! held in `DIR/sets/plumb/<id>/` ([`HeldPageSet`]). Its items give the
+//! same pages back, and it is read in place of the file when the node
+//! holds as many of its pages that way and the file is no newer, or has
+//! no file.
+//!
 //! The pages kept are indexed together in `DIR/pages/index-<key>/`, where
-//! the key names the sets, their files and how many pages of each, so a
-//! changed setting or a new file builds a new index and an unchanged one is
-//! opened as it is.
+//! the key names the sets, their files or item sets and how many pages of
+//! each, so a changed setting or a new file builds a new index and an
+//! unchanged one is opened as it is.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -731,19 +737,172 @@ impl FromStr for SetUpdates {
     }
 }
 
-/// What one page index holds: for each set kept, how many pages of which
-/// file.
+/// Where a page set's pages are read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetSource {
+    /// Its articles file.
+    File(PathBuf),
+    /// The project's item set of it, as far as the node holds it.
+    Items(HeldPageSet),
+}
+
+impl SetSource {
+    /// The articles file, when the pages are read from one.
+    pub fn file(&self) -> Option<&Path> {
+        match self {
+            SetSource::File(file) => Some(file),
+            SetSource::Items(_) => None,
+        }
+    }
+}
+
+/// A file's time in Unix seconds, 0 when it can't be read. A set file
+/// taken from another node has its maker's time.
+fn file_time(file: &Path) -> i64 {
+    std::fs::metadata(file)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_secs() as i64)
+}
+
+/// The project's item set of a page set, `plumb/<id>` as `plumb-tools set
+/// from-pages` names it, held in `DATA/sets/plumb/<id>/`
+/// ([`crate::node::signed_sets`]): its first parts, or all of them. Each
+/// item gives its page back ([`plumb_index::items::page_of_item`]), so the
+/// pages are the ones its articles file gives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldPageSet {
+    pub dir: PathBuf,
+    /// Its generation, in Unix seconds.
+    pub generation: i64,
+    /// The files of the parts held, the set's first, in order.
+    pub parts: Vec<String>,
+    /// The items in them.
+    pub items: u64,
+    /// Whether they are all the set's parts.
+    pub complete: bool,
+}
+
+impl HeldPageSet {
+    /// The item set of the page set `set` held in `data_dir`, when one of
+    /// `publishers` (the publishers the node takes sets from, the
+    /// project's key by default) signed it, the node holds at least its
+    /// first part, and this version reads it.
+    pub fn find(
+        data_dir: &Path,
+        set: &SetInfo,
+        publishers: &[plumb_format::PublicKey],
+    ) -> Option<HeldPageSet> {
+        if publishers.is_empty() || !Page::has_reader(set.id) {
+            return None;
+        }
+        let name = format!("plumb/{}", set.id);
+        let (dir, manifest) = crate::node::signed_sets::held_trusted(data_dir, &name, publishers)?;
+        if manifest.is_denylist() || manifest.is_site_rules() {
+            return None;
+        }
+        let generation = plumb_format::value::unix_seconds(&manifest.generation)?;
+        // A part is in place only once checked whole, so its size says
+        // it is there.
+        let parts: Vec<&plumb_format::FilePart> = manifest
+            .files
+            .iter()
+            .take_while(|part| {
+                std::fs::metadata(dir.join(&part.path)).is_ok_and(|meta| meta.len() == part.bytes)
+            })
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        Some(HeldPageSet {
+            items: parts.iter().map(|part| part.count).sum(),
+            complete: parts.len() == manifest.files.len(),
+            parts: parts.iter().map(|part| part.path.clone()).collect(),
+            dir,
+            generation,
+        })
+    }
+
+    /// Whether it holds the `pages` first pages of its set, or all it has.
+    pub fn holds(&self, pages: u64) -> bool {
+        self.complete || self.items >= pages
+    }
+
+    /// Reads up to `limit` pages of the page set `id` from the parts held,
+    /// most read first.
+    fn read(&self, id: &'static str, limit: u64) -> impl Iterator<Item = Page> {
+        let dir = self.dir.clone();
+        self.parts
+            .clone()
+            .into_iter()
+            .flat_map(move |part| {
+                let path = dir.join(part);
+                let lines = std::fs::File::open(&path)
+                    .and_then(zstd::Decoder::new)
+                    .map(|decoder| std::io::BufRead::lines(std::io::BufReader::new(decoder)));
+                let lines = match lines {
+                    Ok(lines) => Some(lines),
+                    Err(err) => {
+                        warn!("reading {}: {err}", path.display());
+                        None
+                    }
+                };
+                lines
+                    .into_iter()
+                    .flatten()
+                    .map_while(move |line| match line {
+                        Ok(line) => Some(line),
+                        Err(err) => {
+                            warn!("reading {}: {err}", path.display());
+                            None
+                        }
+                    })
+            })
+            .filter_map(move |line| {
+                let item: plumb_format::Item = serde_json::from_str(&line).ok()?;
+                if item.is_extension() || item.is_deleted() {
+                    return None;
+                }
+                plumb_index::items::page_of_item(&item, id)
+            })
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+    }
+}
+
+/// What one page index holds: for each set kept, how many pages from
+/// where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wanted {
-    pub sets: Vec<(&'static SetInfo, PathBuf, u64)>,
+    pub sets: Vec<(&'static SetInfo, SetSource, u64)>,
+    /// The stamp of the denylist the pages are built without, when the
+    /// node holds one.
+    pub denylist: Option<String>,
 }
 
 impl Wanted {
     /// The sets of `data_dir` to keep under `sets` and a storage limit of
-    /// `storage_limit_mb`; sets with no file yet are left out.
+    /// `storage_limit_mb`, from their files; sets with no file yet are left
+    /// out.
     pub fn new(data_dir: &Path, sets: &PageSets, storage_limit_mb: u64) -> Self {
+        Wanted::taking(data_dir, sets, storage_limit_mb, &[])
+    }
+
+    /// [`Wanted::new`], reading a set from the project's item set of it
+    /// ([`HeldPageSet`]), signed by one of `publishers`, when the node
+    /// holds as many of its pages that way and its file is no newer than
+    /// that generation, or has no file of it. A newer file is one the
+    /// publisher installed and has not yet written as items.
+    pub fn taking(
+        data_dir: &Path,
+        sets: &PageSets,
+        storage_limit_mb: u64,
+        publishers: &[plumb_format::PublicKey],
+    ) -> Self {
         let staged = SetInfo::find(plumb_index::pages::REFERENCE2_SET).unwrap();
-        let use_staged = staged.kept(sets, storage_limit_mb) > 0 && reference_stage_ready(data_dir);
+        let use_staged = staged.kept(sets, storage_limit_mb) > 0
+            && (reference_stage_ready(data_dir)
+                || reference_items_ready(data_dir, staged, publishers));
         Wanted {
             sets: SETS
                 .iter()
@@ -759,16 +918,38 @@ impl Wanted {
                 })
                 .filter_map(|set| {
                     let pages = set.kept(sets, storage_limit_mb);
+                    if pages == 0 {
+                        return None;
+                    }
                     let file = set.file(data_dir);
                     let file = plumb_net::pages::generation_file(&file).unwrap_or(file);
-                    (pages > 0 && file.is_file()).then_some((set, file, pages))
+                    let held = HeldPageSet::find(data_dir, set, publishers).filter(|held| {
+                        !file.is_file()
+                            || (held.holds(pages) && held.generation >= file_time(&file))
+                    });
+                    let source = match held {
+                        Some(held) => SetSource::Items(held),
+                        None if file.is_file() => SetSource::File(file),
+                        None => return None,
+                    };
+                    Some((set, source, pages))
                 })
                 .collect(),
+            denylist: None,
+        }
+    }
+
+    /// These pages without what the denylist of `stamp` denies.
+    pub fn with_denylist(self, stamp: Option<String>) -> Self {
+        Wanted {
+            denylist: stamp,
+            ..self
         }
     }
 
     /// Names the index of these pages: changes when a set, its file (size
-    /// or time) or its count changes.
+    /// or time), the item set it is read from or its count changes, or the
+    /// denylist. Read from files with no denylist, it is 0.2.0's key.
     pub fn key(&self) -> Option<String> {
         if self.sets.is_empty() {
             return None;
@@ -776,7 +957,19 @@ impl Wanted {
         // Keep schema generations separate; the indexed scope fields used
         // by typed docs retrieval require a fresh index, not a new crawl.
         let mut text = String::from(plumb_index::pages::PAGE_INDEX_VERSION);
-        for (set, file, pages) in &self.sets {
+        for (set, source, pages) in &self.sets {
+            let file = match source {
+                SetSource::File(file) => file,
+                SetSource::Items(held) => {
+                    text.push_str(&format!(
+                        "|{}:items:{}:{}:{pages}",
+                        set.id,
+                        held.generation,
+                        held.parts.len()
+                    ));
+                    continue;
+                }
+            };
             let meta = std::fs::metadata(file).ok();
             let modified = meta
                 .as_ref()
@@ -788,6 +981,9 @@ impl Wanted {
             if let Some(quality) = plumb_net::pages::read_quality(file, modified, len) {
                 text.push_str(&format!(":generation={}", quality.generation));
             }
+        }
+        if let Some(denylist) = &self.denylist {
+            text.push_str(&format!("|denylist:{denylist}"));
         }
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(text.as_bytes());
@@ -814,6 +1010,24 @@ fn reference_stage_ready(data_dir: &Path) -> bool {
     })
 }
 
+/// [`reference_stage_ready`] for the project's item set of the staged
+/// reference set, held whole in place of its file.
+fn reference_items_ready(
+    data_dir: &Path,
+    staged: &SetInfo,
+    publishers: &[plumb_format::PublicKey],
+) -> bool {
+    let Some(held) = HeldPageSet::find(data_dir, staged, publishers)
+        .filter(|held| held.complete && held.items > 0)
+    else {
+        return false;
+    };
+    let legacy = SetInfo::find(plumb_index::pages::REFERENCE_SET).unwrap();
+    legacy.file_notes(data_dir).is_none_or(|old| {
+        old.lines != u64::MAX && held.items.saturating_mul(100) >= old.lines.saturating_mul(90)
+    })
+}
+
 /// The directory of the page index named `key`.
 pub fn index_dir(data_dir: &Path, key: &str) -> PathBuf {
     data_dir.join(PAGES_DIR).join(format!("index-{key}"))
@@ -830,6 +1044,16 @@ pub fn open_or_build_with_budget(
     wanted: &Wanted,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 ) -> Result<Option<(String, PageSearcher)>> {
+    open_or_build_with(data_dir, wanted, budget, None)
+}
+
+/// [`open_or_build_with_budget`], leaving out what `denylist` denies.
+pub fn open_or_build_with(
+    data_dir: &Path,
+    wanted: &Wanted,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    denylist: Option<&plumb_format::deny::Denylist>,
+) -> Result<Option<(String, PageSearcher)>> {
     let Some(key) = wanted.key() else {
         return Ok(None);
     };
@@ -838,15 +1062,45 @@ pub fn open_or_build_with_budget(
         return Ok(Some((key, searcher)));
     }
     let started = std::time::Instant::now();
-    let mut pages: Box<dyn Iterator<Item = Page>> = Box::new(std::iter::empty());
-    for (set, file, count) in &wanted.sets {
-        info!("indexing page set {} from {}", set.id, file.display());
-        let _mutation = budget.as_ref().map(|budget| budget.mutation());
-        let lease = budget.as_ref().map(|budget| budget.read_lease(file));
-        let read = HoldingPages {
-            pages: Box::new(set.read(file, *count)?),
-            _lease: lease,
+    let denied = std::cell::Cell::new(0usize);
+    let allowed = |page: &Page| {
+        let Some(denial) = denylist.and_then(|list| list.denies_url(&page.url)) else {
+            return true;
         };
+        if denial.is_locked() {
+            warn!(
+                "denylist entry {} ({}) left a page out of the page index",
+                denial.id, denial.category
+            );
+        }
+        denied.set(denied.get() + 1);
+        false
+    };
+    let mut pages: Box<dyn Iterator<Item = Page> + '_> = Box::new(std::iter::empty());
+    for (set, from, count) in &wanted.sets {
+        let read = match from {
+            SetSource::File(file) => {
+                info!("indexing page set {} from {}", set.id, file.display());
+                let _mutation = budget.as_ref().map(|budget| budget.mutation());
+                let lease = budget.as_ref().map(|budget| budget.read_lease(file));
+                HoldingPages {
+                    pages: Box::new(set.read(file, *count)?),
+                    _lease: lease,
+                }
+            }
+            SetSource::Items(held) => {
+                info!(
+                    "indexing page set {} from the project's item set ({} of its parts)",
+                    set.id,
+                    held.parts.len()
+                );
+                HoldingPages {
+                    pages: Box::new(held.read(set.id, *count)),
+                    _lease: None,
+                }
+            }
+        }
+        .filter(allowed);
         pages = Box::new(pages.chain(read));
     }
     let stats = plumb_index::pages::build_page_index_with_budget(&dir, pages, budget)?;
@@ -855,6 +1109,12 @@ pub fn open_or_build_with_budget(
         stats.pages,
         started.elapsed().as_secs_f32()
     );
+    if denied.get() > 0 {
+        info!(
+            "the denylist left {} pages of the page sets out",
+            thousands(denied.get() as u64)
+        );
+    }
     Ok(Some((key, PageSearcher::open(&dir)?)))
 }
 
@@ -1227,6 +1487,148 @@ mod tests {
         assert_eq!(serde_json::from_str::<PageSets>(&json).unwrap(), sets);
         assert_eq!(thousands(1_000_000), "1,000,000");
         assert_eq!(PageSetSize::Top(100_000).words(), "100,000 most read");
+    }
+
+    #[test]
+    fn denied_pages_are_left_out_as_the_index_is_built() {
+        use plumb_format::deny::{Denylist, Entry, Switch};
+
+        use plumb_tools::set::{deny_entry, DenyEntryArgs};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        write_set(data, &[("Marie Curie", 900), ("Pierre Curie", 300)]);
+        let mut list = Denylist::new(Switch::On);
+        for (category, target, hash_of) in [
+            (
+                "copyright",
+                Some(plumb_core::article::article_url("en", "Pierre Curie")),
+                None,
+            ),
+            // A csam entry is logged by its id only.
+            (
+                "csam",
+                None,
+                Some("https://example.com/never-seen".to_string()),
+            ),
+        ] {
+            let entry = deny_entry(&DenyEntryArgs {
+                category: category.into(),
+                target: target.map(|url| format!("url:{url}")),
+                hash_of,
+                any_query: false,
+                places: Vec::new(),
+                id: None,
+            })
+            .unwrap();
+            list.add(Entry::from_item(&entry).unwrap().unwrap());
+        }
+        let wanted = Wanted::new(data, &PageSets::default(), 0);
+        let (key, searcher) = open_or_build(data, &wanted).unwrap().unwrap();
+        assert_eq!(searcher.num_pages(), 2);
+        let wanted = wanted.with_denylist(Some("2026-10-12T00:00:00Z:on".into()));
+        let (denied, searcher) = open_or_build_with(data, &wanted, None, Some(&list))
+            .unwrap()
+            .unwrap();
+        assert_ne!(denied, key, "a denylist names its own index");
+        assert_eq!(searcher.num_pages(), 1);
+        let hits = searcher.search("curie", 5).unwrap();
+        let titles: Vec<&str> = hits.iter().map(|hit| hit.page.title.as_str()).collect();
+        assert_eq!(titles, ["Marie Curie"]);
+    }
+
+    #[test]
+    fn a_held_project_page_set_is_read_in_place_of_its_file() {
+        use ed25519_dalek::SigningKey;
+        use plumb_format::PublicKey;
+        use serde_json::{json, Value};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let titles = [("Marie Curie", 900), ("Pierre Curie", 300), ("Curie", 10)];
+        write_set(data, &titles);
+        let file = SetInfo::find("wikipedia-en").unwrap().file(data);
+        let pages: Vec<Page> = SetInfo::find("wikipedia-en")
+            .unwrap()
+            .read(&file, u64::MAX)
+            .unwrap()
+            .collect();
+        // The project's item set of it, one item a part.
+        let held = crate::node::signed_sets::set_dir(data, "plumb/wikipedia-en").unwrap();
+        let Value::Object(manifest) = json!({"format": plumb_format::FORMAT,
+            "set": "plumb/wikipedia-en", "generation": "2026-10-12T04:00:00Z",
+            "license": "CC-BY-SA-4.0"})
+        else {
+            unreachable!()
+        };
+        let items = pages.iter().map(plumb_tools::page_items::page_item);
+        let fields = plumb_tools::page_items::page_fields();
+        plumb_tools::set::write_set(items, fields, manifest, &held, &[1, 2], 3).unwrap();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        plumb_tools::set::sign_set(&held, &key, None, None).unwrap();
+        let project = [PublicKey::of(&key)];
+        let generation = plumb_format::value::unix_seconds("2026-10-12T04:00:00Z").unwrap();
+        let date = |file: &Path, time: i64| {
+            let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(time as u64);
+            let file = std::fs::File::options().write(true).open(file).unwrap();
+            file.set_modified(time).unwrap();
+        };
+        // The file the item set was written from.
+        date(&file, generation - 3600);
+
+        let from_file = Wanted::new(data, &PageSets::default(), 0);
+        assert_eq!(from_file.sets[0].1, SetSource::File(file.clone()));
+        let stranger = [PublicKey::of(&SigningKey::from_bytes(&[8; 32]))];
+        assert_eq!(
+            Wanted::taking(data, &PageSets::default(), 0, &stranger),
+            from_file,
+            "a set no trusted publisher signed is not read"
+        );
+        let from_items = Wanted::taking(data, &PageSets::default(), 0, &project);
+        let SetSource::Items(read) = &from_items.sets[0].1 else {
+            panic!("{:?}", from_items.sets[0].1);
+        };
+        assert_eq!((read.items, read.complete, read.parts.len()), (3, true, 3));
+        assert_ne!(from_items.key(), from_file.key());
+        let pages_of = |wanted: &Wanted| {
+            let (_, searcher) = open_or_build(data, wanted).unwrap().unwrap();
+            let hits = searcher.search("curie", 10).unwrap();
+            let mut pages: Vec<Page> = hits.into_iter().map(|hit| hit.page).collect();
+            pages.sort_by(|a, b| a.title.cmp(&b.title));
+            pages
+        };
+        let indexed = pages_of(&from_items);
+        assert_eq!(indexed.len(), 3);
+        assert_eq!(indexed, pages_of(&from_file), "the same pages either way");
+        // A file newer than the item set, as when the publisher installs
+        // the next one, is read in its place.
+        date(&file, generation + 3600);
+        assert_eq!(
+            Wanted::taking(data, &PageSets::default(), 0, &project).sets[0].1,
+            SetSource::File(file.clone()),
+        );
+        date(&file, generation - 3600);
+
+        // Holding only its first parts: read when they hold what is kept,
+        // or when there is no file.
+        std::fs::remove_file(held.join(&read.parts[2])).unwrap();
+        let two = PageSets::parse("wikipedia-en=2").unwrap();
+        assert!(matches!(
+            Wanted::taking(data, &two, 0, &project).sets[0].1,
+            SetSource::Items(HeldPageSet {
+                items: 2,
+                complete: false,
+                ..
+            })
+        ));
+        assert_eq!(
+            Wanted::taking(data, &PageSets::default(), 0, &project).sets[0].1,
+            SetSource::File(file.clone()),
+            "the file holds more"
+        );
+        std::fs::remove_file(&file).unwrap();
+        let partial = Wanted::taking(data, &PageSets::default(), 0, &project);
+        assert_eq!(pages_of(&partial).len(), 2);
     }
 
     #[test]

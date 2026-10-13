@@ -217,7 +217,74 @@ starting for a trusted node to connect, and downloads the list from its
 source only when none has a fresh copy, so in practice only the nodes that
 build from source (plumbsearch.org) fetch it, once a week. Answers that
 need live data (currency rates, cached six hours) and a page an AI asks
-to read are still fetched by the node that needs them.
+to read are still fetched by the node that needs them. From 0.3 the
+blocklist, the page sets, the map and shared site vectors also come as
+signed sets, from any node (below).
+
+## Signed sets
+
+The project's own data reaches nodes as signed sets, in the format of
+`crates/plumb-format`: a set has a name (`plumb/denylist`), a generation
+(when it was made), parts that each hold items or bytes and are named by
+their SHA-256, and a manifest listing them, signed by the set's publisher.
+A node trusts sets signed with the project's key,
+`ed25519:MMrfl7-ASNz-h2d2f0ru1EWjAws59Ls3D5TbdfJS98c`, kept on the
+machine that builds the project's data; no other key signs sets yet.
+`plumb-tools set` writes, signs and checks them.
+
+Since a node checks a set rather than trusting whoever sends it, it takes
+one from any node that holds it, trusted or not, over `/plumb/sets/1`,
+which asks for a set's newest signed manifest by name or for bytes of a
+part by its hash (`plumb_net::sets`, `plumb-node`'s
+`node/signed_sets.rs`). Every six hours a node asks up to eight connected
+nodes, trusted ones first, for the manifest of each set it takes. When one
+signed by a publisher it trusts is newer than its own, it fetches the
+parts it lacks from whichever node has them, checks each part's size and
+hash and then the whole set as `plumb-tools set check` does, and only
+then puts it in place of the old one, in `DATA/sets/plumb/<name>/`. A
+download that stops keeps the parts it got and goes on from there next
+time. A node serves the sets it holds in turn, rate-limited as page set
+files are. Nodes before 0.3 neither ask nor answer; a 0.3 node still
+serves and takes files over `/plumb/pages/1`, so both keep their data.
+
+What a node takes:
+
+- **`plumb/denylist`**, always: pages and sites the project has accepted
+  a takedown for. A node applies a newer list as soon as it takes it, to
+  search results and everything shown with them in its pages, API and MCP
+  answers; leaves what it denies out of the page and search indexes as it
+  builds them; and drops it from crawls, leads, fills and batches before
+  keeping them or passing them on (a stored batch is signed and can't be
+  edited, so one that names a denied site is not relayed).
+  `plumb run --no-project-denylist` turns the list off, except its entries
+  for child sexual abuse material, which always apply; what they take off
+  is logged by the entry's id, never by its address.
+- **`plumb/site-rules`**, always: the public suffix and subsite lists that
+  say which site a host is on. A node uses a held set from its next start
+  in place of the built-in lists, and when the rules differ from those its
+  records were made with, it works its sites out again, as after an
+  upgrade that changes the built-in lists.
+- **`plumb/adult-sites`**, always: the adult blocklist safe search uses.
+  When it is newer than the node's list file it becomes that file, so
+  nodes asking for the file over `/plumb/pages/1` still get it.
+- **`plumb/map`**, on a node that keeps a map, under the same
+  `--set-updates`, storage limit and growth rules as the map file, and
+  never while it takes the file. The node keeps one copy, and draws from
+  and serves whichever is newer.
+- **The page sets**, as item sets named by the set's id
+  (`plumb/wikipedia-en`), each as far as the node keeps pages of it: the
+  first parts that hold that many. The node indexes a held set in place of
+  its file, unless the file is newer, and the pages are the same either
+  way. With `--set-updates` leaving a set out, the node takes it only when
+  it has no pages of it, as with files. A node that holds as many pages of
+  a set this way takes no file of it; while no node serves the set, it
+  takes files as before. Parts count toward the daily download limit.
+- **`plumb/vectors-<model>`**, the site vectors for search by meaning made
+  with the node's model, when the node turns search by meaning on or gets
+  a new model. It reads the set into its own vectors file, keeping only
+  the vectors made from the very text it has, and removes the set; while
+  no node serves the set, it takes a trusted node's vectors file over
+  `/plumb/pages/1` instead.
 
 ## Network search
 

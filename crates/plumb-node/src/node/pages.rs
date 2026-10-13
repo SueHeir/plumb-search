@@ -28,8 +28,8 @@ use tracing::{debug, info, warn};
 
 use super::{Inner, NodeSettings};
 use crate::pages::{
-    index_dir, notes_path, open_or_build_with_budget, remove_other_indexes_with_budget, stand_in,
-    thousands, wanted_counts, SetFileCutter, SetFileNotes, SetInfo, Wanted,
+    index_dir, notes_path, open_or_build_with, remove_other_indexes_with_budget, stand_in,
+    thousands, wanted_counts, HeldPageSet, SetFileCutter, SetFileNotes, SetInfo, Wanted,
 };
 
 /// How often the job looks for changed settings or set files.
@@ -37,6 +37,13 @@ use crate::pages::{
 const LOOK_EVERY: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const LOOK_EVERY: Duration = Duration::from_millis(200);
+/// Least time between two builds of the page index for a new denylist,
+/// which already applies to what the node shows: the whole index is built
+/// again each time.
+#[cfg(not(test))]
+const LIST_CHANGES_EVERY: Duration = Duration::from_secs(6 * 3600);
+#[cfg(test)]
+const LIST_CHANGES_EVERY: Duration = Duration::from_secs(0);
 /// Wait after a failed build before trying the same pages again.
 const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How often a wait looks for shutdown.
@@ -66,14 +73,22 @@ pub(super) fn coverage(inner: &Inner) -> super::PageCoverage {
                 .and_then(|f| serde_json::from_reader(f).ok());
             let file_quality = super::newer::stamp(&file)
                 .and_then(|(modified, size)| plumb_net::pages::read_quality(&file, modified, size));
+            // With no file, the project's item set of it, when held.
+            let held = (!file.is_file())
+                .then(|| HeldPageSet::find(&inner.paths.data, set, &inner.config.set_publishers))
+                .flatten();
             super::SetCoverage {
                 set: set.id.into(),
                 enabled: set.kept(&settings.page_sets, settings.storage_limit_mb) > 0,
                 stored_records: notes
                     .as_ref()
                     .map(|n| n.lines)
-                    .or_else(|| file_quality.as_ref().map(|q| q.records)),
-                transfer_complete: notes.as_ref().map(|n| n.complete),
+                    .or_else(|| file_quality.as_ref().map(|q| q.records))
+                    .or_else(|| held.as_ref().map(|held| held.items)),
+                transfer_complete: notes
+                    .as_ref()
+                    .map(|n| n.complete)
+                    .or_else(|| held.as_ref().map(|held| held.complete)),
                 file_quality,
             }
         })
@@ -121,6 +136,8 @@ pub(super) fn run(inner: Arc<Inner>) {
     let mut retired_places = Vec::new();
     let mut kept_whole = HashSet::new();
     let mut retired_readers: Vec<std::sync::Weak<plumb_index::pages::PageSearcher>> = Vec::new();
+    // The page sets of the index last built, and when it was.
+    let mut built: Option<(Option<String>, Instant)> = None;
     while !inner.stopping() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
@@ -130,6 +147,10 @@ pub(super) fn run(inner: Arc<Inner>) {
         // the whole file would be built again at once.
         let near = super::places::known_homes(&inner);
         let counts = wanted_counts(&settings.page_sets, settings.storage_limit_mb);
+        let held_sets = inner
+            .held_page_sets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         // Only a node with a storage limit cuts its files: a server's are
         // handed on to other nodes whole.
         for &(set, pages) in counts.iter().filter(|_| settings.storage_limit_mb > 0) {
@@ -140,18 +161,29 @@ pub(super) fn run(inner: Arc<Inner>) {
             if let Err(err) = cut_if_longer(&inner, set, pages, &near, &mut kept_whole) {
                 warn!("page set {}: {err:#}", set.id);
             }
+            if let Err(err) = super::signed_sets::trim_page_set(&inner, set, pages) {
+                warn!("plumb/{}: {err:#}", set.id);
+            }
         }
-        let wanted = Wanted::new(
+        let wanted = Wanted::taking(
             &inner.paths.data,
             &settings.page_sets,
             settings.storage_limit_mb,
+            &inner.config.set_publishers,
         );
+        let page_sets_key = wanted.key();
+        let denylist = inner.denylist_stamped();
+        let wanted = wanted.with_denylist(denylist.as_ref().map(|(_, stamp)| stamp.clone()));
         let key = wanted.key();
         let current = inner.page_key();
         let retry_later = failed
             .as_ref()
             .is_some_and(|(k, at)| Some(k) == key.as_ref() && at.elapsed() < RETRY_WAIT);
-        if key != current && !retry_later {
+        // Only the denylist changed: that waits a while.
+        let list_wait = built.as_ref().is_some_and(|(sets_key, at)| {
+            current.is_some() && *sets_key == page_sets_key && at.elapsed() < LIST_CHANGES_EVERY
+        });
+        if key != current && !retry_later && !list_wait {
             // At a start that has to build the index, the one the last
             // start or 0.2.0 left is searched until then: an upgrade's
             // build of every page takes minutes on a server and longer
@@ -169,8 +201,14 @@ pub(super) fn run(inner: Arc<Inner>) {
                 *inner.pages.write().unwrap_or_else(PoisonError::into_inner) =
                     Some((older, Arc::new(searcher)));
             }
-            match open_or_build_with_budget(&inner.paths.data, &wanted, inner.storage.clone()) {
+            match open_or_build_with(
+                &inner.paths.data,
+                &wanted,
+                inner.storage.clone(),
+                denylist.as_ref().map(|(list, _)| list.as_ref()),
+            ) {
                 Ok(found) => {
+                    built = Some((page_sets_key, Instant::now()));
                     let pages = found.as_ref().map_or(0, |(_, s)| s.num_pages());
                     let kept = found.as_ref().map(|(k, _)| k.clone());
                     let replacement = found.map(|(k, s)| (k, Arc::new(s)));
@@ -200,6 +238,7 @@ pub(super) fn run(inner: Arc<Inner>) {
                 }
             }
         }
+        drop(held_sets);
         retired_readers.retain(|reader| reader.strong_count() > 0);
         if retired_readers.is_empty() {
             remove_other_indexes_with_budget(
@@ -254,15 +293,31 @@ fn keep_files(inner: &Inner, done: &AtomicBool) {
                 if fetch_failed.contains_key(set.id) {
                     continue;
                 }
+                // Taken as the project's item set ([`super::signed_sets`]):
+                // only a file made after that generation is worth taking.
+                let held = {
+                    let _held = inner
+                        .held_page_sets
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    HeldPageSet::find(&inner.paths.data, set, &inner.config.set_publishers)
+                }
+                .filter(|held| held.holds(pages))
+                .map(|held| held.generation);
                 let near = near_of(&settings, near.as_deref(), set, pages);
-                if let Err(err) = fetch_if_needed(inner, &net, set, pages, &near, &mut checked) {
+                if let Err(err) =
+                    fetch_if_needed(inner, &net, set, pages, &near, held, &mut checked)
+                {
                     warn!("page set {}: {err:#}", set.id);
                     fetch_failed.insert(set.id, Instant::now());
                 }
             }
+            let has_map = crate::map::file(&inner.paths.data).is_file()
+                || super::signed_sets::held_map(&inner.paths.data, &inner.config.set_publishers)
+                    .is_some();
             if !ended()
                 && !fetch_failed.contains_key(MAP_SET)
-                && (settings.storage_limit_mb == 0 || crate::map::file(&inner.paths.data).is_file())
+                && (settings.storage_limit_mb == 0 || has_map)
             {
                 if let Err(err) = keep_map(inner, &net, &mut checked) {
                     warn!("map file: {err:#}");
@@ -303,14 +358,14 @@ fn near_of(
 
 /// Holds a set's file for one writer: a download or a cut, never both,
 /// since each writes the file's `.part` and renames it over the file.
-struct SetFileHold<'a> {
+pub(super) struct SetFileHold<'a> {
     inner: &'a Inner,
     id: &'static str,
 }
 
 impl<'a> SetFileHold<'a> {
     /// `None` while another writer holds the file.
-    fn take(inner: &'a Inner, id: &'static str) -> Option<Self> {
+    pub(super) fn take(inner: &'a Inner, id: &'static str) -> Option<Self> {
         let taken = inner
             .set_files_busy
             .lock()
@@ -347,25 +402,31 @@ fn fetch_if_needed(
     set: &SetInfo,
     pages: u64,
     near: &[(f64, f64)],
+    items_made: Option<i64>,
     checked: &mut HashMap<&'static str, Instant>,
 ) -> Result<()> {
     let data = &inner.paths.data;
     let notes = set.file_notes(data);
     let now = now_unix();
     let near_key = crate::places::near_key(near);
+    let looked_lately = || {
+        checked
+            .get(set.id)
+            .is_some_and(|at| at.elapsed() < super::newer::CHECK_EVERY)
+    };
+    // The pages are there as items: a file newer than them is looked for
+    // as often as a newer file is.
+    if items_made.is_some() && looked_lately() {
+        return Ok(());
+    }
     let reason = match notes {
+        None if items_made.is_some() => "a file newer than its items",
         None => "none yet",
         Some(n) if !n.complete && near_key != 0 && n.near != near_key => {
             "places near other towns wanted"
         }
         Some(n) if !n.complete && n.lines < pages => "more pages wanted",
-        Some(_)
-            if checked
-                .get(set.id)
-                .is_some_and(|at| at.elapsed() < super::newer::CHECK_EVERY) =>
-        {
-            return Ok(())
-        }
+        Some(_) if looked_lately() => return Ok(()),
         Some(_) => "a newer file",
     };
     // `--set-updates off`, or a list without this set: a set the node has
@@ -380,10 +441,18 @@ fn fetch_if_needed(
         return Ok(());
     }
     // What each trusted node has, and the file worth taking.
-    let Some(offers) = super::newer::offers(inner, net, set.id)? else {
+    let Some(mut offers) = super::newer::offers(inner, net, set.id)? else {
         debug!("page set {}: no trusted node serves page sets", set.id);
         return Ok(());
     };
+    if let Some(made) = items_made {
+        checked.insert(set.id, Instant::now());
+        offers.retain(|offer| i64::try_from(offer.modified).is_ok_and(|modified| modified > made));
+        if offers.is_empty() {
+            debug!("page set {}: no file newer than its items", set.id);
+            return Ok(());
+        }
+    }
     let chosen = match notes {
         Some(n) if reason == "a newer file" => {
             checked.insert(set.id, Instant::now());
@@ -662,11 +731,18 @@ fn keep_map(
     {
         return Ok(());
     }
+    // Not while the map is taken as a set ([`super::signed_sets`]).
+    let Some(_hold) = SetFileHold::take(inner, MAP_SET) else {
+        return Ok(());
+    };
     let file = crate::map::file(&inner.paths.data);
-    // A node with no map file takes one whatever --set-updates says.
+    // The map held as a set counts as the node's map, so a file is taken
+    // only when it is newer.
+    let held = super::signed_sets::held_map(&inner.paths.data, &inner.config.set_publishers);
+    // A node with no map takes one whatever --set-updates says.
     let may_grow = match inner.config.set_updates.allows(MAP_SET) {
         Some(may_grow) => may_grow,
-        None if file.is_file() => return Ok(()),
+        None if file.is_file() || held.is_some() => return Ok(()),
         None => false,
     };
     if inner.download_pause().is_some() {
@@ -676,7 +752,11 @@ fn keep_map(
         return Ok(());
     };
     checked.insert(MAP_SET, Instant::now());
-    let (modified, size) = super::newer::stamp(&file).unwrap_or((0, 0));
+    let (modified, size) = super::newer::stamp(&file)
+        .into_iter()
+        .chain(held)
+        .max()
+        .unwrap_or((0, 0));
     let mine = super::newer::Mine {
         modified,
         size,

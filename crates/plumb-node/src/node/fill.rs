@@ -506,7 +506,9 @@ pub(super) async fn seed_from_network(
         state.total = page.total;
         bytes += page.bytes;
         done = page.done();
-        for record in page.records {
+        let mut records = page.records;
+        inner.drop_denied_records(&mut records);
+        for record in records {
             set.upsert(record);
         }
         inner.set_step(
@@ -758,6 +760,7 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         if focus {
             records.retain(|record| topics.matches(record));
         }
+        inner.drop_denied_records(&mut records);
         let n = records.len() as u64;
         // The disk the sites kept take: all of the page, or the share kept.
         let bytes = if focus {
