@@ -4906,12 +4906,16 @@ fn mark_legacy_deliveries(
 }
 
 /// Rebuild agreement without awarding its already-counted credits again.
-/// Preserve the startup order for a second, bounded pass recovering deliveries.
+/// Also returns the batches held, oldest first, up to the last one whose
+/// records may not have been delivered, for [`resend_pending`] to replay:
+/// none unless the node stopped with deliveries in flight or trusts a
+/// crawler anew, so it doesn't normally build a second agreement.
 fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> (Agreement, Vec<Hash>) {
     let now = now_unix();
-    let replay = store.ids_oldest_first();
+    let mut replay = store.ids_oldest_first();
     let mut agreement = Agreement::new(me, trusted.iter().copied());
-    for id in &replay {
+    let mut pending = 0;
+    for (n, id) in replay.iter().enumerate() {
         let batch = match store.get(id) {
             Ok(Some(batch)) => batch,
             Ok(None) => continue,
@@ -4924,15 +4928,24 @@ fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> (Agre
         let Ok(crawler) = batch.check(made) else {
             continue;
         };
+        let is_trusted = trusted.contains(&crawler);
         let records = if crawler == me {
             accept_own_batch(&batch, &crawler, made)
-        } else if trusted.contains(&crawler) {
+        } else if is_trusted {
             accept_trusted_batch(&batch, &crawler, made)
         } else {
             accept_batch(&batch, &crawler, made)
         };
-        agreement.observe(crawler, records, made);
+        let confirmed = agreement.observe(crawler, records, made);
+        // Records resend_pending would send again.
+        if crawler != me
+            && !store.delivery_ack(id, is_trusted).acknowledged()
+            && (!confirmed.is_empty() || (is_trusted && !accept_news(&batch, made).is_empty()))
+        {
+            pending = n + 1;
+        }
     }
+    replay.truncate(pending);
     agreement.prune(now);
     agreement.take_verdicts();
     (agreement, replay)
@@ -5633,6 +5646,35 @@ mod tests {
             budget.status().used_bytes,
             crate::storage::directory_bytes(dir.path()).unwrap()
         );
+    }
+
+    #[test]
+    fn a_start_replays_only_up_to_the_last_batch_not_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_unix();
+        let key = Keypair::generate_ed25519();
+        let crawler = key.public().to_peer_id();
+        let me = PeerId::random();
+        let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            let mut record = SiteRecord::new(format!("site-{n}.example"));
+            record.title = Some(format!("Site {n}"));
+            record.crawled_at = Some(now - 3 + n);
+            let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now - 3 + n)
+                .unwrap()
+                .unwrap();
+            store.insert(&batch).unwrap();
+            ids.push(batch.id());
+        }
+        let replay = |store: &BatchStore| replay_agreement(store, me, &[crawler]).1;
+        assert_eq!(replay(&store), ids, "nothing delivered yet");
+        for id in &ids[1..] {
+            store.delivery_ack(id, true).acknowledge().unwrap();
+        }
+        assert_eq!(replay(&store), ids[..1]);
+        store.delivery_ack(&ids[0], true).acknowledge().unwrap();
+        assert!(replay(&store).is_empty(), "all delivered: no second replay");
     }
 
     #[test]

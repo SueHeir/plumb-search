@@ -238,43 +238,68 @@ impl Facts {
     }
 }
 
+/// A crawler, by where it is in [`Agreement::crawlers`]. Millions of
+/// crawls are held, so each names its crawler in 4 bytes, not the 80 of a
+/// [`PeerId`].
+type Crawler = u32;
+
+/// This node, the first crawler.
+const ME: Crawler = 0;
+
+/// What this node knows of one crawler.
+#[derive(Debug)]
+struct CrawlerState {
+    id: PeerId,
+    score: Score,
+    /// The sites behind [`Score::vouched`].
+    vouches: Vec<String>,
+    /// Its crawls are taken in at once (see "Trusted nodes").
+    trusted: bool,
+}
+
 /// One crawler's latest crawl of a homepage.
 #[derive(Debug, Clone)]
 struct Observation {
-    crawler: PeerId,
-    /// Shared with the confirmed facts of the site when it is what was
-    /// released.
-    facts: Arc<Facts>,
-    crawled_at: u64,
+    crawler: Crawler,
     /// Already scored for or against its crawler.
     judged: bool,
+    crawled_at: u64,
+    /// Shared with the other crawls of the site that saw the same, and
+    /// with its confirmed facts when it is what was released.
+    facts: Arc<Facts>,
+}
+
+/// The crawls held of one homepage.
+#[derive(Debug, Default)]
+struct Homepage {
+    crawls: Vec<Observation>,
+    /// The facts last released for the site.
+    confirmed: Option<Arc<Facts>>,
 }
 
 /// One crawler's latest report of links to a site.
 #[derive(Debug, Clone)]
 struct Mention {
-    crawler: PeerId,
-    seen_at: u64,
+    crawler: Crawler,
     linking_domains: u32,
+    seen_at: u64,
     texts: Vec<LinkText>,
 }
 
 #[derive(Debug)]
 pub struct Agreement {
-    me: PeerId,
-    homepages: HashMap<String, Vec<Observation>>,
-    /// The facts last released for each confirmed site.
-    confirmed: HashMap<String, Arc<Facts>>,
-    mentions: HashMap<String, Vec<Mention>>,
-    scores: HashMap<PeerId, Score>,
-    /// The sites behind each crawler's [`Score::vouched`].
-    vouches: HashMap<PeerId, Vec<String>>,
+    /// Every crawler seen or trusted, this node first.
+    crawlers: Vec<CrawlerState>,
+    /// Where each crawler is in `crawlers`.
+    ids: HashMap<PeerId, Crawler>,
+    homepages: HashMap<Box<str>, Homepage>,
+    /// Homepages with confirmed facts.
+    confirmed: usize,
+    mentions: HashMap<Box<str>, Vec<Mention>>,
     /// Sites this node holds a crawl of its own for.
     own: usize,
     /// Disputed sites this node should fetch itself.
     rechecks: BTreeSet<String>,
-    /// Nodes whose crawls are taken in at once (see "Trusted nodes").
-    trusted: HashSet<PeerId>,
     /// Scored since the last [`Agreement::take_verdicts`].
     verdicts: Vec<Verdict>,
 }
@@ -283,18 +308,24 @@ impl Agreement {
     /// An empty agreement step for the node `me`, taking crawls signed by
     /// `trusted` nodes in at once.
     pub fn new(me: PeerId, trusted: impl IntoIterator<Item = PeerId>) -> Agreement {
-        Agreement {
-            me,
+        let mut agreement = Agreement {
+            crawlers: Vec::new(),
+            ids: HashMap::new(),
             homepages: HashMap::new(),
-            confirmed: HashMap::new(),
+            confirmed: 0,
             mentions: HashMap::new(),
-            scores: HashMap::new(),
-            vouches: HashMap::new(),
             own: 0,
             rechecks: BTreeSet::new(),
-            trusted: trusted.into_iter().filter(|peer| *peer != me).collect(),
             verdicts: Vec::new(),
+        };
+        agreement.crawler(me);
+        for peer in trusted {
+            if peer != me {
+                let crawler = agreement.crawler(peer);
+                agreement.crawlers[crawler as usize].trusted = true;
+            }
         }
+        agreement
     }
 
     /// Takes in records `crawler` signed (as [`crate::batch::accept_batch`]
@@ -306,6 +337,7 @@ impl Agreement {
         records: Vec<SiteRecord>,
         seen_at: u64,
     ) -> Vec<SiteRecord> {
+        let crawler = self.crawler(crawler);
         let mut out = Vec::new();
         for mut record in records {
             let texts = std::mem::take(&mut record.link_texts);
@@ -333,16 +365,17 @@ impl Agreement {
     /// Drops observations older than [`WINDOW_EPOCHS`] before `now`.
     pub fn prune(&mut self, now: u64) {
         let oldest = now.saturating_sub(WINDOW_EPOCHS * EPOCH_SECS);
-        let me = self.me;
+        let (confirmed, rechecks) = (&mut self.confirmed, &mut self.rechecks);
         let mut own = 0;
-        self.homepages.retain(|domain, held| {
-            held.retain(|o| o.crawled_at >= oldest);
-            if held.is_empty() {
-                self.confirmed.remove(domain);
-                self.rechecks.remove(domain);
+        self.homepages.retain(|domain, site| {
+            site.crawls.retain(|o| o.crawled_at >= oldest);
+            if site.crawls.is_empty() {
+                *confirmed -= usize::from(site.confirmed.is_some());
+                rechecks.remove(&**domain);
+                return false;
             }
-            own += usize::from(held.iter().any(|o| o.crawler == me));
-            !held.is_empty()
+            own += usize::from(site.crawls.iter().any(|o| o.crawler == ME));
+            true
         });
         self.own = own;
         self.mentions.retain(|_, held| {
@@ -353,7 +386,9 @@ impl Agreement {
 
     /// How often `crawler` agreed with the others.
     pub fn score(&self, crawler: &PeerId) -> Score {
-        self.scores.get(crawler).copied().unwrap_or_default()
+        self.ids
+            .get(crawler)
+            .map_or_else(Score::default, |&c| self.crawlers[c as usize].score)
     }
 
     /// The crawls scored since the last call, oldest first.
@@ -366,11 +401,17 @@ impl Agreement {
     /// this node has crawled anything itself, has been vouched for by
     /// matching this node's own crawls of [`VOUCHES_NEEDED`] sites.
     pub fn counts(&self, crawler: &PeerId) -> bool {
-        if *crawler == self.me || self.trusted.contains(crawler) {
+        self.ids
+            .get(crawler)
+            .map_or(self.own == 0, |&c| self.counts_id(c))
+    }
+
+    fn counts_id(&self, crawler: Crawler) -> bool {
+        let state = &self.crawlers[crawler as usize];
+        if crawler == ME || state.trusted {
             return true;
         }
-        let score = self.score(crawler);
-        !score.distrusted() && (self.own == 0 || score.vouched >= VOUCHES_NEEDED)
+        !state.score.distrusted() && (self.own == 0 || state.score.vouched >= VOUCHES_NEEDED)
     }
 
     /// Whether this node trusts `crawler` strictly: it is this node, or it
@@ -378,11 +419,12 @@ impl Agreement {
     /// [`VOUCHES_NEEDED`] sites. Unlike [`Agreement::counts`], never true
     /// for a crawler merely because this node crawls nothing itself.
     pub fn vouched(&self, crawler: &PeerId) -> bool {
-        if *crawler == self.me {
-            return true;
-        }
-        let score = self.score(crawler);
-        !score.distrusted() && score.vouched >= VOUCHES_NEEDED
+        self.ids.get(crawler).is_some_and(|&c| self.vouched_id(c))
+    }
+
+    fn vouched_id(&self, crawler: Crawler) -> bool {
+        let score = self.crawlers[crawler as usize].score;
+        crawler == ME || (!score.distrusted() && score.vouched >= VOUCHES_NEEDED)
     }
 
     /// Up to `limit` disputed sites this node should fetch itself to settle
@@ -393,20 +435,40 @@ impl Agreement {
     }
 
     pub fn status(&self) -> AgreementStatus {
-        let others = || self.scores.iter().filter(|(peer, _)| **peer != self.me);
+        let others = || self.crawlers.iter().skip(1);
         AgreementStatus {
-            pending_sites: self.homepages.len() - self.confirmed.len(),
-            confirmed_sites: self.confirmed.len(),
-            distrusted_crawlers: others().filter(|(_, score)| score.distrusted()).count(),
+            pending_sites: self.homepages.len() - self.confirmed,
+            confirmed_sites: self.confirmed,
+            distrusted_crawlers: others().filter(|c| c.score.distrusted()).count(),
             vouched_crawlers: others()
-                .filter(|(_, score)| !score.distrusted() && score.vouched >= VOUCHES_NEEDED)
+                .filter(|c| !c.score.distrusted() && c.score.vouched >= VOUCHES_NEEDED)
                 .count(),
             disputed_sites: self.rechecks.len(),
-            trusted_peers: self.trusted.len(),
+            trusted_peers: others().filter(|c| c.trusted).count(),
         }
     }
 
-    fn observe_homepage(&mut self, crawler: PeerId, mut record: SiteRecord) -> Option<SiteRecord> {
+    /// Where `peer` is in [`Agreement::crawlers`], added if new.
+    fn crawler(&mut self, peer: PeerId) -> Crawler {
+        *self.ids.entry(peer).or_insert_with(|| {
+            self.crawlers.push(CrawlerState {
+                id: peer,
+                score: Score::default(),
+                vouches: Vec::new(),
+                trusted: false,
+            });
+            (self.crawlers.len() - 1) as Crawler
+        })
+    }
+
+    /// Notes `facts` as the last released for `domain`.
+    fn confirm(&mut self, domain: &str, facts: Arc<Facts>) {
+        if let Some(site) = self.homepages.get_mut(domain) {
+            self.confirmed += usize::from(site.confirmed.replace(facts).is_none());
+        }
+    }
+
+    fn observe_homepage(&mut self, crawler: Crawler, mut record: SiteRecord) -> Option<SiteRecord> {
         let crawled_at = record.crawled_at?;
         let domain = record.domain.clone();
         // Only the homepage facts are compared ([`agree`]); the page text
@@ -419,16 +481,23 @@ impl Agreement {
         let key_pages = std::mem::take(&mut record.key_pages);
         let links_to = std::mem::take(&mut record.links_to);
         let icon = record.icon.take();
-        let held = self.homepages.entry(domain.clone()).or_default();
+        let facts = Facts::of(record);
+        let site = self.homepages.entry(domain.as_str().into()).or_default();
+        // Crawlers of a homepage mostly see the same: one copy for them all.
+        let facts = (site.crawls.iter().map(|o| &o.facts))
+            .chain(&site.confirmed)
+            .find(|known| ***known == facts)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(facts));
         let mut observation = Observation {
             crawler,
-            facts: Arc::new(Facts::of(record)),
-            crawled_at,
             judged: false,
+            crawled_at,
+            facts,
         };
         // A crawl not seen from this crawler before.
         let mut fresh = true;
-        match held.iter_mut().find(|o| o.crawler == crawler) {
+        match site.crawls.iter_mut().find(|o| o.crawler == crawler) {
             Some(old) if old.crawled_at > crawled_at => return None,
             Some(old) => {
                 // Sending the same crawl again does not earn a second
@@ -440,31 +509,31 @@ impl Agreement {
             None => {
                 // Most sites are held from one or two crawlers: no room
                 // kept for more.
-                held.reserve_exact(1);
-                held.push(observation);
-                if crawler == self.me {
+                site.crawls.reserve_exact(1);
+                site.crawls.push(observation);
+                if crawler == ME {
                     self.own += 1;
                 }
             }
         }
-        if crawler == self.me {
+        if crawler == ME {
             self.rechecks.remove(&domain);
         }
         self.judge_against_own(&domain);
-        if self.trusted.contains(&crawler) {
+        if self.crawlers[crawler as usize].trusted {
             if fresh {
                 self.verdicts.push(Verdict {
-                    crawler,
+                    crawler: self.crawlers[crawler as usize].id,
                     crawled_at,
                     agreed: true,
                     witnesses: 0,
                     trusted: true,
                 });
             }
-            let held = &self.homepages[&domain];
+            let held = &self.homepages[domain.as_str()].crawls;
             let facts = held.iter().find(|o| o.crawler == crawler)?.facts.clone();
             let mut record = facts.record(&domain, crawled_at);
-            self.confirmed.insert(domain, facts);
+            self.confirm(&domain, facts);
             record.headings = headings;
             record.body_text = body_text;
             record.terms = terms;
@@ -474,7 +543,7 @@ impl Agreement {
             record.icon = icon;
             return Some(record);
         }
-        let held = &self.homepages[&domain];
+        let held = &self.homepages[domain.as_str()].crawls;
         let new = held.iter().position(|o| o.crawler == crawler)?;
         // The crawls that match this one, from crawlers that count.
         let group: Vec<usize> = (0..held.len())
@@ -482,12 +551,13 @@ impl Agreement {
             .collect();
         // A crawl that matches this node's own needs no vouching: that
         // match is the check.
-        let ours = group.iter().any(|&i| held[i].crawler == self.me);
+        let ours = group.iter().any(|&i| held[i].crawler == ME);
         let counting = group
             .iter()
             .filter(|&&i| {
-                let crawler = &held[i].crawler;
-                self.counts(crawler) || (ours && !self.score(crawler).distrusted())
+                let crawler = held[i].crawler;
+                self.counts_id(crawler)
+                    || (ours && !self.crawlers[crawler as usize].score.distrusted())
             })
             .count();
         if counting < QUORUM {
@@ -526,7 +596,7 @@ impl Agreement {
         let witnesses = |i: usize| {
             group
                 .iter()
-                .filter(|&&j| j != i && self.vouched(&held[j].crawler))
+                .filter(|&&j| j != i && self.vouched_id(held[j].crawler))
                 .count()
         };
         let mut verdicts = Vec::new();
@@ -543,7 +613,7 @@ impl Agreement {
         for (i, agreed, witnesses) in verdicts {
             self.judge(&domain, i, agreed, ours, witnesses);
         }
-        self.confirmed.insert(domain, released);
+        self.confirm(&domain, released);
         Some(confirmed)
     }
 
@@ -555,10 +625,11 @@ impl Agreement {
     /// [`JUDGE_WINDOW_SECS`] older, already says otherwise, or the node does not crawl and the other side is at
     /// least as large.
     fn disputed(&self, domain: &str, group: &[usize], newest: usize) -> Option<bool> {
-        let held = &self.homepages[domain];
+        let site = &self.homepages[domain];
+        let held = &site.crawls;
         if group
             .iter()
-            .any(|&i| held[i].crawler == self.me || self.trusted.contains(&held[i].crawler))
+            .any(|&i| held[i].crawler == ME || self.crawlers[held[i].crawler as usize].trusted)
         {
             return None;
         }
@@ -571,7 +642,7 @@ impl Agreement {
             .iter()
             .enumerate()
             .filter(|(i, o)| {
-                !group.contains(i) && (o.crawler == self.me || (self.counts(&o.crawler) && near(o)))
+                !group.contains(i) && (o.crawler == ME || (self.counts_id(o.crawler) && near(o)))
             })
             .count();
         if self.own == 0 {
@@ -579,33 +650,33 @@ impl Agreement {
             // so the larger side wins.
             let counting = group
                 .iter()
-                .filter(|&&i| self.counts(&held[i].crawler))
+                .filter(|&&i| self.counts_id(held[i].crawler))
                 .count();
             return (rivals >= counting).then_some(true);
         }
-        let overturns = self
+        let overturns = site
             .confirmed
-            .get(domain)
+            .as_ref()
             .is_some_and(|last| !last.agrees(&held[newest].facts));
         if rivals == 0 && !overturns {
             return None;
         }
-        let own = held.iter().find(|o| o.crawler == self.me);
+        let own = held.iter().find(|o| o.crawler == ME);
         Some(own.is_some_and(|o| o.crawled_at + JUDGE_WINDOW_SECS >= held[newest].crawled_at))
     }
 
     /// Scores every crawl of `domain` not judged yet that was made close in
     /// time to this node's own crawl of it, against that crawl.
     fn judge_against_own(&mut self, domain: &str) {
-        let held = &self.homepages[domain];
-        let Some(own) = held.iter().find(|o| o.crawler == self.me) else {
+        let held = &self.homepages[domain].crawls;
+        let Some(own) = held.iter().find(|o| o.crawler == ME) else {
             return;
         };
         let verdicts: Vec<(usize, bool)> = held
             .iter()
             .enumerate()
             .filter(|(_, o)| {
-                o.crawler != self.me
+                o.crawler != ME
                     && !o.judged
                     && o.crawled_at.abs_diff(own.crawled_at) <= JUDGE_WINDOW_SECS
             })
@@ -621,44 +692,46 @@ impl Agreement {
     /// the crawl it was compared with includes this node's own, which
     /// `witnesses` other strictly trusted crawlers made.
     fn judge(&mut self, domain: &str, i: usize, agreed: bool, ours: bool, witnesses: usize) {
-        let o = &mut self.homepages.get_mut(domain).expect("held")[i];
+        let o = &mut self.homepages.get_mut(domain).expect("held").crawls[i];
         o.judged = true;
-        let crawler = o.crawler;
+        let (crawler, crawled_at) = (o.crawler, o.crawled_at);
+        let state = &mut self.crawlers[crawler as usize];
         self.verdicts.push(Verdict {
-            crawler,
-            crawled_at: o.crawled_at,
+            crawler: state.id,
+            crawled_at,
             agreed,
             witnesses,
             trusted: false,
         });
-        let score = self.scores.entry(crawler).or_default();
         if agreed {
-            score.agreed += 1;
-            if ours && crawler != self.me {
-                let sites = self.vouches.entry(crawler).or_default();
-                if sites.len() < MAX_VOUCHES as usize && !sites.iter().any(|d| d == domain) {
-                    sites.push(domain.to_string());
-                    score.vouched = sites.len() as u32;
-                }
+            state.score.agreed += 1;
+            let sites = &mut state.vouches;
+            if ours
+                && crawler != ME
+                && sites.len() < MAX_VOUCHES as usize
+                && !sites.iter().any(|d| d == domain)
+            {
+                sites.push(domain.to_string());
+                state.score.vouched = sites.len() as u32;
             }
         } else {
-            score.disagreed += 1;
+            state.score.disagreed += 1;
         }
     }
 
     fn observe_mention(
         &mut self,
-        crawler: PeerId,
+        crawler: Crawler,
         domain: &str,
         texts: Vec<LinkText>,
         linking_domains: u32,
         seen_at: u64,
     ) -> Option<SiteRecord> {
-        let held = self.mentions.entry(domain.to_string()).or_default();
+        let held = self.mentions.entry(domain.into()).or_default();
         let mention = Mention {
             crawler,
-            seen_at,
             linking_domains,
+            seen_at,
             texts,
         };
         match held.iter_mut().find(|m| m.crawler == crawler) {
@@ -670,7 +743,7 @@ impl Agreement {
             }
         }
         let held = &self.mentions[domain];
-        if self.trusted.contains(&crawler) {
+        if self.crawlers[crawler as usize].trusted {
             let m = held.iter().find(|m| m.crawler == crawler)?;
             let mut site = SiteRecord::new(domain);
             site.signals.linking_domains = m.linking_domains;
@@ -679,7 +752,7 @@ impl Agreement {
             }
             return Some(site);
         }
-        let counting: Vec<&Mention> = held.iter().filter(|m| self.counts(&m.crawler)).collect();
+        let counting: Vec<&Mention> = held.iter().filter(|m| self.counts_id(m.crawler)).collect();
         if counting.len() < QUORUM {
             return None;
         }
@@ -1143,7 +1216,7 @@ mod tests {
         let out = agreement.observe(trusted, vec![texty], NOW);
         assert_eq!(out[0].headings, ["Find a book"]);
         assert_eq!(out[0].body_text.as_deref(), Some("Borrow books and films"));
-        let held = &agreement.homepages["library.org"][0].facts;
+        let held = &agreement.homepages["library.org"].crawls[0].facts;
         assert_eq!(held.title.as_deref(), Some("Library"));
         let mut named = SiteRecord::new("newbank.com");
         named.add_link_text_linkers("New Bank", 0b01);
