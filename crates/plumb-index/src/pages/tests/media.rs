@@ -411,3 +411,54 @@ fn podcasts_are_found_by_their_name_and_podcast() {
         .iter()
         .any(|hit| hit.whole));
 }
+
+#[test]
+fn a_song_or_film_asked_about_is_named() {
+    let described = |title: &str, description: &str, views: u64| {
+        let mut page = page(title, views, &[]);
+        page.description = Some(description.into());
+        page
+    };
+    let (_dir, s) = searcher(&[
+        described("Hotel California", "1977 single by Eagles", 7_000),
+        described(
+            "Hotel California (album)",
+            "1976 studio album by Eagles",
+            4_000,
+        ),
+        page("California", 90_000, &[]),
+        described(
+            "Titanic",
+            "British passenger liner that sank in 1912",
+            90_000,
+        ),
+        described("Titanic (1997 film)", "1997 film by James Cameron", 60_000),
+        described(
+            "Power (Kanye West song)",
+            "2010 single by Kanye West",
+            5_000,
+        ),
+        page("Power chord", 3_000, &["Power chords"]),
+        page("Code review", 2_000, &[]),
+        described("Code (film)", "2016 film", 100),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title.clone())
+            .collect()
+    };
+    assert_eq!(named("hotel california chords"), ["Hotel California"]);
+    assert_eq!(named("hotel california piano chords"), ["Hotel California"]);
+    assert_eq!(named("titanic trailer"), ["Titanic (1997 film)"]);
+    assert_eq!(named("where to watch titanic"), ["Titanic (1997 film)"]);
+    assert_eq!(named("titanic actors"), ["Titanic (1997 film)"]);
+    // Not when a page is called the whole query.
+    assert_eq!(named("power chords"), ["Power chord"]);
+    assert_eq!(named("code review"), ["Code review"]);
+    assert_eq!(
+        hinted_name("Let It Be lyrics"),
+        Some(("let it be".into(), Hint::Work(&["song", "single"])))
+    );
+}

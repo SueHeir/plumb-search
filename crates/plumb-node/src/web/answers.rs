@@ -445,20 +445,6 @@ const HOLDER_FACTS: &[plumb_core::facts::FactKind] = &[
     plumb_core::facts::FactKind::Headquarters,
 ];
 
-/// Where a description stops saying what its page is and goes on to who
-/// made it or what it is part of.
-const DESCRIPTION_HEAD_ENDS: &[&str] = &[
-    " by ",
-    " directed ",
-    " created ",
-    " starring ",
-    " based ",
-    " of ",
-    " from ",
-    " (",
-    ",",
-];
-
 /// The kinds of work [`KIND_LISTINGS`] has for the listing among
 /// `services`, if one is.
 fn listed_kinds(services: &[&plumb_core::profiles::Service]) -> Option<&'static [&'static str]> {
@@ -526,26 +512,7 @@ pub fn profile_candidates(
     }
     let films = kinds.contains(&"film");
     let of_kind = |hit: &plumb_index::pages::PageHit| {
-        let qualifier = hit
-            .page
-            .title
-            .strip_suffix(')')
-            .and_then(|title| title.rsplit_once(" ("));
-        let description = hit.page.description.as_deref().unwrap_or("").to_lowercase();
-        let head_end = DESCRIPTION_HEAD_ENDS
-            .iter()
-            .filter_map(|end| description.find(end))
-            .min()
-            .unwrap_or(description.len());
-        films && hit.page.set == FILMS_SET
-            || qualifier.is_some_and(|(_, what)| {
-                what.split_whitespace()
-                    .any(|word| kinds.contains(&word.to_lowercase().as_str()))
-            })
-            || description[..head_end]
-                .split_whitespace()
-                .last()
-                .is_some_and(|word| kinds.contains(&word))
+        films && hit.page.set == FILMS_SET || hit.page.is_work_of(kinds)
     };
     if candidates.iter().any(of_kind) {
         candidates.retain(of_kind);
