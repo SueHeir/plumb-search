@@ -572,12 +572,18 @@ fn names_are_not_taken_for_slips() {
     add("Htop", 3);
     add("Sauce", 200);
     add("Saute", 3);
+    add("Argument", 200);
+    add("Arguement", 3);
     pages.push(page("Htop", 10, &[]));
-    pages.push(Page::from_word(Article {
-        title: "saute".into(),
-        description: Some("(verb) To fry quickly in a little fat.".into()),
-        ..Article::default()
-    }));
+    let word = |title: &str, description: &str| {
+        Page::from_word(Article {
+            title: title.into(),
+            description: Some(description.into()),
+            ..Article::default()
+        })
+    };
+    pages.push(word("saute", "(verb) To fry quickly in a little fat."));
+    pages.push(word("arguement", "(noun) Misspelling of argument."));
     let (_dir, searcher) = searcher(&pages);
     let model = crate::spell_model::Model::with_rules(
         &[
@@ -585,6 +591,7 @@ fn names_are_not_taken_for_slips() {
             ("l", "t", 0.001),
             ("t", "o", 0.001),
             ("c", "t", 0.001),
+            ("u", "ue", 0.01),
         ],
         1e-6,
     );
@@ -603,8 +610,9 @@ fn names_are_not_taken_for_slips() {
     assert_eq!(suggest("ETIAS"), None);
     // An article is named by it.
     assert_eq!(suggest("htop"), None);
-    // Wiktionary has it.
+    // Wiktionary has it, and not only as a misspelling.
     assert_eq!(suggest("saute"), None);
+    assert_eq!(suggest("arguement").as_deref(), Some("argument"));
 }
 
 #[test]
