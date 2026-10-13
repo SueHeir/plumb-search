@@ -347,20 +347,22 @@ impl BatchStore {
             .collect()
     }
 
-    /// Whether any batch held has a delivery marker: the store has been
-    /// kept by a version that writes them.
-    pub(crate) fn has_delivery_markers(&self) -> bool {
+    /// When the newest delivery marker was written, if any: when a version
+    /// that writes them last kept the store.
+    pub(crate) fn newest_delivery_marker(&self) -> Option<std::time::SystemTime> {
         fs::read_dir(&self.dir)
             .into_iter()
             .flatten()
             .flatten()
-            .any(|entry| {
+            .filter(|entry| {
                 entry
                     .path()
                     .extension()
                     .and_then(|e| e.to_str())
                     .is_some_and(|e| e.starts_with("delivered-"))
             })
+            .filter_map(|entry| entry.metadata().ok()?.modified().ok())
+            .max()
     }
 
     pub(crate) fn delivery_ack(&self, id: &Hash, trusted: bool) -> DeliveryAck {
