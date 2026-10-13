@@ -382,6 +382,18 @@ impl SiteRecord {
         }
     }
 
+    /// The language the site is in, as its homepage declares or as its
+    /// title and description are written ([`site_language`]). The index, a
+    /// node's headlines and private search all judge a site by it.
+    pub fn written_language(&self) -> Option<String> {
+        let text = format!(
+            "{} {}",
+            self.title.as_deref().unwrap_or_default(),
+            self.description.as_deref().unwrap_or_default()
+        );
+        site_language(self.language.as_deref(), &text)
+    }
+
     /// Adds a link to this site with `text` from the site `linking_domain`
     /// (its registrable domain). Each linking site counts once per text,
     /// however often it is added. See [`SiteRecord::add_link_text_linkers`].

@@ -812,7 +812,9 @@ pub(crate) fn wants_feed(record: &SiteRecord) -> bool {
 }
 
 /// The site of `record` to watch the feed of ([`crate::news`]): its domain,
-/// homepage and language.
+/// homepage and language, as the index has it, so a search in English
+/// leaves out the headlines of a site written in Cyrillic that declares
+/// nothing as it leaves out the site.
 pub(crate) fn feed_of(record: &SiteRecord) -> crate::news::Watched {
     crate::news::Watched {
         domain: record.domain.clone(),
@@ -820,7 +822,7 @@ pub(crate) fn feed_of(record: &SiteRecord) -> crate::news::Watched {
             .url
             .clone()
             .unwrap_or_else(|| format!("https://{}/", record.domain)),
-        language: record.language.clone(),
+        language: record.written_language(),
         ..Default::default()
     }
 }
@@ -938,6 +940,17 @@ mod tests {
         r.link_texts = vec![LinkText::with_count(title, 2)];
         r.crawled_at = Some(at);
         r
+    }
+
+    #[test]
+    fn a_feed_is_in_the_language_its_site_is_written_in() {
+        let mut news = crawled("lenta.example", "Лента новостей России и мира сегодня", 1);
+        assert_eq!(feed_of(&news).language.as_deref(), Some("Cyrl"));
+        // A declaration still wins.
+        news.language = Some("en".into());
+        assert_eq!(feed_of(&news).language.as_deref(), Some("en"));
+        let english = crawled("news.example", "World news", 1);
+        assert_eq!(feed_of(&english).language, None);
     }
 
     /// Every site in the records file at `path`, read a record at a time.
