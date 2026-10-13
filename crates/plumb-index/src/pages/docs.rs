@@ -279,28 +279,6 @@ impl PageSearcher {
     }
 }
 
-/// Whether `hit` is a docs page found by its words that must come after
-/// the best of `sites`: "python package index" wants pypi.org first, and
-/// "bash parameter expansion" anything but expansion.com. Only the docs'
-/// own site may come after it, as python.org for docs.python.org's
-/// "python sorting techniques".
-pub(crate) fn docs_kept_below(hit: &PageHit, sites: &[crate::Hit]) -> bool {
-    docs_found_by_words(hit)
-        && sites
-            .first()
-            .is_some_and(|best| !docs_of(&hit.page, &best.domain))
-}
-
-/// Whether the docs page `page` is on `domain` or one of its subdomains.
-fn docs_of(page: &Page, domain: &str) -> bool {
-    plumb_core::host_of(&page.url).is_some_and(|host| {
-        host == domain
-            || host
-                .strip_suffix(domain)
-                .is_some_and(|sub| sub.ends_with('.'))
-    })
-}
-
 /// Whether `query` asks about something in the docs of the docs page
 /// `page`'s site (see [`plumb_core::docs::asks_about`]): "python sort
 /// list" does for a page of Python's docs; "note taking app" for none.
