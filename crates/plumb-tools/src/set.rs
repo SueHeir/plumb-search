@@ -21,13 +21,14 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use clap::{Args, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
+use plumb_embed::Vectors;
 use plumb_format::deny::{Entry, DENY};
 use plumb_format::manifest::{is_set_name, BLOB_PARTS};
 use plumb_format::notes::{sign_note, NOTE_FORMAT};
 use plumb_format::sign::sign;
 use plumb_format::sites::{read_suffix_list, SITE_RULE};
 use plumb_format::urls::{url_sha256, url_sha256_any_query};
-use plumb_format::{FieldSpec, Item, Manifest, Note, PublicKey, SiteRules, FORMAT};
+use plumb_format::{FieldSpec, Item, Manifest, Note, PublicKey, SiteRules, Vector, FORMAT};
 use plumb_index::items::page_of_item;
 use plumb_index::pages::Page;
 use plumb_node::sets::{check_parts, check_set, id_hash, measure, now, Checked, MANIFEST};
@@ -94,6 +95,10 @@ pub enum SetCommand {
     /// as a blob part, linked rather than copied where it can be. Its
     /// generation is the file's time. The manifest is still to be signed.
     Map(MapArgs),
+    /// Write a node's site vectors (`vectors.bin`) as the layer a node
+    /// turning search by meaning on takes them from, with a manifest still
+    /// to be signed.
+    Vectors(VectorsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -205,6 +210,33 @@ pub struct MapArgs {
     pub license: String,
     #[arg(long, default_value = "© OpenStreetMap contributors, via Protomaps")]
     pub attribution: String,
+}
+
+#[derive(Debug, Args)]
+pub struct VectorsArgs {
+    /// The vectors file, `vectors.bin` in a node's data folder. It is only
+    /// read.
+    #[arg(long, value_name = "FILE")]
+    pub vectors: PathBuf,
+    /// The set's name, `<scope>/<name>`: by default the name a node with
+    /// the same model asks for, `plumb/vectors-` and the start of its id.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// The folder to write. It must not exist yet, or be empty.
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// The license of the text the vectors were made from: what sites'
+    /// homepages say, and what Wikidata and Wikipedia say of them.
+    #[arg(long, default_value = "LicenseRef-plumb-crawl AND CC-BY-SA-4.0")]
+    pub license: String,
+    #[arg(
+        long,
+        default_value = "Made from sites' homepages, Wikidata and Wikipedia"
+    )]
+    pub attribution: String,
+    /// The zstd level of the parts.
+    #[arg(long, default_value_t = 19)]
+    pub level: i32,
 }
 
 #[derive(Debug, Args)]
@@ -432,6 +464,16 @@ pub fn run(args: SetArgs) -> Result<()> {
             println!(
                 "{}: the map as a blob part; sign it with `plumb-tools set sign`",
                 args.out.display()
+            );
+            Ok(())
+        }
+        SetCommand::Vectors(args) => {
+            let (written, name) = vectors(&args)?;
+            println!(
+                "{}: {name}, {} site vectors in {} parts; sign it with `plumb-tools set sign`",
+                args.out.display(),
+                written.items,
+                written.parts
             );
             Ok(())
         }
@@ -1025,6 +1067,52 @@ pub fn map(args: &MapArgs) -> Result<Written> {
         }));
     write_manifest(&args.out, &value)?;
     Ok(written)
+}
+
+/// Writes the vectors in `args.vectors` as a layer on the sites they are
+/// of, each item holding its site's vector. Returns the set's name too.
+pub fn vectors(args: &VectorsArgs) -> Result<(Written, String)> {
+    let (model, _, count) = Vectors::read_header(&args.vectors)?;
+    ensure!(count > 0, "{} holds no vectors", args.vectors.display());
+    let name = args
+        .name
+        .clone()
+        .unwrap_or_else(|| plumb_node::meaning::vectors_set(&model));
+    ensure!(is_set_name(&name), "{name:?} is not <scope>/<name>");
+    let mut manifest = Map::new();
+    manifest.insert("format".into(), json!(FORMAT));
+    manifest.insert("set".into(), json!(name));
+    manifest.insert("generation".into(), json!(now()));
+    manifest.insert("license".into(), json!(args.license));
+    manifest.insert("attribution".into(), json!(args.attribution));
+    manifest.insert("extends".into(), json!(["site"]));
+    // Read on one thread and written on this one, so a file of millions of
+    // vectors is never held whole.
+    let (send, items) = std::sync::mpsc::sync_channel(1024);
+    let written = std::thread::scope(|scope| {
+        let reader = scope.spawn(move || {
+            Vectors::for_each_in(&args.vectors, |domain, hash, values| {
+                let item: Option<Item> = serde_json::from_value(json!({
+                    "id": domain, "extends": format!("site:{domain}"),
+                    "vectors": [Vector::new(&model, hash, values)],
+                }))
+                .ok();
+                send.send(item).context("the set writer stopped")
+            })
+        });
+        let written = write_set(
+            items.into_iter(),
+            BTreeMap::new(),
+            manifest,
+            &args.out,
+            PART_ENDS,
+            args.level,
+        );
+        let read = reader.join().expect("the vectors reader panicked");
+        // A writer that failed stops the reader: its error says why.
+        written.and_then(|written| read.map(|_| written))
+    })?;
+    Ok((written, name))
 }
 
 /// The entry `args` describes, checked as a node reads it.
@@ -1630,6 +1718,46 @@ mod tests {
         );
         assert_eq!(items[1].id, "other.example");
         assert!(items.iter().all(|item| item.labels == ["adult"]));
+    }
+
+    #[test]
+    fn a_vectors_file_is_a_layer_of_site_vectors() {
+        let temp = tempfile::tempdir().unwrap();
+        let (file, dir) = (temp.path().join("vectors.bin"), temp.path().join("set"));
+        let model = [0xab; 32];
+        let mut table = Vectors::new(model, 4);
+        table
+            .insert("python.org", [1; 32], &[-127, 0, 64, 127])
+            .unwrap();
+        table
+            .insert("rust-lang.org", [2; 32], &[1, 2, 3, 4])
+            .unwrap();
+        table.save(&file).unwrap();
+        let args = VectorsArgs {
+            vectors: file,
+            name: None,
+            out: dir.clone(),
+            license: "CC0-1.0".into(),
+            attribution: "From a test".into(),
+            level: 3,
+        };
+        let (written, name) = vectors(&args).unwrap();
+        assert_eq!(
+            (written.items, name.as_str()),
+            (2, "plumb/vectors-abababababababab")
+        );
+        let key = SigningKey::from_bytes(&[5; 32]);
+        sign_set(&dir, &key, None, None).unwrap();
+        check_set(&dir, Some(&PublicKey::of(&key)), &[]).unwrap();
+        let (manifest, items) = plumb_node::sets::read_items(&dir).unwrap();
+        assert_eq!(manifest.set, name);
+        assert_eq!(manifest.extends, ["site"]);
+        let python = items.iter().find(|item| item.id == "python.org").unwrap();
+        assert_eq!(python.extends, Some("site:python.org".parse().unwrap()));
+        assert_eq!(
+            python.vectors,
+            [Vector::new(&model, &[1; 32], &[-127, 0, 64, 127])]
+        );
     }
 
     #[test]

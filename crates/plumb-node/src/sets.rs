@@ -75,19 +75,28 @@ pub fn check_first_parts(
 /// are, leaving out blob parts. Check the set first ([`check_set`]): this
 /// reads what is there.
 pub fn read_items(dir: &Path) -> Result<(Manifest, Vec<Item>)> {
+    let mut items = Vec::new();
+    let manifest = for_each_item(dir, |item| {
+        items.push(item);
+        Ok(())
+    })?;
+    Ok((manifest, items))
+}
+
+/// [`read_items`] an item at a time, for a set too big to hold.
+pub fn for_each_item(dir: &Path, mut each: impl FnMut(Item) -> Result<()>) -> Result<Manifest> {
     let text = fs::read_to_string(dir.join(MANIFEST))
         .with_context(|| format!("reading {}", dir.join(MANIFEST).display()))?;
     let (manifest, _) = Manifest::from_signed_json(&text, &now())?;
-    let mut items = Vec::new();
     for part in manifest.files.iter().filter(|part| !part.blob) {
         let path = dir.join(&part.path);
         let reader = BufReader::new(zstd::Decoder::new(File::open(&path)?)?);
         for line in reader.lines() {
             let line = line.with_context(|| format!("reading {}", path.display()))?;
-            items.push(serde_json::from_str::<Item>(&line)?);
+            each(serde_json::from_str::<Item>(&line)?)?;
         }
     }
-    Ok((manifest, items))
+    Ok(manifest)
 }
 
 /// 64 bits of an id's SHA-256, for telling ids apart.

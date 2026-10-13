@@ -3773,6 +3773,22 @@ impl plumb_net::BucketSource for WithVectors {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() {
+    takes_site_vectors(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_site_vectors_from_their_signed_set_from_any_node() {
+    takes_site_vectors(true).await;
+}
+
+/// A node turning search by meaning on takes the vectors another node made
+/// with its model, from a trusted node's vectors file or, `as_set`, from
+/// the signed set of them that any node holds, and keeps only those made
+/// from the text it has for a site.
+async fn takes_site_vectors(as_set: bool) {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
     let dir = seeded_dir();
     let model_dir = dir.path().join(MeaningModel::Small.dir_name());
     plumb_embed::write_test_model(&model_dir).unwrap();
@@ -3795,6 +3811,22 @@ async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() 
     let peer_dir = tempfile::tempdir().unwrap();
     let file = peer_dir.path().join(plumb_embed::VECTORS_FILE_NAME);
     theirs.save(&file).unwrap();
+    let held = peer_dir.path().join("held");
+    let set = crate::meaning::vectors_set(&model);
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    if as_set {
+        let out = super::signed_sets::set_dir(&held, &set).unwrap();
+        let args = plumb_tools::set::VectorsArgs {
+            vectors: file.clone(),
+            name: None,
+            out: out.clone(),
+            license: "CC0-1.0".into(),
+            attribution: "From a test".into(),
+            level: 3,
+        };
+        assert_eq!(plumb_tools::set::vectors(&args).unwrap().1, set);
+        plumb_tools::set::sign_set(&out, &publisher, None, None).unwrap();
+    }
     assert_eq!(
         shared_vectors::servable(peer_dir.path(), &shared_vectors::set_name(&model)),
         Some(file.clone())
@@ -3823,10 +3855,12 @@ async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() 
     peer_config.upnp = false;
     peer_config.local_discovery = false;
     peer_config.round_every = None;
-    let source = WithVectors(table, file, shared_vectors::set_name(&model));
-    let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
-        .await
-        .unwrap();
+    let source: Arc<dyn plumb_net::BucketSource> = if as_set {
+        Arc::new(WithSignedSets(table, held))
+    } else {
+        Arc::new(WithVectors(table, file, shared_vectors::set_name(&model)))
+    };
+    let (peer, _records) = plumb_net::start(peer_config, source).await.unwrap();
     let peer_addr: plumb_net::Multiaddr = loop {
         if let Some(addr) = peer.status().listening.first() {
             break addr.parse().unwrap();
@@ -3836,6 +3870,7 @@ async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() 
 
     let mut config = test_config(dir.path());
     config.search_by_meaning = true;
+    config.set_publishers = vec![PublicKey::of(&publisher)];
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
     net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -3843,7 +3878,8 @@ async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() 
     net.local_discovery = false;
     net.round_every = None;
     net.fill = false;
-    net.trusted_peers = vec![peer_id];
+    // The set needs no trusted node, only a trusted publisher.
+    net.trusted_peers = if as_set { Vec::new() } else { vec![peer_id] };
     net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
     config.network = Some(net);
     let node = start(config).await.unwrap();
@@ -3869,6 +3905,9 @@ async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() 
     assert_eq!(vectors.get(&same.domain), Some((&hash, &marker[..])));
     assert_ne!(vectors.get(&other.domain).unwrap().1, &marker[..]);
     assert!(vectors.get("unknown-to-it.org").is_none());
+    // Read into the node's own file, the set is not kept.
+    let taken = super::signed_sets::set_dir(dir.path(), &set).unwrap();
+    assert!(!taken.exists() && !taken.with_extension("new").exists());
 
     peer.shutdown().await;
     node.shutdown().await.unwrap();

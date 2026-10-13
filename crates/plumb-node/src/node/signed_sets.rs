@@ -216,7 +216,7 @@ pub(super) fn use_held_site_rules(data: &Path, publishers: &[PublicKey]) {
 
 /// What one look for a set found.
 #[derive(Debug, PartialEq, Eq)]
-enum Looked {
+pub(super) enum Looked {
     /// No node that serves sets was connected.
     NoPeer,
     /// None had a newer generation from a trusted publisher.
@@ -370,7 +370,7 @@ async fn ask_newest(inner: &Inner, net: &NetHandle, set: &str, held: Option<i64>
 /// Asks the connected nodes for `set`'s newest manifest and takes the
 /// newest one a trusted publisher signed, when it is newer than the
 /// node's own.
-async fn look(inner: &Inner, net: &NetHandle, set: &str) -> Result<Looked> {
+pub(super) async fn look(inner: &Inner, net: &NetHandle, set: &str) -> Result<Looked> {
     let held = held_generation(&inner.paths.data, set);
     look_newer(inner, net, set, held, u64::MAX).await
 }

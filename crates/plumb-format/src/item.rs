@@ -16,13 +16,15 @@
 use std::collections::BTreeMap;
 
 use anyhow::{ensure, Result};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::refs::{is_namespace, Ref};
 use crate::urls::is_canonical;
-use crate::value::{check_text, is_date, is_language};
+use crate::value::{check_text, hex, is_date, is_language};
 
 /// Longest item, as JSON: the cap a crawl record has today. A manifest's
 /// `limits` can lower it, never raise it.
@@ -143,7 +145,9 @@ pub struct Edge {
 }
 
 /// A vector for search by meaning, made by `model` from the text whose
-/// SHA-256 is `of`, and ignored where that text no longer matches.
+/// SHA-256 is `of`, and ignored where that text no longer matches. `b64`
+/// holds its values, one signed byte each (a unit vector's values times
+/// 127, rounded), in base64 with padding.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vector {
     pub model: String,
@@ -151,6 +155,26 @@ pub struct Vector {
     pub b64: String,
     #[serde(flatten)]
     pub other: BTreeMap<String, Value>,
+}
+
+impl Vector {
+    /// The vector of `values` that the model whose id is `model` made from
+    /// the text whose SHA-256 is `of`, both in hex.
+    pub fn new(model: &[u8], of: &[u8], values: &[i8]) -> Self {
+        let bytes: Vec<u8> = values.iter().map(|&value| value as u8).collect();
+        Vector {
+            model: hex(model),
+            of: hex(of),
+            b64: STANDARD.encode(bytes),
+            other: BTreeMap::new(),
+        }
+    }
+
+    /// The values `b64` holds, when it is base64.
+    pub fn values(&self) -> Option<Vec<i8>> {
+        let bytes = STANDARD.decode(&self.b64).ok()?;
+        Some(bytes.into_iter().map(|byte| byte as i8).collect())
+    }
 }
 
 impl Item {
@@ -277,12 +301,10 @@ impl Item {
     /// `text`, or the hash in its `body`. A node ignores a vector that
     /// isn't, since the page has changed since.
     pub fn is_current(&self, vector: &Vector) -> bool {
-        let of_text = self.text.as_deref().map(|text| {
-            Sha256::digest(text.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        });
+        let of_text = self
+            .text
+            .as_deref()
+            .map(|text| hex(&Sha256::digest(text.as_bytes())));
         of_text.as_deref() == Some(vector.of.as_str())
             || matches!(&self.body, Some(Ref::Blob(hex)) if *hex == vector.of)
     }
@@ -409,6 +431,20 @@ mod tests {
         let mut not_a_blob = australia();
         not_a_blob.body = Some(Ref::Wd("Q408".into()));
         assert!(not_a_blob.check().is_err());
+    }
+
+    #[test]
+    fn a_vector_holds_its_values_as_signed_bytes() {
+        let vector = Vector::new(&[0xab; 32], &[1; 32], &[-127, -1, 0, 1, 127]);
+        assert_eq!(vector.model, "ab".repeat(32));
+        assert_eq!(vector.of, "01".repeat(32));
+        assert_eq!(vector.b64, "gf8AAX8=");
+        assert_eq!(vector.values().unwrap(), [-127, -1, 0, 1, 127]);
+        let not_base64 = Vector {
+            b64: "not base64!".into(),
+            ..vector
+        };
+        assert!(not_base64.values().is_none());
     }
 
     #[test]
