@@ -31,6 +31,7 @@ pub mod papers;
 pub mod place;
 pub mod profiles;
 pub mod safe;
+mod sign_in;
 pub mod simhash;
 mod site_search;
 pub mod stack_exchange;
@@ -48,6 +49,7 @@ pub use kinds::{is_generic_kind, kind_key, other_number, singular, MAX_KINDS};
 pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
+pub use sign_in::{is_sign_in_page, names_label};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
 pub use subsites::{
     parent_domain, subdomain_sites, use_site_list, SiteList, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
