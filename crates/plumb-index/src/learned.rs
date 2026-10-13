@@ -647,6 +647,36 @@ mod tests {
     }
 
     #[test]
+    fn a_named_article_goes_with_its_own_site_on_a_subdomain() {
+        // Wikidata gives Yahoo Mail https://mail.yahoo.com, a site of its
+        // own, on yahoo.com: the article goes with mail.yahoo.com, which
+        // the query names in full, and does not lift yahoo.com over it.
+        let official = |domain: &str, score: f32, named: bool| {
+            let mut hit = site(domain, score, named);
+            hit.official = true;
+            hit.query_evidence = Some(evidence(domain, 0));
+            hit
+        };
+        let mut named = article("Yahoo Mail", true);
+        named.page.item = Some("Q1336321".into());
+        named.page.site = Some("yahoo.com".into());
+        named.page.website = Some("https://mail.yahoo.com".into());
+        let mut hits = vec![
+            official("mail.yahoo.com", 1.0, true),
+            official("yahoo.com", 0.9, false),
+        ];
+        crate::pages::lift_named_sites(&mut hits, &[named.clone()]);
+        let mut placed = place_pages("yahoo mail", &hits, vec![named.clone()]);
+        assert_eq!(placed[0].under.as_deref(), Some("mail.yahoo.com"));
+        reorder(&tied_model(), "yahoo mail", &mut hits, &mut placed);
+        assert_eq!(hits[0].domain, "mail.yahoo.com");
+        // Without its own site listed, it goes with yahoo.com.
+        let hits = vec![official("yahoo.com", 0.9, false)];
+        let placed = place_pages("yahoo mail", &hits, vec![named]);
+        assert_eq!(placed[0].under.as_deref(), Some("yahoo.com"));
+    }
+
+    #[test]
     fn unconfirmed_page_identity_does_not_raise_the_relevance_tier() {
         for control in [
             "partial",

@@ -184,7 +184,7 @@ pub(crate) fn named_page_site<'a>(
 ) -> Option<usize> {
     let shown = sites.len().min(LIFTED_FROM);
     let lifted = |hit: &PageHit| {
-        let site = hit.page.site.as_deref()?;
+        let site = page_site(&hit.page, &sites[..shown])?;
         let at = sites[..shown].iter().position(|s| s.domain == site)?;
         let ok = if hit.page.item.is_some() {
             sites[at].official
@@ -198,6 +198,18 @@ pub(crate) fn named_page_site<'a>(
         .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET);
     let repo = pages.find(|hit| hit.named && hit.page.set == GITHUB_SET);
     article.and_then(lifted).or_else(|| repo.and_then(lifted))
+}
+
+/// The site among `sites` that `page` is about: its item's own website
+/// when that is a site of its own there (mail.yahoo.com for the article
+/// Yahoo Mail, whose [`Page::site`] is yahoo.com, when both are listed),
+/// else its site.
+fn page_site(page: &Page, sites: &[crate::Hit]) -> Option<String> {
+    page.website
+        .as_deref()
+        .and_then(registrable_domain)
+        .filter(|own| sites.iter().any(|site| site.domain == *own))
+        .or_else(|| page.site.clone())
 }
 
 /// Where `pages` (best first) go among the site results `sites`:
@@ -600,7 +612,7 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
                     && page_key(base_title(&p.hit.page.title))
                         == page_key(base_title(&hit.page.title))
             });
-        if let Some(site) = hit.page.site.as_deref() {
+        if let Some(site) = page_site(&hit.page, sites) {
             if sites.iter().any(|s| s.domain == site) {
                 // The best page about the site goes under it, unless a
                 // later one is named by the query: "google maps" carries
@@ -609,10 +621,10 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
                 // "census population clock" carries the Population Clock.
                 let inner = hit.page.is_site_page();
                 match placed.iter_mut().find(|p| {
-                    p.under.as_deref() == Some(site) && p.hit.page.is_site_page() == inner
+                    p.under.as_deref() == Some(site.as_str()) && p.hit.page.is_site_page() == inner
                 }) {
                     None => placed.push(PlacedPage {
-                        under: Some(site.to_string()),
+                        under: Some(site),
                         at: 0,
                         hit,
                     }),
