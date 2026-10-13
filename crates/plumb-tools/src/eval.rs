@@ -20,8 +20,8 @@ use plumb_core::registrable_domain;
 use std::path::Path;
 
 use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, place_pages, Page, PageSearcher,
-    PlacedPage,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, place_pages,
+    Page, PageSearcher, PlacedPage,
 };
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
@@ -820,6 +820,7 @@ fn evaluate(
                         searcher.site(domain).ok().flatten()
                     });
                 }
+                drop_far_namesakes(&mut lifted, &found, &searched, cfg.meaning_only_relevance);
                 if cfg.drop_namesakes {
                     drop_namesakes_of_words(&mut lifted, &found);
                 }

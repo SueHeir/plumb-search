@@ -198,6 +198,79 @@ fn sites_with_some_words_of_a_named_article_are_left_out() {
 }
 
 #[test]
+fn sites_only_a_later_word_of_a_named_article_finds_are_left_out() {
+    // Each lacks a word of "airpods pro": (domain, words of it its name
+    // covers from the first, closeness in meaning).
+    let evidence = |domain: &str, partial_name_words: usize, closeness: Option<f32>| {
+        let mut hit = known_site(domain, false, 0.7);
+        hit.missing_words = true;
+        hit.query_evidence = Some(crate::CandidateEvidence {
+            domain: domain.into(),
+            lexical_score: 30.0,
+            semantic_closeness: closeness,
+            query_coverage: 0.5,
+            substantive_coverage: 0.5,
+            remaining_coverage: 0.5,
+            named_subject_words: 0,
+            named_subject_domain: None,
+            named_subject_reason: None,
+            subject_coverage: None,
+            subject_remaining_coverage: None,
+            full_name: false,
+            typed_domain: false,
+            partial_name_words,
+            relevance_tier: 0,
+            source_quality: None,
+        });
+        hit
+    };
+    let mut sites = vec![
+        site("airpodspro.ru", true),
+        // Named by "pro", an alias of the Public Record Office.
+        evidence("nationalarchives.gov.uk", 0, Some(0.0)),
+        evidence("airpods.example", 1, Some(0.1)),
+        evidence("earbuds.example", 0, Some(0.6)),
+        evidence("novector.example", 0, None),
+        evidence("pro.example", 0, Some(0.2)),
+    ];
+    let mut earbuds = found("AirPods Pro", Some("pro.example"), true, 0.9);
+    earbuds.page.item = Some("Q72725578".into());
+    let floor = crate::RankConfig::default().meaning_only_relevance;
+    let query = "airpods pro";
+    // Not named in full, no floor, or words that say what is wanted: all
+    // stay.
+    earbuds.named = false;
+    assert_eq!(
+        drop_far_namesakes(&mut sites, &[earbuds.clone()], query, floor),
+        0
+    );
+    earbuds.named = true;
+    assert_eq!(
+        drop_far_namesakes(&mut sites, &[earbuds.clone()], query, None),
+        0
+    );
+    let hinted = "airpods pro wikipedia";
+    assert_eq!(
+        drop_far_namesakes(&mut sites, &[earbuds.clone()], hinted, floor),
+        0
+    );
+    assert_eq!(drop_far_namesakes(&mut sites, &[earbuds], query, floor), 1);
+    let order: Vec<&str> = sites.iter().map(|s| s.domain.as_str()).collect();
+    // The site the name starts with, one near in meaning, one with no
+    // vector and the article's own site stay.
+    assert_eq!(
+        order,
+        [
+            "airpodspro.ru",
+            "airpods.example",
+            "earbuds.example",
+            "novector.example",
+            "pro.example"
+        ]
+    );
+}
+
+#[test]
 fn the_site_of_the_article_named_is_added_when_missing() {
     let mut sites = vec![
         site("comedycentral.com", false),
