@@ -1107,7 +1107,9 @@ impl PlaceSearcher {
     }
 
     /// Places whose name or other name is `name`, its [`SHORT_WORDS`]
-    /// written either way.
+    /// written either way, and with or without a "the" before it: a
+    /// search leaves out the "the" of "hotels in the hague", and "bronx ny"
+    /// is The Bronx.
     fn key_query(&self, name: &str) -> Option<BooleanQuery> {
         let normalized = normalize_text(name);
         let swapped: Vec<&str> = normalized
@@ -1123,11 +1125,19 @@ impl PlaceSearcher {
                     .unwrap_or(word)
             })
             .collect();
-        let mut keys: Vec<String> = [normalized.clone(), swapped.join(" ")]
-            .iter()
-            .filter_map(|name| analysis::tokens(&self.joined, name).pop())
-            .collect();
-        keys.dedup();
+        let mut keys: Vec<String> = Vec::new();
+        for spelling in [normalized.clone(), swapped.join(" ")] {
+            let other = match spelling.strip_prefix("the ") {
+                Some(rest) => rest.to_string(),
+                None => format!("the {spelling}"),
+            };
+            for text in [spelling, other] {
+                let key = analysis::tokens(&self.joined, &text).pop();
+                if let Some(key) = key.filter(|key| !keys.contains(key)) {
+                    keys.push(key);
+                }
+            }
+        }
         let terms: Vec<(Occur, Box<dyn Query>)> = keys
             .iter()
             .map(|key| {
@@ -2192,6 +2202,49 @@ mod tests {
         assert_eq!(found("mt shasta"), said("Mount Shasta", "CA"));
         assert_eq!(found("st augustine"), said("Saint Augustine", "FL"));
         assert_eq!(found("sault sainte marie"), said("Sault Ste. Marie", "ON"));
+    }
+
+    #[test]
+    fn a_town_whose_name_begins_with_the_is_found_without_it() {
+        let mut fixtures = places();
+        fixtures.extend([
+            Place {
+                aliases: vec!["The Hague".into()],
+                ..city("Den Haag", 550_000, "ZH", "NL", 52.08, 4.31)
+            },
+            Place {
+                kind: "place=town".into(),
+                rank: place_rank("place=town", 1_000, false, false, 3),
+                ..city("Hague", 1_000, "SK", "CA", 52.51, -106.42)
+            },
+            Place {
+                kind: "place=borough".into(),
+                ..city("The Bronx", 1_400_000, "NY", "US", 40.84, -73.87)
+            },
+            Place {
+                town: Some("Varaždin".into()),
+                ..at("Bronx", "place=quarter", 46.30, 16.34)
+            },
+            city("The Woodlands", 114_000, "TX", "US", 30.17, -95.50),
+            at("Bronx Café", "amenity=cafe", 40.841, -73.871),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let centre = |query: &str| {
+            let found = searcher
+                .search(query, None, Some("US"), 5)
+                .unwrap()
+                .unwrap();
+            found.center.map(|place| place.name).unwrap_or_default()
+        };
+        assert_eq!(centre("hotels in the hague"), "Den Haag");
+        assert_eq!(centre("coffee in the bronx"), "The Bronx");
+        assert_eq!(centre("cafe in bronx ny"), "The Bronx");
+        assert_eq!(centre("restaurants in the woodlands tx"), "The Woodlands");
+        let hague = searcher
+            .locate("hague saskatchewan", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hague.name, "Hague");
     }
 
     #[test]
