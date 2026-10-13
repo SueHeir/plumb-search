@@ -19,8 +19,9 @@
 //! [`QUORUM`] different crawlers agree on it ([`crate::agree`]), whether
 //! one answer carried them all or several answers did.
 
+use plumb_core::locks::Locked;
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -431,11 +432,7 @@ async fn ask_one(
         if !response.busy {
             return Ok((response, relayed, false));
         }
-        let token = wallet.and_then(|w| {
-            w.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take(&target.peer)
-        });
+        let token = wallet.and_then(|w| w.locked().take(&target.peer));
         let Some(token) = token else {
             return Ok((response, relayed, false));
         };

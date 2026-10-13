@@ -8,10 +8,11 @@
 //! ([`StorageBudget::reserve`]): a node upgraded from 0.2.0 near its limit
 //! keeps writing, trimming and building its indexes.
 
+use crate::locks::Locked;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
@@ -134,11 +135,11 @@ impl StorageBudget {
     }
 
     pub fn mutation(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.mutation.lock().unwrap_or_else(PoisonError::into_inner)
+        self.mutation.locked()
     }
 
     pub fn status(&self) -> StorageStatus {
-        *self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        *self.state.locked()
     }
 
     pub fn available(&self) -> u64 {
@@ -154,7 +155,7 @@ impl StorageBudget {
     /// bring the node back under it. `_exempt` (the node's own signed
     /// batches) no longer changes anything.
     pub fn reserve(self: &Arc<Self>, bytes: u64, _exempt: bool) -> Result<Reservation> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.locked();
         state.reserved_bytes = state.reserved_bytes.saturating_add(bytes);
         state.backpressure =
             state.used_bytes.saturating_add(state.reserved_bytes) >= state.limit_bytes;
@@ -165,18 +166,18 @@ impl StorageBudget {
     }
 
     pub fn added(&self, bytes: u64) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.locked();
         state.used_bytes = state.used_bytes.saturating_add(bytes);
         state.backpressure =
             state.used_bytes.saturating_add(state.reserved_bytes) >= state.limit_bytes;
     }
 
     pub fn unlinked(&self, bytes: u64) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.locked();
         state.reader_held_bytes = state.reader_held_bytes.saturating_add(bytes);
     }
     pub fn release_unlinked(&self, bytes: u64) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.locked();
         state.reader_held_bytes = state.reader_held_bytes.saturating_sub(bytes);
         state.used_bytes = state.used_bytes.saturating_sub(bytes);
         state.backpressure =
@@ -185,10 +186,7 @@ impl StorageBudget {
 
     /// Register an input file while holding mutation through opening its fd.
     pub fn read_lease(self: &Arc<Self>, path: &Path) -> Arc<FileLease> {
-        let mut readers = self
-            .input_readers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut readers = self.input_readers.locked();
         if let Some(lease) = readers.get(path).and_then(std::sync::Weak::upgrade) {
             return lease;
         }
@@ -204,8 +202,7 @@ impl StorageBudget {
     pub fn retire_file(&self, path: &Path, bytes: u64) {
         let lease = self
             .input_readers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .locked()
             .remove(path)
             .and_then(|lease| lease.upgrade());
         if let Some(lease) = lease {
@@ -224,17 +221,14 @@ impl StorageBudget {
     /// Move a still-linked generation's readers with its retained pathname.
     /// The caller holds mutation and has retired any overwritten destination.
     pub fn move_read_lease(&self, from: &Path, to: &Path) {
-        let mut readers = self
-            .input_readers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut readers = self.input_readers.locked();
         if let Some(lease) = readers.remove(from) {
             readers.insert(to.to_owned(), lease);
         }
     }
 
     pub fn removed(&self, bytes: u64) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.locked();
         state.used_bytes = state.used_bytes.saturating_sub(bytes);
         state.backpressure =
             state.used_bytes.saturating_add(state.reserved_bytes) >= state.limit_bytes;
@@ -243,7 +237,7 @@ impl StorageBudget {
     /// Called at existing rebuild/retention checkpoints, never per batch.
     /// Hold admission while counting so network writes cannot race the count.
     pub fn set_limit(&self, bytes: u64) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.locked();
         state.limit_bytes = if bytes == 0 { u64::MAX } else { bytes };
         state.backpressure =
             state.used_bytes.saturating_add(state.reserved_bytes) >= state.limit_bytes;
@@ -255,10 +249,7 @@ impl StorageBudget {
     }
 
     pub fn recount_if_due_at(&self, root: &Path, now: std::time::Instant) -> Result<()> {
-        let mut counted = self
-            .counted_at
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut counted = self.counted_at.locked();
         if now.saturating_duration_since(*counted) >= std::time::Duration::from_secs(300) {
             self.recount(root)?;
             *counted = now;
@@ -275,7 +266,7 @@ impl StorageBudget {
             "recount root differs from storage owner"
         );
         let linked = directory_bytes(&self.root)?;
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.locked();
         state.used_bytes = linked.saturating_add(state.reader_held_bytes);
         state.backpressure =
             state.used_bytes.saturating_add(state.reserved_bytes) >= state.limit_bytes;
@@ -308,11 +299,7 @@ impl Reservation {
     /// stays reserved while accepted records wait to be written to the inbox.
     pub fn commit(&mut self, reserved: u64, old: u64, new: u64) {
         let reserved = reserved.min(self.bytes);
-        let mut state = self
-            .budget
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.budget.state.locked();
         state.reserved_bytes = state.reserved_bytes.saturating_sub(reserved);
         state.used_bytes = state.used_bytes.saturating_sub(old).saturating_add(new);
         self.bytes -= reserved;
@@ -323,11 +310,7 @@ impl Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        let mut state = self
-            .budget
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.budget.state.locked();
         state.reserved_bytes = state.reserved_bytes.saturating_sub(self.bytes);
         state.backpressure =
             state.used_bytes.saturating_add(state.reserved_bytes) >= state.limit_bytes;
@@ -763,7 +746,7 @@ impl StageLifecycle {
         }
     }
     pub fn lease(&self, path: &Path) -> Arc<FileLease> {
-        let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut files = self.files.locked();
         if let Some(lease) = files.get(path).and_then(std::sync::Weak::upgrade) {
             return lease;
         }
@@ -779,8 +762,7 @@ impl StageLifecycle {
     pub fn detach(&self, path: &Path, bytes: u64) -> bool {
         let lease = self
             .files
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .locked()
             .remove(path)
             .and_then(|lease| lease.upgrade());
         if let Some(lease) = lease {
@@ -803,8 +785,7 @@ impl StageLifecycle {
         let before = directory_bytes(path).unwrap_or(0);
         let leases: Vec<_> = self
             .files
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .locked()
             .iter()
             .filter(|(file, _)| file.starts_with(path))
             .filter_map(|(file, lease)| lease.upgrade().map(|lease| (file.clone(), lease)))

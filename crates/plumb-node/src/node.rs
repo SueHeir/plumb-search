@@ -83,11 +83,12 @@
 //! deletion is retried later. Leftovers of interrupted work (staging
 //! directories, temporary files, partial downloads) are removed at startup.
 
+use plumb_core::locks::{Locked, RwLocked};
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -892,13 +893,7 @@ impl NodeHandle {
         }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
-        drop(
-            inner
-                .lock
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take(),
-        );
+        drop(inner.lock.locked().take());
         inner.journal.info("Stopped");
         info!("node stopped");
         served.and(worked)
@@ -1721,11 +1716,7 @@ impl Inner {
 
     /// What search by meaning is doing, for [`Status::meaning_work`].
     fn meaning_work(&self) -> Option<BackgroundWork> {
-        let work = self
-            .meaning_work
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()?;
+        let work = self.meaning_work.locked().clone()?;
         Some(match work {
             MeaningWork::Downloading => {
                 // The model's files, the one being written included.
@@ -1764,10 +1755,7 @@ impl Inner {
     }
 
     fn set_meaning_work(&self, work: Option<MeaningWork>) {
-        *self
-            .meaning_work
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = work;
+        *self.meaning_work.locked() = work;
     }
 
     /// Counts bytes downloaded now.
@@ -1788,15 +1776,14 @@ impl Inner {
         if let Some(budget) = &self.storage {
             return budget.status().used_bytes;
         }
-        if let Some((at, bytes)) = *self.disk.lock().unwrap_or_else(PoisonError::into_inner) {
+        if let Some((at, bytes)) = *self.disk.locked() {
             if at.elapsed() < DISK_COUNT_MAX_AGE {
                 return bytes;
             }
         }
         let bytes = plumb_net::storage::directory_bytes(&self.paths.data)
             .unwrap_or_else(|_| store::dir_size(&self.paths.data));
-        *self.disk.lock().unwrap_or_else(PoisonError::into_inner) =
-            Some((std::time::Instant::now(), bytes));
+        *self.disk.locked() = Some((std::time::Instant::now(), bytes));
         bytes
     }
 
@@ -1807,7 +1794,7 @@ impl Inner {
         if let Some(budget) = &self.storage {
             return budget.status().used_bytes;
         }
-        let last = *self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        let last = *self.disk.locked();
         match last {
             Some((_, bytes)) => bytes,
             None => self.disk_used(),
@@ -1817,11 +1804,10 @@ impl Inner {
     /// Has the next [`Inner::disk_used`] count the data folder again.
     fn recount_disk(&self) {
         if let Some(budget) = &self.storage {
-            *self.disk.lock().unwrap_or_else(PoisonError::into_inner) =
-                Some((std::time::Instant::now(), budget.status().used_bytes));
+            *self.disk.locked() = Some((std::time::Instant::now(), budget.status().used_bytes));
             return;
         }
-        let mut count = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut count = self.disk.locked();
         // Kept for showing until then.
         *count = count.and_then(|(_, bytes)| {
             let stale = std::time::Instant::now().checked_sub(DISK_COUNT_MAX_AGE)?;
@@ -1830,10 +1816,7 @@ impl Inner {
     }
 
     fn settings(&self) -> NodeSettings {
-        self.settings
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.settings.locked().clone()
     }
 
     /// The topics this node focuses on: `--focus` and the panel's. They
@@ -1872,7 +1855,7 @@ impl Inner {
     /// looks at them again at once.
     fn change_settings(&self, new: NodeSettings) -> Result<()> {
         {
-            let mut settings = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut settings = self.settings.locked();
             if *settings != new {
                 store::save_settings(&self.paths, &new)?;
                 info!("settings changed: {new:?}");
@@ -1894,7 +1877,7 @@ impl Inner {
     }
 
     fn activity(&self) -> std::sync::MutexGuard<'_, Activity> {
-        self.activity.lock().unwrap_or_else(PoisonError::into_inner)
+        self.activity.locked()
     }
 
     /// Shows a new step, without progress until [`Inner::set_progress`].
@@ -1941,7 +1924,7 @@ impl Inner {
     }
 
     fn wikidata_tries(&self) -> std::sync::MutexGuard<'_, WikidataTries> {
-        self.wikidata.lock().unwrap_or_else(PoisonError::into_inner)
+        self.wikidata.locked()
     }
 
     /// Notes a failure to download Wikidata's official websites and returns
@@ -1980,15 +1963,12 @@ impl Inner {
     }
 
     fn saved(&self) -> SavedState {
-        self.saved
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.saved.locked().clone()
     }
 
     /// Changes the saved state and writes it to disk.
     fn update_saved(&self, change: impl FnOnce(&mut SavedState)) -> Result<()> {
-        let mut saved = self.saved.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut saved = self.saved.locked();
         let mut next = saved.clone();
         change(&mut next);
         if next != *saved {
@@ -2011,9 +1991,7 @@ impl Inner {
     /// search by meaning, which both read the file, take turns instead of
     /// holding two copies at once. Held until the set is dropped.
     fn hold_records(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.records_held
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.records_held.locked()
     }
 
     /// `Err(Stopped)` once the node is shutting down.
@@ -2039,10 +2017,7 @@ impl Inner {
     /// The index searched now. Holding it keeps it open, which delays the
     /// deletion of its directory once a newer index replaces it.
     fn current(&self) -> Option<Arc<ServingIndex>> {
-        self.index
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.index.read_locked().clone()
     }
 
     /// The id and the size of the index searched now, read without holding
@@ -2059,8 +2034,7 @@ impl Inner {
 
     fn current_summary(&self) -> Option<(u64, u64)> {
         self.index
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
+            .read_locked()
             .as_ref()
             .map(|index| (index.id, index.docs))
     }
@@ -2074,11 +2048,7 @@ impl Inner {
             index.docs,
             index.dir.display()
         );
-        let old = self
-            .index
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .replace(Arc::new(index));
+        let old = self.index.write_locked().replace(Arc::new(index));
         if let Some(old) = old {
             self.retired_list().push(Retired {
                 dir: old.dir.clone(),
@@ -2089,7 +2059,7 @@ impl Inner {
     }
 
     fn retired_list(&self) -> std::sync::MutexGuard<'_, Vec<Retired>> {
-        self.retired.lock().unwrap_or_else(PoisonError::into_inner)
+        self.retired.locked()
     }
 
     fn has_retired(&self) -> bool {
@@ -2466,7 +2436,7 @@ impl StatusSource for Inner {
         restored.stage(&self.paths.data)?;
         restored.restore(&self.paths.data)?;
         if let Some(settings) = store::load_settings(&self.paths) {
-            *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = settings;
+            *self.settings.locked() = settings;
             self.wake.notify_one();
         }
         self.journal.warning(format!(

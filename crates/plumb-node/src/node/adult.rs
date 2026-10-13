@@ -19,10 +19,11 @@
 //!
 //! [`SeedSources::adult_list_url`]: super::SeedSources::adult_list_url
 
+use plumb_core::locks::RwLocked;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
@@ -410,15 +411,12 @@ impl Inner {
     }
 
     fn set_adult(&self, list: AdultList) {
-        *self.adult.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(list));
+        *self.adult.write_locked() = Some(Arc::new(list));
     }
 
     /// The adult blocklist, once the node has one.
     pub(super) fn adult_list(&self) -> Option<Arc<AdultList>> {
-        self.adult
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.adult.read_locked().clone()
     }
 }
 

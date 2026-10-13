@@ -26,6 +26,7 @@
 //!
 //! [`NodeConfig::set_publishers`]: super::NodeConfig::set_publishers
 
+use plumb_core::locks::Locked;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -659,10 +660,7 @@ async fn take(
             None,
         )?;
         check_first_parts(&staging, Some(&publisher), &[], parts)?;
-        let _held = held_page_sets.as_ref().map(|held| {
-            held.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        });
+        let _held = held_page_sets.as_ref().map(|held| held.locked());
         swap(&dir, &staging, budget_for_check.as_deref())
     })
     .await??;

@@ -17,11 +17,12 @@
 //! latest posts of the site a query names, or the newest headlines that
 //! match the substantive topic terms in their title.
 
+use plumb_core::locks::{Locked, RwLocked};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use plumb_core::news::{merge_headlines, NEWS_PUBLISHERS as PUBLISHERS, NEWS_WINDOW_SECS};
 use plumb_core::Headline;
@@ -176,11 +177,11 @@ impl NewsStore {
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, State> {
-        self.state.read().unwrap_or_else(PoisonError::into_inner)
+        self.state.read_locked()
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, State> {
-        self.state.write().unwrap_or_else(PoisonError::into_inner)
+        self.state.write_locked()
     }
 
     /// Watches the feeds of `sites` (domain and homepage), best first,
@@ -393,7 +394,7 @@ impl NewsStore {
     /// minutes.
     pub fn save(&self) -> io::Result<()> {
         // One save at a time, so an older copy never lands after a newer one.
-        let _saving = self.saving.lock().unwrap_or_else(PoisonError::into_inner);
+        let _saving = self.saving.locked();
         let (feeds, headlines) = {
             let mut state = self.write();
             if !state.dirty {

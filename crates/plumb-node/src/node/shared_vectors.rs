@@ -13,8 +13,8 @@
 //! it was made from the very text the node has for that site (the text's
 //! hash matches), so a vector is never kept for other text.
 
+use plumb_core::locks::RwLocked;
 use std::path::{Path, PathBuf};
-use std::sync::PoisonError;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -264,10 +264,7 @@ fn keep(
     let mut taken = Vec::new();
     let mut kept = 0;
     let mut put_in = |taken: &mut Vec<(String, plumb_embed::TextHash, Vec<i8>)>| {
-        let mut vectors = meaning
-            .vectors()
-            .write()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut vectors = meaning.vectors().write_locked();
         for (domain, hash, vector) in taken.drain(..) {
             vectors.insert(&domain, hash, &vector)?;
             kept += 1;

@@ -12,9 +12,10 @@
 //! the sites they opened before are ranked higher. With both off nothing is
 //! noted.
 
+use plumb_core::locks::Locked;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use plumb_core::collapse_whitespace;
@@ -253,7 +254,7 @@ impl HistoryStore {
         let Some(path) = self.path(profile) else {
             anyhow::bail!("not a profile id: {profile:?}");
         };
-        let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+        let _writing = WRITING.locked();
         let mut history = read(&path).unwrap_or_default();
         change(&mut history);
         fs::create_dir_all(&self.dir)
@@ -266,7 +267,7 @@ impl HistoryStore {
         let Some(path) = self.path(profile) else {
             return Ok(());
         };
-        let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+        let _writing = WRITING.locked();
         match fs::remove_file(&path) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
                 Err(err).with_context(|| format!("deleting {}", path.display()))

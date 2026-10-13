@@ -19,10 +19,11 @@
 //! It is never part of a search sent to other nodes, so nothing of it
 //! leaves the node.
 
+use plumb_core::locks::Locked;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use plumb_core::collapse_whitespace;
@@ -551,7 +552,7 @@ impl AboutStore {
         let Some(path) = self.path(profile) else {
             anyhow::bail!("not a profile id: {profile:?}");
         };
-        let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+        let _writing = WRITING.locked();
         if about.is_empty() {
             return remove(&path);
         }
@@ -566,7 +567,7 @@ impl AboutStore {
         let Some(path) = self.path(profile) else {
             anyhow::bail!("not a profile id: {profile:?}");
         };
-        let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+        let _writing = WRITING.locked();
         let mut about = read(&path).unwrap_or_default();
         change(&mut about);
         if about.is_empty() {

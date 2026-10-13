@@ -2,11 +2,12 @@
 //! for the person running it rather than for a developer. The panel shows
 //! it; `DIR/activity.jsonl` keeps it across restarts.
 
+use plumb_core::locks::Locked;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use plumb_core::now_unix;
 use serde::{Deserialize, Serialize};
@@ -106,8 +107,7 @@ impl Journal {
         let since = now_unix().saturating_sub(24 * 60 * 60);
         let said = self
             .inner
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .locked()
             .entries
             .iter()
             .any(|e| e.at >= since && e.message == message);
@@ -126,7 +126,7 @@ impl Journal {
             level,
             message,
         };
-        let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.inner.locked();
         state.entries.push_back(entry.clone());
         if state.entries.len() > KEEP {
             state.entries.pop_front();
@@ -181,24 +181,12 @@ impl Journal {
 
     /// The entries, newest first.
     pub fn entries(&self) -> Vec<LogEntry> {
-        self.inner
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entries
-            .iter()
-            .rev()
-            .cloned()
-            .collect()
+        self.inner.locked().entries.iter().rev().cloned().collect()
     }
 
     /// The last entry, if any.
     pub fn last(&self) -> Option<LogEntry> {
-        self.inner
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entries
-            .back()
-            .cloned()
+        self.inner.locked().entries.back().cloned()
     }
 }
 

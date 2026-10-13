@@ -8,9 +8,10 @@
 //! with no storage limit, or one with a map file already, keeps the map
 //! file the same way.
 
+use plumb_core::locks::{Locked, RwLocked};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use std::io::Write;
@@ -93,7 +94,7 @@ pub(super) fn coverage(inner: &Inner) -> super::PageCoverage {
             }
         })
         .collect();
-    let pages = inner.pages.read().unwrap_or_else(PoisonError::into_inner);
+    let pages = inner.pages.read_locked();
     super::PageCoverage {
         indexed_pages: pages.as_ref().map_or(0, |(_, p)| p.num_pages()),
         index_generation: pages.as_ref().map(|(key, _)| key.clone()),
@@ -147,10 +148,7 @@ pub(super) fn run(inner: Arc<Inner>) {
         // the whole file would be built again at once.
         let near = super::places::known_homes(&inner);
         let counts = wanted_counts(&settings.page_sets, settings.storage_limit_mb);
-        let held_sets = inner
-            .held_page_sets
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let held_sets = inner.held_page_sets.locked();
         // Only a node with a storage limit cuts its files: a server's are
         // handed on to other nodes whole.
         for &(set, pages) in counts.iter().filter(|_| settings.storage_limit_mb > 0) {
@@ -198,8 +196,7 @@ pub(super) fn run(inner: Arc<Inner>) {
                     "searching the page index {older} ({} pages) while the one of these pages is built",
                     searcher.num_pages()
                 );
-                *inner.pages.write().unwrap_or_else(PoisonError::into_inner) =
-                    Some((older, Arc::new(searcher)));
+                *inner.pages.write_locked() = Some((older, Arc::new(searcher)));
             }
             match open_or_build_with(
                 &inner.paths.data,
@@ -212,10 +209,7 @@ pub(super) fn run(inner: Arc<Inner>) {
                     let pages = found.as_ref().map_or(0, |(_, s)| s.num_pages());
                     let kept = found.as_ref().map(|(k, _)| k.clone());
                     let replacement = found.map(|(k, s)| (k, Arc::new(s)));
-                    let old = std::mem::replace(
-                        &mut *inner.pages.write().unwrap_or_else(PoisonError::into_inner),
-                        replacement,
-                    );
+                    let old = std::mem::replace(&mut *inner.pages.write_locked(), replacement);
                     if let Some((_, reader)) = old {
                         retired_readers.push(Arc::downgrade(&reader));
                     }
@@ -296,10 +290,7 @@ fn keep_files(inner: &Inner, done: &AtomicBool) {
                 // Taken as the project's item set ([`super::signed_sets`]):
                 // only a file made after that generation is worth taking.
                 let held = {
-                    let _held = inner
-                        .held_page_sets
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
+                    let _held = inner.held_page_sets.locked();
                     HeldPageSet::find(&inner.paths.data, set, &inner.config.set_publishers)
                 }
                 .filter(|held| held.holds(pages))
@@ -366,11 +357,7 @@ pub(super) struct SetFileHold<'a> {
 impl<'a> SetFileHold<'a> {
     /// `None` while another writer holds the file.
     pub(super) fn take(inner: &'a Inner, id: &'static str) -> Option<Self> {
-        let taken = inner
-            .set_files_busy
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id);
+        let taken = inner.set_files_busy.locked().insert(id);
         // Not `then_some`: a hold made and dropped would let the other
         // writer's go.
         if taken {
@@ -383,11 +370,7 @@ impl<'a> SetFileHold<'a> {
 
 impl Drop for SetFileHold<'_> {
     fn drop(&mut self) {
-        self.inner
-            .set_files_busy
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(self.id);
+        self.inner.set_files_busy.locked().remove(self.id);
     }
 }
 
@@ -1031,8 +1014,7 @@ pub(super) fn wait(inner: &Inner, wait: Duration) -> bool {
 impl Inner {
     pub(super) fn page_key(&self) -> Option<String> {
         self.pages
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
+            .read_locked()
             .as_ref()
             .map(|(key, _)| key.clone())
     }
@@ -1041,13 +1023,7 @@ impl Inner {
 /// Whether the pages know the words of `query` that `spelling` changes
 /// ([`PageSearcher::check_spelling`]): then it was spelled as meant.
 pub(super) fn knows_typed(inner: &Inner, query: &str, spelling: &plumb_index::Spelling) -> bool {
-    let Some(searcher) = inner
-        .pages
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .map(|(_, s)| s.clone())
-    else {
+    let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return false;
     };
     match searcher.check_spelling(query, spelling.clone()) {
@@ -1066,12 +1042,7 @@ pub(super) fn known_song(
     query: &str,
     options: &SearchOptions,
 ) -> Option<plumb_index::pages::Page> {
-    let searcher = inner
-        .pages
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .map(|(_, s)| s.clone())?;
+    let searcher = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone())?;
     match searcher.known_song(query) {
         Ok(song) => song.filter(|page| options_allow(options, page)),
         Err(err) => {
@@ -1083,12 +1054,7 @@ pub(super) fn known_song(
 
 /// The Wiktionary word `name` is; see [`PageSearcher::definition`].
 pub(super) fn definition(inner: &Inner, name: &str) -> Option<plumb_index::pages::Page> {
-    let searcher = inner
-        .pages
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .map(|(_, s)| s.clone())?;
+    let searcher = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone())?;
     match searcher.definition(name) {
         Ok(word) => word,
         Err(err) => {
@@ -1105,13 +1071,7 @@ pub(super) fn entities(
     limit: usize,
     options: &SearchOptions,
 ) -> Result<Vec<PageHit>> {
-    let Some(searcher) = inner
-        .pages
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .map(|(_, s)| s.clone())
-    else {
+    let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return Ok(Vec::new());
     };
     let ops = Operators::parse(query);
@@ -1137,13 +1097,7 @@ pub(super) fn pages_of(
     docs: bool,
     keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
 ) -> Vec<PageHit> {
-    let Some(searcher) = inner
-        .pages
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .map(|(_, s)| s.clone())
-    else {
+    let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return Vec::new();
     };
     match typed_pages(&searcher, query, limit, options, docs, keep) {
@@ -1195,12 +1149,7 @@ pub(super) fn papers(
     limit: usize,
     options: &SearchOptions,
 ) -> Result<Vec<PageHit>> {
-    let searcher = inner
-        .pages
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .map(|(_, s)| s.clone());
+    let searcher = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone());
     let Some(searcher) = searcher else {
         return Ok(Vec::new());
     };
@@ -1216,8 +1165,7 @@ pub(super) fn papers(
 pub(super) fn paper_coverage(inner: &Inner) -> Option<plumb_index::pages::PaperCoverage> {
     inner
         .pages
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
+        .read_locked()
         .as_ref()
         .map(|(_, s)| s.paper_coverage().clone())
 }
@@ -1231,13 +1179,7 @@ pub(super) fn add_pages(
     options: &SearchOptions,
     results: &mut SearchResults,
 ) {
-    let Some(searcher) = inner
-        .pages
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .map(|(_, s)| s.clone())
-    else {
+    let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return;
     };
     let searcher = searcher.in_language(options.language.as_deref());

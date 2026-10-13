@@ -2,8 +2,9 @@
 //! by meaning ([`plumb_node::meaning`]) with `plumb serve` or
 //! `plumb-tools search`.
 
+use plumb_core::locks::RwLocked;
 use std::path::PathBuf;
-use std::sync::{PoisonError, RwLock};
+use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -53,7 +54,7 @@ pub fn run(args: EmbedArgs) -> Result<()> {
     )?;
     println!(
         "{} site vectors in {} ({} embedded now, {} failed)",
-        vectors.read().unwrap_or_else(PoisonError::into_inner).len(),
+        vectors.read_locked().len(),
         args.vectors.display(),
         embedded.done,
         embedded.failed
