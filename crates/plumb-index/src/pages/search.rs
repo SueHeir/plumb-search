@@ -29,6 +29,9 @@ pub(crate) enum Hint {
     Article,
     /// A paper of that title: "batch normalization paper".
     Paper,
+    /// A person of that name, of whom something is asked: "obama
+    /// daughters", "picasso paintings".
+    Person,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
 }
@@ -113,6 +116,37 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" net worth", Hint::Any),
     (" wife", Hint::Any),
     (" husband", Hint::Any),
+    // What people ask about a person, which a person's article answers but
+    // whose words it is not called by. "Cause of death" before "death".
+    (" cause of death", Hint::Person),
+    (" death", Hint::Person),
+    (" kids", Hint::Person),
+    (" children", Hint::Person),
+    (" daughter", Hint::Person),
+    (" daughters", Hint::Person),
+    (" son", Hint::Person),
+    (" sons", Hint::Person),
+    (" parents", Hint::Person),
+    (" mother", Hint::Person),
+    (" father", Hint::Person),
+    (" siblings", Hint::Person),
+    (" family", Hint::Person),
+    (" girlfriend", Hint::Person),
+    (" boyfriend", Hint::Person),
+    (" education", Hint::Person),
+    (" nationality", Hint::Person),
+    (" religion", Hint::Person),
+    (" awards", Hint::Person),
+    (" stats", Hint::Person),
+    (" movies", Hint::Person),
+    (" films", Hint::Person),
+    (" books", Hint::Person),
+    (" novels", Hint::Person),
+    (" poems", Hint::Person),
+    (" songs", Hint::Person),
+    (" albums", Hint::Person),
+    (" paintings", Hint::Person),
+    (" inventions", Hint::Person),
     (" cast", Hint::Any),
     (" author", Hint::Any),
     (" movie", Hint::Any),
@@ -639,6 +673,13 @@ impl PageSearcher {
             found.retain(|hit| hit.named);
         }
         match hint {
+            // Only a person the name names, and not when a page is called
+            // the whole query: "black death" is not about the singer Black,
+            // nor "christmas songs" about Christmas.
+            Hint::Person => {
+                let called = hits.iter().any(|hit| hit.named);
+                found.retain(|hit| !called && hit.named && hit.page.is_person());
+            }
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             Hint::Paper => {
                 if found.iter().any(|hit| hit.page.set == PAPERS_SET) {
