@@ -63,6 +63,26 @@ fn a_work_in_a_series_is_named_by_its_own_title() {
 }
 
 #[test]
+fn a_title_is_named_without_its_leading_the() {
+    let (_dir, s) = searcher(&[
+        page("The Dark Side of the Moon", 18_000, &[]),
+        page("Far side of the Moon", 2_800, &["Dark side of the Moon"]),
+        page("The Dark Knight", 40_000, &[]),
+        page("Dark Knight (TV series)", 300, &[]),
+    ]);
+    for (query, title) in [
+        ("dark side of the moon", "The Dark Side of the Moon"),
+        ("dark knight", "The Dark Knight"),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert!(
+            hits[0].named && hits[0].page.title == title,
+            "{query}: {hits:?}"
+        );
+    }
+}
+
+#[test]
 fn songs_and_albums_are_found_by_their_name_and_artist() {
     let jude = song(
         "Hey Jude",
