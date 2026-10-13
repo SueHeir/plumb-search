@@ -118,6 +118,17 @@ fn simplify(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// `text`, simplified, without the words that ask for a conversion:
+/// "convert", and "how to convert" or "how do you convert".
+fn unasked(text: &str) -> &str {
+    let text = ["how to ", "how do you ", "how do i ", "how can i "]
+        .iter()
+        .find_map(|lead| text.strip_prefix(lead))
+        .filter(|rest| rest.starts_with("convert "))
+        .unwrap_or(text);
+    text.strip_prefix("convert ").unwrap_or(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
