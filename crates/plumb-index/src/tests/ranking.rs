@@ -304,6 +304,47 @@ fn small_joining_words_name_no_site_in_a_longer_query() {
 }
 
 #[test]
+fn comparison_words_match_nothing_between_the_things_compared() {
+    let records = vec![
+        site(
+            "apple.com",
+            Some("Apple"),
+            Some("Compare iPhone 17 Pro vs iPhone Air and shop the latest models."),
+            &["Apple"],
+            &[("Apple", 50)],
+            popular(1, 50),
+        ),
+        site(
+            "biologycorner.com",
+            Some("The Biology Corner"),
+            Some("Lessons on mitosis and meiosis for biology teachers."),
+            &[],
+            &[],
+            obscure(500_000, 2),
+        ),
+        site(
+            "vscode.dev",
+            Some("Visual Studio Code for the Web"),
+            None,
+            &["VS Code"],
+            &[("VS Code", 40)],
+            popular(900, 40),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    for query in [
+        "mitosis vs meiosis",
+        "mitosis vs. meiosis",
+        "mitosis versus meiosis",
+    ] {
+        let hits = searcher.search(query, 10).unwrap();
+        assert_eq!(domains(&hits), ["biologycorner.com"], "{query}: {hits:#?}");
+    }
+    // First, "vs" is still a word of a name.
+    assert_eq!(top(&searcher, "vs code"), "vscode.dev");
+}
+
+#[test]
 fn longer_leading_names_win() {
     let (_dir, searcher) = build(&lookalike_corpus());
     // chasecenter.com covers "chase center", chase.com only "chase".
