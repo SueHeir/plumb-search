@@ -287,9 +287,12 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
         .filter(|_| !diplomatic);
     // Canada's addresses give the province as addr:province, and so do
     // Italy's (MI, PE), whose would be taken for states and provinces.
+    // Where they give none, the postal code says it: shops by Glen Walter,
+    // Ontario give K6H and no province.
     let province = get("addr:province")
         .map(normalize_region)
         .filter(|region| CANADIAN_PROVINCES.iter().any(|(code, _)| code == region))
+        .or_else(|| postal_province(get("addr:postcode")?).map(str::to_string))
         .filter(|_| country.as_deref().is_none_or(|country| country == "CA"));
     let website = ["website", "contact:website", "url", "brand:website"]
         .iter()
@@ -345,6 +348,44 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
         website,
         osm,
         aliases,
+    })
+}
+
+/// The province of a Canadian postal code ("K6H 2R4"), by the first
+/// letter Canada Post gives each. Other countries' codes are no A9A 9A9.
+fn postal_province(code: &str) -> Option<&'static str> {
+    let code: Vec<char> = code
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    let canadian = code.len() == 6
+        && code.iter().enumerate().all(|(i, c)| {
+            if i % 2 == 0 {
+                c.is_ascii_uppercase()
+            } else {
+                c.is_ascii_digit()
+            }
+        });
+    if !canadian {
+        return None;
+    }
+    Some(match code[0] {
+        'A' => "NL",
+        'B' => "NS",
+        'C' => "PE",
+        'E' => "NB",
+        'G' | 'H' | 'J' => "QC",
+        'K' | 'L' | 'M' | 'N' | 'P' => "ON",
+        'R' => "MB",
+        'S' => "SK",
+        'T' => "AB",
+        'V' => "BC",
+        // X0A to X0C are Nunavut's, the rest the Northwest Territories'.
+        'X' if code[1] == '0' && matches!(code[2], 'A' | 'B' | 'C') => "NU",
+        'X' => "NT",
+        'Y' => "YT",
+        _ => return None,
     })
 }
 
@@ -1282,6 +1323,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shop.region.as_deref(), Some("ON"));
+        // Or their postal codes do; a British one says nothing.
+        let postal = |code: &str| {
+            let shop = [
+                ("name", "Esso"),
+                ("amenity", "fuel"),
+                ("addr:postcode", code),
+            ];
+            place_of(&tags(&shop), "n9".into(), true).unwrap().region
+        };
+        assert_eq!(postal("K6H 2R4").as_deref(), Some("ON"));
+        assert_eq!(postal("x0a0h0").as_deref(), Some("NU"));
+        assert_eq!(postal("W1A 0AX"), None);
+        assert_eq!(postal("80202"), None);
         // Italy's provinces are no states.
         let bar = place_of(
             &tags(&[
