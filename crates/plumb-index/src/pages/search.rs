@@ -14,6 +14,7 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 
 use super::building::schema;
 use super::page::is_item_id;
+use super::placing::is_year;
 use super::scoring::truncate_keeping_inner_pages;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
@@ -34,6 +35,10 @@ pub(crate) enum Hint {
     Person,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
+    /// Only pages the name names: what a fact question asks about. "madrid
+    /// spanish" (of "madrid spanish capital city") names nothing, and the
+    /// clubs it describes would push Madrid out.
+    Named,
 }
 
 /// Words before a name that ask about it. "What's" is read as "what is";
@@ -53,6 +58,16 @@ const HINT_LEADS: &[&str] = &[
     "what are ",
     "what was ",
     "what were ",
+    "who won the ",
+    "who won ",
+    "who wins the ",
+    "who wins ",
+    "who will win the ",
+    "who will win ",
+    "winner of the ",
+    "winner of ",
+    "winners of the ",
+    "winners of ",
     "what does ",
     "define ",
     "definition of ",
@@ -106,6 +121,8 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" paper", Hint::Paper),
     (" papers", Hint::Paper),
     (" arxiv", Hint::Paper),
+    (" winner", Hint::Any),
+    (" winners", Hint::Any),
     (" summary", Hint::Any),
     (" plot", Hint::Any),
     (" biography", Hint::Any),
@@ -189,6 +206,22 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     let name = name.trim();
     let hint = hint?;
     (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
+}
+
+/// `name` with the year at one of its ends moved to the other: "2025 tour
+/// de france" of "tour de france 2025". `None` without one, or with a year
+/// alone.
+pub(crate) fn year_moved(name: &str) -> Option<String> {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    match words.as_slice() {
+        [first, rest @ ..] if !rest.is_empty() && is_year(first) => {
+            Some(format!("{} {first}", rest.join(" ")))
+        }
+        [rest @ .., last] if !rest.is_empty() && is_year(last) => {
+            Some(format!("{last} {}", rest.join(" ")))
+        }
+        _ => None,
+    }
 }
 
 /// Least listeners of a song or album that [`PageSearcher::known_song`]
@@ -577,23 +610,41 @@ impl PageSearcher {
         // name, so the name is searched for too. So is what a fact question
         // asks about, or "when was isaac newton born" lists Newton's mother
         // and namesakes, whose descriptions hold its words, and not him;
-        // but not when the query is itself a name ("age of empires"). Of
-        // that search only the pages the subject names are kept: "madrid
-        // spanish" (of "madrid spanish capital city") names nothing, and
-        // the clubs it describes would push Madrid out.
-        let hinted = hinted_name(query);
-        let asked = hinted.is_none();
-        let Some((name, hint)) = hinted.or_else(|| {
+        // but not when the query is itself a name ("age of empires").
+        let hinted = hinted_name(query).or_else(|| {
             plumb_core::facts::fact_asked(query)
                 .filter(|_| !hits.iter().any(|hit| hit.named))
-                .map(|asked| (asked.subject, Hint::Any))
-        }) else {
+                .map(|asked| (asked.subject, Hint::Named))
+        });
+        // An event's article has its year first or last ("2025 Tour de
+        // France", "Eurovision Song Contest 2025"), so a name with a year
+        // at one end is searched with it at the other too.
+        let (name, hint) = hinted
+            .clone()
+            .unwrap_or_else(|| (query.to_lowercase(), Hint::Any));
+        let moved = year_moved(&name).map(|name| (name, hint));
+        let searches: Vec<(String, Hint)> = hinted.into_iter().chain(moved).collect();
+        if searches.is_empty() {
             return Ok(hits);
-        };
-        let mut found = self.search_once(&name, limit, scope)?;
-        if asked {
-            found.retain(|hit| hit.named);
         }
+        for (name, hint) in searches {
+            self.add_found(&mut hits, &name, hint, limit, scope)?;
+        }
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        truncate_keeping_inner_pages(&mut hits, limit);
+        Ok(hits)
+    }
+
+    /// Adds to `hits` the pages found for `name`, the kind `hint` asks for.
+    fn add_found(
+        &self,
+        hits: &mut Vec<PageHit>,
+        name: &str,
+        hint: Hint,
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<()> {
+        let mut found = self.search_once(name, limit, scope)?;
         match hint {
             // Only a person the name names, and not when a page is called
             // the whole query: "black death" is not about the singer Black,
@@ -602,6 +653,7 @@ impl PageSearcher {
                 let called = hits.iter().any(|hit| hit.named);
                 found.retain(|hit| !called && hit.named && hit.page.is_person());
             }
+            Hint::Named => found.retain(|hit| hit.named),
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             Hint::Paper => {
                 if found.iter().any(|hit| hit.page.set == PAPERS_SET) {
@@ -635,9 +687,7 @@ impl PageSearcher {
                 None => hits.push(hit),
             }
         }
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        truncate_keeping_inner_pages(&mut hits, limit);
-        Ok(hits)
+        Ok(())
     }
 
     pub(crate) fn scope_term(&self, text: &str) -> Box<dyn Query> {
