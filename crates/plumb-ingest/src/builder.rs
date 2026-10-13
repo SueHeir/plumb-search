@@ -154,7 +154,8 @@ impl Builder {
     /// `https://www.perplexity.ai/hub/` makes perplexity.ai its site, while
     /// the film Rocky at a bit.ly link does not. A front page claimed by more than five
     /// different items is a shared host rather than anyone's official site,
-    /// so it is skipped entirely.
+    /// so it is skipped entirely, unless one of them owns it ([`front_page_owner`]):
+    /// then it is that item's site alone.
     ///
     /// A label that is just the item id (what Wikidata's label service
     /// returns for items without an English label) is not added as an alias.
@@ -192,11 +193,17 @@ impl Builder {
         }
         let (mut official, mut shared) = (0usize, 0usize);
         for (domain, claims) in &claims {
-            let items: HashSet<&str> = claims.iter().map(|site| site.item.as_str()).collect();
+            let mut items: HashSet<&str> = claims.iter().map(|site| site.item.as_str()).collect();
+            let mut claims = claims.clone();
             if items.len() > MAX_ITEMS_PER_HOMEPAGE {
-                shared += 1;
-                continue;
+                let Some(owner) = front_page_owner(&claims) else {
+                    shared += 1;
+                    continue;
+                };
+                claims.retain(|site| site.item == owner);
+                items = HashSet::from([owner]);
             }
+            let claims = &claims;
             official += 1;
             let record = self.records.entry(domain);
             record.signals.official_site = true;
@@ -352,6 +359,25 @@ fn best_rank<T: Ord>(current: Option<T>, new: Option<T>) -> Option<T> {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     }
+}
+
+/// The item of `claims`, by more than [`MAX_ITEMS_PER_HOMEPAGE`] items,
+/// whose site the front page is: the best known of them (by sitelinks),
+/// when its names name the domain ([`OfficialSite::names_its_domain`]) or
+/// it has [`DOMINANT_SITELINKS`] times the sitelinks of every other. The
+/// seasons and divisions of the NBA, or the ceremonies and categories of
+/// the Grammys, give the organization's front page as their own; a host
+/// that many items no better known than each other give is nobody's.
+fn front_page_owner<'a>(claims: &[&'a OfficialSite]) -> Option<&'a str> {
+    let best = claims.iter().max_by_key(|site| site.sitelinks)?;
+    let next = claims
+        .iter()
+        .filter(|site| site.item != best.item)
+        .map(|site| site.sitelinks)
+        .max()
+        .unwrap_or(0);
+    let owns = best.names_its_domain() || best.sitelinks >= DOMINANT_SITELINKS.saturating_mul(next);
+    (best.sitelinks > next && owns).then_some(best.item.as_str())
 }
 
 #[cfg(test)]
@@ -779,6 +805,62 @@ mod tests {
             ("Q6", "F", "six.com"),
         ]);
         assert!(got.is_empty(), "{got:?}");
+    }
+
+    #[test]
+    fn a_front_page_many_items_claim_is_the_site_of_the_one_it_names() {
+        let claim = |item: &str, label: &str, domain: &str, sitelinks: u32| {
+            let mut site = site(item, label, domain);
+            site.sitelinks = sitelinks;
+            site.about = Some(format!("about {label}"));
+            site
+        };
+        let mut nba = claim("Q155223", "National Basketball Association", "nba.com", 114);
+        nba.names = vec!["NBA".into()];
+        let mut sites = vec![nba];
+        // Its divisions and seasons give its front page as theirs.
+        for (i, label) in [
+            "Pacific Division",
+            "Eastern Conference",
+            "Atlantic Division",
+            "2012–13 NBA season",
+            "2016–17 NBA season",
+            "2023–24 NBA season",
+        ]
+        .iter()
+        .enumerate()
+        {
+            sites.push(claim(&format!("Q{i}"), label, "nba.com", 42 - i as u32));
+        }
+        // An item far better known than the rest owns the front page too,
+        // named by it or not.
+        sites.push(claim("Q41254", "Grammy Awards", "grammys.example", 109));
+        for i in 0..6 {
+            sites.push(claim(
+                &format!("Q9{i}"),
+                "Some category",
+                "grammys.example",
+                29,
+            ));
+        }
+        // Items none of which stands out still share a host.
+        sites.push(claim("Q700", "Brand", "host.example", 40));
+        for i in 0..6 {
+            sites.push(claim(&format!("Q8{i}"), "Other brand", "host.example", 30));
+        }
+        let mut builder = Builder::new();
+        builder.add_official_sites(&sites);
+        let records = builder.finish(None);
+        let get = |domain: &str| records.iter().find(|r| r.domain == domain);
+        let nba = get("nba.com").unwrap();
+        assert!(nba.signals.official_site);
+        assert_eq!(nba.aliases, ["National Basketball Association", "NBA"]);
+        assert_eq!(
+            nba.about.as_deref(),
+            Some("about National Basketball Association")
+        );
+        assert_eq!(get("grammys.example").unwrap().aliases, ["Grammy Awards"]);
+        assert!(get("host.example").is_none());
     }
 
     #[test]

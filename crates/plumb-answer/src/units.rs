@@ -842,7 +842,10 @@ fn shown(value: f64) -> Option<String> {
 }
 
 fn named(value: f64, unit: &Unit) -> Option<String> {
-    let number = shown(value)?;
+    with_name(shown(value)?, unit)
+}
+
+fn with_name(number: String, unit: &Unit) -> Option<String> {
     let name = if number == "1" { unit.one } else { unit.many };
     Some(format!("{number} {name}"))
 }
@@ -952,7 +955,16 @@ fn conversion<'a>(from: &str, to: &str, typed: impl Fn(&str) -> &'a str) -> Opti
         return None;
     }
     let result = convert(value, from_unit, to_unit);
-    let note = (shown(value)? != "1" && !std::ptr::eq(from_unit, to_unit)).then(|| {
+    // A factor is given in full, but an amount converted is no more exact
+    // than the amount typed: half a cup is 118.294 millilitres, and the
+    // note gives the cup in full.
+    let factor = shown(value)? == "1";
+    let answer = if factor {
+        named(result, to_unit)?
+    } else {
+        with_name(format_number(result, 6)?, to_unit)?
+    };
+    let note = (!factor && !std::ptr::eq(from_unit, to_unit)).then(|| {
         Some(format!(
             "1 {} = {}",
             from_unit.one,
@@ -962,7 +974,7 @@ fn conversion<'a>(from: &str, to: &str, typed: impl Fn(&str) -> &'a str) -> Opti
     Some(Answer {
         kind: Kind::Conversion,
         question: question(from_unit)?,
-        answer: named(result, to_unit)?,
+        answer,
         note: note
             .flatten()
             .filter(|_| from_unit.dimension != Temperature),
@@ -1018,7 +1030,7 @@ mod tests {
         );
         assert_eq!(
             convert("5 lbs to kg").unwrap(),
-            "5 pounds = 2.26796185 kilograms"
+            "5 pounds = 2.26796 kilograms"
         );
         assert_eq!(
             convert("1 gallon to liters").unwrap(),
@@ -1030,7 +1042,7 @@ mod tests {
         );
         assert_eq!(
             convert("60 mph to km/h").unwrap(),
-            "60 miles per hour = 96.56064 kilometres per hour"
+            "60 miles per hour = 96.5606 kilometres per hour"
         );
         assert_eq!(
             convert("1 gib in mb").unwrap(),
@@ -1038,7 +1050,7 @@ mod tests {
         );
         assert_eq!(
             convert("convert 3 cups to ml").unwrap(),
-            "3 US cups = 709.7647095 millilitres"
+            "3 US cups = 709.765 millilitres"
         );
         assert_eq!(
             convert("km to miles").unwrap(),
@@ -1058,7 +1070,12 @@ mod tests {
     fn reads_fractions() {
         assert_eq!(
             convert("1/2 cup in ml").unwrap(),
-            "0.5 US cups = 118.29411825 millilitres"
+            "0.5 US cups = 118.294 millilitres"
+        );
+        // An amount is rounded, the factor in the note is not.
+        assert_eq!(
+            answer("1/2 cup in ml").unwrap().note.as_deref(),
+            Some("1 US cup = 236.5882365 millilitres")
         );
         assert_eq!(
             convert("3/4 inch to mm").unwrap(),
@@ -1067,7 +1084,7 @@ mod tests {
         for cups in ["1 1/2 cups", "1½ cups", "1 ½ cups"] {
             assert_eq!(
                 convert(&format!("{cups} to ml")).unwrap(),
-                "1.5 US cups = 354.88235475 millilitres",
+                "1.5 US cups = 354.882 millilitres",
                 "{cups}"
             );
         }
@@ -1196,7 +1213,7 @@ mod tests {
     fn gr_is_a_grain() {
         assert_eq!(
             convert("100 gr to g").unwrap(),
-            "100 grains = 6.479891 grams"
+            "100 grains = 6.47989 grams"
         );
         assert_eq!(
             convert("1 grain in mg").unwrap(),
