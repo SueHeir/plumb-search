@@ -258,6 +258,56 @@ fn sites_only_a_later_word_of_a_named_article_finds_are_left_out() {
 }
 
 #[test]
+fn sites_only_a_first_name_finds_are_left_out_for_people() {
+    // Each lacks a word of "ted kaczynski" and is named by "ted".
+    let evidence = |domain: &str, closeness: f32| {
+        let mut hit = known_site(domain, false, 0.7);
+        hit.missing_words = true;
+        hit.query_evidence = Some(crate::CandidateEvidence {
+            domain: domain.into(),
+            lexical_score: 30.0,
+            semantic_closeness: Some(closeness),
+            query_coverage: 0.5,
+            substantive_coverage: 0.5,
+            remaining_coverage: 0.0,
+            named_subject_words: 0,
+            named_subject_domain: None,
+            named_subject_reason: None,
+            subject_coverage: None,
+            subject_remaining_coverage: None,
+            full_name: false,
+            typed_domain: false,
+            partial_name_words: 1,
+            relevance_tier: 0,
+            source_quality: None,
+        });
+        hit
+    };
+    let sites = vec![
+        evidence("ted.com", 0.0),
+        evidence("tedfans.example", 0.6),
+        evidence("own.example", 0.1),
+    ];
+    let mut article = found("Ted Kaczynski", Some("own.example"), true, 0.9);
+    article.page.item = Some("Q222134".into());
+    let floor = crate::RankConfig::default().meaning_only_relevance;
+    // Not a person: the site the name starts with stays.
+    assert_eq!(
+        drop_far_namesakes(&mut sites.clone(), &[article.clone()], floor),
+        0
+    );
+    article.page.facts = vec![plumb_core::facts::Fact {
+        kind: plumb_core::facts::FactKind::Born,
+        value: "1942-05-22".into(),
+    }];
+    let mut left = sites.clone();
+    assert_eq!(drop_far_namesakes(&mut left, &[article], floor), 1);
+    let order: Vec<&str> = left.iter().map(|s| s.domain.as_str()).collect();
+    // One near in meaning and the person's own site stay.
+    assert_eq!(order, ["tedfans.example", "own.example"]);
+}
+
+#[test]
 fn the_site_of_the_article_named_is_added_when_missing() {
     let mut sites = vec![
         site("comedycentral.com", false),
