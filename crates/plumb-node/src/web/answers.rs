@@ -1964,6 +1964,9 @@ mod tests {
         );
         let age = ask("how old is albert einstein", &einstein).unwrap();
         assert_eq!(age.answer, "Died at 76");
+        // Whether someone lives is answered by how old they are or were.
+        let alive = ask("is albert einstein still alive", &einstein).unwrap();
+        assert_eq!(alive.answer, "Died at 76");
         // 2026-10-06 is when the test's "now" is.
         let musk = [placed(
             with_facts(
@@ -1975,6 +1978,10 @@ mod tests {
         )];
         assert_eq!(
             ask("how old is elon musk", &musk).unwrap().answer,
+            "55 years old"
+        );
+        assert_eq!(
+            ask("is elon musk dead", &musk).unwrap().answer,
             "55 years old"
         );
 

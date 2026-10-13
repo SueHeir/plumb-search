@@ -656,30 +656,41 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         (" radius", &[Radius], false),
     ];
     // Words around it.
-    let around: &[(&str, &str, &[FactKind])] = &[
-        ("when was ", " born", &[Born]),
-        ("when is ", " birthday", &[Born]),
-        ("where was ", " born", &[Birthplace]),
-        ("when did ", " die", &[Died]),
-        ("when was ", " founded", &[Founded]),
-        ("when was ", " established", &[Founded]),
-        ("when was ", " built", &[Founded]),
-        ("when was ", " formed", &[Founded]),
-        ("where is ", " headquartered", &[Headquarters]),
-        ("where is ", " based", &[Headquarters]),
-        ("what currency does ", " use", &[Currency]),
-        ("how long does ", " take to orbit the sun", &[OrbitalPeriod]),
+    let around: &[(&str, &str, &[FactKind], bool)] = &[
+        ("when was ", " born", &[Born], false),
+        ("when is ", " birthday", &[Born], false),
+        ("where was ", " born", &[Birthplace], false),
+        ("when did ", " die", &[Died], false),
+        // "is elvis still alive": how old they are, or were when they died.
+        ("is ", " still alive", &[Born], true),
+        ("is ", " still living", &[Born], true),
+        ("is ", " alive", &[Born], true),
+        ("is ", " dead", &[Born], true),
+        ("when was ", " founded", &[Founded], false),
+        ("when was ", " established", &[Founded], false),
+        ("when was ", " built", &[Founded], false),
+        ("when was ", " formed", &[Founded], false),
+        ("where is ", " headquartered", &[Headquarters], false),
+        ("where is ", " based", &[Headquarters], false),
+        ("what currency does ", " use", &[Currency], false),
+        (
+            "how long does ",
+            " take to orbit the sun",
+            &[OrbitalPeriod],
+            false,
+        ),
         (
             "how long does it take ",
             " to orbit the sun",
             &[OrbitalPeriod],
+            false,
         ),
     ];
     let found = around
         .iter()
-        .find_map(|(lead, tail, kinds)| {
+        .find_map(|(lead, tail, kinds, age)| {
             let subject = q.strip_prefix(lead)?.strip_suffix(tail)?;
-            Some((subject, kinds.to_vec(), false))
+            Some((subject, kinds.to_vec(), *age))
         })
         .or_else(|| {
             before
@@ -899,6 +910,13 @@ mod tests {
             asked("how old is elon musk"),
             Some((Born, "elon musk".into(), true))
         );
+        for (q, subject) in [
+            ("is morgan freeman still alive", "morgan freeman"),
+            ("is betty white dead?", "betty white"),
+            ("is ozzy osbourne alive", "ozzy osbourne"),
+        ] {
+            assert_eq!(asked(q), Some((Born, subject.into(), true)), "{q}");
+        }
         assert_eq!(
             asked("who is the ceo of nvidia"),
             Some((Ceo, "nvidia".into(), false))
