@@ -583,6 +583,10 @@ impl PlaceSearcher {
                 required_country,
             )?);
         }
+        // A guessed town of several namesakes is only an answer when no
+        // other reading finds one town: "denver pizza places" is not about
+        // the villages called Places.
+        let mut choice = None;
         for asked in readings {
             let location = match &asked.near {
                 Near::Me => match home {
@@ -603,13 +607,18 @@ impl PlaceSearcher {
                 Some(place) => !GUESSED_TOWNS.contains(&place.kind.as_str()),
                 None => location.status == LocationStatus::UnknownLocation,
             };
-            if asked.said_where || !guessed_wrong {
+            if asked.said_where || (!guessed_wrong && location.selected().is_some()) {
                 return self
                     .found(asked, location, required_country, limit)
                     .map(Some);
             }
+            if !guessed_wrong && choice.is_none() {
+                choice = Some((asked, location));
+            }
         }
-        Ok(None)
+        choice
+            .map(|(asked, location)| self.found(asked, location, required_country, limit))
+            .transpose()
     }
 
     /// The places `asked` for around `location`.
@@ -1397,6 +1406,13 @@ mod tests {
             },
             at("Little Man", "amenity=ice_cream", 39.7593, -105.0111),
         ]);
+        // Villages called Places, none bigger than the others.
+        for (lat, lon) in [(49.1, 0.5), (45.0, 4.0), (8.5, -12.0)] {
+            fixtures.push(Place {
+                rank: place_rank("place=village", 400, false, false, 3),
+                ..at("Places", "place=village", lat, lon)
+            });
+        }
         let (_dir, searcher) = index(fixtures);
         let first = |query: &str, home: Option<&str>| {
             let found = searcher.search(query, home, None, 5).unwrap();
@@ -1412,6 +1428,10 @@ mod tests {
         // Plurals in -ies, and "places" left out of what is looked for.
         assert_eq!(first("denver breweries", None), "Wynkoop Brewing");
         assert_eq!(first("denver pizza places", None), "Blue Pan");
+        // With no other reading, the choice of towns is still offered.
+        let portland = searcher.search("portland pizza", None, None, 5).unwrap();
+        let location = portland.unwrap().location.unwrap();
+        assert_eq!(location.status, LocationStatus::AmbiguousLocation);
         // A two-word kind at a time is near the searcher.
         assert_eq!(
             first("coffee shop open now", Some("Denver")),
