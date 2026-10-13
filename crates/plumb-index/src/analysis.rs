@@ -37,8 +37,8 @@ pub(crate) fn register(manager: &TokenizerManager) {
 }
 
 /// [`register`] for the sites' index, whose word fields hold a run of
-/// [`unspaced`] script as its [`pieces`], and a word of Arabic script also
-/// [`folded`]. Queries are read with [`words_analyzer`] still, and a word
+/// [`unspaced`] script as its [`pieces`], and a word of Arabic, Greek or
+/// Cyrillic script also [`folded`]. Queries are read with [`words_analyzer`] still, and a word
 /// is looked for by its pieces ([`crate::query::Clauses::add_word`]), so
 /// the names a query is matched to stay whole.
 pub(crate) fn register_sites(manager: &TokenizerManager) {
@@ -90,16 +90,22 @@ pub(crate) fn pieces(word: &str) -> Vec<String> {
 /// letters and digits.
 pub(crate) const FOLDED: char = '~';
 
-/// A word of Arabic script with the letters it is written either way made
-/// one, after [`FOLDED`]. Arabic is often typed without the hamza or madda
-/// over an alef (`اخبار` for `أخبار`), with a dotless yeh for a final yeh
-/// (`مصرى` for `مصري`) and with Persian yeh and kaf for the Arabic ones,
-/// and the tatweel only stretches a word (`اخـبـار`). The sites' word
-/// fields hold each such word folded too, and a query looks for the folded
-/// form a little weaker than the word as typed, so either spelling finds
-/// the other but the one typed comes first. `None` for other words.
+/// A word of Arabic or Greek script, or of Cyrillic with an е or ё, with
+/// the letters it is written either way made one, after [`FOLDED`]. Arabic
+/// is often typed without the hamza or madda over an alef (`اخبار` for
+/// `أخبار`), with a dotless yeh for a final yeh (`مصرى` for `مصري`) and
+/// with Persian yeh and kaf for the Arabic ones, and the tatweel only
+/// stretches a word (`اخـبـار`). Greek is often typed without its accents,
+/// and capitals are written without them (`ΗΡΑΚΛΕΙΟ`), lowercasing to a
+/// σ where a word ends in ς. Russian is mostly written with е for ё
+/// (`Королев` for `Королёв`). The sites' word fields hold each such word
+/// folded too, and a query looks for the folded form a little weaker than
+/// the word as typed, so either spelling finds the other but the one typed
+/// comes first. `None` for other words.
 pub(crate) fn folded(word: &str) -> Option<String> {
-    if !word.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)) {
+    let folds =
+        |c: char| matches!(c, '\u{0600}'..='\u{06FF}' | '\u{0370}'..='\u{03FF}' | 'е' | 'ё');
+    if !word.chars().any(folds) {
         return None;
     }
     let letters = word.chars().filter_map(|letter| match letter {
@@ -107,6 +113,15 @@ pub(crate) fn folded(word: &str) -> Option<String> {
         'ى' | 'ی' => Some('ي'),
         'ک' => Some('ك'),
         'ـ' => None,
+        'ά' => Some('α'),
+        'έ' => Some('ε'),
+        'ή' => Some('η'),
+        'ί' | 'ϊ' | 'ΐ' => Some('ι'),
+        'ό' => Some('ο'),
+        'ύ' | 'ϋ' | 'ΰ' => Some('υ'),
+        'ώ' => Some('ω'),
+        'ς' => Some('σ'),
+        'ё' => Some('е'),
         _ => Some(letter),
     });
     Some(std::iter::once(FOLDED).chain(letters).collect())

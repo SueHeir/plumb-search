@@ -104,8 +104,8 @@ pub(crate) struct ParsedQuery {
     /// [`COMPARISON_WORDS`] entry between two others is left out.
     pub(crate) words: Vec<String>,
     /// Each word in its other number ([`plumb_core::other_number`]), if it
-    /// has one: `videos` -> `video`. A word of Arabic script has its
-    /// [`analysis::folded`] form instead.
+    /// has one: `videos` -> `video`. A word of Arabic, Greek or Cyrillic
+    /// script has its [`analysis::folded`] form instead.
     pub(crate) others: Vec<Option<String>>,
     /// The whole query as one joined token: `U.S. Bank` -> `usbank`.
     pub(crate) joined: Option<String>,
@@ -221,9 +221,9 @@ impl ParsedQuery {
 
     /// The clauses for the `i`th query word: the word in every field, and
     /// its other number in the fields of free text, a little weaker, so
-    /// "videos" finds a site about "video" but names stay exact. An Arabic
-    /// word's folded form is taken the same way: `اخبار` finds `أخبار`, a
-    /// little below what is written `اخبار`.
+    /// "videos" finds a site about "video" but names stay exact. A folded
+    /// word is taken the same way: `اخبار` finds `أخبار` and `θεσσαλονικη`
+    /// finds `Θεσσαλονίκη`, a little below what is written as typed.
     ///
     /// The other number never counts for more than the word as typed: when
     /// "videos" is common and "video" rare, BM25 would make the rare form

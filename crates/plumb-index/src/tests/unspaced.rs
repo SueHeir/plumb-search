@@ -1,5 +1,6 @@
 //! Words of other scripts: Japanese, Chinese and Thai, written without
-//! spaces, and Arabic, written with or without some of its marks.
+//! spaces, and Arabic, Greek and Russian, written with or without some of
+//! their marks.
 
 use super::*;
 
@@ -99,4 +100,28 @@ fn arabic_is_found_however_its_alefs_and_yehs_are_written() {
     for query in ["مصري", "مصرى"] {
         assert_eq!(found(&searcher, query), ["masry.example"], "{query}");
     }
+}
+
+#[test]
+fn greek_and_russian_are_found_with_or_without_their_accents() {
+    let site_titled =
+        |domain: &str, title: &str| site(domain, Some(title), None, &[], &[], ranked(900, 5_000));
+    let (_dir, searcher) = build(&[
+        site_titled("thess.example", "Δήμος Θεσσαλονίκη"),
+        site_titled("blog.example", "ΘΕΣΣΑΛΟΝΙΚΗ ΣΗΜΕΡΑ"),
+        site_titled("athens.example", "ΑΘΗΝΑΣ news"),
+        site_titled("korolev.example", "Королёв наукоград"),
+        site_titled("orel.example", "Королев и Орел"),
+    ]);
+    // Each spelling finds the other, the one typed first.
+    for (query, first, then) in [
+        ("θεσσαλονίκη", "thess.example", "blog.example"),
+        ("θεσσαλονικη", "blog.example", "thess.example"),
+        ("королёв", "korolev.example", "orel.example"),
+        ("королев", "orel.example", "korolev.example"),
+    ] {
+        assert_eq!(found(&searcher, query), [first, then], "{query}");
+    }
+    // A capital sigma lowercases to σ, not the final ς typed.
+    assert_eq!(found(&searcher, "αθήνας"), ["athens.example"]);
 }
