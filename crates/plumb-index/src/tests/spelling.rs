@@ -262,36 +262,6 @@ fn typos_never_lead_to_look_alikes() {
 }
 
 #[test]
-fn mistyped_addresses_suggest_the_site_s_address() {
-    let (_dir, searcher) = build(&typo_corpus());
-    let spelled = |query: &str| {
-        let results = search_spelled(&searcher, query);
-        let spelling = results.spelling.map(|s| (s.query, s.site));
-        let hits = domains(&results.hits)
-            .iter()
-            .map(|d| d.to_string())
-            .collect();
-        (spelling, hits)
-    };
-    let suggests = |domain: &str| Some((domain.to_string(), Some(domain.to_string())));
-    // No site has the address typed: the site meant comes first.
-    for typed in ["amzon.com", "amazn.com", "wwwamazon.com"] {
-        let (spelling, hits): (_, Vec<String>) = spelled(typed);
-        assert_eq!(spelling, suggests("amazon.com"), "{typed}");
-        assert_eq!(hits[0], "amazon.com", "{typed}");
-    }
-    // A look-alike that has it stays first, the site meant right under it.
-    let (spelling, hits) = spelled("gogle.com");
-    assert_eq!(spelling, suggests("google.com"));
-    assert_eq!(hits[..2], ["gogle.com", "google.com"]);
-    // Addresses of sites known in their own right, or of nothing near
-    // a well-known one, get none.
-    for typed in ["amazon.com", "hilten.com", "zzqxv.com"] {
-        assert_eq!(spelled(typed).0, None, "{typed}");
-    }
-}
-
-#[test]
 fn exact_names_are_not_corrected() {
     let (_dir, searcher) = build(&typo_corpus());
     for query in [
@@ -573,4 +543,34 @@ fn the_most_popular_matches_are_ranked_past_the_bm25_cutoff() {
         .search_with("watch videos online", 10, &cfg)
         .unwrap();
     assert!(domains(&hits).contains(&"youtube.com"), "{hits:?}");
+}
+
+#[test]
+fn mistyped_addresses_suggest_the_site_s_address() {
+    let (_dir, searcher) = build(&typo_corpus());
+    let spelled = |query: &str| {
+        let results = search_spelled(&searcher, query);
+        let spelling = results.spelling.map(|s| (s.query, s.site));
+        let hits = domains(&results.hits)
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
+        (spelling, hits)
+    };
+    let suggests = |domain: &str| Some((domain.to_string(), Some(domain.to_string())));
+    // No site has the address typed: the site meant comes first.
+    for typed in ["amzon.com", "amazn.com", "wwwamazon.com"] {
+        let (spelling, hits): (_, Vec<String>) = spelled(typed);
+        assert_eq!(spelling, suggests("amazon.com"), "{typed}");
+        assert_eq!(hits[0], "amazon.com", "{typed}");
+    }
+    // A look-alike that has it stays first, the site meant right under it.
+    let (spelling, hits) = spelled("gogle.com");
+    assert_eq!(spelling, suggests("google.com"));
+    assert_eq!(hits[..2], ["gogle.com", "google.com"]);
+    // Addresses of sites known in their own right, or of nothing near
+    // a well-known one, get none.
+    for typed in ["amazon.com", "hilten.com", "zzqxv.com"] {
+        assert_eq!(spelled(typed).0, None, "{typed}");
+    }
 }
