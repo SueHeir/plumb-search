@@ -14,14 +14,15 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use plumb_index::learned::{
-    train, Learner, Model, Objective, RowSignals, TrainOptions, TrainingQuery, LEARNED_ROWS,
-};
+use plumb_index::learned::{Model, RowSignals, LEARNED_ROWS};
 use serde::Deserialize;
 use tracing::info;
 
 use crate::cli::Half;
 use crate::eval::Metrics;
+
+mod learn;
+use learn::{train, Learner, Objective, TrainOptions, TrainingQuery};
 
 #[derive(Debug, Args)]
 pub struct TrainRankArgs {
