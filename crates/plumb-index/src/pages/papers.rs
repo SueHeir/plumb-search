@@ -31,7 +31,7 @@ impl PageSearcher {
         let ops = Operators::parse(&query.query);
         // "gene family" is a topic, not a person's.
         let words = hinted_name(&ops.words)
-            .filter(|(_, hint)| *hint != Hint::Person)
+            .filter(|(_, hint)| !matches!(hint, Hint::Aspect | Hint::Person))
             .map_or_else(|| ops.words.clone(), |(name, _)| name);
         let mut clauses: Vec<(Occur, Box<dyn Query>)> =
             vec![(Occur::Must, self.scope_term("set:papers"))];

@@ -34,6 +34,10 @@ pub(crate) enum Hint {
     Person,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
+    /// The thing, of which one part is asked about: "ibuprofen side
+    /// effects", "volcano facts". A search for papers keeps those words
+    /// ("loss function").
+    Aspect,
 }
 
 /// Words before a name that ask about it. "What's" is read as "what is";
@@ -57,6 +61,15 @@ const HINT_LEADS: &[&str] = &[
     "define ",
     "definition of ",
     "meaning of ",
+    "symptoms of ",
+    "side effects of ",
+    "benefits of ",
+    "health benefits of ",
+    "causes of ",
+    "treatment for ",
+    "treatment of ",
+    "uses of ",
+    "examples of ",
     "info about ",
     "information about ",
     "facts about ",
@@ -159,6 +172,25 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" stands for", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
+    // The article on a drug, an illness or a thing of science says what
+    // these ask, and none of the words: "melatonin dosage", "shingles
+    // symptoms", "photosynthesis equation".
+    (" side effects", Hint::Aspect),
+    (" symptoms", Hint::Aspect),
+    (" dosage", Hint::Aspect),
+    (" dose", Hint::Aspect),
+    (" health benefits", Hint::Aspect),
+    (" benefits", Hint::Aspect),
+    (" treatment", Hint::Aspect),
+    (" causes", Hint::Aspect),
+    (" facts", Hint::Aspect),
+    (" uses", Hint::Aspect),
+    (" examples", Hint::Aspect),
+    (" function", Hint::Aspect),
+    (" structure", Hint::Aspect),
+    (" equation", Hint::Aspect),
+    (" formula", Hint::Aspect),
+    (" diagram", Hint::Aspect),
 ];
 
 /// The name in `query` without the words around it that only say what is
@@ -580,8 +612,11 @@ impl PageSearcher {
         // but not when the query is itself a name ("age of empires"). Of
         // that search only the pages the subject names are kept: "madrid
         // spanish" (of "madrid spanish capital city") names nothing, and
-        // the clubs it describes would push Madrid out.
-        let hinted = hinted_name(query);
+        // the clubs it describes would push Madrid out. Not when a page is
+        // called the whole query: "plaster cast", "ice age" and "horror
+        // film" are not about plaster, ice or horror.
+        let called = hits.iter().any(|hit| hit.named && !hit.whole);
+        let hinted = hinted_name(query).filter(|_| !called);
         let asked = hinted.is_none();
         let Some((name, hint)) = hinted.or_else(|| {
             plumb_core::facts::fact_asked(query)
@@ -621,7 +656,7 @@ impl PageSearcher {
                     }
                 }
             }
-            Hint::Any => {}
+            Hint::Any | Hint::Aspect => {}
         }
         for hit in found {
             // Found both ways, a page keeps its better score and whatever
