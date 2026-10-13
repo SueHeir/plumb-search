@@ -166,10 +166,10 @@ impl Builder {
         let mut named_inner: HashMap<String, Vec<&OfficialSite>> = HashMap::new();
         let mut inner = 0u64;
         let mut invalid = 0u64;
-        let mut wiki_pages = 0u64;
+        let mut nothing = 0u64;
         for site in sites {
-            if site.is_wiki_page() {
-                wiki_pages += 1;
+            if site.claims_nothing() {
+                nothing += 1;
                 continue;
             }
             let front_page = site.is_root_homepage();
@@ -277,7 +277,7 @@ impl Builder {
         }
         warn_invalid("Wikidata official sites", invalid);
         info!(
-            "marked {official} official sites ({by_inner_page} by an inner page naming the site); skipped {shared} front pages claimed by more than {MAX_ITEMS_PER_HOMEPAGE} Wikidata items, {inner} claims on a subdomain or an inner page, and {wiki_pages} claims by a disambiguation page, category or template"
+            "marked {official} official sites ({by_inner_page} by an inner page naming the site); skipped {shared} front pages claimed by more than {MAX_ITEMS_PER_HOMEPAGE} Wikidata items, {inner} claims on a subdomain or an inner page, and {nothing} claims by a disambiguation page, category, template or domain ending"
         );
     }
 
@@ -760,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn wiki_pages_claim_nothing() {
+    fn wiki_pages_and_domain_endings_claim_nothing() {
         let claim = |item: &str, label: &str, domain: &str, kind: &str, about: &str| {
             let mut site = site(item, label, domain);
             site.kinds = vec![kind.to_string()];
@@ -797,6 +797,13 @@ mod tests {
                 "hoophall.com",
                 "Wikimedia template",
                 "",
+            ),
+            claim(
+                "Q19870599",
+                ".microsoft",
+                "nic.microsoft",
+                "generic top-level domain",
+                "top-level Internet domain",
             ),
         ]);
         let records = builder.finish(None);

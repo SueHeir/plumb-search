@@ -470,7 +470,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     let wikidata_missing = wikidata_err.is_some();
     let built = blocking(inner, move |inner| {
         let _records = inner.hold_records();
-        let (seed, wiki_pages) = seed_records(inner, &files)?;
+        let (seed, void) = seed_records(inner, &files)?;
         inner.set_step(Step::Ingesting, "Reading the site records");
         let mut set = load_records(&inner.paths.records)?;
         let before = set.len();
@@ -482,7 +482,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             });
         }
         take_back_misread(&files, &mut set);
-        for site in &wiki_pages {
+        for site in &void {
             let names: Vec<&str> = std::iter::once(site.label.trim())
                 .chain(site.names.iter().map(String::as_str))
                 .collect();
@@ -938,12 +938,12 @@ fn is_recent(path: &Path) -> bool {
 }
 
 /// Folds the seed files into site records and keeps the best
-/// [`NodeConfig::sites`], best first. Also gives the front page claims of
-/// wiki pages ([`OfficialSite::is_wiki_page`]), which count for nothing, to
-/// take back off records an earlier fold made with them.
+/// [`NodeConfig::sites`], best first. Also gives the front page claims
+/// that count for nothing ([`OfficialSite::claims_nothing`]), to take back
+/// off records an earlier fold made with them.
 fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<(Vec<SiteRecord>, Vec<OfficialSite>)> {
     let wikidata = files.wikidata.as_ref().ok();
-    let mut wiki_pages = Vec::new();
+    let mut void = Vec::new();
     let sources = 1 + usize::from(wikidata.is_some()) + usize::from(files.cc_ranks.is_some());
     let mut builder = Builder::new();
 
@@ -990,9 +990,9 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<(Vec<SiteRecord>, Ve
                 Err(err) => warn!("going on without Wikipedia's intros: {err:#}"),
             }
         }
-        wiki_pages = sites
+        void = sites
             .iter()
-            .filter(|site| site.is_wiki_page() && site.is_root_homepage())
+            .filter(|site| site.claims_nothing() && site.is_root_homepage())
             .cloned()
             .collect();
         builder.add_official_sites(&sites);
@@ -1006,7 +1006,7 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<(Vec<SiteRecord>, Ve
         "kept the best {} of {found} sites from the seed data",
         records.len()
     );
-    Ok((records, wiki_pages))
+    Ok((records, void))
 }
 
 /// Saves the records of a setup as the records file.
