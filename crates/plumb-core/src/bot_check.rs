@@ -11,7 +11,7 @@
 //! The same goes for other pages that stand in for a homepage: an error or
 //! maintenance page ("FedEx | System Down"), an identity check ("Verifica
 //! tu identidad", "Client Challenge") or a parked domain's "this domain is
-//! for sale".
+//! for sale" or bare "Hello!".
 
 use crate::{canonical_domain, normalize_text, registrable_domain, SiteRecord};
 
@@ -105,6 +105,12 @@ const PLACEHOLDER_TITLES: &[&str] = &[
     "default web site page",
     "web server s default page",
 ];
+
+/// Words, after [`normalize_text`], of a homepage that only greets: "Hello!",
+/// "hello hello", ":: HELLO ::", "Hello world". Parked domains show such
+/// pages by the thousand, and a query with "hello" in it found them by
+/// their one word and by meaning.
+const GREETING_WORDS: &[&str] = &["hello", "hi", "hey", "hallo", "hola", "welcome", "world"];
 
 /// What a page title is split at into parts for [`STAND_IN_TITLE_PARTS`].
 const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»', '«', '/', '\\'];
@@ -220,6 +226,9 @@ pub fn is_bot_check_page(
             return true;
         }
     }
+    if only_greets(all()) {
+        return true;
+    }
     let stand_in = |part: &str| STAND_IN_TITLE_PARTS.contains(&normalize_text(part).as_str());
     if title.is_some_and(|title| {
         title
@@ -235,6 +244,21 @@ pub fn is_bot_check_page(
             .iter()
             .any(|phrase| text.contains(&format!(" {phrase} ")))
     })
+}
+
+/// Whether `texts`, all together, greet and say nothing else
+/// ([`GREETING_WORDS`]). "World" alone is not a greeting.
+fn only_greets<'a>(texts: impl Iterator<Item = &'a str>) -> bool {
+    let mut greets = false;
+    for text in texts {
+        for word in normalize_text(text).split_whitespace() {
+            if !GREETING_WORDS.contains(&word) {
+                return false;
+            }
+            greets |= word != "world";
+        }
+    }
+    greets
 }
 
 /// Whole titles, after [`normalize_text`], of sign-in pages that
@@ -570,6 +594,22 @@ mod tests {
         ] {
             assert!(!check("example.com", title), "{title}");
         }
+        // Parked pages that only greet, whatever field the greeting is in.
+        let page = |title: Option<&str>, description: Option<&str>, body: Option<&str>| {
+            is_bot_check_page("example.com", title, description, &[], body)
+        };
+        assert!(page(Some("Hello!"), None, None));
+        assert!(page(None, None, Some("hello")));
+        assert!(page(None, None, Some("hello hello")));
+        assert!(page(Some(":: HELLO ::"), None, Some(":: HELLO ::")));
+        assert!(page(Some("Hello!"), Some("Hello!"), None));
+        assert!(page(Some("Hello World"), None, None));
+        // A greeting with anything more is a homepage.
+        assert!(!page(Some("Hello"), Some("English band"), None));
+        assert!(!page(Some("Hello"), None, Some("Hello, we sell bikes")));
+        assert!(!page(Some("HELLO! US Edition - Latest news"), None, None));
+        assert!(!page(Some("Hello Kitty"), None, None));
+        assert!(!page(Some("World"), None, None));
     }
 
     #[test]

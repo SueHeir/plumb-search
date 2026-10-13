@@ -322,20 +322,15 @@ pub fn embed_records(
 pub(crate) type ToEmbed = (f32, String, plumb_embed::TextHash, String);
 
 /// The first half of [`embed_records`]: drops the vectors of sites not in
-/// `records` and returns the sites to embed, best first. The records are
-/// freed by the time it returns.
+/// `records`, or with no text there, and returns the sites to embed, best
+/// first. The records are freed by the time it returns.
 pub(crate) fn sites_to_embed(
     vectors: &RwLock<Vectors>,
     records: RecordSet,
     words: usize,
 ) -> Vec<ToEmbed> {
-    let write = || vectors.write_locked();
-    {
-        let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
-        write().retain(|domain| domains.contains(domain));
-    }
-
     let total = records.len();
+    let mut domains: HashSet<u64> = HashSet::new();
     let mut todo = Vec::new();
     {
         let vectors = vectors.read_locked();
@@ -344,29 +339,35 @@ pub(crate) fn sites_to_embed(
             if text.is_empty() {
                 continue;
             }
+            domains.insert(domain_hash(&record.domain));
             let hash = text_hash(&text);
             if vectors.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
                 let score = record.link_score();
                 todo.push((score, record.domain, hash, text));
             }
         }
-        // The most popular sites first: a long run (all of them, after
-        // their text changed) gets to the sites most searched for early.
-        todo.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        todo.shrink_to_fit();
-        info!(
-            "{} of {total} sites need a vector ({} have one)",
-            todo.len(),
-            vectors.len()
-        );
     }
+    vectors
+        .write_locked()
+        .retain(|domain| domains.contains(&domain_hash(domain)));
+    // The most popular sites first: a long run (all of them, after
+    // their text changed) gets to the sites most searched for early.
+    todo.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    todo.shrink_to_fit();
+    info!(
+        "{} of {total} sites need a vector ({} have one)",
+        todo.len(),
+        vectors.read_locked().len()
+    );
     todo
 }
 
 /// [`sites_to_embed`] for a node, reading the records file at `path` a
 /// record at a time (its journal folded in first, see [`crate::outline`])
 /// rather than holding every record: drops the vectors of sites not in the
-/// file and returns the best `max` sites to embed, best first, and whether
+/// file, or with no text there (a homepage now read as a placeholder,
+/// [`plumb_core::is_bot_check_page`]), and returns the best `max` sites to
+/// embed, best first, and whether
 /// more wait for a vector. The text of each site to embed is held until it
 /// is embedded, so a node takes them `max` at a time.
 pub(crate) fn sites_to_embed_from_file(
@@ -389,11 +390,11 @@ pub(crate) fn sites_to_embed_from_file(
         let held = vectors.read_locked();
         crate::outline::for_each_record(path, |record| {
             total += 1;
-            domains.insert(domain_hash(&record.domain));
             let text = site_text_words(&record, words);
             if text.is_empty() {
                 return;
             }
+            domains.insert(domain_hash(&record.domain));
             let hash = text_hash(&text);
             if held.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
                 todo.push((record.link_score(), record.domain, hash, text));
@@ -668,5 +669,32 @@ mod tests {
         let vectors = vectors.into_inner().unwrap();
         assert_eq!(vectors.len(), 1);
         assert!(vectors.get("zzz.example").is_some());
+    }
+
+    #[test]
+    fn a_site_left_with_no_text_loses_its_vector() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model");
+        plumb_embed::write_test_model(&model).unwrap();
+        let embedder = Embedder::load(&model).unwrap();
+        let vectors = RwLock::new(Vectors::new(embedder.id(), embedder.dim()));
+        let embed = |title: &str| {
+            let records = [record("parked.example", title)].into_iter().collect();
+            embed_records(
+                &embedder,
+                &vectors,
+                records,
+                1,
+                &|| false,
+                &mut |_| Ok(()),
+                &mut |_, _| {},
+            )
+            .unwrap();
+        };
+        embed("Parked Things");
+        assert!(vectors.read_locked().get("parked.example").is_some());
+        // Crawled again, its homepage only says hello: a placeholder.
+        embed("Hello!");
+        assert!(vectors.read_locked().get("parked.example").is_none());
     }
 }
