@@ -112,6 +112,8 @@ impl FrozenBackend {
             drop_namesakes_of_words(&mut results.hits, &found);
         }
         lift_named_sites(&mut results.hits, &found);
+        pages.add_named_site_page(query, &results.hits, &mut found)?;
+        found.retain(|hit| options_allow(options, &hit.page));
         pages.note_demand(&mut results.hits)?;
         let spelled_right = found
             .iter()

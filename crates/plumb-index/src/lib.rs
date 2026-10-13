@@ -74,6 +74,7 @@ pub mod health;
 mod hits;
 mod indexing;
 pub mod items;
+mod language;
 pub mod learned;
 mod names;
 pub mod pages;
@@ -483,15 +484,6 @@ impl SearchOptions {
         self.language
             .as_deref()
             .filter(|wanted| !plumb_core::written_outside(wanted, query))
-    }
-
-    /// These options with [`SearchOptions::language_for`] `query` as the
-    /// language.
-    pub fn for_query(&self, query: &str) -> Self {
-        Self {
-            language: self.language_for(query).map(str::to_string),
-            ..self.clone()
-        }
     }
 }
 

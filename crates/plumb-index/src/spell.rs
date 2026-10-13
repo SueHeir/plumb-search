@@ -158,6 +158,65 @@ pub(crate) fn correct(
     }))
 }
 
+/// The domain of a site that `typed`, a registrable domain, is a slip of,
+/// with its link score: the domain with a `www` glued to its name dropped
+/// ("wwwmove.mil"), if a site with a link score of [`MIN_FIX_LINK_SCORE`]
+/// has it, or else the likeliest with the same suffix whose name is within
+/// [`max_edits`] of the name typed, by the noisy channel against how
+/// popular, as names are, if a well-known site ([`WELL_KNOWN_LINK_SCORE`])
+/// has it: "amzon.com" is amazon.com. `link_score` gives the best link
+/// score among a set of documents.
+pub(crate) fn fix_domain(
+    searcher: &tantivy::Searcher,
+    fields: &Fields,
+    model: Option<&Model>,
+    typed: &str,
+    link_score: &dyn Fn(&HashSet<DocAddress>) -> f32,
+) -> Result<Option<(String, f32)>> {
+    let Some((name, suffix)) = typed.split_once('.') else {
+        return Ok(None);
+    };
+    let score_of = |domain: &str| -> Result<f32> {
+        let docs = matching_docs(searcher, vec![Term::from_field_text(fields.domain, domain)])?;
+        Ok(link_score(&docs))
+    };
+    if let Some(rest) = name.strip_prefix("www").filter(|rest| !rest.is_empty()) {
+        let domain = format!("{rest}.{suffix}");
+        let score = score_of(&domain)?;
+        if score >= MIN_FIX_LINK_SCORE {
+            return Ok(Some((domain, score)));
+        }
+    }
+    let edits = max_edits(name.chars().count());
+    if edits == 0 {
+        return Ok(None);
+    }
+    let mut best: Option<(f64, String, f32)> = None;
+    for (domain, distance) in near_terms(searcher, fields.domain, typed, edits)? {
+        let Some(fixed) = domain
+            .strip_suffix(suffix)
+            .and_then(|rest| rest.strip_suffix('.'))
+            .filter(|fixed| !fixed.contains('.') && plausible_fix(name, fixed))
+        else {
+            continue;
+        };
+        let score = score_of(&domain)?;
+        // Without the model, an edit costs as much as a thousand times
+        // the sites.
+        let cost = match model {
+            Some(model) => model.ln_channel(name, fixed),
+            None => -7.0 * f64::from(distance),
+        };
+        let likelihood = cost + NAME_PRIOR * f64::from(score);
+        if best.as_ref().is_none_or(|b| likelihood > b.0) {
+            best = Some((likelihood, domain, score));
+        }
+    }
+    Ok(best
+        .filter(|(_, _, score)| *score >= WELL_KNOWN_LINK_SCORE)
+        .map(|(_, domain, score)| (domain, score)))
+}
+
 /// A corrected name.
 struct NameFix {
     /// How many of the query's first words it replaces.
