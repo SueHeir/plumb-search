@@ -606,23 +606,49 @@ impl PlaceSearcher {
             // A town guessed from words ("toy story", "hotel california",
             // "crypto exchange") is only taken for a big one: Story in
             // France and Crypto in Poland are villages whose names are
-            // words. Otherwise the query may still split another way.
+            // words, and "workout app" offers no choice of fuel stations
+            // called APP. Otherwise the query may still split another way.
+            let big = |place: &Place| GUESSED_TOWNS.contains(&place.kind.as_str());
             let guessed_wrong = match location.selected() {
-                Some(place) => !GUESSED_TOWNS.contains(&place.kind.as_str()),
-                None => location.status == LocationStatus::UnknownLocation,
+                Some(place) => !big(place),
+                None => {
+                    location.status == LocationStatus::UnknownLocation
+                        || !location.candidates.iter().all(big)
+                }
             };
             if asked.said_where || (!guessed_wrong && location.selected().is_some()) {
-                return self
-                    .found(asked, location, required_country, limit)
-                    .map(Some);
+                let found = self.found(asked, location, required_country, limit)?;
+                return self.asks_for_places(found);
             }
             if !guessed_wrong && choice.is_none() {
                 choice = Some((asked, location));
             }
         }
-        choice
-            .map(|(asked, location)| self.found(asked, location, required_country, limit))
-            .transpose()
+        match choice {
+            Some((asked, location)) => {
+                let found = self.found(asked, location, required_country, limit)?;
+                self.asks_for_places(found)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// `found`, unless it found nothing and what it looked for is neither
+    /// a kind of place nor any place's name: "sort a list in python" and
+    /// "how many ounces in a cup" ask for no place, while "pizza in
+    /// gotham" and "starbucks near me" do.
+    fn asks_for_places(&self, found: PlaceResults) -> Result<Option<PlaceResults>> {
+        let kind = found.what.rsplit(' ').next().is_some_and(is_kind_word);
+        if found.hits.is_empty()
+            && !kind
+            && !self
+                .named(&found.what)?
+                .iter()
+                .any(|place| !place.is_town())
+        {
+            return Ok(None);
+        }
+        Ok(Some(found))
     }
 
     /// The places `asked` for around `location`.
@@ -930,6 +956,7 @@ impl PlaceSearcher {
         // village in Alberta.
         let mut other = None;
         let mut conflict = false;
+        let notable = plumb_core::place::place_rank("", 0, true, false, 0);
         for k in (1..=words.len()).rev() {
             let name = words[..k].join(" ");
             let qualifier = words[k..].join(" ");
@@ -962,6 +989,13 @@ impl PlaceSearcher {
                 .cloned()
                 .collect();
             conflict |= !qualifier.is_empty() && !matching.is_empty() && candidates.is_empty();
+            // A place that is no town, named alone, is somewhere to search
+            // around only when Wikidata knows it: "planets in the solar
+            // system" is not about an office called Solar System, nor
+            // "calories in a shot" about a restaurant called Ashot.
+            if qualifier.is_empty() {
+                candidates.retain(|place| place.is_town() || place.rank >= notable);
+            }
             let town_like = |place: &Place| place.is_town() || place.is_landmark();
             if candidates.iter().any(town_like) {
                 candidates.retain(town_like);
@@ -1454,7 +1488,11 @@ mod tests {
             // Too far from Denver.
             at("Boulder Pizza", "amenity=restaurant", 40.0150, -105.2705),
             at("Pizza Port", "amenity=restaurant", 45.52, -122.67),
-            at("Tour Eiffel", "tourism=attraction", 48.8584, 2.2945),
+            // Wikidata knows it, so it is somewhere to search around.
+            Place {
+                rank: place_rank("tourism=attraction", 0, true, false, 3),
+                ..at("Tour Eiffel", "tourism=attraction", 48.8584, 2.2945)
+            },
             Place {
                 aliases: vec!["NYC".into()],
                 ..city("New York", 8_800_000, "NY", "US", 40.7128, -74.0060)
@@ -1586,6 +1624,56 @@ mod tests {
             .unwrap();
         assert_eq!(hotels.hits[0].place.name, "Hotel Eiffel");
         assert_eq!(hotels.hits[1].place.name, "Hôtel de Béhague");
+    }
+
+    #[test]
+    fn a_search_about_no_place_lists_none() {
+        let mut fixtures = places();
+        fixtures.extend([
+            // An office, a village, fuel stations and suburbs whose names
+            // are words, and a water park.
+            Place {
+                rank: place_rank("office=company", 0, false, true, 3),
+                ..at("Solar System", "office=company", -21.2, -50.4)
+            },
+            at(
+                "Hot Planet Thermas Park",
+                "leisure=water_park",
+                -21.22,
+                -50.42,
+            ),
+            Place {
+                rank: place_rank("place=village", 2_000, false, false, 3),
+                country: Some("NL".into()),
+                ..at("Python", "place=village", 52.0, 5.0)
+            },
+            at("APP", "amenity=fuel", 48.0, 2.0),
+            at("APP", "amenity=fuel", 40.0, -3.0),
+            // Two suburbs of one name, which no one guesses is meant.
+            Place {
+                rank: place_rank("place=suburb", 0, false, false, 3),
+                ..at("Stock", "place=suburb", 51.6, 0.4)
+            },
+            Place {
+                rank: place_rank("place=suburb", 0, false, false, 3),
+                ..at("Stock", "place=suburb", 50.1, 8.6)
+            },
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        for query in [
+            "planets in the solar system",
+            "sort a list in python",
+            "workout app",
+            "stock market",
+        ] {
+            let found = searcher.search(query, None, None, 5).unwrap();
+            assert!(found.is_none(), "{query}: {found:?}");
+        }
+        // A kind of place, or a place's name, is still looked for.
+        for query in ["pizza in python", "blue pan in python"] {
+            let found = searcher.search(query, None, None, 5).unwrap();
+            assert!(found.is_some(), "{query}");
+        }
     }
 
     #[test]

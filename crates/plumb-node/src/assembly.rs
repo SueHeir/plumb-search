@@ -46,9 +46,13 @@ pub(crate) fn places(
     if had_results && found.is_none() {
         return None;
     }
+    // When the place index finds nothing, only a kind of place said where,
+    // or anything near me, is still a place search: "pizza in denver" and
+    // "starbucks near me", not "sort a list in python".
     let mut found = found.or_else(|| {
         let asked = parse_place_query(query)?;
-        asked.said_where.then(|| PlaceResults {
+        let kind = asked.what.rsplit(' ').next().is_some_and(is_kind_word);
+        (asked.said_where && (kind || asked.near == Near::Me)).then(|| PlaceResults {
             what: asked.what,
             center: None,
             near_me: asked.near == Near::Me,
@@ -488,6 +492,16 @@ mod tests {
         assert_eq!(shown.found.hits[0].place.website, None);
         assert_eq!(shown.osm_urls[0], "https://www.openstreetmap.org/node/3");
         assert_eq!(shown.found.center.unwrap().name, "Denver");
+    }
+
+    #[test]
+    fn without_places_found_only_a_place_search_gets_a_block() {
+        let options = SearchOptions::default();
+        let status = |query| places(query, None, &[], &options, |_| false).map(|p| p.status);
+        assert_eq!(status("pizza in gotham"), Some("location_unavailable"));
+        assert_eq!(status("starbucks near me"), Some("missing_location"));
+        assert_eq!(status("sort a list in python"), None);
+        assert_eq!(status("calories in a shot"), None);
     }
 
     #[test]
