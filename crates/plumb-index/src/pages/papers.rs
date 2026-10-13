@@ -12,7 +12,7 @@ use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{TantivyDocument, Term};
 
 use super::placing::operators_allow;
-use super::search::hinted_name;
+use super::search::{hinted_name, Hint};
 use super::{
     Page, PageHit, PageSearcher, CANDIDATES, PARTIAL_MATCH, POPULARITY_SCALE, POPULARITY_SHARE,
 };
@@ -29,7 +29,9 @@ impl PageSearcher {
             return Ok(Vec::new());
         }
         let ops = Operators::parse(&query.query);
-        let words = hinted_name(&ops.words).map_or_else(|| ops.words.clone(), |(name, _)| name);
+        let words = hinted_name(&ops.words)
+            .filter(|(_, hint)| *hint != Hint::Aspect)
+            .map_or_else(|| ops.words.clone(), |(name, _)| name);
         let mut clauses: Vec<(Occur, Box<dyn Query>)> =
             vec![(Occur::Must, self.scope_term("set:papers"))];
         if let Some(scope) = self.page_scope(&ops, false) {

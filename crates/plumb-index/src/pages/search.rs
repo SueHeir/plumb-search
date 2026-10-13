@@ -31,6 +31,10 @@ pub(crate) enum Hint {
     Paper,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
+    /// The thing, of which one part is asked about: "ibuprofen side
+    /// effects", "volcano facts". A search for papers keeps those words
+    /// ("loss function").
+    Aspect,
 }
 
 /// Words before a name that ask about it.
@@ -51,6 +55,15 @@ const HINT_LEADS: &[&str] = &[
     "define ",
     "definition of ",
     "meaning of ",
+    "symptoms of ",
+    "side effects of ",
+    "benefits of ",
+    "health benefits of ",
+    "causes of ",
+    "treatment for ",
+    "treatment of ",
+    "uses of ",
+    "examples of ",
     "info about ",
     "information about ",
     "facts about ",
@@ -83,6 +96,25 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" definition", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
+    // The article on a drug, an illness or a thing of science says what
+    // these ask, and none of the words: "melatonin dosage", "shingles
+    // symptoms", "photosynthesis equation".
+    (" side effects", Hint::Aspect),
+    (" symptoms", Hint::Aspect),
+    (" dosage", Hint::Aspect),
+    (" dose", Hint::Aspect),
+    (" health benefits", Hint::Aspect),
+    (" benefits", Hint::Aspect),
+    (" treatment", Hint::Aspect),
+    (" causes", Hint::Aspect),
+    (" facts", Hint::Aspect),
+    (" uses", Hint::Aspect),
+    (" examples", Hint::Aspect),
+    (" function", Hint::Aspect),
+    (" structure", Hint::Aspect),
+    (" equation", Hint::Aspect),
+    (" formula", Hint::Aspect),
+    (" diagram", Hint::Aspect),
 ];
 
 /// The name in `query` without the words around it that only say what is
@@ -486,8 +518,11 @@ impl PageSearcher {
         let mut hits = self.search_once(query, limit, scope)?;
         // "lululemon wikipedia", "batch normalization paper", "who is
         // galileo": the words that say what is wanted are not part of the
-        // name, so the name is searched for too.
-        let Some((name, hint)) = hinted_name(query) else {
+        // name, so the name is searched for too. Not when a page is called
+        // the whole query: "plaster cast", "ice age" and "horror film" are
+        // not about plaster, ice or horror.
+        let called = hits.iter().any(|hit| hit.named && !hit.whole);
+        let Some((name, hint)) = hinted_name(query).filter(|_| !called) else {
             return Ok(hits);
         };
         let mut found = self.search_once(&name, limit, scope)?;
@@ -511,7 +546,7 @@ impl PageSearcher {
                     }
                 }
             }
-            Hint::Any => {}
+            Hint::Any | Hint::Aspect => {}
         }
         for hit in found {
             // Found both ways, a page keeps its better score and whatever
