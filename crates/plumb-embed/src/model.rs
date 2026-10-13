@@ -193,9 +193,10 @@ impl Embedder {
         let Runner::Bert { tokenizer, .. } = &self.runner else {
             return true;
         };
-        let (Some(unknown), Ok(encoding)) =
-            (tokenizer.token_to_id("[UNK]"), tokenizer.encode(text, false))
-        else {
+        let (Some(unknown), Ok(encoding)) = (
+            tokenizer.token_to_id("[UNK]"),
+            tokenizer.encode(text, false),
+        ) else {
             return true;
         };
         let ids = encoding.get_ids();
