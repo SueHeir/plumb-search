@@ -80,8 +80,8 @@ const MEASURES: &[&str] = &[
 /// "refrigerator" of "how does a refrigerator work", "metabolism" of "how
 /// metabolism works", "meiosis" of "where does meiosis occur", "coffee" of
 /// "is coffee bad for you", "penicillin" of "who discovered penicillin",
-/// "liver" of "what does the liver do". The first pair a question has
-/// decides.
+/// "liver" of "what does the liver do", "taylor swift" of "where is taylor
+/// swift from". The first pair a question has decides.
 const ASKED_BETWEEN: &[(&[&str], &[&str])] = &[
     (&["how does ", "how do "], &[" work"]),
     (&["how "], &[" works", " work"]),
@@ -89,6 +89,7 @@ const ASKED_BETWEEN: &[(&[&str], &[&str])] = &[
         &["where does ", "where do "],
         &[" take place", " occur", " happen", " come from"],
     ),
+    (&["where is ", "where are "], &[" from"]),
     (
         &["is ", "are "],
         &[
