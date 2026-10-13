@@ -15,7 +15,7 @@ use super::placing::subpage_asked;
 use super::sites::squash;
 use super::{
     asked_as_question, Page, PageHit, PageSearcher, ASKING_WORDS, PARTIAL_MATCH, POPULARITY_SCALE,
-    POPULARITY_SHARE, REFERENCE2_SET, REFERENCE_SET, SUBPAGES_SET,
+    POPULARITY_SHARE, REFERENCE2_SET, REFERENCE_SET, SUBPAGES_SET, WANTED_SET,
 };
 use crate::analysis;
 
@@ -120,7 +120,7 @@ impl PageSearcher {
             return Ok(None);
         };
         let sets: Box<dyn Query> = Box::new(BooleanQuery::new(
-            [REFERENCE_SET, REFERENCE2_SET, SUBPAGES_SET]
+            [REFERENCE_SET, REFERENCE2_SET, SUBPAGES_SET, WANTED_SET]
                 .iter()
                 .map(|set| (Occur::Should, self.scope_term(&format!("set:{set}"))))
                 .collect(),

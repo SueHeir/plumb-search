@@ -247,6 +247,14 @@ A docs page's title alone ("Glossary") names nothing. It is named by its product
 
 This is the first set of inner pages of good sites; universities, professors, companies and other kinds follow the same way (`plumb-tools`' `fetch::site_pages`), each as a set of its own that a node turns on or off under Page sets.
 
+## Pages a node finds for its own searches
+
+The page sets hold a few inner pages of sites picked by hand. A node also goes looking for the ones its own searches want, so each node grows the pages its people search for. After a search on the results page, `/api/search` or the MCP server's `search`, the node takes each of the three best sites that show no page for it, and notes the search's words besides the site's own name ("dengue fact sheet" of "who dengue fact sheet" for who.int). A search that is a site's name, or uses `site:` and the other operators, notes nothing.
+
+Every ten minutes the node visits up to 30 such sites, at most 12 pages each. From the homepage, or from links left from an earlier visit, it fetches the links whose text or address has the most of a search's words, best first, up to four links deep; when the homepage links to nothing with the words, menu links to lists of the site's pages ("Health topics", "A-Z") are tried. A page whose title, description, headings or address has all of a search's words (two or fewer) or three in five of them is kept, with its title, description and address, and that search is answered. Links on it to other sites with the words make those sites wanted too, once. The links with words left unfetched are tried when the site is wanted again, or a day later. Each page is fetched as a homepage is in a crawl: robots.txt obeyed, a second between pages of a site, redirects followed only on the same site, no private addresses, and nothing the denylist or the adult blocklist takes off. The fetches count towards the day's download limit and wait while background updates are paused.
+
+The pages found are searched with the page sets as the `wanted` set and listed as a site's inner pages are; their views are 1,000 over how many links deep they are. Searches' words stay on the node and are forgotten after 30 days; the sites see only the fetches. At most 2,000 sites and 50,000 pages are kept (5,000 under a storage limit below 1 GB, 20,000 below 8 GB), in `DIR/wanted`, about 40 MB at most. The About page's "Kinds of results" can leave them out of one browser's results; `plumb run --no-wanted-pages` turns it all off. A node that only crawls never does it.
+
 ## How pages and sites are listed together
 
 - An article about a listed site (its Wikidata item's official website) goes under that site's result instead of in a place of its own.

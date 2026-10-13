@@ -407,7 +407,7 @@ pub fn build_client(cfg: &CrawlConfig) -> reqwest::Result<Client> {
 /// The client's settings. It follows no redirects: [`Visit`] follows them
 /// itself, checking robots.txt before each hop.
 fn client_builder(cfg: &CrawlConfig) -> ClientBuilder {
-    let builder = Client::builder()
+    let mut builder = Client::builder()
         .user_agent(cfg.user_agent.as_str())
         .timeout(cfg.timeout)
         .gzip(true)
@@ -416,6 +416,9 @@ fn client_builder(cfg: &CrawlConfig) -> ClientBuilder {
             cfg.allow_private_addresses,
             cfg.dns_lookups,
         ));
+    for (name, addr) in &cfg.resolve {
+        builder = builder.resolve(name, *addr);
+    }
     // reqwest uses the system proxy unless told not to; behind a proxy the
     // resolver above would see only the proxy's name, not the targets'.
     if cfg.use_system_proxy {

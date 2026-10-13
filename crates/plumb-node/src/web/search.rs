@@ -213,6 +213,9 @@ pub(crate) async fn search_page(
         _ => None,
     };
     let local = run_search_ranked(&state, &query, limit, &settings.options, rank).await;
+    if let (Ok(results), Some(node)) = (&local, &state.node) {
+        node.searched(&query, results);
+    }
     // "Near me", "weather" and "what time is it" go by the town the
     // searcher gave.
     let town = match &visitor {

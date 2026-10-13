@@ -12,7 +12,7 @@ use super::docs::{docs_found_by_words, docs_named_as_code};
 use super::sites::{base_title, describes_an_organization, is_government, site_is_titled, squash};
 use super::{
     LearnedPlace, Page, PageHit, PlacedPage, ASKING_WORDS, DOCS_SET, FILMS_SET, GITHUB_SET,
-    PODCASTS_SET, REFERENCE2_SET, SUBPAGES_SET, WIKIDATA_SET,
+    PODCASTS_SET, REFERENCE2_SET, SUBPAGES_SET, WANTED_SET, WIKIDATA_SET,
 };
 use crate::analysis;
 
@@ -288,7 +288,7 @@ const TITLE_STOP_WORDS: &[&str] = &[
 /// ign.com. A tag archive is listed only on one of the best sites, named
 /// or not. Pages of other sets always may.
 pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
-    if hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET {
+    if ![SUBPAGES_SET, REFERENCE2_SET, WANTED_SET].contains(&hit.page.set.as_str()) {
         return true;
     }
     let domain = registrable_domain(&hit.page.url);

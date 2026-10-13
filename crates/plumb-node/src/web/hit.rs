@@ -166,6 +166,7 @@ pub(crate) fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
             plumb_index::pages::REFERENCE_SET | plumb_index::pages::SUBPAGES_SET => {
                 "the site's weight over the page's depth"
             }
+            plumb_index::pages::WANTED_SET => "a thousand over the page's depth",
             plumb_index::pages::PAPERS_SET => hit
                 .page
                 .paper

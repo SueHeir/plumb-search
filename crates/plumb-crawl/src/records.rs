@@ -211,6 +211,7 @@ mod tests {
                             text: text.into(),
                         })
                         .collect(),
+                    own_links: Vec::new(),
                 },
                 icon: None,
             }),

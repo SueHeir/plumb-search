@@ -72,6 +72,9 @@ pub(crate) async fn api_search(
     }
     let options = params.options(&state.settings, &headers);
     let found = run_search(&state, &query, params.limit(), &options).await;
+    if let (Ok(results), Some(node)) = (&found, &state.node) {
+        node.searched(&query, results);
+    }
     match found {
         Ok(mut results) if full => {
             let places = crate::assembly::places(

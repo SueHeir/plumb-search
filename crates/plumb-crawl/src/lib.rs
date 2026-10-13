@@ -12,6 +12,8 @@
 //! - [`to_records`] turns crawl results into [`plumb_core::SiteRecord`]s
 //!   to merge into a [`plumb_core::RecordSet`].
 //! - [`check_feeds`] reads recent headlines from sites' RSS or Atom feeds.
+//! - [`follow_links`] follows a site's links toward the pages a node's
+//!   searches want.
 //! - [`PageReader`] reads one page as text for an AI assistant, without
 //!   keeping it.
 
@@ -27,6 +29,7 @@ mod crawl;
 mod dns;
 mod extract;
 mod feed;
+mod follow;
 mod icon;
 mod read;
 mod records;
@@ -45,6 +48,9 @@ pub use extract::{
     MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS, MAX_PAGE_TEXT_WORDS, MAX_SECTIONS, MAX_SECTION_WORDS,
 };
 pub use feed::{parse_date, read_feed};
+pub use follow::{
+    follow_links, match_words, FollowTarget, Followed, Lead, WantedPage, MAX_DEPTH, MAX_LEADS,
+};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
 pub use records::{to_records, CRAWL_VERSION, REREAD_BELOW};
@@ -121,6 +127,9 @@ pub struct CrawlConfig {
     /// host name is still checked, so give a proxy on a private network as an
     /// IP address.
     pub use_system_proxy: bool,
+    /// Host names connected to at these addresses, not looked up (tests
+    /// only, in practice; the port is the URL's).
+    pub resolve: Vec<(String, std::net::SocketAddr)>,
     /// Counts the bytes of response bodies read (robots.txt files and
     /// pages, after decompression), so that a caller can keep track of
     /// the crawl's downloads. Clones of a config share the count.
@@ -141,6 +150,7 @@ impl Default for CrawlConfig {
             fetch_icons: true,
             allow_private_addresses: false,
             use_system_proxy: false,
+            resolve: Vec::new(),
             downloaded: Arc::default(),
         }
     }
@@ -242,6 +252,11 @@ pub struct PageMeta {
     pub feed: Option<String>,
     /// Links to other registrable domains, in page order.
     pub links: Vec<OutLink>,
+    /// Links to the page's own site, with their text, in page order, at
+    /// most a few hundred: what [`follow_links`] follows. Left out of the
+    /// JSON form.
+    #[serde(skip)]
+    pub own_links: Vec<plumb_core::key_pages::OwnLink>,
 }
 
 /// A link from the page to another registrable domain.

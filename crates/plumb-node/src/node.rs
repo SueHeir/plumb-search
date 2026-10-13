@@ -125,6 +125,7 @@ mod shared_vectors;
 pub(crate) mod signed_sets;
 pub(crate) mod store;
 mod trim;
+mod wanted_pages;
 mod worker;
 
 #[cfg(test)]
@@ -318,6 +319,9 @@ pub struct NodeConfig {
     /// week of headlines is kept. 0 checks none; headlines trusted nodes
     /// share are still kept and shown.
     pub news_feeds: usize,
+    /// Go looking for the inner pages this node's own searches want, and
+    /// show the ones found (see [`crate::wanted_pages`]).
+    pub wanted_pages: bool,
 }
 
 impl NodeConfig {
@@ -374,6 +378,7 @@ impl NodeConfig {
             search_history: false,
             focus_topics: Vec::new(),
             news_feeds: 3_000,
+            wanted_pages: true,
         }
     }
 
@@ -417,6 +422,7 @@ impl NodeConfig {
         self.search_by_meaning = false;
         self.private_search = false;
         self.news_feeds = 0;
+        self.wanted_pages = false;
         if let Some(net) = &mut self.network {
             // Nothing is searched here, and other nodes' crawls are not
             // taken in, so neither is followed in memory.
@@ -808,11 +814,9 @@ pub struct NodeHandle {
     stop: watch::Sender<bool>,
     server: JoinHandle<std::io::Result<()>>,
     worker: JoinHandle<()>,
-    embedding: Option<JoinHandle<()>>,
-    pages: JoinHandle<()>,
-    news: JoinHandle<()>,
-    adult: JoinHandle<()>,
-    signed_sets: JoinHandle<()>,
+    /// Background jobs besides the worker, each with what its failure is
+    /// called; a node that only crawls runs fewer.
+    jobs: Vec<(JoinHandle<()>, &'static str)>,
 }
 
 impl NodeHandle {
@@ -862,11 +866,7 @@ impl NodeHandle {
             stop,
             mut server,
             worker,
-            embedding,
-            pages,
-            news,
-            adult,
-            signed_sets,
+            jobs,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -886,22 +886,10 @@ impl NodeHandle {
             }
         };
         let worked = worker.await.context("the background work failed");
-        if let Some(embedding) = embedding {
-            if let Err(err) = embedding.await {
-                warn!("search by meaning failed: {err}");
+        for (job, what) in jobs {
+            if let Err(err) = job.await {
+                warn!("{what} failed: {err}");
             }
-        }
-        if let Err(err) = pages.await {
-            warn!("page sets failed: {err}");
-        }
-        if let Err(err) = news.await {
-            warn!("checking feeds failed: {err}");
-        }
-        if let Err(err) = adult.await {
-            warn!("the adult blocklist failed: {err}");
-        }
-        if let Err(err) = signed_sets.await {
-            warn!("signed sets failed: {err}");
         }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
@@ -1048,35 +1036,52 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         worker::run(inner.clone()),
     ));
     tokio::spawn(release_memory_now_and_then(inner.clone()));
-    let embedding = inner.config.search_by_meaning.then(|| {
-        supervise(&inner, "search by meaning", |inner| {
-            tokio::task::spawn_blocking(move || embedding::run(inner))
-        })
-    });
-    let (pages, news, adult) = if inner.config.crawl_only {
+    let mut jobs = Vec::new();
+    if inner.config.search_by_meaning {
+        let what = "search by meaning";
+        jobs.push((
+            supervise(&inner, what, |inner| {
+                tokio::task::spawn_blocking(move || embedding::run(inner))
+            }),
+            what,
+        ));
+    }
+    if inner.config.crawl_only {
         // Only searching needs these.
         info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
-        (
-            tokio::spawn(async {}),
-            tokio::spawn(async {}),
-            tokio::spawn(async {}),
-        )
     } else {
-        (
+        jobs.push((
             supervise(&inner, "page sets", |inner| {
                 tokio::task::spawn_blocking(move || pages::run(inner))
             }),
+            "page sets",
+        ));
+        jobs.push((
             supervise(&inner, "checking feeds", |inner| {
                 tokio::spawn(news::run(inner))
             }),
+            "checking feeds",
+        ));
+        jobs.push((
             supervise(&inner, "the adult blocklist", |inner| {
                 tokio::spawn(adult::run(inner))
             }),
-        )
-    };
-    let signed_sets = supervise(&inner, "signed sets", |inner| {
-        tokio::spawn(signed_sets::run(inner))
-    });
+            "the adult blocklist",
+        ));
+    }
+    if inner.config.wanted_pages {
+        let what = "following links for searches";
+        jobs.push((
+            supervise(&inner, what, |inner| tokio::spawn(wanted_pages::run(inner))),
+            what,
+        ));
+    }
+    jobs.push((
+        supervise(&inner, "signed sets", |inner| {
+            tokio::spawn(signed_sets::run(inner))
+        }),
+        "signed sets",
+    ));
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -1087,11 +1092,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         stop,
         server,
         worker,
-        embedding,
-        pages,
-        news,
-        adult,
-        signed_sets,
+        jobs,
     })
 }
 
@@ -1374,6 +1375,8 @@ struct Inner {
     map: crate::map::MapFile,
     /// Recent headlines and the feeds watched for them.
     news: crate::news::NewsStore,
+    /// The inner pages this node's searches wanted, and the ones found.
+    wanted_pages: crate::wanted_pages::WantedPages,
     /// The adult blocklist, once loaded.
     adult: RwLock<Option<Arc<adult::AdultList>>>,
     /// The project's denylist, once the node holds one, with its stamp
@@ -1553,6 +1556,8 @@ impl Inner {
             .with_held_set(map_data, config.set_publishers.clone());
         let fill_state = fill::FillState::load(&opened.paths.net);
         let news = crate::news::NewsStore::open(&opened.paths.news).with_budget(storage.clone());
+        let wanted_pages = crate::wanted_pages::WantedPages::open(&opened.paths.wanted)
+            .with_budget(storage.clone());
         Inner {
             config,
             paths: opened.paths,
@@ -1602,6 +1607,7 @@ impl Inner {
             places: RwLock::new(None),
             map,
             news,
+            wanted_pages,
             adult: RwLock::new(None),
             denylist: RwLock::new(None),
         }
@@ -2336,6 +2342,13 @@ impl StatusSource for Inner {
 
     fn denies(&self, url: &str) -> bool {
         Inner::denies(self, url)
+    }
+
+    fn searched(&self, query: &str, results: &SearchResults) {
+        if self.config.wanted_pages {
+            self.wanted_pages
+                .note(query, results, now_unix(), |url| self.may_want(url));
+        }
     }
 
     fn network(&self) -> Option<Arc<plumb_net::NetHandle>> {
