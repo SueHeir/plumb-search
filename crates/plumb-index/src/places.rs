@@ -23,7 +23,7 @@ use anyhow::{bail, Context, Result};
 use plumb_core::place::{
     distance_km, is_kind_word, normalize_region, parse_place, town_size, write_place, Place,
 };
-use plumb_core::{country_of_name, joined, normalize_text};
+use plumb_core::{country_of_any_name, joined, normalize_text};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::directory::Directory;
@@ -231,7 +231,7 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
     for count in (1..=3.min(words.len().saturating_sub(2))).rev() {
         let at = words.len() - count;
         let country = words[at..].join(" ");
-        if country_of_name(&country).is_some() {
+        if country_of_any_name(&country).is_some() {
             let qualified: Vec<PlaceQuery> = place_query_readings(&words[..at].join(" "))
                 .into_iter()
                 .filter_map(|mut asked| match &mut asked.near {
@@ -851,7 +851,7 @@ impl PlaceSearcher {
         // Country-only intent cannot select a foreign town of that name:
         // Italy, Texas or Us, France. A city-state can still resolve to
         // an actual town within that country (Singapore).
-        let named_country = country_of_name(text);
+        let named_country = country_of_any_name(text);
         let words: Vec<&str> = text
             .split(|c: char| c.is_whitespace() || c == ',')
             .collect();
@@ -1026,8 +1026,8 @@ fn resolve_candidates(
 }
 
 fn country_matches(place: &Place, name: &str) -> bool {
-    let normalized =
-        plumb_core::normalize_country(name).or_else(|| country_of_name(name).map(str::to_string));
+    let normalized = plumb_core::normalize_country(name)
+        .or_else(|| country_of_any_name(name).map(str::to_string));
     normalized.as_deref().is_some_and(|country| {
         place
             .country
@@ -1468,6 +1468,29 @@ mod tests {
             .unwrap();
         assert_eq!(bakery.center.unwrap().country.as_deref(), Some("FR"));
         assert_eq!(bakery.hits[0].place.name, "Poilâne");
+    }
+
+    #[test]
+    fn any_country_qualifies_a_town() {
+        let mut fixtures = places();
+        fixtures.extend([
+            city(
+                "Reykjavík",
+                140_000,
+                "Höfuðborgarsvæðið",
+                "IS",
+                64.146,
+                -21.94,
+            ),
+            at("Hótel Borg", "tourism=hotel", 64.147, -21.939),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        for query in ["hotels in reykjavik iceland", "reykjavik hotels iceland"] {
+            let found = searcher.search(query, None, None, 5).unwrap().unwrap();
+            assert_eq!(found.hits[0].place.name, "Hótel Borg", "{query}");
+        }
+        let country = searcher.resolve("iceland", None, None).unwrap();
+        assert_eq!(country.status, LocationStatus::MissingLocation);
     }
 
     #[test]
