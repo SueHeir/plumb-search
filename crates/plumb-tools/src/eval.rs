@@ -1133,7 +1133,7 @@ fn profile_shown(
     };
     use plumb_node::web::answers::{self, EntityResolution};
     for name in answers::profile_lookups(query) {
-        let entities = answers::profile_candidates(query, pages.entities(&name, 20)?);
+        let entities = answers::profile_candidates(query, &name, pages.entities(&name, 20)?);
         let resolution = answers::resolve_entity(&name, &entities, None);
         if let EntityResolution::Resolved(page) = &resolution {
             if let Some(profile) = answers::profile_answer_from_page(query, page) {

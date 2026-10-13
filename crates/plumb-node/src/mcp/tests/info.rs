@@ -591,11 +591,21 @@ impl SearchBackend for Profiles {
     }
     fn entities(
         &self,
-        _: &str,
+        query: &str,
         _: usize,
         _: &SearchOptions,
     ) -> Result<Vec<plumb_index::pages::PageHit>> {
-        Ok(self.articles.clone())
+        // As in the page index, a film's title alone finds its article,
+        // not the films set's page.
+        Ok(self
+            .articles
+            .iter()
+            .filter(|hit| {
+                hit.page.set != plumb_index::pages::FILMS_SET
+                    || !hit.page.title.eq_ignore_ascii_case(query)
+            })
+            .cloned()
+            .collect())
     }
     fn search_full(&self, query: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
         Ok(SearchResults {
@@ -753,5 +763,30 @@ fn listings_are_of_the_kind_of_work_they_list() {
     assert_eq!(
         profile(hades, "hades steam")["url"],
         "https://store.steampowered.com/app/1145360/"
+    );
+    // "top gun movie" names the 1955 film of the films set, but asks for
+    // the film called Top Gun, found by its name alone.
+    let imdb = |id: &str| {
+        vec![plumb_core::profiles::Profile {
+            service: "imdb".into(),
+            id: id.into(),
+        }]
+    };
+    let mut old = shelved(
+        Page::from_film(plumb_core::article::Article {
+            title: "Top Gun".into(),
+            description: Some("Film by Henry Levin, 1955".into()),
+            item: Some("Q7824830/Top_Gun_(1955_film)".into()),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    old.named = true;
+    old.page.profiles = imdb("tt0048734");
+    let mut top_gun = article("Top Gun", "Q49003", Some("tt0092099"));
+    top_gun.page.description = Some("1986 action drama film by Tony Scott".into());
+    assert_eq!(
+        profile(vec![old, top_gun], "top gun movie cast")["url"],
+        "https://www.imdb.com/title/tt0092099/"
     );
 }
