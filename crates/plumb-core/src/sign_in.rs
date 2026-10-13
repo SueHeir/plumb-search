@@ -100,6 +100,15 @@ fn is_sign_in_address(url: &str) -> bool {
             .any(|part| SIGN_IN_PATHS.contains(&part.to_ascii_lowercase().as_str()))
 }
 
+/// Whether `query` asks to sign in somewhere: "chase login", "Xfinity
+/// account sign in".
+pub fn asks_to_sign_in(query: &str) -> bool {
+    let query = format!(" {} ", normalize_text(query));
+    SIGN_IN
+        .iter()
+        .any(|phrase| query.contains(&format!(" {phrase} ")))
+}
+
 /// Whether some of `query`'s words in a row, joined, are a label of
 /// `domain` or the start of one: "wealthscape login" names wealthscape.com,
 /// "us bank login" usbank.com, "hdfc login" hdfcbank.com and "uc davis
@@ -206,5 +215,15 @@ mod tests {
         assert!(names_label("uc davis canvas login", "canvas.ucdavis.edu"));
         assert!(!names_label("att net account login", "datahub.net"));
         assert!(!names_label("bank online login", "datahubnet.online"));
+    }
+
+    #[test]
+    fn a_query_asks_to_sign_in_by_its_words() {
+        for query in ["chase login", "Xfinity account sign in", "AOL Log-in"] {
+            assert!(asks_to_sign_in(query), "{query}");
+        }
+        for query in ["microsoft account", "loginradius", "signing in spanish"] {
+            assert!(!asks_to_sign_in(query), "{query}");
+        }
     }
 }

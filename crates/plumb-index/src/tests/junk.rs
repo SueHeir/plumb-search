@@ -38,10 +38,19 @@ fn sign_in_pages_of_sites_the_query_does_not_name_are_left_out() {
             "https://www.wealthscape.com/",
             Some("Wealthscape Login"),
         ),
+        SiteRecord {
+            description: Some("How workplace retirement plans work.".into()),
+            ..at(
+                "retireguide.example",
+                "https://retireguide.example/",
+                Some("Workplace retirement plan guide"),
+            )
+        },
+        // Says nothing of itself, and only meaning found it.
         at(
-            "retireguide.example",
-            "https://retireguide.example/",
-            Some("Workplace retirement plan guide"),
+            "cardgate.example",
+            "https://cardgate.example/",
+            Some("My CardGate"),
         ),
     ];
     let (_dir, searcher) = build(&records);
@@ -51,6 +60,7 @@ fn sign_in_pages_of_sites_the_query_does_not_name_are_left_out() {
         ("jenta.example", 0.93),
         ("wealthscape.com", 0.92),
         ("retireguide.example", 0.9),
+        ("cardgate.example", 0.89),
     ]);
     let search = |query: &str| {
         searcher
@@ -67,18 +77,24 @@ fn sign_in_pages_of_sites_the_query_does_not_name_are_left_out() {
     let hits = search("fidelity netbenefits login");
     let found = domains(&hits);
     assert!(found.contains(&"fidelity.com"), "{found:?}");
-    // What meaning finds stays, short of other sites' sign-in forms.
+    // What meaning finds stays when it says what it is, short of other
+    // sites' sign-in forms.
     assert!(found.contains(&"retireguide.example"), "{found:?}");
     for login in [
         "datahubnet.example",
         "qris.example",
         "jenta.example",
         "wealthscape.com",
+        "cardgate.example",
     ] {
         assert!(!found.contains(&login), "{login} in {found:?}");
     }
     // Named, a site's own sign-in page is what was asked for.
     let hits = search("wealthscape login");
     assert_eq!(domains(&hits)[0], "wealthscape.com");
+    // Not asked to sign in, meaning's finds stay.
+    let hits = search("fidelity netbenefits");
+    let found = domains(&hits);
+    assert!(found.contains(&"cardgate.example"), "{found:?}");
     assert_eq!(top(&searcher, "datahubnet"), "datahubnet.example");
 }

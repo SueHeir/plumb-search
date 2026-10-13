@@ -14,8 +14,13 @@
 //!   Web App" on bpl.net for "microsoft outlook",
 //!   [`plumb_core::is_sign_in_portal`]) goes too. live.com, titled
 //!   "Outlook", is Microsoft's.
+//! - In a search to sign in, little-known sites with no description that
+//!   only meaning found. Once the sign-in pages went, "My CardGate" on
+//!   curopayments.net took their place for "chase login", "coinbase login"
+//!   and "amex login", and three untitled strangers for "schwab login".
+//!   Nothing ties them to the site the searcher wants to sign in to.
 
-use plumb_core::{is_sign_in_page, names_label};
+use plumb_core::{asks_to_sign_in, is_sign_in_page, names_label};
 
 use crate::names::is_reserved_name;
 use crate::{health, Hit, WELL_KNOWN_LINK_SCORE};
@@ -39,6 +44,16 @@ pub(crate) fn left_out(query: &str, hit: &Hit) -> bool {
         return false;
     }
     let title = hit.title.as_deref();
+    let says_nothing_meaning_found = || {
+        hit.description.is_none()
+            && hit
+                .query_evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.lexical_score <= 0.0)
+    };
     title.is_some_and(|title| plumb_core::is_sign_in_portal(&hit.domain, title))
-        || (!hit.official && is_sign_in_page(&hit.url, title) && !names_label(query, &hit.domain))
+        || (!hit.official
+            && (is_sign_in_page(&hit.url, title)
+                || (asks_to_sign_in(query) && says_nothing_meaning_found()))
+            && !names_label(query, &hit.domain))
 }
