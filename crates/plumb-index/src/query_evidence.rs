@@ -210,7 +210,7 @@ impl ParsedQuery {
                 if field == fields.terms && self.terms_boost <= 0.0 {
                     continue;
                 }
-                substantive.add(Term::from_field_text(field, &self.words[i]), 1.0);
+                substantive.add_word(field, &self.words[i], 1.0);
                 if let Some(other) = &self.others[i] {
                     substantive.add(Term::from_field_text(field, other), 1.0);
                 }
