@@ -22,8 +22,8 @@ use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::place::{
-    area_size, distance_km, is_kind_word, normalize_region, parse_place, town_size, write_place,
-    Place, CANADIAN_PROVINCES, US_STATES,
+    area_size, distance_km, is_kind_word, normalize_region, parse_place, town_size,
+    us_state_abbreviated, write_place, Place, CANADIAN_PROVINCES, US_STATES,
 };
 use plumb_core::{country_of_any_name, joined, normalize_text};
 use serde::{Deserialize, Serialize};
@@ -1023,35 +1023,41 @@ impl PlaceSearcher {
         let mut other = None;
         let mut conflict = false;
         let notable = plumb_core::place::place_rank("", 0, true, false, 0);
+        let town_like = |place: &Place| place.is_town() || place.is_landmark();
         for k in (1..=words.len()).rev() {
             let name = words[..k].join(" ");
             let qualifier = words[k..].join(" ");
-            let mut matching: Vec<Place> = self
-                .named(&name)?
-                .into_iter()
-                .filter(|place| {
-                    (qualifier.is_empty() || place_is_in(place, &qualifier))
-                        // Nor an island the country is on: "hotels in
-                        // jamaica" asks for a town.
-                        && named_country.is_none_or(|country| {
-                            place.is_town() && country_matches(place, country)
-                        })
-                        && named_state.is_none_or(|(state, country)| {
-                            // Uruguay's Florida is in its department FL.
-                            let (region, of) = (place.region.as_deref(), place.country.as_deref());
-                            let in_state = of == Some(country)
-                                && region.is_some_and(|region| {
-                                    region == state || (state == "WA" && region == "DC")
-                                });
-                            // Older places files know no Canadian town's
-                            // province.
-                            in_state
-                                || (country == "CA"
-                                    && region.is_none()
-                                    && of.is_none_or(|of| of == "CA"))
-                        })
-                })
-                .collect();
+            let fits = |place: &Place| {
+                (qualifier.is_empty() || place_is_in(place, &qualifier))
+                    // Nor an island the country is on: "hotels in jamaica"
+                    // asks for a town.
+                    && named_country.is_none_or(|country| {
+                        place.is_town() && country_matches(place, country)
+                    })
+                    && named_state.is_none_or(|(state, country)| {
+                        // Uruguay's Florida is in its department FL.
+                        let (region, of) = (place.region.as_deref(), place.country.as_deref());
+                        let in_state = of == Some(country)
+                            && region.is_some_and(|region| {
+                                region == state || (state == "WA" && region == "DC")
+                            });
+                        // Older places files know no Canadian town's
+                        // province.
+                        in_state
+                            || (country == "CA" && region.is_none() && of.is_none_or(|of| of == "CA"))
+                    })
+            };
+            let mut matching: Vec<Place> = self.named(&name)?.into_iter().filter(fits).collect();
+            // German without its accents ([`Self::named_within`]) also when
+            // what the name as typed finds is no town that fits: "muenster
+            // germany" is not Muenster, Texas.
+            let plain = without_umlauts(&name);
+            if plain != name && !matching.iter().any(town_like) {
+                let found: Vec<Place> = self.named(&plain)?.into_iter().filter(fits).collect();
+                if found.iter().any(town_like) {
+                    matching = found;
+                }
+            }
             // "union station denver", "soho london": a place by the town
             // the qualifier names, not in a region of that name. A town is
             // a few words, and each try resolves them again.
@@ -1075,7 +1081,6 @@ impl PlaceSearcher {
             if qualifier.is_empty() {
                 candidates.retain(|place| place.is_town() || place.rank >= notable);
             }
-            let town_like = |place: &Place| place.is_town() || place.is_landmark();
             if candidates.iter().any(town_like) {
                 candidates.retain(town_like);
                 if towns
@@ -1242,10 +1247,7 @@ impl PlaceSearcher {
     /// Borne.
     fn named_within(&self, name: &str, near: Option<(&Place, f64)>) -> Result<Vec<Place>> {
         let typed = normalize_text(name);
-        let plain = typed
-            .replace("ae", "a")
-            .replace("oe", "o")
-            .replace("ue", "u");
+        let plain = without_umlauts(&typed);
         let searcher = self.reader.searcher();
         for name in [&typed, &plain] {
             let Some(key) = self.key_query(name) else {
@@ -1321,12 +1323,15 @@ impl PlaceSearcher {
                     .unwrap_or(word)
             })
             .collect();
+        let swapped = swapped.join(" ");
         // A national park is often named without its "National Park":
-        // "hotels near acadia".
-        let park =
-            (!normalized.ends_with("national park")).then(|| format!("{normalized} national park"));
+        // "hotels near acadia", "mt rainier".
+        let parks = [&normalized, &swapped]
+            .into_iter()
+            .filter(|name| !name.ends_with("national park"))
+            .map(|name| format!("{name} national park"));
         let mut keys = self.typed_keys(name);
-        for other in std::iter::once(swapped.join(" ")).chain(park) {
+        for other in std::iter::once(swapped.clone()).chain(parks) {
             for key in self.typed_keys(&other) {
                 if !keys.contains(&key) {
                     keys.push(key);
@@ -1529,11 +1534,27 @@ fn place_is_in(place: &Place, qualifier: &str) -> bool {
     })
 }
 
+/// `name` as German written without its accents would have it: "muenchen"
+/// is "munchen", as München is kept.
+fn without_umlauts(name: &str) -> String {
+    name.replace("ae", "a")
+        .replace("oe", "o")
+        .replace("ue", "u")
+}
+
 fn region_matches(place: &Place, qualifier: &str) -> bool {
     let region_code = normalize_region(qualifier);
+    // "paris, tex.": a state as the style books abbreviate it is a US one.
+    let abbreviated = us_state_abbreviated(qualifier).filter(|_| {
+        place
+            .country
+            .as_deref()
+            .is_none_or(|country| country == "US")
+    });
     if let Some(region) = &place.region {
         if normalize_text(region) == qualifier
             || region.eq_ignore_ascii_case(&region_code)
+            || abbreviated.is_some_and(|code| region == code)
             || joined(region) == joined(qualifier)
         {
             return true;
@@ -2243,6 +2264,15 @@ mod tests {
                 region: Some("AB".into()),
                 ..at("Banff", "place=town", 51.18, -115.57)
             },
+            Place {
+                rank: plumb_core::place::landmark_rank(80_000),
+                ..at(
+                    "Mount Rainier National Park",
+                    "boundary=national_park",
+                    46.85,
+                    -121.75,
+                )
+            },
         ]);
         // The park is meant, and searched wide: its hotel is 9 km off.
         let park = searcher
@@ -2278,6 +2308,8 @@ mod tests {
         assert_eq!(acadia.hits[0].place.name, "Bar Harbor Inn");
         let banff = searcher.locate("banff", None).unwrap().unwrap();
         assert_eq!(banff.kind, "place=town");
+        let rainier = searcher.locate("mt rainier", None).unwrap().unwrap();
+        assert_eq!(rainier.name, "Mount Rainier National Park");
     }
 
     #[test]
@@ -2291,12 +2323,22 @@ mod tests {
                 ..city("Boerne", 18_000, "TX", "US", 29.79, -98.73)
             },
             city("Borne", 400_000, "OV", "NL", 52.30, 6.75),
+            city("Münster", 315_000, "NW", "DE", 51.96, 7.63),
+            Place {
+                kind: "place=village".into(),
+                rank: place_rank("place=village", 1_500, false, false, 3),
+                ..city("Muenster", 1_500, "TX", "US", 33.65, -97.38)
+            },
+            at("Muenchen", "amenity=restaurant", 39.10, -84.51),
         ]);
         let (_dir, searcher) = index(fixtures);
         let found = |text: &str| searcher.locate(text, None).unwrap().map(|place| place.name);
+        // Not the restaurant, which is no town.
         assert_eq!(found("muenchen").as_deref(), Some("München"));
-        // Only where nothing is called the name as typed.
+        // Only where nothing that fits is called the name as typed.
         assert_eq!(found("boerne").as_deref(), Some("Boerne"));
+        assert_eq!(found("muenster").as_deref(), Some("Muenster"));
+        assert_eq!(found("muenster germany").as_deref(), Some("Münster"));
     }
 
     #[test]
@@ -2423,6 +2465,7 @@ mod tests {
             city("Ontario", 175_000, "CA", "US", 34.06, -117.65),
             city("Newfoundland", 1_000, "NJ", "US", 41.04, -74.43),
             city("St. John's", 110_000, "NL", "CA", 47.56, -52.71),
+            city("Ala", 9_000, "TN", "IT", 45.76, 11.0),
             // As a places file that read no provinces has it.
             Place {
                 region: None,
@@ -2457,6 +2500,9 @@ mod tests {
         );
         let california = searcher.locate("ontario ca", None).unwrap().unwrap();
         assert_eq!(california.region.as_deref(), Some("CA"));
+        // A state's abbreviation alone is no state: Ala is in Italy.
+        let ala = searcher.locate("ala", None).unwrap().unwrap();
+        assert_eq!(ala.country.as_deref(), Some("IT"));
         // A province is often called by the first part of its name.
         let found = searcher.locate("st johns newfoundland", None).unwrap();
         assert_eq!(found.unwrap().name, "St. John's");

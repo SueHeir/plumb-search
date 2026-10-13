@@ -239,6 +239,7 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
                     NATURAL_SIGHTS.contains(&value)
                         && get("wikidata").is_some()
                         && get("water").is_none_or(|water| LAKE_WATERS.contains(&water))
+                        && get("waterway").is_none()
                 }
                 _ => value != "no" && value != "vacant",
             };
@@ -605,8 +606,10 @@ pub fn read_places(paths: &[PathBuf], articles: Option<&Path>) -> Result<Vec<Pla
     let (states, mut found): (Vec<_>, Vec<_>) = found
         .into_iter()
         .partition(|(place, _)| place.kind == STATE_KIND);
-    if let Some(articles) = articles {
-        add_article_names(&mut found, articles)?;
+    match articles {
+        Some(articles) => add_article_names(&mut found, articles)?,
+        // Then no article names a lake or mountain.
+        None => found.retain(|(place, _)| !place.kind.starts_with("natural=")),
     }
     let mut located: Vec<Place> = found.into_iter().map(|(place, _)| place).collect();
     let states: Vec<Place> = states.into_iter().map(|(state, _)| state).collect();
@@ -761,16 +764,19 @@ fn titled_region(title: &str, lon: f64) -> Option<(String, &'static str)> {
 /// takes nothing from it.
 fn add_article_names(found: &mut Vec<(Place, Option<u64>)>, path: &Path) -> Result<()> {
     let mut places_of: HashMap<u64, ItemPlaces> = HashMap::new();
+    // The parts of a lake or a beach are one place, not a brand's many,
+    // and a park or museum of the item stays its landmark.
+    let natural = |place: &Place| place.kind.starts_with("natural=");
     for (i, (place, item)) in found.iter().enumerate() {
         let Some(item) = item else { continue };
         let of = places_of.entry(*item).or_default();
-        of.places += 1;
+        of.places += u32::from(!natural(place));
         of.town |= place.is_town();
-        if !place.is_town()
-            && of
-                .landmark
-                .is_none_or(|best| found[best].0.rank < place.rank)
-        {
+        let better = |best: usize| {
+            let best = &found[best].0;
+            (!natural(best), best.rank) < (!natural(place), place.rank)
+        };
+        if !place.is_town() && of.landmark.is_none_or(better) {
             of.landmark = Some(i);
         }
     }
@@ -1392,6 +1398,8 @@ mod tests {
             ("wikidata", "Q19686"),
         ];
         assert!(place_of(&tags(river), "r7".into(), false).is_none());
+        let bank = &[river[0], river[1], ("waterway", "riverbank"), river[3]];
+        assert!(place_of(&tags(bank), "r7".into(), false).is_none());
         // A consulate's address says whose it is, not where.
         let consulate = &[
             ("name", "Consulado de El Salvador"),
@@ -1456,13 +1464,32 @@ mod tests {
             // A lake an article names, and a mountain none does.
             (at("Lake Tahoe", "natural=water", "r13"), Some(107374)),
             (at("Mount Nobody", "natural=peak", "n14"), Some(99)),
+            // A park stays its item's landmark, and a beach of four parts
+            // is no brand.
+            (
+                at("Emerald Bay State Park", "leisure=park", "w15"),
+                Some(555),
+            ),
+            (
+                Place {
+                    rank: place_rank("natural=water", 0, true, true, 9),
+                    ..at("Emerald Bay", "natural=water", "r16")
+                },
+                Some(555),
+            ),
         ];
+        found.extend((17..21).map(|n| {
+            (
+                at("Bondi Beach", "natural=beach", &format!("w{n}")),
+                Some(666),
+            )
+        }));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wikipedia-en.tsv");
         std::fs::write(
             &path,
             format!(
-                "{}{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}{}",
                 plumb_core::article::ARTICLES_HEADER,
                 "a line with no columns\n",
                 "90000\tBig Ben\tclock tower\tQ41225\t\tElizabeth Tower|BigBen|10.57232|Clock Tower (Westminster)|Big Ben, London\n",
@@ -1472,6 +1499,8 @@ mod tests {
                 "2293\tNiagara Falls, Ontario\tcity\tQ274120\t\tNiagara Falls, ON|Crowland Township\n",
                 "900\tGori, Georgia\ttown\tQ1003\t\t\n",
                 "60000\tLake Tahoe\tlake\tQ107374\t\tTahoe\n",
+                "40000\tEmerald Bay State Park\tpark\tQ555\t\t\n",
+                "50000\tBondi Beach\tbeach\tQ666\t\t\n",
             ),
         )
         .unwrap();
@@ -1502,7 +1531,11 @@ mod tests {
         assert_eq!(found[11].0.region, None);
         // The lake is a landmark; the mountain no article names is gone.
         assert!(found[12].0.is_landmark());
-        assert_eq!(found.len(), 13);
+        assert_eq!(found[13].0.name, "Emerald Bay State Park");
+        assert!(found[13].0.is_landmark());
+        assert_eq!(found[14].0.name, "Bondi Beach");
+        assert!(found[14].0.is_landmark());
+        assert_eq!(found.len(), 15);
     }
 
     #[test]

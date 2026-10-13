@@ -383,6 +383,8 @@ pub const CANADIAN_PROVINCES: &[(&str, &str)] = &[
 
 /// US states as the GPO Style Manual and the AP Stylebook abbreviate
 /// them, where that is not the postal code: "boston, mass." is Boston, MA.
+/// Read only after a town's name ([`us_state_abbreviated`]), since several
+/// are words or towns too ("Ala", "Ore", "Mich." for Michoacán).
 const US_STATE_ABBREVIATIONS: &[(&str, &str)] = &[
     ("AL", "Ala."),
     ("AZ", "Ariz."),
@@ -427,7 +429,6 @@ pub fn normalize_region(region: &str) -> String {
     US_STATES
         .iter()
         .chain(CANADIAN_PROVINCES)
-        .chain(US_STATE_ABBREVIATIONS)
         .find(|(_, full)| {
             // A name of two parts is often given as its first:
             // "Newfoundland" for Newfoundland and Labrador.
@@ -438,6 +439,16 @@ pub fn normalize_region(region: &str) -> String {
                     .is_some_and(|rest| rest.starts_with(" and "))
         })
         .map_or(region, |(code, _)| (*code).to_string())
+}
+
+/// The code of the US state `text` abbreviates as the style books do:
+/// "Mass." -> "MA", "w va" -> "WV".
+pub fn us_state_abbreviated(text: &str) -> Option<&'static str> {
+    let text = crate::normalize_text(text);
+    US_STATE_ABBREVIATIONS
+        .iter()
+        .find(|(_, short)| crate::normalize_text(short) == text)
+        .map(|(code, _)| *code)
 }
 
 /// Great-circle distance in km.
@@ -895,8 +906,10 @@ mod tests {
         assert_eq!(normalize_region("Bayern"), "Bayern");
         assert_eq!(normalize_region("Newfoundland"), "NL");
         assert_eq!(normalize_region("Labrador"), "Labrador");
-        assert_eq!(normalize_region("Mass."), "MA");
-        assert_eq!(normalize_region("w va"), "WV");
+        assert_eq!(normalize_region("Mich."), "Mich.", "Michoacán's too");
+        assert_eq!(us_state_abbreviated("Mass."), Some("MA"));
+        assert_eq!(us_state_abbreviated("w va"), Some("WV"));
+        assert_eq!(us_state_abbreviated("Massachusetts"), None);
     }
 
     #[test]
