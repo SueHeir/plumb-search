@@ -13,8 +13,9 @@
 //! words makes that site wanted too, one hop out from the search's own
 //! sites, after them.
 //!
-//! The words stay on the node, and are forgotten after [`WANT_KEPT`]; the
-//! sites see only the fetches, as a crawl's. Kept in memory and on disk,
+//! The words, and the pages found, stay on the node in a directory only
+//! its owner can read, and are forgotten after [`WANT_KEPT`]; the sites
+//! see only the fetches, as a crawl's. Kept in memory and on disk,
 //! at most [`MAX_SITES`] sites and 50,000 pages (fewer under a storage
 //! limit), come to about 40 MB:
 //!
@@ -34,7 +35,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::Result;
 use plumb_core::article::Article;
 use plumb_core::locks::{Locked, RwLocked};
-use plumb_core::{domain_label, registrable_domain, Operators};
+use plumb_core::{adult_level, domain_label, registrable_domain, AdultLevel, Operators};
 use plumb_crawl::{match_words, FollowTarget, Followed, Lead, WantedPage};
 use plumb_index::pages::{Page, PageSearcher, WANTED_SET};
 use plumb_index::SearchResults;
@@ -42,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 const DAY: u64 = 24 * 60 * 60;
-/// How long a search's words are kept.
+/// How long a search's words, and a page found, are kept.
 pub const WANT_KEPT: u64 = 30 * DAY;
 /// Sites kept: the searches' own before those one hop out, the most
 /// recently wanted first.
@@ -152,6 +153,10 @@ impl Site {
 
 impl Sites {
     fn want(&mut self, domain: &str, homepage: &str, want: Want) {
+        // Searches for ever new sites wait for the next prune.
+        if self.sites.len() >= 2 * MAX_SITES && !self.sites.contains_key(domain) {
+            return;
+        }
         let site = self.sites.entry(domain.to_string()).or_default();
         if site.homepage.is_empty() {
             site.homepage = homepage.to_string();
@@ -211,8 +216,16 @@ impl Pages {
         changed
     }
 
-    /// Forgets the least recently found pages past `max_pages`.
-    fn prune(&mut self, max_pages: usize) {
+    /// Forgets the pages not found again in [`WANT_KEPT`]: which pages a
+    /// node went looking for tells what its people searched. Then the least
+    /// recently found past `max_pages`.
+    fn prune(&mut self, now: u64, max_pages: usize) {
+        let before = self.pages.len();
+        self.pages.retain(|_, found| found.at + WANT_KEPT > now);
+        if self.pages.len() != before {
+            self.index = 0;
+            self.dirty = true;
+        }
         if self.pages.len() <= max_pages {
             return;
         }
@@ -321,10 +334,11 @@ impl WantedPages {
         }
     }
 
-    /// Forgets old searches, and the sites and pages past the most kept.
+    /// Forgets old searches and pages, and the sites and pages past the
+    /// most kept.
     pub fn prune(&self, now: u64, max_pages: usize) {
         self.sites.write_locked().prune(now);
-        self.pages.write_locked().prune(max_pages);
+        self.pages.write_locked().prune(now, max_pages);
     }
 
     /// The sites whose links are to be followed at `now`, whose homepage
@@ -358,7 +372,8 @@ impl WantedPages {
     }
 
     /// Keeps what following `targets`' links found: the `https` pages
-    /// `allowed` lets through, which answer the searches that wanted them,
+    /// `allowed` lets through and not plainly adult, which answer the
+    /// searches that wanted them,
     /// the leads left, and the other sites the pages link to with a
     /// search's words. Gives the number of pages new or changed.
     pub fn apply(
@@ -369,6 +384,13 @@ impl WantedPages {
         allowed: impl Fn(&str) -> bool,
     ) -> usize {
         let target = |domain: &str| targets.iter().find(|target| target.domain == domain);
+        let explicit = |page: &WantedPage| {
+            let domain = registrable_domain(&page.url).unwrap_or_default();
+            let texts = [page.title.as_str()]
+                .into_iter()
+                .chain(page.description.as_deref());
+            adult_level(&domain, texts) == AdultLevel::Explicit
+        };
         let mut changed = 0;
         let mut answered: HashSet<(String, Vec<String>)> = HashSet::new();
         {
@@ -378,7 +400,7 @@ impl WantedPages {
                     continue;
                 };
                 for (page, want) in &visit.pages {
-                    if page.url.starts_with("https://") && allowed(&page.url) {
+                    if page.url.starts_with("https://") && allowed(&page.url) && !explicit(page) {
                         changed += usize::from(pages.keep(page.clone(), now));
                         let words = target.wants.get(*want).cloned().unwrap_or_default();
                         answered.insert((visit.domain.clone(), words));
@@ -424,7 +446,10 @@ impl WantedPages {
                     continue;
                 };
                 sites.want(&other, &format!("https://{other}/"), want);
-                let leads = &mut sites.sites.entry(other).or_default().leads;
+                let Some(site) = sites.sites.get_mut(&other) else {
+                    continue;
+                };
+                let leads = &mut site.leads;
                 if !leads.iter().any(|known| known.url == lead.url) && leads.len() < MAX_SITE_LEADS
                 {
                     leads.push(lead);
@@ -464,6 +489,19 @@ impl WantedPages {
         written
     }
 
+    /// Creates the store's directory, readable by the node's owner only:
+    /// the index holds the pages found too.
+    fn create_dir(&self) -> io::Result<()> {
+        plumb_core::storage::create_directory(&self.dir, self.budget.as_ref())
+            .map_err(io::Error::other)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+
     fn write_files(
         &self,
         sites: Option<&BTreeMap<String, Site>>,
@@ -477,8 +515,7 @@ impl WantedPages {
             let Some(bytes) = bytes else {
                 continue;
             };
-            plumb_core::storage::create_directory(&self.dir, self.budget.as_ref())
-                .map_err(io::Error::other)?;
+            self.create_dir()?;
             let path = self.dir.join(name);
             plumb_core::storage::write_atomic_private(
                 &path,
@@ -530,6 +567,7 @@ impl WantedPages {
     }
 
     fn build(&self, number: u64, pages: Vec<WantedPage>) -> Result<PageSearcher> {
+        self.create_dir()?;
         let dir = self.dir.join(format!("{INDEX_PREFIX}{number}"));
         let pages = pages.into_iter().filter_map(|page| {
             Page::from_set(

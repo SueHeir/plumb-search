@@ -124,13 +124,21 @@ fn pages_found_answer_their_search_and_branch_out_once() {
                 },
                 0,
             ),
+            (
+                WantedPage {
+                    url: "https://www.irs.gov/xxx".into(),
+                    title: "Contribution limits xxx".into(),
+                    ..page.clone()
+                },
+                0,
+            ),
         ],
         leads: vec![lead("https://www.irs.gov/more-limits")],
         elsewhere: vec![(lead("https://www.ssa.gov/limits"), 0)],
         fetched: 5,
     };
     let then = NOW + LOOK_AGAIN;
-    // Only the https page is kept.
+    // Only the https page not plainly adult is kept.
     assert_eq!(store.apply(&targets, vec![followed], then, |_| true), 1);
     // The IRS search is answered; the page found links to ssa.gov, which
     // is wanted for it in turn, with that link to follow.
@@ -269,7 +277,7 @@ fn pages_kept_are_searched_and_saved() {
     reopened.save().unwrap();
     assert!(WantedPages::open(dir.path()).searcher().is_none());
     #[cfg(unix)]
-    for file in [SITES_FILE, PAGES_FILE] {
+    for file in ["", SITES_FILE, PAGES_FILE] {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(dir.path().join(file))
             .unwrap()
@@ -315,16 +323,33 @@ fn sites_searches_named_come_before_sites_one_hop_out() {
 }
 
 #[test]
-fn forgetting_a_search_is_saved() {
+fn searches_and_pages_are_forgotten_on_time() {
     let dir = tempfile::tempdir().unwrap();
     let store = WantedPages::open(dir.path());
     let irs = results(&IRS[..1], &[]);
     store.note("irs contribution limits", &irs, NOW, |_| true);
     store.note("irs tax brackets", &irs, NOW + WANT_KEPT / 2, |_| true);
+    let targets = store.due(NOW, 10, 5, |_| true);
+    let page = |path: &str| WantedPage {
+        url: format!("https://www.irs.gov/{path}"),
+        title: "Tax".into(),
+        depth: 1,
+        ..WantedPage::default()
+    };
+    let followed = |path: &str| Followed {
+        domain: "irs.gov".into(),
+        pages: vec![(page(path), 0)],
+        ..Followed::default()
+    };
+    store.apply(&targets, vec![followed("limits")], NOW, |_| true);
+    store.apply(&targets, vec![followed("brackets")], NOW + 1, |_| true);
     store.save().unwrap();
     store.prune(NOW + WANT_KEPT, 10);
     store.save().unwrap();
     let saved = std::fs::read_to_string(dir.path().join(SITES_FILE)).unwrap();
     assert!(saved.contains("bracket"));
     assert!(!saved.contains("contribution"));
+    let saved = std::fs::read_to_string(dir.path().join(PAGES_FILE)).unwrap();
+    assert!(saved.contains("/brackets"));
+    assert!(!saved.contains("/limits"));
 }

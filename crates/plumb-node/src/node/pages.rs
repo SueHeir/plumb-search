@@ -17,11 +17,11 @@ use std::time::{Duration, Instant};
 use std::io::Write;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, registrable_domain, Operators, SafeSearch};
+use plumb_core::{adult_level, now_unix, registrable_domain, Operators, SafeSearch};
 use plumb_index::pages::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
-    options_allow, place_operator_pages, place_pages, PageHit, PageSearcher, OPERATOR_PAGES,
-    WANTED_SET,
+    options_allow, place_operator_pages, place_pages, site_pages_after_named_article, PageHit,
+    PageSearcher, OPERATOR_PAGES, WANTED_SET,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -1258,16 +1258,22 @@ pub(super) fn add_pages(
             }
             lift_named_sites(&mut results.hits, &found);
             add_named_site_page(&searcher, wanted.as_ref(), query, &results.hits, &mut found);
-            // A page found for this node's searches may be of a site the
-            // adult blocklist took in after it was fetched.
-            let adult = inner
+            // Pages found for this node's searches come from anywhere on
+            // the web, not from sites picked by hand: they are checked as
+            // sites are, and against the adult blocklist as it is now.
+            let list = inner
                 .adult_list()
                 .filter(|_| options.safe != SafeSearch::Off);
             let adult = |hit: &PageHit| {
-                hit.page.set == WANTED_SET
-                    && adult.as_ref().is_some_and(|list| {
-                        registrable_domain(&hit.page.url).is_some_and(|d| list.contains(&d))
-                    })
+                if hit.page.set != WANTED_SET {
+                    return false;
+                }
+                let domain = registrable_domain(&hit.page.url).unwrap_or_default();
+                let texts = [hit.page.title.as_str()]
+                    .into_iter()
+                    .chain(hit.page.description.as_deref());
+                options.safe.hides(adult_level(&domain, texts))
+                    || list.as_ref().is_some_and(|list| list.contains(&domain))
             };
             found.retain(|hit| options_allow(options, &hit.page) && !adult(hit));
             if let Err(err) = searcher.note_demand(&mut results.hits) {
@@ -1368,7 +1374,8 @@ const WANTED_PER_SEARCH: usize = 3;
 
 /// Adds to `found` the pages found for this node's searches that `query`
 /// finds, best first among the page sets' by score: both are scored the
-/// same way, each set's popularity against its own most viewed page.
+/// same way, each set's popularity against its own most viewed page, and
+/// none goes above the article the query names.
 fn add_wanted(wanted: &PageSearcher, query: &str, found: &mut Vec<PageHit>) {
     match wanted.search(query, WANTED_PER_SEARCH) {
         Ok(more) => {
@@ -1379,6 +1386,7 @@ fn add_wanted(wanted: &PageSearcher, query: &str, found: &mut Vec<PageHit>) {
                 }
             }
             if found.len() > before {
+                site_pages_after_named_article(found);
                 found.sort_by(|a, b| b.score.total_cmp(&a.score));
             }
         }

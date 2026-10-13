@@ -1024,7 +1024,7 @@ const BELOW_NAMED_ARTICLE: f32 = 0.99;
 /// page at chessprogramming.org for "napoleon", loc.gov's for "abraham
 /// lincoln". A page on the article's own website keeps its score: nps.gov's
 /// "Yosemite National Park" is the park's own page.
-pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
+pub fn site_pages_after_named_article(hits: &mut [PageHit]) {
     let Some(article) = hits
         .iter()
         .filter(|hit| {

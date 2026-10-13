@@ -268,13 +268,15 @@ pub struct RunArgs {
     /// 300 with --profile desktop]. Each feed is checked at most hourly.
     #[arg(long, value_name = "N")]
     pub news_feeds: Option<usize>,
-    /// Don't go looking for the inner pages this node's searches want, and
-    /// don't show the ones found before. Without it, after a search whose
-    /// best sites show no page for the rest of its words, the node follows
-    /// those sites' links a few pages deep to find one, and keeps what it
-    /// finds for later searches.
+    /// Go looking for the inner pages this node's searches want: after a
+    /// search whose best sites show no page for the rest of its words, the
+    /// node follows those sites' links a few pages deep to find one, and
+    /// keeps what it finds for later searches. The searches' words are
+    /// kept 30 days in DIR/wanted, so it suits a node only you and people
+    /// you live with search; leave it off on a public server. On for
+    /// --profile desktop already.
     #[arg(long)]
-    pub no_wanted_pages: bool,
+    pub wanted_pages: bool,
     /// Never refresh: keep the index as the initial crawl leaves it.
     #[arg(long, conflicts_with_all = ["refresh_hours", "crawl_per_refresh"])]
     pub no_refresh: bool,

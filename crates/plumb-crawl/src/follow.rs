@@ -205,7 +205,7 @@ fn wanted_page(
     depth: u8,
 ) -> Option<(WantedPage, usize)> {
     let title = collapse_whitespace(meta.title.as_deref()?);
-    if title.is_empty() {
+    if title.is_empty() || url.len() > MAX_URL_BYTES {
         return None;
     }
     let mut words = match_words(&title);

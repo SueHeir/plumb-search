@@ -30,8 +30,8 @@ const ROUND_EVERY: Duration = Duration::from_secs(10 * 60);
 #[cfg(test)]
 const ROUND_EVERY: Duration = Duration::from_millis(200);
 
-/// Runs until the node stops. Turned off (`--no-wanted-pages`), it only
-/// forgets old searches on time.
+/// Runs until the node stops. Turned off, or on a node that only crawls,
+/// it only forgets old searches and pages on time.
 pub(super) async fn run(inner: Arc<Inner>) {
     loop {
         let max_pages = max_pages(inner.settings().storage_limit_mb);

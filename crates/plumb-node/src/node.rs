@@ -320,7 +320,9 @@ pub struct NodeConfig {
     /// share are still kept and shown.
     pub news_feeds: usize,
     /// Go looking for the inner pages this node's own searches want, and
-    /// show the ones found (see [`crate::wanted_pages`]).
+    /// show the ones found (see [`crate::wanted_pages`]). The searches'
+    /// words are kept 30 days, so it is on for the desktop app, as
+    /// [`NodeConfig::search_history`] is, and off for servers.
     pub wanted_pages: bool,
 }
 
@@ -378,7 +380,7 @@ impl NodeConfig {
             search_history: false,
             focus_topics: Vec::new(),
             news_feeds: 3_000,
-            wanted_pages: true,
+            wanted_pages: false,
         }
     }
 
@@ -397,6 +399,7 @@ impl NodeConfig {
             settings: NodeSettings::desktop(),
             manage_other_nodes: true,
             search_history: true,
+            wanted_pages: true,
             search_by_meaning: true,
             news_feeds: 300,
             ..NodeConfig::server(data_dir)
@@ -1074,10 +1077,11 @@ fn start_jobs(inner: &Arc<Inner>) -> Vec<(JoinHandle<()>, &'static str)> {
         job("the adult blocklist", |inner| {
             tokio::spawn(adult::run(inner))
         });
-        job("following links for searches", |inner| {
-            tokio::spawn(wanted_pages::run(inner))
-        });
     }
+    // Off or crawling only, it still forgets old searches on time.
+    job("following links for searches", |inner| {
+        tokio::spawn(wanted_pages::run(inner))
+    });
     job("signed sets", |inner| tokio::spawn(signed_sets::run(inner)));
     jobs
 }
@@ -2331,7 +2335,8 @@ impl StatusSource for Inner {
     }
 
     fn searched(&self, query: &str, results: &SearchResults) {
-        if self.config.wanted_pages {
+        // Pages found are shown next to the page sets' only.
+        if self.config.wanted_pages && self.pages.read_locked().is_some() {
             self.wanted_pages
                 .note(query, results, now_unix(), |url| self.may_want(url));
         }
