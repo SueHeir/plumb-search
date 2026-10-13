@@ -225,7 +225,8 @@ pub struct Page {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<plumb_core::profiles::Profile>,
     /// The item's official website when it is a subdomain or an inner page
-    /// of [`Page::site`]: `https://music.youtube.com/` for YouTube Music.
+    /// of [`Page::site`]: `https://music.youtube.com/` for YouTube Music. A
+    /// person's then has no site ([`Page::drop_borrowed_site`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<String>,
     /// A software package's card: its version, install command, docs.

@@ -402,7 +402,8 @@ impl PageSearcher {
             else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
+            let mut page: Page = serde_json::from_str(stored)?;
+            page.drop_borrowed_site();
             let popularity = document
                 .get_first(self.fields.popularity)
                 .and_then(|v| v.as_u64())
