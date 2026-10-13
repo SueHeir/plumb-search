@@ -724,10 +724,11 @@ impl PlaceSearcher {
             &TopDocs::with_limit(CANDIDATES)
                 .order_by_fast_field::<u64>("rank", tantivy::Order::Desc),
         )?;
-        // "park" is also the stem of "parking".
-        let parking = ["parking", "garage", "car park"]
-            .iter()
-            .any(|word| what.contains(word));
+        // "park" is also the stem of "parking": a car park is no park,
+        // and a park (or the Park Hotel) no parking.
+        const PARKING: [&str; 3] = ["parking", "garage", "car park"];
+        let says_parking = |text: &str| PARKING.iter().any(|word| text.contains(word));
+        let parking = says_parking(what);
         let mut hits = Vec::new();
         for (_, address) in found {
             let document: TantivyDocument = searcher.doc(address)?;
@@ -735,7 +736,12 @@ impl PlaceSearcher {
             if required_country.is_some_and(|country| !country_matches(&place, country)) {
                 continue;
             }
-            if place.is_town() || (place.kind == "amenity=parking" && !parking) {
+            let car_park = place.kind == "amenity=parking";
+            let no_parking = || {
+                let words = normalize_text(&format!("{} {}", place.name, place.kind_words()));
+                !car_park && !says_parking(&words)
+            };
+            if place.is_town() || (car_park && !parking) || (parking && no_parking()) {
                 continue;
             }
             let d = distance_km(center.lat, center.lon, place.lat, place.lon);
@@ -1187,7 +1193,8 @@ mod tests {
             .search("parking in denver", None, None, 5)
             .unwrap()
             .unwrap();
-        assert_eq!(parking.hits[0].place.name, "Union Station Park-n-Ride");
+        let names: Vec<&str> = parking.hits.iter().map(|h| h.place.name.as_str()).collect();
+        assert_eq!(names, ["Union Station Park-n-Ride"]);
         // Nothing of the kind around a town: still a search there, with no
         // places to list.
         let gyms = searcher
