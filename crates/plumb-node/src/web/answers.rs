@@ -1306,12 +1306,16 @@ pub(crate) fn fact_text(
                     } else {
                         2
                     };
+                    // A person's height in whole feet says little: 1.7 m
+                    // is 5 ft 7 in, not 6 ft.
+                    let imperial = if amount < 3.0 {
+                        let inches = (amount / 0.0254).round() as u64;
+                        format!("{} ft {} in", inches / 12, inches % 12)
+                    } else {
+                        format!("{} ft", group_digits(amount * 3.280_84, 0))
+                    };
                     (
-                        format!(
-                            "{} m ({} ft)",
-                            group_digits(amount, digits),
-                            group_digits(amount * 3.280_84, 0)
-                        ),
+                        format!("{} m ({imperial})", group_digits(amount, digits)),
                         None,
                     )
                 }
@@ -2017,6 +2021,11 @@ mod tests {
         );
         assert_eq!(text(FactKind::Radius, "6371000"), "6,371 km (3,959 mi)");
         assert_eq!(text(FactKind::Radius, "250"), "250 m (820 ft)");
+        // People's heights in feet and inches.
+        assert_eq!(text(FactKind::Height, "1.7"), "1.7 m (5 ft 7 in)");
+        assert_eq!(text(FactKind::Height, "2.06"), "2.06 m (6 ft 9 in)");
+        assert_eq!(text(FactKind::Height, "1.47"), "1.47 m (4 ft 10 in)");
+        assert_eq!(text(FactKind::Height, "46"), "46 m (151 ft)");
     }
 
     #[test]
