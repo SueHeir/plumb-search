@@ -30,6 +30,7 @@ use crate::cli::{EvalArgs, Half};
 use plumb_node::meaning::MeaningIndex;
 
 pub mod contracts;
+mod rerank;
 
 /// One query of a queries file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,7 +275,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
             .rerank_model
             .iter()
             .map(|dir| {
-                plumb_embed::Reranker::load(dir)
+                rerank::Reranker::load(dir)
                     .with_context(|| format!("loading the reranker in {}", dir.display()))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1351,7 +1352,7 @@ fn row_text(row: &serde_json::Value) -> String {
 /// Scores the first [`RERANKED_ROWS`] rows of a query written by
 /// [`feature_rows`] with each reranker: `ce` holds one score per model,
 /// and the query's `ce_ms` how long each model took over all its rows.
-fn rerank_rows(rerankers: &[plumb_embed::Reranker], query: &mut serde_json::Value) -> Result<()> {
+fn rerank_rows(rerankers: &[rerank::Reranker], query: &mut serde_json::Value) -> Result<()> {
     if rerankers.is_empty() {
         return Ok(());
     }

@@ -387,7 +387,7 @@ pub const REFERENCE_SITES: &[ReferenceSite] = &[
 
 /// The site of a page at `url`: the one whose host it is on.
 pub fn site_of_url(url: &str) -> Option<&'static ReferenceSite> {
-    let host = crate::host_of(url)?;
+    let host = plumb_core::host_of(url)?;
     REFERENCE_SITES.iter().find(|site| site.host == host)
 }
 
@@ -412,7 +412,7 @@ mod tests {
             }
             for index in site.index_pages {
                 assert!(index.starts_with("https://"), "{index}");
-                assert_eq!(crate::host_of(index).as_deref(), Some(site.host));
+                assert_eq!(plumb_core::host_of(index).as_deref(), Some(site.host));
             }
         }
     }

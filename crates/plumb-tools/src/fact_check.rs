@@ -5,7 +5,7 @@
 //! wrong is not made right by links.
 //!
 //! A [`FactBook`] holds the names of Wikipedia articles and the facts of
-//! the ones with facts ([`crate::facts`]). [`FactBook::check`] reads a
+//! the ones with facts ([`plumb_core::facts`]). [`FactBook::check`] reads a
 //! page's text a sentence at a time, finds the articles it names by their
 //! titles and, for each, a statement of one of its facts:
 //!
@@ -33,9 +33,9 @@
 
 use std::collections::HashMap;
 
-use crate::article::Article;
-use crate::facts::{Date, Fact, FactKind, ValueType};
-use crate::normalize_text;
+use plumb_core::article::Article;
+use plumb_core::facts::{Date, Fact, FactKind, ValueType};
+use plumb_core::normalize_text;
 
 /// Most words in a name looked for.
 pub const MAX_NAME_WORDS: usize = 6;
