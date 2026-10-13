@@ -24,7 +24,12 @@
 //! no file of it over `/plumb/pages/1`; one that finds no node with the
 //! set goes on taking files as before.
 //!
+//! Crawling only ([`NodeConfig::crawl_only`]), the node takes the
+//! denylist and the site rules alone, which its crawls keep to: no adult
+//! list, map or page sets, which only searching needs.
+//!
 //! [`NodeConfig::set_publishers`]: super::NodeConfig::set_publishers
+//! [`NodeConfig::crawl_only`]: super::NodeConfig::crawl_only
 
 use plumb_core::locks::Locked;
 use std::fs;
@@ -57,6 +62,9 @@ pub const PROJECT_KEY: &str = "ed25519:MMrfl7-ASNz-h2d2f0ru1EWjAws59Ls3D5TbdfJS9
 
 /// The sets every node takes, the denylist first.
 pub(super) const TAKEN_SETS: &[&str] = &[DENYLIST, SITE_RULES, super::adult::ADULT_SITES];
+
+/// The sets a node that only crawls takes: those its crawls keep to.
+const CRAWLING_SETS: &[&str] = &[DENYLIST, SITE_RULES];
 
 /// The map ([`crate::map`]), taken by a node that keeps one.
 pub(crate) const MAP: &str = "plumb/map";
@@ -235,7 +243,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
             return;
         };
         let mut met = false;
-        for set in TAKEN_SETS {
+        for set in taken_sets(inner.config.crawl_only) {
             match look(&inner, &net, set).await {
                 Ok(Looked::NoPeer) => {}
                 Ok(Looked::Current) => met = true,
@@ -410,9 +418,21 @@ async fn look_newer(
     }
 }
 
+/// The sets of [`TAKEN_SETS`] the node takes.
+fn taken_sets(crawl_only: bool) -> &'static [&'static str] {
+    if crawl_only {
+        CRAWLING_SETS
+    } else {
+        TAKEN_SETS
+    }
+}
+
 /// The page sets the node keeps pages of that come as item sets, and how
-/// many pages of each.
+/// many pages of each: none crawling only.
 fn page_sets_kept(inner: &Inner) -> Vec<(&'static SetInfo, u64)> {
+    if inner.config.crawl_only {
+        return Vec::new();
+    }
     let mut settings = inner.settings();
     if inner.config.blackhole {
         settings.page_sets = settings.page_sets.all_unless_set();
@@ -427,9 +447,10 @@ fn page_sets_kept(inner: &Inner) -> Vec<(&'static SetInfo, u64)> {
 /// has (the set's generation, or its map file's time when newer), so only
 /// a newer one is taken, and the most bytes it takes. As for the map
 /// file: a node with a storage limit takes one only when it already has a
-/// map, and a much bigger one only when `--set-updates` names it.
+/// map, and a much bigger one only when `--set-updates` names it. Never
+/// crawling only: nothing is searched, and the map is many gigabytes.
 fn map_wanted(inner: &Inner) -> Option<(Option<i64>, u64)> {
-    if inner.download_pause().is_some() {
+    if inner.config.crawl_only || inner.download_pause().is_some() {
         return None;
     }
     let data = &inner.paths.data;
@@ -887,6 +908,12 @@ mod tests {
         plumb_tools::set::write_set(items, fields, manifest, dir, &[1, 2], 3).unwrap();
         plumb_tools::set::sign_set(dir, key, None, None).unwrap();
         fs::read_to_string(dir.join(MANIFEST)).unwrap()
+    }
+
+    #[test]
+    fn crawling_only_takes_only_what_crawls_keep_to() {
+        assert_eq!(taken_sets(false), TAKEN_SETS);
+        assert_eq!(taken_sets(true), [DENYLIST, SITE_RULES]);
     }
 
     #[test]
