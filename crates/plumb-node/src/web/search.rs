@@ -574,6 +574,7 @@ pub(crate) async fn extras(
         let Ok(entities) = run_entities(state, &name, options).await else {
             continue;
         };
+        let entities = answers::profile_candidates(query, entities);
         let resolution = answers::resolve_entity(&name, &entities, None);
         if let answers::EntityResolution::Resolved(page) = &resolution {
             profile = answers::profile_answer_from_page(query, page);

@@ -342,6 +342,63 @@ pub fn profile_lookups(query: &str) -> Vec<String> {
     lookups
 }
 
+/// Services that list one kind of work, with the words an article's
+/// title is qualified with when it is one ("Barbie (film)", "Hades (video
+/// game)"). A page of the films set is a film or show.
+const KIND_LISTINGS: &[(&[&str], &[&str])] = &[
+    (
+        &[
+            "imdb",
+            "rotten-tomatoes",
+            "letterboxd",
+            "tmdb-movie",
+            "tmdb-tv",
+            "netflix",
+        ],
+        &["film", "series", "miniseries", "sitcom", "show", "tv"],
+    ),
+    (&["steam", "igdb"], &["game"]),
+];
+
+/// Of `candidates`, the articles a lookup of `query`'s profile may name
+/// ([`resolve_entity`]): for a listing of one kind of work
+/// ([`KIND_LISTINGS`]), only works of that kind when some are called so.
+/// "barbie cast" is the 2023 film's, not the doll's, "the last of us imdb"
+/// the show's, not the game's, and "hades steam" the game's, not the
+/// god's. The kind asked for decides, never which namesake has the
+/// profile.
+pub fn profile_candidates(
+    query: &str,
+    mut candidates: Vec<plumb_index::pages::PageHit>,
+) -> Vec<plumb_index::pages::PageHit> {
+    let Some((services, _)) = services_asked(query) else {
+        return candidates;
+    };
+    let Some((_, kinds)) = KIND_LISTINGS
+        .iter()
+        .find(|(keys, _)| services.iter().any(|s| keys.contains(&s.key)))
+    else {
+        return candidates;
+    };
+    let films = kinds.contains(&"film");
+    let of_kind = |hit: &plumb_index::pages::PageHit| {
+        let qualifier = hit
+            .page
+            .title
+            .strip_suffix(')')
+            .and_then(|title| title.rsplit_once(" ("));
+        films && hit.page.set == FILMS_SET
+            || qualifier.is_some_and(|(_, what)| {
+                what.split_whitespace()
+                    .any(|word| kinds.contains(&word.to_lowercase().as_str()))
+            })
+    };
+    if candidates.iter().any(of_kind) {
+        candidates.retain(of_kind);
+    }
+    candidates
+}
+
 /// Whether a lookup of `query`'s profile ([`profile_lookups`]) goes on
 /// to the songs and albums of the music set ([`songs_profile`]) when the
 /// article it names, resolved as `resolution`, gives none. Lyrics always

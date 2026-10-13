@@ -309,6 +309,7 @@ impl Mcp {
         let names_a_page = placed.iter().any(|placed| placed.hit.named);
         let profile = answers::profile_lookups(query).iter().find_map(|name| {
             let entities = self.backend.entities(name, 20, options).ok()?;
+            let entities = answers::profile_candidates(query, entities);
             let resolution = answers::resolve_entity(name, &entities, None);
             if let answers::EntityResolution::Resolved(page) = &resolution {
                 let profile = answers::profile_answer_from_page(query, page);

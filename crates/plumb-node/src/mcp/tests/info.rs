@@ -577,12 +577,12 @@ fn facts_entity_profiles_keep_the_existing_music_fallback() {
 }
 
 /// Finds `articles` for every name, and each of `songs` for its search.
-struct Songs {
+struct Profiles {
     articles: Vec<plumb_index::pages::PageHit>,
     songs: Vec<(&'static str, PlacedPage)>,
 }
 
-impl SearchBackend for Songs {
+impl SearchBackend for Profiles {
     fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
         Ok(Vec::new())
     }
@@ -645,7 +645,7 @@ fn lyrics_come_from_the_song_asked_for() {
         under: None,
         at: 0,
     };
-    let lyrics = |backend: Songs, query: &str| {
+    let lyrics = |backend: Profiles, query: &str| {
         Mcp::new(Arc::new(backend), None)
             .search(query, None, &SearchOptions::default())
             .unwrap()["profile"]
@@ -653,7 +653,7 @@ fn lyrics_come_from_the_song_asked_for() {
     };
     // Two articles are called "Creep"; MusicBrainz lists Radiohead's
     // first, with its page on Genius.
-    let creep = Songs {
+    let creep = Profiles {
         articles: vec![
             article(
                 "Creep (Radiohead song)",
@@ -671,7 +671,7 @@ fn lyrics_come_from_the_song_asked_for() {
     assert_eq!(profile["url"], "https://genius.com/Radiohead-creep-lyrics");
     // "Pyramid Song" is Radiohead's, never Wolfmother's "Pyramid", which a
     // search for "pyramid song" finds as a song.
-    let pyramid = Songs {
+    let pyramid = Profiles {
         articles: vec![article(
             "Pyramid Song",
             "Q1755624",
@@ -683,4 +683,75 @@ fn lyrics_come_from_the_song_asked_for() {
         )],
     };
     assert!(lyrics(pyramid, "pyramid song lyrics").is_null());
+}
+
+#[test]
+fn listings_are_of_the_kind_of_work_they_list() {
+    let article = |title: &str, item: &str, imdb: Option<&str>| plumb_index::pages::PageHit {
+        named: true,
+        ..shelved(Page::from_article(
+            "en",
+            plumb_core::article::Article {
+                title: title.into(),
+                item: Some(item.into()),
+                profiles: imdb
+                    .map(|id| plumb_core::profiles::Profile {
+                        service: "imdb".into(),
+                        id: id.into(),
+                    })
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        ))
+    };
+    let profile = |articles, query: &str| {
+        let backend = Profiles {
+            articles,
+            songs: Vec::new(),
+        };
+        Mcp::new(Arc::new(backend), None)
+            .search(query, None, &SearchOptions::default())
+            .unwrap()["profile"]
+            .clone()
+    };
+    let barbie = || {
+        vec![
+            article("Barbie", "Q167447", None),
+            article("Barbie (film)", "Q55606767", Some("tt1517268")),
+        ]
+    };
+    assert_eq!(
+        profile(barbie(), "barbie cast")["url"],
+        "https://www.imdb.com/title/tt1517268/"
+    );
+    // Other profiles are still the doll's, which has none; two shows of
+    // the name stay ambiguous.
+    assert!(profile(barbie(), "barbie youtube").is_null());
+    let offices = vec![
+        article(
+            "The Office (American TV series)",
+            "Q23831",
+            Some("tt0386676"),
+        ),
+        article(
+            "The Office (British TV series)",
+            "Q23834",
+            Some("tt0290978"),
+        ),
+    ];
+    assert!(profile(offices, "the office cast").is_null());
+    // A store of games lists the game, not the god.
+    let mut hades = vec![
+        article("Hades", "Q42272", None),
+        article("Hades (video game)", "Q63000000", None),
+    ];
+    hades[1].page.profiles = vec![plumb_core::profiles::Profile {
+        service: "steam".into(),
+        id: "1145360".into(),
+    }];
+    assert_eq!(
+        profile(hades, "hades steam")["url"],
+        "https://store.steampowered.com/app/1145360/"
+    );
 }
