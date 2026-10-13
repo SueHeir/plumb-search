@@ -10,7 +10,8 @@
 //!   ("depression help", "suicide hotline");
 //! - the time in a place: `time in tokyo`, `what time is it in paris`, and
 //!   a time from one place in another: `3pm est to pst` (with the `zones`
-//!   feature, on by default).
+//!   feature, on by default). For a town not in its own list, a caller
+//!   that can look up towns asks [`asked_town`] and [`time_in_town`].
 //!
 //! Nothing here reads the network, the clock or the computer's settings:
 //! the caller passes the current time and the rates it has, so the same
@@ -29,9 +30,13 @@ mod places;
 mod time;
 mod units;
 pub mod weather;
+#[cfg(feature = "zones")]
+mod zones;
 
 pub use currency::{Rates, ECB_RATES_URL};
 pub use format::format_number;
+#[cfg(feature = "zones")]
+pub use time::{asked_town, time_in_town, Town};
 
 /// What kind of question an [`Answer`] answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

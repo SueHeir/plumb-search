@@ -29,17 +29,23 @@ pub(crate) enum Hint {
     Article,
     /// A paper of that title: "batch normalization paper".
     Paper,
+    /// A person of that name, of whom something is asked: "obama
+    /// daughters", "picasso paintings".
+    Person,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
 }
 
-/// Words before a name that ask about it.
+/// Words before a name that ask about it. "What's" is read as "what is";
+/// "whats" is not, since "whats app" is a misspelled name.
 const HINT_LEADS: &[&str] = &[
     "who is ",
     "who was ",
     "who are ",
     "who were ",
     "tell me about ",
+    "what is the meaning of ",
+    "what is the definition of ",
     "what is a ",
     "what is an ",
     "what is the ",
@@ -54,7 +60,44 @@ const HINT_LEADS: &[&str] = &[
     "info about ",
     "information about ",
     "facts about ",
+    "what causes a ",
+    "what causes an ",
+    "what causes the ",
+    "what causes ",
+    "where is the ",
+    "where is ",
+    "where are the ",
+    "where are ",
+    "how many people live in ",
 ];
+
+/// What "how ... is" asks the measure of: "how tall is the eiffel tower".
+const MEASURES: &[&str] = &[
+    "tall", "old", "big", "long", "deep", "high", "far", "wide", "large", "heavy",
+];
+
+/// What a question of how something works or how big it is asks about:
+/// "refrigerator" of "how does a refrigerator work", "eiffel tower" of
+/// "how tall is the eiffel tower". `None` for other questions ("how do i
+/// make pancakes", where "how do" starts any question) and for "it".
+fn asked_how(q: &str) -> Option<&str> {
+    let works = ["how does ", "how do "]
+        .iter()
+        .find_map(|lead| q.strip_prefix(lead)?.strip_suffix(" work"));
+    let measured = || {
+        let (measure, rest) = q.strip_prefix("how ")?.split_once(' ')?;
+        let rest = ["is ", "are ", "was "]
+            .iter()
+            .find_map(|verb| rest.strip_prefix(verb))?;
+        MEASURES.contains(&measure).then_some(rest)
+    };
+    let about = works.or_else(measured)?;
+    let about = ["a ", "an ", "the "]
+        .iter()
+        .find_map(|article| about.strip_prefix(article))
+        .unwrap_or(about);
+    (!matches!(about, "it" | "this" | "that" | "they" | "these" | "those")).then_some(about)
+}
 
 /// Words after a name that say what about it is wanted.
 const HINT_TAILS: &[(&str, Hint)] = &[
@@ -73,6 +116,37 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" net worth", Hint::Any),
     (" wife", Hint::Any),
     (" husband", Hint::Any),
+    // What people ask about a person, which a person's article answers but
+    // whose words it is not called by. "Cause of death" before "death".
+    (" cause of death", Hint::Person),
+    (" death", Hint::Person),
+    (" kids", Hint::Person),
+    (" children", Hint::Person),
+    (" daughter", Hint::Person),
+    (" daughters", Hint::Person),
+    (" son", Hint::Person),
+    (" sons", Hint::Person),
+    (" parents", Hint::Person),
+    (" mother", Hint::Person),
+    (" father", Hint::Person),
+    (" siblings", Hint::Person),
+    (" family", Hint::Person),
+    (" girlfriend", Hint::Person),
+    (" boyfriend", Hint::Person),
+    (" education", Hint::Person),
+    (" nationality", Hint::Person),
+    (" religion", Hint::Person),
+    (" awards", Hint::Person),
+    (" stats", Hint::Person),
+    (" movies", Hint::Person),
+    (" films", Hint::Person),
+    (" books", Hint::Person),
+    (" novels", Hint::Person),
+    (" poems", Hint::Person),
+    (" songs", Hint::Person),
+    (" albums", Hint::Person),
+    (" paintings", Hint::Person),
+    (" inventions", Hint::Person),
     (" cast", Hint::Any),
     (" author", Hint::Any),
     (" movie", Hint::Any),
@@ -81,6 +155,8 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" mean", Hint::Any),
     (" means", Hint::Any),
     (" definition", Hint::Any),
+    (" stand for", Hint::Any),
+    (" stands for", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
 ];
@@ -89,10 +165,17 @@ const HINT_TAILS: &[(&str, Hint)] = &[
 /// wanted, and what kind of page they ask for: "lululemon" of "lululemon
 /// wikipedia". `None` when there are none, or nothing else.
 pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
-    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?')).to_lowercase();
-    let mut name = q.as_str();
+    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?'))
+        .to_lowercase()
+        .replace('’', "'");
+    let asked = q
+        .strip_prefix("what's ")
+        .map(|rest| format!("what is {rest}"));
+    let mut name = asked.as_deref().unwrap_or(&q);
     let mut hint = None;
-    if let Some(rest) = HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)) {
+    if let Some(rest) =
+        asked_how(name).or_else(|| HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)))
+    {
         name = rest;
         hint = Some(Hint::Any);
     }
@@ -325,6 +408,11 @@ impl PageSearcher {
         model: Option<&crate::spell_model::Model>,
         site_known: &dyn Fn(&str) -> bool,
     ) -> Result<Option<crate::Spelling>> {
+        // A web address is a name, not words: "amazn.com" is not "amazon
+        // com". The sites suggest the address it is a slip of.
+        if crate::names::typed_domain(query).is_some() {
+            return Ok(None);
+        }
         let searcher = self.reader.searcher();
         let docs = |word: &str| -> Result<u64> {
             Ok(searcher.doc_freq(&Term::from_field_text(self.fields.words, word))?)
@@ -486,12 +574,34 @@ impl PageSearcher {
         let mut hits = self.search_once(query, limit, scope)?;
         // "lululemon wikipedia", "batch normalization paper", "who is
         // galileo": the words that say what is wanted are not part of the
-        // name, so the name is searched for too.
-        let Some((name, hint)) = hinted_name(query) else {
+        // name, so the name is searched for too. So is what a fact question
+        // asks about, or "when was isaac newton born" lists Newton's mother
+        // and namesakes, whose descriptions hold its words, and not him;
+        // but not when the query is itself a name ("age of empires"). Of
+        // that search only the pages the subject names are kept: "madrid
+        // spanish" (of "madrid spanish capital city") names nothing, and
+        // the clubs it describes would push Madrid out.
+        let hinted = hinted_name(query);
+        let asked = hinted.is_none();
+        let Some((name, hint)) = hinted.or_else(|| {
+            plumb_core::facts::fact_asked(query)
+                .filter(|_| !hits.iter().any(|hit| hit.named))
+                .map(|asked| (asked.subject, Hint::Any))
+        }) else {
             return Ok(hits);
         };
         let mut found = self.search_once(&name, limit, scope)?;
+        if asked {
+            found.retain(|hit| hit.named);
+        }
         match hint {
+            // Only a person the name names, and not when a page is called
+            // the whole query: "black death" is not about the singer Black,
+            // nor "christmas songs" about Christmas.
+            Hint::Person => {
+                let called = hits.iter().any(|hit| hit.named);
+                found.retain(|hit| !called && hit.named && hit.page.is_person());
+            }
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             Hint::Paper => {
                 if found.iter().any(|hit| hit.page.set == PAPERS_SET) {
