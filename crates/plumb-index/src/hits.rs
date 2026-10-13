@@ -101,7 +101,7 @@ impl Searcher {
             .as_deref()
             .is_some_and(|url| reads_another_site(url, &domain));
         let url = stored_url
-            .filter(|_| !borrowed)
+            .filter(|url| !borrowed && !is_check_address(url))
             .unwrap_or_else(|| format!("https://{domain}/"));
         let own = |field| text(field).filter(|_| !borrowed);
         let about = text(self.fields.about);
@@ -113,9 +113,11 @@ impl Searcher {
             // A title in the wrong encoding ("����") says nothing.
             title: own(self.fields.title).filter(|title| !title.contains('\u{FFFD}')),
             official: about.is_some(),
-            // The site's own description, else Wikipedia's, else what
-            // Wikidata says it is.
-            description: own(self.fields.description).or(about),
+            // The site's own description, unless its template left it
+            // unfilled, else Wikipedia's, else what Wikidata says it is.
+            description: own(self.fields.description)
+                .filter(|description| !is_unfilled(description))
+                .or(about),
             domain,
             score: ranked.score,
             text_score: ranked.text_score,
@@ -144,6 +146,52 @@ impl Searcher {
 /// google.com ([`plumb_core::subsites`]).
 pub(crate) fn reads_another_site(url: &str, domain: &str) -> bool {
     registrable_domain(url).is_some_and(|site| site != domain)
+}
+
+/// Whether `url`, where a crawl of a homepage ended, is a bot check's
+/// address (https://www.skyscanner.nl/sttc/px/captcha-v2/index.html?uuid=…,
+/// https://www.dreamwidth.org/captcha?returnto=…): a link to it leads only
+/// to a stale check, so the site's root is linked instead.
+fn is_check_address(url: &str) -> bool {
+    let path = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .map_or("", |(_, path)| path);
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    path.contains("captcha") || path.starts_with("cdn-cgi/")
+}
+
+/// Descriptions, after [`normalize_text`], that a site's template was
+/// meant to fill in.
+const UNFILLED: &[&str] = &[
+    "description",
+    "desc",
+    "site description",
+    "meta description",
+    "description here",
+    "your description here",
+    "null",
+    "undefined",
+];
+
+/// Whether `description` is a template's placeholder no one filled in,
+/// which says nothing of the site: "{{description}}" (frengly.com), "{{
+/// page.excerpt }}", "null", "YOUR DESCRIPTION HERE", or a name and
+/// "desc" ("surbl desc" on surbl.org).
+pub(crate) fn is_unfilled(description: &str) -> bool {
+    let text = description.trim();
+    let words = normalize_text(text);
+    [("{{", "}}"), ("{%", "%}"), ("${", "}")]
+        .iter()
+        .any(|(open, close)| text.starts_with(open) && text.ends_with(close))
+        || UNFILLED.contains(&words.as_str())
+        || words
+            .split_once(' ')
+            .is_some_and(|(_, last)| last == "desc")
 }
 
 /// The text of `hit` that search operators look at, besides its domain.
