@@ -54,7 +54,7 @@ const LIMITS: Limits = Limits {
     bare_spawns: 17,
     unwraps: 19,
     long_functions: 30,
-    long_files: 6,
+    long_files: 5,
 };
 
 const RAW_LOCKS: &[&str] = &[
