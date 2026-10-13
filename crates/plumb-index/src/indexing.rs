@@ -89,11 +89,8 @@ pub struct IndexBuild {
 }
 
 impl IndexBuild {
-    /// Starts a build that replaces the index in `dir` when finished.
-    pub fn new(dir: &Path) -> Result<IndexBuild> {
-        Self::new_with_budget(dir, None)
-    }
-
+    /// Starts a build that replaces the index in `dir` when finished,
+    /// counting what it writes against `budget`.
     pub fn new_with_budget(
         dir: &Path,
         budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
