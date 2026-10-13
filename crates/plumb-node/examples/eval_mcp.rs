@@ -18,8 +18,8 @@ use axum::Json;
 use clap::Parser;
 use plumb_core::Operators;
 use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, operators_allow, options_allow,
-    place_operator_pages, place_pages, Page, PageHit, PageSearcher, OPERATOR_PAGES,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
+    options_allow, place_operator_pages, place_pages, Page, PageHit, PageSearcher, OPERATOR_PAGES,
 };
 use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher};
 use plumb_node::cli::MeaningArgs;
@@ -108,6 +108,7 @@ impl FrozenBackend {
         if rank.add_named_site {
             add_named_site(&mut results.hits, &found, |domain| self.sites.site(domain));
         }
+        drop_far_namesakes(&mut results.hits, &found, rank.meaning_only_relevance);
         if rank.drop_namesakes {
             drop_namesakes_of_words(&mut results.hits, &found);
         }
