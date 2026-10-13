@@ -262,6 +262,90 @@ fn questions_without_the_word_asked_about_are_not_found() {
 }
 
 #[test]
+fn asking_words_count_half_toward_a_question() {
+    let question = |title: &str, tags: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some(tags.into()),
+            item: Some(item.into()),
+            views: 100_000,
+            ..Article::default()
+        })
+    };
+    let pages = [
+        question(
+            "How many amps should my car pull while it is turned off?",
+            "battery, relay, power",
+            "1",
+        ),
+        question(
+            "How long does cooked pasta last in the fridge?",
+            "pasta, storage-lifetime, refrigerator",
+            "2",
+        ),
+        question(
+            "How do I get my toddler to sleep by himself?",
+            "sleep, toddler",
+            "3",
+        ),
+        question("Is it safe to drive through the night?", "road-trips", "4"),
+        question(
+            "Can I eat cheese which has been infected with blue cheese mold?",
+            "cheese, food-safety",
+            "5",
+        ),
+        question(
+            "Is it healthy for a cat to regularly eat cheese?",
+            "cats, diet",
+            "6",
+        ),
+        question("Why does my cat knead?", "cats, behavior", "7"),
+        question("How do I stop my cat scratching furniture?", "cats", "8"),
+    ];
+    // Names that make the query's other words known, not typos.
+    let known = [
+        "Climate change",
+        "Social change",
+        "Change management",
+        "Social work",
+        "Work ethic",
+        "Work (physics)",
+        "Twelfth Night",
+        "Night owl",
+        "Through the Night",
+        "Through the Looking-Glass",
+        "Through the Wall",
+        "Get Out",
+        "Get Smart",
+        "My Fair Lady",
+        "I, Robot",
+        "I Love Lucy",
+    ]
+    .map(|title| page(title, 1_000, &[]));
+    let (_dir, s) = searcher(&[&pages[..], &known[..]].concat());
+    let found = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.is_question())
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    // Only the asking words and one or two others.
+    assert!(found("how to change a car battery").is_empty());
+    assert!(found("how does a refrigerator work").is_empty());
+    assert_eq!(
+        found("can cats eat cheese"),
+        ["Is it healthy for a cat to regularly eat cheese?"]
+    );
+    // Most of what the query asks about.
+    assert_eq!(
+        found("how do i get my toddler to sleep through the night"),
+        ["How do I get my toddler to sleep by himself?"]
+    );
+}
+
+#[test]
 fn no_question_is_found_for_a_known_word_none_asks_about() {
     let question = |title: &str, tags: &str, item: &str| {
         Page::from_question(Article {

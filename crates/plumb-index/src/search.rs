@@ -48,7 +48,7 @@ impl Searcher {
     pub fn open(dir: &Path) -> Result<Self> {
         let index = Index::open_in_dir(dir)
             .with_context(|| format!("opening search index in {}", dir.display()))?;
-        analysis::register(index.tokenizers());
+        analysis::register_sites(index.tokenizers());
         if !schema::readable(&index.schema()) {
             bail!(
                 "the index in {} was built by another version of plumb-index; rebuild it",

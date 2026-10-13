@@ -330,7 +330,10 @@ pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
 /// What to search for to find whose profile `query` asks for: the words
 /// before the service ("mrbeast" of "mrbeast youtube"), and for lyrics
 /// those words as a song too, since a song is only found when asked for
-/// as one ("bohemian rhapsody song" for "bohemian rhapsody lyrics").
+/// as one ("bohemian rhapsody song" for "bohemian rhapsody lyrics"). For
+/// a listing of one kind of work, the name without the words saying that
+/// kind too: "top gun movie cast" asks for the film called Top Gun,
+/// unless a film is called "Top Gun Movie" ("bee movie cast").
 pub fn profile_lookups(query: &str) -> Vec<String> {
     let Some((services, name)) = services_asked(query) else {
         return Vec::new();
@@ -339,7 +342,168 @@ pub fn profile_lookups(query: &str) -> Vec<String> {
     if services.iter().any(|s| s.key == "genius-song") {
         lookups.push(format!("{name} song"));
     }
+    if let Some(title) = listed_kinds(&services).and_then(|kinds| kind_named(&name, kinds)) {
+        lookups.push(title.to_string());
+    }
     lookups
+}
+
+/// Services that list one kind of work, with the words that call a work
+/// that kind: in its article's title ("Barbie (film)", "Hades (video
+/// game)"), at the head of its description ("1986 action drama film by
+/// Tony Scott") or after its name in a search ("top gun movie"). A page
+/// of the films set is a film or show.
+const KIND_LISTINGS: &[(&[&str], &[&str])] = &[
+    (
+        &[
+            "imdb",
+            "rotten-tomatoes",
+            "letterboxd",
+            "tmdb-movie",
+            "tmdb-tv",
+            "netflix",
+        ],
+        &[
+            "film",
+            "movie",
+            "series",
+            "miniseries",
+            "sitcom",
+            "show",
+            "tv",
+        ],
+    ),
+    (&["steam", "igdb"], &["game"]),
+];
+
+/// Where a description stops saying what its page is and goes on to who
+/// made it or what it is part of.
+const DESCRIPTION_HEAD_ENDS: &[&str] = &[
+    " by ",
+    " directed ",
+    " created ",
+    " starring ",
+    " based ",
+    " of ",
+    " from ",
+    " (",
+    ",",
+];
+
+/// The kinds of work [`KIND_LISTINGS`] has for the listing among
+/// `services`, if one is.
+fn listed_kinds(services: &[&plumb_core::profiles::Service]) -> Option<&'static [&'static str]> {
+    KIND_LISTINGS
+        .iter()
+        .find(|(keys, _)| services.iter().any(|s| keys.contains(&s.key)))
+        .map(|(_, kinds)| *kinds)
+}
+
+/// `name` without the words after it saying it is one of `kinds` ("top
+/// gun" of "top gun movie", "the office" of "the office tv show", "halo"
+/// of "halo video game"), when it has some.
+fn kind_named<'a>(name: &'a str, kinds: &[&str]) -> Option<&'a str> {
+    let (rest, last) = name.rsplit_once(' ')?;
+    kinds.contains(&last).then(|| {
+        rest.strip_suffix(" tv")
+            .or_else(|| rest.strip_suffix(" video"))
+            .unwrap_or(rest)
+    })
+}
+
+/// Of `candidates`, the articles a lookup of `name` for `query`'s profile
+/// may name ([`resolve_entity`]): for a listing of one kind of work
+/// ([`KIND_LISTINGS`]), only works of that kind when some are called so.
+/// "barbie cast" is the 2023 film's, not the doll's, "the last of us imdb"
+/// the show's, not the game's, and "hades steam" the game's, not the
+/// god's. Looked up with its kind ("top gun movie"), only a work called
+/// so, since a search names every film of the title then, and the film
+/// called Top Gun is looked up by its name alone ([`profile_lookups`]).
+/// The kind asked for decides, never which namesake has the profile.
+pub fn profile_candidates(
+    query: &str,
+    name: &str,
+    mut candidates: Vec<plumb_index::pages::PageHit>,
+) -> Vec<plumb_index::pages::PageHit> {
+    let Some(kinds) = services_asked(query).and_then(|(services, _)| listed_kinds(&services))
+    else {
+        return candidates;
+    };
+    if kind_named(name, kinds).is_some() {
+        let name = plumb_core::normalize_text(name);
+        candidates.retain(|hit| {
+            plumb_core::normalize_text(plumb_index::pages::base_title(&hit.page.title)) == name
+        });
+    }
+    let films = kinds.contains(&"film");
+    let of_kind = |hit: &plumb_index::pages::PageHit| {
+        let qualifier = hit
+            .page
+            .title
+            .strip_suffix(')')
+            .and_then(|title| title.rsplit_once(" ("));
+        let description = hit.page.description.as_deref().unwrap_or("").to_lowercase();
+        let head_end = DESCRIPTION_HEAD_ENDS
+            .iter()
+            .filter_map(|end| description.find(end))
+            .min()
+            .unwrap_or(description.len());
+        films && hit.page.set == FILMS_SET
+            || qualifier.is_some_and(|(_, what)| {
+                what.split_whitespace()
+                    .any(|word| kinds.contains(&word.to_lowercase().as_str()))
+            })
+            || description[..head_end]
+                .split_whitespace()
+                .last()
+                .is_some_and(|word| kinds.contains(&word))
+    };
+    if candidates.iter().any(of_kind) {
+        candidates.retain(of_kind);
+    }
+    candidates
+}
+
+/// Whether a lookup of `query`'s profile ([`profile_lookups`]) goes on
+/// to the songs and albums of the music set ([`songs_profile`]) when the
+/// article it names, resolved as `resolution`, gives none. Lyrics always
+/// do: MusicBrainz knows a song's page on Genius more often than Wikidata,
+/// and lists the best-known recording of a title first ("creep" is
+/// Radiohead's, though TLC's has an article too). Other profiles only
+/// when no article is called so, and never a film's, show's or game's
+/// listing ([`KIND_LISTINGS`]), which no song has.
+pub fn searches_songs(query: &str, resolution: &EntityResolution) -> bool {
+    services_asked(query).is_some_and(|(services, _)| {
+        services.iter().any(|s| s.key == "genius-song")
+            || matches!(resolution, EntityResolution::Unresolved)
+                && listed_kinds(&services).is_none()
+    })
+}
+
+/// The profile `query` asks for of a song or album among `found`, what a
+/// search for a lookup found ([`searches_songs`]). When the lookup's
+/// article resolved as `resolution`, the song must have its title: a
+/// search for "pyramid song", Radiohead's "Pyramid Song", finds
+/// Wolfmother's "Pyramid" as a song too.
+pub fn songs_profile(
+    query: &str,
+    resolution: &EntityResolution,
+    found: Vec<PlacedPage>,
+) -> Option<ProfileAnswer> {
+    let title = |title: &str| plumb_core::normalize_text(plumb_index::pages::base_title(title));
+    let songs: Vec<PlacedPage> = found
+        .into_iter()
+        .filter(|placed| {
+            placed.hit.page.set == MUSIC_SET
+                && match resolution {
+                    EntityResolution::Resolved(page) => {
+                        title(&placed.hit.page.title) == title(&page.title)
+                    }
+                    _ => true,
+                }
+        })
+        .collect();
+    profile_answer(query, &songs)
 }
 
 /// The official profile `query` asks for ("mrbeast youtube", "valve
@@ -358,7 +522,7 @@ pub fn profile_answer(query: &str, pages: &[PlacedPage]) -> Option<ProfileAnswer
 }
 
 /// Renders a profile only after the caller has resolved its entity.
-pub(crate) fn profile_answer_from_page(query: &str, page: &Page) -> Option<ProfileAnswer> {
+pub fn profile_answer_from_page(query: &str, page: &Page) -> Option<ProfileAnswer> {
     let (services, _) = services_asked(query)?;
     let source = if page.set == MUSIC_SET {
         "MusicBrainz"
@@ -550,13 +714,13 @@ pub(crate) fn fact_pages(pages: &[PlacedPage]) -> impl Iterator<Item = &PlacedPa
 
 /// Resolving an entity does not inspect whether it has the requested
 /// fact. A missing fact must never select a namesake instead.
-pub(crate) enum EntityResolution<'a> {
+pub enum EntityResolution<'a> {
     Resolved(&'a Page),
     Ambiguous(Vec<&'a Page>),
     Unresolved,
 }
 
-pub(crate) fn resolve_entity<'a>(
+pub fn resolve_entity<'a>(
     subject: &str,
     candidates: &'a [plumb_index::pages::PageHit],
     kinds: Option<&[plumb_core::facts::FactKind]>,
@@ -615,24 +779,6 @@ pub(crate) fn resolve_entity<'a>(
     if candidates.is_empty() {
         return EntityResolution::Unresolved;
     }
-    let legal_name = |title: &str| {
-        let title = key(title);
-        for suffix in [
-            ", inc.",
-            " inc.",
-            ", inc",
-            " inc",
-            " corporation",
-            " corp.",
-            " ltd.",
-            " limited",
-        ] {
-            if let Some(bare) = title.strip_suffix(suffix) {
-                return bare.to_string();
-            }
-        }
-        title
-    };
     if kinds.is_some_and(|kinds| {
         kinds
             .iter()
@@ -653,7 +799,7 @@ pub(crate) fn resolve_entity<'a>(
             })
             .collect();
         if named.len() > 1 {
-            return EntityResolution::Ambiguous(named.iter().map(|hit| &hit.page).collect());
+            return main_sense(&subject, &named);
         }
     }
     let exact: Vec<_> = candidates
@@ -684,7 +830,45 @@ pub(crate) fn resolve_entity<'a>(
     match candidates.as_slice() {
         [] => EntityResolution::Unresolved,
         [hit] => EntityResolution::Resolved(&hit.page),
-        _ => EntityResolution::Ambiguous(candidates.iter().map(|hit| &hit.page).collect()),
+        _ => main_sense(&subject, &candidates),
+    }
+}
+
+/// The bare name of a company's legal one ("Netflix, Inc."), lowercased.
+fn legal_name(title: &str) -> String {
+    let title = plumb_core::collapse_whitespace(title).to_lowercase();
+    for suffix in [
+        ", inc.",
+        " inc.",
+        ", inc",
+        " inc",
+        " corporation",
+        " corp.",
+        " ltd.",
+        " limited",
+    ] {
+        if let Some(bare) = title.strip_suffix(suffix) {
+            return bare.to_string();
+        }
+    }
+    title
+}
+
+/// Settles a tie between pages named like `subject` (lowercased): the one
+/// Wikipedia article known by the name in full, by its title, its legal
+/// name or a redirect ("Beethoven" to Ludwig van Beethoven), is Wikipedia's
+/// main sense of it, so items with no article and pages named so only
+/// before a qualifier ("Beethoven (film)") give way to it. Two such
+/// articles ("Apple" and "Apple Inc.") leave the question open.
+fn main_sense<'a>(subject: &str, tied: &[&'a plumb_index::pages::PageHit]) -> EntityResolution<'a> {
+    let mut own = tied.iter().filter(|hit| {
+        let title = &hit.page.title;
+        hit.page.is_article()
+            && (legal_name(title) == subject || hit.named && !title.trim_end().ends_with(')'))
+    });
+    match (own.next(), own.next()) {
+        (Some(hit), None) => EntityResolution::Resolved(&hit.page),
+        _ => EntityResolution::Ambiguous(tied.iter().map(|hit| &hit.page).collect()),
     }
 }
 
@@ -753,8 +937,11 @@ pub(crate) fn fact_answer_from_page(
 }
 
 /// Words before a name that ask what it is: "what is a" of "what is a
-/// manatee".
+/// manatee". "what's" is read as "what is"; "whats" is not, since "whats
+/// app" is a misspelled name.
 const DEFINITION_LEADS: &[&str] = &[
+    "what is the meaning of ",
+    "what is the definition of ",
     "what is a ",
     "what is an ",
     "what is the ",
@@ -775,16 +962,38 @@ const DEFINITION_LEADS: &[&str] = &[
 /// "photosynthesis definition".
 const DEFINITION_TAILS: &[&str] = &[" definition", " meaning", " defined", " explained"];
 
+/// Words after "what does" and a name that ask what it means or is: "what
+/// does lol mean", "what does nasa stand for", "what does a cpa do".
+const DOES_TAILS: &[&str] = &[" mean", " stand for", " stands for", " do"];
+
 /// The name `query` asks what it is: "manatee" of "what is a manatee?",
-/// "photosynthesis" of "define photosynthesis". `None` for a query that
-/// asks nothing so, or more than that ("what is the capital of france"
-/// asks a fact, "what is my ip" about the searcher).
+/// "photosynthesis" of "define photosynthesis", "nasa" of "what does nasa
+/// stand for". `None` for a query that asks nothing so, or more than that
+/// ("what is the capital of france" asks a fact, "what is my ip" about the
+/// searcher).
 pub(crate) fn definition_asked(query: &str) -> Option<String> {
     let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches(['?', '.', '!']))
-        .to_lowercase();
-    let name = DEFINITION_LEADS
-        .iter()
-        .find_map(|lead| q.strip_prefix(lead))
+        .to_lowercase()
+        .replace('’', "'");
+    let q = match q.strip_prefix("what's ") {
+        Some(rest) => format!("what is {rest}"),
+        None => q,
+    };
+    let does = q.strip_prefix("what does ").and_then(|rest| {
+        let name = DOES_TAILS.iter().find_map(|tail| rest.strip_suffix(tail))?;
+        Some(
+            ["a ", "an ", "the "]
+                .iter()
+                .find_map(|article| name.strip_prefix(article))
+                .unwrap_or(name),
+        )
+    });
+    let name = does
+        .or_else(|| {
+            DEFINITION_LEADS
+                .iter()
+                .find_map(|lead| q.strip_prefix(lead))
+        })
         .or_else(|| {
             DEFINITION_TAILS
                 .iter()
@@ -802,6 +1011,9 @@ pub(crate) fn definition_asked(query: &str) -> Option<String> {
                     | "i"
                     | "you"
                     | "we"
+                    | "it"
+                    | "this"
+                    | "that"
                     | "of"
                     | "in"
                     | "for"
@@ -841,12 +1053,15 @@ pub(crate) fn definition_answer(pages: &[PlacedPage]) -> Option<plumb_answer::An
 }
 
 /// Whether `query` asks what a word means rather than what a thing is:
-/// "define anadromous", "prioritize meaning". Such a query is answered
-/// from Wiktionary first, others from Wikipedia first.
+/// "define anadromous", "prioritize meaning", "what does gdp stand for".
+/// Such a query is answered from Wiktionary first, others from Wikipedia
+/// first.
 pub(crate) fn asks_word(query: &str) -> bool {
     let q = query.to_lowercase();
-    q.split_whitespace()
-        .any(|word| matches!(word, "define" | "definition" | "meaning" | "means" | "mean"))
+    q.contains(" stand for")
+        || q.contains(" stands for")
+        || q.split_whitespace()
+            .any(|word| matches!(word, "define" | "definition" | "meaning" | "means" | "mean"))
 }
 
 /// What the Wiktionary word `page` means, as an answer: "(adjective) Of
@@ -1098,8 +1313,24 @@ mod tests {
             definition_asked("who was ada lovelace").as_deref(),
             Some("ada lovelace")
         );
+        // However it is asked.
+        for (query, name) in [
+            ("what does lol mean", "lol"),
+            ("What does NASA stand for?", "nasa"),
+            ("what does a cpa do", "cpa"),
+            ("what's a roth ira", "roth ira"),
+            ("what’s kombucha", "kombucha"),
+            ("what is the meaning of serendipity", "serendipity"),
+            ("what is the definition of inflation", "inflation"),
+        ] {
+            assert_eq!(definition_asked(query).as_deref(), Some(name), "{query}");
+        }
         assert_eq!(definition_asked("what is my ip"), None);
         assert_eq!(definition_asked("what is the capital of france"), None);
+        assert_eq!(definition_asked("what's the capital of france"), None);
+        assert_eq!(definition_asked("what does it mean"), None);
+        assert_eq!(definition_asked("what does my name mean"), None);
+        assert_eq!(definition_asked("whats app"), None);
         assert_eq!(definition_asked("manatee"), None);
         let mut manatee = article("West Indian manatee", "species of mammal", None);
         manatee.page.lead = Some(
@@ -1133,6 +1364,7 @@ mod tests {
     fn words_answer_what_they_mean() {
         assert!(asks_word("define anadromous"));
         assert!(asks_word("prioritize meaning"));
+        assert!(asks_word("what does gdp stand for"));
         assert!(!asks_word("what is a manatee"));
         let word = Page::from_word(plumb_core::Article {
             title: "anadromous".into(),
@@ -1187,6 +1419,53 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn facts_of_the_main_sense_of_a_name_despite_namesakes() {
+        use plumb_core::facts::{fact_asked, FactKind::*};
+        let entity = |title: &str, item: &str, facts: &[(plumb_core::facts::FactKind, &str)]| {
+            let mut hit = with_facts(article(title, "", None), facts);
+            hit.page.item = Some(item.into());
+            hit
+        };
+        let ask = |q: &str, candidates: &[PageHit]| {
+            let asked = fact_asked(q).unwrap();
+            match resolve_entity(&asked.subject, candidates, Some(&asked.kinds)) {
+                EntityResolution::Resolved(page) => fact_answer_from_page(&asked, page, 0),
+                _ => None,
+            }
+        };
+        // Named by a redirect ("Beethoven"), the person comes before the
+        // pages named so only before a qualifier.
+        let beethoven = [
+            entity("Beethoven (film)", "Q754892", &[]),
+            entity("Ludwig van Beethoven", "Q255", &[(Born, "1770-12-17")]),
+            entity("Beethoven (TV series)", "Q2566764", &[]),
+        ];
+        let born = ask("when was beethoven born", &beethoven).unwrap();
+        assert_eq!(born.answer, "December 17, 1770");
+        // A founding question too: the organization, not the band.
+        let un = [
+            entity("United Nations (band)", "Q7888317", &[(Founded, "2005")]),
+            entity("United Nations", "Q1065", &[(Founded, "1945-10-24")]),
+        ];
+        let founded = ask("when was the united nations founded", &un).unwrap();
+        assert_eq!(founded.answer, "October 24, 1945");
+        // An item with no article gives way to the article of its name.
+        let mut no_article = entity("Gold", "Q910023", &[]);
+        no_article.page.set = plumb_index::pages::WIKIDATA_SET.into();
+        let gold = [no_article, entity("Gold", "Q897", &[(AtomicNumber, "79")])];
+        assert_eq!(ask("atomic number of gold", &gold).unwrap().answer, "79");
+        // Named only before their qualifiers, namesakes stay a question.
+        let qualified = [
+            entity("Einstein (American TV series)", "Q910020", &[]),
+            entity("Einstein (film)", "Q910022", &[]),
+        ];
+        assert!(matches!(
+            resolve_entity("einstein", &qualified, None),
+            EntityResolution::Ambiguous(_)
+        ));
     }
 
     #[test]
@@ -1729,6 +2008,60 @@ mod tests {
         );
         assert_eq!(profile_lookups("mrbeast youtube"), ["mrbeast"]);
         assert!(profile_lookups("hey jude").is_empty());
+        // Lyrics are looked for among songs whatever the articles called
+        // so; other profiles only when there are none.
+        let ambiguous = EntityResolution::Ambiguous(Vec::new());
+        assert!(searches_songs("creep lyrics", &ambiguous));
+        assert!(searches_songs(
+            "hey jude spotify",
+            &EntityResolution::Unresolved
+        ));
+        assert!(!searches_songs("hey jude spotify", &ambiguous));
+    }
+
+    #[test]
+    fn a_work_asked_for_with_its_kind_is_the_one_called_so() {
+        assert_eq!(
+            profile_lookups("top gun movie cast"),
+            ["top gun movie", "top gun"]
+        );
+        assert_eq!(
+            profile_lookups("the office tv show imdb"),
+            ["the office tv show", "the office"]
+        );
+        assert_eq!(
+            profile_lookups("halo video game steam"),
+            ["halo video game", "halo"]
+        );
+        assert_eq!(profile_lookups("top gun cast"), ["top gun"]);
+        assert_eq!(profile_lookups("mrbeast movie youtube"), ["mrbeast movie"]);
+        // With its kind, only a work called so: not the 1955 film a search
+        // for "top gun movie" names, but "Bee Movie".
+        let mut old = article("Top Gun", "Film by Henry Levin, 1955", None);
+        old.page.set = FILMS_SET.to_string();
+        assert!(profile_candidates("top gun movie cast", "top gun movie", vec![old]).is_empty());
+        let bee = article("Bee Movie", "2007 animated film by Simon J. Smith", None);
+        assert_eq!(
+            profile_candidates("bee movie cast", "bee movie", vec![bee]).len(),
+            1
+        );
+        // The head of a description says what kind of work it is on.
+        let kept = profile_candidates(
+            "top gun cast",
+            "top gun",
+            vec![
+                article("Top Gun", "1986 action drama film by Tony Scott", None),
+                article("Top Gun (video game)", "1987 video game", None),
+                article("Top Gun (franchise)", "Action film franchise", None),
+            ],
+        );
+        let titles: Vec<_> = kept.iter().map(|hit| hit.page.title.as_str()).collect();
+        assert_eq!(titles, ["Top Gun"]);
+        // No song has a film's listing.
+        assert!(!searches_songs(
+            "top gun movie cast",
+            &EntityResolution::Unresolved
+        ));
     }
 
     #[test]
