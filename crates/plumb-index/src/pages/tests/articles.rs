@@ -11,6 +11,8 @@ fn words_that_say_what_is_wanted_keep_the_name() {
         page("Ariana Grande", 300_000, &[]),
         page("Hiccup", 60_000, &["Hiccups"]),
         page("Refrigerator", 70_000, &["Fridge"]),
+        page("Eiffel Tower", 80_000, &[]),
+        page("Eiffel Tower (Paris, Tennessee)", 2_000, &[]),
         Page::from_paper(Article {
             title: "Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift".into(),
             description: Some("Paper by Sergey Ioffe et al., 2015".into()),
@@ -39,6 +41,10 @@ fn words_that_say_what_is_wanted_keep_the_name() {
     assert_eq!(
         first("how does a refrigerator work"),
         Some(("Refrigerator".into(), true))
+    );
+    assert_eq!(
+        first("how tall is the eiffel tower"),
+        Some(("Eiffel Tower".into(), true))
     );
     let (title, named) = first("batch normalization paper").unwrap();
     assert!(
@@ -207,6 +213,10 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("what causes the northern lights", "northern lights"),
         ("how does a refrigerator work", "refrigerator"),
         ("how do vaccines work", "vaccines"),
+        ("how tall is the eiffel tower", "eiffel tower"),
+        ("how big is texas", "texas"),
+        ("where is machu picchu", "machu picchu"),
+        ("how many people live in tokyo", "tokyo"),
     ] {
         assert_eq!(
             hinted_name(query),
@@ -216,6 +226,8 @@ fn articles_are_found_by_what_they_say_of_themselves() {
     }
     assert_eq!(hinted_name("whats app"), None);
     assert_eq!(hinted_name("how does it work"), None);
+    assert_eq!(hinted_name("how long is it"), None);
+    assert_eq!(hinted_name("how long does it take to boil an egg"), None);
     assert_eq!(hinted_name("how do i make pancakes"), None);
 }
 

@@ -61,18 +61,40 @@ const HINT_LEADS: &[&str] = &[
     "what causes an ",
     "what causes the ",
     "what causes ",
+    "where is the ",
+    "where is ",
+    "where are the ",
+    "where are ",
+    "how many people live in ",
 ];
 
-/// Words before a name that, with " work" after it, ask how it works:
-/// "how does a refrigerator work". Alone they start any question ("how do
-/// i make pancakes").
-const WORKS_LEADS: &[&str] = &[
-    "how does a ",
-    "how does an ",
-    "how does the ",
-    "how does ",
-    "how do ",
+/// What "how ... is" asks the measure of: "how tall is the eiffel tower".
+const MEASURES: &[&str] = &[
+    "tall", "old", "big", "long", "deep", "high", "far", "wide", "large", "heavy",
 ];
+
+/// What a question of how something works or how big it is asks about:
+/// "refrigerator" of "how does a refrigerator work", "eiffel tower" of
+/// "how tall is the eiffel tower". `None` for other questions ("how do i
+/// make pancakes", where "how do" starts any question) and for "it".
+fn asked_how(q: &str) -> Option<&str> {
+    let works = ["how does ", "how do "]
+        .iter()
+        .find_map(|lead| q.strip_prefix(lead)?.strip_suffix(" work"));
+    let measured = || {
+        let (measure, rest) = q.strip_prefix("how ")?.split_once(' ')?;
+        let rest = ["is ", "are ", "was "]
+            .iter()
+            .find_map(|verb| rest.strip_prefix(verb))?;
+        MEASURES.contains(&measure).then_some(rest)
+    };
+    let about = works.or_else(measured)?;
+    let about = ["a ", "an ", "the "]
+        .iter()
+        .find_map(|article| about.strip_prefix(article))
+        .unwrap_or(about);
+    (!matches!(about, "it" | "this" | "that" | "they" | "these" | "those")).then_some(about)
+}
 
 /// Words after a name that say what about it is wanted.
 const HINT_TAILS: &[(&str, Hint)] = &[
@@ -117,11 +139,8 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
         .map(|rest| format!("what is {rest}"));
     let mut name = asked.as_deref().unwrap_or(&q);
     let mut hint = None;
-    let works = WORKS_LEADS
-        .iter()
-        .find_map(|lead| name.strip_prefix(lead)?.strip_suffix(" work"))
-        .filter(|rest| !matches!(*rest, "it" | "this" | "that" | "they" | "these" | "those"));
-    if let Some(rest) = works.or_else(|| HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)))
+    if let Some(rest) =
+        asked_how(name).or_else(|| HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)))
     {
         name = rest;
         hint = Some(Hint::Any);
