@@ -808,3 +808,48 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
     assert_eq!(sites[1].title.as_deref(), Some("Welcome to Steam"));
     assert_eq!(sites[2].title.as_deref(), Some("California Post"));
 }
+
+#[test]
+fn a_famous_surname_alone_names_the_person() {
+    let person = |title: &str, views: u64| {
+        let mut person = page(title, views, &[]);
+        person.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1925-10-13".into(),
+        }];
+        person
+    };
+    let mut hilton = page("Hilton Worldwide", 3_448, &[]);
+    hilton.description = Some("American hospitality company".into());
+    hilton.site = Some("hilton.com".into());
+    let (_dir, s) = searcher(&[
+        person("Margaret Thatcher", 43_807),
+        person("Denis Thatcher", 3_863),
+        page("Thatcher effect", 900, &[]),
+        person("Franz Kafka", 32_449),
+        page("Kafka (film)", 1_200, &[]),
+        page("Kafka on the Shore", 4_270, &[]),
+        // Read too little more than another of the name.
+        person("Franklin D. Roosevelt", 69_007),
+        person("Theodore Roosevelt", 52_362),
+        // An article is called the word, or a company's site is.
+        person("Bruno Mars", 90_557),
+        page("Mars", 80_000, &[]),
+        person("Paris Hilton", 34_645),
+        hilton,
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("thatcher"), ["Margaret Thatcher"]);
+    assert_eq!(named("kafka"), ["Franz Kafka", "Kafka (film)"]);
+    assert!(named("roosevelt").is_empty());
+    assert_eq!(named("mars"), ["Mars"]);
+    assert!(named("hilton").is_empty());
+    // A surname and more words still name no one.
+    assert!(named("thatcher era").is_empty());
+}
