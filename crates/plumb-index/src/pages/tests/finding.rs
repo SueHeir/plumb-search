@@ -645,6 +645,69 @@ fn spellings_keep_the_words_pages_know() {
     );
 }
 
+/// Wikipedia keeps the misspellings people type as redirects, so the
+/// pages know "mississipi" and "einstien" and name articles by them.
+#[test]
+fn misspelled_redirects_are_still_corrected() {
+    let pages = [
+        page("Mississippi", 9_000, &["Mississipi", "MS"]),
+        page("Mississippi River", 5_000, &["Mississipi River"]),
+        page(
+            "University of Mississippi",
+            2_000,
+            &["University of Mississipi"],
+        ),
+        page("Albert Einstein", 9_000, &["Einstein", "Einstien"]),
+        page("Hanukkah", 3_000, &["Hanukah", "Chanukah"]),
+        // A misspelling that is a title too, but of a little read page.
+        page("Cemetery", 9_000, &["Cemetary"]),
+        page("Cemetary (band)", 10, &[]),
+        page("Cemetary Gates", 20, &[]),
+        page("Cemetary Hill", 20, &[]),
+        page("Stain", 900, &[]),
+        page("Staining", 800, &[]),
+        page("Stain removal", 10, &[]),
+        page("Wood stain", 10, &[]),
+    ];
+    let (_dir, searcher) = searcher(&pages);
+    let spelling = |query: &str| crate::Spelling {
+        query: query.into(),
+        site: None,
+        applied: false,
+    };
+    let checked = |typed: &str, fixed: &str| {
+        searcher
+            .check_spelling(typed, spelling(fixed))
+            .unwrap()
+            .map(|spelling| spelling.query)
+    };
+    assert_eq!(
+        checked("mississipi", "mississippi").as_deref(),
+        Some("mississippi")
+    );
+    assert_eq!(
+        checked("mississipi river cruise", "mississippi river cruise").as_deref(),
+        Some("mississippi river cruise")
+    );
+    assert_eq!(checked("cemetary", "cemetery").as_deref(), Some("cemetery"));
+    // A word the best read page with it is titled with is put back.
+    assert_eq!(checked("stain wood", "spain wood"), None);
+    let spelled_right = |typed: &str, fixed: Option<&str>| {
+        let found = searcher.search(typed, 10).unwrap();
+        searcher.spelled_right(typed, &found, fixed.map(spelling).as_ref())
+    };
+    // Named by a redirect, but the suggestion names the article too.
+    assert!(!spelled_right("einstien", Some("einstein")));
+    assert!(!spelled_right("mississipi", Some("mississippi")));
+    assert!(!spelled_right("hanukah", Some("hanukkah")));
+    // Named by its title as typed: spelled right.
+    assert!(spelled_right("cemetary", Some("cemetery")));
+    assert!(spelled_right("stain", Some("spain")));
+    // Named by a redirect, and nothing else suggested.
+    assert!(spelled_right("einstien", None));
+    assert!(spelled_right("einstein", Some("einstien")));
+}
+
 #[test]
 fn untitled_sites_take_their_article_s_title() {
     let mut notion = page("Notion (productivity software)", 500, &[]);

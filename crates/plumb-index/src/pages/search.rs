@@ -15,6 +15,7 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 use super::building::schema;
 use super::page::is_item_id;
 use super::scoring::truncate_keeping_inner_pages;
+use super::sites::base_title;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
     KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET, POPULARITY_SCALE,
@@ -317,8 +318,10 @@ impl PageSearcher {
     /// ([`PageSearcher::knows_word`]) put back as typed; `None` when no
     /// change is left. The sites index hardly knows "pkce", "dplyr" or
     /// "stain", so it suggests "pace", "plyr" and "spain"; pages name them.
-    /// A correction to a site's name ([`crate::Spelling::site`]) is kept:
-    /// "wels fargo" is a typo even though Wels is a town.
+    /// A word the pages know only as a misspelling of the word suggested
+    /// ([`PageSearcher::misspells`]) is not put back. A correction to a
+    /// site's name ([`crate::Spelling::site`]) is kept: "wels fargo" is a
+    /// typo even though Wels is a town.
     pub fn check_spelling(
         &self,
         query: &str,
@@ -335,7 +338,7 @@ impl PageSearcher {
             .collect();
         if typed.len() == fixed.len() {
             for (word, fix) in typed.iter().zip(fixed.iter_mut()) {
-                if word != fix && self.knows_word(word)? {
+                if word != fix && self.knows_word(word)? && !self.misspells(word, fix)? {
                     fix.clone_from(word);
                 }
             }
@@ -355,6 +358,79 @@ impl PageSearcher {
             query: fixed.join(" "),
             ..spelling
         }))
+    }
+
+    /// Whether `word` is a misspelling of `fix` that Wikipedia keeps as a
+    /// redirect: the most read article with the word among its names is
+    /// titled with `fix` and not with the word. "mississipi" is in the
+    /// names of ten pages, but only as a redirect to Mississippi and the
+    /// like; "stain" is the title of Stain, not a misspelling of "spain".
+    fn misspells(&self, word: &str, fix: &str) -> Result<bool> {
+        let searcher = self.reader.searcher();
+        let named = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.fields.words, word),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ),
+            (Occur::Must, self.scope_term("set:wikipedia-en")),
+        ]);
+        let top =
+            TopDocs::with_limit(1).order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        let Some((_, address)) = searcher.search(&named, &top)?.pop() else {
+            return Ok(false);
+        };
+        let document: TantivyDocument = searcher.doc(address)?;
+        let Some(stored) = document
+            .get_first(self.fields.page)
+            .and_then(|v| v.as_str())
+        else {
+            return Ok(false);
+        };
+        let page: Page = serde_json::from_str(stored)?;
+        let title = analysis::tokens(&self.words, &page.title);
+        Ok(title.iter().any(|t| t == fix) && !title.iter().any(|t| t == word))
+    }
+
+    /// Whether the pages `found` for `query` say it is spelled as meant, so
+    /// that no other spelling is suggested: one is a package, holds all of
+    /// a question's main words ("git undo last commit" is not "git und") or
+    /// is named by it ("serde crate" is not "serde create"). A page does
+    /// not count when `fix`, the spelling suggested, names it before the
+    /// query does, by its title or by another name read more (the most
+    /// read come first): Wikipedia keeps the misspellings people type as
+    /// redirects, so "einstien" names Albert Einstein, but after
+    /// "Einstein".
+    pub fn spelled_right(
+        &self,
+        query: &str,
+        found: &[PageHit],
+        fix: Option<&crate::Spelling>,
+    ) -> bool {
+        let key = |text: &str| {
+            analysis::tokens(&self.joined, text)
+                .pop()
+                .unwrap_or_default()
+        };
+        let typed = key(query);
+        let fixed = fix
+            .map(|fix| key(&fix.query))
+            .filter(|fixed| *fixed != typed);
+        let misnamed = |page: &Page| {
+            fixed.as_ref().is_some_and(|fixed| {
+                [page.title.as_str(), base_title(&page.title)]
+                    .into_iter()
+                    .chain(page.aliases.iter().map(String::as_str))
+                    .map(key)
+                    .find(|name| *name == typed || name == fixed)
+                    .is_some_and(|name| name == *fixed)
+            })
+        };
+        found
+            .iter()
+            .any(|hit| hit.page.package.is_some() || hit.whole || hit.named && !misnamed(&hit.page))
     }
 
     /// A suggested spelling of `query` from the words of the pages' names,
