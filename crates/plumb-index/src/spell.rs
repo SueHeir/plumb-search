@@ -9,7 +9,9 @@
 //!   up to 3 letters, 1 up to 7, then 2. A swap of two neighbouring
 //!   letters counts as one edit. Only a site with a link score of at least
 //!   [`MIN_FIX_LINK_SCORE`] can be the correction: look-alike sites have no
-//!   popularity to show, so a typo never leads to them.
+//!   popularity to show, so a typo never leads to them. With the spelling
+//!   model, one word is not taken for a name when another word is a
+//!   likelier slip of it: "existance" is "existence", not distance.to.
 //! - **Words.** Any other word that hardly appears in the index (in fewer
 //!   than [`KNOWN_WORD_DOCS`] sites) is replaced by the nearest known word
 //!   that appears in many more ([`FIX_DOCS_RATIO`] times as many). A rare
@@ -237,6 +239,44 @@ impl Speller<'_> {
         Ok(docs)
     }
 
+    /// The words of the index within `edits` edits of `word`, each with
+    /// its edit distance.
+    fn near_words(&self, word: &str, edits: u8) -> Result<BTreeMap<String, u8>> {
+        let mut near = BTreeMap::new();
+        for field in self.word_fields() {
+            near.extend(near_terms(self.searcher, field, word, edits)?);
+        }
+        Ok(near)
+    }
+
+    /// Whether a known word other than `name`, a site's name, is likelier
+    /// what `word` was meant as by the noisy channel, `P(word | meant) *
+    /// P(meant)`, each counted as a word of the sites: "existance" is a
+    /// slip of "existence", not of distance.to's name, and "supercede" of
+    /// "supersede", not supercell.com's.
+    fn likelier_word_than(&self, word: &str, name: &str) -> Result<bool> {
+        let Some(model) = self.model.filter(|_| self.tuning.channel) else {
+            return Ok(false);
+        };
+        let likelihood =
+            |term: &str, docs: u64| model.ln_channel(word, term) + (docs.max(1) as f64).ln();
+        let as_name = likelihood(name, self.docs_with(name)?);
+        let needed = KNOWN_WORD_DOCS.max(FIX_DOCS_RATIO.saturating_mul(self.docs_with(word)?));
+        for term in self
+            .near_words(word, max_edits(word.chars().count()))?
+            .into_keys()
+        {
+            if term == name || !plausible_word_fix(word, &term) {
+                continue;
+            }
+            let docs = self.docs_with(&term)?;
+            if docs >= needed && likelihood(&term, docs) > as_name {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Whether `word` is, as typed, the whole name of a site with a link
     /// score of at least `least`: "lyft" is not a typo of "syft", nor
     /// "ulta" of "alta".
@@ -359,6 +399,11 @@ impl Speller<'_> {
                         break;
                     }
                 }
+                // A word is no site's name when another word is a likelier
+                // slip of it: "sentance" is "sentence", not sundance.org.
+                if plausible && covers == 1 && self.likelier_word_than(&words[0], &fixed[0])? {
+                    continue;
+                }
                 if plausible {
                     return Ok(Some(NameFix {
                         covers,
@@ -392,12 +437,7 @@ impl Speller<'_> {
         {
             return Ok(None);
         }
-        let mut near: BTreeMap<String, u8> = BTreeMap::new();
-        for field in self.word_fields() {
-            for (term, distance) in near_terms(self.searcher, field, word, edits)? {
-                near.insert(term, distance);
-            }
-        }
+        let near = self.near_words(word, edits)?;
         // Only to a known word: a slip of a rare word is no likelier than
         // a rare word typed as meant.
         let needed = KNOWN_WORD_DOCS.max(FIX_DOCS_RATIO.saturating_mul(docs));
@@ -477,13 +517,7 @@ impl Speller<'_> {
             {
                 continue;
             }
-            let mut near: BTreeMap<String, u8> = BTreeMap::new();
-            for field in self.word_fields() {
-                for (term, distance) in near_terms(self.searcher, field, word, max_edits(chars))? {
-                    near.insert(term, distance);
-                }
-            }
-            for term in near.into_keys() {
+            for term in self.near_words(word, max_edits(chars))?.into_keys() {
                 if model.count(&term) < MIN_FIX_DOCS as u32
                     || !within_edits(word, &term)
                     || !plausible_word_fix(word, &term)
