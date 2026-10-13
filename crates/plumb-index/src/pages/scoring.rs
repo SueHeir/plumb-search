@@ -4,12 +4,14 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use plumb_core::registrable_domain;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{TantivyDocument, Term};
 
 use super::docs::docs_asked;
+use super::page::is_item_id;
 use super::sites::base_title;
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
@@ -836,6 +838,39 @@ fn fold_films(hits: Vec<PageHit>) -> Vec<PageHit> {
         }
     }
     kept
+}
+
+/// How far below the article the query names [`site_pages_after_named_article`]
+/// puts a site's inner page.
+const BELOW_NAMED_ARTICLE: f32 = 0.99;
+
+/// Scores the inner pages of sites (the subpages and reference sets) below
+/// the best Wikipedia article the query names. Such a page's popularity is
+/// its site's weight over its depth, not how much its subject is read, so
+/// any page titled just "Napoleon" or "Plato" outranked the article and
+/// took its place among the results, info box and all: a chess engine's
+/// page at chessprogramming.org for "napoleon", loc.gov's for "abraham
+/// lincoln". A page on the article's own website keeps its score: nps.gov's
+/// "Yosemite National Park" is the park's own page.
+pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
+    let Some(article) = hits
+        .iter()
+        .filter(|hit| {
+            hit.named && hit.page.is_article() && hit.page.item.as_deref().is_some_and(is_item_id)
+        })
+        .max_by(|a, b| a.score.total_cmp(&b.score))
+    else {
+        return;
+    };
+    let (most, own_site) = (
+        article.score * BELOW_NAMED_ARTICLE,
+        article.page.site.clone(),
+    );
+    for hit in hits.iter_mut().filter(|hit| hit.page.is_site_page()) {
+        if own_site.is_none() || registrable_domain(&hit.page.url) != own_site {
+            hit.score = hit.score.min(most);
+        }
+    }
 }
 
 /// Cuts `hits`, best first, to `limit`, keeping the best docs page and the

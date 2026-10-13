@@ -52,6 +52,53 @@ fn subpages_are_found_like_reference_pages() {
 }
 
 #[test]
+fn subpages_named_like_an_article_come_after_it() {
+    let subpage = |url: &str, title: &str, views: u64| {
+        Page::from_set(
+            SUBPAGES_SET,
+            Article {
+                title: title.into(),
+                item: Some(url.into()),
+                views,
+                ..Article::default()
+            },
+        )
+        .unwrap()
+    };
+    let article = |title: &str, views: u64, site: Option<&str>| {
+        let mut article = page(title, views, &[]);
+        article.item = Some(format!("Q{views}"));
+        article.site = site.map(str::to_string);
+        article
+    };
+    let (_dir, searcher) = searcher(&[
+        article("United States", 10_000_000, None),
+        article("Napoleon", 30_000, None),
+        article("Yosemite National Park", 20_000, Some("nps.gov")),
+        subpage(
+            "https://www.nps.gov/yose/",
+            "Yosemite National Park",
+            10_000,
+        ),
+        subpage("https://chessprogramming.org/Napoleon", "Napoleon", 4_000),
+    ]);
+    let first = |query: &str| {
+        let hits = searcher.search(query, 10).unwrap();
+        assert_eq!(hits.len(), 2, "{query}: {hits:?}");
+        hits[0].page.url.clone()
+    };
+    // Read by the site's weight, the chess engine would come first.
+    assert_eq!(first("napoleon"), "https://en.wikipedia.org/wiki/Napoleon");
+    // Under a site the query names, the one page listed is the article.
+    let hits = searcher.search("napoleon", 10).unwrap();
+    let placed = place_pages("napoleon", &[site("napoleon.org", true)], hits);
+    let listed: Vec<&str> = placed.iter().map(|p| p.hit.page.set.as_str()).collect();
+    assert_eq!(listed, ["wikipedia-en"]);
+    // The park's own page stays first.
+    assert_eq!(first("yosemite national park"), "https://www.nps.gov/yose/");
+}
+
+#[test]
 fn declared_subpage_language_survives_retrieval_and_placement() {
     for (language, title, query) in [
         ("es", "Receta fácil de galleta", "recetas fáciles galletas"),
