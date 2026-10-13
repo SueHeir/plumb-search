@@ -14,6 +14,7 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 
 use super::building::schema;
 use super::page::is_item_id;
+use super::placing::is_year;
 use super::scoring::truncate_keeping_inner_pages;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
@@ -36,6 +37,10 @@ pub(crate) enum Hint {
     Person,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
+    /// Only pages the name names: what a fact question asks about. "madrid
+    /// spanish" (of "madrid spanish capital city") names nothing, and the
+    /// clubs it describes would push Madrid out.
+    Named,
 }
 
 /// Words before a name that ask about it. "What's" is read as "what is";
@@ -55,6 +60,16 @@ const HINT_LEADS: &[&str] = &[
     "what are ",
     "what was ",
     "what were ",
+    "who won the ",
+    "who won ",
+    "who wins the ",
+    "who wins ",
+    "who will win the ",
+    "who will win ",
+    "winner of the ",
+    "winner of ",
+    "winners of the ",
+    "winners of ",
     "what does ",
     "define ",
     "definition of ",
@@ -112,6 +127,8 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" paper", Hint::Paper),
     (" papers", Hint::Paper),
     (" arxiv", Hint::Paper),
+    (" winner", Hint::Any),
+    (" winners", Hint::Any),
     (" summary", Hint::Any),
     (" plot", Hint::Any),
     (" biography", Hint::Any),
@@ -195,6 +212,86 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     let name = name.trim();
     let hint = hint?;
     (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
+}
+
+/// `name` with the year at one of its ends moved to the other: "2025 tour
+/// de france" of "tour de france 2025". `None` without one, or with a year
+/// alone.
+pub(crate) fn year_moved(name: &str) -> Option<String> {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    match words.as_slice() {
+        [first, rest @ ..] if !rest.is_empty() && is_year(first) => {
+            Some(format!("{} {first}", rest.join(" ")))
+        }
+        [rest @ .., last] if !rest.is_empty() && is_year(last) => {
+            Some(format!("{last} {}", rest.join(" ")))
+        }
+        _ => None,
+    }
+}
+
+/// Words after a name that ask for the list of the works of an artist,
+/// actor or writer, with the titles of Wikipedia's lists of them, best
+/// first, `{}` for the name: "drake albums" for "Drake albums
+/// discography", "tom hanks movies" for "Tom Hanks filmography".
+const WORK_LISTS: &[(&str, &[&str])] = &[
+    ("albums", &["{} albums discography", "{} discography"]),
+    ("discography", &["{} discography", "{} albums discography"]),
+    ("singles", &["{} singles discography", "{} discography"]),
+    (
+        "songs",
+        &[
+            "List of songs recorded by {}",
+            "{} singles discography",
+            "{} discography",
+        ],
+    ),
+    ("movies", &["{} filmography"]),
+    ("films", &["{} filmography"]),
+    ("filmography", &["{} filmography"]),
+    ("books", &["{} bibliography"]),
+    ("novels", &["{} bibliography"]),
+    ("bibliography", &["{} bibliography"]),
+];
+
+/// The titles of the lists of works `query` asks for ([`WORK_LISTS`]),
+/// best first: "Pink Floyd discography" for "pink floyd albums". The
+/// name may be said without "the": "beatles songs".
+pub(crate) fn work_lists(query: &str) -> Vec<String> {
+    let query = plumb_core::collapse_whitespace(query.trim()).to_lowercase();
+    let Some((artist, asked)) = query.rsplit_once(' ') else {
+        return Vec::new();
+    };
+    let Some((_, titles)) = WORK_LISTS.iter().find(|(word, _)| *word == asked) else {
+        return Vec::new();
+    };
+    let mut artists = vec![artist.to_string()];
+    if !artist.starts_with("the ") {
+        artists.push(format!("the {artist}"));
+    }
+    titles
+        .iter()
+        .flat_map(|title| {
+            artists
+                .iter()
+                .map(move |artist| title.replace("{}", artist))
+        })
+        .collect()
+}
+
+/// Adds `found` to `hits`. Found both ways, a page keeps its better score
+/// and whatever either way says of it.
+fn keep_found(hits: &mut Vec<PageHit>, found: Vec<PageHit>) {
+    for hit in found {
+        match hits.iter_mut().find(|h| h.page == hit.page) {
+            Some(kept) => {
+                kept.named |= hit.named;
+                kept.whole |= hit.whole;
+                kept.score = kept.score.max(hit.score);
+            }
+            None => hits.push(hit),
+        }
+    }
 }
 
 /// Least listeners of a song or album that [`PageSearcher::known_song`]
@@ -578,42 +675,74 @@ impl PageSearcher {
         scope: Option<&dyn Query>,
     ) -> Result<Vec<PageHit>> {
         let mut hits = self.search_once(query, limit, scope)?;
+        // "drake albums", "tom hanks movies": Wikipedia's list of the
+        // works of an artist, actor or writer, which the query names only
+        // in part.
+        if scope.is_none() {
+            if let Some(list) = self.first_titled(&work_lists(query))? {
+                match hits.iter_mut().find(|hit| hit.page == list.page) {
+                    Some(kept) => {
+                        kept.named = true;
+                        kept.score = kept.score.max(list.score);
+                    }
+                    None => hits.push(list),
+                }
+                hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+            }
+        }
         // "lululemon wikipedia", "batch normalization paper", "who is
         // galileo": the words that say what is wanted are not part of the
         // name, so the name is searched for too. So is what a fact question
         // asks about, or "when was isaac newton born" lists Newton's mother
         // and namesakes, whose descriptions hold its words, and not him;
-        // but not when the query is itself a name ("age of empires"). Of
-        // that search only the pages the subject names are kept: "madrid
-        // spanish" (of "madrid spanish capital city") names nothing, and
-        // the clubs it describes would push Madrid out.
-        let hinted = hinted_name(query);
-        let asked = hinted.is_none();
-        let Some((name, hint)) = hinted.or_else(|| {
+        // but not when the query is itself a name ("age of empires").
+        let hinted = hinted_name(query).or_else(|| {
             plumb_core::facts::fact_asked(query)
                 .filter(|_| !hits.iter().any(|hit| hit.named))
-                .map(|asked| (asked.subject, Hint::Any))
-        }) else {
+                .map(|asked| (asked.subject, Hint::Named))
+        });
+        // An event's article has its year first or last ("2025 Tour de
+        // France", "Eurovision Song Contest 2025"), so a name with a year
+        // at one end is searched with it at the other too.
+        let (name, hint) = hinted
+            .clone()
+            .unwrap_or_else(|| (query.to_lowercase(), Hint::Any));
+        let moved = year_moved(&name).map(|name| (name, hint));
+        let searches: Vec<(String, Hint)> = hinted.into_iter().chain(moved).collect();
+        if searches.is_empty() {
             return Ok(hits);
-        };
-        let mut found = self.search_once(&name, limit, scope)?;
-        if asked {
-            // A work keeps its "the" for "The Hobbit", but "who painted the
-            // mona lisa" asks about Mona Lisa, not the song The Mona Lisa:
-            // what the name names without it counts too when it holds the
-            // fact asked.
-            let kinds = plumb_core::facts::fact_asked(query).map(|asked| asked.kinds);
-            if let (Some(bare), Some(kinds)) = (name.strip_prefix("the "), kinds) {
-                let holds =
-                    |hit: &PageHit| hit.page.facts.iter().any(|fact| kinds.contains(&fact.kind));
-                found.extend(
-                    self.search_once(bare, limit, scope)?
-                        .into_iter()
-                        .filter(holds),
-                );
-            }
-            found.retain(|hit| hit.named);
         }
+        for (name, hint) in searches {
+            self.add_found(&mut hits, &name, hint, limit, scope)?;
+        }
+        // A work keeps its "the" for "The Hobbit", but "who painted the
+        // mona lisa" asks about Mona Lisa, not the song The Mona Lisa: what
+        // the name names without it counts too when it holds the fact asked.
+        let asked = plumb_core::facts::fact_asked(query).filter(|_| hint == Hint::Named);
+        if let (Some(bare), Some(asked)) = (name.strip_prefix("the "), asked) {
+            let holds = |hit: &PageHit| {
+                let facts = &hit.page.facts;
+                facts.iter().any(|fact| asked.kinds.contains(&fact.kind))
+            };
+            let mut found = self.search_once(bare, limit, scope)?;
+            found.retain(|hit| hit.named && holds(hit));
+            keep_found(&mut hits, found);
+        }
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        truncate_keeping_inner_pages(&mut hits, limit);
+        Ok(hits)
+    }
+
+    /// Adds to `hits` the pages found for `name`, the kind `hint` asks for.
+    fn add_found(
+        &self,
+        hits: &mut Vec<PageHit>,
+        name: &str,
+        hint: Hint,
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<()> {
+        let mut found = self.search_once(name, limit, scope)?;
         match hint {
             // Only a person the name names, and not when a page is called
             // the whole query: "black death" is not about the singer Black,
@@ -622,6 +751,7 @@ impl PageSearcher {
                 let called = hits.iter().any(|hit| hit.named);
                 found.retain(|hit| !called && hit.named && hit.page.is_person());
             }
+            Hint::Named => found.retain(|hit| hit.named),
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             // Only a repository called so: "reverse repo" is finance.
             Hint::Repo => found.retain(|hit| hit.named && hit.page.set == GITHUB_SET),
@@ -645,21 +775,8 @@ impl PageSearcher {
             }
             Hint::Any => {}
         }
-        for hit in found {
-            // Found both ways, a page keeps its better score and whatever
-            // either way says of it.
-            match hits.iter_mut().find(|h| h.page == hit.page) {
-                Some(kept) => {
-                    kept.named |= hit.named;
-                    kept.whole |= hit.whole;
-                    kept.score = kept.score.max(hit.score);
-                }
-                None => hits.push(hit),
-            }
-        }
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        truncate_keeping_inner_pages(&mut hits, limit);
-        Ok(hits)
+        keep_found(hits, found);
+        Ok(())
     }
 
     pub(crate) fn scope_term(&self, text: &str) -> Box<dyn Query> {
@@ -774,6 +891,49 @@ impl PageSearcher {
             found.truncate(limit);
         }
         Ok(())
+    }
+
+    /// The Wikipedia article titled the first of `titles` there is one
+    /// of, named by it.
+    fn first_titled(&self, titles: &[String]) -> Result<Option<PageHit>> {
+        let searcher = self.reader.searcher();
+        for title in titles {
+            let Some(joined) = analysis::tokens(&self.joined, title).pop() else {
+                continue;
+            };
+            let keyed = TermQuery::new(
+                Term::from_field_text(self.fields.keys, &joined),
+                IndexRecordOption::Basic,
+            );
+            let top = TopDocs::with_limit(TITLE_CANDIDATES)
+                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+            for (popularity, address) in
+                searcher.search(self.language_query(&keyed).as_ref(), &top)?
+            {
+                let document: TantivyDocument = searcher.doc(address)?;
+                let Some(stored) = document
+                    .get_first(self.fields.page)
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                let page: Page = serde_json::from_str(stored)?;
+                let titled = analysis::tokens(&self.joined, &page.title).pop();
+                if !page.is_article() || titled.as_deref() != Some(joined.as_str()) {
+                    continue;
+                }
+                let popularity = popularity.unwrap_or(0) as f32 / POPULARITY_SCALE;
+                return Ok(Some(PageHit {
+                    page,
+                    named: true,
+                    whole: false,
+                    score: 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity,
+                    popularity,
+                    learned: None,
+                }));
+            }
+        }
+        Ok(None)
     }
 
     /// The song or album of the music set whose title is the whole of
