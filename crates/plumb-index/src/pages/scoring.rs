@@ -4,12 +4,14 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use plumb_core::registrable_domain;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{TantivyDocument, Term};
 
 use super::docs::docs_asked;
+use super::page::is_item_id;
 use super::sites::base_title;
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
@@ -18,9 +20,49 @@ use super::{
     PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
     REFERENCE_QUERY_WORDS, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET, TITLE_INSIDE_CANDIDATES,
-    WELL_KNOWN_PACKAGE,
+    UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
 };
 use crate::analysis;
+
+/// Words a Wikipedia article's short description ends a work's kind
+/// with, before "by" and its maker, each with the words a search may say
+/// it is with: "1997 studio album by Radiohead".
+const WORKS: &[(&str, &[&str])] = &[
+    ("album", &["album"]),
+    ("ep", &["ep", "album"]),
+    ("mixtape", &["mixtape", "album"]),
+    ("soundtrack", &["soundtrack", "album"]),
+    ("song", &["song"]),
+    ("single", &["single", "song"]),
+    ("novel", &["novel", "book"]),
+    ("novella", &["novella", "book"]),
+    ("book", &["book"]),
+    ("film", plumb_core::films::FILM_WORDS),
+    ("play", &["play"]),
+    ("poem", &["poem"]),
+    ("painting", &["painting"]),
+    ("opera", &["opera"]),
+    ("musical", &["musical"]),
+];
+
+/// Who made the work a Wikipedia article whose short description is
+/// `description` is on, and the words a search may say what it is with:
+/// "Radiohead" and "album" of "1997 studio album by Radiohead". `None`
+/// unless the word before "by" is a work's kind ([`WORKS`]) and nothing
+/// before it ties the article to another one's work: "Protagonist of 1949
+/// novel by George Orwell" is a character, not the novel.
+fn made_by(description: &str) -> Option<(&str, &'static [&'static str])> {
+    let (what, by) = description.rsplit_once(" by ")?;
+    let what: Vec<String> = what.split_whitespace().map(str::to_lowercase).collect();
+    let (kind, before) = what.split_last()?;
+    if before.iter().any(|word| plumb_core::is_function_word(word)) {
+        return None;
+    }
+    WORKS
+        .iter()
+        .find(|(work, _)| work == kind)
+        .map(|(_, asked)| (by.trim(), *asked))
+}
 
 impl PageSearcher {
     pub(crate) fn search_once(
@@ -123,7 +165,8 @@ impl PageSearcher {
         // when it is asked for so.
         let mut by_title_first = HashSet::new();
         // Films and shows by a title of one word too: "inception 2010".
-        // Other pages found so must be films asked for so.
+        // Other pages found so must be films, or articles on works, asked
+        // for so: "1989 by taylor swift".
         let mut film_title_first = HashSet::new();
         for end in 1..words.len() {
             let Some(key) = analysis::tokens(&self.joined, &words[..end].join(" ")).pop() else {
@@ -281,17 +324,20 @@ impl PageSearcher {
             }
         }
         let best_lead = lead_scores.values().copied().fold(0.0f32, f32::max);
-        // The query's rarest word that some question has: what it is
-        // about. A question without it has only the asking words ("how to
+        // The query's rarest word that some question has, of those that
+        // do not only ask: what it is about. A question without it has only the asking words ("how to
         // get rid of aphids" found "How do I get rid of my bounty?"). A
         // word the pages know that no question has is rarer still: no
         // question asks about it, so none is found. A word nothing knows
         // is likely a typo, and is passed over.
         let mut topic_word: Option<(u64, &String)> = None;
+        let mut unknown = HashSet::new();
         if stems.len() >= QUESTION_QUERY_WORDS.min(REFERENCE_QUERY_WORDS) {
             for stem in &stems {
                 let found = searcher.doc_freq(&Term::from_field_text(self.fields.topic, stem))?;
-                if (found > 0 || self.knows_stem(query, stem)?)
+                if found == 0 && !self.knows_stem(query, stem)? {
+                    unknown.insert(stem);
+                } else if described.contains(stem)
                     && topic_word.is_none_or(|(least, _)| found < least)
                 {
                     topic_word = Some((found, stem));
@@ -299,6 +345,11 @@ impl PageSearcher {
             }
         }
         let topic_word = topic_word.map(|(_, stem)| stem.as_str());
+        let sure: Vec<String> = described
+            .iter()
+            .filter(|stem| !unknown.contains(stem))
+            .cloned()
+            .collect();
         // Articles whose title is some of the query and the rest says more
         // about it: "titanic sinking", "radium discovery marie curie",
         // "catholic homily". They lack the query's other words, so nothing
@@ -396,7 +447,8 @@ impl PageSearcher {
                     });
             if !article_inside
                 && (by_title_first.contains(&address) && !asked_by_title
-                    || film_title_first.contains(&address) && !asked_as_film)
+                    || film_title_first.contains(&address)
+                        && !(asked_as_film || asked_by_title && page.is_article()))
             {
                 continue;
             }
@@ -408,7 +460,7 @@ impl PageSearcher {
             if asked_by_title {
                 (name, named, whole) = (name.max(ALIAS_MATCH), true, true);
             } else if !named && (page.set != DOCS_SET || docs_asked(&page, query)) {
-                let (question, asked) = self.question_match(&page, &stems, topic_word);
+                let (question, asked) = self.question_match(&page, &stems, &sure, topic_word);
                 name = name.max(question);
                 whole = asked;
             }
@@ -436,6 +488,11 @@ impl PageSearcher {
                 whole,
                 learned: None,
             });
+        }
+        match words.as_slice() {
+            [word] => self.name_by_surname(word, &joined, &mut hits),
+            [title, name @ ..] => self.name_by_title(title, name, &joined, &mut hits),
+            [] => {}
         }
         let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -572,6 +629,9 @@ impl PageSearcher {
     /// How well a question's words cover the query's stemmed words
     /// `stems`: [`PARTIAL_MATCH`] times the share they have, when that is
     /// at least [`QUESTION_SHARE`] of at least [`QUESTION_QUERY_WORDS`].
+    /// A word not in `sure`, the query's words that say what it asks (not
+    /// [`ASKING_WORDS`], nor a word no page knows), counts
+    /// [`UNSURE_WORD_SHARE`].
     /// And whether the query asks the question as a whole: it has all of
     /// the query's words, and the query at least [`QUESTION_TITLE_SHARE`]
     /// of its title's. A question without `topic_word`, the query's rarest
@@ -582,6 +642,7 @@ impl PageSearcher {
         &self,
         page: &Page,
         stems: &[String],
+        sure: &[String],
         topic_word: Option<&str>,
     ) -> (f32, bool) {
         let fewest = if page.is_site_page() {
@@ -592,6 +653,14 @@ impl PageSearcher {
         if stems.len() < fewest {
             return (0.0, false);
         }
+        let weight = |stem: &String| {
+            if sure.contains(stem) {
+                1.0
+            } else {
+                UNSURE_WORD_SHARE
+            }
+        };
+        let all: f32 = stems.iter().map(weight).sum();
         let mut best = (0.0f32, false);
         for (title, topic) in page.asked_as() {
             let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
@@ -600,8 +669,12 @@ impl PageSearcher {
             if topic_word.is_some_and(|word| !words.contains(word)) {
                 continue;
             }
-            let share = stems.iter().filter(|stem| words.contains(*stem)).count() as f32
-                / stems.len() as f32;
+            let share = stems
+                .iter()
+                .filter(|stem| words.contains(*stem))
+                .map(weight)
+                .sum::<f32>()
+                / all;
             if share < QUESTION_SHARE {
                 continue;
             }
@@ -619,33 +692,39 @@ impl PageSearcher {
         best
     }
 
-    /// Whether the query `words` are a book's, podcast's or paper's title
-    /// followed by words of its author's name or by what it is ("book",
-    /// "novel", "podcast", "paper"): "dune frank herbert", "the great gatsby
-    /// book", "hardcore history podcast", "random forests breiman". A
-    /// paper's year and venue may follow too, and a paper's whole title of
-    /// [`PAPER_TITLE_WORDS`] words or more asks for it alone.
+    /// Whether the query `words` are a book's, podcast's, paper's, song's
+    /// or album's title followed by words of its author's name or by what
+    /// it is ("book", "novel", "podcast", "paper"), or both: "dune frank
+    /// herbert", "the great gatsby book", "nevermind nirvana album",
+    /// "hardcore history podcast", "random forests breiman". A paper's
+    /// year and venue may follow too, and a paper's whole title of
+    /// [`PAPER_TITLE_WORDS`] words or more asks for it alone. A Wikipedia
+    /// article on a work ([`made_by`]) is asked for so too, by its title
+    /// or another name: "1984 george orwell" for Nineteen Eighty-Four.
     pub(crate) fn book_match(&self, page: &Page, words: &[String]) -> bool {
-        let (byline, kinds): (&str, &[&str]) = match page.set.as_str() {
-            BOOKS_SET => ("Book by ", &["book", "novel"]),
-            PODCASTS_SET => ("Podcast by ", &["podcast"]),
-            PAPERS_SET => ("Paper by ", &["paper"]),
-            MUSIC_SET if page.is_song() => ("Song by ", &["song"]),
-            MUSIC_SET => ("Album by ", &["album"]),
+        let description = page.description.as_deref().unwrap_or("");
+        let byline = |byline: &str| description.strip_prefix(byline).unwrap_or("");
+        let (by, kinds): (&str, &[&str]) = match page.set.as_str() {
+            BOOKS_SET => (byline("Book by "), &["book", "novel"]),
+            PODCASTS_SET => (byline("Podcast by "), &["podcast"]),
+            PAPERS_SET => (byline("Paper by "), &["paper"]),
+            MUSIC_SET if page.is_song() => (byline("Song by "), &["song"]),
+            MUSIC_SET => (byline("Album by "), &["album"]),
+            _ if page.is_article() => match made_by(description) {
+                Some(work) => work,
+                None => return false,
+            },
             _ => return false,
         };
-        let by = page
-            .description
-            .as_deref()
-            .and_then(|d| d.strip_prefix(byline))
-            .unwrap_or("");
         // "Book by AUTHOR, YEAR", "Podcast by AUTHOR · CATEGORY", "Paper by
-        // AUTHOR et al., YEAR, VENUE".
+        // AUTHOR et al., YEAR, VENUE", "1997 studio album by ARTIST".
         let author = if page.set == PAPERS_SET {
             by.split(", ")
                 .collect::<Vec<_>>()
                 .join(" ")
                 .replace(" et al.", "")
+        } else if page.is_article() {
+            by.to_string()
         } else {
             let by = by.split(" · ").next().unwrap_or(by);
             by.rsplit_once(", ")
@@ -661,49 +740,57 @@ impl PageSearcher {
         let artist = analysis::tokens(&self.words, main);
         let author: HashSet<String> = analysis::tokens(&self.words, &author).into_iter().collect();
         // The title, or the title without its subtitle: "Frankenstein" for
-        // "Frankenstein; or, The Modern Prometheus".
+        // "Frankenstein; or, The Modern Prometheus". An article's without
+        // what tells it from its namesakes ("1989 (Taylor Swift album)"),
+        // and its other names.
         let short = page.title.split([':', ';']).next().unwrap_or("");
-        [page.title.as_str(), short]
-            .into_iter()
-            .enumerate()
-            .any(|(i, title)| {
-                let title = analysis::tokens(&self.words, title);
-                // Songs and albums are as often asked for artist first:
-                // "vampire weekend step", "nirvana nevermind album",
-                // "beatles hey jude".
-                let unthe = match artist.as_slice() {
-                    [the, rest @ ..] if the == "the" && !rest.is_empty() => rest,
-                    artist => artist,
-                };
-                if page.set == MUSIC_SET && !artist.is_empty() && !title.is_empty() {
-                    if let Some(rest) = words
-                        .strip_prefix(artist.as_slice())
-                        .or_else(|| words.strip_prefix(unthe))
-                        .and_then(|rest| rest.strip_prefix(title.as_slice()))
-                    {
-                        if rest.is_empty()
-                            || matches!(rest, [word] if kinds.contains(&word.as_str()))
-                        {
-                            return true;
-                        }
+        let mut titles = vec![page.title.as_str(), short];
+        if page.is_article() {
+            titles.push(base_title(&page.title));
+            titles.extend(page.aliases.iter().map(|alias| base_title(alias)));
+        }
+        titles.into_iter().enumerate().any(|(i, title)| {
+            let title = analysis::tokens(&self.words, title);
+            // Songs, albums and other works are as often asked for
+            // artist first: "vampire weekend step", "nirvana nevermind
+            // album", "beatles hey jude", "radiohead ok computer".
+            let unthe = match artist.as_slice() {
+                [the, rest @ ..] if the == "the" && !rest.is_empty() => rest,
+                artist => artist,
+            };
+            if (page.set == MUSIC_SET || page.is_article())
+                && !artist.is_empty()
+                && !title.is_empty()
+            {
+                if let Some(rest) = words
+                    .strip_prefix(artist.as_slice())
+                    .or_else(|| words.strip_prefix(unthe))
+                    .and_then(|rest| rest.strip_prefix(title.as_slice()))
+                {
+                    if rest.is_empty() || matches!(rest, [word] if kinds.contains(&word.as_str())) {
+                        return true;
                     }
                 }
-                let rest = match words.strip_prefix(title.as_slice()) {
-                    Some([]) => {
-                        return page.set == PAPERS_SET && i == 0 && title.len() >= PAPER_TITLE_WORDS
-                    }
-                    Some(rest) if !title.is_empty() => rest,
-                    _ => return false,
-                };
-                // "hey jude by the beatles".
-                let rest = match rest {
-                    [by, rest @ ..] if by == "by" && !rest.is_empty() => rest,
-                    rest => rest,
-                };
-                rest.iter().all(|word| author.contains(word))
-                    || matches!(rest, [word] if kinds.contains(&word.as_str()))
-            })
-            || (page.set == PODCASTS_SET && self.podcast_named(page, words))
+            }
+            let rest = match words.strip_prefix(title.as_slice()) {
+                Some([]) => {
+                    return page.set == PAPERS_SET && i == 0 && title.len() >= PAPER_TITLE_WORDS
+                }
+                Some(rest) if !title.is_empty() => rest,
+                _ => return false,
+            };
+            // "hey jude by the beatles", "dune book", "nevermind nirvana
+            // album": the maker, what the work is, or both.
+            let rest = match rest {
+                [by, rest @ ..] if by == "by" && !rest.is_empty() => rest,
+                rest => rest,
+            };
+            let maker = match rest {
+                [maker @ .., kind] if kinds.contains(&kind.as_str()) => maker,
+                rest => rest,
+            };
+            maker.iter().all(|word| author.contains(word))
+        }) || (page.set == PODCASTS_SET && self.podcast_named(page, words))
     }
 
     /// Whether `words` are the end of a podcast's title, two words or more,
@@ -787,6 +874,117 @@ impl PageSearcher {
         }
         (best, false)
     }
+
+    /// Names the person a query of one `word` (whose key is `joined`) is
+    /// the surname of when Wikipedia has no redirect from it: "thatcher"
+    /// is Margaret Thatcher and "kafka" Franz Kafka, not the film Kafka.
+    /// Only when they are read [`super::SURNAME_MARGIN`] times as much as
+    /// every other article with the word in its title ("darwin" is a city
+    /// too, "ford" two presidents), and no article is called the word
+    /// ("swift", "clinton") nor a company's site ("tesla", "hilton").
+    fn name_by_surname(&self, word: &str, joined: &str, hits: &mut [PageHit]) {
+        let called =
+            |name: &str| analysis::tokens(&self.joined, name).pop().as_deref() == Some(joined);
+        let articles = || {
+            hits.iter()
+                .enumerate()
+                .filter(|(_, hit)| hit.page.is_article())
+        };
+        let taken = articles().any(|(_, hit)| {
+            std::iter::once(&hit.page.title)
+                .chain(&hit.page.aliases)
+                .any(|name| called(name))
+                || super::sites::describes_an_organization(hit.page.description.as_deref())
+                    && hit
+                        .page
+                        .site
+                        .as_deref()
+                        .and_then(|site| site.split('.').next())
+                        .is_some_and(called)
+        });
+        let titled = |hit: &PageHit| analysis::tokens(&self.words, &hit.page.title);
+        let Some((best, views)) = articles()
+            .filter(|(_, hit)| {
+                !hit.named
+                    && hit.page.is_person()
+                    && titled(hit).last().map(String::as_str) == Some(word)
+            })
+            .max_by_key(|(_, hit)| hit.page.views)
+            .map(|(at, hit)| (at, hit.page.views))
+        else {
+            return;
+        };
+        if taken
+            || articles().any(|(at, hit)| {
+                at != best
+                    && hit.page.views * super::SURNAME_MARGIN > views
+                    && titled(hit).iter().any(|title_word| title_word == word)
+            })
+        {
+            return;
+        }
+        name_by_alias(&mut hits[best]);
+    }
+
+    /// Names the person a `title` and words of their `name` call when no
+    /// article is called the whole query (whose key is `joined`): "sir
+    /// isaac newton" is Isaac Newton, "president obama" Barack Obama,
+    /// "princess diana" Diana, Princess of Wales, not the song. Every word
+    /// of the name must be in the person's title or another name, and an
+    /// office ([`super::OFFICES`]) in their title or description. Only
+    /// when they are read [`super::SURNAME_MARGIN`] times as much as every
+    /// other article that fits: "president bush" is two presidents.
+    fn name_by_title(&self, title: &str, name: &[String], joined: &str, hits: &mut [PageHit]) {
+        let office = super::OFFICES.contains(&title);
+        if !office && !super::HONORIFICS.contains(&title) {
+            return;
+        }
+        let words = |text: &str| analysis::tokens(&self.words, text);
+        let fits = |page: &Page| {
+            let names: HashSet<String> = std::iter::once(&page.title)
+                .chain(&page.aliases)
+                .flat_map(|text| words(text))
+                .collect();
+            let said = || {
+                words(&page.title)
+                    .into_iter()
+                    .chain(words(page.description.as_deref().unwrap_or("")))
+                    .any(|word| word == title)
+            };
+            page.is_article() && name.iter().all(|word| names.contains(word)) && (!office || said())
+        };
+        let called =
+            |text: &str| analysis::tokens(&self.joined, text).pop().as_deref() == Some(joined);
+        if hits.iter().any(|hit| {
+            hit.page.is_article()
+                && std::iter::once(&hit.page.title)
+                    .chain(&hit.page.aliases)
+                    .any(|text| called(text))
+        }) {
+            return;
+        }
+        let Some((best, views)) = hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| !hit.named && hit.page.is_person() && fits(&hit.page))
+            .max_by_key(|(_, hit)| hit.page.views)
+            .map(|(at, hit)| (at, hit.page.views))
+        else {
+            return;
+        };
+        if hits.iter().enumerate().any(|(at, hit)| {
+            at != best && hit.page.views * super::SURNAME_MARGIN > views && fits(&hit.page)
+        }) {
+            return;
+        }
+        name_by_alias(&mut hits[best]);
+    }
+}
+
+/// Marks `hit` named by the query and scores it as if by an alias.
+fn name_by_alias(hit: &mut PageHit) {
+    hit.named = true;
+    hit.score = ALIAS_MATCH * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity);
 }
 
 /// Folds the films and shows in `hits` that English Wikipedia has an
@@ -812,6 +1010,39 @@ fn fold_films(hits: Vec<PageHit>) -> Vec<PageHit> {
         }
     }
     kept
+}
+
+/// How far below the article the query names [`site_pages_after_named_article`]
+/// puts a site's inner page.
+const BELOW_NAMED_ARTICLE: f32 = 0.99;
+
+/// Scores the inner pages of sites (the subpages and reference sets) below
+/// the best Wikipedia article the query names. Such a page's popularity is
+/// its site's weight over its depth, not how much its subject is read, so
+/// any page titled just "Napoleon" or "Plato" outranked the article and
+/// took its place among the results, info box and all: a chess engine's
+/// page at chessprogramming.org for "napoleon", loc.gov's for "abraham
+/// lincoln". A page on the article's own website keeps its score: nps.gov's
+/// "Yosemite National Park" is the park's own page.
+pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
+    let Some(article) = hits
+        .iter()
+        .filter(|hit| {
+            hit.named && hit.page.is_article() && hit.page.item.as_deref().is_some_and(is_item_id)
+        })
+        .max_by(|a, b| a.score.total_cmp(&b.score))
+    else {
+        return;
+    };
+    let (most, own_site) = (
+        article.score * BELOW_NAMED_ARTICLE,
+        article.page.site.clone(),
+    );
+    for hit in hits.iter_mut().filter(|hit| hit.page.is_site_page()) {
+        if own_site.is_none() || registrable_domain(&hit.page.url) != own_site {
+            hit.score = hit.score.min(most);
+        }
+    }
 }
 
 /// Cuts `hits`, best first, to `limit`, keeping the best docs page and the

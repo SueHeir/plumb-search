@@ -163,7 +163,7 @@ fn parse(text: &str) -> anyhow::Result<Forecast> {
 }
 
 /// The place as the answer names it: "Denver, CO", "Paris, France".
-fn place_label(place: &Place) -> String {
+pub(crate) fn place_label(place: &Place) -> String {
     let mut label = place.name.clone();
     match (place.region.as_deref(), place.country.as_deref()) {
         (Some(region), Some("US" | "CA" | "AU")) if region.len() <= 3 => {
