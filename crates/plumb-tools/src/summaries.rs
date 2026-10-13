@@ -268,6 +268,7 @@ mod tests {
         record.redirect = Some(plumb_core::Redirect {
             to: "new.com".into(),
             at: 1,
+            inner: false,
         });
         assert!(!wanted(&record));
     }

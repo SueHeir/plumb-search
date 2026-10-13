@@ -59,8 +59,9 @@ pub const REREAD_BELOW: u32 = 1;
 ///   [`plumb_core::is_useful_anchor`]).
 /// - [`CrawlOutcome::OffsiteRedirect`] adds an empty record for the
 ///   registrable domain the redirect points to, so it gets discovered, and
-///   marks the domain that redirected with a [`Redirect`] to it, timed now.
-///   Other outcomes add nothing.
+///   marks the domain that redirected with a [`Redirect`] to it, timed now,
+///   and [`Redirect::inner`] unless it points at that site's front page
+///   ([`is_front_page`]). Other outcomes add nothing.
 /// - Records for the same domain are merged with [`SiteRecord::merge`], so
 ///   there is one record per domain, sorted by domain.
 pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
@@ -120,6 +121,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                     if domain != result.domain {
                         let mut from = SiteRecord::new(result.domain.as_str());
                         from.redirect = Some(Redirect {
+                            inner: !is_front_page(final_url, &domain),
                             to: domain.clone(),
                             at: now,
                         });
@@ -160,6 +162,17 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
 fn has_useful_front_page_text(url: &str, text: &str) -> bool {
     Url::parse(url)
         .is_ok_and(|parsed| is_homepage_path(parsed.path()) && is_useful_anchor(text, url, &parsed))
+}
+
+/// Whether `url` is the front page of `site`: on its own host or `www.`
+/// and it, at a homepage path ([`is_homepage_path`]), whatever the query.
+/// `https://www.pnc.com/en/` is pnc.com's; Google's sign-in on
+/// `accounts.google.com` and Bungie's page on Destiny are not.
+fn is_front_page(url: &str, site: &str) -> bool {
+    Url::parse(url).is_ok_and(|url| {
+        let host = url.host_str().unwrap_or_default();
+        host.strip_prefix("www.").unwrap_or(host) == site && is_homepage_path(url.path())
+    })
 }
 
 fn upsert(records: &mut BTreeMap<String, SiteRecord>, record: SiteRecord) {
@@ -379,6 +392,29 @@ mod tests {
         let redirect = records[1].redirect.as_ref().unwrap();
         assert_eq!(redirect.to, "facebook.com");
         assert!(redirect.at > 0);
+        assert!(!redirect.inner);
+    }
+
+    #[test]
+    fn redirects_off_the_front_page_are_inner() {
+        for (url, inner) in [
+            ("https://pnc.com", false),
+            ("https://www.pnc.com/en/?utm_source=pncbank", false),
+            ("https://www.computerworld.com/au/", false),
+            ("https://www.bungie.net/7/en/Destiny", true),
+            ("https://accounts.google.com/ServiceLogin?continue=x", true),
+            ("https://validate.perfdrive.com/?ssa=1", true),
+            ("https://starcraft2.blizzard.com/", true),
+        ] {
+            let records = to_records(&[result(
+                "old.com",
+                CrawlOutcome::OffsiteRedirect {
+                    final_url: url.into(),
+                },
+            )]);
+            let old = records.iter().find(|r| r.domain == "old.com").unwrap();
+            assert_eq!(old.redirect.as_ref().unwrap().inner, inner, "{url}");
+        }
     }
 
     #[test]

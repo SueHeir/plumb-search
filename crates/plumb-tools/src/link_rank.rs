@@ -657,6 +657,7 @@ mod tests {
         old.redirect = Some(Redirect {
             to: "pnc.com".into(),
             at: 1,
+            inner: false,
         });
         let ranked = ranked(&[
             old,
@@ -678,11 +679,13 @@ mod tests {
         a.redirect = Some(Redirect {
             to: "b.com".into(),
             at: 1,
+            inner: false,
         });
         let mut b = site("b.com", &[]);
         b.redirect = Some(Redirect {
             to: "a.com".into(),
             at: 1,
+            inner: false,
         });
         let ranked = ranked(&[a, b, site("c.com", &["a.com"])]);
         assert_eq!(names(&ranked).len(), 3);
