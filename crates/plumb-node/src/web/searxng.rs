@@ -219,7 +219,8 @@ async fn collect(
         let local = super::place_sites(state, &places.found, options).await;
         crate::assembly::local_first(&places.found, &mut results.hits, local, limit);
     }
-    let extras = extras(state, query, options, None).await;
+    let spelling = results.spelling.as_ref().map(|s| s.query.as_str());
+    let extras = extras(state, query, spelling, options, None).await;
     super::route_sources(
         state,
         query,

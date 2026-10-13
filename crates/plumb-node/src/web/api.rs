@@ -90,7 +90,8 @@ pub(crate) async fn api_search(
                 let local = place_sites(&state, &found.found, &options).await;
                 places::local_first(&found.found, &mut results.hits, local, params.limit());
             }
-            let extras = extras(&state, &query, &options, None).await;
+            let spelling = results.spelling.as_ref().map(|s| s.query.as_str());
+            let extras = extras(&state, &query, spelling, &options, None).await;
             route_sources(
                 &state,
                 &query,
