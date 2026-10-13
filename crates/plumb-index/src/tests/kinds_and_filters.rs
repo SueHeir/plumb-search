@@ -821,3 +821,53 @@ fn brand_names_find_the_official_site() {
     assert_eq!(top(&searcher, "chase"), "chase.com");
     assert_eq!(top(&searcher, "wikipedia"), "wikipedia.org");
 }
+
+#[test]
+fn a_well_known_site_the_query_starts_by_naming_keeps_its_language() {
+    let foreign = |domain: &str, title: &str, alias: &[&str], language: &str, signals| {
+        let mut record = site(domain, Some(title), None, alias, &[], signals);
+        record.language = Some(language.into());
+        record
+    };
+    let mut records = corpus();
+    records.extend([
+        foreign(
+            "realmadrid.example",
+            "Real Madrid CF | Web oficial",
+            &["Real Madrid"],
+            "es",
+            popular(500, 50_000),
+        ),
+        // Well known, but by one common word.
+        foreign(
+            "free.example",
+            "Free: Freebox, forfaits et jeux",
+            &["Free"],
+            "fr",
+            popular(300, 50_000),
+        ),
+        // Named by two words, but known to few.
+        foreign(
+            "realestate.example",
+            "Real Estate Immobilien",
+            &[],
+            "de",
+            obscure(5_000_000, 20),
+        ),
+    ]);
+    let (_dir, searcher) = build(&records);
+    let english = SearchOptions {
+        language: Some("en".into()),
+        ..SearchOptions::default()
+    };
+    for (query, domain, kept) in [
+        ("real madrid tickets", "realmadrid.example", true),
+        ("free games", "free.example", false),
+        ("real estate agents", "realestate.example", false),
+    ] {
+        let found =
+            |options: &SearchOptions| search_in(&searcher, query, options).contains(&domain.into());
+        assert!(found(&SearchOptions::default()), "{query}");
+        assert_eq!(found(&english), kept, "{query}");
+    }
+}
