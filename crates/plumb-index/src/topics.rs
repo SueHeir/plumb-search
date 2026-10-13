@@ -15,9 +15,12 @@ use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::IndexRecordOption;
 use tantivy::{DocAddress, Order, Term};
 
+use crate::rank::unit_or;
+use crate::rank::Columns;
+use crate::rank::Ranked;
 use crate::{
-    normalize_country, normalize_text, schema, unit_or, Columns, Hit, RankConfig, Ranked,
-    SearchOptions, SearchResults, Searcher, WELL_KNOWN_LINK_SCORE,
+    normalize_country, normalize_text, schema, Hit, RankConfig, SearchOptions, SearchResults,
+    Searcher, WELL_KNOWN_LINK_SCORE,
 };
 
 /// Words that, alone or together, ask for the news rather than name

@@ -82,11 +82,11 @@ pub fn source_quality(
             .is_some_and(|word| ["buy", "order", "shop"].contains(word));
         let drug = words
             .get(1)
-            .is_some_and(|word| crate::PILL_SHOP_DRUGS.contains(word))
+            .is_some_and(|word| PILL_SHOP_DRUGS.contains(word))
             || words.get(1) == Some(&"generic")
                 && words
                     .get(2)
-                    .is_some_and(|word| crate::PILL_SHOP_DRUGS.contains(word));
+                    .is_some_and(|word| PILL_SHOP_DRUGS.contains(word));
         selling
             && drug
             && [
@@ -100,7 +100,7 @@ pub fn source_quality(
     });
     let reason = if offer {
         SourceQualityReason::UnprescribedDrugOffer
-    } else if link_score.is_some_and(|score| crate::is_pill_shop(host, score)) {
+    } else if link_score.is_some_and(|score| is_pill_shop(host, score)) {
         SourceQualityReason::DrugDomainPattern
     } else {
         return None;
@@ -116,7 +116,7 @@ pub fn source_quality(
 /// not exempt a prescription-free drug offer.
 pub(crate) fn page_allowed(query: &str, page: &crate::pages::Page) -> bool {
     if !page.is_site_page()
-        || crate::typed_domain(query).is_some_and(|domain| {
+        || crate::names::typed_domain(query).is_some_and(|domain| {
             plumb_core::registrable_domain(&page.url).as_deref() == Some(domain.as_str())
         })
     {
@@ -238,7 +238,7 @@ pub(crate) fn is_medical(query: &str) -> bool {
     }
     let words: Vec<&str> = query.split(' ').collect();
     words.iter().any(|word| {
-        MEDICAL_WORDS.contains(word) || crate::PILL_SHOP_DRUGS.contains(word)
+        MEDICAL_WORDS.contains(word) || PILL_SHOP_DRUGS.contains(word)
     }) || MEDICAL_PHRASES
         .iter()
         .any(|phrase| padded.contains(&format!(" {phrase} ")))
@@ -326,7 +326,7 @@ pub(crate) fn authorities_first(
     limit: usize,
     site: &dyn Fn(&str) -> Option<Hit>,
 ) {
-    if limit == 0 || crate::typed_domain(query).is_some() || !is_medical(query) {
+    if limit == 0 || crate::names::typed_domain(query).is_some() || !is_medical(query) {
         return;
     }
     let mut sources = Vec::new();
@@ -386,7 +386,7 @@ pub(crate) fn authorities_first(
 /// them.
 pub fn sources_lead(query: &str, hits: &mut Vec<Hit>, placed: &mut [PlacedPage]) {
     if plumb_core::Operators::parse(query).any()
-        || crate::typed_domain(query).is_some()
+        || crate::names::typed_domain(query).is_some()
         || !is_medical(query)
     {
         return;
@@ -429,11 +429,72 @@ pub fn sources_lead(query: &str, hits: &mut Vec<Hit>, placed: &mut [PlacedPage])
     }
 }
 
+/// Drugs that spam pill shops put in their names.
+const PILL_SHOP_DRUGS: &[&str] = &[
+    "viagra",
+    "cialis",
+    "levitra",
+    "kamagra",
+    "sildenafil",
+    "tadalafil",
+    "vardenafil",
+    "vidalista",
+    "fildena",
+    "cenforce",
+    "celebrex",
+    "ciprofloxacin",
+    "flibanserin",
+    "tramadol",
+    "xanax",
+    "alprazolam",
+    "valium",
+    "diazepam",
+    "oxycodone",
+    "hydrocodone",
+    "modafinil",
+    "armodafinil",
+    "ivermectin",
+    "hydroxychloroquine",
+    "propecia",
+    "finasteride",
+    "clomid",
+    "accutane",
+    "isotretinoin",
+    "priligy",
+    "dapoxetine",
+    "zithromax",
+    "azithromycin",
+    "amoxicillin",
+    "doxycycline",
+    "lasix",
+    "furosemide",
+    "prednisone",
+    "neurontin",
+    "gabapentin",
+    "lyrica",
+    "pregabalin",
+    "synthroid",
+    "lexapro",
+    "zoloft",
+    "prozac",
+];
+
+/// Whether `domain` is a little-known site named after a drug that spam
+/// pill shops sell (celebrex365o24.com, vidalista.pics): such a name is
+/// nearly always a shop, not a place to learn about the drug.
+fn is_pill_shop(domain: &str, link_score: f32) -> bool {
+    if link_score >= WELL_KNOWN_LINK_SCORE {
+        return false;
+    }
+    let label = domain.split('.').next().unwrap_or("");
+    PILL_SHOP_DRUGS.iter().any(|drug| label.contains(drug))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn hit(domain: &str, named: bool, link_score: f32) -> Hit {
+    pub(crate) fn hit(domain: &str, named: bool, link_score: f32) -> Hit {
         Hit {
             domain: domain.to_string(),
             url: format!("https://{domain}/"),
