@@ -74,6 +74,7 @@ pub mod health;
 mod hits;
 mod indexing;
 pub mod items;
+mod language;
 pub mod learned;
 mod names;
 pub mod pages;
@@ -472,6 +473,18 @@ pub struct SearchOptions {
     pub language: Option<String>,
     /// How the results page shows recent headlines; the index ignores it.
     pub recent: plumb_core::RecentNews,
+}
+
+impl SearchOptions {
+    /// [`SearchOptions::language`] for `query`: none when the query is
+    /// written partly in a script that language is not, "天気予報" with
+    /// English chosen, or the filter would leave out the very sites the
+    /// query is written for ([`plumb_core::written_outside`]).
+    pub fn language_for(&self, query: &str) -> Option<&str> {
+        self.language
+            .as_deref()
+            .filter(|wanted| !plumb_core::written_outside(wanted, query))
+    }
 }
 
 /// A link into a site's own search for the words after its name:

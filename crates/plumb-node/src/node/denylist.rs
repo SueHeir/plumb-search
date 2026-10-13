@@ -6,9 +6,9 @@
 //! The node reads the list it holds at start, and again whenever it takes
 //! a newer one, so an entry takes a result off at once, without waiting
 //! for an index to be built again. Every search result, page, key page,
-//! headline and site it describes is looked up by its URL before it is
-//! shown: in the node's own pages, and in what it answers through its API
-//! and MCP tools.
+//! headline, site it describes and place's website is looked up by its
+//! URL before it is shown: in the node's own pages, and in what it answers
+//! through its API and MCP tools.
 //!
 //! What the list denies is also left out of what the node keeps and
 //! builds: the page index ([`super::pages`], built again when the list
@@ -37,6 +37,7 @@ use plumb_core::SiteRecord;
 use plumb_format::deny::{Denylist, Switch};
 use plumb_format::PublicKey;
 use plumb_index::pages::{Page, PageHit};
+use plumb_index::places::PlaceResults;
 use plumb_index::{Hit, SearchResults};
 use tracing::{info, warn};
 
@@ -200,6 +201,29 @@ impl Inner {
         }
         hits.pop()
     }
+
+    /// `found` without the places whose website the denylist denies: the
+    /// place would link it, and the results would list it first as a
+    /// local site ([`crate::assembly::linked_sites`]).
+    pub(super) fn unless_denied_places(
+        &self,
+        mut found: Option<PlaceResults>,
+    ) -> Option<PlaceResults> {
+        if let (Some(list), Some(found)) = (self.denylist(), found.as_mut()) {
+            drop_denied_places(&list, found);
+        }
+        found
+    }
+}
+
+/// Places whose website `list` denies taken off `found`.
+fn drop_denied_places(list: &Denylist, found: &mut PlaceResults) {
+    found.hits.retain(|hit| {
+        !hit.place
+            .website
+            .as_deref()
+            .is_some_and(|url| denies(list, url))
+    });
 }
 
 /// `record` as the node may index or pass it on by `list`: `None` when
@@ -277,6 +301,37 @@ mod tests {
             list.add(Entry::from_item(&entry).unwrap().unwrap());
         }
         list
+    }
+
+    #[test]
+    fn a_place_whose_website_is_denied_is_not_shown() {
+        use plumb_core::place::Place;
+        use plumb_index::places::PlaceHit;
+
+        let place = |name: &str, website: Option<&str>| PlaceHit {
+            place: Place {
+                name: name.into(),
+                website: website.map(str::to_string),
+                ..Place::default()
+            },
+            km: 1.0,
+        };
+        let mut found = PlaceResults {
+            what: "pizza".into(),
+            center: None,
+            near_me: false,
+            guessed: false,
+            radius_km: 12.0,
+            hits: vec![
+                place("Denied", Some("https://www.denied.example/menu")),
+                place("Allowed", Some("https://allowed.example/")),
+                place("No site", None),
+            ],
+            location: None,
+        };
+        drop_denied_places(&list(&["site:denied.example"]), &mut found);
+        let names: Vec<&str> = found.hits.iter().map(|h| h.place.name.as_str()).collect();
+        assert_eq!(names, ["Allowed", "No site"]);
     }
 
     #[test]

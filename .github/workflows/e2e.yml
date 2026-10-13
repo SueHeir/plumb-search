@@ -6,14 +6,18 @@
 # depends on those sites answering, so this workflow is not a required check.
 name: End to end
 
+# After every merge to main, nightly and by hand. Pull requests run it only
+# when they change the image's build or these tests: its two jobs take about
+# half the runner time of a pull request, and the account's 20 runners are
+# shared with the image builds that deploys wait on.
 on:
   push:
     branches: [main]
   pull_request:
     paths:
-      - "crates/**"
-      - "Cargo.lock"
       - "Dockerfile"
+      - ".dockerignore"
+      - "crates/plumb-e2e/**"
       - ".github/workflows/e2e.yml"
   schedule:
     - cron: "17 6 * * *"

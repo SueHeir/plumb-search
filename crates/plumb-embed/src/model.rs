@@ -183,6 +183,44 @@ impl Embedder {
         Ok(quantize(&unit))
     }
 
+    /// Whether the model reads `text`: not when a third or more of its
+    /// tokens are ones the model does not know, as Thai, Hindi and many
+    /// Japanese words are to the pinned English model ("ข่าว" and "ヤフー"
+    /// are one `[UNK]` each, "任天堂" is `[UNK]`, `天`, `堂`), nor when half
+    /// or more are those or single letters of another script than Latin,
+    /// as Russian, Greek, Arabic and Hebrew words are spelled out to it
+    /// ("погода" is `п`, `##о`, `##г`, `##о`, `##д`, `##а`) and Chinese
+    /// is read a character at a time ("東京" is `東`, `京`). The vector
+    /// of such a text says little of it, and is nearest to the sites the
+    /// model cannot read either.
+    pub fn reads(&self, text: &str) -> bool {
+        let Runner::Bert { tokenizer, .. } = &self.runner else {
+            return true;
+        };
+        let (Some(unknown), Ok(encoding)) = (
+            tokenizer.token_to_id("[UNK]"),
+            tokenizer.encode(text, false),
+        ) else {
+            return true;
+        };
+        let unknown = encoding
+            .get_ids()
+            .iter()
+            .filter(|&&id| id == unknown)
+            .count();
+        let spelled = encoding
+            .get_tokens()
+            .iter()
+            .filter(|token| {
+                let mut letters = token.strip_prefix("##").unwrap_or(token).chars();
+                matches!((letters.next(), letters.next()),
+                    (Some(letter), None) if letter.is_alphabetic() && !letter.is_ascii())
+            })
+            .count();
+        let tokens = encoding.len().max(1);
+        unknown * 3 < tokens && (unknown + spelled) * 2 < tokens
+    }
+
     /// Whether searches may be embedded after BGE's instruction for search
     /// queries: only the pinned model was trained with it; other models
     /// have their own query prefix ([`Embedder::embed_query`]).
@@ -204,7 +242,8 @@ impl Embedder {
 /// Words the test model knows.
 const TEST_WORDS: &[&str] = &[
     "electric", "car", "cars", "maker", "bank", "credit", "union", "news", "paper", "airline",
-    "flights", "tesla", "solar", "energy", "american", "the", "of", "and",
+    "flights", "tesla", "solar", "energy", "american", "the", "of", "and", "п", "##о", "##г",
+    "##д", "##а",
 ];
 
 /// The `config.json` and `tokenizer.json` of a tiny BERT model with a
@@ -343,6 +382,20 @@ pub(crate) mod tests {
         let long = "electric car ".repeat(MAX_TOKENS);
         assert_eq!(embedder.embed(&long).unwrap().len(), 32);
         assert_eq!(embedder.embed("").unwrap().len(), 32);
+    }
+
+    #[test]
+    fn texts_mostly_of_unknown_tokens_are_not_read() {
+        let embedder = tiny_embedder();
+        assert!(embedder.reads("electric car maker"));
+        assert!(embedder.reads("tesla solar cars zzz"));
+        assert!(!embedder.reads("tesla cars zzz"));
+        assert!(embedder.reads(""));
+        assert!(!embedder.reads("ข่าว"));
+        assert!(!embedder.reads("bank zzz"));
+        // Spelled out a letter at a time: "п", "##о", "##г", "##о", "##д", "##а".
+        assert!(!embedder.reads("погода"));
+        assert!(embedder.reads("tesla solar energy cars п"));
     }
 
     #[test]
