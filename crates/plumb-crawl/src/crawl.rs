@@ -1,7 +1,6 @@
 //! Fetching homepages: robots.txt for every origin, politeness delays,
 //! redirects followed hop by hop, fallback URLs, and size limits.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -375,13 +374,15 @@ async fn check_feed(client: &Client, cfg: &CrawlConfig, target: &FeedTarget) -> 
                 .map(str::to_string)
         };
         let (etag, last_modified) = (header(ETAG), header(LAST_MODIFIED));
+        let kind = header(CONTENT_TYPE);
         let body = match read_body(response, FEED_MAX_BYTES, &cfg.downloaded).await {
             Ok(body) => body,
             Err(err) => return FeedOutcome::Failed(error_text(err)),
         };
         let (domain, base) = (domain.clone(), url.clone());
         let read = tokio::task::spawn_blocking(move || {
-            crate::read_feed(&domain, &base, &decode_html(&body), now_unix())
+            let text = crate::charset::decode(&body, kind.as_deref());
+            crate::read_feed(&domain, &base, &text, now_unix())
         })
         .await;
         return match read {
@@ -872,10 +873,9 @@ impl<'a> Visit<'a> {
                 status: status.as_u16(),
             };
         }
-        if let Some(content_type) = content_type(&response) {
-            if !is_html(&content_type) {
-                return CrawlOutcome::NotHtml { content_type };
-            }
+        let kind = content_type(&response);
+        if let Some(content_type) = kind.clone().filter(|kind| !is_html(kind)) {
+            return CrawlOutcome::NotHtml { content_type };
         }
         let body = match read_body(response, self.cfg.max_bytes, &self.cfg.downloaded).await {
             Ok(body) => body,
@@ -886,7 +886,8 @@ impl<'a> Visit<'a> {
         let base_url = final_url.clone();
         let extraction = self.extraction;
         let parsed = tokio::task::spawn_blocking(move || {
-            crate::extract_inner_page_meta(&base_url, &decode_html(&body), extraction)
+            let text = crate::charset::decode(&body, kind.as_deref());
+            crate::extract_inner_page_meta(&base_url, &text, extraction)
         })
         .await;
         match parsed {
@@ -1128,17 +1129,6 @@ pub async fn read_body(
         body.extend_from_slice(&chunk[..take]);
     }
     Ok(body)
-}
-
-/// Decodes a page as UTF-8, replacing invalid bytes.
-///
-/// Known gap: the charset from `Content-Type` or `<meta charset>` is
-/// ignored, so pages in legacy encodings (windows-1252, Shift_JIS, GBK,
-/// ...) come out partly garbled. Fixing that needs a decoder such as
-/// `encoding_rs`.
-fn decode_html(body: &[u8]) -> Cow<'_, str> {
-    let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
-    String::from_utf8_lossy(body)
 }
 
 /// An error and its causes on one line, like `a: b: c`.
@@ -2480,6 +2470,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pages_read_in_the_charset_their_header_names() {
+        let (port, _) = serve(|_| {
+            Router::new().route(
+                "/",
+                get(|| async {
+                    let (page, _, _) = encoding_rs::SHIFT_JIS.encode("<title>価格.com</title>");
+                    let kind = [(header::CONTENT_TYPE, "text/html; charset=Shift_JIS")];
+                    (kind, page.into_owned())
+                }),
+            )
+        })
+        .await;
+        let page = expect_fetched(crawl_one(target(port, "/"), &config()).await);
+        assert_eq!(page.meta.title.as_deref(), Some("価格.com"));
+    }
+
+    #[tokio::test]
     async fn read_body_stops_at_the_limit() {
         let (port, _) =
             serve(|_| Router::new().route("/big", get(|| async { "y".repeat(200_000) }))).await;
@@ -2862,17 +2869,5 @@ mod tests {
             known_url: None,
         };
         assert_eq!(urls(&www), ["http://www.example.com/"]);
-    }
-
-    #[test]
-    fn decoding_is_lossy_utf8_without_bom() {
-        assert_eq!(
-            decode_html(b"\xEF\xBB\xBF<title>Caf\xC3\xA9</title>"),
-            "<title>Café</title>"
-        );
-        assert_eq!(
-            decode_html(b"<title>Caf\xE9</title>"),
-            "<title>Caf\u{FFFD}</title>"
-        );
     }
 }
