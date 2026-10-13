@@ -46,6 +46,9 @@ const CELL_DEGREES: f64 = 0.1;
 const CANDIDATES: usize = 1_000;
 /// Towns of the same name looked at.
 const TOWN_CANDIDATES: usize = 50;
+/// People in a borough or suburb that make it as much a town as a city of
+/// that size: Brooklyn, Manhattan, Setagaya.
+const CITY_SIZED: u64 = 200_000;
 /// How far around a named place that is not a town places are looked for.
 const LANDMARK_KM: f64 = 3.0;
 /// Fewer places than this within a town's size: look farther.
@@ -1064,7 +1067,17 @@ fn same_place(a: &Place, b: &Place) -> bool {
 /// name: towns before other places, bigger towns first, towns in the
 /// searcher's country a little ahead.
 fn town_score(place: &Place, country: Option<&str>) -> f64 {
-    let mut score = f64::from(place.rank) / 1_000_000.0;
+    let mut rank = place.rank;
+    // Brooklyn and Manhattan are boroughs of millions, not smaller than
+    // Brooklyn, Ohio or Manhattan, Kansas: a borough or suburb of a city's
+    // size ranks as a city of that size.
+    let tier = |kind: &str, people| plumb_core::place::place_rank(kind, people, false, false, 0);
+    if matches!(place.kind.as_str(), "place=borough" | "place=suburb")
+        && rank >= tier(&place.kind, CITY_SIZED)
+    {
+        rank = rank - tier(&place.kind, 0) + tier("place=city", 0);
+    }
+    let mut score = f64::from(rank) / 1_000_000.0;
     if !place.is_town() {
         score -= 10.0;
     }
@@ -1352,6 +1365,35 @@ mod tests {
             },
             city("Boulder", 108_000, "CO", "US", 40.0150, -105.2705),
         ]
+    }
+
+    #[test]
+    fn a_borough_of_millions_outranks_a_small_city() {
+        let borough = |name: &str, kind: &str, people: u64, lat: f64, lon: f64| Place {
+            rank: place_rank(kind, people, true, false, 3),
+            region: Some("NY".into()),
+            country: Some("US".into()),
+            ..at(name, kind, lat, lon)
+        };
+        let mut fixtures = places();
+        fixtures.extend([
+            city("Manhattan", 55_000, "KS", "US", 39.18, -96.57),
+            borough("Manhattan", "place=borough", 1_600_000, 40.78, -73.97),
+            city("Brooklyn", 11_000, "OH", "US", 41.44, -81.74),
+            borough("Brooklyn", "place=suburb", 2_600_000, 40.65, -73.95),
+            // A suburb of a few thousand stays behind the city.
+            city("Richmond", 230_000, "VA", "US", 37.54, -77.44),
+            borough("Richmond", "place=suburb", 20_000, 40.58, -74.15),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let at = |name: &str| {
+            let found = searcher.resolve(name, Some("US"), None).unwrap();
+            found.selected().map(|place| place.region.clone().unwrap())
+        };
+        assert_eq!(at("manhattan").as_deref(), Some("NY"));
+        assert_eq!(at("brooklyn").as_deref(), Some("NY"));
+        assert_eq!(at("richmond").as_deref(), Some("VA"));
+        assert_eq!(at("manhattan kansas").as_deref(), Some("KS"));
     }
 
     #[test]
