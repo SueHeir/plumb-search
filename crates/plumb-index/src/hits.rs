@@ -312,9 +312,10 @@ pub fn suggested_site_second(hits: &mut Vec<Hit>, site: &str) {
 ///   (a copy of Coinbase's title on elephant-blue.org).
 ///
 /// `typed` is the domain the query is, which always stays, and so do the
-/// sites of `home`, the searcher's country (bbc.co.uk in Britain), and of
-/// the countries the query names (`asked`: mcdonalds.co.jp for
-/// "mcdonald's japan").
+/// sites of `home`, the searcher's country (bbc.co.uk in Britain). The
+/// brand's site for a country the query names (`asked`) is no copy
+/// either: amazon.co.uk for "amazon uk", mcdonalds.co.jp for "mcdonald's
+/// japan".
 pub(crate) fn without_copies(
     hits: Vec<Hit>,
     typed: Option<&str>,
@@ -351,6 +352,8 @@ pub(crate) fn without_copies(
         plumb_core::tld_country(&hit.domain)
             .is_some_and(|at| home != Some(at) && !asked.contains(&at))
     };
+    let named_country =
+        |hit: &Hit| plumb_core::tld_country(&hit.domain).is_some_and(|at| asked.contains(&at));
     let mut copies = vec![false; hits.len()];
     for (i, hit) in hits.iter().enumerate() {
         if typed == Some(hit.domain.as_str()) {
@@ -403,7 +406,7 @@ pub(crate) fn without_copies(
             copies[i] = true;
             continue;
         }
-        let Some((label, suffix)) = brand_label(&hit.domain) else {
+        let Some((label, suffix)) = brand_label(&hit.domain).filter(|_| !named_country(hit)) else {
             continue;
         };
         // A copy is the brand again somewhere it says nothing of its own:
