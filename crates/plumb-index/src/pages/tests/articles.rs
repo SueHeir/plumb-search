@@ -75,6 +75,11 @@ fn fact_questions_find_the_article_they_ask_about() {
         described("SS Mont-Blanc", 8_000, "French cargo ship"),
         page("Age of Empires", 80_000, &[]),
         page("Empires (film)", 2_000, &[]),
+        described("Madrid", 90_000, "Capital and largest city of Spain"),
+        described("Real Madrid CF", 300_000, "Spanish football club"),
+        described("Atlético Madrid", 120_000, "Spanish football club"),
+        described("Rome", 90_000, "Capital city of Italy"),
+        described("S.S. Lazio", 300_000, "Italian football club in Rome"),
     ]);
     let first = |q: &str| {
         let hits = s.search(q, 5).unwrap();
@@ -87,6 +92,16 @@ fn fact_questions_find_the_article_they_ask_about() {
     assert_eq!(
         first("how high is mont blanc"),
         Some(("Mont Blanc".into(), true))
+    );
+    // Only what the subject names is added: "madrid spanish" names
+    // nothing, and the clubs it describes are no answer.
+    assert_eq!(
+        first("madrid spanish capital city"),
+        Some(("Madrid".into(), false))
+    );
+    assert_eq!(
+        first("rome italian capital city"),
+        Some(("Rome".into(), false))
     );
     // A query that names something is not a question about its last words.
     let hits = s.search("age of empires", 5).unwrap();

@@ -489,8 +489,13 @@ impl PageSearcher {
         // name, so the name is searched for too. So is what a fact question
         // asks about, or "when was isaac newton born" lists Newton's mother
         // and namesakes, whose descriptions hold its words, and not him;
-        // but not when the query is itself a name ("age of empires").
-        let Some((name, hint)) = hinted_name(query).or_else(|| {
+        // but not when the query is itself a name ("age of empires"). Of
+        // that search only the pages the subject names are kept: "madrid
+        // spanish" (of "madrid spanish capital city") names nothing, and
+        // the clubs it describes would push Madrid out.
+        let hinted = hinted_name(query);
+        let asked = hinted.is_none();
+        let Some((name, hint)) = hinted.or_else(|| {
             plumb_core::facts::fact_asked(query)
                 .filter(|_| !hits.iter().any(|hit| hit.named))
                 .map(|asked| (asked.subject, Hint::Any))
@@ -498,6 +503,9 @@ impl PageSearcher {
             return Ok(hits);
         };
         let mut found = self.search_once(&name, limit, scope)?;
+        if asked {
+            found.retain(|hit| hit.named);
+        }
         match hint {
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             Hint::Paper => {
