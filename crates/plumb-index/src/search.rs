@@ -91,6 +91,13 @@ impl Searcher {
             .sum()
     }
 
+    /// Whether many sites' titles have `word` ([`KNOWN_WORD_SITES`] or
+    /// more): "first" and "health" do, a name such as "medscape" does not.
+    pub fn is_common_word(&self, word: &str) -> bool {
+        self.names_by_common_word(&self.reader.searcher(), word, 1)
+            .unwrap_or(true)
+    }
+
     /// Number of documents (sites) in the index.
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()
@@ -201,6 +208,7 @@ impl Searcher {
                     &mut results.hits,
                     limit,
                     &|domain| self.site(domain).ok().flatten(),
+                    &|word| self.is_common_word(word),
                 );
             }
             return Ok(results);
