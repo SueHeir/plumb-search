@@ -1,5 +1,5 @@
 use super::*;
-use crate::facts::Fact;
+use plumb_core::facts::Fact;
 
 fn article(title: &str, facts: &[(FactKind, &str)]) -> Article {
     Article {

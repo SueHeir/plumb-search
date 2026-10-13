@@ -15,7 +15,6 @@ pub mod article;
 mod bot_check;
 mod country;
 pub mod docs;
-pub mod fact_check;
 pub mod facts;
 pub mod films;
 pub mod key_pages;
@@ -30,13 +29,11 @@ pub mod paper_query;
 pub mod papers;
 pub mod place;
 pub mod profiles;
-pub mod reference;
 pub mod safe;
 pub mod simhash;
 mod site_search;
 pub mod stack_exchange;
 pub mod storage;
-pub mod subpages;
 pub mod subsites;
 
 pub use article::{article_url, Article};
@@ -331,7 +328,7 @@ pub struct Signals {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub sitelinks: u32,
     /// Facts the site's pages state about Wikipedia's articles that were
-    /// checked against Wikidata ([`fact_check`]), each counted once.
+    /// checked against Wikidata (`plumb-tools fact-trust`), each counted once.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub fact_checks: u32,
     /// How many of those were Wikidata's. See [`fact_accuracy`].

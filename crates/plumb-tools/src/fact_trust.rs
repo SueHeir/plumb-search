@@ -1,6 +1,6 @@
 //! `plumb-tools fact-trust`: how often each site's pages get Wikidata's facts
 //! right (Knowledge-Based Trust, Dong et al. 2015), from the text of pages
-//! in Common Crawl WET files, checked with [`plumb_core::fact_check`].
+//! in Common Crawl WET files, checked with [`crate::fact_check`].
 //!
 //! Each site counts a fact it states once, however many of its pages
 //! state it, so a site does not gain by repeating itself. With `--apply`,
@@ -20,11 +20,12 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use clap::Args;
 use plumb_core::article::articles_of;
-use plumb_core::fact_check::{Check, FactBook};
 use plumb_core::facts::{FactKind, KINDS};
 use plumb_core::{canonical_domain, fact_accuracy, registrable_domain, Signals};
 
 use plumb_node::web::group_thousands;
+
+use crate::fact_check::{Check, FactBook};
 
 /// Most checks one page adds: a list of a thousand birthdays is one
 /// page's say, not a thousand.

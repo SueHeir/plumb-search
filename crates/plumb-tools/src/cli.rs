@@ -492,7 +492,7 @@ pub struct FetchPagesArgs {
     pub max_docs_per_site: usize,
     /// Reference: the reference sites to fetch, by host without `www.`
     /// (healthline.com, merriam-webster.com and others; see
-    /// plumb_core::reference), comma-separated; all when left out.
+    /// plumb_tools::reference_sites), comma-separated; all when left out.
     #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
     pub reference_sites: Vec<String>,
     /// Reference: limit pages fetched per host, including hosts with their
@@ -504,7 +504,7 @@ pub struct FetchPagesArgs {
     pub max_subpages_per_site: Option<usize>,
     /// Subpages: the subpage sites to fetch, by host without `www.`
     /// (nist.gov, chessprogramming.org and others; see
-    /// plumb_core::subpages), comma-separated; all when left out.
+    /// plumb_tools::subpage_sites), comma-separated; all when left out.
     #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
     pub subpage_sites: Vec<String>,
     /// Subpages: only the sites of these kinds (university, company,

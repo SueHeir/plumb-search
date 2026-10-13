@@ -4,7 +4,7 @@
 //! company's products and investor pages, a government agency's
 //! publications, a team's or a show's pages, a museum's collections and
 //! visiting hours. Their pages make the `subpages` page set and are found
-//! like reference pages ([`crate::reference`]): by their whole title
+//! like reference pages ([`crate::reference_sites`]): by their whole title
 //! ("Perft Results", "Special Publication 811") or by most of a search's
 //! words.
 //!
@@ -14,7 +14,7 @@
 //! shallowest are taken first, up to a cap per site, so the set stays
 //! small: about 200,000 pages in all.
 
-use crate::reference::ReferenceSite;
+use crate::reference_sites::ReferenceSite;
 
 /// What a subpage site is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -483,7 +483,7 @@ mod tests {
             assert!(keys.insert(site.key()), "{} is listed twice", site.key());
             // The reference set has its own sites; none is fetched twice.
             assert!(
-                crate::reference::site(site.key()).is_none(),
+                crate::reference_sites::site(site.key()).is_none(),
                 "{} is a reference site",
                 site.key()
             );
