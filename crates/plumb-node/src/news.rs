@@ -455,11 +455,17 @@ impl NewsStore {
             .filter(|w| !is_one_of(w, NEWS_WORDS) && !is_one_of(w, STOP_WORDS))
             .collect();
         let state = self.read();
-        // A query that spells the site it names, "news" and all, is that
-        // site: "fox news" is foxnews.com, not fox.com's news.
-        let spelled = !topic.is_empty()
-            && top.is_some_and(|(domain, named)| named && spells_site(&operators.words, domain));
+        let named = top.and_then(|(domain, named)| named.then_some(domain));
         let source = requested_source(&operators.words, &topic, wants_news, &state);
+        // A query can name a site whose name only starts with a watched
+        // site's: "fox news" is foxnews.com and "abc news" is ABC News, not
+        // fox.com's or abc.es's posts. That named site is then the request.
+        let gives_way = source.as_ref().is_some_and(|source| {
+            source.bare && named.is_some_and(|domain| !source.domains.iter().any(|d| d == domain))
+        });
+        let spelled = gives_way
+            || !topic.is_empty()
+                && named.is_some_and(|domain| spells_site(&operators.words, domain));
         if let Some(source) = source.filter(|_| !spelled) {
             let bare = source.bare;
             let block = source_block(&state, &operators, query, source, now);
@@ -1118,6 +1124,36 @@ mod tests {
         let asked = store.recent("budget news from fox", None, NOW).unwrap();
         assert_eq!(asked.site.as_deref(), Some("fox.com"));
         assert_eq!(asked.status, "source_unavailable");
+    }
+
+    #[test]
+    fn a_named_site_outranks_a_watched_site_that_shares_its_first_word() {
+        let (_dir, store) = store();
+        store.watch(vec![("abc.es".into(), "https://www.abc.es/".into())]);
+        store.put_shared(
+            vec![
+                shared(
+                    "abc.es",
+                    vec![headline("abc.es", "El Parlamento aprueba la ley", HOUR)],
+                ),
+                shared(
+                    "go.com",
+                    vec![headline("go.com", "Storm reaches the coast", HOUR)],
+                ),
+            ],
+            NOW,
+        );
+        // "abc news" names ABC News (go.com), not the Spanish paper abc.es.
+        let named = store
+            .recent("abc news", Some(("go.com", true)), NOW)
+            .unwrap();
+        assert_eq!(named.site.as_deref(), Some("go.com"));
+        assert_eq!(titles(&named), ["Storm reaches the coast"]);
+        // Naming abc.es itself, or nothing, it is abc.es's posts.
+        for top in [Some(("abc.es", true)), None] {
+            let paper = store.recent("abc news", top, NOW).unwrap();
+            assert_eq!(paper.site.as_deref(), Some("abc.es"));
+        }
     }
 
     #[test]
