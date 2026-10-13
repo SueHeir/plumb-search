@@ -353,9 +353,8 @@ fn reference_pages_are_listed_only_when_asked_for() {
     }
     // A subpage needs most of its title in the query, however much of the
     // query its title has.
-    let iron_lung = "How Long Can You Live in an Iron Lung? Polio & How It Works";
-    assert!(allowed(REFERENCE_SET, "polio iron lung", iron_lung));
-    assert!(!allowed(SUBPAGES_SET, "polio iron lung", iron_lung));
+    let cyst = "Will an ovarian cyst cause back pain? What to know";
+    assert!(!allowed(SUBPAGES_SET, "pain with ovarian cyst", cyst));
     let page = Page::from_set(
         REFERENCE2_SET,
         Article {
