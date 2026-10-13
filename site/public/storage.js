@@ -1,12 +1,14 @@
-// Shows how much data the node on this server searches, from its own
-// /api/status, and refreshes it every 30 seconds. Nothing is sent anywhere
-// else, and nothing about the visitor is kept.
+// Shows how many items (sites, pages and places) and how much data the node
+// on this server searches, from its own /api/status, and refreshes it every
+// 30 seconds. Nothing is sent anywhere else, and nothing about the visitor is
+// kept.
 (function () {
   "use strict";
   var box = document.getElementById("storage");
+  var items = document.getElementById("storage-items");
   var used = document.getElementById("storage-used");
   var limit = document.getElementById("storage-limit");
-  if (!box || !used || !limit || !window.fetch) return;
+  if (!box || !items || !used || !limit || !window.fetch) return;
 
   // Gigabytes of 1,024 of the node's megabytes (10^6 bytes each), so a
   // storage limit set as 65,536 MB reads as the 64 GB it was chosen as.
@@ -24,6 +26,8 @@
           box.hidden = true;
           return;
         }
+        var pages = s.page_coverage ? s.page_coverage.indexed_pages || 0 : 0;
+        items.textContent = ((s.sites || 0) + pages + (s.places || 0)).toLocaleString("en-US");
         used.textContent = gb(s.disk_used);
         limit.textContent = s.storage_limit ? ", of a " + gb(s.storage_limit).replace(".0 GB", " GB") + " limit" : "";
         box.hidden = false;
