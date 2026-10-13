@@ -63,8 +63,35 @@ pub const OTHER_NAME_MATCH: f32 = 0.6;
 
 /// How many times as much a person must be read as any other article with
 /// their surname in its title to be named by it alone
-/// ([`PageSearcher::name_by_surname`]).
+/// ([`PageSearcher::name_by_surname`]), or by a title and their name.
 const SURNAME_MARGIN: u64 = 3;
+
+/// Words before a person's name that are none of it: "sir isaac newton",
+/// "st francis of assisi" ([`PageSearcher::name_by_title`]).
+const HONORIFICS: &[&str] = &[
+    "sir", "dame", "dr", "mr", "mrs", "ms", "saint", "st", "lord", "lady", "tsar", "czar",
+];
+
+/// Titles before a person's name that their article's title or
+/// description says they held: "president kennedy" is John F. Kennedy,
+/// "President of the United States", and not Kennedy the commentator.
+const OFFICES: &[&str] = &[
+    "president",
+    "senator",
+    "governor",
+    "mayor",
+    "chancellor",
+    "chairman",
+    "pope",
+    "emperor",
+    "empress",
+    "king",
+    "queen",
+    "prince",
+    "princess",
+    "general",
+    "admiral",
+];
 
 /// How much popularity counts, against how well the query names the page.
 pub const POPULARITY_SHARE: f32 = 0.5;
