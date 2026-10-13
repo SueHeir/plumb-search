@@ -605,6 +605,15 @@ fn safe_search_and_language_leave_sites_out() {
         &[],
         ranked(755, 5_000),
     ));
+    // Says no language, but its words are French.
+    records.push(site(
+        "bankfr.example",
+        Some("Bank Populaire: la banque pour vous et votre famille, avec nos conseils"),
+        None,
+        &[],
+        &[],
+        ranked(750, 5_000),
+    ));
     // Explicit English metadata remains authoritative.
     let mut template = site(
         "banktemplate.example",
@@ -663,6 +672,15 @@ fn safe_search_and_language_leave_sites_out() {
     assert!(has(&off, "bankru.example"));
     assert!(!has(&english, "bankru.example"));
     assert!(!has(&german, "bankru.example"));
+    // So is missing-language text whose common words are another language's.
+    assert!(has(&off, "bankfr.example"));
+    assert!(!has(&english, "bankfr.example"));
+    let french = with(SearchOptions {
+        language: Some("fr".into()),
+        ..SearchOptions::default()
+    });
+    assert!(has(&french, "bankfr.example"));
+    assert!(!has(&french, "bankde.example"));
     // Explicit language is authoritative, even for a multilingual excerpt.
     assert!(has(&english, "banktemplate.example"));
     for language in ["ru", "uk"] {

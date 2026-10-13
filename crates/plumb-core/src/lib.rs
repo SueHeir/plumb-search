@@ -20,6 +20,7 @@ pub mod films;
 pub mod key_pages;
 pub mod keys;
 mod kinds;
+mod language_words;
 pub mod locks;
 pub mod news;
 #[cfg(feature = "oblivious")]
@@ -1390,6 +1391,7 @@ pub fn text_script(text: &str) -> Option<&'static str> {
 /// only keeps the candidate, it does not establish its language. Unlisted
 /// languages and scripts fail open rather than excluding uncertain text.
 pub fn language_fits(wanted: &str, site: &str) -> bool {
+    let site = site.strip_prefix(GUESSED).unwrap_or(site);
     if site.starts_with(|c: char| c.is_ascii_uppercase()) {
         if !matches!(
             site,
@@ -1437,14 +1439,25 @@ pub fn written_outside(language: &str, query: &str) -> bool {
     })
 }
 
+/// Marks a language [`site_language`] tells from a site's common words
+/// rather than its declaration ("~de"). [`language_fits`] takes it as that
+/// language; the shares of declared languages a search's words are judged
+/// by leave it out, since their limits were set on declarations alone.
+pub const GUESSED: char = '~';
+
 /// Keep valid declared language metadata authoritative. Only missing or
-/// invalid declarations fall back to dominant title/description script.
-/// Short excerpts and multilingual names do not reliably contradict an
-/// explicit declaration; this intentionally leaves mistagged pages alone.
+/// invalid declarations fall back to dominant title/description script,
+/// and then, for Latin letters, to the language their common words say
+/// clearly ([`language_words::language_by_words`]), marked [`GUESSED`]:
+/// seven sites in eight declare none, and a French or German one was
+/// otherwise taken for English. Short excerpts and multilingual names do
+/// not reliably contradict an explicit declaration; this intentionally
+/// leaves mistagged pages alone.
 pub fn site_language(declared: Option<&str>, text: &str) -> Option<String> {
     declared
         .and_then(language_code)
         .or_else(|| text_script(text).map(str::to_string))
+        .or_else(|| language_words::language_by_words(text).map(|code| format!("{GUESSED}{code}")))
 }
 
 /// Collapses every whitespace run to one space and trims the ends.
@@ -1602,6 +1615,12 @@ mod tests {
             Some("de")
         );
         assert_eq!(site_language(None, "Bank Deutschland"), None);
+        // Undeclared Latin text falls back to what its common words say.
+        let german = "Willkommen bei uns: wir bieten Reisen und Urlaub für alle";
+        assert_eq!(site_language(None, german).as_deref(), Some("~de"));
+        assert_eq!(site_language(Some("en"), german).as_deref(), Some("en"));
+        assert!(language_fits("de", "~de"));
+        assert!(!language_fits("en", "~de"));
     }
 
     #[test]
