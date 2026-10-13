@@ -15,6 +15,7 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 use super::building::schema;
 use super::page::is_item_id;
 use super::scoring::truncate_keeping_inner_pages;
+use super::sites::base_title;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
     KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAGE_SLIP_WEIGHT, PAPERS_SET,
@@ -502,10 +503,11 @@ impl PageSearcher {
 
     /// Whether `word`, typed among `words`, is the name of something rather
     /// than a slip, however near a commoner word it is: Wiktionary has it as
-    /// a word ("saute", "renter"; not "arguement", which it has only as a
-    /// misspelling), an English Wikipedia article is named by
-    /// it ("Everlong", "htop"), or a page's name has it with another word
-    /// typed ("Jean Meeus", "Baidu Baike").
+    /// a word ("saute", "renter"), an English Wikipedia article is named by
+    /// it ("Everlong", "htop", "Scald" for Burn), or a page's name has it
+    /// with another word typed ("Jean Meeus", "Baidu Baike"). A near
+    /// spelling of an article's title is not its name but the redirect
+    /// Wikipedia keeps for a misspelling ("Arguement" for Argument).
     fn names_something(&self, word: &str, words: &[String]) -> Result<bool> {
         let searcher = self.reader.searcher();
         let term = |field, text: &str| -> Box<dyn Query> {
@@ -518,20 +520,30 @@ impl PageSearcher {
             let query = BooleanQuery::new(clauses.into_iter().map(|q| (Occur::Must, q)).collect());
             Ok(searcher.search(&query, &Count)? > 0)
         };
-        // Sets built before misspellings were left out have "(noun)
-        // Misspelling of argument." as the word "arguement".
-        let a_word = |page: &Page| {
-            let text = page.description.as_deref().unwrap_or_default();
-            let first = text.split_once(") ").map_or(text, |(_, sense)| sense);
-            !first.to_lowercase().starts_with("misspelling of")
-        };
-        if self.definition(word)?.is_some_and(|page| a_word(&page))
-            || found(vec![
-                term(self.fields.keys, word),
-                self.scope_term("set:wikipedia-en"),
-            ])?
-        {
+        if searcher.doc_freq(&Term::from_field_text(self.fields.word, word))? > 0 {
             return Ok(true);
+        }
+        let articles = BooleanQuery::new(vec![
+            (Occur::Must, term(self.fields.keys, word)),
+            (Occur::Must, self.scope_term("set:wikipedia-en")),
+        ]);
+        let top = TopDocs::with_limit(TITLE_CANDIDATES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        for (_, address) in searcher.search(&articles, &top)? {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            let title = analysis::tokens(&self.joined, base_title(&page.title))
+                .pop()
+                .unwrap_or_default();
+            if title == word || !crate::spell::within_edits(word, &title) {
+                return Ok(true);
+            }
         }
         for other in words {
             if other != word

@@ -262,6 +262,46 @@ fn typos_never_lead_to_look_alikes() {
 }
 
 #[test]
+fn misspelled_words_are_not_taken_for_a_site_s_name() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "distance.to",
+        Some("Distance"),
+        None,
+        &["Distance"],
+        &[],
+        ranked(40_000, 2_000),
+    ));
+    for i in 0..30 {
+        records.push(site(
+            &format!("existence{i}.com"),
+            Some(&format!("Existence of things {i}")),
+            None,
+            &[],
+            &[],
+            obscure(5_000_000 + i, 10),
+        ));
+        records.push(site(
+            &format!("movers{i}.com"),
+            Some(&format!("Long distance movers {i}")),
+            None,
+            &[],
+            &[],
+            obscure(6_000_000 + i, 10),
+        ));
+    }
+    let (_dir, searcher) = build(&records);
+    // distance.to is two edits from "existance", "existence" one.
+    let results = search_spelled(&searcher, "existance");
+    assert_ne!(suggestion(&results), suggested("distance"));
+    assert!(!domains(&results.hits).contains(&"distance.to"));
+    // A slip of the name itself still finds the site.
+    let results = search_spelled(&searcher, "distanse");
+    assert_eq!(suggestion(&results), suggested("distance"));
+    assert_eq!(domains(&results.hits)[0], "distance.to");
+}
+
+#[test]
 fn exact_names_are_not_corrected() {
     let (_dir, searcher) = build(&typo_corpus());
     for query in [
