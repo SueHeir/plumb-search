@@ -70,11 +70,13 @@ RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry 
 # The licenses and notices of every third-party crate in the binary and the
 # private search page (and the desktop app's, which share Cargo.lock).
 # --fail stops the build on a license about.toml does not accept. A stage of
-# its own, so it runs while the build compiles.
+# its own, so it runs while the build compiles. Its crate caches are its own
+# too: Cargo's lock on them lives outside the mount, so two stages unpacking
+# into one at once collide.
 FROM tools AS notices
 COPY . .
-RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=plumb-cargo-git,target=/usr/local/cargo/git/db \
+RUN --mount=type=cache,id=plumb-cargo-registry-notices,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=plumb-cargo-git-notices,target=/usr/local/cargo/git/db \
     mkdir /out \
  && cargo about generate --locked --workspace --fail \
         -o /out/THIRD-PARTY-NOTICES.html about.hbs
