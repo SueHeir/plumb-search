@@ -606,15 +606,12 @@ impl PlaceSearcher {
             // A town guessed from words ("toy story", "hotel california",
             // "crypto exchange") is only taken for a big one: Story in
             // France and Crypto in Poland are villages whose names are
-            // words, and "workout app" offers no choice of fuel stations
-            // called APP. Otherwise the query may still split another way.
-            let big = |place: &Place| GUESSED_TOWNS.contains(&place.kind.as_str());
-            let guessed_wrong = match location.selected() {
-                Some(place) => !big(place),
-                None => {
-                    location.status == LocationStatus::UnknownLocation
-                        || !location.candidates.iter().all(big)
-                }
+            // words. A choice of towns is offered only when the likeliest
+            // is big: "stock market" offers no choice of suburbs called
+            // Stock. Otherwise the query may still split another way.
+            let guessed_wrong = match location.candidates.first() {
+                Some(place) => !GUESSED_TOWNS.contains(&place.kind.as_str()),
+                None => location.status == LocationStatus::UnknownLocation,
             };
             if asked.said_where || (!guessed_wrong && location.selected().is_some()) {
                 let found = self.found(asked, location, required_country, limit)?;
@@ -634,12 +631,14 @@ impl PlaceSearcher {
     }
 
     /// `found`, unless it found nothing and what it looked for is neither
-    /// a kind of place nor any place's name: "sort a list in python" and
-    /// "how many ounces in a cup" ask for no place, while "pizza in
-    /// gotham" and "starbucks near me" do.
+    /// a kind of place nor the name of a place other than a town: "sort a
+    /// list in python" and "how many ounces in a cup" ask for no place,
+    /// while "pizza in gotham" does. Near me is always a place search, so
+    /// one that finds nothing still says so.
     fn asks_for_places(&self, found: PlaceResults) -> Result<Option<PlaceResults>> {
         let kind = found.what.rsplit(' ').next().is_some_and(is_kind_word);
         if found.hits.is_empty()
+            && !found.near_me
             && !kind
             && !self
                 .named(&found.what)?
@@ -1658,6 +1657,11 @@ mod tests {
                 rank: place_rank("place=suburb", 0, false, false, 3),
                 ..at("Stock", "place=suburb", 50.1, 8.6)
             },
+            Place {
+                rank: place_rank("place=town", 9_000, false, false, 3),
+                region: Some("CT".into()),
+                ..at("Portland", "place=town", 41.57, -72.64)
+            },
         ]);
         let (_dir, searcher) = index(fixtures);
         for query in [
@@ -1674,6 +1678,15 @@ mod tests {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_some(), "{query}");
         }
+        // Two Portland cities are still a choice, though a town shares
+        // their name, and near me says it found nothing.
+        let portland = searcher.search("portland pizza", None, None, 5);
+        assert_eq!(
+            portland.unwrap().unwrap().location.unwrap().status,
+            LocationStatus::AmbiguousLocation
+        );
+        let near = searcher.search("starbuks near me", Some("Denver"), None, 5);
+        assert!(near.unwrap().unwrap().hits.is_empty());
     }
 
     #[test]
