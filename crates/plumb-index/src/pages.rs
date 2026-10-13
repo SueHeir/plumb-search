@@ -64,6 +64,38 @@ pub const PARTIAL_MATCH: f32 = 0.6;
 /// query names, but enough to be listed.
 pub const OTHER_NAME_MATCH: f32 = 0.6;
 
+/// How many times as much a person must be read as any other article with
+/// their surname in its title to be named by it alone
+/// ([`PageSearcher::name_by_surname`]), or by a title and their name.
+const SURNAME_MARGIN: u64 = 3;
+
+/// Words before a person's name that are none of it: "sir isaac newton",
+/// "st francis of assisi" ([`PageSearcher::name_by_title`]).
+const HONORIFICS: &[&str] = &[
+    "sir", "dame", "dr", "mr", "mrs", "ms", "saint", "st", "lord", "lady", "tsar", "czar",
+];
+
+/// Titles before a person's name that their article's title or
+/// description says they held: "president kennedy" is John F. Kennedy,
+/// "President of the United States", and not Kennedy the commentator.
+const OFFICES: &[&str] = &[
+    "president",
+    "senator",
+    "governor",
+    "mayor",
+    "chancellor",
+    "chairman",
+    "pope",
+    "emperor",
+    "empress",
+    "king",
+    "queen",
+    "prince",
+    "princess",
+    "general",
+    "admiral",
+];
+
 /// How much popularity counts, against how well the query names the page.
 pub const POPULARITY_SHARE: f32 = 0.5;
 
@@ -129,7 +161,7 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 const LEAD_CANDIDATES: usize = 20;
 
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v6-paper-dates-rich-symbol-docs-scope";
+pub const PAGE_INDEX_VERSION: &str = "v7-docs-address-symbols";
 
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.

@@ -145,10 +145,7 @@ impl Mcp {
             // "fastapi docs" is not "fastai docs".
             results.spelling = None;
         }
-        let places = if sites_only
-            || plumb_core::Operators::parse(query).any()
-            || plumb_index::places::parse_place_query(query).is_none()
-        {
+        let places = if sites_only || plumb_core::Operators::parse(query).any() {
             None
         } else {
             crate::assembly::places(
