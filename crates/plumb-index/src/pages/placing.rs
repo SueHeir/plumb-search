@@ -236,8 +236,21 @@ pub(crate) fn named_page_site<'a>(
 /// stays where it put it: before the same site, or last, except that a
 /// docs page found by its words never comes before the best site.
 pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -> Vec<PlacedPage> {
+    // The site of what the query names, when it is listed.
+    let home = pages
+        .iter()
+        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET)
+        .and_then(|hit| hit.page.site.as_deref())
+        .and_then(registrable_domain)
+        .filter(|home| {
+            sites
+                .iter()
+                .any(|site| registrable_domain(&site.domain).as_ref() == Some(home))
+        });
     pages.retain(|hit| {
-        crate::health::page_allowed(query, &hit.page) && subpage_asked(query, sites, hit)
+        crate::health::page_allowed(query, &hit.page)
+            && subpage_asked(query, sites, hit)
+            && !covered_elsewhere(hit, sites, home.as_deref())
     });
     if !asks_for_podcasts(query) {
         // Podcasts it does not ask for take no other page's place
@@ -291,14 +304,7 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
     if hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET {
         return true;
     }
-    let domain = registrable_domain(&hit.page.url);
-    let on_best_site = || {
-        domain.is_some()
-            && sites
-                .iter()
-                .take(SUBPAGE_SITES)
-                .any(|site| registrable_domain(&site.domain) == domain)
-    };
+    let on_best_site = || among_best_sites(&hit.page.url, sites);
     // A site's list of its posts with one tag is titled just the tag, and
     // says nothing of it: jnj.com's "Lupus" ("Explore Johnson & Johnson's
     // lupus resources") was named by "lupus" and led it, above the article.
@@ -383,6 +389,31 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
                 .split_once(mark)
                 .is_some_and(|(head, _)| has_most(head))
         })
+}
+
+/// Whether `url` is on one of the query's best [`SUBPAGE_SITES`] sites.
+fn among_best_sites(url: &str, sites: &[crate::Hit]) -> bool {
+    let domain = registrable_domain(url);
+    domain.is_some()
+        && sites
+            .iter()
+            .take(SUBPAGE_SITES)
+            .any(|site| registrable_domain(&site.domain) == domain)
+}
+
+/// Whether `hit` is another site's page titled what the query names, when
+/// that has a site of its own among the results, `home` (the named
+/// article's): lanl.gov's "Boston Marathon" tells of staff who ran it, and
+/// the race's site is baa.org. It is listed only on one of the best sites,
+/// as a tag archive is.
+fn covered_elsewhere(hit: &PageHit, sites: &[crate::Hit], home: Option<&str>) -> bool {
+    let Some(home) = home else {
+        return false;
+    };
+    hit.named
+        && (hit.page.set == SUBPAGES_SET || hit.page.set == REFERENCE2_SET)
+        && registrable_domain(&hit.page.url).as_deref() != Some(home)
+        && !among_best_sites(&hit.page.url, sites)
 }
 
 /// Whether `url` is a site's list of its posts with one tag:
