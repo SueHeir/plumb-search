@@ -19,8 +19,8 @@ use super::{
     LEAD_CANDIDATES, LEAD_MATCH, MUSIC_SET, OTHER_NAME_MATCH, PACKAGES_SET, PAPERS_SET,
     PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
-    REFERENCE_QUERY_WORDS, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET, TITLE_INSIDE_CANDIDATES,
-    UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
+    REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
+    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
 };
 use crate::analysis;
 
@@ -1050,7 +1050,7 @@ pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
 /// words of "javascript array sort" are more read than MDN's page on it,
 /// and would crowd it out.
 pub(crate) fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
-    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE2_SET];
+    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET];
     for set in kept {
         if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
             continue;
