@@ -13,6 +13,7 @@ When a query only might say where ("denver brewery", with no "in" or "near") and
 - `WHAT in WHERE`, `WHAT near WHERE`, `WHAT around WHERE`, `WHAT close to WHERE`.
 - `WHAT near me`, `WHAT nearby`, `nearby WHAT`.
 - `WHERE WHAT` or `WHAT WHERE` when WHAT is a kind of place ("denver pizza", "sushi fort collins").
+- `NAME WHERE` when WHERE is a city and a place in or near it is called NAME ("starbucks denver", "ikea seattle"), and no site is named by the whole query.
 
 Words like "best", "good" or "cheap" are left out of WHAT. WHAT must be in a place's name or among the words for its kind: a café is found by "cafe", "coffee" and "coffee shop", a supermarket by "grocery store".
 

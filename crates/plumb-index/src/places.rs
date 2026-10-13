@@ -25,7 +25,7 @@ use plumb_core::place::{
 };
 use plumb_core::{country_of_any_name, joined, normalize_text};
 use serde::{Deserialize, Serialize};
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::directory::Directory;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
@@ -676,8 +676,10 @@ impl PlaceSearcher {
         })
     }
 
-    /// A named business followed by an actually indexed city: "Poilâne
-    /// Paris". No geographic interpretation is made for an unknown tail.
+    /// A named business followed by a city its name resolves to: "Poilâne
+    /// Paris", "starbucks denver" (Colorado's, though villages elsewhere
+    /// are called Denver too). No geographic interpretation is made for an
+    /// unknown tail or a choice of towns.
     fn named_business_query(
         &self,
         query: &str,
@@ -691,16 +693,32 @@ impl PlaceSearcher {
         }
         for count in (1..=3.min(words.len() - 1)).rev() {
             let (what, near) = words.split_at(words.len() - count);
+            // Most searches end in no city's name: found without reading
+            // a place, since every search on a node comes here.
+            let mut city = false;
+            for k in 1..=near.len() {
+                city = city
+                    || self.named_with(&near[..k].join(" "), self.fields.kind, GUESSED_TOWNS)?;
+            }
+            if !city {
+                continue;
+            }
             let name = near.join(" ");
             let location = self.resolve(&name, preferred_country, required_country)?;
-            if !location.candidates.is_empty()
-                && location
-                    .candidates
-                    .iter()
-                    .all(|place| GUESSED_TOWNS.contains(&place.kind.as_str()))
-            {
+            let Some(town) = location
+                .selected()
+                .filter(|place| GUESSED_TOWNS.contains(&place.kind.as_str()))
+            else {
+                continue;
+            };
+            // Only a place called that is a business named: "bible
+            // reading" asks for no Bible church in Reading, Pennsylvania.
+            let what = what.join(" ");
+            let km = 3.0 * town_size(&town.kind).unwrap_or(LANDMARK_KM);
+            let cells = cells_around(town.lat, town.lon, km);
+            if self.named_with(&what, self.fields.cell, &cells)? {
                 return Ok(Some(PlaceQuery {
-                    what: what.join(" "),
+                    what,
                     near: Near::Named(name),
                     said_where: false,
                 }));
@@ -738,6 +756,29 @@ impl PlaceSearcher {
             .into_iter()
             .collect();
         stems.iter().all(|stem| words.contains(stem))
+    }
+
+    /// Whether a place called `name` has one of `values` in `field`: is
+    /// of one of those kinds, or in one of those cells.
+    fn named_with(&self, name: &str, field: Field, values: &[impl AsRef<str>]) -> Result<bool> {
+        let Some(key) = analysis::tokens(&self.joined, name).pop() else {
+            return Ok(false);
+        };
+        let term = |field, text: &str| {
+            Box::new(TermQuery::new(
+                Term::from_field_text(field, text),
+                IndexRecordOption::Basic,
+            )) as Box<dyn Query>
+        };
+        let values = values
+            .iter()
+            .map(|value| (Occur::Should, term(field, value.as_ref())))
+            .collect();
+        let query = BooleanQuery::new(vec![
+            (Occur::Must, term(self.fields.keys, &key)),
+            (Occur::Must, Box::new(BooleanQuery::new(values))),
+        ]);
+        Ok(self.reader.searcher().search(&query, &Count)? > 0)
     }
 
     /// The best `limit` places matching `what` within `km` of `center`.
@@ -1213,6 +1254,42 @@ mod tests {
         ] {
             assert_eq!(query(plain), None, "{plain}");
         }
+    }
+
+    #[test]
+    fn a_business_named_with_a_city_is_looked_for_there() {
+        let mut fixtures = places();
+        fixtures.extend([
+            Place {
+                rank: place_rank("place=village", 3_800, false, false, 3),
+                region: Some("PA".into()),
+                country: Some("US".into()),
+                ..at("Denver", "place=village", 40.23, -76.14)
+            },
+            at("Starbucks", "amenity=cafe", 39.74, -104.99),
+            at("Starbucks", "amenity=cafe", 43.66, -70.26),
+            city("Reading", 95_000, "PA", "US", 40.34, -75.93),
+            at(
+                "Bible Baptist Church",
+                "amenity=place_of_worship",
+                40.35,
+                -75.92,
+            ),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        // Denver, Colorado, though a village is called Denver too.
+        let found = searcher
+            .search("starbucks denver", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.center.unwrap().region.as_deref(), Some("CO"));
+        assert_eq!(found.hits[0].place.name, "Starbucks");
+        // Which Portland is not guessed.
+        let portland = searcher.search("starbucks portland", None, Some("US"), 5);
+        assert!(portland.unwrap().is_none());
+        // Nothing in Reading is called Bible.
+        let bible = searcher.search("bible reading", None, Some("US"), 5);
+        assert!(bible.unwrap().is_none());
     }
 
     fn at(name: &str, kind: &str, lat: f64, lon: f64) -> Place {

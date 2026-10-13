@@ -41,13 +41,13 @@ pub(crate) fn places(
     if plumb_core::Operators::parse(query).any() {
         return None;
     }
-    let asked = parse_place_query(query)?;
     let had_results = found.is_some();
     let found = not_a_name(found, hits);
     if had_results && found.is_none() {
         return None;
     }
     let mut found = found.or_else(|| {
+        let asked = parse_place_query(query)?;
         asked.said_where.then(|| PlaceResults {
             what: asked.what,
             center: None,
