@@ -74,6 +74,56 @@ fn read_sharps(text: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// [`register`] for the sites' index, whose word fields hold a run of
+/// [`unspaced`] script as its [`pieces`]. Queries are read with
+/// [`words_analyzer`] still, and a word is looked for by its pieces
+/// ([`crate::query::Clauses::add_word`]), so the names a query is matched
+/// to stay whole.
+pub(crate) fn register_sites(manager: &TokenizerManager) {
+    register(manager);
+    manager.register(
+        WORDS_ANALYZER,
+        TextAnalyzer::builder(WordTokenizer {
+            in_pieces: true,
+            ..WordTokenizer::default()
+        })
+        .filter(AsciiFoldingFilter)
+        .filter(LowerCaser)
+        .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
+        .build(),
+    );
+}
+
+/// Whether `c` belongs to a script written without spaces between words:
+/// Chinese and Japanese, Thai, Lao, Khmer and Burmese.
+fn unspaced(c: char) -> bool {
+    matches!(c as u32,
+        0x0E00..=0x0EFF // Thai, Lao
+        | 0x1000..=0x109F // Burmese
+        | 0x1780..=0x17FF // Khmer
+        | 0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F // kana
+        | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF // Han
+    )
+}
+
+/// The terms a word is indexed as in the sites' word fields: the word,
+/// except that a run of more than two [`unspaced`] characters becomes its
+/// overlapping pairs, and such a run is split from letters of other
+/// scripts. A title's "全国の天気予報" has no spaces to find the word
+/// "天気予報" by, but holds all of its pairs: 天気, 気予, 予報.
+pub(crate) fn pieces(word: &str) -> Vec<String> {
+    let chars: Vec<char> = word.chars().collect();
+    let mut pieces = Vec::new();
+    for run in chars.chunk_by(|a, b| unspaced(*a) == unspaced(*b)) {
+        if unspaced(run[0]) && run.len() > 2 {
+            pieces.extend(run.windows(2).map(|pair| pair.iter().collect::<String>()));
+        } else {
+            pieces.push(run.iter().collect());
+        }
+    }
+    pieces
+}
+
 /// The analyzer registered as [`STEMMED_ANALYZER`].
 pub(crate) fn stemmed_analyzer() -> TextAnalyzer {
     stemmed_in(Language::English)
@@ -189,12 +239,17 @@ struct WordTokenizer {
     sharps: bool,
     normalized: String,
     token: Token,
+    /// Each word as its [`pieces`].
+    in_pieces: bool,
 }
 
 struct WordStream<'a> {
     words: std::str::Split<'a, char>,
     offset: usize,
     token: &'a mut Token,
+    in_pieces: bool,
+    /// The pieces of the current word still to come, last first.
+    pending: Vec<String>,
 }
 
 impl Tokenizer for WordTokenizer {
@@ -212,12 +267,19 @@ impl Tokenizer for WordTokenizer {
             words: self.normalized.split(' '),
             offset: 0,
             token: &mut self.token,
+            in_pieces: self.in_pieces,
+            pending: Vec::new(),
         }
     }
 }
 
 impl TokenStream for WordStream<'_> {
     fn advance(&mut self) -> bool {
+        if let Some(piece) = self.pending.pop() {
+            self.token.text = piece;
+            self.token.position = self.token.position.wrapping_add(1);
+            return true;
+        }
         for word in self.words.by_ref() {
             let from = self.offset;
             // `normalize_text` separates words with exactly one space.
@@ -231,6 +293,11 @@ impl TokenStream for WordStream<'_> {
             }
             self.token.offset_from = from;
             self.token.offset_to = from + word.len();
+            if self.in_pieces && self.token.text.chars().any(unspaced) {
+                self.pending = pieces(&self.token.text);
+                self.pending.reverse();
+                return self.advance();
+            }
             self.token.position = self.token.position.wrapping_add(1);
             return true;
         }
@@ -367,6 +434,30 @@ mod tests {
         // Unsupported languages keep exact neutral words rather than
         // applying English morphology to them.
         assert_eq!(tokens(&content_analyzer(Some("fr")), "types"), ["types"]);
+    }
+
+    #[test]
+    fn unspaced_scripts_are_indexed_in_pieces() {
+        assert_eq!(pieces("天気予報"), ["天気", "気予", "予報"]);
+        assert_eq!(pieces("楽天"), ["楽天"]);
+        assert_eq!(pieces("協会tenki"), ["協会", "tenki"]);
+        assert_eq!(pieces("weather"), ["weather"]);
+        let manager = TokenizerManager::default();
+        register_sites(&manager);
+        let sites = manager.get(WORDS_ANALYZER).unwrap();
+        assert_eq!(
+            tokens(&sites, "全国の天気予報 tenki.jp"),
+            ["全国", "国の", "の天", "天気", "気予", "予報", "tenki", "jp"]
+        );
+        // Queries keep their words whole.
+        assert_eq!(words("全国の天気予報"), ["全国の天気予報"]);
+        let mut sites = sites.clone();
+        let mut stream = sites.token_stream("天気予報 tenki");
+        let mut positions = Vec::new();
+        while let Some(token) = stream.next() {
+            positions.push(token.position);
+        }
+        assert_eq!(positions, [0, 1, 2, 3]);
     }
 
     #[test]

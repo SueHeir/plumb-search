@@ -72,12 +72,15 @@ pub(crate) const MAP: &str = "plumb/map";
 /// The folder of the signed sets in the data directory.
 pub(super) const DIR: &str = "sets";
 
-/// How often the node looks for newer sets.
+/// How often the node looks for newer sets. In tests, seldom enough that
+/// a look at every set stays within the requests a node answers another a
+/// minute ([`plumb_net::sets::SETS_REQUESTS_PER_MINUTE`]).
 #[cfg(not(test))]
 const LOOK_EVERY: Duration = Duration::from_secs(6 * 3600);
 #[cfg(test)]
-const LOOK_EVERY: Duration = Duration::from_secs(1);
-/// Wait before looking again when no node that serves sets was connected.
+const LOOK_EVERY: Duration = Duration::from_secs(30);
+/// Wait before looking again when a set found no node that serves sets
+/// connected, or only busy ones.
 #[cfg(not(test))]
 const RETRY_WAIT: Duration = Duration::from_secs(10 * 60);
 #[cfg(test)]
@@ -228,6 +231,8 @@ pub(super) fn use_held_site_rules(data: &Path, publishers: &[PublicKey]) {
 pub(super) enum Looked {
     /// No node that serves sets was connected.
     NoPeer,
+    /// A node that may have a newer generation was busy: ask again soon.
+    Busy,
     /// None had a newer generation from a trusted publisher.
     Current,
     /// Took this generation.
@@ -242,13 +247,13 @@ pub(super) async fn run(inner: Arc<Inner>) {
         let Some(net) = network::handle(&inner).cloned() else {
             return;
         };
-        let mut met = false;
+        // Whether a set found no node to ask, or only busy ones.
+        let mut unsettled = false;
         for set in taken_sets(inner.config.crawl_only) {
             match look(&inner, &net, set).await {
-                Ok(Looked::NoPeer) => {}
-                Ok(Looked::Current) => met = true,
+                Ok(Looked::NoPeer | Looked::Busy) => unsettled = true,
+                Ok(Looked::Current) => {}
                 Ok(Looked::Took(generation)) => {
-                    met = true;
                     info!("took {set} generation {generation}");
                     // The denylist and the adult list apply at once; the
                     // site rules from the next start.
@@ -260,7 +265,6 @@ pub(super) async fn run(inner: Arc<Inner>) {
                     }
                 }
                 Err(err) => {
-                    met = true;
                     warn!("taking {set}: {err:#}");
                 }
             }
@@ -272,15 +276,13 @@ pub(super) async fn run(inner: Arc<Inner>) {
         let hold = super::pages::SetFileHold::take(&inner, super::pages::MAP_SET);
         if let Some((held, max_bytes)) = hold.as_ref().and_then(|_| map_wanted(&inner)) {
             match look_newer(&inner, &net, MAP, held, max_bytes).await {
-                Ok(Looked::NoPeer) => {}
-                Ok(Looked::Current) => met = true,
+                Ok(Looked::NoPeer | Looked::Busy) => unsettled = true,
+                Ok(Looked::Current) => {}
                 Ok(Looked::Took(generation)) => {
-                    met = true;
                     info!("took {MAP} generation {generation}");
                     settle_map(&inner);
                 }
                 Err(err) => {
-                    met = true;
                     warn!("taking {MAP}: {err:#}");
                 }
             }
@@ -291,14 +293,12 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 break;
             }
             match look_page_set(&inner, &net, set, pages).await {
-                Ok(Looked::NoPeer) => {}
-                Ok(Looked::Current) => met = true,
+                Ok(Looked::NoPeer | Looked::Busy) => unsettled = true,
+                Ok(Looked::Current) => {}
                 Ok(Looked::Took(generation)) => {
-                    met = true;
                     info!("took plumb/{} generation {generation}", set.id);
                 }
                 Err(err) => {
-                    met = true;
                     warn!("taking plumb/{}: {err:#}", set.id);
                 }
             }
@@ -306,7 +306,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 return;
             }
         }
-        let wait = if met { LOOK_EVERY } else { RETRY_WAIT };
+        let wait = if unsettled { RETRY_WAIT } else { LOOK_EVERY };
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
             _ = stopped.wait_for(|stop| *stop) => return,
@@ -318,6 +318,8 @@ pub(super) async fn run(inner: Arc<Inner>) {
 enum Offer {
     /// No node that serves sets was connected.
     NoPeer,
+    /// None offered a newer generation, but one was busy.
+    Busy,
     /// None had a newer generation from a trusted publisher.
     Current,
     /// The newest one, from `from`, signed for `publisher`.
@@ -340,6 +342,7 @@ fn held_generation(data: &Path, set: &str) -> Option<i64> {
 async fn ask_newest(inner: &Inner, net: &NetHandle, set: &str, held: Option<i64>) -> Result<Offer> {
     let mut asked: Vec<PeerId> = Vec::new();
     let mut newest: Option<(i64, String, PeerId, PublicKey)> = None;
+    let mut busy = false;
     while asked.len() < MAX_ASKED {
         let request = SetsRequest::Manifest {
             set: set.to_string(),
@@ -348,8 +351,13 @@ async fn ask_newest(inner: &Inner, net: &NetHandle, set: &str, held: Option<i64>
             break;
         };
         asked.push(answer.peer);
-        let SetsResponse::Manifest(Some(text)) = answer.response else {
-            continue;
+        let text = match answer.response {
+            SetsResponse::Manifest(Some(text)) => text,
+            SetsResponse::Busy => {
+                busy = true;
+                continue;
+            }
+            _ => continue,
         };
         let (generation, publisher) = match vet(inner, set, &text) {
             Ok(vetted) => vetted,
@@ -372,6 +380,7 @@ async fn ask_newest(inner: &Inner, net: &NetHandle, set: &str, held: Option<i64>
             from,
             publisher,
         },
+        None if busy => Offer::Busy,
         None => Offer::Current,
     })
 }
@@ -396,6 +405,7 @@ async fn look_newer(
 ) -> Result<Looked> {
     match ask_newest(inner, net, set, held).await? {
         Offer::NoPeer => Ok(Looked::NoPeer),
+        Offer::Busy => Ok(Looked::Busy),
         Offer::Current => Ok(Looked::Current),
         Offer::Newer {
             text,
@@ -557,6 +567,7 @@ async fn look_page_set(
     let held_generation = held.as_ref().map(|held| held.generation);
     match ask_newest(inner, net, &name, held_generation).await? {
         Offer::NoPeer => Ok(Looked::NoPeer),
+        Offer::Busy => Ok(Looked::Busy),
         Offer::Newer {
             text,
             from,
