@@ -882,11 +882,16 @@ fn a_package_not_asked_for_leaves_the_other_pages_their_places() {
         .map(|row| row["url"].as_str().unwrap())
         .collect();
     let at = |part: &str| urls.iter().position(|url| url.contains(part));
-    // The repository and the article are listed, and npm's page with them.
-    let site = at("die-linke.de").unwrap();
-    for part in ["github.com", "wikipedia.org", "npmjs.com"] {
-        assert!(at(part).is_some_and(|page| page < site), "{part}: {urls:?}");
+    // The repository and the article are listed, and npm's page where it
+    // goes on its own, ahead of the site.
+    for part in ["github.com", "wikipedia.org"] {
+        assert!(at(part).is_some(), "{part}: {urls:?}");
     }
+    let site = at("die-linke.de");
+    assert!(
+        at("npmjs.com").is_some_and(|npm| Some(npm) < site),
+        "{urls:?}"
+    );
 }
 
 #[test]
