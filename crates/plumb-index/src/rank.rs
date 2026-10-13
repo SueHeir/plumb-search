@@ -928,7 +928,7 @@ impl Searcher {
         // known homepages that are only a company's sign-in page for
         // someone else's product ("Outlook Web App" on bpl.net for
         // "microsoft outlook"). live.com, titled "Outlook", is Microsoft's.
-        let ranked = self.untitled_last(&searcher, ranked, limit)?;
+        let ranked = self.untitled_last(&searcher, ranked, query_text, limit)?;
         // A few more than asked for, so that copies left out below leave
         // the page full.
         let wanted = limit.saturating_add(COPY_LOOKAHEAD);

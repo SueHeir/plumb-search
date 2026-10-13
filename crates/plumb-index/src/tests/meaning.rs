@@ -804,3 +804,59 @@ fn sites_with_no_embedding_matching_the_whole_query_keep_their_words() {
         .hits;
     assert_eq!(hits[0].domain, "schwab.com", "{hits:?}");
 }
+
+#[test]
+fn bare_sites_only_meaning_finds_are_left_out() {
+    let records = vec![
+        site(
+            "realpython.com",
+            Some("Real Python"),
+            Some("Python tutorials, from managing versions with pyenv to packaging"),
+            &[],
+            &[],
+            obscure(60_000, 200),
+        ),
+        // No title or description, near "pyenv" in meaning only: expired
+        // domains, better linked than the tutorials.
+        site("makewebeasy.co", None, None, &[], &[], obscure(20_000, 400)),
+        site(
+            "deleciousfood.com",
+            None,
+            None,
+            &[],
+            &[],
+            obscure(900_000, 3),
+        ),
+        // Bare too, but its address shows the query's word.
+        site("pyenvtips.net", None, None, &[], &[], obscure(900_000, 3)),
+    ];
+    let (_dir, searcher) = build(&records);
+    let meaning = FixedMeaning(vec![
+        ("makewebeasy.co", 1.0),
+        ("deleciousfood.com", 1.0),
+        ("pyenvtips.net", 0.9),
+        ("realpython.com", 0.6),
+    ]);
+    let found = |query: &str| -> Vec<String> {
+        let results = searcher
+            .search_meaning(
+                query,
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap();
+        results.hits.into_iter().map(|hit| hit.domain).collect()
+    };
+    assert_eq!(found("pyenv"), ["realpython.com", "pyenvtips.net"]);
+    let unrelated = found("starship prompt");
+    assert!(
+        !unrelated
+            .iter()
+            .any(|d| d == "makewebeasy.co" || d == "deleciousfood.com"),
+        "{unrelated:?}"
+    );
+    // Named, a bare site is still found.
+    assert_eq!(found("makewebeasy")[0], "makewebeasy.co");
+}
