@@ -2,7 +2,7 @@
 //! left out.
 
 use super::*;
-use crate::junk::is_gambling;
+use crate::junk::{is_gambling, is_gambling_address};
 
 /// A site found only by meaning, whose homepage is at `url`.
 fn at(domain: &str, url: &str, title: Option<&str>) -> SiteRecord {
@@ -146,6 +146,24 @@ fn gambling_sites_are_left_out_of_searches_not_about_gambling() {
             &[],
             obscure(300_000, 2),
         ),
+        // No words of its own, but named like a gambling site.
+        site(
+            "312bet29.com",
+            None,
+            None,
+            &[],
+            &[("lazy", 5)],
+            obscure(200_000, 3),
+        ),
+        // Named like one, but it says what it is.
+        site(
+            "lakeside.casino",
+            Some("Lakeside Hotel"),
+            Some("Rooms and a restaurant by the lake."),
+            &[],
+            &[("lazy", 5)],
+            obscure(200_000, 3),
+        ),
         site(
             "nugget.example",
             Some("Golden Nugget Las Vegas Hotel & Casino"),
@@ -167,6 +185,9 @@ fn gambling_sites_are_left_out_of_searches_not_about_gambling() {
     let lazy = found("lazydocker");
     assert!(lazy.contains("lazydocker.example"), "{lazy}");
     assert!(!lazy.contains("lazybar.example"), "{lazy}");
+    let lazy = found("lazy");
+    assert!(!lazy.contains("312bet29.com"), "{lazy}");
+    assert!(lazy.contains("lakeside.casino"), "{lazy}");
     // Asked about gambling, or named, they are found.
     assert!(found("lazy casino").contains("lazybar.example"));
     assert!(found("lazybar").contains("lazybar.example"));
@@ -200,5 +221,29 @@ fn gambling_sites_are_told_by_their_words() {
         "Interest rates (ставки) explained",
     ] {
         assert!(!is_gambling([Some(text)]), "{text:?}");
+    }
+    for domain in [
+        "161bet.bet",
+        "312bet29.com",
+        "bet365.com",
+        "jalurwlatogel88.net",
+        "kitakaisartoto88.net",
+        "pkrslots29.vip",
+        "qq88.money",
+    ] {
+        assert!(is_gambling_address(domain), "{domain}");
+    }
+    for domain in [
+        "tibet2025.org",
+        "alphabet1.com",
+        "bet.com",
+        "toto.com",
+        "betterhelp.com",
+        "slotmachine-museum.org",
+        "slot.ws",
+        "247bethesdaplumber.com",
+        "judi2024.com",
+    ] {
+        assert!(!is_gambling_address(domain), "{domain}");
     }
 }

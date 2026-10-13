@@ -23,7 +23,8 @@
 //! - Little-known online gambling sites, for a search that is not about
 //!   gambling. Most are spam on expired domains ("Situs Toto MATARAMTOTO"
 //!   on alleghenyartgalleries.com) whose links call them by a big site's
-//!   name, so they go even when that name is the query ("ebay").
+//!   name, so they go even when that name is the query ("ebay"). Those
+//!   with no description to tell them by go by their names (312bet29.com).
 
 use plumb_core::{
     asks_to_sign_in, is_sign_in_page, names_label, normalize_text, spells_label,
@@ -133,7 +134,8 @@ const GAMBLING_QUERY_WORDS: &[&str] = &[
 pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
     let little_known = hit.link_score < WELL_KNOWN_LINK_SCORE && !hit.official;
     if little_known
-        && is_gambling([hit.title.as_deref(), hit.description.as_deref()])
+        && (is_gambling([hit.title.as_deref(), hit.description.as_deref()])
+            || (hit.description.is_none() && is_gambling_address(&hit.domain)))
         && !asks_about_gambling(query)
         && !spells_label(query, &hit.domain)
     {
@@ -193,6 +195,43 @@ pub(crate) fn is_gambling<'a>(texts: impl IntoIterator<Item = Option<&'a str>>) 
                         || (word.len() >= 5 && word.ends_with("qq")))
             })
     })
+}
+
+/// Endings only gambling sites take.
+const GAMBLING_ENDINGS: &[&str] = &["bet", "casino", "poker", "bingo", "lotto"];
+
+/// Words that, with a number right after them, make a gambling site's
+/// name: "kitakaisartoto88", "pkrslots29", "qq88".
+const GAMBLING_NUMBERED: &[&str] = &["toto", "slot", "slots", "qq", "gacor"];
+
+/// Whether `domain` is named like a gambling site, which often has no
+/// title or description to tell it by: on a gambling ending (161bet.bet),
+/// with "togel" in its name (jalurwlatogel88.net), a gambling word
+/// numbered ("kitakaisartoto88.net"), or "bet" next to a number with no
+/// letter on either side ("312bet29.com", "bet365.com", not
+/// tibet2025.org or 247bethesdaplumber.com).
+pub(crate) fn is_gambling_address(domain: &str) -> bool {
+    let domain = domain.to_ascii_lowercase();
+    let ending = domain.rsplit('.').next().unwrap_or_default();
+    let label = plumb_core::domain_label(&domain).replace(['-', '.'], "");
+    let digit_at = |at: usize| label.as_bytes().get(at).is_some_and(u8::is_ascii_digit);
+    let numbered = |word: &str| {
+        label
+            .match_indices(word)
+            .any(|(at, _)| digit_at(at + word.len()))
+    };
+    let bet = label.match_indices("bet").any(|(at, _)| {
+        let before = at.checked_sub(1).map(|b| label.as_bytes()[b]);
+        let digit_before = before.is_some_and(|b| b.is_ascii_digit());
+        let end = at + 3 == label.len();
+        (before.is_none() || digit_before)
+            && (end || digit_at(at + 3))
+            && (digit_before || digit_at(at + 3))
+    });
+    GAMBLING_ENDINGS.contains(&ending)
+        || label.contains("togel")
+        || GAMBLING_NUMBERED.iter().any(|word| numbered(word))
+        || bet
 }
 
 /// Whether `query` asks about gambling: "nfl free vegas picks", "las
