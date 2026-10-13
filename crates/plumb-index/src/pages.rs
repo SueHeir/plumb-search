@@ -143,12 +143,14 @@ pub const DESCRIBED_QUERY_WORDS: usize = 2;
 pub const DESCRIBED_MISSING_FROM: usize = 3;
 
 /// How much a query word an article only says counts, against one of its
-/// title.
+/// title. It has to say the word itself, in the singular or the plural,
+/// not only its stem: "scheduled monument" does not say "schedule".
 pub const DESCRIBED_WORD: f32 = 0.5;
 
 /// Most `name` of a Wikipedia article whose lead ([`Page::lead`]), with
-/// its names and description, has every word of a query (stemmed, without
-/// the asking words) of at least [`DESCRIBED_QUERY_WORDS`]: the article
+/// its names and description, says every word of a query (without the
+/// asking words, as [`DESCRIBED_WORD`] says) of at least
+/// [`DESCRIBED_QUERY_WORDS`]: the article
 /// whose lead matches them best gets it, others less by how much worse
 /// theirs does. "triassic jurassic cretaceous" finds Mesozoic.
 pub const LEAD_MATCH: f32 = 0.55;

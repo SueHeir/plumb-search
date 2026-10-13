@@ -44,7 +44,7 @@ pub use country::{
     COUNTRY_CHOICES,
 };
 pub use key_pages::{KeyPage, PageIntent, MAX_KEY_PAGES};
-pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
+pub use kinds::{is_generic_kind, kind_key, other_number, singular, MAX_KINDS};
 pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
