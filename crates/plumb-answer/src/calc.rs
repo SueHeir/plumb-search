@@ -1,6 +1,6 @@
-//! Sums: `12 * (3 + 4)`, `2^10`, `sqrt(2)`, `15% of 80`, `5!`, and the same
-//! in words: "2 to the power of 10", "square root of 2", "15 percent of 80",
-//! "10 factorial", "log base 2 of 8".
+//! Sums: `12 * (3 + 4)`, `2^10`, `sqrt(2)`, `15% of 80`, `50 - 20%`, `5!`, and
+//! the same in words: "2 to the power of 10", "square root of 2", "15
+//! percent of 80", "20% off 50", "10 factorial", "log base 2 of 8".
 //!
 //! A query is a sum only when all of it reads as one, with at least one
 //! operation in it, so "2024" and "f1" stay searches. Two numbers joined by
@@ -242,12 +242,19 @@ impl Parser {
     }
 
     /// expr := term (('+' | '-') term)*
+    ///
+    /// A percent alone after `+` or `-` is of the amount before it, as
+    /// calculators read it: "50 - 20%" is 40, not 49.8.
     fn expr(&mut self) -> Option<Value> {
         let (mut value, mut text) = self.term()?;
         while let Some(op @ (Token::Plus | Token::Minus)) = self.peek() {
             self.at += 1;
             self.operations += 1;
-            let (right, right_text) = self.term()?;
+            let start = self.at;
+            let (mut right, right_text) = self.term()?;
+            if matches!(self.tokens[start..self.at], [Token::Num(_), Token::Percent]) {
+                right *= value;
+            }
             if op == Token::Plus {
                 value += right;
                 text = format!("{text} + {right_text}");
@@ -455,6 +462,11 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
         }
     }
     let text = in_symbols(text.trim_end_matches(['=', '?']));
+    // "20% off 50" is 50 less 20% of it.
+    let text = match text.split_once("% off ") {
+        Some((cut, price)) => format!("{price} - {cut}%"),
+        None => text,
+    };
     if is_name_like(&text) {
         return None;
     }
@@ -560,6 +572,29 @@ mod tests {
             "natural logarithm",
             "round of 16",
         ] {
+            assert_eq!(answer(query), None, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn a_percent_added_or_taken_away_is_of_the_amount() {
+        for (query, sum) in [
+            ("50 - 20%", "40"),
+            ("100 + 10%", "110"),
+            ("80-25%", "60"),
+            ("60 + 15%", "69"),
+            ("10 + 40 + 20%", "60"),
+            ("20% off 50", "40"),
+            ("what is 15 percent off 80", "68"),
+            // Elsewhere a percent is a hundredth.
+            ("200 * 15%", "30"),
+            ("50 - 20% of 30", "44"),
+            ("-20% + 1", "0.8"),
+        ] {
+            assert_eq!(calc(query).as_deref(), Some(sum), "{query:?}");
+        }
+        assert_eq!(answer("20% off 50").unwrap().question, "50 − 20% =");
+        for query in ["20% off", "20% off sale", "off 50"] {
             assert_eq!(answer(query), None, "{query:?}");
         }
     }
