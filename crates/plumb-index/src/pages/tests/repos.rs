@@ -124,3 +124,28 @@ fn what_the_whole_query_names_keeps_its_place_over_a_described_repository() {
     assert_eq!(found[0].page.title, "Titanic", "{found:?}");
     assert!(!titles(&found).contains(&"someone/titanic"), "{found:?}");
 }
+
+#[test]
+fn a_name_shared_with_a_better_starred_repository_names_that_one() {
+    let (_dir, s) = searcher(&[
+        repo(
+            "TheAlgorithms/Python",
+            190_000,
+            "All Algorithms implemented in Python",
+        ),
+        repo("geekcomputers/Python", 33_000, "My Python Examples"),
+        page("Python (programming language)", 900_000, &["Python"]),
+    ]);
+    // People mean TheAlgorithms/Python by "python", so "python examples"
+    // asks for no repository, though geekcomputers/Python says it.
+    let found = s.search("python examples", 5).unwrap();
+    assert!(found.iter().all(|hit| !hit.named), "{found:?}");
+    assert!(
+        !titles(&found).contains(&"geekcomputers/Python"),
+        "{found:?}"
+    );
+    // The best starred one is asked for by what it says.
+    let found = s.search("python algorithms", 5).unwrap();
+    assert_eq!(found[0].page.title, "TheAlgorithms/Python", "{found:?}");
+    assert!(found[0].named && found[0].whole, "{found:?}");
+}

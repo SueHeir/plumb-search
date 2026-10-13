@@ -12,7 +12,7 @@ use tantivy::{TantivyDocument, Term};
 
 use super::docs::docs_asked;
 use super::page::is_item_id;
-use super::repos::name_described_repos;
+use super::repos::DescribedRepos;
 use super::sites::base_title;
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
@@ -406,9 +406,7 @@ impl PageSearcher {
             }
         }
         let mut hits = Vec::new();
-        // The repositories the query names in part and describes, with
-        // whether they would be left out otherwise.
-        let mut described_repos = Vec::new();
+        let mut described_repos = DescribedRepos::default();
         for address in addresses {
             let document: TantivyDocument = searcher.doc(address)?;
             let Some(stored) = document
@@ -465,8 +463,9 @@ impl PageSearcher {
                     || film_title_first.contains(&address)
                         && !(asked_as_film || asked_by_title && page.is_article())
                     || only_inside.contains(&address) && !asked_by_title);
-            let repo_described = self.repo_described(&page, &words);
-            if left_out && !repo_described {
+            let repo_described =
+                self.repo_described(&page, popularity, &words, &mut described_repos);
+            if left_out && repo_described.is_none() {
                 continue;
             }
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
@@ -485,11 +484,11 @@ impl PageSearcher {
                         .max(LEAD_MATCH * (0.5 + 0.5 * lead / best_lead.max(f32::MIN_POSITIVE)));
                 }
             }
-            if name <= 0.0 && !repo_described {
+            if name <= 0.0 && repo_described.is_none() {
                 continue;
             }
-            if repo_described && !named {
-                described_repos.push((hits.len(), left_out || name <= 0.0));
+            if let Some(key) = repo_described.filter(|_| !named) {
+                described_repos.keep(hits.len(), key, left_out || name <= 0.0);
             }
             let mut score = name * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity);
             if !page.may_lead() {
@@ -506,7 +505,7 @@ impl PageSearcher {
                 learned: None,
             });
         }
-        name_described_repos(&mut hits, &described_repos);
+        described_repos.name(&mut hits);
         match words.as_slice() {
             [word] => self.name_by_surname(word, &joined, &mut hits),
             [title, name @ ..] => self.name_by_title(title, name, &joined, &mut hits),
