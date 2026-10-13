@@ -9,50 +9,75 @@
 #   docker run -d --init -p 8080:8080 -p 4001:4001/tcp -p 4001:4001/udp \
 #     -v plumb-data:/data plumb-search
 
-# Rust toolchain of the build stage; pin one with --build-arg RUST_VERSION=1.99.
+# Rust toolchain of the build stages; pin one with --build-arg RUST_VERSION=1.99.
 ARG RUST_VERSION=1
 
 # Built on bookworm to run on bookworm, so the binary links against the glibc
 # it runs with.
-FROM rust:${RUST_VERSION}-slim-bookworm AS build
-ARG TARGETPLATFORM
-# Source archives exclude .git; CI supplies the exact revision and clean state.
-ARG PLUMB_BUILD_REVISION=unknown
-ARG PLUMB_BUILD_DIRTY=unknown
+FROM rust:${RUST_VERSION}-slim-bookworm AS tools
 # The private search page's WebAssembly (crates/plumb-private) needs the
 # wasm32 target and the wasm-bindgen command of the same version as the
 # crate (docs/private-search.md). cargo-about writes the notices of the
-# crates built in (about.toml). In a layer of its own, so it is built once.
+# crates built in (about.toml). cargo-chef builds the dependencies alone, so
+# they can be cached apart from the workspace. In a layer of its own, so it
+# is built once.
 RUN rustup target add wasm32-unknown-unknown \
  && cargo install wasm-bindgen-cli --version 0.2.108 --locked \
  && cargo install cargo-about --version 0.9.2 --locked --features cli \
+ && cargo install cargo-chef --version 0.1.78 --locked \
  && rm -rf /usr/local/cargo/registry
 WORKDIR /src
+
+# The manifests and Cargo.lock, reduced to what building the dependencies
+# needs (cargo-chef's recipe). It comes out the same until one of them changes.
+FROM tools AS recipe
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# The dependencies, compiled in a layer of their own. CI keeps the layers it
+# builds between runs, so a change to the workspace alone compiles only the
+# workspace's crates.
+FROM tools AS dependencies
+COPY --from=recipe /src/recipe.json recipe.json
+RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=plumb-cargo-git,target=/usr/local/cargo/git/db \
+    cargo chef cook --recipe-path recipe.json --locked -p plumb-private \
+        --target wasm32-unknown-unknown --profile wasm \
+ && cargo chef cook --recipe-path recipe.json --locked -p plumb-node --release
+
+FROM dependencies AS build
 # The whole workspace (minus what .dockerignore leaves out): `--locked` checks
 # Cargo.lock against every member's manifest, including the desktop app,
 # which `-p plumb-node` does not build.
 COPY . .
-# The crate registry and target/ are cache mounts, so a rebuild compiles only
-# what changed. Cache mounts are not saved in the layer, so the binary is
-# copied out in the same step.
+# Source archives exclude .git; CI supplies the exact revision and clean state.
+# Declared here, after the steps above: an argument that changes with every
+# commit would otherwise rerun them.
+ARG PLUMB_BUILD_REVISION=unknown
+ARG PLUMB_BUILD_DIRTY=unknown
+# target/ goes once the binary is out, so the layer CI keeps stays small.
 RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=plumb-cargo-git,target=/usr/local/cargo/git/db \
-    --mount=type=cache,id=plumb-target-${TARGETPLATFORM},target=/src/target,sharing=locked \
     cargo build --locked -p plumb-private --target wasm32-unknown-unknown --profile wasm \
  && wasm-bindgen --target web --no-typescript --out-dir target/private \
         target/wasm32-unknown-unknown/wasm/plumb_private.wasm \
  && PLUMB_BUILD_REVISION=${PLUMB_BUILD_REVISION} PLUMB_BUILD_DIRTY=${PLUMB_BUILD_DIRTY} \
         PLUMB_SOURCE_REVISION=${PLUMB_BUILD_REVISION} \
         PLUMB_PRIVATE_DIR=/src/target/private cargo build --release --locked -p plumb-node \
- && install -D -m 0755 target/release/plumb /out/plumb
+ && install -D -m 0755 target/release/plumb /out/plumb \
+ && rm -rf target
+
 # The licenses and notices of every third-party crate in the binary and the
 # private search page (and the desktop app's, which share Cargo.lock).
-# --fail stops the build on a license about.toml does not accept.
+# --fail stops the build on a license about.toml does not accept. A stage of
+# its own, so it runs while the build compiles.
+FROM tools AS notices
+COPY . .
 RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=plumb-cargo-git,target=/usr/local/cargo/git/db \
-    cargo about generate --locked --workspace --fail \
+    mkdir /out \
+ && cargo about generate --locked --workspace --fail \
         -o /out/THIRD-PARTY-NOTICES.html about.hbs
-
 
 FROM debian:bookworm-slim
 
@@ -78,7 +103,7 @@ RUN groupadd --gid 10001 plumb \
  && chown plumb:plumb /data
 
 COPY --link LICENSE-MIT LICENSE-APACHE /usr/share/doc/plumb-search/
-COPY --link --from=build /out/THIRD-PARTY-NOTICES.html /usr/share/doc/plumb-search/
+COPY --link --from=notices /out/THIRD-PARTY-NOTICES.html /usr/share/doc/plumb-search/
 COPY --link --from=build /out/plumb /usr/local/bin/plumb
 
 USER 10001:10001
