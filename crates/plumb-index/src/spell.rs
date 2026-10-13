@@ -41,9 +41,10 @@ use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{DocAddress, Term};
 use tantivy_fst::Automaton;
 
+use crate::query::matching_docs;
 use crate::schema::Fields;
 use crate::spell_model::Model;
-use crate::{analysis, matching_docs, MAX_QUERY_WORDS, WELL_KNOWN_LINK_SCORE};
+use crate::{analysis, MAX_QUERY_WORDS, WELL_KNOWN_LINK_SCORE};
 
 /// The least link score a site needs to be what a typo is corrected to:
 /// roughly a site in the top million with some sites linking to it.
