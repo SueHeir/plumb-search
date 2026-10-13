@@ -161,7 +161,7 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 const LEAD_CANDIDATES: usize = 20;
 
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v7-sharps";
+pub const PAGE_INDEX_VERSION: &str = "v8-sharps";
 
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
