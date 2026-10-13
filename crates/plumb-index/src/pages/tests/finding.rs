@@ -514,6 +514,49 @@ fn words_of_things_are_corrected_from_page_names() {
 }
 
 #[test]
+fn slips_people_make_are_corrected_though_pages_name_them() {
+    let mut pages = Vec::new();
+    let mut add = |title: &str, count: usize| {
+        for i in 0..count {
+            pages.push(page(&format!("{title} {i}"), 10, &[]));
+        }
+    };
+    // Everyday words are rare in pages' names, and their slips are there
+    // too: song titles, misspelled redirects.
+    add("Receive", 200);
+    add("Recieve", 4);
+    add("Definitely", 40);
+    add("Definately", 1);
+    add("Pace", 200);
+    add("PKCE flow", 3);
+    add("Judgment", 40);
+    add("Judgement", 30);
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(
+        &[("ei", "ie", 0.001), ("i", "a", 0.001), ("g", "ge", 0.01)],
+        1e-6,
+    );
+    let nothing_known = |_: &str| false;
+    let suggest = |query: &str, model| {
+        searcher
+            .suggest_spelling(query, model, &nothing_known)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    assert_eq!(suggest("recieve", Some(&model)).as_deref(), Some("receive"));
+    assert_eq!(
+        suggest("definately", Some(&model)).as_deref(),
+        Some("definitely")
+    );
+    // An edit people are not seen to make leaves a word the pages know.
+    assert_eq!(suggest("pkce", Some(&model)), None);
+    // So does a word nearly as common as the near one.
+    assert_eq!(suggest("judgement", Some(&model)), None);
+    // Without the model, a word the pages know stays.
+    assert_eq!(suggest("recieve", None), None);
+}
+
+#[test]
 fn spellings_keep_the_words_pages_know() {
     let mut pages = Vec::new();
     for i in 0..3 {

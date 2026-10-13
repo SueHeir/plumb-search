@@ -17,8 +17,8 @@ use super::page::is_item_id;
 use super::scoring::truncate_keeping_inner_pages;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
-    KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET, POPULARITY_SCALE,
-    POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
+    KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAGE_SLIP_WEIGHT, PAPERS_SET,
+    POPULARITY_SCALE, POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
 };
 use crate::analysis;
 
@@ -317,8 +317,11 @@ impl PageSearcher {
     /// [`MIN_PAGE_FIX_PAGES`], or with the spelling model, the likeliest by
     /// the noisy channel ([`crate::spell_model`]). With the model, a word
     /// is kept unless the slip is likelier than the word, a word no page
-    /// has counting as if one did ("perft" is not "perf"). `None` when no
-    /// word changes.
+    /// has counting as if one did ("perft" is not "perf"), or the slip is
+    /// one the model learned and is likelier than the word with how much
+    /// commoner the near word is weighed by [`PAGE_SLIP_WEIGHT`]; that
+    /// holds for a word the pages know too ("recieve", "definately").
+    /// `None` when no word changes.
     pub fn suggest_spelling(
         &self,
         query: &str,
@@ -334,11 +337,11 @@ impl PageSearcher {
         for word in &mut fixed {
             let chars = word.chars().count();
             let edits = crate::spell::max_edits(chars);
-            if edits == 0
-                || !word.chars().all(char::is_alphabetic)
-                || self.knows_word(word)?
-                || site_known(word)
-            {
+            if edits == 0 || !word.chars().all(char::is_alphabetic) || site_known(word) {
+                continue;
+            }
+            let known = self.knows_word(word)?;
+            if known && model.is_none() {
                 continue;
             }
             let typed_docs = docs(word)?;
@@ -361,10 +364,16 @@ impl PageSearcher {
                     None => -7.0 * f64::from(distance),
                 };
                 let likelihood = cost + (term_docs as f64).ln();
-                // As likely as the word typed, a word no page has counting
-                // as if one did: "perft" is not "perf".
-                if model.is_some() && likelihood < (typed_docs.max(1) as f64).ln() {
-                    continue;
+                if let Some(model) = model {
+                    let commoner = (term_docs as f64 / typed_docs.max(1) as f64).ln();
+                    // As likely as the word typed, a word no page has
+                    // counting as if one did: "perft" is not "perf".
+                    let rare = !known && cost + commoner >= 0.0;
+                    let slip =
+                        model.learned(word, &term) && cost + PAGE_SLIP_WEIGHT * commoner >= 0.0;
+                    if !rare && !slip {
+                        continue;
+                    }
                 }
                 if best.as_ref().is_none_or(|(b, _)| likelihood > *b) {
                     best = Some((likelihood, term));
