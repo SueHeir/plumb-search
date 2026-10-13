@@ -647,7 +647,8 @@ impl PageSearcher {
     /// And whether the query asks the question as a whole: it has all of
     /// the query's words, and the query at least [`QUESTION_TITLE_SHARE`]
     /// of its title's. A question without `topic_word`, the query's rarest
-    /// word, matches not at all. The question's words are its title and
+    /// word, or whose title has none of `sure`, matches not at all. The
+    /// question's words are its title and
     /// tags, or the title of a duplicate of it and its tags, whichever
     /// covers the query best ([`Page::asked_as`]).
     pub(crate) fn question_match(
@@ -695,6 +696,16 @@ impl PageSearcher {
             }
             let title: HashSet<String> =
                 analysis::tokens(&self.stemmed, title).into_iter().collect();
+            // Its tags alone do not make a question about the query: "What
+            // is the tax status of assets recovered via bankruptcy
+            // proceedings?", tagged capital-gains-tax and australia, does
+            // not ask "what is the capital of australia".
+            if page.is_question()
+                && !sure.is_empty()
+                && !sure.iter().any(|stem| title.contains(stem))
+            {
+                continue;
+            }
             let asked = share >= 1.0
                 && !title.is_empty()
                 && title.iter().filter(|word| stems.contains(word)).count() as f32
