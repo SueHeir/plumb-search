@@ -16,9 +16,9 @@ When a query only might say where ("denver brewery", with no "in" or "near") and
 
 Words like "best", "good" or "cheap" are left out of WHAT. WHAT must be in a place's name or among the words for its kind: a café is found by "cafe", "coffee" and "coffee shop", a supermarket by "grocery store".
 
-WHERE is a town (or village, suburb or neighbourhood) by its name or another name ("nyc"), optionally with its state or country: "portland maine", "paris, france", "denver co". Among towns of one name the bigger wins, and one in the searcher's country a little more. WHERE can also be any named place, such as a stadium or a museum.
+WHERE is a town (or village, suburb or neighbourhood) by its name or another name ("nyc", "philly"), optionally with its state or country: "portland maine", "paris, france", "denver co". Among towns of one name the bigger wins, and one in the searcher's country a little more. WHERE can also be any named place, such as a stadium or a museum. A landmark, a place the English Wikipedia article on it names plainly ("Big Ben", "Louvre", "Yellowstone National Park"), counts as a town: "hotels near yellowstone" is the park, not the village in Alberta, though a city of the name still comes first.
 
-Places are listed within a town's size of its centre (12 km for a city, 6 for a town, 3 for a village or around a named place). Places of the kind asked for come first, then those that only have the words in their name (for "sushi", sushi bars before an office called Sushi Tech). Within each, nearest first, with places that have a website, a brand or a Wikidata item a little ahead. When fewer than three are found, Plumb looks three times as far.
+Places are listed within a town's size of its centre (12 km for a city, 6 for a town, 10 around a national park or nature reserve, 3 for a village or around another named place). Places of the kind asked for come first, then those that only have the words in their name (for "sushi", sushi bars before an office called Sushi Tech). Within each, nearest first, with places that have a website, a brand or a Wikidata item a little ahead. When fewer than three are found, Plumb looks three times as far.
 
 ## Near me
 
@@ -26,17 +26,20 @@ Places are listed within a town's size of its centre (12 km for a city, 6 for a 
 
 ## What is kept
 
-For each place: its name, its kind (an OpenStreetMap tag such as `amenity=cafe`), up to four more kinds such as `cuisine=pizza`, its coordinates, its street address, town, state or region, country, website and OpenStreetMap id. Towns also keep up to four other names. That is about 40 bytes a place in the file and about 100 in the index.
+For each place: its name, its kind (an OpenStreetMap tag such as `amenity=cafe`), up to four more kinds such as `cuisine=pizza`, its coordinates, its street address, town, state or region, country, website and OpenStreetMap id, and up to eight other names: OpenStreetMap's English, short and local names (and a town's other and official names, an airport's IATA code such as "JFK"), then the plain title and most read redirects of the English Wikipedia article on its Wikidata item ("Big Ben" for the Elizabeth Tower). That is about 40 bytes a place in the file and about 100 in the index.
+
+A town's state or province is the one most of its places' addresses give (Canada's give it as `addr:province`), and its country the one most of those in that state or province give, so a town on a border is not given the other side's: Niagara Falls, Ontario is in ON, Canada, and its namesake across the river in NY, US. A place takes the town, region and country of the nearest town on its own side.
 
 Places are named shops, restaurants, cafés, bars, banks, pharmacies, hospitals, doctors, schools, libraries, hotels, museums, attractions, parks, gyms, stations, airports, offices, workshops, castles and the like. Benches, bins, car park spaces, toilets, vending machines, ATMs, and places marked closed are left out.
 
 ## Making the file
 
 ```sh
-plumb-tools fetch-pages --set places --osm planet-latest.osm.pbf --data /path/to/node-data
+plumb-tools fetch-pages --set places --osm planet-latest.osm.pbf \
+  --articles /path/to/node-data/pages/sets/wikipedia-en.tsv.gz --data /path/to/node-data
 ```
 
-`--osm` reads an OpenStreetMap extract (`.osm.pbf`): the whole planet (about 90 GB, from planet.openstreetmap.org) or a country or state from download.geofabrik.de. Without `--osm`, `--work DIR` downloads the planet there. The file, `DIR/pages/sets/places.tsv.gz`, is sorted with cities first, then towns, places with a Wikidata item, suburbs, places with a website or brand, villages and neighbourhoods, and then everything else, so the first N places are the best known N.
+`--osm` reads OpenStreetMap extracts (`.osm.pbf`): the whole planet (about 90 GB, from planet.openstreetmap.org) or countries and states from download.geofabrik.de, several of which may overlap. Without `--osm`, `--work DIR` downloads the planet there. `--articles FILE` takes the English Wikipedia articles file (the `wikipedia-en` set, `DIR/pages/sets/wikipedia-en.tsv.gz`) for the places' other names and landmarks; an item tagged on more than three places is a brand's and names none of them. The file, `DIR/pages/sets/places.tsv.gz`, is sorted with cities first, then towns, landmarks (the most read first), places with a Wikidata item, suburbs, places with a website or brand, villages and neighbourhoods, and then everything else, so the first N places are the best known N. A park or other area mapped as a relation is placed in the middle of its outer ways.
 
 Colorado's extract (366 MB) gives 66,102 places in 2 seconds: a 2.7 MB file and a 7 MB index. The whole planet (October 2026) gives 24,014,360 places, 2.4 million of them towns, in 21 minutes on 32 cores with 18 GB of memory: a 971 MB file and a 2.4 GB index, built in 3 minutes. A search takes 10 to 50 ms.
 

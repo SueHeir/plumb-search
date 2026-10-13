@@ -21,7 +21,8 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::place::{
-    distance_km, is_kind_word, normalize_region, parse_place, town_size, write_place, Place,
+    area_size, distance_km, is_kind_word, normalize_region, parse_place, town_size, write_place,
+    Place,
 };
 use plumb_core::{country_of_name, joined, normalize_text};
 use serde::{Deserialize, Serialize};
@@ -597,7 +598,9 @@ impl PlaceSearcher {
                 location: Some(location),
             }));
         };
-        let radius = town_size(&center.kind).unwrap_or(LANDMARK_KM);
+        let radius = town_size(&center.kind)
+            .or_else(|| area_size(&center.kind))
+            .unwrap_or(LANDMARK_KM);
         let mut hits = self.around(&asked.what, &center, radius, required_country, limit)?;
         let mut radius_km = radius;
         if hits.len() < FEW.min(limit) {
@@ -780,6 +783,8 @@ impl PlaceSearcher {
             .collect();
         // A town first, however the words split ("boulder co" is Boulder in
         // Colorado before it is a gym called Boulder & Co.), then any place.
+        // A landmark counts as a town: "yellowstone" is the park before a
+        // village in Alberta.
         let mut other = None;
         let mut conflict = false;
         for k in (1..=words.len()).rev() {
@@ -801,8 +806,9 @@ impl PlaceSearcher {
                 .cloned()
                 .collect();
             conflict |= !qualifier.is_empty() && !matching.is_empty() && candidates.is_empty();
-            if candidates.iter().any(Place::is_town) {
-                candidates.retain(Place::is_town);
+            let town_like = |place: &Place| place.is_town() || place.is_landmark();
+            if candidates.iter().any(town_like) {
+                candidates.retain(town_like);
                 return Ok(resolve_candidates(text, candidates, preferred_country));
             }
             if !candidates.is_empty() && other.is_none() {
@@ -878,11 +884,11 @@ fn same_place(a: &Place, b: &Place) -> bool {
 }
 
 /// How likely `place` is the one a searcher in `country` means by its
-/// name: towns before other places, bigger towns first, towns in the
-/// searcher's country a little ahead.
+/// name: towns and landmarks before other places, bigger towns first,
+/// towns in the searcher's country a little ahead.
 fn town_score(place: &Place, country: Option<&str>) -> f64 {
     let mut score = f64::from(place.rank) / 1_000_000.0;
-    if !place.is_town() {
+    if !place.is_town() && !place.is_landmark() {
         score -= 10.0;
     }
     if country.is_some_and(|country| country_matches(place, country)) {
@@ -1237,6 +1243,55 @@ mod tests {
         assert_eq!(locate("nyc", None).0, "New York");
         assert_eq!(locate("Boulder, CO", None), ("Boulder".into(), "CO".into()));
         assert!(searcher.locate("atlantis", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn landmarks_are_meant_before_villages_and_bars() {
+        let park = Place {
+            rank: plumb_core::place::landmark_rank(70_000),
+            aliases: vec!["Yellowstone".into()],
+            ..at(
+                "Yellowstone National Park",
+                "leisure=nature_reserve",
+                44.6,
+                -110.5,
+            )
+        };
+        let tower = Place {
+            rank: plumb_core::place::landmark_rank(90_000),
+            aliases: vec!["Big Ben".into()],
+            ..at("Elizabeth Tower", "tourism=attraction", 51.5007, -0.1246)
+        };
+        let (_dir, searcher) = index(vec![
+            park,
+            tower,
+            Place {
+                region: Some("AB".into()),
+                ..at("Yellowstone", "place=village", 53.73, -114.38)
+            },
+            Place {
+                rank: place_rank("amenity=bar", 0, false, true, 9),
+                ..at("Big Ben", "amenity=bar", 48.17, 16.37)
+            },
+            at("Lake Hotel", "tourism=hotel", 44.55, -110.40),
+            at("Hotel Westminster", "tourism=hotel", 51.499, -0.127),
+        ]);
+        // The park is meant, and searched wide: its hotel is 9 km off.
+        let park = searcher
+            .search("hotels near yellowstone", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(park.center.unwrap().name, "Yellowstone National Park");
+        assert_eq!(park.hits[0].place.name, "Lake Hotel");
+        let tower = searcher
+            .search("hotels near big ben", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tower.center.unwrap().name, "Elizabeth Tower");
+        assert_eq!(tower.hits[0].place.name, "Hotel Westminster");
+        // The village is still found by its province.
+        let village = searcher.locate("yellowstone ab", None).unwrap().unwrap();
+        assert_eq!(village.kind, "place=village");
     }
 
     #[test]

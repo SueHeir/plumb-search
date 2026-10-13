@@ -5,8 +5,9 @@
 //! A place is kept small, about 100 bytes: its name, what kind of place it
 //! is (an OpenStreetMap tag such as `amenity=cafe`), a few more kinds
 //! (`cuisine=pizza`), where it is, its street address, town, region and
-//! country, its website and its OpenStreetMap id. Towns also keep their
-//! other names, so "nyc" finds New York.
+//! country, its website and its OpenStreetMap id. Towns and well-known
+//! places also keep their other names, so "nyc" finds New York and "big
+//! ben" the Elizabeth Tower.
 //!
 //! Places travel as a tab-separated file, most notable first, so the top
 //! `N` are its first `N` lines (see [`place_rank`]):
@@ -34,8 +35,8 @@ pub const PLACES_HEADER: &str =
 pub const MAX_PLACE_NAME_CHARS: usize = 100;
 /// Longest website kept, in characters.
 pub const MAX_WEBSITE_CHARS: usize = 200;
-/// Most other names kept for a town.
-pub const MAX_PLACE_ALIASES: usize = 4;
+/// Most other names kept for a place.
+pub const MAX_PLACE_ALIASES: usize = 8;
 
 /// Where OpenStreetMap's license and attribution are.
 pub const OSM_COPYRIGHT_URL: &str = "https://www.openstreetmap.org/copyright";
@@ -79,6 +80,13 @@ impl Place {
     /// "in" or "near".
     pub fn is_town(&self) -> bool {
         town_size(&self.kind).is_some()
+    }
+
+    /// Whether it is a sight known by name: not a town, and named plainly
+    /// by the English Wikipedia article on it ([`landmark_rank`]). Such a
+    /// place is meant by its name before a village of that name is.
+    pub fn is_landmark(&self) -> bool {
+        !self.is_town() && self.rank / TIER == LANDMARK_TIER
     }
 
     /// Whether it is found by what it is for, past its kind: a brewpub, or a
@@ -154,13 +162,29 @@ pub fn town_size(kind: &str) -> Option<f64> {
     })
 }
 
+/// How far around a place that is no town, in km, places count as near
+/// it: national parks and nature reserves are wide. `None` for the rest.
+pub fn area_size(kind: &str) -> Option<f64> {
+    matches!(kind, "boundary=national_park" | "leisure=nature_reserve").then_some(10.0)
+}
+
 /// Tiers of [`place_rank`], a million apart.
 const TIER: u32 = 1_000_000;
+/// The tier of [`landmark_rank`].
+const LANDMARK_TIER: u32 = 7;
+
+/// `count` as a share of a tier, by its logarithm: 2 million is 0.83 of
+/// a tier, 25,000 is 0.58.
+fn log_share(count: u64) -> u32 {
+    ((count as f64).ln_1p() / 40_000_000f64.ln_1p() * f64::from(TIER - 1)).min(f64::from(TIER - 1))
+        as u32
+}
 
 /// How notable a place is, for the order of the file: cities, then towns,
-/// then places with a Wikidata item, suburbs, places with a website or a
-/// brand, villages, neighbourhoods, and then everything else; within a
-/// tier, bigger towns and better described places first.
+/// then landmarks ([`landmark_rank`]), places with a Wikidata item,
+/// suburbs, places with a website or a brand, villages, neighbourhoods,
+/// and then everything else; within a tier, bigger towns and better
+/// described places first.
 pub fn place_rank(
     kind: &str,
     population: u64,
@@ -168,10 +192,8 @@ pub fn place_rank(
     website_or_brand: bool,
     tags: usize,
 ) -> u32 {
-    // Within a tier, by the logarithm of the population: a city of 2
-    // million is 0.83 of a tier up, one of 25,000 0.58.
-    let people = ((population as f64).ln_1p() / 40_000_000f64.ln_1p() * f64::from(TIER - 1))
-        .min(f64::from(TIER - 1)) as u32;
+    // Within a tier, by the logarithm of the population.
+    let people = log_share(population);
     let described = (tags as u32).saturating_mul(10_000).min(TIER - 1);
     match kind {
         "place=city" => 9 * TIER + people,
@@ -183,6 +205,14 @@ pub fn place_rank(
         _ if website_or_brand => 4 * TIER + described,
         _ => TIER + described,
     }
+}
+
+/// The rank of a place that is no town and that an English Wikipedia
+/// article read `views` times names plainly, as "Big Ben" or "Louvre",
+/// not "Café Louvre (Prague)": between towns and other places with a
+/// Wikidata item, the most read first.
+pub fn landmark_rank(views: u64) -> u32 {
+    LANDMARK_TIER * TIER + log_share(views)
 }
 
 /// `text` with tabs, line breaks and the separators made spaces.
@@ -320,13 +350,35 @@ pub const US_STATES: &[(&str, &str)] = &[
     ("PR", "Puerto Rico"),
 ];
 
-/// A region as addresses write it, with a United States state's name made
-/// its code: "Colorado" -> "CO".
+/// Canada's provinces and territories, as addresses there write them,
+/// and their names (Quebec's in French too).
+pub const CANADIAN_PROVINCES: &[(&str, &str)] = &[
+    ("AB", "Alberta"),
+    ("BC", "British Columbia"),
+    ("MB", "Manitoba"),
+    ("NB", "New Brunswick"),
+    ("NL", "Newfoundland and Labrador"),
+    ("NS", "Nova Scotia"),
+    ("NT", "Northwest Territories"),
+    ("NU", "Nunavut"),
+    ("ON", "Ontario"),
+    ("PE", "Prince Edward Island"),
+    ("QC", "Quebec"),
+    ("QC", "Québec"),
+    ("SK", "Saskatchewan"),
+    ("YT", "Yukon"),
+];
+
+/// A region as addresses write it, with a United States state's or a
+/// Canadian province's name made its code: "Colorado" -> "CO", "Québec"
+/// -> "QC".
 pub fn normalize_region(region: &str) -> String {
     let region = crate::collapse_whitespace(region);
+    let name = crate::normalize_text(&region);
     US_STATES
         .iter()
-        .find(|(_, name)| name.eq_ignore_ascii_case(&region))
+        .chain(CANADIAN_PROVINCES)
+        .find(|(_, full)| crate::normalize_text(full) == name)
         .map_or(region, |(code, _)| (*code).to_string())
 }
 
@@ -468,6 +520,7 @@ const KINDS: &[KindInfo] = &[
     ("leisure=park", "Park", ""),
     ("leisure=garden", "Garden", "park"),
     ("leisure=nature_reserve", "Nature reserve", "park"),
+    ("boundary=national_park", "National park", "park"),
     ("leisure=playground", "Playground", "kids park"),
     ("leisure=dog_park", "Dog park", "dogs"),
     ("leisure=fitness_centre", "Gym", "fitness gym workout"),
@@ -739,6 +792,33 @@ mod tests {
         let shop = place_rank("shop=bakery", 0, false, true, 12);
         let plain = place_rank("shop=bakery", 0, false, false, 30);
         assert!(city > town && town > known && known > shop && shop > plain);
+        // A landmark Wikipedia names plainly comes between, the most read
+        // first.
+        let (famous, lesser) = (landmark_rank(60_000), landmark_rank(200));
+        assert!(town > famous && famous > lesser && lesser > known);
+        let tower = Place {
+            rank: famous,
+            kind: "tourism=attraction".into(),
+            ..Place::default()
+        };
+        assert!(tower.is_landmark() && !tower.is_town());
+        let village = Place {
+            rank: place_rank("place=village", 300, false, false, 3),
+            kind: "place=village".into(),
+            ..Place::default()
+        };
+        assert!(!village.is_landmark());
+        assert_eq!(area_size("leisure=nature_reserve"), Some(10.0));
+        assert_eq!(area_size("tourism=museum"), None);
+    }
+
+    #[test]
+    fn regions_are_written_as_addresses_write_them() {
+        assert_eq!(normalize_region("Colorado"), "CO");
+        assert_eq!(normalize_region("Ontario"), "ON");
+        assert_eq!(normalize_region("Québec"), "QC");
+        assert_eq!(normalize_region("ON"), "ON");
+        assert_eq!(normalize_region("Bayern"), "Bayern");
     }
 
     #[test]

@@ -17,15 +17,18 @@
 //! country and region most of its places' addresses give.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader, RelMemberType};
-use plumb_core::normalize_country;
+use plumb_core::article::articles_of;
 use plumb_core::place::{
-    brews_where_served, distance_km, normalize_region, place_rank, Place, BREWERY_TAG,
-    MAX_PLACE_ALIASES, MAX_PLACE_NAME_CHARS, MAX_WEBSITE_CHARS,
+    brews_where_served, distance_km, landmark_rank, normalize_region, place_rank, Place,
+    BREWERY_TAG, MAX_PLACE_ALIASES, MAX_PLACE_NAME_CHARS, MAX_WEBSITE_CHARS,
 };
+use plumb_core::{normalize_country, normalize_text};
+use plumb_ingest::open_maybe_gz;
 use tracing::info;
 
 /// The whole planet, about 90 GB, updated weekly.
@@ -125,13 +128,31 @@ const TOWN_VALUES: &[&str] = &[
     "neighbourhood",
 ];
 
-/// What step 1 finds: a place, with its location or what leads to it.
-enum Found {
-    Located(Place),
-    /// A way's place and its first and middle nodes.
-    Way(Place, [i64; 2]),
-    /// A relation's place and its first outer way.
-    Relation(Place, i64),
+/// Most other names taken from a place's own tags; the rest of
+/// [`MAX_PLACE_ALIASES`] is left for its Wikipedia article's.
+const TAGGED_ALIASES: usize = 4;
+/// Most outer ways of a relation whose ends say where it is, spread over
+/// all of them.
+const OUTER_WAYS: usize = 32;
+/// A Wikidata item tagged on more places than this is a brand or a
+/// mistake, not any one of them, and lends them no names.
+const PLACES_PER_ITEM: u32 = 3;
+
+/// What step 1 finds: a place, its Wikidata item, and where it is or what
+/// leads there.
+struct Found {
+    place: Place,
+    item: Option<u64>,
+    at: At,
+}
+
+enum At {
+    /// A node, whose location the place has.
+    Node,
+    /// A way's first and middle nodes.
+    Way([i64; 2]),
+    /// A relation's outer ways.
+    Relation(Vec<i64>),
 }
 
 /// The place `tags` make of something named, its location left at 0.
@@ -217,20 +238,21 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
         .and_then(|p| p.parse::<u64>().ok())
         .unwrap_or(0);
     let mut aliases = Vec::new();
-    let others: &[&str] = if kind.starts_with("place=") {
-        &["name:en", "short_name", "alt_name", "official_name"]
-    } else {
-        &["name:en"]
+    // What people call it there ("Philly"), and an airport's code ("JFK").
+    let others: &[&str] = match kind.as_str() {
+        k if k.starts_with("place=") => &[
+            "name:en",
+            "short_name",
+            "loc_name",
+            "alt_name",
+            "official_name",
+        ],
+        "aeroway=aerodrome" => &["name:en", "short_name", "loc_name", "iata"],
+        _ => &["name:en", "short_name", "loc_name"],
     };
     for key in others {
-        for alias in get(key).unwrap_or("").split(';').map(str::trim) {
-            if !alias.is_empty()
-                && alias != name
-                && !aliases.iter().any(|a: &String| a == alias)
-                && aliases.len() < MAX_PLACE_ALIASES
-            {
-                aliases.push(cut(alias, MAX_PLACE_NAME_CHARS));
-            }
+        for alias in get(key).unwrap_or("").split(';') {
+            push_alias(name, &mut aliases, alias, TAGGED_ALIASES);
         }
     }
     let address = match (get("addr:housenumber"), get("addr:street")) {
@@ -253,8 +275,10 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
         lat: 0.0,
         lon: 0.0,
         town: get("addr:city").map(|c| cut(c, MAX_PLACE_NAME_CHARS)),
+        // Canada's addresses give the province as addr:province.
         region: get("addr:state")
             .or_else(|| get("is_in:state_code"))
+            .or_else(|| get("addr:province"))
             .map(normalize_region),
         country: get("addr:country")
             .or_else(|| get("is_in:country_code"))
@@ -269,6 +293,25 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
 /// `text` cut to `chars` characters.
 fn cut(text: &str, chars: usize) -> String {
     text.chars().take(chars).collect()
+}
+
+/// Adds `alias` to the other names of the place called `name`, unless it
+/// is that name or one of them written another way, or `most` are kept.
+fn push_alias(name: &str, aliases: &mut Vec<String>, alias: &str, most: usize) {
+    let key = normalize_text(alias);
+    if !key.is_empty()
+        && aliases.len() < most.min(MAX_PLACE_ALIASES)
+        && key != normalize_text(name)
+        && !aliases.iter().any(|a| normalize_text(a) == key)
+    {
+        aliases.push(cut(alias.trim(), MAX_PLACE_NAME_CHARS));
+    }
+}
+
+/// The number of the Wikidata item `tags` name: 41225 for `Q41225`.
+fn item_of(tags: &[(&str, &str)]) -> Option<u64> {
+    let (_, item) = tags.iter().find(|(k, _)| *k == "wikidata")?;
+    item.trim().strip_prefix('Q')?.parse().ok()
 }
 
 /// A website as tagged, as a link: `www.example.com` ->
@@ -313,6 +356,13 @@ fn collect_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<(&'a 
 fn find_places(path: &Path) -> Result<Vec<Found>> {
     let reader =
         ElementReader::from_path(path).with_context(|| format!("opening {}", path.display()))?;
+    let found_at = |tags: &[(&str, &str)], osm: String, node: bool, at: At| {
+        place_of(tags, osm, node).map(|place| Found {
+            place,
+            item: item_of(tags),
+            at,
+        })
+    };
     let found = reader.par_map_reduce(
         |element| match element {
             Element::DenseNode(node) => {
@@ -321,45 +371,57 @@ fn find_places(path: &Path) -> Result<Vec<Found>> {
                     return Vec::new();
                 }
                 let tags = collect_tags(tags);
-                place_of(&tags, format!("n{}", node.id()), true)
-                    .map(|mut place| {
-                        place.lat = node.lat();
-                        place.lon = node.lon();
-                        vec![Found::Located(place)]
+                found_at(&tags, format!("n{}", node.id()), true, At::Node)
+                    .map(|mut found| {
+                        found.place.lat = node.lat();
+                        found.place.lon = node.lon();
+                        vec![found]
                     })
                     .unwrap_or_default()
             }
             Element::Node(node) => {
                 let tags = collect_tags(node.tags());
-                place_of(&tags, format!("n{}", node.id()), true)
-                    .map(|mut place| {
-                        place.lat = node.lat();
-                        place.lon = node.lon();
-                        vec![Found::Located(place)]
+                found_at(&tags, format!("n{}", node.id()), true, At::Node)
+                    .map(|mut found| {
+                        found.place.lat = node.lat();
+                        found.place.lon = node.lon();
+                        vec![found]
                     })
                     .unwrap_or_default()
             }
             Element::Way(way) => {
-                let tags = collect_tags(way.tags());
-                let Some(place) = place_of(&tags, format!("w{}", way.id()), false) else {
+                let Some(refs) = refs_of(&way.refs().collect::<Vec<_>>()) else {
                     return Vec::new();
                 };
-                refs_of(&way.refs().collect::<Vec<_>>())
-                    .map(|refs| vec![Found::Way(place, refs)])
-                    .unwrap_or_default()
+                let tags = collect_tags(way.tags());
+                found_at(&tags, format!("w{}", way.id()), false, At::Way(refs))
+                    .into_iter()
+                    .collect()
             }
             Element::Relation(relation) => {
-                let tags = collect_tags(relation.tags());
-                let Some(place) = place_of(&tags, format!("r{}", relation.id()), false) else {
-                    return Vec::new();
-                };
-                relation
+                let outer: Vec<i64> = relation
                     .members()
-                    .find(|m| {
+                    .filter(|m| {
                         m.member_type == RelMemberType::Way && matches!(m.role(), Ok("outer" | ""))
                     })
-                    .map(|m| vec![Found::Relation(place, m.member_id)])
-                    .unwrap_or_default()
+                    .map(|m| m.member_id)
+                    .collect();
+                if outer.is_empty() {
+                    return Vec::new();
+                }
+                // A park's boundary is many ways: their ends all round it
+                // say where its middle is, where one way's would not.
+                let step = outer.len().div_ceil(OUTER_WAYS);
+                let outer = outer.into_iter().step_by(step).collect();
+                let tags = collect_tags(relation.tags());
+                found_at(
+                    &tags,
+                    format!("r{}", relation.id()),
+                    false,
+                    At::Relation(outer),
+                )
+                .into_iter()
+                .collect()
             }
         },
         Vec::new,
@@ -422,18 +484,46 @@ fn node_locations(path: &Path, wanted: &[i64]) -> Result<HashMap<i64, (f64, f64)
     Ok(found.into_iter().collect())
 }
 
-/// Reads the places of the OpenStreetMap file `path`, most notable first.
-pub fn read_places(path: &Path) -> Result<Vec<Place>> {
+/// Reads the places of the OpenStreetMap files `paths` (extracts may
+/// overlap), named also as the English Wikipedia articles in the articles
+/// file `articles` name their Wikidata items, most notable first.
+pub fn read_places(paths: &[PathBuf], articles: Option<&Path>) -> Result<Vec<Place>> {
+    let mut found = Vec::new();
+    for path in paths {
+        found.extend(locate_places(path)?);
+    }
+    if paths.len() > 1 {
+        // A place in two extracts once.
+        found.sort_by(|a, b| a.0.osm.cmp(&b.0.osm));
+        found.dedup_by(|a, b| a.0.osm == b.0.osm);
+    }
+    if let Some(articles) = articles {
+        add_article_names(&mut found, articles)?;
+    }
+    let mut located: Vec<Place> = found.into_iter().map(|(place, _)| place).collect();
+    fill_in_towns(&mut located);
+    located.sort_by(|a, b| {
+        b.rank
+            .cmp(&a.rank)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.osm.cmp(&b.osm))
+    });
+    Ok(located)
+}
+
+/// The places of the OpenStreetMap file `path`, each with its Wikidata
+/// item, where they are.
+fn locate_places(path: &Path) -> Result<Vec<(Place, Option<u64>)>> {
     info!("reading places from {}", path.display());
     let found = find_places(path)?;
     let mut located = Vec::new();
     let mut ways = Vec::new();
     let mut relations = Vec::new();
-    for item in found {
-        match item {
-            Found::Located(place) => located.push(place),
-            Found::Way(place, refs) => ways.push((place, refs)),
-            Found::Relation(place, way) => relations.push((place, way)),
+    for Found { place, item, at } in found {
+        match at {
+            At::Node => located.push((place, item)),
+            At::Way(refs) => ways.push((place, item, refs)),
+            At::Relation(outer) => relations.push((place, item, outer)),
         }
     }
     info!(
@@ -443,43 +533,144 @@ pub fn read_places(path: &Path) -> Result<Vec<Place>> {
         relations.len()
     );
     if !relations.is_empty() {
-        let mut wanted: Vec<i64> = relations.iter().map(|(_, way)| *way).collect();
+        let mut wanted: Vec<i64> = relations.iter().flat_map(|r| r.2.iter().copied()).collect();
         wanted.sort_unstable();
         wanted.dedup();
         let nodes = way_nodes(path, &wanted)?;
-        for (place, way) in relations {
-            if let Some(refs) = nodes.get(&way) {
-                ways.push((place, *refs));
-            }
-        }
-    }
-    if !ways.is_empty() {
-        let mut wanted: Vec<i64> = ways.iter().flat_map(|(_, refs)| *refs).collect();
-        wanted.sort_unstable();
-        wanted.dedup();
-        info!("looking up {} nodes of ways", wanted.len());
-        let locations = node_locations(path, &wanted)?;
-        for (mut place, refs) in ways {
-            let known: Vec<(f64, f64)> = refs
+        // Each relation's outer ways, from here on the ends of those ways.
+        for (_, _, outer) in &mut relations {
+            *outer = outer
                 .iter()
-                .filter_map(|id| locations.get(id).copied())
+                .filter_map(|way| nodes.get(way))
+                .flatten()
+                .copied()
                 .collect();
-            if known.is_empty() {
-                continue;
-            }
-            place.lat = known.iter().map(|l| l.0).sum::<f64>() / known.len() as f64;
-            place.lon = known.iter().map(|l| l.1).sum::<f64>() / known.len() as f64;
-            located.push(place);
         }
     }
-    fill_in_towns(&mut located);
-    located.sort_by(|a, b| {
-        b.rank
-            .cmp(&a.rank)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.osm.cmp(&b.osm))
-    });
+    let mut wanted: Vec<i64> = ways
+        .iter()
+        .flat_map(|w| w.2)
+        .chain(relations.iter().flat_map(|r| r.2.iter().copied()))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(located);
+    }
+    wanted.sort_unstable();
+    wanted.dedup();
+    info!("looking up {} nodes of ways", wanted.len());
+    let locations = node_locations(path, &wanted)?;
+    let mut place_at = |mut place: Place, item, refs: &[i64]| {
+        let known: Vec<(f64, f64)> = refs
+            .iter()
+            .filter_map(|id| locations.get(id).copied())
+            .collect();
+        if let Some((lat, lon)) = middle(&known) {
+            place.lat = lat;
+            place.lon = lon;
+            located.push((place, item));
+        }
+    };
+    for (place, item, refs) in ways {
+        place_at(place, item, &refs);
+    }
+    for (place, item, ends) in relations {
+        place_at(place, item, &ends);
+    }
     Ok(located)
+}
+
+/// The middle of the box around `points`.
+fn middle(points: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let first = *points.first()?;
+    let (low, high) = points
+        .iter()
+        .fold((first, first), |(low, high), &(lat, lon)| {
+            (
+                (low.0.min(lat), low.1.min(lon)),
+                (high.0.max(lat), high.1.max(lon)),
+            )
+        });
+    Some(((low.0 + high.0) / 2.0, (low.1 + high.1) / 2.0))
+}
+
+/// The names and reads of an English Wikipedia article.
+struct ArticleNames {
+    title: String,
+    views: u64,
+    aliases: Vec<String>,
+}
+
+/// Whether `name` is plain: "Big Ben", not "Louvre (museum)" or "Paris,
+/// Texas", which name it only with a qualifier.
+fn is_plain(name: &str) -> bool {
+    !name.contains(['(', ','])
+}
+
+/// Gives each place the plain title and other names (redirects) of the
+/// English Wikipedia article on its Wikidata item, from the articles file
+/// `path`: "Big Ben" for the Elizabeth Tower, "Philly" for Philadelphia.
+/// A place that is no town and that the title names plainly is a landmark
+/// ([`landmark_rank`]).
+fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<()> {
+    let mut places_of: HashMap<u64, u32> = HashMap::new();
+    for item in found.iter().filter_map(|(_, item)| *item) {
+        *places_of.entry(item).or_default() += 1;
+    }
+    places_of.retain(|_, places| *places <= PLACES_PER_ITEM);
+    info!("reading the articles on {} items", places_of.len());
+    let mut failed = None;
+    let lines = open_maybe_gz(path)?.lines().map_while(|line| match line {
+        Ok(line) => Some(line),
+        Err(err) => {
+            failed = Some(err);
+            None
+        }
+    });
+    let mut articles = HashMap::new();
+    for (n, article) in articles_of(lines) {
+        let article = article.with_context(|| format!("{} line {n}", path.display()))?;
+        let Some(item) = article
+            .item
+            .as_deref()
+            .and_then(|item| item.strip_prefix('Q')?.parse::<u64>().ok())
+            .filter(|item| places_of.contains_key(item))
+        else {
+            continue;
+        };
+        articles.insert(
+            item,
+            ArticleNames {
+                title: article.title,
+                views: article.views,
+                aliases: article.aliases,
+            },
+        );
+    }
+    if let Some(err) = failed {
+        return Err(anyhow::Error::new(err).context(format!("reading {}", path.display())));
+    }
+    let mut landmarks = 0;
+    for (place, item) in found.iter_mut() {
+        let Some(article) = item.and_then(|item| articles.get(&item)) else {
+            continue;
+        };
+        let names = std::iter::once(&article.title).chain(&article.aliases);
+        for name in names.filter(|name| is_plain(name)) {
+            push_alias(&place.name, &mut place.aliases, name, MAX_PLACE_ALIASES);
+        }
+        if !place.is_town() && is_plain(&article.title) {
+            place.rank = landmark_rank(article.views);
+            landmarks += 1;
+        }
+    }
+    info!(
+        "{} places have an article, {landmarks} of them landmarks",
+        found
+            .iter()
+            .filter(|(_, item)| item.is_some_and(|item| articles.contains_key(&item)))
+            .count()
+    );
+    Ok(())
 }
 
 /// Writes `places` (most notable first) to the gzipped places file `path`.
@@ -573,16 +764,18 @@ fn winner(votes: &HashMap<String, u32>) -> Option<String> {
         .map(|(value, _)| value.clone())
 }
 
-/// Gives towns the country and region their places' addresses mostly
-/// give, and places without a town, region or country in their address
-/// those of the nearest town.
+/// Gives towns the region their places' addresses mostly give, and the
+/// country those in that region mostly give, and places without a town,
+/// region or country in their address those of the nearest town that
+/// fits them. Across a border, the places on the other side say another
+/// region: both Niagara Falls are nearest to shops of both.
 pub fn fill_in_towns(places: &mut [Place]) {
     let settlements: Vec<usize> = (0..places.len())
         .filter(|&i| is_settlement(&places[i].kind))
         .collect();
     let grid = TownGrid::new(places, settlements.iter().copied());
-    let mut countries: HashMap<usize, HashMap<String, u32>> = HashMap::new();
-    let mut regions: HashMap<usize, HashMap<String, u32>> = HashMap::new();
+    type Said = (Option<String>, Option<String>);
+    let mut votes: HashMap<usize, HashMap<Said, u32>> = HashMap::new();
     let nearest: Vec<Option<usize>> = places
         .iter()
         .map(|place| {
@@ -595,61 +788,106 @@ pub fn fill_in_towns(places: &mut [Place]) {
         .collect();
     for (place, town) in places.iter().zip(&nearest) {
         let Some(town) = *town else { continue };
-        if let Some(country) = &place.country {
-            *countries
+        if place.country.is_some() || place.region.is_some() {
+            *votes
                 .entry(town)
                 .or_default()
-                .entry(country.clone())
-                .or_default() += 1;
-        }
-        if let Some(region) = &place.region {
-            *regions
-                .entry(town)
-                .or_default()
-                .entry(region.clone())
+                .entry((place.country.clone(), place.region.clone()))
                 .or_default() += 1;
         }
     }
     for &i in &settlements {
-        if places[i].country.is_none() {
-            places[i].country = countries.get(&i).and_then(winner);
-        }
+        let Some(said) = votes.get(&i) else { continue };
         if places[i].region.is_none() {
-            places[i].region = regions.get(&i).and_then(winner);
+            let mut regions = HashMap::new();
+            for ((_, region), n) in said {
+                if let Some(region) = region {
+                    *regions.entry(region.clone()).or_default() += n;
+                }
+            }
+            places[i].region = winner(&regions);
+        }
+        if places[i].country.is_none() {
+            let region = places[i].region.clone();
+            let mut countries = HashMap::new();
+            for ((country, place_region), n) in said {
+                if let Some(country) = country {
+                    if place_region.is_none() || *place_region == region {
+                        *countries.entry(country.clone()).or_default() += n;
+                    }
+                }
+            }
+            places[i].country = winner(&countries);
         }
     }
-    // Towns none of whose places had an address: their neighbours'.
+    // Towns none of whose places gave a country: their neighbours', in
+    // their region when one there has it.
     for &i in &settlements {
         if places[i].country.is_some() {
             continue;
         }
-        let (lat, lon) = (places[i].lat, places[i].lon);
-        if let Some(near) = grid.nearest(places, lat, lon, 4.0 * TOWN_REACH_KM, |t| {
-            t.country.is_some()
-        }) {
+        let (lat, lon, region) = (places[i].lat, places[i].lon, places[i].region.clone());
+        let reach = 4.0 * TOWN_REACH_KM;
+        let near = grid
+            .nearest(places, lat, lon, reach, |t| {
+                t.country.is_some() && region.is_some() && t.region == region
+            })
+            .or_else(|| grid.nearest(places, lat, lon, reach, |t| t.country.is_some()));
+        if let Some(near) = near {
             places[i].country = places[near].country.clone();
             if places[i].region.is_none() {
                 places[i].region = places[near].region.clone();
             }
         }
     }
+    // The country most towns of each region are in.
+    let mut countries: HashMap<&str, HashMap<String, u32>> = HashMap::new();
+    for &i in &settlements {
+        if let (Some(region), Some(country)) = (&places[i].region, &places[i].country) {
+            *countries
+                .entry(region)
+                .or_default()
+                .entry(country.clone())
+                .or_default() += 1;
+        }
+    }
+    let region_country: HashMap<String, String> = countries
+        .iter()
+        .filter_map(|(region, votes)| Some((region.to_string(), winner(votes)?)))
+        .collect();
     for (i, town) in nearest.into_iter().enumerate() {
-        let Some(town) = town else { continue };
-        let (name, region, country) = (
+        let Some(mut town) = town else { continue };
+        let (lat, lon) = (places[i].lat, places[i].lon);
+        let (country, region) = (places[i].country.clone(), places[i].region.clone());
+        let fits = |t: &Place| {
+            (country.is_none() || t.country == country) && (region.is_none() || t.region == region)
+        };
+        // A place across a border from its nearest town, by its country
+        // or else its region's: the nearest town on its own side.
+        let side = country
+            .clone()
+            .or_else(|| region_country.get(region.as_deref()?).cloned());
+        if !fits(&places[town]) && side.is_some() && side != places[town].country {
+            let ours = |t: &Place| t.country == side && (region.is_none() || t.region == region);
+            town = grid
+                .nearest(places, lat, lon, TOWN_REACH_KM, ours)
+                .unwrap_or(town);
+        }
+        let (name, town_region, town_country) = (
             places[town].name.clone(),
             places[town].region.clone(),
             places[town].country.clone(),
         );
         let place = &mut places[i];
-        let same_country = place.country.is_none() || place.country == country;
+        let same_country = place.country.is_none() || place.country == town_country;
         if place.town.is_none() && same_country {
             place.town = Some(name);
         }
         if place.region.is_none() && same_country {
-            place.region = region;
+            place.region = town_region;
         }
         if place.country.is_none() {
-            place.country = country;
+            place.country = town_country;
         }
     }
 }
@@ -776,6 +1014,154 @@ mod tests {
         assert_eq!(places[4].country.as_deref(), Some("US"));
         assert_eq!(places[5].town.as_deref(), Some("Denver"));
         assert_eq!(places[6].town, None);
+    }
+
+    #[test]
+    fn places_keep_what_people_call_them() {
+        let airport = place_of(
+            &tags(&[
+                ("name", "John F. Kennedy International Airport"),
+                ("aeroway", "aerodrome"),
+                ("iata", "JFK"),
+                ("loc_name", "JFK"),
+                ("wikidata", "Q8685"),
+            ]),
+            "w1".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(airport.aliases, ["JFK"]);
+        assert_eq!(item_of(&tags(&[("wikidata", "Q8685")])), Some(8685));
+        let city = place_of(
+            &tags(&[
+                ("name", "Philadelphia"),
+                ("place", "city"),
+                ("loc_name", "Philly"),
+            ]),
+            "n1".into(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(city.aliases, ["Philly"]);
+        // Canada's addresses say the province.
+        let shop = place_of(
+            &tags(&[
+                ("name", "Tim Hortons"),
+                ("amenity", "cafe"),
+                ("addr:province", "Ontario"),
+            ]),
+            "n2".into(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(shop.region.as_deref(), Some("ON"));
+    }
+
+    #[test]
+    fn places_take_names_from_their_articles() {
+        let at = |name: &str, kind: &str, osm: &str| Place {
+            rank: place_rank(kind, 0, true, false, 5),
+            name: name.into(),
+            kind: kind.into(),
+            osm: osm.into(),
+            ..Place::default()
+        };
+        let mut found = vec![
+            (
+                at("Elizabeth Tower", "tourism=attraction", "w1"),
+                Some(41225),
+            ),
+            (at("Big Ben", "amenity=bar", "n2"), None),
+            (
+                Place {
+                    rank: place_rank("place=city", 1_600_000, true, false, 5),
+                    ..at("Philadelphia", "place=city", "n3")
+                },
+                Some(1345),
+            ),
+            (at("Café Louvre", "amenity=cafe", "n4"), Some(7)),
+            // A brand's item on its shops names none of them.
+            (at("Starbucks", "amenity=cafe", "n5"), Some(37158)),
+            (at("Starbucks", "amenity=cafe", "n6"), Some(37158)),
+            (at("Starbucks", "amenity=cafe", "n7"), Some(37158)),
+            (at("Starbucks", "amenity=cafe", "n8"), Some(37158)),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wikipedia-en.tsv");
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}{}{}{}",
+                plumb_core::article::ARTICLES_HEADER,
+                "90000\tBig Ben\tclock tower\tQ41225\t\tElizabeth Tower|Clock Tower (Westminster)|Big Ben, London\n",
+                "80000\tPhiladelphia\tcity\tQ1345\t\tPhilly|Philadelphia, Pennsylvania|City of Brotherly Love\n",
+                "20\tCafé Louvre (Prague)\tcafé\tQ7\t\tCafe Louvre\n",
+                "70000\tStarbucks\tcoffeehouse chain\tQ37158\t\t\n",
+            ),
+        )
+        .unwrap();
+        add_article_names(&mut found, &path).unwrap();
+        let tower = &found[0].0;
+        assert_eq!(tower.aliases, ["Big Ben"]);
+        assert!(tower.is_landmark());
+        assert!(tower.rank > found[1].0.rank);
+        let city = &found[2].0;
+        assert_eq!(city.aliases, ["Philly", "City of Brotherly Love"]);
+        assert!(city.is_town() && !city.is_landmark());
+        // A title with a qualifier names nothing plainly: no landmark.
+        let cafe = &found[3].0;
+        assert_eq!(cafe.aliases, ["Cafe Louvre"]);
+        assert!(!cafe.is_landmark());
+        assert!(found[4].0.aliases.is_empty() && !found[4].0.is_landmark());
+    }
+
+    #[test]
+    fn a_relation_is_where_the_middle_of_its_ways_is() {
+        let (lat, lon) = middle(&[(37.5, -119.9), (38.2, -119.6), (37.9, -119.2)]).unwrap();
+        assert!((lat - 37.85).abs() < 1e-9 && (lon + 119.55).abs() < 1e-9);
+        assert!(middle(&[]).is_none());
+    }
+
+    #[test]
+    fn border_towns_keep_their_own_side() {
+        let at = |name: &str, kind: &str, lat: f64, lon: f64| Place {
+            name: name.into(),
+            kind: kind.into(),
+            lat,
+            lon,
+            ..Place::default()
+        };
+        let shop = |lat: f64, lon: f64, country: Option<&str>, region: &str| Place {
+            country: country.map(Into::into),
+            region: Some(region.into()),
+            ..at("Shop", "shop=gift", lat, lon)
+        };
+        // Niagara Falls, New York and Ontario, 2.5 km apart across the
+        // river, and Buffalo, whose shops say they are in the US.
+        let mut places = vec![
+            at("Niagara Falls", "place=city", 43.0844, -79.0615),
+            at("Niagara Falls", "place=city", 43.1066, -79.0639),
+            at("Buffalo", "place=city", 42.8864, -78.8784),
+            shop(42.89, -78.88, Some("US"), "NY"),
+        ];
+        // Each side's shops give the province or state; Canada's some
+        // the country too, and a few are nearer the other side's centre.
+        for i in 0..6 {
+            let d = f64::from(i) * 0.001;
+            places.push(shop(43.083 + d, -79.058, None, "NY"));
+            places.push(shop(43.108 + d, -79.07, Some("CA"), "ON"));
+        }
+        places.push(shop(43.088, -79.075, Some("CA"), "ON"));
+        places.push(shop(43.089, -79.074, Some("CA"), "ON"));
+        places.push(shop(43.100, -79.058, None, "NY"));
+        fill_in_towns(&mut places);
+        let said = |i: usize| (places[i].region.clone(), places[i].country.clone());
+        assert_eq!(said(0), (Some("NY".into()), Some("US".into())));
+        assert_eq!(said(1), (Some("ON".into()), Some("CA".into())));
+        // A New York shop nearer Ontario's centre is still in the US.
+        let last = places.len() - 1;
+        assert_eq!(places[last].country.as_deref(), Some("US"));
+        assert_eq!(places[last].town.as_deref(), Some("Niagara Falls"));
     }
 
     #[test]
