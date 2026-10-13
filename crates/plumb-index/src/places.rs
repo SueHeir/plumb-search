@@ -183,6 +183,16 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         words.truncate(words.len() - when.len());
         said_when = true;
     }
+    // Nor in the middle, "pharmacy open now denver", for a time of two
+    // words or more: one word alone may be part of a name ("now tv").
+    while let Some((at, length)) = WHEN.iter().filter(|when| when.len() > 1).find_map(|when| {
+        (1..words.len().saturating_sub(when.len()))
+            .find(|&at| words[at..at + when.len()] == **when)
+            .map(|at| (at, when.len()))
+    }) {
+        words.drain(at..at + length);
+        said_when = true;
+    }
     if words
         .iter()
         .map(String::as_str)
@@ -1332,6 +1342,15 @@ mod tests {
         assert_eq!(
             query("plumber boston open now"),
             Some(("plumber".into(), Near::Named("boston".into())))
+        );
+        // Or before the town.
+        assert_eq!(
+            query("pharmacy open now denver"),
+            Some(("pharmacy".into(), Near::Named("denver".into())))
+        );
+        assert_eq!(
+            query("gym open 24 hours in boston"),
+            Some(("gym".into(), Near::Named("boston".into())))
         );
         // A kind of place at a time, with no town, is near the searcher.
         assert_eq!(query("coffee open now"), Some(("coffee".into(), Near::Me)));
