@@ -98,6 +98,7 @@ impl Searcher {
         // it is what the look-alikes are measured against. So is every site
         // of the kind the query names.
         let mut names = self.name_matches(&searcher, &query, cfg)?;
+        self.drop_borrowed_names(&searcher, &query, &mut names)?;
         let mut kinds = match &query.kind {
             Some(key) => matching_docs(
                 &searcher,
@@ -1010,7 +1011,10 @@ pub(crate) fn best_link_score(searcher: &tantivy::Searcher, docs: &HashSet<DocAd
 }
 
 /// The link score of each of `docs` that has one.
-fn link_scores(searcher: &tantivy::Searcher, docs: &HashSet<DocAddress>) -> Vec<(f32, DocAddress)> {
+pub(crate) fn link_scores(
+    searcher: &tantivy::Searcher,
+    docs: &HashSet<DocAddress>,
+) -> Vec<(f32, DocAddress)> {
     let mut columns: HashMap<u32, Option<tantivy::columnar::Column<f64>>> = HashMap::new();
     let mut scores = Vec::with_capacity(docs.len());
     for &addr in docs {
