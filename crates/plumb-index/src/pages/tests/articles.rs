@@ -118,6 +118,55 @@ fn a_person_wikidata_gives_no_dates_for_is_a_person() {
 }
 
 #[test]
+fn repository_words_find_the_repository() {
+    let mut tokio = Page::from_repo(Article {
+        title: "tokio-rs/tokio".into(),
+        aliases: vec!["tokio".into()],
+        views: 30_000,
+        ..Article::default()
+    });
+    tokio.site = Some("tokio.rs".into());
+    let reverse = Page::from_repo(Article {
+        title: "someone/reverse-proxy".into(),
+        views: 30_000,
+        ..Article::default()
+    });
+    let (_dir, s) = searcher(&[
+        tokio,
+        reverse,
+        page("Tokio Hotel", 200_000, &[]),
+        page("Repurchase agreement", 90_000, &["Reverse repo"]),
+    ]);
+    let sites = [site("github.com", false), site("tokio.rs", false)];
+    for query in [
+        "tokio github",
+        "tokio repo",
+        "tokio github repo",
+        "Tokio repository",
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(hits[0].page.title, "tokio-rs/tokio", "{query}");
+        assert!(hits[0].named, "{query}");
+        let placed = place_pages(query, &sites, hits.clone());
+        assert!(
+            placed.iter().any(|p| p.hit.page.title == "tokio-rs/tokio"),
+            "{query}"
+        );
+        // Without its site, it comes right after github.com.
+        let placed = place_pages(query, &[site("github.com", true)], hits);
+        assert_eq!(placed[0].at, 1, "{query}");
+    }
+    assert_eq!(
+        hinted_name("tokio github"),
+        Some(("tokio".into(), Hint::Repo))
+    );
+    assert_eq!(hinted_name("github"), None);
+    // A repository named only in part is not taken for the one asked for.
+    let hits = s.search("reverse repo", 5).unwrap();
+    assert_eq!(titles(&hits), ["Repurchase agreement"]);
+}
+
+#[test]
 fn fact_questions_find_the_article_they_ask_about() {
     let described = |title: &str, views: u64, description: &str| {
         let mut page = page(title, views, &[]);
@@ -174,6 +223,38 @@ fn fact_questions_find_the_article_they_ask_about() {
     assert!(!hits
         .iter()
         .any(|h| h.page.title == "Empires (film)" && h.named));
+}
+
+#[test]
+fn an_article_is_found_by_its_alias_past_popular_site_pages_with_the_word() {
+    // Site pages are as popular as their sites, more than all but the most
+    // read articles: hundreds with "NFL" in their titles filled the
+    // candidates, and the article named by "nfl" was never seen.
+    let mut pages = vec![
+        page("United States", 5_000_000, &[]),
+        page("National Football League", 51_000, &["Nfl", "The NFL"]),
+        page("NFL+", 363, &[]),
+    ];
+    pages.extend((0..CANDIDATES + 50).map(|i| {
+        Page::from_set(
+            SUBPAGES_SET,
+            Article {
+                title: format!("NFL Scores Week {i}"),
+                item: Some(format!("https://sports{i}.example/nfl/scores")),
+                views: 5_000,
+                ..Article::default()
+            },
+        )
+        .unwrap()
+    }));
+    let (_dir, s) = searcher(&pages);
+    let hits = s.search("nfl", 5).unwrap();
+    assert_eq!(
+        hits.first().map(|h| (h.page.title.as_str(), h.named)),
+        Some(("National Football League", true)),
+        "{:?}",
+        titles(&hits)
+    );
 }
 
 #[test]

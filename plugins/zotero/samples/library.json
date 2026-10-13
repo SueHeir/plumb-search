@@ -1,0 +1,332 @@
+[
+  {
+    "key": "GIXE866W",
+    "version": 8,
+    "library": {
+      "type": "user",
+      "id": 0,
+      "name": "My Library",
+      "links": {
+        "self": {
+          "href": "http://localhost:23119/api/users/0",
+          "type": "application/json"
+        }
+      }
+    },
+    "links": {
+      "self": {
+        "href": "http://localhost:23119/api/users/0/items/GIXE866W",
+        "type": "application/json"
+      }
+    },
+    "meta": {
+      "parsedDate": "1954",
+      "numChildren": 0
+    },
+    "data": {
+      "key": "GIXE866W",
+      "version": 8,
+      "itemType": "case",
+      "url": "https://en.wikipedia.org/wiki/Brown_v._Board_of_Education",
+      "caseName": "Brown v. Board of Education",
+      "dateDecided": "1954",
+      "creators": [],
+      "tags": [],
+      "collections": [],
+      "relations": {},
+      "dateAdded": "2026-10-13T21:21:00Z",
+      "dateModified": "2026-10-13T21:21:00Z"
+    }
+  },
+  {
+    "key": "TLUNZV7I",
+    "version": 1,
+    "library": {
+      "type": "user",
+      "id": 0,
+      "name": "My Library",
+      "links": {
+        "self": {
+          "href": "http://localhost:23119/api/users/0",
+          "type": "application/json"
+        }
+      }
+    },
+    "links": {
+      "self": {
+        "href": "http://localhost:23119/api/users/0/items/TLUNZV7I",
+        "type": "application/json"
+      }
+    },
+    "meta": {
+      "creatorSummary": "Vaswani et al.",
+      "parsedDate": "2017-06-12",
+      "numChildren": 1
+    },
+    "data": {
+      "key": "TLUNZV7I",
+      "version": 1,
+      "itemType": "journalArticle",
+      "title": "Attention Is All You Need",
+      "abstractNote": "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks in an encoder-decoder configuration.",
+      "date": "2017-06-12",
+      "DOI": "10.48550/arXiv.1706.03762",
+      "url": "https://arxiv.org/abs/1706.03762",
+      "publicationTitle": "Advances in Neural Information Processing Systems",
+      "creators": [
+        {
+          "firstName": "Ashish",
+          "lastName": "Vaswani",
+          "creatorType": "author"
+        },
+        {
+          "firstName": "Noam",
+          "lastName": "Shazeer",
+          "creatorType": "author"
+        },
+        {
+          "firstName": "Niki",
+          "lastName": "Parmar",
+          "creatorType": "author"
+        }
+      ],
+      "tags": [
+        {
+          "tag": "transformers"
+        }
+      ],
+      "collections": [],
+      "relations": {},
+      "dateAdded": "2026-10-13T21:20:59Z",
+      "dateModified": "2026-10-13T21:20:59Z"
+    }
+  },
+  {
+    "key": "HIAP93NW",
+    "version": 3,
+    "library": {
+      "type": "user",
+      "id": 0,
+      "name": "My Library",
+      "links": {
+        "self": {
+          "href": "http://localhost:23119/api/users/0",
+          "type": "application/json"
+        }
+      }
+    },
+    "links": {
+      "self": {
+        "href": "http://localhost:23119/api/users/0/items/HIAP93NW",
+        "type": "application/json"
+      }
+    },
+    "meta": {
+      "numChildren": 0
+    },
+    "data": {
+      "key": "HIAP93NW",
+      "version": 3,
+      "itemType": "note",
+      "note": "<p>Attention span notes</p>",
+      "tags": [],
+      "collections": [],
+      "relations": {},
+      "dateAdded": "2026-10-13T21:20:59Z",
+      "dateModified": "2026-10-13T21:20:59Z"
+    }
+  },
+  {
+    "key": "Y88BNRFN",
+    "version": 4,
+    "library": {
+      "type": "user",
+      "id": 0,
+      "name": "My Library",
+      "links": {
+        "self": {
+          "href": "http://localhost:23119/api/users/0",
+          "type": "application/json"
+        }
+      }
+    },
+    "links": {
+      "self": {
+        "href": "http://localhost:23119/api/users/0/items/Y88BNRFN",
+        "type": "application/json"
+      }
+    },
+    "meta": {
+      "creatorSummary": "Herbert",
+      "parsedDate": "1965",
+      "numChildren": 0
+    },
+    "data": {
+      "key": "Y88BNRFN",
+      "version": 4,
+      "itemType": "book",
+      "title": "Dune",
+      "date": "1965",
+      "publisher": "Chilton Books",
+      "ISBN": "978-0-441-01359-3",
+      "creators": [
+        {
+          "firstName": "Frank",
+          "lastName": "Herbert",
+          "creatorType": "author"
+        }
+      ],
+      "tags": [],
+      "collections": [],
+      "relations": {},
+      "dateAdded": "2026-10-13T21:20:59Z",
+      "dateModified": "2026-10-13T21:20:59Z"
+    }
+  },
+  {
+    "key": "4H8NKHJX",
+    "version": 5,
+    "library": {
+      "type": "user",
+      "id": 0,
+      "name": "My Library",
+      "links": {
+        "self": {
+          "href": "http://localhost:23119/api/users/0",
+          "type": "application/json"
+        }
+      }
+    },
+    "links": {
+      "self": {
+        "href": "http://localhost:23119/api/users/0/items/4H8NKHJX",
+        "type": "application/json"
+      }
+    },
+    "meta": {
+      "numChildren": 0
+    },
+    "data": {
+      "key": "4H8NKHJX",
+      "version": 5,
+      "itemType": "webpage",
+      "title": "The Rust Programming Language",
+      "url": "https://doc.rust-lang.org/book/",
+      "websiteTitle": "Rust documentation",
+      "creators": [],
+      "tags": [],
+      "collections": [],
+      "relations": {},
+      "dateAdded": "2026-10-13T21:20:59Z",
+      "dateModified": "2026-10-13T21:20:59Z"
+    }
+  },
+  {
+    "key": "L8PG3UBD",
+    "version": 6,
+    "library": {
+      "type": "user",
+      "id": 0,
+      "name": "My Library",
+      "links": {
+        "self": {
+          "href": "http://localhost:23119/api/users/0",
+          "type": "application/json"
+        }
+      }
+    },
+    "links": {
+      "self": {
+        "href": "http://localhost:23119/api/users/0/items/L8PG3UBD",
+        "type": "application/json"
+      }
+    },
+    "meta": {
+      "creatorSummary": "He et al.",
+      "parsedDate": "2016",
+      "numChildren": 0
+    },
+    "data": {
+      "key": "L8PG3UBD",
+      "version": 6,
+      "itemType": "conferencePaper",
+      "title": "Deep Residual Learning for Image Recognition",
+      "date": "2016",
+      "DOI": "10.1109/CVPR.2016.90",
+      "proceedingsTitle": "2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR)",
+      "creators": [
+        {
+          "firstName": "Kaiming",
+          "lastName": "He",
+          "creatorType": "author"
+        },
+        {
+          "firstName": "Xiangyu",
+          "lastName": "Zhang",
+          "creatorType": "author"
+        },
+        {
+          "firstName": "Shaoqing",
+          "lastName": "Ren",
+          "creatorType": "author"
+        },
+        {
+          "firstName": "Jian",
+          "lastName": "Sun",
+          "creatorType": "author"
+        }
+      ],
+      "tags": [],
+      "collections": [],
+      "relations": {},
+      "dateAdded": "2026-10-13T21:20:59Z",
+      "dateModified": "2026-10-13T21:20:59Z"
+    }
+  },
+  {
+    "key": "5LJ5WFYW",
+    "version": 7,
+    "library": {
+      "type": "user",
+      "id": 0,
+      "name": "My Library",
+      "links": {
+        "self": {
+          "href": "http://localhost:23119/api/users/0",
+          "type": "application/json"
+        }
+      }
+    },
+    "links": {
+      "self": {
+        "href": "http://localhost:23119/api/users/0/items/5LJ5WFYW",
+        "type": "application/json"
+      }
+    },
+    "meta": {
+      "creatorSummary": "Doe",
+      "parsedDate": "2020",
+      "numChildren": 0
+    },
+    "data": {
+      "key": "5LJ5WFYW",
+      "version": 7,
+      "itemType": "thesis",
+      "title": "Trust and Frustration in Distributed Systems",
+      "date": "2020",
+      "university": "Example University",
+      "creators": [
+        {
+          "firstName": "Jane",
+          "lastName": "Doe",
+          "creatorType": "author"
+        }
+      ],
+      "tags": [],
+      "collections": [],
+      "relations": {},
+      "dateAdded": "2026-10-13T21:20:59Z",
+      "dateModified": "2026-10-13T21:20:59Z"
+    }
+  }
+]
