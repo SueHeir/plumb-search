@@ -19,8 +19,8 @@ use super::{
     LEAD_CANDIDATES, LEAD_MATCH, MUSIC_SET, OTHER_NAME_MATCH, PACKAGES_SET, PAPERS_SET,
     PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
-    REFERENCE_QUERY_WORDS, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET, TITLE_INSIDE_CANDIDATES,
-    UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
+    REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
+    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
 };
 use crate::analysis;
 
@@ -89,19 +89,21 @@ impl PageSearcher {
         );
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         // Pages with every word of the query.
-        let every_word: Vec<(Occur, Box<dyn Query>)> = words
-            .iter()
-            .map(|word| {
-                (
-                    Occur::Must,
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(self.fields.words, word),
-                        IndexRecordOption::WithFreqs,
-                    )) as Box<dyn Query>,
-                )
-            })
-            .collect();
-        clauses.push((Occur::Should, Box::new(BooleanQuery::new(every_word))));
+        let every_word = BooleanQuery::new(
+            words
+                .iter()
+                .map(|word| {
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.words, word),
+                            IndexRecordOption::WithFreqs,
+                        )) as Box<dyn Query>,
+                    )
+                })
+                .collect(),
+        );
+        clauses.push((Occur::Should, Box::new(every_word.clone())));
         // Books, podcasts, songs and albums named by their title and what
         // they are: "dune book", "hardcore history podcast", "hey jude song".
         if let Some((title, last)) = query.trim().rsplit_once(char::is_whitespace) {
@@ -150,13 +152,35 @@ impl PageSearcher {
             .into_iter()
             .map(|(_, address)| address)
             .collect();
-        for (_, address) in searcher.search(
+        let found = searcher.search(
             self.language_query(scoped_query(&BooleanQuery::new(clauses), scope).as_ref())
                 .as_ref(),
             &by_popularity(),
-        )? {
+        )?;
+        // Site pages are as popular as their sites, more than all but the
+        // most read articles: when they fill the candidates, the other
+        // pages with every word are searched apart, or an article named
+        // only by an alias ("nfl" for National Football League, "nhs") is
+        // lost behind hundreds of pages titled "NFL Scores".
+        let crowded = found.len() >= CANDIDATES;
+        for (_, address) in found {
             if !addresses.contains(&address) {
                 addresses.push(address);
+            }
+        }
+        if crowded {
+            let mut apart: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, Box::new(every_word))];
+            for set in [SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET] {
+                apart.push((Occur::MustNot, self.scope_term(&format!("set:{set}"))));
+            }
+            for (_, address) in searcher.search(
+                self.language_query(scoped_query(&BooleanQuery::new(apart), scope).as_ref())
+                    .as_ref(),
+                &by_popularity(),
+            )? {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
             }
         }
         // Books and papers named by their title and then their author:
