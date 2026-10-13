@@ -53,6 +53,12 @@ const DOMAIN_BOOST: f32 = 10.0;
 /// "videos").
 const OTHER_NUMBER_SHARE: f32 = 0.8;
 
+/// Words that set the things around them side by side ("mitosis vs
+/// meiosis") and are none of them. Between other words they are matched
+/// nowhere: as a word of their own, the best-known homepage saying "vs"
+/// (apple.com's) came before what is compared in nearly every comparison.
+pub(crate) const COMPARISON_WORDS: &[&str] = &["vs", "versus"];
+
 /// The words of `query` after the first `words` of its analyzed words, as
 /// typed: "github sueheir/plumb-search" after 1 -> "sueheir/plumb-search".
 /// `None` when nothing is left, or when the typed words do not line up
@@ -94,7 +100,8 @@ pub(crate) fn matching_docs(
 /// A user query, analyzed the same way as the indexed text.
 #[derive(Debug, PartialEq)]
 pub(crate) struct ParsedQuery {
-    /// Distinct words, in query order: `U.S. Bank` -> `us`, `bank`.
+    /// Distinct words, in query order: `U.S. Bank` -> `us`, `bank`. A
+    /// [`COMPARISON_WORDS`] entry between two others is left out.
     pub(crate) words: Vec<String>,
     /// Each word in its other number ([`plumb_core::other_number`]), if it
     /// has one: `videos` -> `video`.
@@ -135,8 +142,10 @@ impl ParsedQuery {
             return None;
         }
         let mut distinct = Vec::new();
-        for word in &tokens {
-            if !distinct.contains(word) {
+        for (i, word) in tokens.iter().enumerate() {
+            let compares =
+                0 < i && i + 1 < tokens.len() && COMPARISON_WORDS.contains(&word.as_str());
+            if !compares && !distinct.contains(word) {
                 distinct.push(word.clone());
             }
         }
@@ -237,7 +246,7 @@ impl ParsedQuery {
             {
                 continue;
             }
-            clauses.add(Term::from_field_text(field, word), boost);
+            clauses.add_word(field, word, boost);
         }
         let Some(other) = &self.others[i] else {
             return Ok(());
@@ -365,27 +374,56 @@ impl ParsedQuery {
     }
 }
 
-/// Boosted term clauses of a disjunction. A term added twice keeps the
-/// larger boost (in a one-word query, the word is also the whole query).
+/// Boosted clauses of a disjunction, each of one term or of all of a
+/// word's [`analysis::pieces`]. A clause added twice keeps the larger
+/// boost (in a one-word query, the word is also the whole query).
 #[derive(Default)]
-pub(crate) struct Clauses(Vec<(Term, f32)>);
+pub(crate) struct Clauses(Vec<(Vec<Term>, f32)>);
 
 impl Clauses {
     pub(crate) fn add(&mut self, term: Term, boost: f32) {
-        match self.0.iter_mut().find(|(known, _)| *known == term) {
+        self.add_all(vec![term], boost);
+    }
+
+    /// `word` in the word field `field`: a word of Chinese, Japanese or
+    /// Thai by all of its pieces, which share the boost, and also whole,
+    /// as an index built before it was in pieces holds it.
+    pub(crate) fn add_word(&mut self, field: Field, word: &str, boost: f32) {
+        let pieces = analysis::pieces(word);
+        if pieces.len() > 1 {
+            let terms = pieces
+                .iter()
+                .map(|piece| Term::from_field_text(field, piece));
+            self.add_all(terms.collect(), boost);
+        }
+        self.add(Term::from_field_text(field, word), boost);
+    }
+
+    fn add_all(&mut self, terms: Vec<Term>, boost: f32) {
+        match self.0.iter_mut().find(|(known, _)| *known == terms) {
             Some((_, known_boost)) => *known_boost = known_boost.max(boost),
-            None => self.0.push((term, boost)),
+            None => self.0.push((terms, boost)),
         }
     }
 
     pub(crate) fn into_query(self) -> BooleanQuery {
+        // Fields indexed without frequencies fall back to `Basic`.
+        let term_query = |term| -> Box<dyn Query> {
+            Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+        };
         let clauses = self
             .0
             .into_iter()
-            .map(|(term, boost)| {
-                // Fields indexed without frequencies fall back to `Basic`.
-                let term_query = TermQuery::new(term, IndexRecordOption::WithFreqs);
-                let query: Box<dyn Query> = Box::new(BoostQuery::new(Box::new(term_query), boost));
+            .map(|(mut terms, boost)| {
+                // The pieces of a word share its boost.
+                let boost = boost / terms.len() as f32;
+                let query = if terms.len() == 1 {
+                    term_query(terms.remove(0))
+                } else {
+                    let all = terms.into_iter().map(|t| (Occur::Must, term_query(t)));
+                    Box::new(BooleanQuery::new(all.collect()))
+                };
+                let query: Box<dyn Query> = Box::new(BoostQuery::new(query, boost));
                 (Occur::Should, query)
             })
             .collect();
