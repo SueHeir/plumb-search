@@ -12,7 +12,7 @@ use tantivy::schema::{
 use tantivy::TantivyDocument;
 
 use super::docs::{docs_overview, docs_symbols};
-use super::sites::base_title;
+use super::sites::{base_title, subtitle};
 use super::{Fields, Page, PageIndexStats, DOCS_SET, PAPERS_SET, POPULARITY_SCALE, WIKTIONARY_SET};
 use crate::analysis::{self, JOINED_ANALYZER, STEMMED_ANALYZER, WORDS_ANALYZER};
 use crate::replace::Staging;
@@ -249,6 +249,10 @@ pub fn build_page_index_with_budget(
             let base = base_title(&page.title);
             if base != page.title {
                 document.add_text(fields.keys, base);
+            }
+            // "no way home" asks for "Spider-Man: No Way Home".
+            if let Some(subtitle) = subtitle(&page.title).filter(|_| page.is_article()) {
+                document.add_text(fields.keys, subtitle);
             }
         }
         // A package is asked for by its short name too: "gin golang".

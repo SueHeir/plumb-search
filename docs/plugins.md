@@ -120,8 +120,9 @@ article it carries is about. The plugin answers with a `Note` for the results
 it has something to say about.
 
 A plugin with `ids` is shown only results about something with one of those
-identifiers, and runs only when there is one; without `ids` it is shown every
-result of every search, so mind its source's limits. It runs beside the
+identifiers or on a site its `pages` lists, and runs only when there is one;
+without `ids` it is shown every result of every search, so mind its source's
+limits. It runs beside the
 plugins' own searches, with the same time limit and cache. A plugin that only
 marks up results needs no keywords and no `plumb_search`
 (`plumb_plugin::annotate_only!(annotate)`).
@@ -245,7 +246,7 @@ into its folder as `plugin.wasm`.
 | `hacker-news` | `hn rust async`: Hacker News stories. | Nothing. |
 | `youtube-music` | `ytm` or `yt` searches: songs and videos from YouTube and YouTube Music, and a channel's uploads for searches about someone with one. | A YouTube Data API key (see its README). |
 | `reddit` | `reddit` searches: Reddit threads. | Your own Reddit app keys (see its README). |
-| `github` | `gh http client`: repositories with stars, language and last push. With a token: "Starred" badges, star counts on GitHub results among the node's own, and Star and Unstar buttons. | Nothing to search (GitHub allows 10 searches a minute without a token); a [fine-grained token](https://github.com/settings/personal-access-tokens) with read and write access to Starring for the rest. |
+| `github` | `gh http client` or `tokio github`: repositories with stars, language and last push. A search that says GitHub, repository, source code or open source, or one about something whose GitHub account the node knows ("python asyncio tutorial"), shows "Show results from GitHub"; one that only names that thing ("rust", "linus torvalds") lists the account's most starred repositories. With a token: "Starred" badges, star counts on GitHub results among the node's own, and Star and Unstar buttons. | Nothing to search (GitHub allows 10 searches a minute without a token, and a search past that shows none of its results); a [fine-grained token](https://github.com/settings/personal-access-tokens) with read and write access to Starring for the rest. |
 | `steam` | `steam portal` or `my games portal`: games in your library with hours played. Results about a game get "Owned, 25 h" or "On your wishlist". | A [Steam Web API key](https://steamcommunity.com/dev/apikey) and your SteamID64. If your library comes back empty, set your Steam profile's game details to public. |
 
 ## Write a plugin
@@ -340,7 +341,7 @@ and copy `target/wasm32-unknown-unknown/release/my_plugin.wasm` to
 | `hints` | Words or phrases that, anywhere in a search, make it fit the plugin, as `ids` do. |
 | `run_ids` | Of its `ids`, those that run it even when it is offered as a link (`suggest` `button`). |
 | `suggest` | What a search that fits it does without a keyword: `automatic` (run it, the default), `button` (offer a link that runs it) or `keywords` (nothing). The node's owner can change it ([Run it, or offer it](#run-it-or-offer-it)). |
-| `pages` | Sites whose pages it can say something about, for [page lookups](#pages-and-browser-extensions). |
+| `pages` | Sites whose pages it can say something about, for [page lookups](#pages-and-browser-extensions), and whose results it is shown to mark up when it has `ids`. |
 | `cache_seconds` | How long its results for a search are reused: 0 to 86400, 600 without it. |
 | `seconds` | How long a search waits for it: 1 to 10, 4 without it. The page waits for its slowest plugin. |
 
