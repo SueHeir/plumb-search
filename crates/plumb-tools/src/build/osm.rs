@@ -188,11 +188,17 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
     // Washington's and Western Australia's. It is not kept as a place.
     let code = get("ISO3166-2").filter(|_| !node && get("boundary") == Some("administrative"));
     if let Some((country, region)) = code.and_then(|code| code.split_once('-')) {
+        // A territory with a country code of its own is in it: US-PR is
+        // Puerto Rico, PR.
+        let own = get("ISO3166-1:alpha2").or_else(|| get("ISO3166-1"));
         return Some(Place {
             name: cut(name, MAX_PLACE_NAME_CHARS),
             kind: STATE_KIND.to_string(),
             region: Some(region.to_string()),
-            country: Some(normalize_country(country)?),
+            country: Some(
+                own.and_then(normalize_country)
+                    .or_else(|| normalize_country(country))?,
+            ),
             osm,
             ..Place::default()
         });
@@ -974,8 +980,12 @@ pub fn fill_in_towns(places: &mut [Place], states: &[Place]) {
             places[i].country = winner(&countries);
         }
     }
-    // Towns that know their region but none of whose places gave a
-    // country: the country of the nearest state with that code.
+    // Towns none of whose places gave a country: a neighbour's that knows
+    // its own, and where none does, the country of the nearest state with
+    // the town's region's code, which near a border can be the other
+    // side's (Rainy River, Ontario is nearest to shops in Minnesota). The
+    // towns those fill lend in turn.
+    lend_countries(places, &grid, &settlements);
     let mut coded: HashMap<String, Vec<&Place>> = HashMap::new();
     for state in states {
         if let Some(code) = &state.region {
@@ -1432,12 +1442,12 @@ mod tests {
 
     #[test]
     fn a_town_takes_its_country_from_its_states_code() {
-        let state = |name: &str, code: &str, lat: f64, lon: f64| {
+        let state = |name: &str, code: &str, own: &str, lat: f64, lon: f64| {
             let tags = [
                 ("name", name),
                 ("boundary", "administrative"),
-                ("admin_level", "4"),
                 ("ISO3166-2", code),
+                ("ISO3166-1:alpha2", own),
             ];
             Place {
                 lat,
@@ -1446,8 +1456,10 @@ mod tests {
             }
         };
         let states = [
-            state("Western Australia", "AU-WA", -24.4, 121.0),
-            state("Washington", "US-WA", 47.3, -120.8),
+            state("Western Australia", "AU-WA", "", -24.4, 121.0),
+            state("Washington", "US-WA", "", 47.3, -120.8),
+            state("Minnesota", "US-MN", "", 46.3, -94.3),
+            state("Puerto Rico", "US-PR", "PR", 18.2, -66.5),
         ];
         assert_eq!(states[0].kind, STATE_KIND);
         // A boundary without a code is no place, and a node is no state.
@@ -1468,19 +1480,38 @@ mod tests {
             lon,
             ..Place::default()
         };
+        let shop = |region: &str, lat: f64, lon: f64| Place {
+            region: Some(region.into()),
+            ..at("Shop", "shop=gift", lat, lon)
+        };
         // Perth's shops give their state and, as all over Australia, no
-        // country; Spokane's give no country either.
+        // country, and so do Spokane's; a village by Perth gives nothing.
+        // Rainy River, Ontario is nearest to shops in Minnesota, but a
+        // neighbour knows it is in Canada. Puerto Rico is a country too.
         let mut places = vec![
             at("Perth", "place=city", -31.95, 115.86),
             at("Boffins", "shop=books", -31.951, 115.857),
             at("Spokane", "place=city", 47.66, -117.43),
             at("Auntie's", "shop=books", 47.658, -117.425),
+            at("Kalamunda", "place=town", -31.97, 116.06),
+            at("Rainy River", "place=town", 48.72, -94.57),
+            shop("MN", 48.721, -94.571),
+            Place {
+                region: Some("ON".into()),
+                country: Some("CA".into()),
+                ..at("Emo", "place=town", 48.63, -93.83)
+            },
+            at("Hatillo", "place=town", 18.49, -66.83),
+            shop("PR", 18.491, -66.831),
         ];
         fill_in_towns(&mut places, &states);
         let said = |i: usize| (places[i].region.as_deref(), places[i].country.as_deref());
         assert_eq!(said(0), (Some("WA"), Some("AU")));
         assert_eq!(said(1), (Some("WA"), Some("AU")));
         assert_eq!(said(2), (Some("WA"), Some("US")));
+        assert_eq!(said(4), (Some("WA"), Some("AU")));
+        assert_eq!(said(5).1, Some("CA"));
+        assert_eq!(said(8), (Some("PR"), Some("PR")));
         // Without the states, no country is made up.
         let mut places = vec![
             at("Perth", "place=city", -31.95, 115.86),
