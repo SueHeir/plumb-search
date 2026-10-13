@@ -110,6 +110,40 @@ fn songs_and_albums_are_found_by_their_name_and_artist() {
 }
 
 #[test]
+fn a_makers_albums_songs_films_or_books_find_the_list_of_them() {
+    let (_dir, s) = searcher(&[
+        page("Drake (musician)", 90_000, &["Drake"]),
+        page("Drake albums discography", 9_000, &[]),
+        page("Drake discography", 8_000, &[]),
+        page("Pink Floyd discography", 7_000, &[]),
+        page("The Beatles", 100_000, &[]),
+        page("List of songs recorded by the Beatles", 7_000, &[]),
+        page("Tom Hanks filmography", 6_000, &[]),
+        page("Stephen King bibliography", 6_000, &[]),
+    ]);
+    for (query, title) in [
+        ("drake albums", "Drake albums discography"),
+        ("drake discography", "Drake discography"),
+        ("pink floyd albums", "Pink Floyd discography"),
+        ("pink floyd songs", "Pink Floyd discography"),
+        ("beatles songs", "List of songs recorded by the Beatles"),
+        ("The Beatles songs", "List of songs recorded by the Beatles"),
+        ("tom hanks movies", "Tom Hanks filmography"),
+        ("stephen king books", "Stephen King bibliography"),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.page.title == title && hit.named),
+            "{query}: {hits:?}"
+        );
+    }
+    // Only someone's works have such a list.
+    for query in ["best albums", "horror movies"] {
+        assert!(s.search(query, 5).unwrap().iter().all(|hit| !hit.named));
+    }
+}
+
+#[test]
 fn works_are_found_by_their_article_with_their_maker() {
     let work = |title: &str, description: &str, views: u64, aliases: &[&str]| {
         let mut page = page(title, views, aliases);
