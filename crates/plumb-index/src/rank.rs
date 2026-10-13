@@ -5,8 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use plumb_core::{
-    is_function_word, kind_key, language_code, language_fits, normalize_country,
-    registrable_domain, AdultLevel,
+    is_function_word, kind_key, language_fits, normalize_country, registrable_domain, AdultLevel,
 };
 use tantivy::collector::TopDocs;
 use tantivy::query::{EnableScoring, Query, Scorer};
@@ -495,7 +494,7 @@ impl Searcher {
 
         let max_bm25 = candidates.iter().map(|&(bm25, _)| bm25).fold(0.0, f32::max);
         let mut ranked: Vec<Ranked> = Vec::with_capacity(candidates.len());
-        let language = options.language_for(query_text).and_then(language_code);
+        let language = self.language_for(options, query_text);
         for (bm25, addr) in candidates {
             let column = &columns[addr.segment_ord as usize];
             if options.safe.hides(column.adult(addr.doc_id)) {
