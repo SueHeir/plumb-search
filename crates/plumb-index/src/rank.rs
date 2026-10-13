@@ -364,6 +364,7 @@ impl Searcher {
                     tokens
                         .iter()
                         .take(name.words())
+                        .filter(|token| query.words.contains(token))
                         .collect::<HashSet<_>>()
                         .len(),
                 )

@@ -53,6 +53,12 @@ const DOMAIN_BOOST: f32 = 10.0;
 /// "videos").
 const OTHER_NUMBER_SHARE: f32 = 0.8;
 
+/// Words that set the things around them side by side ("mitosis vs
+/// meiosis") and are none of them. Between other words they are matched
+/// nowhere: as a word of their own, the best-known homepage saying "vs"
+/// (apple.com's) came before what is compared in nearly every comparison.
+pub(crate) const COMPARISON_WORDS: &[&str] = &["vs", "versus"];
+
 /// The words of `query` after the first `words` of its analyzed words, as
 /// typed: "github sueheir/plumb-search" after 1 -> "sueheir/plumb-search".
 /// `None` when nothing is left, or when the typed words do not line up
@@ -94,7 +100,8 @@ pub(crate) fn matching_docs(
 /// A user query, analyzed the same way as the indexed text.
 #[derive(Debug, PartialEq)]
 pub(crate) struct ParsedQuery {
-    /// Distinct words, in query order: `U.S. Bank` -> `us`, `bank`.
+    /// Distinct words, in query order: `U.S. Bank` -> `us`, `bank`. A
+    /// [`COMPARISON_WORDS`] entry between two others is left out.
     pub(crate) words: Vec<String>,
     /// Each word in its other number ([`plumb_core::other_number`]), if it
     /// has one: `videos` -> `video`.
@@ -135,8 +142,10 @@ impl ParsedQuery {
             return None;
         }
         let mut distinct = Vec::new();
-        for word in &tokens {
-            if !distinct.contains(word) {
+        for (i, word) in tokens.iter().enumerate() {
+            let compares =
+                0 < i && i + 1 < tokens.len() && COMPARISON_WORDS.contains(&word.as_str());
+            if !compares && !distinct.contains(word) {
                 distinct.push(word.clone());
             }
         }
