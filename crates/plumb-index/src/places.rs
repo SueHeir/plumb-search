@@ -559,8 +559,9 @@ impl PlaceSearcher {
     /// The places `query` asks for, when it asks for places somewhere:
     /// around `home`, the searcher's town as they typed it, for "near me";
     /// with `country` ordering alternatives for an ambiguous name.
-    /// `None` when the query does not ask for places. Explicit unknown
-    /// locations return a coverage status instead of a guessed town.
+    /// `None` when the query does not ask for places. A town it doesn't
+    /// know gives a coverage status, not a guessed town, when what it
+    /// asks for is a kind of place.
     pub fn search(
         &self,
         query: &str,
@@ -634,18 +635,21 @@ impl PlaceSearcher {
     /// of place: "sort a list in python", "keel in english" and "calories
     /// in a shot" ask for no place, while "pizza in gotham" does. A place's
     /// name still asks when the town is one of several, so the choice is
-    /// offered ("starbucks in portland"), and near me always does, so one
-    /// that finds nothing still says so.
+    /// offered ("starbucks in portland"), or when only a state or country
+    /// was named, so a town is asked for ("starbucks in texas"). Near me
+    /// always does, so one that finds nothing still says so.
     fn asks_for_places(&self, found: PlaceResults) -> Result<Option<PlaceResults>> {
         let kind = found.what.rsplit(' ').next().is_some_and(is_kind_word);
-        let choice = found
-            .location
-            .as_ref()
-            .is_some_and(|location| location.status == LocationStatus::AmbiguousLocation);
+        let wants_town = found.location.as_ref().is_some_and(|location| {
+            matches!(
+                location.status,
+                LocationStatus::AmbiguousLocation | LocationStatus::MissingLocation
+            )
+        });
         if found.hits.is_empty()
             && !found.near_me
             && !kind
-            && !(choice
+            && !(wants_town
                 && self
                     .named(&found.what)?
                     .iter()
@@ -1690,8 +1694,13 @@ mod tests {
             assert!(found.is_none(), "{query}: {found:?}");
         }
         // A kind of place is still looked for, and so is a place's name in
-        // one of several towns.
-        for query in ["pizza in python", "pizza in gotham", "blue pan in portland"] {
+        // one of several towns or in a state with no town.
+        for query in [
+            "pizza in python",
+            "pizza in gotham",
+            "blue pan in portland",
+            "blue pan in texas",
+        ] {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_some(), "{query}");
         }
