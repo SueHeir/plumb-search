@@ -289,6 +289,18 @@ fn asking_words_count_half_toward_a_question() {
             "3",
         ),
         question("Is it safe to drive through the night?", "road-trips", "4"),
+        question(
+            "Can I eat cheese which has been infected with blue cheese mold?",
+            "cheese, food-safety",
+            "5",
+        ),
+        question(
+            "Is it healthy for a cat to regularly eat cheese?",
+            "cats, diet",
+            "6",
+        ),
+        question("Why does my cat knead?", "cats, behavior", "7"),
+        question("How do I stop my cat scratching furniture?", "cats", "8"),
     ];
     // Names that make the query's other words known, not typos.
     let known = [
@@ -322,6 +334,10 @@ fn asking_words_count_half_toward_a_question() {
     // Only the asking words and one or two others.
     assert!(found("how to change a car battery").is_empty());
     assert!(found("how does a refrigerator work").is_empty());
+    assert_eq!(
+        found("can cats eat cheese"),
+        ["Is it healthy for a cat to regularly eat cheese?"]
+    );
     // Most of what the query asks about.
     assert_eq!(
         found("how do i get my toddler to sleep through the night"),

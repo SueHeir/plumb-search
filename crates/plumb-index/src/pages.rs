@@ -133,6 +133,7 @@ pub const PAGE_INDEX_VERSION: &str = "v6-paper-dates-rich-symbol-docs-scope";
 const ASKING_WORDS: &[&str] = &[
     "about",
     "are",
+    "can",
     "define",
     "definition",
     "did",
@@ -146,6 +147,7 @@ const ASKING_WORDS: &[&str] = &[
     "mean",
     "meaning",
     "means",
+    "should",
     "was",
     "were",
     "what",

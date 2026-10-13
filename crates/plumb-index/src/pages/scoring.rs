@@ -281,8 +281,8 @@ impl PageSearcher {
             }
         }
         let best_lead = lead_scores.values().copied().fold(0.0f32, f32::max);
-        // The query's rarest word that some question has: what it is
-        // about. A question without it has only the asking words ("how to
+        // The query's rarest word that some question has, of those that
+        // do not only ask: what it is about. A question without it has only the asking words ("how to
         // get rid of aphids" found "How do I get rid of my bounty?"). A
         // word the pages know that no question has is rarer still: no
         // question asks about it, so none is found. A word nothing knows
@@ -294,7 +294,9 @@ impl PageSearcher {
                 let found = searcher.doc_freq(&Term::from_field_text(self.fields.topic, stem))?;
                 if found == 0 && !self.knows_stem(query, stem)? {
                     unknown.insert(stem);
-                } else if topic_word.is_none_or(|(least, _)| found < least) {
+                } else if described.contains(stem)
+                    && topic_word.is_none_or(|(least, _)| found < least)
+                {
                     topic_word = Some((found, stem));
                 }
             }
