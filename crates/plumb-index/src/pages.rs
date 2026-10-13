@@ -73,6 +73,13 @@ pub const QUESTION_QUERY_WORDS: usize = 3;
 
 /// Least share of those words a question's title and tags must have.
 pub const QUESTION_SHARE: f32 = 0.75;
+/// How much a word that only asks ([`ASKING_WORDS`]) counts toward a
+/// question's [`QUESTION_SHARE`]: nearly every question has some, so they
+/// say little of what it asks. Counted whole, "how to change a car battery"
+/// found "How many amps should my car pull while it is turned off?" by
+/// "how", "car" and "battery". A word no page knows, likely a typo, counts
+/// as little: "how to undo git comit" still finds the question.
+const UNSURE_WORD_SHARE: f32 = 0.5;
 
 /// Least number of pages whose names have a word for the word to be
 /// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
@@ -126,6 +133,7 @@ pub const PAGE_INDEX_VERSION: &str = "v6-paper-dates-rich-symbol-docs-scope";
 const ASKING_WORDS: &[&str] = &[
     "about",
     "are",
+    "can",
     "define",
     "definition",
     "did",
@@ -139,6 +147,7 @@ const ASKING_WORDS: &[&str] = &[
     "mean",
     "meaning",
     "means",
+    "should",
     "was",
     "were",
     "what",

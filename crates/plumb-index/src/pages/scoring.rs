@@ -18,7 +18,7 @@ use super::{
     PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
     REFERENCE_QUERY_WORDS, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET, TITLE_INSIDE_CANDIDATES,
-    WELL_KNOWN_PACKAGE,
+    UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
 };
 use crate::analysis;
 
@@ -281,17 +281,20 @@ impl PageSearcher {
             }
         }
         let best_lead = lead_scores.values().copied().fold(0.0f32, f32::max);
-        // The query's rarest word that some question has: what it is
-        // about. A question without it has only the asking words ("how to
+        // The query's rarest word that some question has, of those that
+        // do not only ask: what it is about. A question without it has only the asking words ("how to
         // get rid of aphids" found "How do I get rid of my bounty?"). A
         // word the pages know that no question has is rarer still: no
         // question asks about it, so none is found. A word nothing knows
         // is likely a typo, and is passed over.
         let mut topic_word: Option<(u64, &String)> = None;
+        let mut unknown = HashSet::new();
         if stems.len() >= QUESTION_QUERY_WORDS.min(REFERENCE_QUERY_WORDS) {
             for stem in &stems {
                 let found = searcher.doc_freq(&Term::from_field_text(self.fields.topic, stem))?;
-                if (found > 0 || self.knows_stem(query, stem)?)
+                if found == 0 && !self.knows_stem(query, stem)? {
+                    unknown.insert(stem);
+                } else if described.contains(stem)
                     && topic_word.is_none_or(|(least, _)| found < least)
                 {
                     topic_word = Some((found, stem));
@@ -299,6 +302,11 @@ impl PageSearcher {
             }
         }
         let topic_word = topic_word.map(|(_, stem)| stem.as_str());
+        let sure: Vec<String> = described
+            .iter()
+            .filter(|stem| !unknown.contains(stem))
+            .cloned()
+            .collect();
         // Articles whose title is some of the query and the rest says more
         // about it: "titanic sinking", "radium discovery marie curie",
         // "catholic homily". They lack the query's other words, so nothing
@@ -408,7 +416,7 @@ impl PageSearcher {
             if asked_by_title {
                 (name, named, whole) = (name.max(ALIAS_MATCH), true, true);
             } else if !named && (page.set != DOCS_SET || docs_asked(&page, query)) {
-                let (question, asked) = self.question_match(&page, &stems, topic_word);
+                let (question, asked) = self.question_match(&page, &stems, &sure, topic_word);
                 name = name.max(question);
                 whole = asked;
             }
@@ -572,6 +580,9 @@ impl PageSearcher {
     /// How well a question's words cover the query's stemmed words
     /// `stems`: [`PARTIAL_MATCH`] times the share they have, when that is
     /// at least [`QUESTION_SHARE`] of at least [`QUESTION_QUERY_WORDS`].
+    /// A word not in `sure`, the query's words that say what it asks (not
+    /// [`ASKING_WORDS`], nor a word no page knows), counts
+    /// [`UNSURE_WORD_SHARE`].
     /// And whether the query asks the question as a whole: it has all of
     /// the query's words, and the query at least [`QUESTION_TITLE_SHARE`]
     /// of its title's. A question without `topic_word`, the query's rarest
@@ -582,6 +593,7 @@ impl PageSearcher {
         &self,
         page: &Page,
         stems: &[String],
+        sure: &[String],
         topic_word: Option<&str>,
     ) -> (f32, bool) {
         let fewest = if page.is_site_page() {
@@ -592,6 +604,14 @@ impl PageSearcher {
         if stems.len() < fewest {
             return (0.0, false);
         }
+        let weight = |stem: &String| {
+            if sure.contains(stem) {
+                1.0
+            } else {
+                UNSURE_WORD_SHARE
+            }
+        };
+        let all: f32 = stems.iter().map(weight).sum();
         let mut best = (0.0f32, false);
         for (title, topic) in page.asked_as() {
             let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
@@ -600,8 +620,12 @@ impl PageSearcher {
             if topic_word.is_some_and(|word| !words.contains(word)) {
                 continue;
             }
-            let share = stems.iter().filter(|stem| words.contains(*stem)).count() as f32
-                / stems.len() as f32;
+            let share = stems
+                .iter()
+                .filter(|stem| words.contains(*stem))
+                .map(weight)
+                .sum::<f32>()
+                / all;
             if share < QUESTION_SHARE {
                 continue;
             }
