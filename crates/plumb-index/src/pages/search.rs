@@ -131,14 +131,45 @@ fn asked_how(q: &str) -> Option<&str> {
             .find_map(|verb| rest.strip_prefix(verb))?;
         MEASURES.contains(&measure).then_some(rest)
     };
-    let about = between.or_else(measured)?;
-    let about = ["a ", "an ", "the "]
-        .iter()
-        .find_map(|article| about.strip_prefix(article))
-        .unwrap_or(about);
+    let about = without_article(between.or_else(measured)?);
     let words = || about.split(' ');
     (words().count() <= MAX_ASKED_WORDS && !words().any(|word| NOT_NAMES.contains(&word)))
         .then_some(about)
+}
+
+/// `text` without a leading "a", "an" or "the".
+fn without_article(text: &str) -> &str {
+    ["a ", "an ", "the "]
+        .iter()
+        .find_map(|article| text.strip_prefix(article))
+        .unwrap_or(text)
+}
+
+/// The two things a comparison sets side by side, each looked up as a
+/// name: "mitosis" and "meiosis" of "mitosis vs meiosis" or "difference
+/// between mitosis and meiosis". `None` for other queries, and when a
+/// side has more than [`MAX_ASKED_WORDS`] words.
+pub(crate) fn compared(query: &str) -> Option<[String; 2]> {
+    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?'))
+        .to_lowercase()
+        .replace('’', "'");
+    let (a, b) = [
+        "what is the difference between ",
+        "what's the difference between ",
+        "difference between ",
+    ]
+    .iter()
+    .find_map(|lead| q.strip_prefix(lead)?.split_once(" and "))
+    .or_else(|| {
+        [" vs. ", " vs ", " versus "]
+            .iter()
+            .find_map(|word| q.split_once(word))
+    })?;
+    let side = |text: &str| {
+        let text = without_article(text.trim());
+        (!text.is_empty() && text.split(' ').count() <= MAX_ASKED_WORDS).then(|| text.to_string())
+    };
+    Some([side(a)?, side(b)?])
 }
 
 /// Words after a name that say what about it is wanted.
@@ -614,6 +645,39 @@ impl PageSearcher {
         scope: Option<&dyn Query>,
     ) -> Result<Vec<PageHit>> {
         let mut hits = self.search_once(query, limit, scope)?;
+        let found = match compared(query) {
+            Some(sides) => self.compared_pages(&sides, &hits, limit, scope)?,
+            None => self.hinted_pages(query, &hits, limit, scope)?,
+        };
+        let Some(found) = found else {
+            return Ok(hits);
+        };
+        for hit in found {
+            // Found both ways, a page keeps its better score and whatever
+            // either way says of it.
+            match hits.iter_mut().find(|h| h.page == hit.page) {
+                Some(kept) => {
+                    kept.named |= hit.named;
+                    kept.whole |= hit.whole;
+                    kept.score = kept.score.max(hit.score);
+                }
+                None => hits.push(hit),
+            }
+        }
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        truncate_keeping_inner_pages(&mut hits, limit);
+        Ok(hits)
+    }
+
+    /// The pages named by what `query` asks about, besides its `hits`:
+    /// "galileo" of "who is galileo". `None` when it asks about nothing.
+    fn hinted_pages(
+        &self,
+        query: &str,
+        hits: &[PageHit],
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<Option<Vec<PageHit>>> {
         // "lululemon wikipedia", "batch normalization paper", "who is
         // galileo": the words that say what is wanted are not part of the
         // name, so the name is searched for too. So is what a fact question
@@ -630,7 +694,7 @@ impl PageSearcher {
                 .filter(|_| !hits.iter().any(|hit| hit.named))
                 .map(|asked| (asked.subject, Hint::Any))
         }) else {
-            return Ok(hits);
+            return Ok(None);
         };
         let mut found = self.search_once(&name, limit, scope)?;
         if asked {
@@ -665,21 +729,34 @@ impl PageSearcher {
             }
             Hint::Any => {}
         }
-        for hit in found {
-            // Found both ways, a page keeps its better score and whatever
-            // either way says of it.
-            match hits.iter_mut().find(|h| h.page == hit.page) {
-                Some(kept) => {
-                    kept.named |= hit.named;
-                    kept.whole |= hit.whole;
-                    kept.score = kept.score.max(hit.score);
-                }
-                None => hits.push(hit),
-            }
+        Ok(Some(found))
+    }
+
+    /// The pages named by each of the things a comparison sets side by
+    /// side ([`compared`]): the articles on mitosis and meiosis for
+    /// "mitosis vs meiosis". `None` when one of `hits` already compares
+    /// them, as "Crocodiles vs. Alligators" does "crocodile vs alligator".
+    fn compared_pages(
+        &self,
+        sides: &[String; 2],
+        hits: &[PageHit],
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<Option<Vec<PageHit>>> {
+        let compares = |hit: &PageHit| {
+            let title = hit.page.title.to_lowercase();
+            sides.iter().all(|side| title.contains(side.as_str()))
+        };
+        if hits.iter().any(compares) {
+            return Ok(None);
         }
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        truncate_keeping_inner_pages(&mut hits, limit);
-        Ok(hits)
+        let mut found = Vec::new();
+        for side in sides {
+            let mut named = self.search_once(side, limit, scope)?;
+            named.retain(|hit| hit.named);
+            found.extend(named);
+        }
+        Ok(Some(found))
     }
 
     pub(crate) fn scope_term(&self, text: &str) -> Box<dyn Query> {
