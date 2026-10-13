@@ -10,8 +10,9 @@
 //!
 //! The same goes for other pages that stand in for a homepage: an error or
 //! maintenance page ("FedEx | System Down"), an identity check ("Verifica
-//! tu identidad", "Client Challenge") or a parked domain's "this domain is
-//! for sale" or bare "Hello!".
+//! tu identidad", "Client Challenge"), a refusal of the crawler's browser
+//! ("Unsupported client – Canva") or a parked domain's "this domain is for
+//! sale" or bare "Hello!".
 
 use crate::{canonical_domain, normalize_text, registrable_domain, SiteRecord};
 
@@ -59,7 +60,8 @@ const CHECK_TITLES: &[&str] = &[
 
 /// Title parts, after [`normalize_text`], of a page standing in for the
 /// homepage, wherever they are in a title split at its separators: "FedEx |
-/// System Down", "Walmart: Verifica tu identidad".
+/// System Down", "Walmart: Verifica tu identidad", "Unsupported Browser |
+/// Microsoft Teams".
 const STAND_IN_TITLE_PARTS: &[&str] = &[
     "404 not found",
     "500 internal server error",
@@ -67,6 +69,7 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
     "503 service unavailable",
     "access denied",
     "bad gateway",
+    "browser not supported",
     "client challenge",
     "domain for sale",
     "domain parked",
@@ -81,9 +84,12 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
     "system down",
     "temporarily unavailable",
     "under maintenance",
+    "unsupported browser",
+    "unsupported client",
     "verifica tu identidad",
     "verify your identity",
     "website unavailable",
+    "your browser is not supported",
 ];
 
 /// Whole titles, after [`normalize_text`], of a placeholder where a
@@ -503,6 +509,12 @@ mod tests {
             ("example.com", "503 Service Unavailable"),
             ("example.com", "Error"),
             ("amazon.com.au", "Server Busy"),
+            ("canva.com", "Unsupported client – Canva"),
+            (
+                "teams.microsoft.com",
+                "Unsupported Browser | Microsoft Teams",
+            ),
+            ("example.com", "Your browser is not supported"),
             ("labubu.st", "Domain Parked"),
             (
                 "charlotterampling.net",
@@ -531,6 +543,7 @@ mod tests {
             "Downdetector",
             "Errors in Medicine Journal",
             "Not Found Records",
+            "Unsupported: a podcast",
         ] {
             assert!(!check("example.com", title), "{title}");
         }
