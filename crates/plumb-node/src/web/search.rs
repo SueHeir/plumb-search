@@ -801,8 +801,8 @@ pub(crate) fn shown_results(
             .pages
             .iter()
             .map(|placed| &placed.hit.page)
-            .find(|page| page.site.as_deref() == Some(hit.domain.as_str()))
-            .and_then(about_of);
+            .filter(|page| page.site.as_deref() == Some(hit.domain.as_str()))
+            .find_map(about_of);
         shown.push(plumb_plugin::ShownResult {
             id: shown.len() as u32,
             url,
