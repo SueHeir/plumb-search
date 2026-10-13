@@ -8,7 +8,7 @@ use plumb_core::{
 };
 use tantivy::tokenizer::TextAnalyzer;
 
-use super::docs::docs_found_by_words;
+use super::docs::{docs_found_by_words, docs_named_as_code};
 use super::sites::{base_title, describes_an_organization, is_government, site_is_titled, squash};
 use super::{
     LearnedPlace, Page, PageHit, PlacedPage, ASKING_WORDS, DOCS_SET, FILMS_SET, GITHUB_SET,
@@ -398,20 +398,27 @@ fn on_site(page: &Page, domain: &str) -> bool {
 }
 
 /// The places no ranking overrides, applied after [`place_pages`] and
-/// after [`crate::learned::reorder`]: a docs page found by its words, or
+/// after [`crate::learned::reorder`]: the docs page of an API the query
+/// names as code comes first ("Object.keys" wants MDN's page, see
+/// [`docs_named_as_code`]); any other docs page found by its words, or
 /// another site's page while the query names the best site's owner, never
-/// comes before the best site (see [`kept_below`]), and, unless the
+/// comes before the best site (see [`kept_below`]); and, unless the
 /// query asks for them, podcasts come after the best site and the other
 /// pages listed on their own ("better call saul" wants amc.com and the
 /// article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
     placed.retain(|page| crate::health::page_allowed(query, &page.hit.page));
     let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0);
+    let code = |p: &PlacedPage| p.under.is_none() && docs_named_as_code(&p.hit, query, sites);
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
-        if kept_below(&page.hit, sites, names_best) {
+        if code(page) {
+            page.at = 0;
+        } else if kept_below(&page.hit, sites, names_best) {
             page.at = page.at.max(1).min(sites.len());
         }
     }
+    // Pages at one place are listed in order, so it leads the questions too.
+    placed.sort_by_key(|p| !code(p));
     if asks_for_podcasts(query) {
         return;
     }
