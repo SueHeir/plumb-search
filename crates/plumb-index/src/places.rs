@@ -2105,6 +2105,7 @@ mod tests {
         assert_eq!(locate("Portland, ME", None).1, "ME");
         assert_eq!(locate("paris", Some("US")).1, "Île-de-France");
         assert_eq!(locate("paris tx", None).1, "TX");
+        assert_eq!(locate("paris, tex.", None).1, "TX");
         assert_eq!(locate("paris france", Some("US")).1, "Île-de-France");
         assert_eq!(locate("nyc", None).0, "New York");
         assert_eq!(locate("Boulder, CO", None), ("Boulder".into(), "CO".into()));

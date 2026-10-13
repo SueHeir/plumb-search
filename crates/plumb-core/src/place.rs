@@ -381,6 +381,43 @@ pub const CANADIAN_PROVINCES: &[(&str, &str)] = &[
     ("YT", "Yukon"),
 ];
 
+/// US states as the GPO Style Manual and the AP Stylebook abbreviate
+/// them, where that is not the postal code: "boston, mass." is Boston, MA.
+const US_STATE_ABBREVIATIONS: &[(&str, &str)] = &[
+    ("AL", "Ala."),
+    ("AZ", "Ariz."),
+    ("AR", "Ark."),
+    ("CA", "Calif."),
+    ("CO", "Colo."),
+    ("CT", "Conn."),
+    ("DE", "Del."),
+    ("FL", "Fla."),
+    ("IL", "Ill."),
+    ("IN", "Ind."),
+    ("KS", "Kan."),
+    ("KS", "Kans."),
+    ("MA", "Mass."),
+    ("MI", "Mich."),
+    ("MN", "Minn."),
+    ("MS", "Miss."),
+    ("MT", "Mont."),
+    ("NE", "Neb."),
+    ("NE", "Nebr."),
+    ("NV", "Nev."),
+    ("NM", "N. Mex."),
+    ("ND", "N. Dak."),
+    ("OK", "Okla."),
+    ("OR", "Ore."),
+    ("OR", "Oreg."),
+    ("SD", "S. Dak."),
+    ("TN", "Tenn."),
+    ("TX", "Tex."),
+    ("WA", "Wash."),
+    ("WV", "W. Va."),
+    ("WI", "Wis."),
+    ("WY", "Wyo."),
+];
+
 /// A region as addresses write it, with a United States state's or a
 /// Canadian province's name made its code: "Colorado" -> "CO", "Québec"
 /// -> "QC".
@@ -390,6 +427,7 @@ pub fn normalize_region(region: &str) -> String {
     US_STATES
         .iter()
         .chain(CANADIAN_PROVINCES)
+        .chain(US_STATE_ABBREVIATIONS)
         .find(|(_, full)| {
             // A name of two parts is often given as its first:
             // "Newfoundland" for Newfoundland and Labrador.
@@ -857,6 +895,8 @@ mod tests {
         assert_eq!(normalize_region("Bayern"), "Bayern");
         assert_eq!(normalize_region("Newfoundland"), "NL");
         assert_eq!(normalize_region("Labrador"), "Labrador");
+        assert_eq!(normalize_region("Mass."), "MA");
+        assert_eq!(normalize_region("w va"), "WV");
     }
 
     #[test]
