@@ -338,7 +338,10 @@ impl NameMatch {
 /// to, in a `link_name_key` field: one that holds more than
 /// [`LINK_NAME_SHARE`] of the term's occurrences, each standing for a
 /// linking site ([`schema`](crate::schema)).
-fn named_by_links(searcher: &tantivy::Searcher, term: &Term) -> Result<Option<DocAddress>> {
+pub(crate) fn named_by_links(
+    searcher: &tantivy::Searcher,
+    term: &Term,
+) -> Result<Option<DocAddress>> {
     if searcher.doc_freq(term)? > u64::from(MAX_LINK_NAME_DOCS) {
         return Ok(None);
     }
