@@ -316,6 +316,45 @@ fn near_copies_of_a_better_known_site_are_left_out() {
 }
 
 #[test]
+fn a_spam_network_with_one_text_is_listed_once() {
+    let text = "Beginner's guide to coding in Python. Learn variables, loops, \
+        functions and lists step by step, with small exercises after every lesson \
+        and answers at the end, so you can practise at your own pace and build \
+        your first programs in a weekend.";
+    let page = |domain: &str, title: &str, body: &str| {
+        let mut record = site(domain, Some(title), None, &[], &[], obscure(50_000, 20));
+        record.body_text = Some(body.to_string());
+        record
+    };
+    let pizza = "Joe's Pizza: New York style pizza by the slice, baked in a coal oven \
+        since 1975. Order online for pickup or delivery, see our menu and opening hours.";
+    let records = [
+        page(
+            "modusygunaciro.example",
+            "Beginner's Guide to Coding in Python | Crest Center",
+            text,
+        ),
+        page(
+            "nyhizyjybawozi.example",
+            "Beginner's Guide to Coding in Python | Harbor Workshop",
+            text,
+        ),
+        // Namesakes on one template: each title is its own name.
+        page("joespizzanyc.example", "Joe's Pizza NYC", pizza),
+        page(
+            "joespizzala.example",
+            "Joe's Pizza LA",
+            &pizza.replace("New York", "LA"),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let hits = searcher.search("coding in python", 10).unwrap();
+    assert_eq!(domains(&hits).len(), 1, "{hits:#?}");
+    let hits = searcher.search("joe's pizza", 10).unwrap();
+    assert_eq!(domains(&hits).len(), 2, "{hits:#?}");
+}
+
+#[test]
 fn copies_and_copycats_are_left_out() {
     let hit = |domain: &str, title: Option<&str>, link_score: f32, official: bool| Hit {
         domain: domain.into(),
@@ -494,12 +533,46 @@ fn copies_and_copycats_are_left_out() {
         ),
     ];
     assert_eq!(kept(coin, None), ["coinbase.com"]);
-    // Sites sharing a title that names neither stay.
-    let homes = vec![
-        hit("acme.com", Some("Home"), 0.6, false),
-        hit("widgets.com", Some("Home"), 0.3, false),
+    // Namesakes sharing a title that is each one's own name stay.
+    let pizza = vec![
+        hit("joespizzanyc.com", Some("Joe's Pizza"), 0.3, false),
+        hit("joes-pizza.com", Some("Joe's Pizza"), 0.3, false),
+        hit("joespizza.ie", Some("Joe's Pizza"), 0.1, false),
     ];
-    assert_eq!(kept(homes, None), ["acme.com", "widgets.com"]);
+    assert_eq!(
+        kept(pizza, None),
+        ["joespizzanyc.com", "joes-pizza.com", "joespizza.ie"]
+    );
+    // A spam network under one title that names none of its sites, as
+    // well linked as each other: the first stays.
+    let network = vec![
+        hit("python.org", Some("Welcome to Python.org"), 0.9, true),
+        hit("bountystory.site", Some("INFORMATION40"), 0.29, false),
+        hit("bountystory.fun", Some("INFORMATION40"), 0.29, false),
+        hit("wordlistfinder.com", Some("Word List Finder"), 0.3, false),
+        hit("bountystory.online", Some("INFORMATION40"), 0.29, false),
+    ];
+    assert_eq!(
+        kept(network, None),
+        ["python.org", "bountystory.site", "wordlistfinder.com"]
+    );
+    // A whole title of a site with a short name, copied on a site it is
+    // no name of: mos-scripts.com titled as CNN's homepage.
+    let cnn = vec![
+        hit(
+            "cnn.com",
+            Some("Breaking News, Latest News and Videos | CNN"),
+            0.9,
+            true,
+        ),
+        hit(
+            "mos-scripts.com",
+            Some("Breaking News, Latest News and Videos | CNN"),
+            0.23,
+            false,
+        ),
+    ];
+    assert_eq!(kept(cnn, None), ["cnn.com"]);
     // The best known of unofficial namesakes stays, wherever it ranks.
     let cbc = vec![
         hit("cbc.bb", Some("CBC Barbados"), 0.3, false),

@@ -302,6 +302,12 @@ pub fn suggested_site_second(hits: &mut Vec<Hit>, site: &str) {
 ///   title of its own (amazon.co.jp's).
 /// - A site nobody links to whose title is that of a site listed above it
 ///   (a copy of Coinbase's title on elephant-blue.org).
+/// - A little-known site whose title is that of a site listed with it
+///   and is no name of its own ([`is_own_name`]): a network of spam sites
+///   under one title ("INFORMATION40" on bountystory.site and three more
+///   of its endings, "Big-B" on five gambling sites, "MailUp Tracking
+///   Service" for "ups tracking"), or a copy of CNN's whole homepage
+///   title on mos-scripts.com. The first of them stays.
 ///
 /// `typed` is the domain the query is, which always stays, and so do the
 /// sites of `home`, the searcher's country (bbc.co.uk in Britain).
@@ -333,11 +339,14 @@ pub(crate) fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&
                 label.len() >= 4 && names_brand(other, label) && !hit.domain.contains(label)
             })
         };
-        if hits.iter().any(|other| {
-            other.link_score > hit.link_score
-                && same_title(other)
-                && (hit.link_score < COPYCAT_LINK_SCORE
-                    || (hit.link_score < WELL_KNOWN_LINK_SCORE && names_other(other)))
+        let someone_elses = hit.link_score < WELL_KNOWN_LINK_SCORE && !is_own_name(hit);
+        if hits.iter().enumerate().any(|(j, other)| {
+            let better = other.link_score > hit.link_score;
+            same_title(other)
+                && ((better
+                    && (hit.link_score < COPYCAT_LINK_SCORE
+                        || (hit.link_score < WELL_KNOWN_LINK_SCORE && names_other(other))))
+                    || ((better || (other.link_score == hit.link_score && j < i)) && someone_elses))
         }) {
             copies[i] = true;
             continue;
@@ -410,6 +419,10 @@ pub(crate) fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&
 /// ([`plumb_core::simhash::near_copies`] of their `fingerprints`, one per
 /// hit): a scraped copy, a parked page on a template, a mirror under a
 /// title of its own, which [`without_copies`] cannot tell by its title.
+/// A little-known site goes too when its title is no name of its own
+/// ([`is_own_name`]) and a site listed above it, as well linked, has its
+/// text: one of a spam network's sites ("Beginner's Guide to Coding in
+/// Python | Crest Center" and "| Harbor Workshop" on made-up names).
 /// Official sites, the domain the query is (`typed`) and the searcher's
 /// country's sites (`home`) always stay.
 pub(crate) fn without_near_copies(
@@ -424,20 +437,41 @@ pub(crate) fn without_near_copies(
             return false;
         };
         if hit.official
-            || hit.link_score >= COPYCAT_LINK_SCORE
+            || hit.link_score >= WELL_KNOWN_LINK_SCORE
             || typed == Some(hit.domain.as_str())
             || (home.is_some() && hit.country.as_deref() == home)
         {
             return false;
         }
-        hits.iter().zip(fingerprints).any(|(other, other_print)| {
-            other.link_score > hit.link_score
-                && other_print.is_some_and(|other| plumb_core::simhash::near_copies(*print, other))
-        })
+        let someone_elses = !is_own_name(hit);
+        hits.iter()
+            .zip(fingerprints)
+            .enumerate()
+            .any(|(j, (other, other_print))| {
+                let better = other.link_score > hit.link_score;
+                (better && hit.link_score < COPYCAT_LINK_SCORE
+                    || (better || (other.link_score == hit.link_score && j < i)) && someone_elses)
+                    && other_print
+                        .is_some_and(|other| plumb_core::simhash::near_copies(*print, other))
+            })
     };
     let copies: Vec<bool> = (0..hits.len()).map(copy).collect();
     hits.into_iter()
         .zip(copies)
         .filter_map(|(hit, copy)| (!copy).then_some(hit))
         .collect()
+}
+
+/// Whether the title of `hit` is a name of its own: its address's label
+/// is in the title, or the title is in the label ("Joe's Pizza" on
+/// joespizzanyc.com, "XX88" on xx88s.com). Spam sites under one title
+/// are mostly not ("INFORMATION40" on bountystory.site), and namesakes
+/// titled alike are.
+fn is_own_name(hit: &Hit) -> bool {
+    let Some(title) = &hit.title else {
+        return false;
+    };
+    let title = normalize_text(title).replace(' ', "");
+    let label = plumb_core::domain_label(&hit.domain).replace(['-', '.'], "");
+    !title.is_empty() && (title.contains(&label) || label.contains(&title))
 }
