@@ -166,7 +166,10 @@ pub(crate) fn named_page_site<'a>(
 ///
 /// - A page about one of the sites (its [`Page::site`]) goes under that
 ///   site's result rather than in a place of its own: "python" lists
-///   python.org with the article on the Python language under it.
+///   python.org with the article on the Python language under it. So does
+///   the site's own page the query names
+///   ([`PageSearcher::add_named_site_page`](super::PageSearcher::add_named_site_page)),
+///   and the site's other inner pages are then left out.
 /// - Of the others, at most [`MAX_PAGES_LISTED`] are listed: pages the
 ///   query names in full, and others scoring at least
 ///   [`MIN_PARTIAL_SCORE`]; only one when the best site is named by the
@@ -493,8 +496,13 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
             if sites.iter().any(|s| s.domain == site) {
                 // The best page about the site goes under it, unless a
                 // later one is named by the query: "google maps" carries
-                // Google Maps under google.com, not Google.
-                match placed.iter_mut().find(|p| p.under.as_deref() == Some(site)) {
+                // Google Maps under google.com, not Google. The site's
+                // own page the query names goes there too, besides it:
+                // "census population clock" carries the Population Clock.
+                let inner = hit.page.is_site_page();
+                match placed.iter_mut().find(|p| {
+                    p.under.as_deref() == Some(site) && p.hit.page.is_site_page() == inner
+                }) {
                     None => placed.push(PlacedPage {
                         under: Some(site.to_string()),
                         at: 0,
@@ -509,6 +517,16 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         // An item without an article is only told apart from its
         // namesakes by its website.
         if hit.page.set == WIKIDATA_SET {
+            continue;
+        }
+        // The site's other inner pages match the search less than the one
+        // under it.
+        let same_site = |p: &PlacedPage| {
+            p.under.is_some()
+                && p.hit.page.is_site_page()
+                && registrable_domain(&p.hit.page.url) == registrable_domain(&hit.page.url)
+        };
+        if hit.page.is_site_page() && placed.iter().any(same_site) {
             continue;
         }
         // One docs page found by its words is enough: more crowd out the

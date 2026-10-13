@@ -824,6 +824,7 @@ fn evaluate(
                     drop_namesakes_of_words(&mut lifted, &found);
                 }
                 lift_named_sites(&mut lifted, &found);
+                pages.add_named_site_page(&searched, &lifted, &mut found)?;
                 pages.note_demand(&mut lifted)?;
                 let mut placed = place_pages(&searched, &lifted, found);
                 // --features-out writes the hand-made order the learned
