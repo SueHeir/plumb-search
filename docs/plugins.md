@@ -215,10 +215,11 @@ node:
   folders.
 
 Read `plugin.json` before installing: `hosts` lists everywhere the plugin can
-send your users' searches. A host is allowed on every port, so a plugin that
-lists `localhost`, `127.0.0.1` or a machine on your network can reach every
-service on it. On start the node lists each plugin it loaded and
-its hosts in its log and the panel's activity list. A plugin that cannot load
+send your users' searches. A host is allowed only on ports 80 and 443 unless
+it names a port, as the Zotero plugin's `127.0.0.1:23119` does, and a plugin
+that lists `localhost`, `127.0.0.1` or a machine on your network can reach
+the services on those ports. On start the node lists each plugin it loaded
+and its hosts in its log and the panel's activity list. A plugin that cannot load
 is left out with a warning. To remove a plugin, delete its folder and restart.
 
 Try a plugin before installing it:
