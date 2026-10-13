@@ -573,6 +573,39 @@ fn copies_and_copycats_are_left_out() {
         ),
     ];
     assert_eq!(kept(cnn, None), ["cnn.com"]);
+    // Little-known sites sharing a title stay when each says something
+    // else of itself, or the title has no words, or names the site.
+    let described = |domain: &str, title: &str, description: &str| Hit {
+        description: Some(description.into()),
+        ..hit(domain, Some(title), 0.2, false)
+    };
+    let dentists = vec![
+        described(
+            "smithdental.com",
+            "Family Dentistry",
+            "Dr. Smith in Austin.",
+        ),
+        described(
+            "austinsmiles.com",
+            "Family Dentistry",
+            "Gentle care in Round Rock.",
+        ),
+        hit("stars.example", Some("★★★"), 0.2, false),
+        hit("moons.example", Some("☾☾"), 0.2, false),
+        hit("xn--mnchen-3ya.de", Some("München"), 0.2, false),
+        hit("muenchen.example", Some("München"), 0.3, false),
+    ];
+    assert_eq!(
+        kept(dentists, None),
+        [
+            "smithdental.com",
+            "austinsmiles.com",
+            "stars.example",
+            "moons.example",
+            "xn--mnchen-3ya.de",
+            "muenchen.example"
+        ]
+    );
     // The best known of unofficial namesakes stays, wherever it ranks.
     let cbc = vec![
         hit("cbc.bb", Some("CBC Barbados"), 0.3, false),

@@ -302,12 +302,14 @@ pub fn suggested_site_second(hits: &mut Vec<Hit>, site: &str) {
 ///   title of its own (amazon.co.jp's).
 /// - A site nobody links to whose title is that of a site listed above it
 ///   (a copy of Coinbase's title on elephant-blue.org).
-/// - A little-known site whose title is that of a site listed with it
-///   and is no name of its own ([`is_own_name`]): a network of spam sites
-///   under one title ("INFORMATION40" on bountystory.site and three more
-///   of its endings, "Big-B" on five gambling sites, "MailUp Tracking
-///   Service" for "ups tracking"), or a copy of CNN's whole homepage
-///   title on mos-scripts.com. The first of them stays.
+/// - A little-known site whose title is that of a site listed with it,
+///   is no name of its own ([`is_own_name`]) and has no description
+///   other than that site's: a network of spam sites under one title
+///   ("INFORMATION40" on bountystory.site and three more of its endings,
+///   "Big-B" on five gambling sites, "MailUp Tracking Service" for "ups
+///   tracking"), or a copy of CNN's whole homepage on mos-scripts.com.
+///   The first of them stays. Two dentists both titled "Family
+///   Dentistry" say different things of themselves, and both stay.
 ///
 /// `typed` is the domain the query is, which always stays, and so do the
 /// sites of `home`, the searcher's country (bbc.co.uk in Britain).
@@ -327,7 +329,11 @@ pub(crate) fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&
         {
             continue;
         }
-        let title = hit.title.as_deref().map(normalize_text);
+        let title = hit
+            .title
+            .as_deref()
+            .map(normalize_text)
+            .filter(|title| !title.is_empty());
         let same_title =
             |other: &Hit| title.is_some() && other.title.as_deref().map(normalize_text) == title;
         // Another site's title word for word, naming that site and not
@@ -340,13 +346,19 @@ pub(crate) fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&
             })
         };
         let someone_elses = hit.link_score < WELL_KNOWN_LINK_SCORE && !is_own_name(hit);
+        let description = hit.description.as_deref().map(normalize_text);
+        let says_nothing_else = |other: &Hit| {
+            description.is_none() || other.description.as_deref().map(normalize_text) == description
+        };
         if hits.iter().enumerate().any(|(j, other)| {
             let better = other.link_score > hit.link_score;
             same_title(other)
                 && ((better
                     && (hit.link_score < COPYCAT_LINK_SCORE
                         || (hit.link_score < WELL_KNOWN_LINK_SCORE && names_other(other))))
-                    || ((better || (other.link_score == hit.link_score && j < i)) && someone_elses))
+                    || ((better || (other.link_score == hit.link_score && j < i))
+                        && someone_elses
+                        && says_nothing_else(other)))
         }) {
             copies[i] = true;
             continue;
@@ -464,14 +476,17 @@ pub(crate) fn without_near_copies(
 
 /// Whether the title of `hit` is a name of its own: its address's label
 /// is in the title, or the title is in the label ("Joe's Pizza" on
-/// joespizzanyc.com, "XX88" on xx88s.com). Spam sites under one title
-/// are mostly not ("INFORMATION40" on bountystory.site), and namesakes
-/// titled alike are.
+/// joespizzanyc.com, "XX88" on xx88s.com, "München" on münchen.de).
+/// Spam sites under one title are mostly not ("INFORMATION40" on
+/// bountystory.site), and namesakes titled alike are.
 fn is_own_name(hit: &Hit) -> bool {
     let Some(title) = &hit.title else {
         return false;
     };
-    let title = normalize_text(title).replace(' ', "");
-    let label = plumb_core::domain_label(&hit.domain).replace(['-', '.'], "");
+    let joined = |text: &str| normalize_text(text).replace(' ', "");
+    let (title, label) = (
+        joined(title),
+        joined(&crate::schema::label_text(&hit.domain)),
+    );
     !title.is_empty() && (title.contains(&label) || label.contains(&title))
 }
