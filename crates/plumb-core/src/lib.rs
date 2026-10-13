@@ -1418,6 +1418,18 @@ pub fn language_fits(wanted: &str, site: &str) -> bool {
     }
 }
 
+/// Whether `query` has letters in a script `language` is not written in:
+/// "天気予報", "погода москва" or "iphone 価格" with English chosen. Such
+/// a search is for sites in that script, which a filter for `language`
+/// would leave out. Latin letters never count, since names and codes are
+/// typed in them whatever the language.
+pub fn written_outside(language: &str, query: &str) -> bool {
+    query.chars().filter_map(char_script).any(|(script, _)| {
+        let script = if script == "Kana" { "Jpan" } else { script };
+        !matches!(script, "Latn" | "other") && !language_fits(language, script)
+    })
+}
+
 /// Keep valid declared language metadata authoritative. Only missing or
 /// invalid declarations fall back to dominant title/description script.
 /// Short excerpts and multilingual names do not reliably contradict an
@@ -1629,6 +1641,39 @@ mod tests {
         );
         assert!(!language_fits("en", "Hani"));
         assert!(!language_fits("en", "ru"));
+    }
+
+    #[test]
+    fn queries_in_another_script_than_the_language() {
+        for query in [
+            "天気予報",
+            "東京タワー",
+            "iphone 価格",
+            "погода москва",
+            "네이버",
+            "الجزيرة",
+            "मौसम",
+        ] {
+            assert!(written_outside("en", query), "{query}");
+        }
+        for (language, query) in [
+            ("en", "weather tokyo"),
+            ("en", "Nestlé café"),
+            ("de", "münchen wetter"),
+            ("ru", "погода москва"),
+            ("ru", "weather"),
+            ("ja", "天気予報"),
+            ("ja", "東京タワー"),
+            ("ko", "네이버 날씨"),
+            ("ar", "الجزيرة"),
+            ("bo", "བོད་"),
+            ("en", "12345 !?"),
+        ] {
+            assert!(!written_outside(language, query), "{language} {query}");
+        }
+        // Kana is Japanese, not Chinese; Han alone fits either.
+        assert!(written_outside("zh", "東京タワー"));
+        assert!(!written_outside("zh", "天气预报"));
     }
 
     #[test]
