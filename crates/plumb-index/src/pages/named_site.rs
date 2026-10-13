@@ -1,6 +1,7 @@
 //! The inner page of a site that a search names along with the site:
 //! "census population clock" is census.gov's Population Clock, "who
-//! malaria" who.int's page on malaria.
+//! malaria" who.int's page on malaria. And the page at a web address
+//! typed as the search: "en.wikipedia.org/wiki/Albert_Einstein".
 
 use std::collections::HashSet;
 
@@ -11,11 +12,11 @@ use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{TantivyDocument, Term};
 
-use super::placing::subpage_asked;
+use super::placing::{options_allow, subpage_asked};
 use super::sites::squash;
 use super::{
-    asked_as_question, Page, PageHit, PageSearcher, ASKING_WORDS, PARTIAL_MATCH, POPULARITY_SCALE,
-    POPULARITY_SHARE, REFERENCE2_SET, REFERENCE_SET, SUBPAGES_SET,
+    asked_as_question, Page, PageHit, PageSearcher, PlacedPage, ASKING_WORDS, PARTIAL_MATCH,
+    POPULARITY_SCALE, POPULARITY_SHARE, REFERENCE2_SET, REFERENCE_SET, SUBPAGES_SET,
 };
 use crate::analysis;
 
@@ -34,6 +35,16 @@ const NAMED_SITE_CANDIDATES: usize = 20;
 /// Where a title's subject ends and a subtitle or the site's name starts:
 /// "Plantar fasciitis - Symptoms and causes - Mayo Clinic".
 const TITLE_BREAKS: &[&str] = &[":", " - ", " | ", " -- ", " — ", " – ", " · "];
+
+/// Pages on a typed address's host looked at for the one at it
+/// ([`PageSearcher::list_typed_page`]).
+const ADDRESS_CANDIDATES: usize = 50;
+
+/// Most parts of a typed address's path searched for...
+const ADDRESS_SEGMENTS: usize = 8;
+
+/// ...and most of their words.
+const ADDRESS_WORDS: usize = 12;
 
 impl PageSearcher {
     /// Puts under the first of the best [`NAMED_SITES`] of `sites` whose
@@ -105,6 +116,146 @@ impl PageSearcher {
         found.retain(|hit| hit.page.url != best.page.url);
         found.insert(0, best);
         Ok(())
+    }
+
+    /// Lists first among `placed` the page held at the web address that
+    /// `query` is, or the nearest above it: "en.wikipedia.org/wiki/Albert_Einstein"
+    /// is the article, not Wikipedia's homepage, "github.com/torvalds/linux"
+    /// the repository, and a Stack Overflow question's address with its
+    /// title after the number the question. It counts as named by the
+    /// query, so an article gets the info box. Nothing changes for an
+    /// address without a path, one no page held is at, or a page `options`
+    /// leave out.
+    pub fn list_typed_page(
+        &self,
+        query: &str,
+        options: &crate::SearchOptions,
+        placed: &mut Vec<PlacedPage>,
+    ) -> Result<()> {
+        let Some(hit) = self
+            .page_at(query)?
+            .filter(|hit| options_allow(options, &hit.page))
+        else {
+            return Ok(());
+        };
+        placed.retain(|p| p.hit.page.url != hit.page.url);
+        placed.insert(
+            0,
+            PlacedPage {
+                hit,
+                under: None,
+                at: 0,
+            },
+        );
+        Ok(())
+    }
+
+    /// The page held at the address `query` is, or else the one whose
+    /// address is the longest start of its path. Found among the pages on
+    /// its host named or worded like parts of its path.
+    fn page_at(&self, query: &str) -> Result<Option<PageHit>> {
+        let Some(typed) = typed_address(query) else {
+            return Ok(None);
+        };
+        let typed_path = typed
+            .split_once('?')
+            .map_or(typed.as_str(), |(path, _)| path);
+        let Some((host, path)) = typed_path.split_once('/') else {
+            return Ok(None);
+        };
+        // A page is named by a part of its address ("Albert_Einstein",
+        // "why-is-processing-…") or by two ("torvalds/linux").
+        let segments: Vec<String> = path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .take(ADDRESS_SEGMENTS)
+            .map(|segment| percent_decoded(segment).replace(['_', '-', '+'], " "))
+            .collect();
+        let names = segments
+            .iter()
+            .cloned()
+            .chain(segments.windows(2).map(|pair| pair.join("/")));
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for name in names {
+            if let Some(key) = analysis::tokens(&self.joined, &name).pop() {
+                clauses.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(self.fields.keys, &key),
+                        IndexRecordOption::Basic,
+                    )),
+                ));
+            }
+        }
+        let asked = typed.split_once('?').map_or("", |(_, asked)| asked);
+        let words = analysis::tokens(
+            &self.words,
+            &format!("{} {}", segments.join(" "), percent_decoded(asked)),
+        );
+        for word in words
+            .iter()
+            .filter(|word| !plumb_core::is_function_word(word))
+            .take(ADDRESS_WORDS)
+        {
+            clauses.push((
+                Occur::Should,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.fields.words, word),
+                    IndexRecordOption::WithFreqs,
+                )),
+            ));
+        }
+        if clauses.is_empty() {
+            return Ok(None);
+        }
+        let on_host = BooleanQuery::new(vec![
+            (Occur::Must, self.scope_term(&format!("under:{host}"))),
+            (Occur::Must, Box::new(BooleanQuery::new(clauses))),
+        ]);
+        let searcher = self.reader.searcher();
+        let mut best: Option<(usize, PageHit)> = None;
+        for (_, address) in searcher.search(
+            self.language_query(&on_host).as_ref(),
+            &TopDocs::with_limit(ADDRESS_CANDIDATES).order_by_score(),
+        )? {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            let Some(at) = address_key(&page.url) else {
+                continue;
+            };
+            // A page whose address has a query is that page only: "?id=5"
+            // is not "?id=6". A query on the typed address alone is a
+            // share link's ("?wprov=sfla1").
+            let holds = if at.contains('?') {
+                typed == at
+            } else {
+                typed_path == at || typed_path.starts_with(&format!("{at}/"))
+            };
+            if !holds || best.as_ref().is_some_and(|(kept, _)| *kept >= at.len()) {
+                continue;
+            }
+            let popularity = document
+                .get_first(self.fields.popularity)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as f32
+                / POPULARITY_SCALE;
+            let hit = PageHit {
+                page,
+                score: 1.0,
+                named: true,
+                popularity,
+                whole: true,
+                learned: None,
+            };
+            best = Some((at.len(), hit));
+        }
+        Ok(best.map(|(_, hit)| hit))
     }
 
     /// The page of `named.site` whose title the words `rest` name best, as
@@ -288,4 +439,61 @@ fn rest_of_name(words: &[String], site: &crate::Hit) -> Option<Vec<String>> {
             crate::is_function_word(word) || ASKING_WORDS.contains(&word.as_str())
         });
     (!asks).then(|| rest.to_vec())
+}
+
+/// The address `query` is, when it is a web address with a path, as
+/// [`address_key`] writes it, without a phone site's `m.`:
+/// "en.wikipedia.org/wiki/albert_einstein" for
+/// "https://en.m.wikipedia.org/wiki/Albert_Einstein".
+fn typed_address(query: &str) -> Option<String> {
+    crate::names::typed_domain(query)?;
+    let query = query.trim();
+    let url = if query.contains("://") {
+        query.to_string()
+    } else {
+        format!("https://{query}")
+    };
+    let key = address_key(&url)?;
+    let (host, path) = key.split_once('/')?;
+    if path.starts_with('?') || path.is_empty() {
+        return None;
+    }
+    let labels: Vec<&str> = host.split('.').filter(|label| *label != "m").collect();
+    let host = if labels.len() >= 2 {
+        labels.join(".")
+    } else {
+        host.to_string()
+    };
+    Some(format!("{host}/{path}"))
+}
+
+/// `url` written to compare with others: its match key, which leaves out
+/// the scheme, `www.`, a trailing `/` and tracking parameters, in lower
+/// case, as Wikipedia and GitHub take an address whatever its case.
+fn address_key(url: &str) -> Option<String> {
+    Some(plumb_format::urls::match_key(url)?.to_lowercase())
+}
+
+/// `text` with its `%xx` escapes decoded, read as UTF-8.
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = text
+            .get(i + 1..i + 3)
+            .filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match (bytes[i], escaped) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

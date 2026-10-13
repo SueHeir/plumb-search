@@ -151,6 +151,7 @@ impl FrozenBackend {
             plumb_index::suggested_site_second(&mut results.hits, site);
         }
         pages.title_untitled(&mut results.hits)?;
+        pages.list_typed_page(query, options, &mut results.pages)?;
         Ok(())
     }
 }
