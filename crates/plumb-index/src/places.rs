@@ -973,7 +973,12 @@ impl PlaceSearcher {
         // A town first, however the words split ("boulder co" is Boulder in
         // Colorado before it is a gym called Boulder & Co.), then any place.
         // A landmark counts as a town: "yellowstone" is the park before a
-        // village in Alberta.
+        // village in Alberta. Where the words split more than one way into
+        // towns, the biggest wins, so "san antonio texas" is the city in
+        // Texas, not a village in Oaxaca called San Antonio Texas; a city
+        // found is not looked past.
+        let mut towns: Option<Vec<Place>> = None;
+        let biggest = |places: &[Place]| places.iter().map(|place| place.rank).max();
         let mut other = None;
         let mut conflict = false;
         let notable = plumb_core::place::place_rank("", 0, true, false, 0);
@@ -1031,11 +1036,27 @@ impl PlaceSearcher {
             let town_like = |place: &Place| place.is_town() || place.is_landmark();
             if candidates.iter().any(town_like) {
                 candidates.retain(town_like);
-                return Ok(resolve_candidates(text, candidates, preferred_country));
+                if towns
+                    .as_deref()
+                    .is_none_or(|towns| biggest(&candidates) > biggest(towns))
+                {
+                    towns = Some(candidates);
+                }
+                if towns
+                    .iter()
+                    .flatten()
+                    .any(|place| place.kind == "place=city")
+                {
+                    break;
+                }
+                continue;
             }
             if !candidates.is_empty() && other.is_none() {
                 other = Some(resolve_candidates(text, candidates, preferred_country));
             }
+        }
+        if let Some(towns) = towns {
+            return Ok(resolve_candidates(text, towns, preferred_country));
         }
         Ok(other.unwrap_or_else(|| LocationResolution {
             requested: text.to_string(),
@@ -2245,6 +2266,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(hague.name, "Hague");
+    }
+
+    #[test]
+    fn the_biggest_town_the_words_name_wins_however_they_split() {
+        let mut fixtures = places();
+        fixtures.extend([
+            Place {
+                region: Some("OAX".into()),
+                country: Some("MX".into()),
+                ..at("San Antonio Texas", "place=village", 18.17, -96.13)
+            },
+            city("San Antonio", 1_400_000, "TX", "US", 29.42, -98.49),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let found = searcher.locate("san antonio texas", None).unwrap().unwrap();
+        assert_eq!(
+            (found.name.as_str(), found.region.as_deref()),
+            ("San Antonio", Some("TX"))
+        );
+        // With its own country, the village is still found.
+        let found = searcher
+            .locate("san antonio texas mexico", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.name, "San Antonio Texas");
     }
 
     #[test]
