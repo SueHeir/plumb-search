@@ -590,32 +590,22 @@ pub(crate) async fn extras(
         let Ok(entities) = run_entities(state, &name, options).await else {
             continue;
         };
-        match answers::resolve_entity(&name, &entities, None) {
-            answers::EntityResolution::Resolved(page) => {
-                profile = answers::profile_answer_from_page(query, page);
-                if profile.is_some() {
-                    break;
-                }
-                if !name.ends_with(" song") {
-                    continue;
-                }
+        let entities = answers::profile_candidates(query, &name, entities);
+        let resolution = answers::resolve_entity(&name, &entities, None);
+        if let answers::EntityResolution::Resolved(page) = &resolution {
+            profile = answers::profile_answer_from_page(query, page);
+            if profile.is_some() {
+                break;
             }
-            answers::EntityResolution::Ambiguous(_) => continue,
-            answers::EntityResolution::Unresolved => {}
         }
-        // MusicBrainz songs have no Wikidata ID. Keep the lyrics fallback
-        // when no entity resolved, or a requested song lacks its profile.
+        if !answers::searches_songs(query, &resolution) {
+            continue;
+        }
+        // MusicBrainz songs have no Wikidata ID.
         profile = run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
             .await
             .ok()
-            .and_then(|found| {
-                let songs: Vec<_> = found
-                    .pages
-                    .into_iter()
-                    .filter(|placed| placed.hit.page.set == plumb_index::pages::MUSIC_SET)
-                    .collect();
-                answers::profile_answer(query, &songs)
-            });
+            .and_then(|found| answers::songs_profile(query, &resolution, found.pages));
         if profile.is_some() {
             break;
         }

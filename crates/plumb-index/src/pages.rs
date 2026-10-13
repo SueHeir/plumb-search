@@ -47,6 +47,7 @@ pub use self::placing::{
 };
 pub(crate) use self::placing::{asked_as_question, kept_below, named_page_site};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
+pub use self::sites::base_title;
 
 /// `name` of a page one of whose aliases the query is.
 pub const ALIAS_MATCH: f32 = 0.9;
