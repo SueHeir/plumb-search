@@ -25,7 +25,7 @@ use osmpbf::{Element, ElementReader, RelMemberType};
 use plumb_core::article::articles_of;
 use plumb_core::place::{
     brews_where_served, distance_km, landmark_rank, normalize_region, place_rank, Place,
-    BREWERY_TAG, MAX_PLACE_ALIASES, MAX_PLACE_NAME_CHARS, MAX_WEBSITE_CHARS,
+    BREWERY_TAG, CANADIAN_PROVINCES, MAX_PLACE_ALIASES, MAX_PLACE_NAME_CHARS, MAX_WEBSITE_CHARS,
 };
 use plumb_core::{joined, normalize_country};
 use plumb_ingest::open_maybe_gz;
@@ -116,6 +116,7 @@ const PLACE_KEYS: &[&str] = &[
     "healthcare",
     "aeroway",
     "railway",
+    "boundary",
 ];
 /// Values of `place` that are towns or parts of them.
 const TOWN_VALUES: &[&str] = &[
@@ -193,6 +194,7 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
                 "historic" => KEPT_HISTORIC.contains(&value),
                 "aeroway" => value == "aerodrome",
                 "railway" => value == "station",
+                "boundary" => value == "national_park",
                 _ => value != "no" && value != "vacant",
             };
             if !kept || value.contains(';') {
@@ -230,6 +232,15 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
             place_tags.push(format!("sport={}", sport.to_lowercase()));
         }
     }
+    let country = get("addr:country")
+        .or_else(|| get("is_in:country_code"))
+        .and_then(normalize_country);
+    // Canada's addresses give the province as addr:province, and so do
+    // Italy's (MI, PE), whose would be taken for states and provinces.
+    let province = get("addr:province")
+        .map(normalize_region)
+        .filter(|region| CANADIAN_PROVINCES.iter().any(|(code, _)| code == region))
+        .filter(|_| country.as_deref().is_none_or(|country| country == "CA"));
     let website = ["website", "contact:website", "url", "brand:website"]
         .iter()
         .find_map(|key| get(key).and_then(clean_website));
@@ -275,14 +286,11 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
         lat: 0.0,
         lon: 0.0,
         town: get("addr:city").map(|c| cut(c, MAX_PLACE_NAME_CHARS)),
-        // Canada's addresses give the province as addr:province.
         region: get("addr:state")
             .or_else(|| get("is_in:state_code"))
-            .or_else(|| get("addr:province"))
-            .map(normalize_region),
-        country: get("addr:country")
-            .or_else(|| get("is_in:country_code"))
-            .and_then(normalize_country),
+            .map(normalize_region)
+            .or(province),
+        country,
         address: address.map(|a| cut(&a, MAX_PLACE_NAME_CHARS)),
         website,
         osm,
@@ -362,11 +370,13 @@ fn collect_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<(&'a 
 fn find_places(path: &Path) -> Result<Vec<Found>> {
     let reader =
         ElementReader::from_path(path).with_context(|| format!("opening {}", path.display()))?;
-    let found_at = |tags: &[(&str, &str)], osm: String, node: bool, at: At| {
-        place_of(tags, osm, node).map(|place| Found {
+    // Where a place is is looked for only once its tags make it one.
+    let found_at = |tags: &[(&str, &str)], osm: String, node: bool, at: &dyn Fn() -> Option<At>| {
+        let place = place_of(tags, osm, node)?;
+        Some(Found {
             place,
             item: item_of(tags),
-            at,
+            at: at()?,
         })
     };
     let found = reader.par_map_reduce(
@@ -377,7 +387,7 @@ fn find_places(path: &Path) -> Result<Vec<Found>> {
                     return Vec::new();
                 }
                 let tags = collect_tags(tags);
-                found_at(&tags, format!("n{}", node.id()), true, At::Node)
+                found_at(&tags, format!("n{}", node.id()), true, &|| Some(At::Node))
                     .map(|mut found| {
                         found.place.lat = node.lat();
                         found.place.lon = node.lon();
@@ -387,7 +397,7 @@ fn find_places(path: &Path) -> Result<Vec<Found>> {
             }
             Element::Node(node) => {
                 let tags = collect_tags(node.tags());
-                found_at(&tags, format!("n{}", node.id()), true, At::Node)
+                found_at(&tags, format!("n{}", node.id()), true, &|| Some(At::Node))
                     .map(|mut found| {
                         found.place.lat = node.lat();
                         found.place.lon = node.lon();
@@ -396,38 +406,32 @@ fn find_places(path: &Path) -> Result<Vec<Found>> {
                     .unwrap_or_default()
             }
             Element::Way(way) => {
-                let Some(refs) = refs_of(&way.refs().collect::<Vec<_>>()) else {
-                    return Vec::new();
-                };
                 let tags = collect_tags(way.tags());
-                found_at(&tags, format!("w{}", way.id()), false, At::Way(refs))
+                let refs = || refs_of(&way.refs().collect::<Vec<_>>()).map(At::Way);
+                found_at(&tags, format!("w{}", way.id()), false, &refs)
                     .into_iter()
                     .collect()
             }
             Element::Relation(relation) => {
-                let outer: Vec<i64> = relation
-                    .members()
-                    .filter(|m| {
-                        m.member_type == RelMemberType::Way && matches!(m.role(), Ok("outer" | ""))
-                    })
-                    .map(|m| m.member_id)
-                    .collect();
-                if outer.is_empty() {
-                    return Vec::new();
-                }
+                let tags = collect_tags(relation.tags());
                 // A park's boundary is many ways: their ends all round it
                 // say where its middle is, where one way's would not.
-                let step = outer.len().div_ceil(OUTER_WAYS);
-                let outer = outer.into_iter().step_by(step).collect();
-                let tags = collect_tags(relation.tags());
-                found_at(
-                    &tags,
-                    format!("r{}", relation.id()),
-                    false,
-                    At::Relation(outer),
-                )
-                .into_iter()
-                .collect()
+                let outer = || {
+                    let outer: Vec<i64> = relation
+                        .members()
+                        .filter(|m| {
+                            m.member_type == RelMemberType::Way
+                                && matches!(m.role(), Ok("outer" | ""))
+                        })
+                        .map(|m| m.member_id)
+                        .collect();
+                    let step = outer.len().div_ceil(OUTER_WAYS).max(1);
+                    (!outer.is_empty())
+                        .then(|| At::Relation(outer.into_iter().step_by(step).collect()))
+                };
+                found_at(&tags, format!("r{}", relation.id()), false, &outer)
+                    .into_iter()
+                    .collect()
             }
         },
         Vec::new,
@@ -494,6 +498,10 @@ fn node_locations(path: &Path, wanted: &[i64]) -> Result<HashMap<i64, (f64, f64)
 /// overlap), named also as the English Wikipedia articles in the articles
 /// file `articles` name their Wikidata items, most notable first.
 pub fn read_places(paths: &[PathBuf], articles: Option<&Path>) -> Result<Vec<Place>> {
+    // A missing articles file fails the build before the extracts are read.
+    if let Some(articles) = articles {
+        open_maybe_gz(articles)?;
+    }
     let mut found = Vec::new();
     for path in paths {
         found.extend(locate_places(path)?);
@@ -585,18 +593,37 @@ fn locate_places(path: &Path) -> Result<Vec<(Place, Option<u64>)>> {
     Ok(located)
 }
 
-/// The middle of the box around `points`.
+/// The middle of the box around `points`, or of the box across the 180th
+/// meridian when that one is narrower (the Aleutians).
 fn middle(points: &[(f64, f64)]) -> Option<(f64, f64)> {
-    let first = *points.first()?;
-    let (low, high) = points
-        .iter()
-        .fold((first, first), |(low, high), &(lat, lon)| {
-            (
-                (low.0.min(lat), low.1.min(lon)),
-                (high.0.max(lat), high.1.max(lon)),
-            )
-        });
-    Some(((low.0 + high.0) / 2.0, (low.1 + high.1) / 2.0))
+    let bounds = |shift: f64| {
+        points
+            .iter()
+            .map(|&(lat, lon)| (lat, if lon < 0.0 { lon + shift } else { lon }))
+            .fold(None, |bounds: Option<[f64; 4]>, (lat, lon)| {
+                let [south, west, north, east] = bounds.unwrap_or([lat, lon, lat, lon]);
+                Some([south.min(lat), west.min(lon), north.max(lat), east.max(lon)])
+            })
+    };
+    let mut found = bounds(0.0)?;
+    if found[3] - found[1] > 180.0 {
+        found = bounds(360.0)?;
+    }
+    let [south, west, north, east] = found;
+    let lon = (west + east) / 2.0;
+    Some((
+        (south + north) / 2.0,
+        if lon > 180.0 { lon - 360.0 } else { lon },
+    ))
+}
+
+/// The places of one Wikidata item: how many, whether one is a town, and
+/// the best known of those that are not, the one that can be its landmark.
+#[derive(Default)]
+struct ItemPlaces {
+    places: u32,
+    town: bool,
+    landmark: Option<usize>,
 }
 
 /// The names and reads of an English Wikipedia article.
@@ -615,14 +642,25 @@ fn is_plain(name: &str) -> bool {
 /// Gives each place the plain title and other names (redirects) of the
 /// English Wikipedia article on its Wikidata item, from the articles file
 /// `path`: "Big Ben" for the Elizabeth Tower, "Philly" for Philadelphia.
-/// A place that is no town and that the title names plainly is a landmark
-/// ([`landmark_rank`]).
+/// The best known place of an item that is no town, and that the title
+/// names plainly, is a landmark ([`landmark_rank`]). A place with its
+/// town's item (a town hall) takes nothing from it.
 fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<()> {
-    let mut places_of: HashMap<u64, u32> = HashMap::new();
-    for item in found.iter().filter_map(|(_, item)| *item) {
-        *places_of.entry(item).or_default() += 1;
+    let mut places_of: HashMap<u64, ItemPlaces> = HashMap::new();
+    for (i, (place, item)) in found.iter().enumerate() {
+        let Some(item) = item else { continue };
+        let of = places_of.entry(*item).or_default();
+        of.places += 1;
+        of.town |= place.is_town();
+        if !place.is_town()
+            && of
+                .landmark
+                .is_none_or(|best| found[best].0.rank < place.rank)
+        {
+            of.landmark = Some(i);
+        }
     }
-    places_of.retain(|_, places| *places <= PLACES_PER_ITEM);
+    places_of.retain(|_, of| of.places <= PLACES_PER_ITEM);
     info!("reading the articles on {} items", places_of.len());
     let mut failed = None;
     let lines = open_maybe_gz(path)?.lines().map_while(|line| match line {
@@ -633,8 +671,9 @@ fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<
         }
     });
     let mut articles = HashMap::new();
-    for (n, article) in articles_of(lines) {
-        let article = article.with_context(|| format!("{} line {n}", path.display()))?;
+    for (_, article) in articles_of(lines) {
+        // A line the file's writer got wrong names nothing.
+        let Ok(article) = article else { continue };
         let Some(item) = article
             .item
             .as_deref()
@@ -656,15 +695,20 @@ fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<
         return Err(anyhow::Error::new(err).context(format!("reading {}", path.display())));
     }
     let mut landmarks = 0;
-    for (place, item) in found.iter_mut() {
-        let Some(article) = item.and_then(|item| articles.get(&item)) else {
+    for (i, (place, item)) in found.iter_mut().enumerate() {
+        let Some((article, of)) =
+            item.and_then(|item| Some((articles.get(&item)?, &places_of[&item])))
+        else {
             continue;
         };
+        if of.town && !place.is_town() {
+            continue;
+        }
         let names = std::iter::once(&article.title).chain(&article.aliases);
         for name in names.filter(|name| is_plain(name)) {
             push_alias(&place.name, &mut place.aliases, name, MAX_PLACE_ALIASES);
         }
-        if !place.is_town() && is_plain(&article.title) {
+        if of.landmark == Some(i) && is_plain(&article.title) {
             place.rank = landmark_rank(article.views);
             landmarks += 1;
         }
@@ -1064,6 +1108,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shop.region.as_deref(), Some("ON"));
+        // Italy's provinces are no states.
+        let bar = place_of(
+            &tags(&[
+                ("name", "Bar Roma"),
+                ("amenity", "bar"),
+                ("addr:province", "MI"),
+            ]),
+            "n3".into(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(bar.region, None);
+        // A national park mapped only as its boundary is a park; other
+        // boundaries are no places.
+        let park = &[
+            ("name", "Yosemite National Park"),
+            ("boundary", "national_park"),
+        ];
+        let park = place_of(&tags(park), "r1".into(), false).unwrap();
+        assert_eq!(park.kind, "boundary=national_park");
+        let county = &[("name", "Mariposa County"), ("boundary", "administrative")];
+        assert!(place_of(&tags(county), "r2".into(), false).is_none());
     }
 
     #[test]
@@ -1094,14 +1160,21 @@ mod tests {
             (at("Starbucks", "amenity=cafe", "n6"), Some(37158)),
             (at("Starbucks", "amenity=cafe", "n7"), Some(37158)),
             (at("Starbucks", "amenity=cafe", "n8"), Some(37158)),
+            // The tower mapped twice, and a town hall with its town's item.
+            (
+                at("Elizabeth Tower", "tourism=attraction", "n9"),
+                Some(41225),
+            ),
+            (at("City Hall", "amenity=townhall", "n10"), Some(1345)),
         ];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wikipedia-en.tsv");
         std::fs::write(
             &path,
             format!(
-                "{}{}{}{}{}",
+                "{}{}{}{}{}{}",
                 plumb_core::article::ARTICLES_HEADER,
+                "a line with no columns\n",
                 "90000\tBig Ben\tclock tower\tQ41225\t\tElizabeth Tower|BigBen|10.57232|Clock Tower (Westminster)|Big Ben, London\n",
                 "80000\tPhiladelphia\tcity\tQ1345\t\tPhilly|Philadelphia, Pennsylvania|City of Brotherly Love\n",
                 "20\tCafé Louvre (Prague)\tcafé\tQ7\t\tCafe Louvre\n",
@@ -1124,6 +1197,10 @@ mod tests {
         assert_eq!(cafe.aliases, ["Cafe Louvre"]);
         assert!(!cafe.is_landmark());
         assert!(found[4].0.aliases.is_empty() && !found[4].0.is_landmark());
+        // One landmark a name, and the town's names stay the town's.
+        assert_eq!(found[8].0.aliases, ["Big Ben"]);
+        assert!(!found[8].0.is_landmark());
+        assert!(found[9].0.aliases.is_empty() && !found[9].0.is_landmark());
     }
 
     #[test]
@@ -1131,6 +1208,9 @@ mod tests {
         let (lat, lon) = middle(&[(37.5, -119.9), (38.2, -119.6), (37.9, -119.2)]).unwrap();
         assert!((lat - 37.85).abs() < 1e-9 && (lon + 119.55).abs() < 1e-9);
         assert!(middle(&[]).is_none());
+        // An island across the 180th meridian is in the Pacific, not at 0.
+        let (_, lon) = middle(&[(51.5, 179.0), (52.0, -177.0)]).unwrap();
+        assert!((lon + 179.0).abs() < 1e-9);
     }
 
     #[test]
