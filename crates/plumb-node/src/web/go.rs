@@ -179,7 +179,7 @@ async fn go_block(
         }
         Block::News => match run_search(state, query, MAX_LIMIT, &options).await {
             Ok(results) => state
-                .recent(query, &results)
+                .recent(query, &results, &options)
                 .map(|recent| {
                     recent
                         .headlines

@@ -38,10 +38,11 @@ pub(crate) async fn run_places(
     home: Option<&str>,
     country: Option<&str>,
 ) -> Option<plumb_index::places::PlaceResults> {
+    // Not only queries that say where: "starbucks denver" names a town
+    // too, which only the place index knows.
     if plumb_core::Operators::parse(query).any() {
         return None;
     }
-    plumb_index::places::parse_place_query(query)?;
     let backend = Arc::clone(&state.backend);
     let (query, home, country) = (
         query.to_string(),
@@ -372,7 +373,7 @@ pub(crate) async fn search_page(
             let icons = state.icons(domains).await;
             let recent = crate::assembly::recent(
                 &query,
-                state.recent(&query, &results),
+                state.recent(&query, &results, &settings.options),
                 &settings.options,
                 limit,
                 |domain| {
@@ -577,9 +578,13 @@ pub(crate) async fn extras(
     options: &SearchOptions,
     town: Option<&str>,
 ) -> answers::Extras {
+    let country = options.country.as_deref();
     let answer = match instant_answer(state, query, town).await {
         Some(answer) => Some(answer),
-        None => weather::answer(state, query, town, options.country.as_deref()).await,
+        None => match answers::town_time(state, query, country).await {
+            Some(answer) => Some(answer),
+            None => weather::answer(state, query, town, country).await,
+        },
     };
     let mut profile = None;
     for name in answers::profile_lookups(query) {
@@ -797,8 +802,8 @@ pub(crate) fn shown_results(
             .pages
             .iter()
             .map(|placed| &placed.hit.page)
-            .find(|page| page.site.as_deref() == Some(hit.domain.as_str()))
-            .and_then(about_of);
+            .filter(|page| page.site.as_deref() == Some(hit.domain.as_str()))
+            .find_map(about_of);
         shown.push(plumb_plugin::ShownResult {
             id: shown.len() as u32,
             url,

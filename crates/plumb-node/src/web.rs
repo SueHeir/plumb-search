@@ -235,16 +235,23 @@ impl AppState {
             .is_some_and(|node| node.shares_popularity())
     }
 
-    /// The "Recent" block for `query`, whose results are `results`; `None`
-    /// for `plumb serve`, which keeps no headlines. Headlines are matched
-    /// with the query as typed: spelling corrections come from site names,
-    /// and would turn news words into them.
-    fn recent(&self, query: &str, results: &SearchResults) -> Option<Recent> {
+    /// The "Recent" block for `query`, whose results are `results`, searched
+    /// with `options`; `None` for `plumb serve`, which keeps no headlines.
+    /// Headlines are matched with the query as typed: spelling corrections
+    /// come from site names, and would turn news words into them.
+    fn recent(
+        &self,
+        query: &str,
+        results: &SearchResults,
+        options: &SearchOptions,
+    ) -> Option<Recent> {
         let top = results
             .hits
             .first()
             .map(|hit| (hit.domain.as_str(), hit.named));
-        self.node.as_ref()?.recent(query, top)
+        self.node
+            .as_ref()?
+            .recent(query, top, options.language.as_deref())
     }
 
     /// What the node's plugins find for `query`, which the node took to

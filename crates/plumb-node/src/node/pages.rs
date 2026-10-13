@@ -19,8 +19,8 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, Operators};
 use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, operators_allow, options_allow,
-    place_operator_pages, place_pages, PageHit, OPERATOR_PAGES,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
+    options_allow, place_operator_pages, place_pages, PageHit, OPERATOR_PAGES,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -29,8 +29,8 @@ use tracing::{debug, info, warn};
 
 use super::{Inner, NodeSettings};
 use crate::pages::{
-    index_dir, notes_path, open_or_build_with, remove_other_indexes_with_budget, stand_in,
-    thousands, wanted_counts, HeldPageSet, SetFileCutter, SetFileNotes, SetInfo, Wanted,
+    index_dir, notes_path, open_built, open_or_build_with, remove_other_indexes_with_budget,
+    stand_in, thousands, wanted_counts, HeldPageSet, SetFileCutter, SetFileNotes, SetInfo, Wanted,
 };
 
 /// How often the job looks for changed settings or set files.
@@ -198,15 +198,19 @@ pub(super) fn run(inner: Arc<Inner>) {
                 );
                 *inner.pages.write_locked() = Some((older, Arc::new(searcher)));
             }
-            let found = {
-                let _big = inner.one_big_job();
-                open_or_build_with(
-                    &inner.paths.data,
-                    &wanted,
-                    inner.storage.clone(),
-                    denylist.as_ref().map(|(list, _)| list.as_ref()),
-                    &mut || inner.check_stop(),
-                )
+            // An index already built is only opened: that needs no turn.
+            let found = match open_built(&inner.paths.data, &wanted) {
+                Some(found) => Ok(Some(found)),
+                None => {
+                    let _big = inner.one_big_job();
+                    open_or_build_with(
+                        &inner.paths.data,
+                        &wanted,
+                        inner.storage.clone(),
+                        denylist.as_ref().map(|(list, _)| list.as_ref()),
+                        &mut || inner.check_stop(),
+                    )
+                }
             };
             match found {
                 Ok(found) => {
@@ -1042,6 +1046,20 @@ pub(super) fn knows_typed(inner: &Inner, query: &str, spelling: &plumb_index::Sp
     }
 }
 
+/// `options` with the language filter the sites' index gives `query`
+/// ([`plumb_index::Searcher::language_for`]), so pages keep or drop a
+/// language for a search as sites do.
+fn for_query(inner: &Inner, options: &SearchOptions, query: &str) -> SearchOptions {
+    let language = match inner.current() {
+        Some(index) => index.backend().searcher().language_for(options, query),
+        None => options.language_for(query).map(str::to_string),
+    };
+    SearchOptions {
+        language,
+        ..options.clone()
+    }
+}
+
 /// The song or album a search of `query` alone is surely for; see
 /// [`PageSearcher::known_song`].
 pub(super) fn known_song(
@@ -1049,7 +1067,7 @@ pub(super) fn known_song(
     query: &str,
     options: &SearchOptions,
 ) -> Option<plumb_index::pages::Page> {
-    let options = &options.for_query(query);
+    let options = &for_query(inner, options, query);
     let searcher = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone())?;
     match searcher.known_song(query) {
         Ok(song) => song.filter(|page| options_allow(options, page)),
@@ -1084,7 +1102,7 @@ pub(super) fn entities(
     };
     let ops = Operators::parse(query);
     let words = if ops.any() { ops.words.as_str() } else { query };
-    let options = &options.for_query(query);
+    let options = &for_query(inner, options, query);
     let searcher = searcher.in_language(options.language.as_deref());
     Ok(searcher
         .entities(words, KIND_PAGES)?
@@ -1109,6 +1127,7 @@ pub(super) fn pages_of(
     let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return Vec::new();
     };
+    let options = &for_query(inner, options, query);
     match typed_pages(&searcher, query, limit, options, docs, keep) {
         Ok(found) => found,
         Err(err) => {
@@ -1129,7 +1148,6 @@ fn typed_pages(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let options = &options.for_query(query);
     let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
     if paper.constrained {
         return Ok(searcher
@@ -1163,7 +1181,7 @@ pub(super) fn papers(
     let Some(searcher) = searcher else {
         return Ok(Vec::new());
     };
-    let options = &options.for_query(&query.text());
+    let options = &for_query(inner, options, &query.text());
     Ok(searcher
         .in_language(options.language.as_deref())
         .search_papers(query, KIND_PAGES)?
@@ -1193,7 +1211,7 @@ pub(super) fn add_pages(
     let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return;
     };
-    let options = &options.for_query(query);
+    let options = &for_query(inner, options, query);
     let searcher = searcher.in_language(options.language.as_deref());
     let ops = Operators::parse(query);
     if ops.any() {
@@ -1230,10 +1248,15 @@ pub(super) fn add_pages(
                     index.backend().site(domain)
                 });
             }
+            drop_far_namesakes(&mut results.hits, &found, inner.rank.meaning_only_relevance);
             if inner.rank.drop_namesakes {
                 drop_namesakes_of_words(&mut results.hits, &found);
             }
             lift_named_sites(&mut results.hits, &found);
+            if let Err(err) = searcher.add_named_site_page(query, &results.hits, &mut found) {
+                warn!("searching the pages of a site the query names: {err:#}");
+            }
+            found.retain(|hit| options_allow(options, &hit.page));
             if let Err(err) = searcher.note_demand(&mut results.hits) {
                 warn!("reading what sites' articles are read: {err:#}");
             }
@@ -1516,5 +1539,62 @@ mod tests {
         assert!(file.exists());
         // No sets folder yet: nothing to do.
         remove_stale_parts(&dir.path().join("none"), None);
+    }
+
+    /// While the node joins the network, the page index it already has is
+    /// searched at once, and a new one is built only after the join.
+    #[test]
+    fn the_built_index_is_searched_while_the_node_joins() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let file = SetInfo::find("wikipedia-en").unwrap().file(data);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let write = |title: &str, time: u64| {
+            let mut text = plumb_core::article::ARTICLES_HEADER.as_bytes().to_vec();
+            let article = plumb_core::Article {
+                title: title.into(),
+                views: 10,
+                ..Default::default()
+            };
+            plumb_core::article::write_article(&mut text, &article).unwrap();
+            std::fs::write(&file, text).unwrap();
+            super::super::newer::set_time(&file, time).unwrap();
+        };
+        write("Built Before", 1_700_000_000);
+        let mut config = crate::node::NodeConfig::desktop(data.to_path_buf());
+        config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
+        let wanted = Wanted::taking(data, &config.settings.page_sets, 0, &[]);
+        let (built, _) = crate::pages::open_or_build_with_budget(data, &wanted, None)
+            .unwrap()
+            .unwrap();
+        let rank = crate::rank_config(config.alpha);
+        let opened = super::super::open_data_dir(&config, rank).unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let inner = Arc::new(Inner::new(config, rank, opened, stopped, None));
+        inner.joining.store(true, Ordering::Release);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let job = {
+            let inner = inner.clone();
+            let handle = runtime.handle().clone();
+            std::thread::spawn(move || {
+                let _entered = handle.enter();
+                run(inner)
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while inner.page_key().as_deref() != Some(built.as_str()) {
+            assert!(Instant::now() < deadline, "the built index was not opened");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        write("Built After", 1_700_000_001);
+        std::thread::sleep(LOOK_EVERY * 5);
+        assert_eq!(inner.page_key().as_deref(), Some(built.as_str()));
+        inner.joining.store(false, Ordering::Release);
+        while inner.page_key().as_deref() == Some(built.as_str()) {
+            assert!(Instant::now() < deadline, "no build after the join");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stop.send(true).unwrap();
+        job.join().unwrap();
     }
 }

@@ -1,6 +1,7 @@
 //! What a results page shows besides the results: an instant answer above
-//! them ([`plumb_answer`]: sums, conversions, the time somewhere) and an
-//! info box beside them, about the one thing the query names.
+//! them ([`plumb_answer`]: sums, conversions, the time somewhere, and the
+//! time in a town found in the node's places) and an info box beside
+//! them, about the one thing the query names.
 //!
 //! Both are built from what the node holds. The only thing fetched for
 //! them is the European Central Bank's daily currency rates, once a
@@ -22,9 +23,11 @@
 //! the query names ([`definition_answer`]).
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use plumb_answer::{Answer, Rates, ECB_RATES_URL};
+use plumb_core::place::Place;
 use plumb_core::profiles::{services_asked, shown_profiles};
 use plumb_core::truncate_chars;
 use plumb_index::pages::{Page, PlacedPage, FILMS_SET, MUSIC_SET, WIKIDATA_SET};
@@ -33,7 +36,8 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use super::{escape_html, homepage_url, http_url};
+use super::weather::place_label;
+use super::{escape_html, homepage_url, http_url, AppState};
 use crate::country::country_name;
 
 /// Rates older than this are fetched again when next needed.
@@ -100,6 +104,44 @@ async fn fetch_rates() -> anyhow::Result<Rates> {
         .text()
         .await?;
     Rates::parse_ecb(&text).ok_or_else(|| anyhow::anyhow!("the rates file did not read"))
+}
+
+/// The time in a town [`plumb_answer`]'s own list lacks ("time in
+/// boulder", "what time is it in porto"), found in the node's places.
+/// `country` is the searcher's, to tell towns of one name apart.
+pub(super) async fn town_time(
+    state: &AppState,
+    query: &str,
+    country: Option<&str>,
+) -> Option<Answer> {
+    let name = plumb_answer::asked_town(query)?;
+    let backend = Arc::clone(&state.backend);
+    let country = country.map(str::to_string);
+    let place = tokio::task::spawn_blocking(move || backend.locate(&name, country.as_deref()))
+        .await
+        .ok()
+        .flatten()?;
+    time_in_place(&place)
+}
+
+/// The time in `place`, when it is a city or town (not a nightclub
+/// called Heaven) and the clock it keeps can be told.
+pub(crate) fn time_in_place(place: &Place) -> Option<Answer> {
+    if !matches!(
+        place.kind.as_str(),
+        "place=city" | "place=town" | "place=borough"
+    ) {
+        return None;
+    }
+    let town = plumb_answer::Town {
+        shown: &place_label(place),
+        country: place.country.as_deref()?,
+        region: place.region.as_deref(),
+        lat: place.lat,
+        lon: place.lon,
+    };
+    let now = i64::try_from(plumb_core::now_unix()).unwrap_or(i64::MAX);
+    plumb_answer::time_in_town(&town, now)
 }
 
 /// An instant answer, as a block above the results.
@@ -376,6 +418,33 @@ const KIND_LISTINGS: &[(&[&str], &[&str])] = &[
     (&["steam", "igdb"], &["game"]),
 ];
 
+/// Services holding an account of someone's own: a person's, a group's or
+/// an organization's.
+const ACCOUNTS: &[&str] = &[
+    "instagram",
+    "x",
+    "tiktok",
+    "facebook",
+    "threads",
+    "bluesky",
+    "mastodon",
+    "twitch",
+    "linkedin",
+    "linkedin-company",
+    "soundcloud",
+    "patreon",
+];
+
+/// Facts only a person (born) or a group or organization (founded, its
+/// founders, its CEO or headquarters) has.
+const HOLDER_FACTS: &[plumb_core::facts::FactKind] = &[
+    plumb_core::facts::FactKind::Born,
+    plumb_core::facts::FactKind::Founded,
+    plumb_core::facts::FactKind::Founder,
+    plumb_core::facts::FactKind::Ceo,
+    plumb_core::facts::FactKind::Headquarters,
+];
+
 /// Where a description stops saying what its page is and goes on to who
 /// made it or what it is part of.
 const DESCRIPTION_HEAD_ENDS: &[&str] = &[
@@ -419,14 +488,34 @@ fn kind_named<'a>(name: &'a str, kinds: &[&str]) -> Option<&'a str> {
 /// god's. Looked up with its kind ("top gun movie"), only a work called
 /// so, since a search names every film of the title then, and the film
 /// called Top Gun is looked up by its name alone ([`profile_lookups`]).
+/// For an account ([`ACCOUNTS`]), only a person, group or organization
+/// when some are: "drake instagram" is the rapper's, not the name list's,
+/// and "pink instagram" the singer's, not the colour's.
 /// The kind asked for decides, never which namesake has the profile.
 pub fn profile_candidates(
     query: &str,
     name: &str,
     mut candidates: Vec<plumb_index::pages::PageHit>,
 ) -> Vec<plumb_index::pages::PageHit> {
-    let Some(kinds) = services_asked(query).and_then(|(services, _)| listed_kinds(&services))
-    else {
+    let Some((services, _)) = services_asked(query) else {
+        return candidates;
+    };
+    if services
+        .iter()
+        .all(|service| ACCOUNTS.contains(&service.key))
+    {
+        let holder = |hit: &plumb_index::pages::PageHit| {
+            hit.page
+                .facts
+                .iter()
+                .any(|fact| HOLDER_FACTS.contains(&fact.kind))
+        };
+        if candidates.iter().any(holder) {
+            candidates.retain(holder);
+        }
+        return candidates;
+    }
+    let Some(kinds) = listed_kinds(&services) else {
         return candidates;
     };
     if kind_named(name, kinds).is_some() {
@@ -776,6 +865,12 @@ pub fn resolve_entity<'a>(
             candidates = organizations;
         }
     }
+    if let Some(works) = works_made(&subject, &candidates, kinds) {
+        match works.as_slice() {
+            [work] => return EntityResolution::Resolved(&work.page),
+            _ => candidates = works,
+        }
+    }
     if candidates.is_empty() {
         return EntityResolution::Unresolved;
     }
@@ -869,6 +964,60 @@ fn main_sense<'a>(subject: &str, tied: &[&'a plumb_index::pages::PageHit]) -> En
     match (own.next(), own.next()) {
         (Some(hit), None) => EntityResolution::Resolved(&hit.page),
         _ => EntityResolution::Ambiguous(tied.iter().map(|hit| &hit.page).collect()),
+    }
+}
+
+/// What a question about a work's maker asks: the subject is the work.
+/// Only works have these, so a page without one is no answer to it, an
+/// exception to [`EntityResolution`]'s rule ([`works_made`]).
+const MAKERS: &[plumb_core::facts::FactKind] = {
+    use plumb_core::facts::FactKind::*;
+    &[Author, Director, Composer, Creator]
+};
+
+/// How many times as read as every other work the subject names the work
+/// a maker question means must be ("Titanic (1997 film)", not the 1953 one).
+const MOST_READ_WORK: u64 = 10;
+
+/// The works a question about a work's maker can be about, when it is one
+/// and `candidates` hold any: those `subject` (lowercased) names, by their
+/// title or another name, with or without a qualifier or "the", that have
+/// the maker it asks for first. Only a work has an author or a director,
+/// and compact records say what a page is only by such facts: "who wrote
+/// 1984" asks about the novel known as 1984, not the year, and "who
+/// directed titanic" about a film, not the ship. Of several, one read far
+/// more than each of the others is the one meant, so it is given alone.
+/// Only the first kind asked counts: "director of the fbi" asks for no TV
+/// series' creator.
+fn works_made<'a>(
+    subject: &str,
+    candidates: &[&'a plumb_index::pages::PageHit],
+    kinds: Option<&[plumb_core::facts::FactKind]>,
+) -> Option<Vec<&'a plumb_index::pages::PageHit>> {
+    let maker = kinds?.first().filter(|kind| MAKERS.contains(kind))?;
+    // fact_asked keeps a work's "the" for "The Hobbit", but "the mona
+    // lisa" is "Mona Lisa".
+    let named = |name: &str| {
+        let name =
+            plumb_core::collapse_whitespace(plumb_index::pages::base_title(name)).to_lowercase();
+        name == subject || subject.strip_prefix("the ") == Some(name.as_str())
+    };
+    let mut works: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|hit| {
+            let page = &hit.page;
+            (hit.named || named(&page.title) || page.aliases.iter().any(|alias| named(alias)))
+                && page.facts.iter().any(|fact| fact.kind == *maker)
+        })
+        .collect();
+    works.sort_by_key(|hit| std::cmp::Reverse(hit.page.views));
+    match works.as_slice() {
+        [] => None,
+        [most, next, ..] if next.page.views.saturating_mul(MOST_READ_WORK) >= most.page.views => {
+            Some(works)
+        }
+        [most, ..] => Some(vec![*most]),
     }
 }
 
@@ -1226,6 +1375,32 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn tells_the_time_in_a_town_found() {
+        let place = |name: &str, kind: &str, region: Option<&str>, country: &str| Place {
+            rank: 0,
+            name: name.into(),
+            kind: kind.into(),
+            tags: Vec::new(),
+            lat: 40.01,
+            lon: -105.27,
+            town: None,
+            region: region.map(str::to_string),
+            country: Some(country.into()),
+            address: None,
+            website: None,
+            osm: "n1".into(),
+            aliases: Vec::new(),
+        };
+        let boulder = time_in_place(&place("Boulder", "place=city", Some("CO"), "US")).unwrap();
+        assert_eq!(boulder.question, "Time in Boulder, CO");
+        assert!(boulder.note.unwrap().contains("UTC-"));
+        // A nightclub called Heaven is no town, and El Paso's state keeps
+        // two clocks.
+        assert!(time_in_place(&place("Heaven", "amenity=nightclub", None, "GB")).is_none());
+        assert!(time_in_place(&place("El Paso", "place=city", Some("TX"), "US")).is_none());
+    }
+
     fn article(title: &str, description: &str, site: Option<&str>) -> PageHit {
         PageHit {
             page: Page {
@@ -1508,6 +1683,139 @@ mod tests {
         };
         assert_eq!(page.item.as_deref(), Some("Q910012"));
         assert_eq!(fact_answer_from_page(&asked, page, 0), None);
+    }
+
+    #[test]
+    fn makers_are_asked_of_the_work_the_name_means() {
+        use plumb_core::facts::{fact_asked, FactKind, FactKind::*};
+        let page = |title: &str, item: &str, views: u64, facts: &[(FactKind, &str)]| {
+            let mut hit = with_facts(article(title, "", None), facts);
+            hit.page.item = Some(item.into());
+            hit.page.views = views;
+            hit
+        };
+        let ask = |q: &str, candidates: &[PageHit]| {
+            let asked = fact_asked(q).unwrap();
+            match resolve_entity(&asked.subject, candidates, Some(&asked.kinds)) {
+                EntityResolution::Resolved(page) => fact_answer_from_page(&asked, page, 0),
+                _ => None,
+            }
+        };
+        // The year is called 1984; the novel is known as "1984 (novel)".
+        let mut novel = page(
+            "Nineteen Eighty-Four",
+            "Q208460",
+            30_159,
+            &[(Author, "George Orwell")],
+        );
+        novel.named = false;
+        novel.page.aliases = vec!["1984 (novel)".into()];
+        let advert = page(
+            "1984 (advertisement)",
+            "Q4566",
+            900,
+            &[(Director, "Ridley Scott")],
+        );
+        let nineteen = [page("1984", "Q2432", 2_014, &[]), advert, novel];
+        let answer = ask("who wrote 1984", &nineteen).unwrap();
+        assert_eq!(answer.question, "Author of Nineteen Eighty-Four");
+        assert_eq!(answer.answer, "George Orwell");
+        assert_eq!(
+            ask("who directed 1984", &nineteen).unwrap().answer,
+            "Ridley Scott"
+        );
+        // Of films called Titanic, the one read far more.
+        let titanic = [
+            page("Titanic", "Q25173", 39_360, &[(Owner, "White Star Line")]),
+            page(
+                "Titanic (1953 film)",
+                "Q1140317",
+                1_500,
+                &[(Director, "Jean Negulesco")],
+            ),
+            page(
+                "Titanic (1997 film)",
+                "Q44578",
+                30_683,
+                &[(Director, "James Cameron")],
+            ),
+        ];
+        let answer = ask("who directed titanic", &titanic).unwrap();
+        assert_eq!(
+            (answer.question.as_str(), answer.answer.as_str()),
+            ("Director of Titanic (1997 film)", "James Cameron")
+        );
+        assert_eq!(
+            ask("titanic owner", &titanic).unwrap().answer,
+            "White Star Line"
+        );
+        // Works read alike stay a question, and a work called the name
+        // keeps it ("The Lion King" over its remake).
+        let alien = [
+            page(
+                "Alien (film)",
+                "Q103569",
+                23_181,
+                &[(Director, "Ridley Scott")],
+            ),
+            page(
+                "Alien (franchise)",
+                "Q1813470",
+                21_144,
+                &[(Director, "James Cameron")],
+            ),
+        ];
+        assert_eq!(ask("who directed alien", &alien), None);
+        let lion = [
+            page(
+                "The Lion King (2019 film)",
+                "Q27964762",
+                20_000,
+                &[(Director, "Jon Favreau")],
+            ),
+            page(
+                "The Lion King",
+                "Q36479",
+                40_000,
+                &[(Director, "Roger Allers")],
+            ),
+        ];
+        assert_eq!(
+            ask("who directed the lion king", &lion).unwrap().answer,
+            "Roger Allers"
+        );
+        // A work's "the" need not be in its title.
+        let mona = [
+            page(
+                "Mona Lisa",
+                "Q12418",
+                34_216,
+                &[(Creator, "Leonardo da Vinci")],
+            ),
+            page(
+                "Mona Lisa (Prado)",
+                "Q2126369",
+                1_497,
+                &[(Owner, "Museo del Prado")],
+            ),
+        ]
+        .map(|mut hit| {
+            hit.named = false;
+            hit
+        });
+        let answer = ask("who painted the mona lisa", &mona).unwrap();
+        assert_eq!(answer.answer, "Leonardo da Vinci");
+        // "director of" asks a creator only of what the name means.
+        let fbi = [
+            page("Federal Bureau of Investigation", "Q8333", 60_000, &[]),
+            page(
+                "FBI (TV series)",
+                "Q57571045",
+                14_151,
+                &[(Creator, "Dick Wolf")],
+            ),
+        ];
+        assert_eq!(ask("director of fbi", &fbi), None);
     }
 
     #[test]
@@ -2062,6 +2370,92 @@ mod tests {
             "top gun movie cast",
             &EntityResolution::Unresolved
         ));
+    }
+
+    #[test]
+    fn an_account_is_a_person_s_group_s_or_organization_s() {
+        use plumb_core::facts::FactKind::{self, Born, Founded};
+        let entity = |title: &str, description: &str, item: &str, facts: &[(FactKind, &str)]| {
+            let mut hit = with_facts(article(title, description, None), facts);
+            hit.page.item = Some(item.into());
+            hit.named = true;
+            hit
+        };
+        let resolved = |query: &str, name: &str, candidates: Vec<PageHit>| match resolve_entity(
+            name,
+            &profile_candidates(query, name, candidates),
+            None,
+        ) {
+            EntityResolution::Resolved(page) => Some(page.title.clone()),
+            _ => None,
+        };
+        let drake = vec![
+            entity(
+                "Drake (musician)",
+                "Canadian rapper and singer (born 1986)",
+                "Q33240",
+                &[(Born, "1986-10-24")],
+            ),
+            entity("Drake (given name)", "Name list", "Q1254221", &[]),
+        ];
+        // Both named by "drake", so neither without the account asked for.
+        assert!(matches!(
+            resolve_entity("drake", &drake, None),
+            EntityResolution::Ambiguous(_)
+        ));
+        assert_eq!(
+            resolved("drake instagram", "drake", drake).as_deref(),
+            Some("Drake (musician)")
+        );
+        // Over a namesake with the very title: the colour has no account.
+        let pink = vec![
+            entity("Pink", "Pale tint of red", "Q51101", &[]),
+            entity(
+                "Pink (singer)",
+                "American singer and songwriter (born 1979)",
+                "Q160009",
+                &[(Born, "1979-09-08")],
+            ),
+        ];
+        assert_eq!(
+            resolved("pink instagram", "pink", pink.clone()).as_deref(),
+            Some("Pink (singer)")
+        );
+        // A band has its founding.
+        let queen = vec![
+            entity(
+                "Queen (band)",
+                "British rock band",
+                "Q15862",
+                &[(Founded, "1970")],
+            ),
+            entity("Queen regnant", "Female monarch", "Q16511993", &[]),
+        ];
+        assert_eq!(
+            resolved("queen x", "queen", queen).as_deref(),
+            Some("Queen (band)")
+        );
+        // YouTube also has a song's video, so every namesake stays.
+        assert_eq!(profile_candidates("pink youtube", "pink", pink).len(), 2);
+        // With no person, group or organization, nothing is left out.
+        let office = vec![
+            entity(
+                "The Office (American TV series)",
+                "American mockumentary sitcom",
+                "Q23831",
+                &[],
+            ),
+            entity(
+                "The Office (British TV series)",
+                "British mockumentary sitcom",
+                "Q1052839",
+                &[],
+            ),
+        ];
+        assert_eq!(
+            profile_candidates("the office instagram", "the office", office).len(),
+            2
+        );
     }
 
     #[test]

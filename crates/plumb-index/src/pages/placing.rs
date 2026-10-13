@@ -8,7 +8,7 @@ use plumb_core::{
 };
 use tantivy::tokenizer::TextAnalyzer;
 
-use super::docs::docs_found_by_words;
+use super::docs::{docs_found_by_words, docs_named_as_code};
 use super::sites::{base_title, describes_an_organization, is_government, site_is_titled, squash};
 use super::{
     LearnedPlace, Page, PageHit, PlacedPage, ASKING_WORDS, DOCS_SET, FILMS_SET, GITHUB_SET,
@@ -51,6 +51,44 @@ const LIFT_LINK_MARGIN: f32 = 0.2;
 /// and codastory.com, having one word of it, are no answer. The page's
 /// own site stays. Returns how many were left out.
 pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -> usize {
+    drop_namesakes(sites, pages, |hit| hit.missing_words)
+}
+
+/// [`drop_namesakes_of_words`] for the sites that only one word of the
+/// name found, past its first: a site the query does not name by its
+/// first words, lacking some of its main words and less close to it in
+/// meaning than `floor` ([`crate::RankConfig::meaning_only_relevance`]).
+/// A word of an article's name is not a name of its own, though the
+/// ranking keeps a site that word names, as it keeps hilton.com for
+/// "back bay hilton": "airpods pro" names the earbuds, so
+/// nationalarchives.gov.uk, once the Public Record Office (PRO), is no
+/// answer, nor is carbon3d.com for "thinkpad x1 carbon" or mini.com for
+/// "ipad mini". A site the name starts with stays (apple.com, found by
+/// "mac", for "mac mini"), and so does one with no vector to judge it by.
+pub fn drop_far_namesakes(
+    sites: &mut Vec<crate::Hit>,
+    pages: &[PageHit],
+    floor: Option<f32>,
+) -> usize {
+    let Some(floor) = floor else {
+        return 0;
+    };
+    drop_namesakes(sites, pages, |hit| {
+        hit.missing_words
+            && hit.query_evidence.as_ref().is_some_and(|evidence| {
+                evidence.partial_name_words == 0
+                    && evidence.semantic_closeness.is_some_and(|c| c < floor)
+            })
+    })
+}
+
+/// Leaves out the `namesake` sites, but the page's own, when the whole
+/// query is the name of an article or Wikidata item.
+fn drop_namesakes(
+    sites: &mut Vec<crate::Hit>,
+    pages: &[PageHit],
+    namesake: impl Fn(&crate::Hit) -> bool,
+) -> usize {
     let Some(named) = pages
         .iter()
         .find(|hit| hit.named && hit.page.item.is_some())
@@ -59,7 +97,7 @@ pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -
     };
     let own = named.page.site.as_deref();
     let before = sites.len();
-    sites.retain(|hit| !hit.missing_words || Some(hit.domain.as_str()) == own);
+    sites.retain(|hit| !namesake(hit) || Some(hit.domain.as_str()) == own);
     before - sites.len()
 }
 
@@ -166,7 +204,10 @@ pub(crate) fn named_page_site<'a>(
 ///
 /// - A page about one of the sites (its [`Page::site`]) goes under that
 ///   site's result rather than in a place of its own: "python" lists
-///   python.org with the article on the Python language under it.
+///   python.org with the article on the Python language under it. So does
+///   the site's own page the query names
+///   ([`PageSearcher::add_named_site_page`](super::PageSearcher::add_named_site_page)),
+///   and the site's other inner pages are then left out.
 /// - Of the others, at most [`MAX_PAGES_LISTED`] are listed: pages the
 ///   query names in full, and others scoring at least
 ///   [`MIN_PARTIAL_SCORE`]; only one when the best site is named by the
@@ -244,9 +285,27 @@ const TITLE_STOP_WORDS: &[&str] = &[
 /// Values and company culture"). A big site's news, press releases and reviews
 /// share words with all sorts of searches: "seven summits" is not a
 /// leadership summit at jnj.com, nor "mount everest" a film review at
-/// ign.com. Pages of other sets always may.
+/// ign.com. A tag archive is listed only on one of the best sites, named
+/// or not. Pages of other sets always may.
 pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
-    if (hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET) || hit.named {
+    if hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET {
+        return true;
+    }
+    let domain = registrable_domain(&hit.page.url);
+    let on_best_site = || {
+        domain.is_some()
+            && sites
+                .iter()
+                .take(SUBPAGE_SITES)
+                .any(|site| registrable_domain(&site.domain) == domain)
+    };
+    // A site's list of its posts with one tag is titled just the tag, and
+    // says nothing of it: jnj.com's "Lupus" ("Explore Johnson & Johnson's
+    // lupus resources") was named by "lupus" and led it, above the article.
+    if is_tag_archive(&hit.page.url) {
+        return on_best_site();
+    }
+    if hit.named {
         return true;
     }
     // Retrieval/options already constrain known language. A locale-like
@@ -255,13 +314,7 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
     if language.is_none() && in_other_language(&hit.page.url) {
         return false;
     }
-    let domain = registrable_domain(&hit.page.url);
-    if domain.is_some()
-        && sites
-            .iter()
-            .take(SUBPAGE_SITES)
-            .any(|site| registrable_domain(&site.domain) == domain)
-    {
+    if on_best_site() {
         return true;
     }
     static STEMS: std::sync::LazyLock<TextAnalyzer> =
@@ -332,6 +385,22 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
         })
 }
 
+/// Whether `url` is a site's list of its posts with one tag:
+/// `https://www.jnj.com/tag/lupus`.
+fn is_tag_archive(url: &str) -> bool {
+    let path = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let segments: Vec<&str> = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .split('/')
+        .collect();
+    segments
+        .windows(2)
+        .skip(1)
+        .any(|pair| matches!(pair[0], "tag" | "tags") && !pair[1].is_empty())
+}
+
 /// Whether `word` is a year: four digits from 1000 to 2999.
 fn is_year(word: &str) -> bool {
     word.len() == 4
@@ -398,20 +467,27 @@ fn on_site(page: &Page, domain: &str) -> bool {
 }
 
 /// The places no ranking overrides, applied after [`place_pages`] and
-/// after [`crate::learned::reorder`]: a docs page found by its words, or
+/// after [`crate::learned::reorder`]: the docs page of an API the query
+/// names as code comes first ("Object.keys" wants MDN's page, see
+/// [`docs_named_as_code`]); any other docs page found by its words, or
 /// another site's page while the query names the best site's owner, never
-/// comes before the best site (see [`kept_below`]), and, unless the
+/// comes before the best site (see [`kept_below`]); and, unless the
 /// query asks for them, podcasts come after the best site and the other
 /// pages listed on their own ("better call saul" wants amc.com and the
 /// article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
     placed.retain(|page| crate::health::page_allowed(query, &page.hit.page));
     let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0);
+    let code = |p: &PlacedPage| p.under.is_none() && docs_named_as_code(&p.hit, query, sites);
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
-        if kept_below(&page.hit, sites, names_best) {
+        if code(page) {
+            page.at = 0;
+        } else if kept_below(&page.hit, sites, names_best) {
             page.at = page.at.max(1).min(sites.len());
         }
     }
+    // Pages at one place are listed in order, so it leads the questions too.
+    placed.sort_by_key(|p| !code(p));
     if asks_for_podcasts(query) {
         return;
     }
@@ -528,8 +604,13 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
             if sites.iter().any(|s| s.domain == site) {
                 // The best page about the site goes under it, unless a
                 // later one is named by the query: "google maps" carries
-                // Google Maps under google.com, not Google.
-                match placed.iter_mut().find(|p| p.under.as_deref() == Some(site)) {
+                // Google Maps under google.com, not Google. The site's
+                // own page the query names goes there too, besides it:
+                // "census population clock" carries the Population Clock.
+                let inner = hit.page.is_site_page();
+                match placed.iter_mut().find(|p| {
+                    p.under.as_deref() == Some(site) && p.hit.page.is_site_page() == inner
+                }) {
                     None => placed.push(PlacedPage {
                         under: Some(site.to_string()),
                         at: 0,
@@ -544,6 +625,16 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         // An item without an article is only told apart from its
         // namesakes by its website.
         if hit.page.set == WIKIDATA_SET {
+            continue;
+        }
+        // The site's other inner pages match the search less than the one
+        // under it.
+        let same_site = |p: &PlacedPage| {
+            p.under.is_some()
+                && p.hit.page.is_site_page()
+                && registrable_domain(&p.hit.page.url) == registrable_domain(&hit.page.url)
+        };
+        if hit.page.is_site_page() && placed.iter().any(same_site) {
             continue;
         }
         // One docs page found by its words is enough: more crowd out the

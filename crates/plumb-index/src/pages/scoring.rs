@@ -12,15 +12,15 @@ use tantivy::{TantivyDocument, Term};
 
 use super::docs::docs_asked;
 use super::page::is_item_id;
-use super::sites::base_title;
+use super::sites::{base_title, subtitle};
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
     DESCRIBED_MISSING_FROM, DESCRIBED_QUERY_WORDS, DESCRIBED_WORD, DOCS_SET, FILMS_SET, GITHUB_SET,
     LEAD_CANDIDATES, LEAD_MATCH, MUSIC_SET, OTHER_NAME_MATCH, PACKAGES_SET, PAPERS_SET,
     PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
-    REFERENCE_QUERY_WORDS, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET, TITLE_INSIDE_CANDIDATES,
-    UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
+    REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
+    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
 };
 use crate::analysis;
 
@@ -89,19 +89,21 @@ impl PageSearcher {
         );
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         // Pages with every word of the query.
-        let every_word: Vec<(Occur, Box<dyn Query>)> = words
-            .iter()
-            .map(|word| {
-                (
-                    Occur::Must,
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(self.fields.words, word),
-                        IndexRecordOption::WithFreqs,
-                    )) as Box<dyn Query>,
-                )
-            })
-            .collect();
-        clauses.push((Occur::Should, Box::new(BooleanQuery::new(every_word))));
+        let every_word = BooleanQuery::new(
+            words
+                .iter()
+                .map(|word| {
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.words, word),
+                            IndexRecordOption::WithFreqs,
+                        )) as Box<dyn Query>,
+                    )
+                })
+                .collect(),
+        );
+        clauses.push((Occur::Should, Box::new(every_word.clone())));
         // Books, podcasts, songs and albums named by their title and what
         // they are: "dune book", "hardcore history podcast", "hey jude song".
         if let Some((title, last)) = query.trim().rsplit_once(char::is_whitespace) {
@@ -150,13 +152,35 @@ impl PageSearcher {
             .into_iter()
             .map(|(_, address)| address)
             .collect();
-        for (_, address) in searcher.search(
+        let found = searcher.search(
             self.language_query(scoped_query(&BooleanQuery::new(clauses), scope).as_ref())
                 .as_ref(),
             &by_popularity(),
-        )? {
+        )?;
+        // Site pages are as popular as their sites, more than all but the
+        // most read articles: when they fill the candidates, the other
+        // pages with every word are searched apart, or an article named
+        // only by an alias ("nfl" for National Football League, "nhs") is
+        // lost behind hundreds of pages titled "NFL Scores".
+        let crowded = found.len() >= CANDIDATES;
+        for (_, address) in found {
             if !addresses.contains(&address) {
                 addresses.push(address);
+            }
+        }
+        if crowded {
+            let mut apart: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, Box::new(every_word))];
+            for set in [SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET] {
+                apart.push((Occur::MustNot, self.scope_term(&format!("set:{set}"))));
+            }
+            for (_, address) in searcher.search(
+                self.language_query(scoped_query(&BooleanQuery::new(apart), scope).as_ref())
+                    .as_ref(),
+                &by_popularity(),
+            )? {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
             }
         }
         // Books and papers named by their title and then their author:
@@ -488,6 +512,11 @@ impl PageSearcher {
                 whole,
                 learned: None,
             });
+        }
+        match words.as_slice() {
+            [word] => self.name_by_surname(word, &joined, &mut hits),
+            [title, name @ ..] => self.name_by_title(title, name, &joined, &mut hits),
+            [] => {}
         }
         let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -837,10 +866,12 @@ impl PageSearcher {
         }
         // "Mozart (film)" and "Mozart!" are no better a match for "mozart"
         // than the redirect "Mozart" to "Wolfgang Amadeus Mozart":
-        // popularity decides between them.
+        // popularity decides between them, as between "No Way Home (1996
+        // film)" and "Spider-Man: No Way Home" for "no way home".
         if key(&page.title) == joined
             || key(base_title(&page.title)) == joined
             || page.aliases.iter().any(|alias| key(alias) == joined)
+            || page.is_article() && subtitle(&page.title).is_some_and(|sub| key(sub) == joined)
         {
             return (ALIAS_MATCH, true);
         }
@@ -869,6 +900,117 @@ impl PageSearcher {
         }
         (best, false)
     }
+
+    /// Names the person a query of one `word` (whose key is `joined`) is
+    /// the surname of when Wikipedia has no redirect from it: "thatcher"
+    /// is Margaret Thatcher and "kafka" Franz Kafka, not the film Kafka.
+    /// Only when they are read [`super::SURNAME_MARGIN`] times as much as
+    /// every other article with the word in its title ("darwin" is a city
+    /// too, "ford" two presidents), and no article is called the word
+    /// ("swift", "clinton") nor a company's site ("tesla", "hilton").
+    fn name_by_surname(&self, word: &str, joined: &str, hits: &mut [PageHit]) {
+        let called =
+            |name: &str| analysis::tokens(&self.joined, name).pop().as_deref() == Some(joined);
+        let articles = || {
+            hits.iter()
+                .enumerate()
+                .filter(|(_, hit)| hit.page.is_article())
+        };
+        let taken = articles().any(|(_, hit)| {
+            std::iter::once(&hit.page.title)
+                .chain(&hit.page.aliases)
+                .any(|name| called(name))
+                || super::sites::describes_an_organization(hit.page.description.as_deref())
+                    && hit
+                        .page
+                        .site
+                        .as_deref()
+                        .and_then(|site| site.split('.').next())
+                        .is_some_and(called)
+        });
+        let titled = |hit: &PageHit| analysis::tokens(&self.words, &hit.page.title);
+        let Some((best, views)) = articles()
+            .filter(|(_, hit)| {
+                !hit.named
+                    && hit.page.is_person()
+                    && titled(hit).last().map(String::as_str) == Some(word)
+            })
+            .max_by_key(|(_, hit)| hit.page.views)
+            .map(|(at, hit)| (at, hit.page.views))
+        else {
+            return;
+        };
+        if taken
+            || articles().any(|(at, hit)| {
+                at != best
+                    && hit.page.views * super::SURNAME_MARGIN > views
+                    && titled(hit).iter().any(|title_word| title_word == word)
+            })
+        {
+            return;
+        }
+        name_by_alias(&mut hits[best]);
+    }
+
+    /// Names the person a `title` and words of their `name` call when no
+    /// article is called the whole query (whose key is `joined`): "sir
+    /// isaac newton" is Isaac Newton, "president obama" Barack Obama,
+    /// "princess diana" Diana, Princess of Wales, not the song. Every word
+    /// of the name must be in the person's title or another name, and an
+    /// office ([`super::OFFICES`]) in their title or description. Only
+    /// when they are read [`super::SURNAME_MARGIN`] times as much as every
+    /// other article that fits: "president bush" is two presidents.
+    fn name_by_title(&self, title: &str, name: &[String], joined: &str, hits: &mut [PageHit]) {
+        let office = super::OFFICES.contains(&title);
+        if !office && !super::HONORIFICS.contains(&title) {
+            return;
+        }
+        let words = |text: &str| analysis::tokens(&self.words, text);
+        let fits = |page: &Page| {
+            let names: HashSet<String> = std::iter::once(&page.title)
+                .chain(&page.aliases)
+                .flat_map(|text| words(text))
+                .collect();
+            let said = || {
+                words(&page.title)
+                    .into_iter()
+                    .chain(words(page.description.as_deref().unwrap_or("")))
+                    .any(|word| word == title)
+            };
+            page.is_article() && name.iter().all(|word| names.contains(word)) && (!office || said())
+        };
+        let called =
+            |text: &str| analysis::tokens(&self.joined, text).pop().as_deref() == Some(joined);
+        if hits.iter().any(|hit| {
+            hit.page.is_article()
+                && std::iter::once(&hit.page.title)
+                    .chain(&hit.page.aliases)
+                    .any(|text| called(text))
+        }) {
+            return;
+        }
+        let Some((best, views)) = hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| !hit.named && hit.page.is_person() && fits(&hit.page))
+            .max_by_key(|(_, hit)| hit.page.views)
+            .map(|(at, hit)| (at, hit.page.views))
+        else {
+            return;
+        };
+        if hits.iter().enumerate().any(|(at, hit)| {
+            at != best && hit.page.views * super::SURNAME_MARGIN > views && fits(&hit.page)
+        }) {
+            return;
+        }
+        name_by_alias(&mut hits[best]);
+    }
+}
+
+/// Marks `hit` named by the query and scores it as if by an alias.
+fn name_by_alias(hit: &mut PageHit) {
+    hit.named = true;
+    hit.score = ALIAS_MATCH * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity);
 }
 
 /// Folds the films and shows in `hits` that English Wikipedia has an

@@ -139,6 +139,13 @@ impl Page {
         self.set.starts_with("wikipedia-")
     }
 
+    /// Whether the page is about a person: it has a birth date.
+    pub fn is_person(&self) -> bool {
+        self.facts
+            .iter()
+            .any(|fact| fact.kind == plumb_core::facts::FactKind::Born)
+    }
+
     /// Whether the page is a question, of Stack Overflow or another Stack
     /// Exchange site.
     pub fn is_question(&self) -> bool {
@@ -358,7 +365,7 @@ impl Page {
     /// Whether the page is an inner page of a site of the reference or
     /// subpages set, found by the same rules.
     pub fn is_site_page(&self) -> bool {
-        self.set == REFERENCE_SET || self.set == REFERENCE2_SET || self.set == SUBPAGES_SET
+        is_site_page_set(&self.set)
     }
 
     /// The host of a docs, reference or subpages page's address, without
@@ -752,6 +759,12 @@ impl Page {
             "wikipedia.org"
         }
     }
+}
+
+/// Whether `set` holds inner pages of sites, of the reference or
+/// subpages sets ([`Page::is_site_page`]).
+pub(crate) fn is_site_page_set(set: &str) -> bool {
+    set == REFERENCE_SET || set == REFERENCE2_SET || set == SUBPAGES_SET
 }
 
 /// Whether `id` is a Wikidata item's: `Q25188`.

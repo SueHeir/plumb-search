@@ -145,10 +145,7 @@ impl Mcp {
             // "fastapi docs" is not "fastai docs".
             results.spelling = None;
         }
-        let places = if sites_only
-            || plumb_core::Operators::parse(query).any()
-            || plumb_index::places::parse_place_query(query).is_none()
-        {
+        let places = if sites_only || plumb_core::Operators::parse(query).any() {
             None
         } else {
             crate::assembly::places(
@@ -192,7 +189,12 @@ impl Mcp {
             query,
             i64::try_from(now).unwrap_or(i64::MAX),
             self.rates.as_ref(),
-        );
+        )
+        .or_else(|| {
+            let town = plumb_answer::asked_town(query)?;
+            let place = self.backend.locate(&town, options.country.as_deref())?;
+            crate::web::answers::time_in_place(&place)
+        });
         crate::assembly::route_sources(
             query,
             answer.as_ref().map(|a| a.kind),
@@ -339,7 +341,7 @@ impl Mcp {
                     .map(|hit| (hit.domain.as_str(), hit.named));
                 crate::assembly::recent(
                     query,
-                    node.recent(query, top),
+                    node.recent(query, top, options.language.as_deref()),
                     options,
                     limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
                     |domain| node.blocks_adult(domain),
