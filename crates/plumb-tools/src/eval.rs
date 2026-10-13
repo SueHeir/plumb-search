@@ -1150,11 +1150,13 @@ fn profile_shown(
         if !answers::searches_songs(query, &resolution) {
             continue;
         }
-        let mut sites = searcher.search_meaning(&name, 5, cfg, &options, None)?;
-        pages.note_demand(&mut sites.hits)?;
-        let found = place_pages(&name, &sites.hits, pages.search(&name, 10)?);
-        if let Some(profile) = answers::songs_profile(query, &resolution, found) {
-            return Ok(Some(profile.url));
+        for lookup in answers::song_lookups(&name, &resolution) {
+            let mut sites = searcher.search_meaning(&lookup, 5, cfg, &options, None)?;
+            pages.note_demand(&mut sites.hits)?;
+            let found = place_pages(&lookup, &sites.hits, pages.search(&lookup, 10)?);
+            if let Some(profile) = answers::songs_profile(query, &resolution, found) {
+                return Ok(Some(profile.url));
+            }
         }
     }
     Ok(None)

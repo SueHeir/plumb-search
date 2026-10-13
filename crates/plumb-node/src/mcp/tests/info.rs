@@ -693,6 +693,42 @@ fn lyrics_come_from_the_song_asked_for() {
         )],
     };
     assert!(lyrics(pyramid, "pyramid song lyrics").is_null());
+    // "Africa (song)" is Toto's, and other pages of Africa fill a search
+    // of "africa song", so the song is looked for by title and maker.
+    let africa = || {
+        vec![
+            article("Africa", "Q15", "Continent"),
+            article("Africa (song)", "Q1144706", "1982 single by Toto"),
+            article(
+                "Africa (Rose Laurens song)",
+                "Q2827044",
+                "1982 single by Rose Laurens",
+            ),
+        ]
+    };
+    let toto = Profiles {
+        articles: africa(),
+        songs: vec![
+            (
+                "africa song",
+                song("Africa", "Weezer", "Weezer-africa-lyrics"),
+            ),
+            ("Africa Toto", song("Africa", "Toto", "Toto-africa-lyrics")),
+        ],
+    };
+    assert_eq!(
+        lyrics(toto, "africa lyrics")["url"],
+        "https://genius.com/Toto-africa-lyrics"
+    );
+    // Another band's song of the title is never the article's.
+    let cover = Profiles {
+        articles: africa(),
+        songs: vec![(
+            "africa song",
+            song("Africa", "Weezer", "Weezer-africa-lyrics"),
+        )],
+    };
+    assert!(lyrics(cover, "africa lyrics").is_null());
 }
 
 #[test]

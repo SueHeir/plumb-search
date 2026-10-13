@@ -598,10 +598,15 @@ pub(crate) async fn extras(
             continue;
         }
         // MusicBrainz songs have no Wikidata ID.
-        profile = run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
-            .await
-            .ok()
-            .and_then(|found| answers::songs_profile(query, &resolution, found.pages));
+        for lookup in answers::song_lookups(&name, &resolution) {
+            profile = run_search(state, &lookup, PROFILE_SEARCH_LIMIT, options)
+                .await
+                .ok()
+                .and_then(|found| answers::songs_profile(query, &resolution, found.pages));
+            if profile.is_some() {
+                break;
+            }
+        }
         if profile.is_some() {
             break;
         }

@@ -480,11 +480,71 @@ pub fn searches_songs(query: &str, resolution: &EntityResolution) -> bool {
     })
 }
 
+/// The searches for the songs a lookup `name` may be ([`songs_profile`]),
+/// once the article it names resolved as `resolution`: first a song's
+/// title and maker, when the article is on a song ("africa toto" for
+/// "1982 single by Toto"), as other songs of its title can fill a search
+/// of the name ("africa song"), then the name.
+pub fn song_lookups(name: &str, resolution: &EntityResolution) -> Vec<String> {
+    let mut lookups = Vec::new();
+    if let EntityResolution::Resolved(page) = resolution {
+        if let Some(by) = song_by(page) {
+            let title = plumb_index::pages::base_title(&page.title);
+            lookups.push(format!("{title} {by}"));
+        }
+    }
+    lookups.push(name.to_string());
+    lookups
+}
+
+/// Who made the song `page` is on, as its description says, the main
+/// artist alone: "Toto" of Wikipedia's "1982 single by Toto" and of
+/// MusicBrainz's "Song by Toto, 1982", "Beyoncé" of "Song by Beyoncé
+/// feat. JAY-Z". `None` for anything but a song.
+fn song_by(page: &Page) -> Option<&str> {
+    let description = page.description.as_deref()?;
+    let by = if page.set == MUSIC_SET {
+        description.strip_prefix("Song by ")?
+    } else {
+        let (by, asked) = plumb_index::pages::made_by(description)?;
+        if !asked.contains(&"song") {
+            return None;
+        }
+        by
+    };
+    let by = by
+        .rsplit_once(", ")
+        .filter(|(_, year)| year.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(by, |(name, _)| name);
+    let by = [" feat. ", " ft. ", " featuring "]
+        .iter()
+        .find_map(|joiner| by.split_once(joiner))
+        .map_or(by, |(main, _)| main);
+    Some(by.trim())
+}
+
+/// Whether two songs' makers ([`song_by`]) are the same, or one is the
+/// other with more said, whatever "the" and "and" they are said with:
+/// "the Beatles" and "The Beatles", "Bruce Springsteen" and "Bruce
+/// Springsteen and the E Street Band".
+fn same_maker(one: &str, other: &str) -> bool {
+    let words = |name: &str| -> Vec<String> {
+        plumb_core::normalize_text(name)
+            .split(' ')
+            .filter(|word| !matches!(*word, "the" | "and"))
+            .map(str::to_string)
+            .collect()
+    };
+    let (one, other) = (words(one), words(other));
+    !one.is_empty() && !other.is_empty() && (one.starts_with(&other) || other.starts_with(&one))
+}
+
 /// The profile `query` asks for of a song or album among `found`, what a
 /// search for a lookup found ([`searches_songs`]). When the lookup's
-/// article resolved as `resolution`, the song must have its title: a
-/// search for "pyramid song", Radiohead's "Pyramid Song", finds
-/// Wolfmother's "Pyramid" as a song too.
+/// article resolved as `resolution`, the song must have its title, and
+/// its maker when the article says who that is: a search for "pyramid
+/// song", Radiohead's "Pyramid Song", finds Wolfmother's "Pyramid" as a
+/// song too, and one for Adele's "Hello" finds Oasis's.
 pub fn songs_profile(
     query: &str,
     resolution: &EntityResolution,
@@ -494,10 +554,14 @@ pub fn songs_profile(
     let songs: Vec<PlacedPage> = found
         .into_iter()
         .filter(|placed| {
-            placed.hit.page.set == MUSIC_SET
+            let song = &placed.hit.page;
+            song.set == MUSIC_SET
                 && match resolution {
                     EntityResolution::Resolved(page) => {
-                        title(&placed.hit.page.title) == title(&page.title)
+                        title(&song.title) == title(&page.title)
+                            && song_by(page).is_none_or(|by| {
+                                song_by(song).is_some_and(|other| same_maker(by, other))
+                            })
                     }
                     _ => true,
                 }
@@ -2142,5 +2206,28 @@ mod tests {
             },
         );
         assert!(html.contains("&lt;i&gt;") && html.contains("&amp;"));
+    }
+
+    #[test]
+    fn song_makers_are_read_from_descriptions() {
+        let by = |set: &str, description: &str| {
+            let mut page = article("Song", description, None).page;
+            page.set = set.to_string();
+            song_by(&page).map(str::to_string)
+        };
+        assert_eq!(by("wikipedia-en", "1982 single by Toto").unwrap(), "Toto");
+        assert_eq!(by(MUSIC_SET, "Song by Toto, 1982").unwrap(), "Toto");
+        assert_eq!(
+            by(MUSIC_SET, "Song by Beyoncé feat. JAY-Z").unwrap(),
+            "Beyoncé"
+        );
+        assert!(by("wikipedia-en", "1997 studio album by Radiohead").is_none());
+        assert!(by(MUSIC_SET, "Album by Radiohead, 1997").is_none());
+        assert!(same_maker("the Beatles", "The Beatles"));
+        assert!(same_maker(
+            "Bruce Springsteen",
+            "Bruce Springsteen and the E Street Band"
+        ));
+        assert!(!same_maker("Adele", "Oasis"));
     }
 }
