@@ -66,6 +66,50 @@ fn words_that_say_what_is_wanted_keep_the_name() {
 }
 
 #[test]
+fn fact_questions_find_the_article_they_ask_about() {
+    let described = |title: &str, views: u64, description: &str| {
+        let mut page = page(title, views, &[]);
+        page.description = Some(description.into());
+        page
+    };
+    let (_dir, s) = searcher(&[
+        page("Isaac Newton", 400_000, &[]),
+        described(
+            "Hannah Ayscough",
+            3_000,
+            "Mother of Sir Isaac Newton (1616–1679)",
+        ),
+        described(
+            "Nate Newton (American football)",
+            5_000,
+            "American football player (born 1961)",
+        ),
+        page("Mont Blanc", 60_000, &[]),
+        described("SS Mont-Blanc", 8_000, "French cargo ship"),
+        page("Age of Empires", 80_000, &[]),
+        page("Empires (film)", 2_000, &[]),
+    ]);
+    let first = |q: &str| {
+        let hits = s.search(q, 5).unwrap();
+        hits.first().map(|h| (h.page.title.clone(), h.named))
+    };
+    assert_eq!(
+        first("when was isaac newton born"),
+        Some(("Isaac Newton".into(), true))
+    );
+    assert_eq!(
+        first("how high is mont blanc"),
+        Some(("Mont Blanc".into(), true))
+    );
+    // A query that names something is not a question about its last words.
+    let hits = s.search("age of empires", 5).unwrap();
+    assert_eq!(hits[0].page.title, "Age of Empires");
+    assert!(!hits
+        .iter()
+        .any(|h| h.page.title == "Empires (film)" && h.named));
+}
+
+#[test]
 fn articles_whose_title_is_part_of_the_query_are_found() {
     let (_dir, s) = searcher(&[
         page("Titanic", 400_000, &["RMS Titanic"]),
