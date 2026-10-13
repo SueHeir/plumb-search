@@ -526,6 +526,30 @@ fn a_site_s_name_typed_stays_unless_a_far_better_known_one_is_meant() {
 }
 
 #[test]
+fn a_known_word_that_names_a_site_is_still_a_slip_of_a_better_known_name() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "capitol.example",
+        Some("Capitol"),
+        None,
+        &[],
+        &[],
+        ranked(2_000, 5_000),
+    ));
+    let (_dir, searcher) = build(&records);
+    let score = |domain: &str| searcher.site(domain).unwrap().unwrap().link_score;
+    let (typed, meant) = (score("capitol.example"), score("capitalone.com"));
+    assert!(
+        typed < meant && meant < typed + crate::search::TYPO_POPULARITY_MARGIN,
+        "{typed} {meant}"
+    );
+    assert_eq!(
+        suggestion(&search_spelled(&searcher, "capitol one")),
+        suggested("capital one")
+    );
+}
+
+#[test]
 fn known_words_and_short_words_are_left_alone() {
     let (_dir, searcher) = build(&typo_corpus());
     // piazza.com is a letter away, but pizza is a word the index knows.

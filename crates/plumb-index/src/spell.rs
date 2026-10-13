@@ -445,10 +445,16 @@ impl Speller<'_> {
                     // correction's has TYPO_POPULARITY_MARGIN more link
                     // score, as a name typed in full does: "lyft app" is
                     // not "syft app", nor "plagiarisma checker" (0.25)
-                    // "plagiarism checker" (0.42).
-                    if !within_edits(word, fixed)
-                        || self.names_a_site(word, score - TYPO_POPULARITY_MARGIN, link_score)?
-                    {
+                    // "plagiarism checker" (0.42). A word the index knows
+                    // as a word needs only a better-known correction:
+                    // "capitol one" is Capital One, though a site is called
+                    // Capitol.
+                    let least = if self.docs_with(word)? >= KNOWN_WORD_DOCS {
+                        score.max(MIN_FIX_LINK_SCORE)
+                    } else {
+                        score - TYPO_POPULARITY_MARGIN
+                    };
+                    if !within_edits(word, fixed) || self.names_a_site(word, least, link_score)? {
                         plausible = false;
                         break;
                     }
