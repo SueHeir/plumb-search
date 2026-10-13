@@ -16,7 +16,7 @@ use tantivy::query::TermQuery;
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{DocAddress, Index, ReloadPolicy, TantivyDocument, Term};
 
-use crate::hits::{docs_site_first, hit_texts, suggested_site_second};
+use crate::hits::{docs_site_first, hit_texts, look_alikes, suggested_site_second};
 use crate::names::without_intent_words;
 use crate::query::{matching_docs, words_after, ParsedQuery};
 use crate::rank::{best_link_score, bm25_of, domain_of};
@@ -318,7 +318,14 @@ impl Searcher {
                         }
                     }
                 }
-                let mut hits: Vec<Hit> = best.into_values().collect();
+                let hits: Vec<Hit> = best.into_values().collect();
+                // paypal-login.us goes, now that paypal.com is here too.
+                let look_alike = look_alikes(&hits, query_text, None);
+                let mut hits: Vec<Hit> = hits
+                    .into_iter()
+                    .zip(look_alike)
+                    .filter_map(|(hit, look_alike)| (!look_alike).then_some(hit))
+                    .collect();
                 hits.sort_by(|a, b| {
                     b.score
                         .total_cmp(&a.score)
