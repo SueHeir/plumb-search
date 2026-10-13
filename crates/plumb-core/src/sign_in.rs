@@ -107,6 +107,21 @@ fn is_sign_in_address(url: &str) -> bool {
 /// than 3 letters name nothing ("v8 login" does not name v8engines.com),
 /// and nor do the [`SIGN_IN`] words.
 pub fn names_label(query: &str, domain: &str) -> bool {
+    label_runs(query, domain, |run, label| {
+        run.len() >= 3 && label.starts_with(run)
+    })
+}
+
+/// Whether some of `query`'s words in a row, joined, are a whole label of
+/// `domain`: "mataram toto" spells mataramtoto.com and "cbs sportsline"
+/// sportsline.com, but "netflix login" does not spell netflixtotoutama.com.
+pub fn spells_label(query: &str, domain: &str) -> bool {
+    label_runs(query, domain, |run, label| run == label)
+}
+
+/// Whether `matches` some run of `query`'s words in a row, joined, and a
+/// label of `domain` short of its ending, leaving out the [`SIGN_IN`] words.
+fn label_runs(query: &str, domain: &str, matches: impl Fn(&str, &str) -> bool) -> bool {
     // Not the ending: "net" names no .net site.
     let suffix = registrable_domain(domain)
         .and_then(|site| site.split_once('.').map(|(_, suffix)| format!(".{suffix}")))
@@ -132,7 +147,7 @@ pub fn names_label(query: &str, domain: &str) -> bool {
         let mut run = String::new();
         words[start..].iter().any(|word| {
             run.push_str(word);
-            run.len() >= 3 && labels.iter().any(|label| label.starts_with(&run))
+            labels.iter().any(|label| matches(&run, label))
         })
     })
 }
@@ -206,5 +221,14 @@ mod tests {
         assert!(names_label("uc davis canvas login", "canvas.ucdavis.edu"));
         assert!(!names_label("att net account login", "datahub.net"));
         assert!(!names_label("bank online login", "datahubnet.online"));
+    }
+
+    #[test]
+    fn a_query_spells_a_label_by_its_words_in_a_row() {
+        assert!(spells_label("mataram toto", "mataramtoto.com"));
+        assert!(spells_label("cbs sportsline", "sportsline.com"));
+        assert!(spells_label("lazybar", "lazy-bar.example"));
+        assert!(!spells_label("netflix login", "netflixtotoutama.com"));
+        assert!(!spells_label("ebay com", "slots.com"));
     }
 }
