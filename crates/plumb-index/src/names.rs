@@ -224,6 +224,32 @@ impl Searcher {
         Ok((named, by_alias))
     }
 
+    /// Whether the document's title has the first `words` words of
+    /// `query`: wimbledon.com, "The Championships, Wimbledon", calls itself
+    /// what "wimbledon final" starts with, and a site that has the word
+    /// only for its domain doesn't.
+    pub(crate) fn titled_by_first_words(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+        query: &str,
+        words: usize,
+    ) -> Result<bool> {
+        let first: Vec<String> = analysis::tokens(&self.words, query)
+            .into_iter()
+            .take(words)
+            .collect();
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let titled = doc
+            .get_all(self.fields.title)
+            .filter_map(|value| value.as_str())
+            .any(|title| {
+                let title = analysis::tokens(&self.words, title);
+                first.iter().all(|word| title.contains(word))
+            });
+        Ok(titled)
+    }
+
     /// Whether the document's title, description or Wikidata description
     /// holds `words` consecutive words whose [`kind_key`] is `key`.
     pub(crate) fn describes_itself_as(
