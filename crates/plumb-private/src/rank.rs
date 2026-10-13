@@ -292,7 +292,13 @@ fn rank_words(
     let words = query.len as f32;
 
     let mut ranked = Vec::new();
-    let language = options.language.as_deref().and_then(language_code);
+    // As on a node, no filter for a query written in a script the language
+    // is not: "楽天市場" with English chosen is for Japanese sites.
+    let language = options
+        .language
+        .as_deref()
+        .filter(|wanted| !plumb_core::written_outside(wanted, query_text))
+        .and_then(language_code);
     for (i, site) in sites.iter().enumerate() {
         if options.safe.hides(record_adult_level(site)) {
             continue;
@@ -305,8 +311,14 @@ fn rank_words(
             site.description.as_deref().unwrap_or_default()
         );
         let site_language = site_language(site.language.as_deref(), &written);
+        // A site the query names stays whatever its language, as on a node:
+        // its domain, or two words or more of a well-known site's name
+        // ("real madrid tickets").
+        let known_name = name.typed
+            || name.label >= query.len
+            || name.words() >= 2 && link_scores[i] >= WELL_KNOWN_LINK_SCORE;
         if let (Some(wanted), Some(site)) = (&language, &site_language) {
-            if !language_fits(wanted, site) && !name.typed && name.label < query.len {
+            if !language_fits(wanted, site) && !known_name {
                 continue;
             }
         }
