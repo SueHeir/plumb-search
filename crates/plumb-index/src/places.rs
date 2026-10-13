@@ -630,20 +630,26 @@ impl PlaceSearcher {
         }
     }
 
-    /// `found`, unless it found nothing and what it looked for is neither
-    /// a kind of place nor the name of a place other than a town: "sort a
-    /// list in python" and "how many ounces in a cup" ask for no place,
-    /// while "pizza in gotham" does. Near me is always a place search, so
-    /// one that finds nothing still says so.
+    /// `found`, unless it found nothing and what it looked for is no kind
+    /// of place: "sort a list in python", "keel in english" and "calories
+    /// in a shot" ask for no place, while "pizza in gotham" does. A place's
+    /// name still asks when the town is one of several, so the choice is
+    /// offered ("starbucks in portland"), and near me always does, so one
+    /// that finds nothing still says so.
     fn asks_for_places(&self, found: PlaceResults) -> Result<Option<PlaceResults>> {
         let kind = found.what.rsplit(' ').next().is_some_and(is_kind_word);
+        let choice = found
+            .location
+            .as_ref()
+            .is_some_and(|location| location.status == LocationStatus::AmbiguousLocation);
         if found.hits.is_empty()
             && !found.near_me
             && !kind
-            && !self
-                .named(&found.what)?
-                .iter()
-                .any(|place| !place.is_town())
+            && !(choice
+                && self
+                    .named(&found.what)?
+                    .iter()
+                    .any(|place| !place.is_town()))
         {
             return Ok(None);
         }
@@ -1662,6 +1668,13 @@ mod tests {
                 region: Some("CT".into()),
                 ..at("Portland", "place=town", 41.57, -72.64)
             },
+            // A village called English, and a pub called Keel far from it.
+            Place {
+                rank: place_rank("place=village", 600, false, false, 3),
+                region: Some("IN".into()),
+                ..at("English", "place=village", 38.33, -86.46)
+            },
+            at("Keel", "amenity=pub", 53.97, -10.08),
         ]);
         let (_dir, searcher) = index(fixtures);
         for query in [
@@ -1669,12 +1682,16 @@ mod tests {
             "sort a list in python",
             "workout app",
             "stock market",
+            "keel in english",
+            "blue pan in python",
+            "blue pan in gotham",
         ] {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_none(), "{query}: {found:?}");
         }
-        // A kind of place, or a place's name, is still looked for.
-        for query in ["pizza in python", "blue pan in python"] {
+        // A kind of place is still looked for, and so is a place's name in
+        // one of several towns.
+        for query in ["pizza in python", "pizza in gotham", "blue pan in portland"] {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_some(), "{query}");
         }
