@@ -879,18 +879,24 @@ pub fn resolve_entity<'a>(
             .iter()
             .any(|kind| matches!(kind, FactKind::Founder | FactKind::Founded))
     }) {
-        // Compact records lack structured entity types. A founding
-        // question cannot prefer the plain title or a legal company name
-        // over another entity known by the same name. Ask for clarification
-        // rather than infer a type from a special-case description word.
+        // Compact records lack structured entity types, so a founding
+        // question infers none from a description word: among the entities
+        // known by the same name, only Wikipedia's main sense of it answers
+        // ([`main_sense`]), else it asks. Known by the same name is by title
+        // (less a bracketed qualifier), legal name or redirect. A name
+        // spelled otherwise ("Face book", "Google+") is not, though a search
+        // for the name finds it.
+        let unqualified = |title: &str| match title.strip_suffix(')') {
+            Some(rest) => key(rest.rsplit_once(" (").map_or(title, |(name, _)| name)),
+            None => key(title),
+        };
         let named: Vec<_> = candidates
             .iter()
             .copied()
             .filter(|hit| {
-                key(&hit.page.title) == subject
+                unqualified(&hit.page.title) == subject
                     || legal_name(&hit.page.title) == subject
-                    || hit.named
-                    || hit.whole
+                    || hit.page.aliases.iter().any(|alias| key(alias) == subject)
             })
             .collect();
         if named.len() > 1 {
@@ -1640,6 +1646,56 @@ mod tests {
         assert!(matches!(
             resolve_entity("einstein", &qualified, None),
             EntityResolution::Ambiguous(_)
+        ));
+    }
+
+    #[test]
+    fn founding_questions_pass_over_namesakes_spelled_otherwise() {
+        use plumb_core::facts::{fact_asked, FactKind::Founder};
+        let mut service = with_facts(
+            article("Vorlink", "social media platform", None),
+            &[(Founder, "Example founder")],
+        );
+        service.page.item = Some("Q910021".into());
+        let mut split = article("Vor link", "television series", None);
+        split.page.item = Some("Q910022".into());
+        split.whole = true;
+        let mut plus = article("Vorlink+", "defunct service", None);
+        plus.page.item = Some("Q910023".into());
+        let mut domain = article(".vorlink", "top-level domain", None);
+        domain.page.item = Some("Q910024".into());
+        let asked = fact_asked("who founded vorlink").unwrap();
+        for candidates in [
+            [split.clone(), plus.clone(), domain.clone(), service.clone()],
+            [service.clone(), split.clone(), plus.clone(), domain.clone()],
+        ] {
+            let EntityResolution::Resolved(page) =
+                resolve_entity(&asked.subject, &candidates, Some(&asked.kinds))
+            else {
+                panic!("names spelled otherwise must not make vorlink ambiguous");
+            };
+            assert_eq!(
+                fact_answer_from_page(&asked, page, 0).unwrap().answer,
+                "Example founder"
+            );
+        }
+        // A bracketed qualifier leaves the same name, and the plain title is
+        // its main sense; a redirect leaves the same name too.
+        let mut song = article("Vorlink (song)", "single", None);
+        song.page.item = Some("Q910025".into());
+        let candidates = [song, service.clone()];
+        let EntityResolution::Resolved(page) =
+            resolve_entity(&asked.subject, &candidates, Some(&asked.kinds))
+        else {
+            panic!("the plain title is the main sense");
+        };
+        assert_eq!(page.item.as_deref(), Some("Q910021"));
+        let mut renamed = article("Vorlink Group", "company", None);
+        renamed.page.item = Some("Q910026".into());
+        renamed.page.aliases = vec!["Vorlink".into()];
+        assert!(matches!(
+            resolve_entity(&asked.subject, &[service, renamed], Some(&asked.kinds)),
+            EntityResolution::Ambiguous(found) if found.len() == 2
         ));
     }
 
