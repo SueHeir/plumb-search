@@ -11,7 +11,7 @@ use super::{Page, PageSearcher, TITLE_CANDIDATES};
 
 /// `title` without a trailing qualifier in brackets: `Python (programming
 /// language)` -> `Python`.
-pub(crate) fn base_title(title: &str) -> &str {
+pub fn base_title(title: &str) -> &str {
     match title.rfind(" (") {
         Some(i) if title.ends_with(')') && i > 0 => &title[..i],
         _ => title,

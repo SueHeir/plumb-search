@@ -12,7 +12,8 @@ use plumb_core::{
     Operators,
 };
 use tantivy::collector::TopDocs;
-use tantivy::schema::Value;
+use tantivy::query::TermQuery;
+use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{DocAddress, Index, ReloadPolicy, TantivyDocument, Term};
 
 use crate::hits::{docs_site_first, hit_texts, suggested_site_second};
@@ -48,7 +49,7 @@ impl Searcher {
     pub fn open(dir: &Path) -> Result<Self> {
         let index = Index::open_in_dir(dir)
             .with_context(|| format!("opening search index in {}", dir.display()))?;
-        analysis::register(index.tokenizers());
+        analysis::register_sites(index.tokenizers());
         if !schema::readable(&index.schema()) {
             bail!(
                 "the index in {} was built by another version of plumb-index; rebuild it",
@@ -100,6 +101,23 @@ impl Searcher {
     pub fn has_domain(&self, domain: &str) -> bool {
         let term = Term::from_field_text(self.fields.domain, domain);
         self.reader.searcher().doc_freq(&term).is_ok_and(|n| n > 0)
+    }
+
+    /// The language `domain`'s homepage says it is in
+    /// ([`plumb_core::SiteRecord::language`]), when the index holds the site
+    /// and knows it.
+    pub fn language(&self, domain: &str) -> Option<String> {
+        let searcher = self.reader.searcher();
+        let term = Term::from_field_text(self.fields.domain, domain);
+        let found = searcher
+            .search(
+                &TermQuery::new(term, IndexRecordOption::Basic),
+                &TopDocs::with_limit(1).order_by_score(),
+            )
+            .ok()?;
+        let document: TantivyDocument = searcher.doc(found.first()?.1).ok()?;
+        let language = document.get_first(self.fields.language)?.as_str()?;
+        (!language.is_empty()).then(|| language.to_string())
     }
 
     /// The site `domain`, a canonical domain, as a result no query found:

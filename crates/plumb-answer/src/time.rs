@@ -1,12 +1,13 @@
 //! The time in a place: `time in tokyo`, `what time is it in paris`,
 //! `london time`; and a time somewhere in another place: `3pm est to pst`,
-//! `15:00 london in tokyo`.
+//! `15:00 london in tokyo`. A town not in the list in `places.rs` is
+//! looked up by the caller ([`asked_town`], [`time_in_town`]).
 
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, Zoned};
 
 use crate::units::sides;
-use crate::{places, simplify, Answer, Kind};
+use crate::{places, simplify, zones, Answer, Kind};
 
 /// A place's name as shown and its time zone.
 struct Place {
@@ -16,7 +17,7 @@ struct Place {
 
 /// The place `name` (simplified) names: a known place or zone name, an
 /// IANA zone (`europe/berlin`), or an offset (`utc+5:30`).
-fn place(name: &str) -> Option<Place> {
+fn place(name: &str, now: Timestamp) -> Option<Place> {
     let name = name
         .trim()
         .trim_start_matches("the ")
@@ -24,20 +25,21 @@ fn place(name: &str) -> Option<Place> {
     if name.is_empty() {
         return None;
     }
-    if let Some((shown, zone)) = places::find(name) {
-        return Some(Place {
-            shown: shown.to_string(),
-            zone: TimeZone::get(zone).ok()?,
-        });
+    if let Some(place) = known(name) {
+        return Some(place);
     }
-    // "Paris, France": the part before the comma.
-    if let Some((first, _)) = name.split_once(',') {
-        if let Some((shown, zone)) = places::find(first.trim()) {
-            return Some(Place {
-                shown: shown.to_string(),
-                zone: TimeZone::get(zone).ok()?,
-            });
-        }
+    // "Paris, France", "St. John's Newfoundland": a place and where it
+    // is, when the second keeps the same time, if this list knows it.
+    // "Paris, Texas" is no Paris this list knows.
+    let split = name.split_once(',').or_else(|| {
+        name.rsplit_once(' ')
+            .filter(|(_, region)| known(region).is_some())
+    });
+    if let Some((town, region)) = split {
+        let place = known(town.trim())?;
+        let agrees = known(region.trim())
+            .is_none_or(|region| zones::same_clock(&region.zone, &place.zone, now));
+        return agrees.then_some(place);
     }
     if name.contains('/') {
         let zone = TimeZone::get(name).ok()?;
@@ -79,6 +81,15 @@ fn place(name: &str) -> Option<Place> {
     None
 }
 
+/// A place in the list of places, and its zone.
+fn known(name: &str) -> Option<Place> {
+    let (shown, zone) = places::find(name)?;
+    Some(Place {
+        shown: shown.to_string(),
+        zone: TimeZone::get(zone).ok()?,
+    })
+}
+
 /// `+9`, `+5:30`, `-3`, or nothing for UTC itself.
 fn offset_text(seconds: i32) -> String {
     if seconds == 0 {
@@ -111,8 +122,9 @@ fn zone_text(time: &Zoned) -> String {
     }
 }
 
-/// The place a question about the time now is about, if `text` asks one.
-fn asked_place(text: &str) -> Option<&str> {
+/// The place a question about the time now is about, if `text` asks one,
+/// and whether it surely names a place: "boulder time" may be a band.
+fn asked_place(text: &str) -> Option<(&str, bool)> {
     for prefix in [
         "what time is it in ",
         "what time is it at ",
@@ -133,7 +145,7 @@ fn asked_place(text: &str) -> Option<&str> {
         "time zone ",
     ] {
         if let Some(place) = text.strip_prefix(prefix) {
-            return Some(place);
+            return Some((place, true));
         }
     }
     for suffix in [
@@ -145,7 +157,7 @@ fn asked_place(text: &str) -> Option<&str> {
         " time",
     ] {
         if let Some(place) = text.strip_suffix(suffix) {
-            return Some(place);
+            return Some((place, suffix != " time"));
         }
     }
     None
@@ -198,7 +210,7 @@ fn time_of_day(text: &str) -> Option<((i8, i8), &str)> {
 pub(crate) fn answer(query: &str, now: i64) -> Option<Answer> {
     let text = simplify(query);
     let now = Timestamp::from_second(now).ok()?;
-    if let Some(answer) = asked_place(&text).and_then(|name| time_in(name, now)) {
+    if let Some(answer) = asked_place(&text).and_then(|(name, _)| time_in(name, now)) {
         return Some(answer);
     }
     sides(&text)
@@ -207,25 +219,59 @@ pub(crate) fn answer(query: &str, now: i64) -> Option<Answer> {
 }
 
 fn time_in(name: &str, now: Timestamp) -> Option<Answer> {
-    let place = place(name)?;
-    let time = now.to_zoned(place.zone);
-    Some(Answer {
+    let place = place(name, now)?;
+    Some(time_answer(&place.shown, now.to_zoned(place.zone)))
+}
+
+/// The town a question about the time surely asks about ("time in
+/// boulder", "what time is it in hobart", not "boulder time"), for a
+/// caller that can look up towns [`crate::answer`] does not know.
+pub fn asked_town(query: &str) -> Option<String> {
+    let text = simplify(query);
+    let (name, surely) = asked_place(&text)?;
+    let name = name.trim().trim_end_matches(" now");
+    (surely && !name.is_empty()).then(|| name.to_string())
+}
+
+/// A town found by the caller, for [`time_in_town`].
+pub struct Town<'a> {
+    /// As the answer names it: "Boulder, CO".
+    pub shown: &'a str,
+    /// Its country's two-letter code.
+    pub country: &'a str,
+    /// Its state or region, as its address gives it.
+    pub region: Option<&'a str>,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// The time in `town`, when the clock it keeps can be told from its
+/// country or state (see `zones.rs`).
+pub fn time_in_town(town: &Town, now: i64) -> Option<Answer> {
+    let now = Timestamp::from_second(now).ok()?;
+    let zone = zones::town_zone(town.country, town.region, town.lat, town.lon, now)?;
+    Some(time_answer(town.shown, now.to_zoned(zone)))
+}
+
+/// "Time in Tokyo, Japan: 12:45 PM".
+fn time_answer(shown: &str, time: Zoned) -> Answer {
+    Answer {
         kind: Kind::Time,
-        question: format!("Time in {}", place.shown),
+        question: format!("Time in {shown}"),
         answer: clock(&time),
         note: Some(format!(
             "{} · {}",
             time.strftime("%A, %B %-d, %Y"),
             zone_text(&time)
         )),
-    })
+    }
 }
 
 /// "3pm est to pst": the time `from` (a time and a place) in the place `to`.
 fn time_from(from: &str, to: &str, now: Timestamp) -> Option<Answer> {
     let ((hour, minute), from_place) = time_of_day(from)?;
-    let from_place = place(from_place)?;
-    let to_place = place(to)?;
+    let from_place = place(from_place, now)?;
+    let to_place = place(to, now)?;
     let today = now.to_zoned(from_place.zone.clone()).date();
     let start = today
         .at(hour, minute, 0, 0)
@@ -281,6 +327,80 @@ mod tests {
             answer("time in paris, france", NOW).unwrap().answer,
             "5:45 AM"
         );
+    }
+
+    #[test]
+    fn a_place_and_where_it_is_must_agree() {
+        let shown = |query: &str| answer(query, NOW).map(|a| a.question);
+        // Newfoundland keeps its own half hour.
+        let a = answer("time in St. John's Newfoundland", NOW).unwrap();
+        assert_eq!(a.question, "Time in St. John's, Canada");
+        assert_eq!(a.note.unwrap(), "Monday, October 5, 2026 · NDT, UTC-2:30");
+        assert_eq!(
+            answer("time in lord howe island", NOW)
+                .unwrap()
+                .note
+                .unwrap(),
+            "Monday, October 5, 2026 · UTC+11"
+        );
+        assert_eq!(
+            answer("time in chatham islands", NOW).unwrap().answer,
+            "5:30 PM"
+        );
+        assert_eq!(
+            shown("time in kansas city missouri").as_deref(),
+            Some("Time in Kansas City, US")
+        );
+        // A qualifier the list does not know leaves the place as it was.
+        assert_eq!(
+            shown("time in sydney, nsw").as_deref(),
+            Some("Time in Sydney, Australia")
+        );
+        // Paris, Texas is not Paris, France; nor London, Ontario London.
+        for query in [
+            "time in paris, texas",
+            "time in paris texas",
+            "time in london, ontario",
+            "time in perth, scotland",
+            "time in portland maine",
+        ] {
+            assert_eq!(shown(query), None, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn a_town_the_caller_finds() {
+        assert_eq!(
+            super::asked_town("time in boulder").as_deref(),
+            Some("boulder")
+        );
+        assert_eq!(
+            super::asked_town("What time is it in Hobart now?").as_deref(),
+            Some("hobart")
+        );
+        assert_eq!(
+            super::asked_town("boulder time zone").as_deref(),
+            Some("boulder")
+        );
+        // "boulder time" may be no question about the time.
+        assert_eq!(super::asked_town("boulder time"), None);
+        assert_eq!(super::asked_town("game time"), None);
+        let town = super::Town {
+            shown: "Boulder, CO",
+            country: "US",
+            region: Some("CO"),
+            lat: 40.01,
+            lon: -105.27,
+        };
+        let a = super::time_in_town(&town, NOW).unwrap();
+        assert_eq!(a.question, "Time in Boulder, CO");
+        assert_eq!(a.answer, "9:45 PM");
+        assert_eq!(a.note.unwrap(), "Sunday, October 4, 2026 · MDT, UTC-6");
+        let el_paso = super::Town {
+            region: Some("TX"),
+            ..town
+        };
+        assert_eq!(super::time_in_town(&el_paso, NOW), None);
     }
 
     #[test]

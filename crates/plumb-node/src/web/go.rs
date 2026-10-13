@@ -142,7 +142,7 @@ async fn place_site(
         run_places(state, query, town, options.country.as_deref()).await,
         hits,
     )?;
-    place_sites(state, &found)
+    place_sites(state, &found, options)
         .await
         .into_iter()
         .find(|hit| hit.domain == domain)
@@ -179,7 +179,7 @@ async fn go_block(
         }
         Block::News => match run_search(state, query, MAX_LIMIT, &options).await {
             Ok(results) => state
-                .recent(query, &results)
+                .recent(query, &results, &options)
                 .map(|recent| {
                     recent
                         .headlines

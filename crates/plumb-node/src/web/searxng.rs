@@ -216,17 +216,7 @@ async fn collect(
         },
     );
     if let Some(places) = &places {
-        let local = super::place_sites(state, &places.found)
-            .await
-            .into_iter()
-            .filter(|hit| {
-                options.safe == SafeSearch::Off
-                    || !state
-                        .node
-                        .as_ref()
-                        .is_some_and(|node| node.blocks_adult(&hit.domain))
-            })
-            .collect();
+        let local = super::place_sites(state, &places.found, options).await;
         crate::assembly::local_first(&places.found, &mut results.hits, local, limit);
     }
     let extras = extras(state, query, options, None).await;
@@ -256,7 +246,7 @@ async fn collect(
     };
     let mut recent = crate::assembly::recent(
         query,
-        state.recent(query, &results),
+        state.recent(query, &results, options),
         options,
         limit,
         |domain| {

@@ -5,7 +5,12 @@
 //! left out, since nothing says they are recent.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 
+use html5ever::tendril::StrTendril;
+use html5ever::tokenizer::{
+    BufferQueue, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
+};
 use plumb_core::Headline;
 use url::Url;
 
@@ -116,7 +121,7 @@ fn read_item(item: roxmltree::Node) -> Option<(String, String, u64)> {
     let mut updated = None;
     for child in item.children().filter(roxmltree::Node::is_element) {
         match child.tag_name().name() {
-            "title" if title.is_none() => title = Some(text_of(child)),
+            "title" if title.is_none() => title = Some(html_text(&text_of(child))),
             "link" if link.is_none() => {
                 // Atom: <link rel="alternate" href="...">; RSS: <link>url</link>.
                 match child.attribute("href") {
@@ -149,6 +154,35 @@ fn text_of(node: roxmltree::Node) -> String {
         .filter(roxmltree::Node::is_text)
         .filter_map(|n| n.text())
         .collect()
+}
+
+/// The text of `html`, its character references decoded and its tags
+/// dropped. A feed's titles are often HTML, in CDATA or escaped twice, so
+/// they read "Don&#39;t", "Big <b>news</b>" or "<![CDATA[Big news]]>"
+/// until they are read so.
+fn html_text(html: &str) -> String {
+    struct Text<'t>(&'t RefCell<String>);
+    impl TokenSink for Text<'_> {
+        type Handle = ();
+        fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
+            if let Token::CharacterTokens(text) = token {
+                self.0.borrow_mut().push_str(&text);
+            }
+            TokenSinkResult::Continue
+        }
+        // So a CDATA section is read as text, as in SVG, not as a comment.
+        fn adjusted_current_node_present_but_not_in_html_namespace(&self) -> bool {
+            true
+        }
+    }
+    let text = RefCell::new(String::new());
+    let tokenizer = Tokenizer::new(Text(&text), TokenizerOpts::default());
+    let input = BufferQueue::default();
+    input.push_back(StrTendril::from_slice(html));
+    let _ = tokenizer.feed(&input);
+    tokenizer.end();
+    drop(tokenizer);
+    text.into_inner()
 }
 
 /// Unix seconds of a feed date: RFC 3339 / ISO 8601 (Atom, `dc:date`) or
@@ -310,7 +344,7 @@ mod tests {
               <title>Example News</title>
               <item><title>Older story</title><link>https://www.example.com/older</link>
                 <pubDate>Sun, 04 Oct 2026 12:00:00 GMT</pubDate></item>
-              <item><title><![CDATA[Big <b>news</b> today]]></title><link>/big</link>
+              <item><title><![CDATA[Big <b>news</b> &#8216;today&#8217;]]></title><link>/big</link>
                 <dc:date>2026-10-04T23:00:00Z</dc:date><description>Long text</description></item>
               <item><title>Elsewhere</title><link>https://other.org/x</link>
                 <pubDate>Sun, 04 Oct 2026 22:00:00 GMT</pubDate></item>
@@ -324,10 +358,42 @@ mod tests {
         let titles: Vec<&str> = items.iter().map(|h| h.title.as_str()).collect();
         assert_eq!(
             titles,
-            ["Big <b>news</b> today", "Older story", "Guid only"]
+            ["Big news \u{2018}today\u{2019}", "Older story", "Guid only"]
         );
         assert_eq!(items[0].url, "https://www.example.com/big");
         assert_eq!(items[0].at, NOW - 3600);
+    }
+
+    #[test]
+    fn reads_titles_as_html_text() {
+        let feed = Url::parse("https://www.example.com/feed.xml").unwrap();
+        let item = |title: &str, path: &str| {
+            format!(
+                "<item><title>{title}</title><link>/{path}</link>\
+                 <pubDate>Sun, 04 Oct 2026 12:00:00 GMT</pubDate></item>"
+            )
+        };
+        let body = format!(
+            "<rss version=\"2.0\"><channel>{}{}{}{}</channel></rss>",
+            item(
+                "<![CDATA[Don&#39;t look now, it&#8217;s <i>Texas</i>]]>",
+                "a"
+            ),
+            item("Escaped &amp;#39;twice&amp;#39;", "b"),
+            item("AT&amp;T &amp; Q&amp;A &lt;3 &amp;lt;b&amp;gt;", "c"),
+            item("&lt;![CDATA[Ronaldo: &quot;fine&quot;]]&gt;", "d"),
+        );
+        let items = read_feed("example.com", &feed, &body, NOW).unwrap();
+        let titles: Vec<&str> = items.iter().map(|h| h.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Don't look now, it\u{2019}s Texas",
+                "Escaped 'twice'",
+                "AT&T & Q&A <3 <b>",
+                "Ronaldo: \"fine\"",
+            ]
+        );
     }
 
     #[test]
