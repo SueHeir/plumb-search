@@ -204,6 +204,9 @@ async fn lists_wikipedia_articles_with_the_sites() {
     let node = start(test_config(dir.path())).await.unwrap();
     let addr = node.addr();
     wait_for(addr, "the first index", ready_and_idle).await;
+    // The node asks its index which words many sites' titles have, so a
+    // health search that names a site by a rare word lists it first.
+    assert!(!node.inner.common_word("chase"));
     let deadline = Instant::now() + Duration::from_secs(60);
     let body = loop {
         let (code, _, body) = get(addr, "/search?q=marie+curie").await;
