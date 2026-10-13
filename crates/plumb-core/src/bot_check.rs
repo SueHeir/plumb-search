@@ -28,6 +28,7 @@ const CHECK_TITLES: &[&str] = &[
     "error",
     "browser check",
     "captcha",
+    "captcha check",
     "captcha verification",
     "checking your browser",
     "ddos protection",
@@ -104,6 +105,10 @@ const PLACEHOLDER_TITLES: &[&str] = &[
     "default web site page",
     "web server s default page",
 ];
+
+/// Title endings, after [`normalize_text`], of a blog host's page for a
+/// domain no one has a blog on yet: "anime-japan.net | 忍者ブログ - 忍者ツールズ".
+const UNUSED_DOMAIN_TITLE_ENDS: &[&str] = &["忍者ブログ 忍者ツールズ"];
 
 /// How a title part, after [`normalize_text`], of a site not built yet
 /// ends, after nothing but [`NOT_BUILT_WORDS`]: "Coming Soon", "This Web
@@ -228,9 +233,15 @@ pub fn is_bot_check_page(
                 .strip_prefix(start)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
         };
+        let ends = |end: &&str| {
+            title
+                .strip_suffix(end)
+                .is_some_and(|rest| rest.is_empty() || rest.ends_with(' '))
+        };
         if CHECK_TITLES.contains(&title.as_str())
             || PLACEHOLDER_TITLES.contains(&title.as_str())
             || CHECK_TITLE_STARTS.iter().any(starts)
+            || UNUSED_DOMAIN_TITLE_ENDS.iter().any(ends)
         {
             return true;
         }
@@ -473,6 +484,7 @@ mod tests {
             "Bot Verification | North Lincolnshire Council",
             "One moment, please...",
             "Captcha",
+            "Captcha Check",
             "Link11 - CAPTCHA",
             "Access Denied",
             "Verification",
@@ -646,6 +658,7 @@ mod tests {
             "Index of /",
             "Apache2 Ubuntu Default Page: It works",
             "Caddy works!",
+            "anime-japan.net | 忍者ブログ - 忍者ツールズ",
         ] {
             assert!(check("example.com", title), "{title}");
         }
@@ -653,6 +666,8 @@ mod tests {
             "Gladiator II | Coming Soon to Theaters",
             "Odeon | Films Now Showing and Coming Soon",
             "Caddy - The Ultimate Server with Automatic HTTPS",
+            "忍者ツールズ｜ホームページ ブログ アクセス解析 カウンター メールフォーム",
+            "アニメ日記 | 忍者ブログ",
             "Nginx: Advanced Load Balancer",
             "Index Ventures",
         ] {
