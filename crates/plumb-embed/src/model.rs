@@ -183,6 +183,25 @@ impl Embedder {
         Ok(quantize(&unit))
     }
 
+    /// Whether the model reads `text`: not when a third or more of its
+    /// tokens are ones the model does not know, as Thai, Hindi and many
+    /// Japanese words are to the pinned English model ("ข่าว" and "ヤフー"
+    /// are one `[UNK]` each, "任天堂" is `[UNK]`, `天`, `堂`). The vector
+    /// of such a text says little of it, and is nearest to the sites the
+    /// model cannot read either.
+    pub fn reads(&self, text: &str) -> bool {
+        let Runner::Bert { tokenizer, .. } = &self.runner else {
+            return true;
+        };
+        let (Some(unknown), Ok(encoding)) =
+            (tokenizer.token_to_id("[UNK]"), tokenizer.encode(text, false))
+        else {
+            return true;
+        };
+        let ids = encoding.get_ids();
+        ids.iter().filter(|&&id| id == unknown).count() * 3 < ids.len().max(1)
+    }
+
     /// Whether searches may be embedded after BGE's instruction for search
     /// queries: only the pinned model was trained with it; other models
     /// have their own query prefix ([`Embedder::embed_query`]).
@@ -343,6 +362,17 @@ pub(crate) mod tests {
         let long = "electric car ".repeat(MAX_TOKENS);
         assert_eq!(embedder.embed(&long).unwrap().len(), 32);
         assert_eq!(embedder.embed("").unwrap().len(), 32);
+    }
+
+    #[test]
+    fn texts_mostly_of_unknown_tokens_are_not_read() {
+        let embedder = tiny_embedder();
+        assert!(embedder.reads("electric car maker"));
+        assert!(embedder.reads("tesla solar cars zzz"));
+        assert!(!embedder.reads("tesla cars zzz"));
+        assert!(embedder.reads(""));
+        assert!(!embedder.reads("ข่าว"));
+        assert!(!embedder.reads("bank zzz"));
     }
 
     #[test]
