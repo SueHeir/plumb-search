@@ -1,5 +1,6 @@
-//! Unit conversions: `10 km in miles`, `100 f to c`, `5 ft 2 in to cm` is
-//! not understood but `62 inches to cm` is, `how many feet in a mile`.
+//! Unit conversions: `10 km in miles`, `100 f to c`, `how many feet in a
+//! mile`, with amounts as recipes and heights are written: `1 1/2 cups to
+//! ml`, `½ cup in ml`, `5'10 in cm`, `180 cm in feet and inches`.
 
 use crate::format::format_number;
 use crate::{Answer, Kind};
@@ -710,14 +711,18 @@ pub(crate) fn find(name: &str) -> Option<&'static Unit> {
 }
 
 /// The number at the start of `text` and what follows it: "10 km" -> (10,
-/// "km"), "1.5kg" -> (1.5, "kg"), "a mile" -> (1, "mile"). Without a
-/// number, 1.
+/// "km"), "1.5kg" -> (1.5, "kg"), "a mile" -> (1, "mile"), and fractions:
+/// "1/2 cup" -> (0.5, "cup"), "1 1/2 cups" and "1½ cups" -> (1.5, "cups").
+/// Without a number, 1.
 pub(crate) fn amount(text: &str) -> Option<(f64, &str)> {
     let text = text.trim();
     for word in ["a ", "an ", "one "] {
         if let Some(rest) = text.strip_prefix(word) {
             return Some((1.0, rest.trim()));
         }
+    }
+    if let Some(found) = fraction(text) {
+        return Some(found);
     }
     let end = text
         .char_indices()
@@ -729,7 +734,94 @@ pub(crate) fn amount(text: &str) -> Option<(f64, &str)> {
         return Some((1.0, rest));
     }
     let value: f64 = number.replace(',', "").parse().ok()?;
+    if number.bytes().all(|b| b.is_ascii_digit()) {
+        if let Some((part, rest)) = fraction(rest).filter(|&(part, _)| part < 1.0) {
+            return Some((value + part, rest));
+        }
+    }
     Some((value, rest))
+}
+
+/// Fractions written as one character: "½ cup".
+const FRACTIONS: &[(char, f64)] = &[
+    ('½', 1.0 / 2.0),
+    ('⅓', 1.0 / 3.0),
+    ('⅔', 2.0 / 3.0),
+    ('¼', 1.0 / 4.0),
+    ('¾', 3.0 / 4.0),
+    ('⅛', 1.0 / 8.0),
+    ('⅜', 3.0 / 8.0),
+    ('⅝', 5.0 / 8.0),
+    ('⅞', 7.0 / 8.0),
+];
+
+/// The fraction at the start of `text` and what follows it: "3/4 inch" ->
+/// (0.75, "inch"), "½ cup" -> (0.5, "cup").
+fn fraction(text: &str) -> Option<(f64, &str)> {
+    let first = text.chars().next()?;
+    if let Some(&(_, value)) = FRACTIONS.iter().find(|&&(c, _)| c == first) {
+        return Some((value, text[first.len_utf8()..].trim()));
+    }
+    let (over, rest) = text.split_once('/')?;
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(over) || !digits(&rest[..end]) {
+        return None;
+    }
+    let (over, under): (f64, f64) = (over.parse().ok()?, rest[..end].parse().ok()?);
+    (under > 0.0).then(|| (over / under, rest[end..].trim()))
+}
+
+/// What can follow the feet of a height: "5 ft", "5'".
+const FEET_MARKS: &[&str] = &["feet", "foot", "ft", "'", "′", "’"];
+/// ...and its inches: "10 in", "10\"".
+const INCH_MARKS: &[&str] = &["inches", "inch", "in", "''", "\"", "″", "”"];
+
+/// What a length in feet and inches is asked for as: "180 cm in feet and
+/// inches".
+const IN_FEET_AND_INCHES: &[&str] = &[
+    "feet and inches",
+    "feet and inch",
+    "ft and inches",
+    "ft and in",
+    "feet inches",
+    "ft in",
+    "ft/in",
+];
+
+/// The feet and inches of a height as people write it: "5'10", "5' 10\"",
+/// "5 ft 10 in", "5 feet 10 inches".
+fn feet_and_inches(text: &str) -> Option<(f64, f64)> {
+    let (feet, rest) = amount(text)?;
+    let rest = FEET_MARKS
+        .iter()
+        .find_map(|mark| rest.strip_prefix(mark))?
+        .trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(rest.len());
+    let inches: f64 = rest[..end].parse().ok()?;
+    let mark = rest[end..].trim();
+    (mark.is_empty() || INCH_MARKS.contains(&mark)).then_some((feet, inches))
+}
+
+/// `feet` and `inches` written out: "5 feet 10 inches".
+fn feet_and_inches_named(feet: f64, inches: f64) -> Option<String> {
+    let (foot, inch) = (find("ft")?, find("in")?);
+    Some(format!("{} {}", named(feet, foot)?, named(inches, inch)?))
+}
+
+/// A length of `inches` in whole feet and inches to a tenth: "5 feet 10.9
+/// inches".
+fn in_feet_and_inches(inches: f64) -> Option<String> {
+    if !inches.is_finite() || inches < 0.0 {
+        return None;
+    }
+    let tenths = (inches * 10.0).round();
+    let feet = (tenths / 120.0).floor();
+    feet_and_inches_named(feet, (tenths - feet * 120.0) / 10.0)
 }
 
 /// The number written for an answer: in full when it ends within 12
@@ -750,7 +842,10 @@ fn shown(value: f64) -> Option<String> {
 }
 
 fn named(value: f64, unit: &Unit) -> Option<String> {
-    let number = shown(value)?;
+    with_name(shown(value)?, unit)
+}
+
+fn with_name(number: String, unit: &Unit) -> Option<String> {
     let name = if number == "1" { unit.one } else { unit.many };
     Some(format!("{number} {name}"))
 }
@@ -799,7 +894,8 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
     let text = lower.strip_prefix("convert ").unwrap_or(&lower);
     // "how many feet in a mile", "how many cm are in 5 inches"
     if let Some(rest) = text.strip_prefix("how many ") {
-        for joiner in [" are in ", " is in ", " in ", " per "] {
+        // "how many cm is 5'10"
+        for joiner in [" are in ", " is in ", " in ", " per ", " is "] {
             if let Some((to, from)) = rest.split_once(joiner) {
                 if let Some(answer) = conversion(from, to) {
                     return Some(answer);
@@ -816,8 +912,34 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
 /// The conversion of `from` to `to`, parts of the lowercased query that
 /// `typed` gives back as typed.
 fn conversion<'a>(from: &str, to: &str, typed: impl Fn(&str) -> &'a str) -> Option<Answer> {
-    let (value, from_name) = amount(from)?;
-    let mut from_unit = find_typed(from_name, typed(from_name))?;
+    // A height in feet and inches is converted as its inches, and asked
+    // for as itself: "5 feet 10 inches =".
+    let (value, mut from_unit, asked) = match feet_and_inches(from) {
+        Some((feet, inches)) => (
+            feet * 12.0 + inches,
+            find("in")?,
+            Some(feet_and_inches_named(feet, inches)?),
+        ),
+        None => {
+            let (value, from_name) = amount(from)?;
+            (value, find_typed(from_name, typed(from_name))?, None)
+        }
+    };
+    let question = |from_unit: &Unit| match &asked {
+        Some(asked) => Some(format!("{asked} =")),
+        None => Some(format!("{} =", named(value, from_unit)?)),
+    };
+    if IN_FEET_AND_INCHES.contains(&to) {
+        if from_unit.dimension != Length {
+            return None;
+        }
+        return Some(Answer {
+            kind: Kind::Conversion,
+            question: question(from_unit)?,
+            answer: in_feet_and_inches(convert(value, from_unit, find("in")?))?,
+            note: None,
+        });
+    }
     let mut to_unit = find_typed(to, typed(to))?;
     // "how many ounces in a cup": an ounce of something poured is a
     // fluid ounce.
@@ -826,11 +948,23 @@ fn conversion<'a>(from: &str, to: &str, typed: impl Fn(&str) -> &'a str) -> Opti
     } else if to_unit.dimension == Volume && from_unit.one == "ounce" {
         from_unit = find("fl oz")?;
     }
-    if from_unit.dimension != to_unit.dimension || std::ptr::eq(from_unit, to_unit) {
+    // "5 km in km" asks nothing, but "5'10 in inches" does.
+    if from_unit.dimension != to_unit.dimension
+        || (asked.is_none() && std::ptr::eq(from_unit, to_unit))
+    {
         return None;
     }
     let result = convert(value, from_unit, to_unit);
-    let note = (shown(value)? != "1").then(|| {
+    // A factor is given in full, but an amount converted is no more exact
+    // than the amount typed: half a cup is 118.294 millilitres, and the
+    // note gives the cup in full.
+    let factor = shown(value)? == "1";
+    let answer = if factor {
+        named(result, to_unit)?
+    } else {
+        with_name(format_number(result, 6)?, to_unit)?
+    };
+    let note = (!factor && !std::ptr::eq(from_unit, to_unit)).then(|| {
         Some(format!(
             "1 {} = {}",
             from_unit.one,
@@ -839,8 +973,8 @@ fn conversion<'a>(from: &str, to: &str, typed: impl Fn(&str) -> &'a str) -> Opti
     });
     Some(Answer {
         kind: Kind::Conversion,
-        question: format!("{} =", named(value, from_unit)?),
-        answer: named(result, to_unit)?,
+        question: question(from_unit)?,
+        answer,
         note: note
             .flatten()
             .filter(|_| from_unit.dimension != Temperature),
@@ -896,7 +1030,7 @@ mod tests {
         );
         assert_eq!(
             convert("5 lbs to kg").unwrap(),
-            "5 pounds = 2.26796185 kilograms"
+            "5 pounds = 2.26796 kilograms"
         );
         assert_eq!(
             convert("1 gallon to liters").unwrap(),
@@ -908,7 +1042,7 @@ mod tests {
         );
         assert_eq!(
             convert("60 mph to km/h").unwrap(),
-            "60 miles per hour = 96.56064 kilometres per hour"
+            "60 miles per hour = 96.5606 kilometres per hour"
         );
         assert_eq!(
             convert("1 gib in mb").unwrap(),
@@ -916,7 +1050,7 @@ mod tests {
         );
         assert_eq!(
             convert("convert 3 cups to ml").unwrap(),
-            "3 US cups = 709.7647095 millilitres"
+            "3 US cups = 709.765 millilitres"
         );
         assert_eq!(
             convert("km to miles").unwrap(),
@@ -929,6 +1063,102 @@ mod tests {
         assert_eq!(
             convert("6 feet to meters").unwrap(),
             "6 feet = 1.8288 metres"
+        );
+    }
+
+    #[test]
+    fn reads_fractions() {
+        assert_eq!(
+            convert("1/2 cup in ml").unwrap(),
+            "0.5 US cups = 118.294 millilitres"
+        );
+        // An amount is rounded, the factor in the note is not.
+        assert_eq!(
+            answer("1/2 cup in ml").unwrap().note.as_deref(),
+            Some("1 US cup = 236.5882365 millilitres")
+        );
+        assert_eq!(
+            convert("3/4 inch to mm").unwrap(),
+            "0.75 inches = 19.05 millimetres"
+        );
+        for cups in ["1 1/2 cups", "1½ cups", "1 ½ cups"] {
+            assert_eq!(
+                convert(&format!("{cups} to ml")).unwrap(),
+                "1.5 US cups = 354.882 millilitres",
+                "{cups}"
+            );
+        }
+        assert_eq!(
+            convert("¼ mile in feet").unwrap(),
+            "0.25 miles = 1,320 feet"
+        );
+        assert_eq!(convert("1/0 cup in ml"), None);
+    }
+
+    #[test]
+    fn leaves_searches_that_only_look_like_amounts() {
+        for query in [
+            "24/7 in hours",
+            "9/11 in new york",
+            "1/2 price in store",
+            "2 1/2 men in tv",
+            "ac/dc in concert",
+            "50/50 in vegas",
+            "5'10 actresses",
+            "5 foot 10 in love",
+            "how many is 5'10",
+            "how many people is too many",
+            "5'10 in kg",
+            "1 kg in feet and inches",
+        ] {
+            assert_eq!(convert(query), None, "{query}");
+        }
+    }
+
+    #[test]
+    fn reads_heights_in_feet_and_inches() {
+        for height in [
+            "5'10",
+            "5'10\"",
+            "5' 10''",
+            "5\u{2019}10\u{201D}",
+            "5 ft 10 in",
+            "5ft10in",
+            "5 feet 10 inches",
+            "5 foot 10",
+        ] {
+            assert_eq!(
+                convert(&format!("{height} in cm")).unwrap(),
+                "5 feet 10 inches = 177.8 centimetres",
+                "{height}"
+            );
+        }
+        assert_eq!(
+            convert("how many cm is 6'2").unwrap(),
+            "6 feet 2 inches = 187.96 centimetres"
+        );
+        assert_eq!(
+            convert("5'10 in inches").unwrap(),
+            "5 feet 10 inches = 70 inches"
+        );
+        assert_eq!(answer("5'10 in inches").unwrap().note, None);
+        // Feet alone, as before.
+        assert_eq!(
+            convert("6 ft in cm").unwrap(),
+            "6 feet = 182.88 centimetres"
+        );
+    }
+
+    #[test]
+    fn gives_lengths_in_feet_and_inches() {
+        assert_eq!(
+            convert("180 cm to feet and inches").unwrap(),
+            "180 centimetres = 5 feet 10.9 inches"
+        );
+        // 71.97 inches is 6 feet, not 5 feet 12 inches.
+        assert_eq!(
+            convert("1.828 m in ft and in").unwrap(),
+            "1.828 metres = 6 feet 0 inches"
         );
     }
 
@@ -983,7 +1213,7 @@ mod tests {
     fn gr_is_a_grain() {
         assert_eq!(
             convert("100 gr to g").unwrap(),
-            "100 grains = 6.479891 grams"
+            "100 grains = 6.47989 grams"
         );
         assert_eq!(
             convert("1 grain in mg").unwrap(),

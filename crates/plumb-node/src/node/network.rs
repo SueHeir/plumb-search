@@ -560,6 +560,21 @@ fn crawl_facts(record: &SiteRecord) -> SiteRecord {
     facts
 }
 
+/// Shared headlines with each site's language as this node's index has
+/// it, since a news line carries none ([`crate::news::NewsStore::put_shared`]).
+fn with_languages(inner: &Inner, news: &[SiteRecord]) -> Vec<SiteRecord> {
+    let index = inner.current();
+    news.iter()
+        .cloned()
+        .map(|mut record| {
+            record.language = index
+                .as_ref()
+                .and_then(|index| index.backend().searcher().language(&record.domain));
+            record
+        })
+        .collect()
+}
+
 pub(super) fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
     append_inbox_reserved(inner, records, &mut None)
 }
@@ -604,7 +619,9 @@ pub(super) async fn persist_delivery(
                 // Headline persistence rewrites its complete store. It admits
                 // that peak itself; raw persistence reacquires its own room.
                 drop(admitted.take());
-                writer.news.put_shared(headlines.to_vec(), now_unix());
+                writer
+                    .news
+                    .put_shared(with_languages(&writer, &headlines), now_unix());
                 if let Err(err) = writer.news.save() {
                     return (
                         false,

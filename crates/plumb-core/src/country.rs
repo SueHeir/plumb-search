@@ -136,6 +136,202 @@ pub fn country_of_name(name: &str) -> Option<&'static str> {
     })
 }
 
+/// The code of any country named `name` in English, past
+/// [`country_of_name`]: "iceland", "croatia", "czech republic". Only for
+/// saying where a place is ("hotels in reykjavik iceland"): elsewhere a
+/// brand's name can be a country's ("air jordan").
+pub fn country_of_any_name(name: &str) -> Option<&'static str> {
+    country_of_name(name).or_else(|| {
+        let name = crate::normalize_text(name);
+        let other = match name.as_str() {
+            "czech republic" => Some("CZ"),
+            "holland" | "the netherlands" => Some("NL"),
+            "uae" => Some("AE"),
+            "korea" => Some("KR"),
+            "burma" => Some("MM"),
+            "cote divoire" | "côte divoire" => Some("CI"),
+            "swaziland" => Some("SZ"),
+            "macedonia" => Some("MK"),
+            "bosnia" => Some("BA"),
+            "drc" | "dr congo" => Some("CD"),
+            "curaçao" => Some("CW"),
+            "the bahamas" => Some("BS"),
+            "the gambia" => Some("GM"),
+            "turkiye" | "türkiye" => Some("TR"),
+            "timor leste" => Some("TL"),
+            "cabo verde" => Some("CV"),
+            "russian federation" => Some("RU"),
+            _ => None,
+        };
+        other.or_else(|| {
+            OTHER_COUNTRIES
+                .iter()
+                .find(|(_, english)| crate::normalize_text(english) == name)
+                .map(|(code, _)| *code)
+        })
+    })
+}
+
+/// The countries not in [`COUNTRY_CHOICES`], by English name.
+const OTHER_COUNTRIES: &[(&str, &str)] = &[
+    ("AD", "Andorra"),
+    ("AF", "Afghanistan"),
+    ("AG", "Antigua and Barbuda"),
+    ("AL", "Albania"),
+    ("AM", "Armenia"),
+    ("AO", "Angola"),
+    ("AW", "Aruba"),
+    ("AZ", "Azerbaijan"),
+    ("BA", "Bosnia and Herzegovina"),
+    ("BB", "Barbados"),
+    ("BD", "Bangladesh"),
+    ("BF", "Burkina Faso"),
+    ("BG", "Bulgaria"),
+    ("BH", "Bahrain"),
+    ("BI", "Burundi"),
+    ("BJ", "Benin"),
+    ("BM", "Bermuda"),
+    ("BN", "Brunei"),
+    ("BO", "Bolivia"),
+    ("BS", "Bahamas"),
+    ("BT", "Bhutan"),
+    ("BW", "Botswana"),
+    ("BY", "Belarus"),
+    ("BZ", "Belize"),
+    ("CD", "Democratic Republic of the Congo"),
+    ("CF", "Central African Republic"),
+    ("CG", "Congo"),
+    ("CI", "Ivory Coast"),
+    ("CM", "Cameroon"),
+    ("CR", "Costa Rica"),
+    ("CU", "Cuba"),
+    ("CV", "Cape Verde"),
+    ("CW", "Curacao"),
+    ("CY", "Cyprus"),
+    ("DJ", "Djibouti"),
+    ("DM", "Dominica"),
+    ("DO", "Dominican Republic"),
+    ("DZ", "Algeria"),
+    ("EC", "Ecuador"),
+    ("EE", "Estonia"),
+    ("ER", "Eritrea"),
+    ("ET", "Ethiopia"),
+    ("FJ", "Fiji"),
+    ("FO", "Faroe Islands"),
+    ("GA", "Gabon"),
+    ("GD", "Grenada"),
+    ("GE", "Georgia"),
+    ("GH", "Ghana"),
+    ("GI", "Gibraltar"),
+    ("GL", "Greenland"),
+    ("GM", "Gambia"),
+    ("GN", "Guinea"),
+    ("GQ", "Equatorial Guinea"),
+    ("GT", "Guatemala"),
+    ("GU", "Guam"),
+    ("GW", "Guinea-Bissau"),
+    ("GY", "Guyana"),
+    ("HN", "Honduras"),
+    ("HR", "Croatia"),
+    ("HT", "Haiti"),
+    ("IQ", "Iraq"),
+    ("IR", "Iran"),
+    ("IS", "Iceland"),
+    ("JM", "Jamaica"),
+    ("JO", "Jordan"),
+    ("KG", "Kyrgyzstan"),
+    ("KH", "Cambodia"),
+    ("KI", "Kiribati"),
+    ("KM", "Comoros"),
+    ("KN", "Saint Kitts and Nevis"),
+    ("KP", "North Korea"),
+    ("KW", "Kuwait"),
+    ("KY", "Cayman Islands"),
+    ("KZ", "Kazakhstan"),
+    ("LA", "Laos"),
+    ("LB", "Lebanon"),
+    ("LC", "Saint Lucia"),
+    ("LI", "Liechtenstein"),
+    ("LK", "Sri Lanka"),
+    ("LR", "Liberia"),
+    ("LS", "Lesotho"),
+    ("LT", "Lithuania"),
+    ("LU", "Luxembourg"),
+    ("LV", "Latvia"),
+    ("LY", "Libya"),
+    ("MA", "Morocco"),
+    ("MC", "Monaco"),
+    ("MD", "Moldova"),
+    ("ME", "Montenegro"),
+    ("MG", "Madagascar"),
+    ("MH", "Marshall Islands"),
+    ("MK", "North Macedonia"),
+    ("ML", "Mali"),
+    ("MM", "Myanmar"),
+    ("MN", "Mongolia"),
+    ("MO", "Macau"),
+    ("MR", "Mauritania"),
+    ("MT", "Malta"),
+    ("MU", "Mauritius"),
+    ("MV", "Maldives"),
+    ("MW", "Malawi"),
+    ("MZ", "Mozambique"),
+    ("NA", "Namibia"),
+    ("NC", "New Caledonia"),
+    ("NE", "Niger"),
+    ("NI", "Nicaragua"),
+    ("NP", "Nepal"),
+    ("NR", "Nauru"),
+    ("OM", "Oman"),
+    ("PA", "Panama"),
+    ("PF", "French Polynesia"),
+    ("PG", "Papua New Guinea"),
+    ("PR", "Puerto Rico"),
+    ("PS", "Palestine"),
+    ("PW", "Palau"),
+    ("PY", "Paraguay"),
+    ("QA", "Qatar"),
+    ("RS", "Serbia"),
+    ("RU", "Russia"),
+    ("RW", "Rwanda"),
+    ("SB", "Solomon Islands"),
+    ("SC", "Seychelles"),
+    ("SD", "Sudan"),
+    ("SI", "Slovenia"),
+    ("SK", "Slovakia"),
+    ("SL", "Sierra Leone"),
+    ("SM", "San Marino"),
+    ("SN", "Senegal"),
+    ("SO", "Somalia"),
+    ("SR", "Suriname"),
+    ("SS", "South Sudan"),
+    ("ST", "Sao Tome and Principe"),
+    ("SV", "El Salvador"),
+    ("SY", "Syria"),
+    ("SZ", "Eswatini"),
+    ("TD", "Chad"),
+    ("TG", "Togo"),
+    ("TJ", "Tajikistan"),
+    ("TL", "East Timor"),
+    ("TM", "Turkmenistan"),
+    ("TN", "Tunisia"),
+    ("TO", "Tonga"),
+    ("TT", "Trinidad and Tobago"),
+    ("TV", "Tuvalu"),
+    ("TZ", "Tanzania"),
+    ("UG", "Uganda"),
+    ("UY", "Uruguay"),
+    ("UZ", "Uzbekistan"),
+    ("VA", "Vatican City"),
+    ("VC", "Saint Vincent and the Grenadines"),
+    ("VE", "Venezuela"),
+    ("VU", "Vanuatu"),
+    ("WS", "Samoa"),
+    ("YE", "Yemen"),
+    ("ZM", "Zambia"),
+    ("ZW", "Zimbabwe"),
+];
+
 /// ISO 3166-1 alpha-2 codes.
 const COUNTRY_CODES: &[&str] = &[
     "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
@@ -159,6 +355,27 @@ const COUNTRY_CODES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_country_is_named_for_places() {
+        for (name, code) in [
+            ("Iceland", "IS"),
+            ("croatia", "HR"),
+            ("Czech Republic", "CZ"),
+            ("Côte d'Ivoire", "CI"),
+            ("Trinidad and Tobago", "TT"),
+            ("germany", "DE"),
+        ] {
+            assert_eq!(country_of_any_name(name), Some(code), "{name}");
+        }
+        // Not where a brand's name may be one.
+        assert_eq!(country_of_name("jordan"), None);
+        assert_eq!(country_of_any_name("atlantis"), None);
+        for (code, _) in OTHER_COUNTRIES {
+            assert!(COUNTRY_CODES.contains(code), "{code}");
+            assert!(COUNTRY_CHOICES.iter().all(|(chosen, _)| chosen != code));
+        }
+    }
 
     #[test]
     fn domain_endings_name_countries() {

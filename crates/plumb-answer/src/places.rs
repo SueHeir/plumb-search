@@ -52,6 +52,8 @@ cape town|Cape Town, South Africa|Africa/Johannesburg
 caracas|Caracas, Venezuela|America/Caracas
 casablanca|Casablanca, Morocco|Africa/Casablanca
 charlotte|Charlotte, US|America/New_York
+chatham island|Chatham Islands, New Zealand|Pacific/Chatham
+chatham islands|Chatham Islands, New Zealand|Pacific/Chatham
 chennai|Chennai, India|Asia/Kolkata
 chicago|Chicago, US|America/Chicago
 chongqing|Chongqing, China|Asia/Shanghai
@@ -115,6 +117,8 @@ lima|Lima, Peru|America/Lima
 lisbon|Lisbon, Portugal|Europe/Lisbon
 ljubljana|Ljubljana, Slovenia|Europe/Ljubljana
 london|London, United Kingdom|Europe/London
+lord howe|Lord Howe Island, Australia|Australia/Lord_Howe
+lord howe island|Lord Howe Island, Australia|Australia/Lord_Howe
 los angeles|Los Angeles, US|America/Los_Angeles
 la|Los Angeles, US|America/Los_Angeles
 luxembourg|Luxembourg|Europe/Luxembourg
@@ -183,6 +187,9 @@ shenzhen|Shenzhen, China|Asia/Shanghai
 silicon valley|San Jose, US|America/Los_Angeles
 singapore|Singapore|Asia/Singapore
 sofia|Sofia, Bulgaria|Europe/Sofia
+st john's|St. John's, Canada|America/St_Johns
+st. john's|St. John's, Canada|America/St_Johns
+st johns|St. John's, Canada|America/St_Johns
 st louis|St. Louis, US|America/Chicago
 st. louis|St. Louis, US|America/Chicago
 st petersburg|Saint Petersburg, Russia|Europe/Moscow

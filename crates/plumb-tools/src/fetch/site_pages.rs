@@ -28,6 +28,9 @@ const ACCEPT_LIST: &str = "application/xml,text/xml,text/html;q=0.9,*/*;q=0.5";
 /// A site's pages found are kept up to this many times the pages asked for
 /// before the shallowest are picked, so a huge sitemap is not held whole.
 const FOUND_FACTOR: usize = 20;
+/// Of the pages fetched, up to one in this many are taken first for being
+/// linked from a root's own page ([`Found::balanced`]).
+const LINKED_SHARE: usize = 4;
 
 /// A site whose inner pages to fetch.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,7 +48,8 @@ pub struct SitePagesTarget {
     /// or index), read for links under the roots, besides the sitemaps.
     #[serde(default)]
     pub index_pages: Vec<String>,
-    /// Most pages fetched; the shallowest found first.
+    /// Most pages fetched ([`fetch_site_pages_with_extraction`] says
+    /// which first).
     pub max_pages: usize,
 }
 
@@ -85,8 +89,9 @@ pub struct SitePageOutcome {
 }
 
 /// Fetches the inner pages of `target`: those its sitemaps and index pages
-/// list under its roots, the shallowest first (fewest `/` in the path, then
-/// the order they were listed in), up to `target.max_pages`. Pages are
+/// list under its roots, up to `target.max_pages`, those its roots' own
+/// pages link to first and then the shallowest of each section (fewest `/`
+/// in the path, then the order they were listed in). Pages are
 /// fetched one at a time, with robots.txt and the per-host delay obeyed as
 /// in a homepage crawl; icons are not fetched and `cfg.target_deadline`
 /// does not apply (each request has `cfg.timeout`). A redirect off the
@@ -125,6 +130,7 @@ pub async fn fetch_site_pages_with_extraction(
     }
     let mut visit = Visit::new(&client, &cfg);
     visit.set_inner_page_extraction(extraction);
+    let root_pages = roots.clone();
     let mut indexes = Vec::new();
     for index in &target.index_pages {
         let Ok(url) = http_url(index) else { continue };
@@ -141,7 +147,7 @@ pub async fn fetch_site_pages_with_extraction(
                     info!("{}: {url} is now under {root}", target.domain);
                     roots.push(root);
                 }
-                indexes.push((at, body));
+                indexes.push((root_pages.contains(&url), at, body));
             }
             Err(error) => {
                 result.outcomes.push(SitePageOutcome {
@@ -155,7 +161,7 @@ pub async fn fetch_site_pages_with_extraction(
     }
     let wanted = target.max_pages.max(1);
     let mut found = Found::new(&roots, wanted.saturating_mul(FOUND_FACTOR));
-    for (at, body) in &indexes {
+    for (root, at, body) in &indexes {
         if plumb_crawl::extract_page_meta(at, &String::from_utf8_lossy(body))
             .title
             .is_some()
@@ -163,7 +169,10 @@ pub async fn fetch_site_pages_with_extraction(
             found.add(at.clone());
         }
         for link in page_links(at, &String::from_utf8_lossy(body)) {
-            found.add(link);
+            let kept = found.add(link);
+            if *root {
+                found.linked.extend(kept);
+            }
         }
     }
     let sitemaps = sitemaps_of(&mut visit, target, &roots).await;
@@ -637,6 +646,8 @@ pub(crate) fn under_roots(url: &Url, roots: &[Url]) -> bool {
 struct Found<'a> {
     roots: &'a [Url],
     urls: Vec<Url>,
+    /// Those of `urls` a root's own page links to, in the order linked.
+    linked: Vec<Url>,
     seen: HashSet<String>,
     /// Pages found in all, kept or not.
     count: usize,
@@ -648,13 +659,16 @@ impl<'a> Found<'a> {
         Found {
             roots,
             urls: Vec::new(),
+            linked: Vec::new(),
             seen: HashSet::new(),
             count: 0,
             most,
         }
     }
 
-    fn add(&mut self, mut url: Url) {
+    /// Adds `url` when it is a page under the roots not found before, and
+    /// returns it as kept.
+    fn add(&mut self, mut url: Url) -> Option<Url> {
         url.set_fragment(None);
         // Sitemaps often list a site's pages as http://.
         if url.scheme() == "http"
@@ -666,37 +680,63 @@ impl<'a> Found<'a> {
             let _ = url.set_scheme("https");
         }
         if !under_roots(&url, self.roots) || is_not_a_page(&url) {
-            return;
+            return None;
         }
         if !self.seen.insert(url.to_string()) {
-            return;
+            return None;
         }
         self.count += 1;
-        if self.urls.len() < self.most {
-            self.urls.push(url);
+        if self.urls.len() >= self.most {
+            return None;
         }
+        self.urls.push(url.clone());
+        Some(url)
     }
 
     fn full(&self) -> bool {
         self.urls.len() >= self.most
     }
 
-    /// Reserve slots across configured roots (or top-level sections of a
-    /// whole-site root), then take shallow pages within each section.
+    /// The pages a root's own page links to first, up to one in
+    /// [`LINKED_SHARE`] of `wanted`: what a site's front page links to is
+    /// what it holds most important ("QuickFacts" on census.gov, three
+    /// folders down). Then slots are reserved across the configured roots
+    /// (or top-level sections of a whole-site root), and shallow pages
+    /// taken within each.
     fn balanced(self, wanted: usize) -> Vec<Url> {
         if self.urls.len() <= wanted {
             return self.shallowest(wanted);
         }
+        let mut chosen: Vec<Url> = self
+            .linked
+            .into_iter()
+            .take(wanted / LINKED_SHARE)
+            .collect();
+        let taken: HashSet<String> = chosen.iter().map(Url::to_string).collect();
+        // A root on a host with `www.` and its twin without are one root,
+        // whose sections are balanced.
+        let twin = |root: &Url| {
+            let host = root.host_str().unwrap_or("");
+            format!(
+                "{}{}",
+                host.strip_prefix("www.").unwrap_or(host),
+                root.path()
+            )
+        };
+        let distinct = self.roots.iter().map(twin).collect::<HashSet<_>>().len();
         let mut groups = std::collections::BTreeMap::<String, Vec<Url>>::new();
         for url in self.urls {
+            if taken.contains(url.as_str()) {
+                continue;
+            }
             let root = self
                 .roots
                 .iter()
                 .filter(|root| under_roots(&url, std::slice::from_ref(root)))
                 .max_by_key(|root| root.path().len());
             let Some(root) = root else { continue };
-            let key = if self.roots.len() > 1 {
-                root.as_str().to_string()
+            let key = if distinct > 1 {
+                twin(root)
             } else {
                 let relative = url.path().strip_prefix(root.path()).unwrap_or(url.path());
                 let section = relative
@@ -720,7 +760,6 @@ impl<'a> Found<'a> {
             })
             .collect();
         groups.sort_by_key(|g| g.front().map_or(usize::MAX, depth));
-        let mut chosen = Vec::new();
         while chosen.len() < wanted {
             let before = chosen.len();
             for group in &mut groups {
@@ -794,6 +833,35 @@ mod tests {
         let chosen = found.balanced(4);
         assert_eq!(chosen.len(), 4);
         assert!(chosen.iter().any(|u| u.path().starts_with("/benefits/")));
+    }
+
+    #[test]
+    fn takes_what_the_front_page_links_to_and_every_section() {
+        let roots = [
+            Url::parse("https://www.a.org/").unwrap(),
+            Url::parse("https://a.org/").unwrap(),
+        ];
+        let mut found = Found::new(&roots, 100);
+        // The front page links to a tool three folders down.
+        let linked = found.add(Url::parse("https://www.a.org/data/tools/quickfacts.html").unwrap());
+        found.linked.extend(linked);
+        // The sitemap lists one section's pages first, then another's.
+        for i in 0..20 {
+            found.add(Url::parse(&format!("https://www.a.org/celebrity/{i}")).unwrap());
+        }
+        for film in ["oppenheimer", "barbie"] {
+            found.add(Url::parse(&format!("https://www.a.org/m/{film}")).unwrap());
+        }
+        let chosen: Vec<String> = found.balanced(4).into_iter().map(String::from).collect();
+        assert_eq!(
+            chosen,
+            [
+                "https://www.a.org/data/tools/quickfacts.html",
+                "https://www.a.org/celebrity/0",
+                "https://www.a.org/m/oppenheimer",
+                "https://www.a.org/celebrity/1",
+            ]
+        );
     }
 
     #[tokio::test]
