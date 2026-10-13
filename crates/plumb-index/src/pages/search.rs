@@ -465,9 +465,10 @@ impl PageSearcher {
 
     /// Whether `word`, typed among `words`, is the name of something rather
     /// than a slip, however near a commoner word it is: Wiktionary has it as
-    /// a word ("saute", "renter"), an English Wikipedia article is named by
-    /// it ("Everlong", "htop", "Scald" for Burn), or a page's name has it
-    /// with another word typed ("Jean Meeus", "Baidu Baike"). A near
+    /// a word ("saute", "renter") or has its singular ("cloths": the set
+    /// leaves out forms of other words), an English Wikipedia article is
+    /// named by it ("Everlong", "htop", "Scald" for Burn), or a page's name
+    /// has it with another word typed ("Jean Meeus", "Baidu Baike"). A near
     /// spelling of an article's title is not its name but the redirect
     /// Wikipedia keeps for a misspelling ("Arguement" for Argument).
     fn names_something(&self, word: &str, words: &[String]) -> Result<bool> {
@@ -482,8 +483,11 @@ impl PageSearcher {
             let query = BooleanQuery::new(clauses.into_iter().map(|q| (Occur::Must, q)).collect());
             Ok(searcher.search(&query, &Count)? > 0)
         };
-        if searcher.doc_freq(&Term::from_field_text(self.fields.word, word))? > 0 {
-            return Ok(true);
+        let plural = word.strip_suffix('s').filter(|one| !one.ends_with('s'));
+        for word in std::iter::once(word).chain(plural) {
+            if searcher.doc_freq(&Term::from_field_text(self.fields.word, word))? > 0 {
+                return Ok(true);
+            }
         }
         let articles = BooleanQuery::new(vec![
             (Occur::Must, term(self.fields.keys, word)),

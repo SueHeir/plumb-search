@@ -665,6 +665,8 @@ fn names_are_not_taken_for_slips() {
     add("Scald", 3);
     add("Magick", 200);
     add("Bake", 200);
+    add("Clothes", 200);
+    add("Cloths", 3);
     // Only one page has each: no more than "anubas" has.
     pages.push(page("Magicka", 10, &[]));
     pages.push(page("Baidu Baike", 10, &[]));
@@ -672,6 +674,10 @@ fn names_are_not_taken_for_slips() {
     pages.push(Page::from_word(Article {
         title: "saute".into(),
         description: Some("(verb) To fry quickly in a little fat.".into()),
+        ..Article::default()
+    }));
+    pages.push(Page::from_word(Article {
+        title: "cloth".into(),
         ..Article::default()
     }));
     let article = |title: &str, name: &str| {
@@ -698,6 +704,7 @@ fn names_are_not_taken_for_slips() {
             ("e", "d", 0.001),
             ("k", "ka", 0.01),
             ("a", "ai", 0.01),
+            ("es", "s", 0.01),
         ],
         1e-6,
     );
@@ -718,8 +725,9 @@ fn names_are_not_taken_for_slips() {
     // An article is named by it.
     assert_eq!(suggest("htop"), None);
     assert_eq!(suggest("scald"), None);
-    // Wiktionary has it.
+    // Wiktionary has it, or its singular.
     assert_eq!(suggest("saute"), None);
+    assert_eq!(suggest("cloths"), None);
     // It is a near spelling of the article's title.
     assert_eq!(suggest("arguement").as_deref(), Some("argument"));
     // However few pages have it, a name is no slip.
