@@ -360,7 +360,7 @@ pub(crate) async fn search_page(
             let icons = state.icons(domains).await;
             let recent = crate::assembly::recent(
                 &query,
-                state.recent(&query, &results),
+                state.recent(&query, &results, &settings.options),
                 &settings.options,
                 limit,
                 |domain| {
