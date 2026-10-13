@@ -733,10 +733,25 @@ impl AppState {
         about: Option<&plumb_plugin::About>,
         run: Option<&str>,
     ) -> Vec<PluginResults> {
-        self.settings
+        let found = self
+            .settings
             .plugins
             .search_running(query, options.safe, options.language.as_deref(), about, run)
-            .await
+            .await;
+        self.without_denied(found)
+    }
+
+    /// `found` less the results the node's denylist takes off, as for
+    /// the node's own results.
+    fn without_denied(&self, mut found: Vec<PluginResults>) -> Vec<PluginResults> {
+        let Some(node) = &self.node else {
+            return found;
+        };
+        for plugin in &mut found {
+            plugin.results.retain(|item| !node.denies(&item.url));
+        }
+        found.retain(|plugin| !plugin.results.is_empty());
+        found
     }
 
     /// The icons of `domains` that this node has, for [`render_hit`]. Read
@@ -5063,6 +5078,113 @@ mod tests {
         assert_eq!(results[1]["url"], "https://news.example.com/1");
         assert_eq!(results[1]["engine"], "test-news");
         assert_eq!(results[0]["engine"], "plumb");
+    }
+
+    /// A ready node whose denylist takes off the pages listed.
+    struct DenyingNode(&'static [&'static str]);
+
+    impl StatusSource for DenyingNode {
+        fn status(&self) -> Status {
+            node_status(Phase::Ready, Step::Idle)
+        }
+        fn denies(&self, url: &str) -> bool {
+            self.0.contains(&url)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_denylist_takes_plugin_results_off_too() {
+        let output = r#"{"results":[
+            {"title":"Kept","url":"https://news.example.com/1","snippet":"One"},
+            {"title":"Denied","url":"https://news.example.com/2","snippet":"Two"}]}"#;
+        let app = |denied: &'static [&'static str]| {
+            node_router_with(
+                backend(bank_hits()),
+                Arc::new(DenyingNode(denied)),
+                WebSettings {
+                    home: HomeCountry::Off,
+                    plugins: crate::plugins::answering_plugins("Test News", "tn", output),
+                    ..WebSettings::default()
+                },
+            )
+        };
+        let one = app(&["https://news.example.com/2"]);
+        let (_, _, page) = send(one.clone(), "/search?q=tn+us+bank").await;
+        assert!(page.contains("href=\"https://news.example.com/1\""));
+        assert!(!page.contains("news.example.com/2"));
+        let (_, _, body) = send(one.clone(), "/api/search?q=tn+us+bank&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let results = json["plugins"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["url"], "https://news.example.com/1");
+        let (_, _, body) = send(one, "/search?q=tn+us+bank&format=json").await;
+        assert!(!body.contains("news.example.com/2"));
+
+        // A plugin left with nothing to show is left out.
+        let both = app(&["https://news.example.com/1", "https://news.example.com/2"]);
+        let (_, _, page) = send(both.clone(), "/search?q=tn+us+bank").await;
+        assert!(!page.contains("From Test News"));
+        let (_, _, body) = send(both, "/api/search?q=tn+us+bank&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(json["plugins"].as_array().is_none_or(Vec::is_empty));
+    }
+
+    #[tokio::test]
+    async fn a_button_on_a_results_page_can_be_pressed_on_the_nodes_computer() {
+        let plugins = crate::plugins::answering_plugins("Shelf", "sh", r#"{"message":"Saved."}"#);
+        let token = plugins.token().to_string();
+        let app = router_with(
+            backend(bank_hits()),
+            WebSettings {
+                home: HomeCountry::Off,
+                plugins,
+                ..WebSettings::default()
+            },
+        );
+        let press = |peer: &str, headers: &[(&str, &str)]| {
+            let mut request = Request::post("/plugins/act")
+                .header(header::HOST, "127.0.0.1:7586")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            let body = format!("plugin=shelf&data=%7B%7D&token={token}&q=sh+us+bank");
+            let mut request = request.body(Body::from(body)).unwrap();
+            let peer: std::net::SocketAddr = peer.parse().unwrap();
+            request
+                .extensions_mut()
+                .insert(axum::extract::ConnectInfo(peer));
+            let app = app.clone();
+            async move {
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                (status, String::from_utf8(body.to_vec()).unwrap())
+            }
+        };
+        // The results page's `no-referrer` policy makes the browser send
+        // `Origin: null` with its own form.
+        let own_page = [("origin", "null"), ("sec-fetch-site", "same-origin")];
+        let (status, body) = press("127.0.0.1:50000", &own_page).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("Saved."), "{body}");
+        // Not from another site, a page the browser can't place, or
+        // another computer.
+        for headers in [
+            &[("origin", "null"), ("sec-fetch-site", "cross-site")][..],
+            &[("origin", "null")][..],
+            &[
+                ("origin", "http://evil.example"),
+                ("sec-fetch-site", "same-origin"),
+            ][..],
+        ] {
+            let (status, _) = press("127.0.0.1:50000", headers).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{headers:?}");
+        }
+        let (status, _) = press("203.0.113.9:50000", &own_page).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
