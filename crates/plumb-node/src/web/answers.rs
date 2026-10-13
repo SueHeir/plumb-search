@@ -900,7 +900,7 @@ pub fn resolve_entity<'a>(
             })
             .collect();
         if named.len() > 1 {
-            return main_sense(&subject, &named);
+            return main_sense(&subject, &named, true);
         }
     }
     let exact: Vec<_> = candidates
@@ -931,7 +931,7 @@ pub fn resolve_entity<'a>(
     match candidates.as_slice() {
         [] => EntityResolution::Unresolved,
         [hit] => EntityResolution::Resolved(&hit.page),
-        _ => main_sense(&subject, &candidates),
+        _ => main_sense(&subject, &candidates, false),
     }
 }
 
@@ -961,14 +961,40 @@ fn legal_name(title: &str) -> String {
 /// main sense of it, so items with no article and pages named so only
 /// before a qualifier ("Beethoven (film)") give way to it. Two such
 /// articles ("Apple" and "Apple Inc.") leave the question open.
-fn main_sense<'a>(subject: &str, tied: &[&'a plumb_index::pages::PageHit]) -> EntityResolution<'a> {
-    let mut own = tied.iter().filter(|hit| {
-        let title = &hit.page.title;
-        hit.page.is_article()
-            && (legal_name(title) == subject || hit.named && !title.trim_end().ends_with(')'))
-    });
-    match (own.next(), own.next()) {
-        (Some(hit), None) => EntityResolution::Resolved(&hit.page),
+///
+/// With none, Wikipedia gave the plain name to a disambiguation page and
+/// bracketed every article of it ("Amazon (company)", "Amazon (chess)").
+/// With `by_site`, the article whose official site the name is
+/// (amazon.com) is then its main sense.
+fn main_sense<'a>(
+    subject: &str,
+    tied: &[&'a plumb_index::pages::PageHit],
+    by_site: bool,
+) -> EntityResolution<'a> {
+    let mut own: Vec<_> = tied
+        .iter()
+        .filter(|hit| {
+            let title = &hit.page.title;
+            hit.page.is_article()
+                && (legal_name(title) == subject || hit.named && !title.trim_end().ends_with(')'))
+        })
+        .collect();
+    if own.is_empty() && by_site {
+        let name = plumb_core::normalize_text(subject).replace(' ', "");
+        own = tied
+            .iter()
+            .filter(|hit| {
+                hit.page.is_article()
+                    && hit
+                        .page
+                        .site
+                        .as_deref()
+                        .is_some_and(|site| plumb_core::domain_label(site) == name)
+            })
+            .collect();
+    }
+    match own.as_slice() {
+        [hit] => EntityResolution::Resolved(&hit.page),
         _ => EntityResolution::Ambiguous(tied.iter().map(|hit| &hit.page).collect()),
     }
 }
@@ -1696,6 +1722,41 @@ mod tests {
         assert!(matches!(
             resolve_entity(&asked.subject, &[service, renamed], Some(&asked.kinds)),
             EntityResolution::Ambiguous(found) if found.len() == 2
+        ));
+    }
+
+    #[test]
+    fn founding_questions_take_the_bracketed_article_whose_site_the_name_is() {
+        use plumb_core::facts::{fact_asked, FactKind::Founder};
+        let mut company = with_facts(
+            article(
+                "Vorlink (company)",
+                "technology company",
+                Some("vorlink.com"),
+            ),
+            &[(Founder, "Example founder")],
+        );
+        company.page.item = Some("Q910031".into());
+        let mut chess = article("Vorlink (chess)", "fairy chess piece", None);
+        chess.page.item = Some("Q910032".into());
+        let mut band = article("Vorlink (band)", "band", Some("vorlinkband.com"));
+        band.page.item = Some("Q910033".into());
+        let asked = fact_asked("who founded vorlink").unwrap();
+        let candidates = [chess.clone(), band.clone(), company.clone()];
+        let EntityResolution::Resolved(page) =
+            resolve_entity(&asked.subject, &candidates, Some(&asked.kinds))
+        else {
+            panic!("vorlink.com says which Vorlink is meant");
+        };
+        assert_eq!(page.item.as_deref(), Some("Q910031"));
+        // Without such a site it still asks, and so do other questions.
+        assert!(matches!(
+            resolve_entity(&asked.subject, &[chess, band], Some(&asked.kinds)),
+            EntityResolution::Ambiguous(_)
+        ));
+        assert!(matches!(
+            resolve_entity("vorlink", &candidates, None),
+            EntityResolution::Ambiguous(_)
         ));
     }
 
