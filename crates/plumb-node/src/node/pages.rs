@@ -19,8 +19,8 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, Operators};
 use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, operators_allow, options_allow,
-    place_operator_pages, place_pages, PageHit, OPERATOR_PAGES,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
+    options_allow, place_operator_pages, place_pages, PageHit, OPERATOR_PAGES,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -1042,6 +1042,20 @@ pub(super) fn knows_typed(inner: &Inner, query: &str, spelling: &plumb_index::Sp
     }
 }
 
+/// `options` with the language filter the sites' index gives `query`
+/// ([`plumb_index::Searcher::language_for`]), so pages keep or drop a
+/// language for a search as sites do.
+fn for_query(inner: &Inner, options: &SearchOptions, query: &str) -> SearchOptions {
+    let language = match inner.current() {
+        Some(index) => index.backend().searcher().language_for(options, query),
+        None => options.language_for(query).map(str::to_string),
+    };
+    SearchOptions {
+        language,
+        ..options.clone()
+    }
+}
+
 /// The song or album a search of `query` alone is surely for; see
 /// [`PageSearcher::known_song`].
 pub(super) fn known_song(
@@ -1049,7 +1063,7 @@ pub(super) fn known_song(
     query: &str,
     options: &SearchOptions,
 ) -> Option<plumb_index::pages::Page> {
-    let options = &options.for_query(query);
+    let options = &for_query(inner, options, query);
     let searcher = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone())?;
     match searcher.known_song(query) {
         Ok(song) => song.filter(|page| options_allow(options, page)),
@@ -1084,7 +1098,7 @@ pub(super) fn entities(
     };
     let ops = Operators::parse(query);
     let words = if ops.any() { ops.words.as_str() } else { query };
-    let options = &options.for_query(query);
+    let options = &for_query(inner, options, query);
     let searcher = searcher.in_language(options.language.as_deref());
     Ok(searcher
         .entities(words, KIND_PAGES)?
@@ -1109,6 +1123,7 @@ pub(super) fn pages_of(
     let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return Vec::new();
     };
+    let options = &for_query(inner, options, query);
     match typed_pages(&searcher, query, limit, options, docs, keep) {
         Ok(found) => found,
         Err(err) => {
@@ -1129,7 +1144,6 @@ fn typed_pages(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let options = &options.for_query(query);
     let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
     if paper.constrained {
         return Ok(searcher
@@ -1163,7 +1177,7 @@ pub(super) fn papers(
     let Some(searcher) = searcher else {
         return Ok(Vec::new());
     };
-    let options = &options.for_query(&query.text());
+    let options = &for_query(inner, options, &query.text());
     Ok(searcher
         .in_language(options.language.as_deref())
         .search_papers(query, KIND_PAGES)?
@@ -1193,7 +1207,7 @@ pub(super) fn add_pages(
     let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return;
     };
-    let options = &options.for_query(query);
+    let options = &for_query(inner, options, query);
     let searcher = searcher.in_language(options.language.as_deref());
     let ops = Operators::parse(query);
     if ops.any() {
@@ -1230,10 +1244,15 @@ pub(super) fn add_pages(
                     index.backend().site(domain)
                 });
             }
+            drop_far_namesakes(&mut results.hits, &found, inner.rank.meaning_only_relevance);
             if inner.rank.drop_namesakes {
                 drop_namesakes_of_words(&mut results.hits, &found);
             }
             lift_named_sites(&mut results.hits, &found);
+            if let Err(err) = searcher.add_named_site_page(query, &results.hits, &mut found) {
+                warn!("searching the pages of a site the query names: {err:#}");
+            }
+            found.retain(|hit| options_allow(options, &hit.page));
             if let Err(err) = searcher.note_demand(&mut results.hits) {
                 warn!("reading what sites' articles are read: {err:#}");
             }

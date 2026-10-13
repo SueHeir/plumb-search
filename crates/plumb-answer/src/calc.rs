@@ -1,5 +1,6 @@
 //! Sums: `12 * (3 + 4)`, `2^10`, `sqrt(2)`, `15% of 80`, `5!`, and the same
-//! in words: "2 to the power of 10", "square root of 2", "15 percent of 80".
+//! in words: "2 to the power of 10", "square root of 2", "15 percent of 80",
+//! "10 factorial", "log base 2 of 8".
 //!
 //! A query is a sum only when all of it reads as one, with at least one
 //! operation in it, so "2024" and "f1" stay searches. Two numbers joined by
@@ -395,6 +396,14 @@ impl Parser {
 const SAID: &[(&str, &str)] = &[
     (" square root of ", " √"),
     (" cube root of ", " cbrt "),
+    (" sqrt of ", " √"),
+    // Before " log of ", which is inside it.
+    (" natural log of ", " ln "),
+    (" ln of ", " ln "),
+    (" log base 2 of ", " log2 "),
+    (" log base 10 of ", " log "),
+    (" log of ", " log "),
+    (" factorial ", "! "),
     (" to the power of ", " ^ "),
     (" divided by ", " / "),
     (" multiplied by ", " * "),
@@ -523,6 +532,15 @@ mod tests {
             ("3 multiplied by 4", "12"),
             ("what is 7 times 8", "56"),
             ("10 minus 3 plus 2", "9"),
+            ("10 factorial", "3,628,800"),
+            ("what is 5 factorial", "120"),
+            ("log of 100", "2"),
+            ("what is the log of 100", "2"),
+            ("log base 2 of 8", "3"),
+            ("log base 10 of 1000", "3"),
+            ("natural log of 1", "0"),
+            ("ln of e", "1"),
+            ("sqrt of 16", "4"),
         ] {
             assert_eq!(calc(query).as_deref(), Some(sum), "{query:?}");
         }
@@ -535,6 +553,12 @@ mod tests {
             "square root",
             "power of 10",
             "4 times",
+            "factorial",
+            "3 factorial design",
+            "log base 2",
+            "natural log",
+            "natural logarithm",
+            "round of 16",
         ] {
             assert_eq!(answer(query), None, "{query:?}");
         }

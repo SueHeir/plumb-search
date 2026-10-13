@@ -511,10 +511,13 @@ pub(crate) fn render_results_with(
                 icon,
                 &notes,
             );
-            let carried = pages
+            // The article about the site, and the site's own page the
+            // query names.
+            let carried: Vec<&plumb_index::pages::PlacedPage> = pages
                 .iter()
-                .find(|p| p.under.as_deref() == Some(item.hit.domain.as_str()));
-            if let Some(page) = carried {
+                .filter(|p| p.under.as_deref() == Some(item.hit.domain.as_str()))
+                .collect();
+            for page in &carried {
                 if let Some(end) = rendered.rfind("</li>") {
                     rendered.insert_str(end, &page_line(&page.hit));
                 }
@@ -525,7 +528,9 @@ pub(crate) fn render_results_with(
                     rendered.insert_str(end, &line);
                 }
             }
-            let product = carried.and_then(|page| product_of(&page.hit, &item.hit.domain, query));
+            let product = carried
+                .iter()
+                .find_map(|page| product_of(&page.hit, &item.hit.domain, query));
             if position == 0 || product.is_some() {
                 if let Some(end) = rendered.rfind("<div class=\"m\">") {
                     let line = key_pages_line(&item.hit, query, product.as_ref());
