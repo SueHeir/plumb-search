@@ -598,6 +598,108 @@ fn words_of_things_are_corrected_from_page_names() {
 }
 
 #[test]
+fn slips_people_make_are_corrected_though_pages_name_them() {
+    let mut pages = Vec::new();
+    let mut add = |title: &str, count: usize| {
+        for i in 0..count {
+            pages.push(page(&format!("{title} {i}"), 10, &[]));
+        }
+    };
+    // Everyday words are rare in pages' names, and their slips are there
+    // too: song titles, misspelled redirects.
+    add("Receive", 200);
+    add("Recieve", 4);
+    add("Definitely", 40);
+    add("Definately", 1);
+    add("Pace", 200);
+    add("PKCE flow", 3);
+    add("Judgment", 40);
+    add("Judgement", 30);
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(
+        &[("ei", "ie", 0.001), ("i", "a", 0.001), ("g", "ge", 0.01)],
+        1e-6,
+    );
+    let nothing_known = |_: &str| false;
+    let suggest = |query: &str, model| {
+        searcher
+            .suggest_spelling(query, model, &nothing_known)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    assert_eq!(suggest("recieve", Some(&model)).as_deref(), Some("receive"));
+    assert_eq!(
+        suggest("definately", Some(&model)).as_deref(),
+        Some("definitely")
+    );
+    // An edit people are not seen to make leaves a word the pages know.
+    assert_eq!(suggest("pkce", Some(&model)), None);
+    // So does a word nearly as common as the near one.
+    assert_eq!(suggest("judgement", Some(&model)), None);
+    // Without the model, a word the pages know stays.
+    assert_eq!(suggest("recieve", None), None);
+}
+
+#[test]
+fn names_are_not_taken_for_slips() {
+    let mut pages = Vec::new();
+    let mut add = |title: &str, count: usize| {
+        for i in 0..count {
+            pages.push(page(&format!("{title} {i}"), 10, &[]));
+        }
+    };
+    add("Meets", 200);
+    add("Jean Meeus", 3);
+    add("Elias", 200);
+    add("ETIAS", 3);
+    add("Http", 200);
+    add("Htop", 3);
+    add("Sauce", 200);
+    add("Saute", 3);
+    add("Argument", 200);
+    add("Arguement", 3);
+    pages.push(page("Htop", 10, &[]));
+    let word = |title: &str, description: &str| {
+        Page::from_word(Article {
+            title: title.into(),
+            description: Some(description.into()),
+            ..Article::default()
+        })
+    };
+    pages.push(word("saute", "(verb) To fry quickly in a little fat."));
+    pages.push(word("arguement", "(noun) Misspelling of argument."));
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(
+        &[
+            ("t", "u", 0.001),
+            ("l", "t", 0.001),
+            ("t", "o", 0.001),
+            ("c", "t", 0.001),
+            ("u", "ue", 0.01),
+        ],
+        1e-6,
+    );
+    let suggest = |query: &str| {
+        searcher
+            .suggest_spelling(query, Some(&model), &|_| false)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    // Alone, each is a likely slip of a commoner word.
+    assert_eq!(suggest("meeus").as_deref(), Some("meets"));
+    assert_eq!(suggest("etias").as_deref(), Some("elias"));
+    // A page names it with another word typed.
+    assert_eq!(suggest("jean meeus"), None);
+    // Typed in capitals, an abbreviation.
+    assert_eq!(suggest("ETIAS"), None);
+    // An article is named by it.
+    assert_eq!(suggest("htop"), None);
+    // Wiktionary has it, and not only as a misspelling.
+    assert_eq!(suggest("saute"), None);
+    assert_eq!(suggest("arguement").as_deref(), Some("argument"));
+}
+
+#[test]
 fn spellings_keep_the_words_pages_know() {
     let mut pages = Vec::new();
     for i in 0..3 {
