@@ -572,6 +572,7 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("size of ", &[Area], false),
         ("how big is ", &[Area, Radius], false),
         ("how old is ", &[Born], true),
+        ("how old was ", &[Born], true),
         ("age of ", &[Born], true),
         ("birthday of ", &[Born], false),
         ("founder of ", &[Founder], false),
@@ -628,6 +629,8 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         (" date of death", &[Died], false),
         (" death date", &[Died], false),
         (" age", &[Born], true),
+        (" age at death", &[Born], true),
+        (" born", &[Born], false),
         (" founder", &[Founder], false),
         (" founders", &[Founder], false),
         (" ceo", &[Ceo], false),
@@ -666,6 +669,11 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("is ", " still living", &[Born], true),
         ("is ", " alive", &[Born], true),
         ("is ", " dead", &[Born], true),
+        // "how old was elvis when he died": the age they died at.
+        ("how old was ", " when he died", &[Born], true),
+        ("how old was ", " when she died", &[Born], true),
+        ("how old was ", " when they died", &[Born], true),
+        ("age of ", " at death", &[Born], true),
         ("when was ", " founded", &[Founded], false),
         ("when was ", " established", &[Founded], false),
         ("when was ", " built", &[Founded], false),
@@ -839,6 +847,7 @@ mod tests {
         use FactKind::*;
         for (q, kind, subject) in [
             ("what is the capital of nepal", Capital, "nepal"),
+            ("taylor swift born", Born, "taylor swift"),
             ("brazil capital", Capital, "brazil"),
             ("nepal's capital", Capital, "nepal"),
             ("what is australia's capital", Capital, "australia"),
@@ -914,6 +923,11 @@ mod tests {
             ("is morgan freeman still alive", "morgan freeman"),
             ("is betty white dead?", "betty white"),
             ("is ozzy osbourne alive", "ozzy osbourne"),
+            ("how old was elvis when he died", "elvis"),
+            ("how old was princess diana when she died", "princess diana"),
+            ("how old was einstein", "einstein"),
+            ("age of kobe bryant at death", "kobe bryant"),
+            ("marilyn monroe age at death", "marilyn monroe"),
         ] {
             assert_eq!(asked(q), Some((Born, subject.into(), true)), "{q}");
         }
