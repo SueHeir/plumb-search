@@ -310,6 +310,15 @@ fn tools(text: &str) -> Option<Route> {
         [a, "to", b, "translation" | "translator" | "translate"] => {
             is_language(a) && is_language(b)
         }
+        // "how do you say thank you in german", "happy birthday in spanish
+        // translation", "mood swings meaning in hindi". A bare "bible in
+        // spanish" may ask for one written in it, so it is not one.
+        ["how", "do" | "would" | "can", "you" | "i" | "we", "say", phrase @ .., "in", to]
+        | ["how", "to", "say", phrase @ .., "in", to]
+        | [phrase @ .., "in", to, "translation"]
+        | [phrase @ .., "meaning", "in", to] => {
+            !phrase.is_empty() && phrase.len() <= 5 && is_language(to)
+        }
         _ => false,
     };
     if translation {
@@ -536,6 +545,25 @@ mod tests {
             domains(route("traductor", None, None))[0],
             "translate.google.com"
         );
+        // Asking how to say something in a language.
+        for (query, first) in [
+            ("how do you say thank you in german", "translate.google.com"),
+            ("how to say good morning in french", "translate.google.com"),
+            ("How do you say “cat” in Spanish?", "spanishdict.com"),
+            ("happy birthday in spanish translation", "spanishdict.com"),
+            ("mood swings meaning in hindi", "translate.google.com"),
+        ] {
+            assert_eq!(domains(route(query, None, None))[0], first, "{query}");
+        }
+        // Something written in a language, or said in a place, is not.
+        for query in [
+            "bible in spanish",
+            "movies in hindi",
+            "how do you say goodbye in a letter",
+            "how to say no in a meeting",
+        ] {
+            assert!(route(query, None, None).is_none(), "{query}");
+        }
         assert_eq!(domains(route("speed test", None, None))[0], "speedtest.net");
         assert_eq!(domains(route("food near me", None, None))[0], "yelp.com");
         assert_eq!(
