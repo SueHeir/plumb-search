@@ -35,6 +35,7 @@ mod named_site;
 mod page;
 mod papers;
 mod placing;
+mod repos;
 mod scoring;
 mod search;
 mod sites;

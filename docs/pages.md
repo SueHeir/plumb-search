@@ -116,7 +116,7 @@ From 0.3 the project's page sets also come as signed item sets (`plumb/wikipedia
 
 ## GitHub repositories
 
-The `github` set lists public GitHub repositories with at least 500 stars: "ripgrep" finds BurntSushi/ripgrep. Each keeps only its `owner/name`, its name as another title, its description, its stars (in place of page views) and the domain of its homepage, so tauri-apps/tauri is shown under tauri.app's result. No code or README is kept. It has its own choice under **Page sets**.
+The `github` set lists public GitHub repositories with at least 500 stars: "ripgrep" finds BurntSushi/ripgrep, and "adguard home" AdguardTeam/AdGuardHome. A repository is also asked for by its name and words of its description, as a film is by its title and year, and may then lead the sites: "frp reverse proxy" finds fatedier/frp ("A fast reverse proxy…"), but "frp tax rates" does not, nor "react native" facebook/react ("The library for web and native user interfaces"), since React Native is called that. Each keeps only its `owner/name`, its name as another title, its description, its stars (in place of page views) and the domain of its homepage, so tauri-apps/tauri is shown under tauri.app's result. No code or README is kept. It has its own choice under **Page sets**.
 
 ```sh
 GITHUB_TOKEN=... plumb-tools fetch-pages --set github --data /path/to/node-data --min-stars 500
