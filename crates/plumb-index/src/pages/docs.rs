@@ -326,7 +326,9 @@ impl PageSearcher {
         }) else {
             return false;
         };
-        if topic.split_whitespace().any(written_as_code) {
+        // A version ("3.12") is not code.
+        let code = |word: &str| written_as_code(word) && word.chars().any(char::is_alphabetic);
+        if topic.split_whitespace().any(code) {
             return true;
         }
         let stems = self.question_words(&rest);

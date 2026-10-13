@@ -1126,12 +1126,17 @@ fn docs_pages_named_by_part_of_a_search_keep_the_rest_as_detail() {
         first_docs("python logging"),
         Some(("logging — Logging facility for Python".to_string(), true))
     );
-    // Nothing says random's page is about forests.
-    assert!(searcher
-        .search("python random forest", 10)
-        .unwrap()
-        .iter()
-        .all(|hit| !hit.page.title.starts_with("random")));
+    // Nothing says random's page is about forests, nor is a version code.
+    for query in ["python random forest", "python 3.12 random forest"] {
+        assert!(
+            searcher
+                .search(query, 10)
+                .unwrap()
+                .iter()
+                .all(|hit| !hit.page.title.starts_with("random")),
+            "{query}"
+        );
+    }
     // A page whose title has every word comes before the one a part names.
     let hits = searcher.search("javascript array flat", 10).unwrap();
     assert_eq!(hits[0].page.title, "Array.prototype.flat() — JavaScript");
