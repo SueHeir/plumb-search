@@ -629,10 +629,13 @@ impl PageSearcher {
     /// Whether `name` is only asking and function words once its code is
     /// dropped: the question "What does :(){ : :& };: do?" says in words
     /// what every "what does the liver do" says, and asks about nothing.
+    /// "Stand for" asks as "mean" does: "What does ~$ stand for?".
     fn only_asks(&self, name: &str) -> bool {
-        analysis::tokens(&self.words, name)
-            .iter()
-            .all(|word| crate::is_function_word(word) || ASKING_WORDS.contains(&word.as_str()))
+        analysis::tokens(&self.words, name).iter().all(|word| {
+            crate::is_function_word(word)
+                || ASKING_WORDS.contains(&word.as_str())
+                || matches!(word.as_str(), "stand" | "stands")
+        })
     }
 
     /// How well a question's words cover the query's stemmed words

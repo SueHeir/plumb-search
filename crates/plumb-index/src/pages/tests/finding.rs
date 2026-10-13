@@ -852,6 +852,7 @@ fn a_question_of_only_asking_words_and_code_names_nothing() {
             "2",
         ),
         question("What is a monad?", "Monads explained", "3"),
+        question("What does ~$ stand for?", "Tilde before the prompt", "4"),
     ];
     // Pages that make the query's other words known, not typos.
     let known = [
@@ -861,6 +862,9 @@ fn a_question_of_only_asking_words_and_code_names_nothing() {
         "Kidney",
         "Kidney stone",
         "Kidney failure",
+        "NASA",
+        "NASA TV",
+        "NASA Astronaut Corps",
     ]
     .map(|title| page(title, 1_000, &[]));
     let (_dir, s) = searcher(&[&pages[..], &known[..]].concat());
@@ -875,6 +879,7 @@ fn a_question_of_only_asking_words_and_code_names_nothing() {
     assert!(questions("what does the liver do").is_empty());
     assert!(questions("what does a kidney do").is_empty());
     assert!(questions("what does yeet mean").is_empty());
+    assert!(questions("what does nasa stand for").is_empty());
     // A question that asks about something is still found.
     assert_eq!(questions("what is a monad"), ["What is a monad?"]);
 }
