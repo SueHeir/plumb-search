@@ -840,11 +840,21 @@ fn bare_sites_only_meaning_finds_are_left_out() {
         ),
         // Bare too, but its address shows the query's word.
         site("pyenvtips.net", None, None, &[], &[], obscure(900_000, 3)),
+        // Its only text is in the wrong encoding, so it says nothing.
+        site(
+            "gztc.example",
+            None,
+            Some("�����ز�����Ϣ������㣬�㼯�˹��ݸ����塢"),
+            &[],
+            &[],
+            obscure(20_000, 400),
+        ),
     ];
     let (_dir, searcher) = build(&records);
     let meaning = FixedMeaning(vec![
         ("makewebeasy.co", 1.0),
         ("deleciousfood.com", 1.0),
+        ("gztc.example", 1.0),
         ("pyenvtips.net", 0.9),
         ("realpython.com", 0.6),
     ]);
@@ -865,7 +875,7 @@ fn bare_sites_only_meaning_finds_are_left_out() {
     assert!(
         !unrelated
             .iter()
-            .any(|d| d == "makewebeasy.co" || d == "deleciousfood.com"),
+            .any(|d| d == "makewebeasy.co" || d == "deleciousfood.com" || d == "gztc.example"),
         "{unrelated:?}"
     );
     // Named, a bare site is still found.

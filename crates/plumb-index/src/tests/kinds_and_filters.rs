@@ -2,7 +2,7 @@
 //! search operators.
 
 use super::*;
-use crate::hits::is_unfilled;
+use crate::hits::{is_garbled, is_unfilled};
 
 fn bank_corpus() -> Vec<SiteRecord> {
     let bank = |domain: &str, alias: &str, country: &str, rank: u32| {
@@ -526,6 +526,28 @@ fn unfilled_descriptions_are_told_from_short_ones() {
         "Descriptive statistics",
     ] {
         assert!(!is_unfilled(text), "{text:?}");
+    }
+}
+
+#[test]
+fn garbled_descriptions_are_told_from_lost_accents() {
+    for text in [
+        "���¾�γ�����й������紴��Ĳƾ���ý�塣",
+        "�X�v�ۂb�`���f�B�J�����^�c����A",
+        "��ҳ",
+        "JTNDZGl2JTIwY2xhc3MlM0QlMjJkZXNrdG9wX3Zp",
+        "5LiA5Y+q54ix5oqY6IW+55qE57uv6Z6g",
+    ] {
+        assert!(is_garbled(text), "{text:?}");
+    }
+    for text in [
+        "D�couvrez et explorez plus de 2000 images satellites",
+        "MotorGiga.com: El coche desde todos los �ngulos",
+        "Python asyncio reference",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "",
+    ] {
+        assert!(!is_garbled(text), "{text:?}");
     }
 }
 
