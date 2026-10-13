@@ -28,7 +28,7 @@ pub mod tranco;
 pub mod wat;
 pub mod wikidata;
 
-pub use builder::Builder;
+pub use builder::{crowded_front_pages, Builder};
 pub use ccranks::{load_cc_domain_ranks, CcRank, DEFAULT_CC_RANKS_LIMIT};
 pub use facts::{attach_facts, load_site_facts, FactsByItem, SiteFacts};
 pub use intros::{attach_intros, load_intros, IntrosByItem};
