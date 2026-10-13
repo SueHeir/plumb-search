@@ -198,15 +198,16 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         said_when = true;
         said_hours |= HOURS.contains(when);
     }
-    // Nor in the middle, "pharmacy open now denver", for a time of two
-    // words or more: one word alone may be part of a name ("now tv").
-    while let Some((at, length)) = WHEN.iter().filter(|when| when.len() > 1).find_map(|when| {
-        (1..words.len().saturating_sub(when.len()))
-            .find(|&at| words[at..at + when.len()] == **when)
-            .map(|at| (at, when.len()))
+    // Nor in the middle, "pharmacy open now denver", for the hours: a
+    // word alone may be part of a name ("now tv").
+    while let Some((at, length)) = HOURS.iter().find_map(|hours| {
+        (1..words.len().saturating_sub(hours.len()))
+            .find(|&at| words[at..at + hours.len()] == **hours)
+            .map(|at| (at, hours.len()))
     }) {
         words.drain(at..at + length);
         said_when = true;
+        said_hours = true;
     }
     if words
         .iter()
