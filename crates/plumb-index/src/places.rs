@@ -18,6 +18,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::place::{
@@ -49,6 +50,10 @@ const TOWN_CANDIDATES: usize = 50;
 /// People in a borough or suburb that make it as much a town as a city of
 /// that size: Brooklyn, Manhattan, Setagaya.
 const CITY_SIZED: u64 = 200_000;
+/// People in a city that is still found by its name typed with a slip.
+const MISTYPED_CITY_PEOPLE: u64 = 100_000;
+/// More cities than have [`MISTYPED_CITY_PEOPLE`] (about 4,500 in the world).
+const BIG_CITIES_READ: usize = 20_000;
 /// How far around a named place that is not a town places are looked for.
 const LANDMARK_KM: f64 = 3.0;
 /// Fewer places than this within a town's size: look farther.
@@ -538,6 +543,9 @@ pub struct PlaceSearcher {
     joined: TextAnalyzer,
     stemmed: TextAnalyzer,
     stats: PlaceIndexStats,
+    /// Cities of [`MISTYPED_CITY_PEOPLE`] or more, the biggest first, with
+    /// the keys of their names: a few thousand, read when first needed.
+    big_cities: OnceLock<Vec<(Vec<String>, Place)>>,
 }
 
 impl PlaceSearcher {
@@ -566,6 +574,7 @@ impl PlaceSearcher {
             joined: analysis::joined_analyzer(),
             stemmed: analysis::stemmed_analyzer(),
             stats,
+            big_cities: OnceLock::new(),
         })
     }
 
@@ -762,7 +771,7 @@ impl PlaceSearcher {
                 continue;
             }
             let name = near.join(" ");
-            let location = self.resolve(&name, preferred_country, required_country)?;
+            let location = self.resolve_as_typed(&name, preferred_country, required_country)?;
             let Some(town) = location
                 .selected()
                 .filter(|place| GUESSED_TOWNS.contains(&place.kind.as_str()))
@@ -939,8 +948,33 @@ impl PlaceSearcher {
     }
 
     /// Resolves the name without allowing a default-country boost to
-    /// override explicit qualifiers or decide a close namesake tie.
+    /// override explicit qualifiers or decide a close namesake tie. Where
+    /// nothing is called that, a big city whose name it mistypes
+    /// ([`Self::mistyped_cities`]).
     pub fn resolve(
+        &self,
+        text: &str,
+        preferred_country: Option<&str>,
+        required_country: Option<&str>,
+    ) -> Result<LocationResolution> {
+        let found = self.resolve_as_typed(text, preferred_country, required_country)?;
+        if found.status != LocationStatus::UnknownLocation {
+            return Ok(found);
+        }
+        let words: Vec<String> = normalize_text(text)
+            .split(' ')
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect();
+        let mistyped = self.mistyped_cities(&words, required_country)?;
+        if mistyped.is_empty() {
+            return Ok(found);
+        }
+        Ok(resolve_candidates(text, mistyped, preferred_country))
+    }
+
+    /// [`Self::resolve`] by the name as typed.
+    fn resolve_as_typed(
         &self,
         text: &str,
         preferred_country: Option<&str>,
@@ -1072,6 +1106,74 @@ impl PlaceSearcher {
         }))
     }
 
+    /// Cities of [`MISTYPED_CITY_PEOPLE`] or more whose name is a slip
+    /// from how `words` begin, the rest saying where it is, for a WHERE
+    /// nothing is called: one slip in a name of six to eight letters, two
+    /// in a longer one ("hotels in cincinatti"). Shorter names are left
+    /// alone: "pizza in gotham" is no Gotha.
+    fn mistyped_cities(
+        &self,
+        words: &[String],
+        required_country: Option<&str>,
+    ) -> Result<Vec<Place>> {
+        let cities = self.big_cities()?;
+        for k in (1..=words.len()).rev() {
+            let qualifier = words[k..].join(" ");
+            let Some(key) = analysis::tokens(&self.joined, &words[..k].join(" ")).pop() else {
+                continue;
+            };
+            let slips = match key.chars().count() {
+                0..=5 => continue,
+                6..=8 => 1,
+                _ => 2,
+            };
+            let dfa = crate::spell::builder(slips).build_dfa(&key);
+            let found: Vec<Place> = cities
+                .iter()
+                .filter(|(keys, place)| {
+                    keys.iter().any(|key| {
+                        matches!(dfa.eval(key), levenshtein_automata::Distance::Exact(_))
+                    }) && (qualifier.is_empty() || place_is_in(place, &qualifier))
+                        && required_country.is_none_or(|country| country_matches(place, country))
+                })
+                .map(|(_, place)| place.clone())
+                .collect();
+            if !found.is_empty() {
+                return Ok(found);
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// [`Self::big_cities`], read the first time.
+    fn big_cities(&self) -> Result<&[(Vec<String>, Place)]> {
+        if let Some(cities) = self.big_cities.get() {
+            return Ok(cities);
+        }
+        let big =
+            plumb_core::place::place_rank("place=city", MISTYPED_CITY_PEOPLE, false, false, 0);
+        let searcher = self.reader.searcher();
+        let city = Term::from_field_text(self.fields.kind, "place=city");
+        let found = searcher.search(
+            &TermQuery::new(city, IndexRecordOption::Basic),
+            &TopDocs::with_limit(BIG_CITIES_READ)
+                .order_by_fast_field::<u64>("rank", tantivy::Order::Desc),
+        )?;
+        let mut cities = Vec::new();
+        for (rank, address) in found {
+            if rank.is_none_or(|rank| rank < u64::from(big)) {
+                break;
+            }
+            let place = self.stored(&searcher.doc(address)?)?;
+            let keys = std::iter::once(&place.name)
+                .chain(&place.aliases)
+                .filter_map(|name| analysis::tokens(&self.joined, name).pop())
+                .collect();
+            cities.push((keys, place));
+        }
+        Ok(self.big_cities.get_or_init(|| cities))
+    }
+
     /// Places whose name or other name is `name`.
     fn named(&self, name: &str) -> Result<Vec<Place>> {
         self.named_within(name, None)
@@ -1086,7 +1188,7 @@ impl PlaceSearcher {
         preferred_country: Option<&str>,
         required_country: Option<&str>,
     ) -> Result<Vec<Place>> {
-        let location = self.resolve(town, preferred_country, required_country)?;
+        let location = self.resolve_as_typed(town, preferred_country, required_country)?;
         let Some(town) = location.selected().filter(|town| town.is_town()) else {
             return Ok(Vec::new());
         };
@@ -2297,6 +2399,42 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(found.name, "San Antonio Texas");
+    }
+
+    #[test]
+    fn a_big_city_is_found_by_its_name_typed_with_a_slip() {
+        let mut fixtures = places();
+        fixtures.extend([
+            city("Cincinnati", 309_000, "OH", "US", 39.10, -84.51),
+            city("Tucson", 540_000, "AZ", "US", 32.22, -110.97),
+            city("Gorham", 17_000, "ME", "US", 43.68, -70.44),
+            Place {
+                kind: "place=town".into(),
+                rank: place_rank("place=town", 46_000, false, false, 3),
+                ..city("Gotha", 46_000, "TH", "DE", 50.95, 10.70)
+            },
+            at("Hotel Cincinnatian", "tourism=hotel", 39.101, -84.511),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let centre = |query: &str| {
+            let found = searcher.search(query, None, Some("US"), 5).unwrap();
+            found.and_then(|found| found.center).map(|place| place.name)
+        };
+        assert_eq!(
+            centre("hotels in cincinatti").as_deref(),
+            Some("Cincinnati")
+        );
+        assert_eq!(
+            centre("hotels in cincinatti ohio").as_deref(),
+            Some("Cincinnati")
+        );
+        let tucson = searcher.locate("tuscon az", None).unwrap().unwrap();
+        assert_eq!(tucson.name, "Tucson");
+        // Nor a small city, a town or a short name.
+        for town in ["gorhams", "gothas", "gotham", "cincinatti tx"] {
+            let found = searcher.resolve(town, None, None).unwrap();
+            assert_eq!(found.status, LocationStatus::UnknownLocation, "{town}");
+        }
     }
 
     #[test]
