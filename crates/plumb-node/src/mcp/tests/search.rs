@@ -882,10 +882,36 @@ fn a_package_not_asked_for_leaves_the_other_pages_their_places() {
         .map(|row| row["url"].as_str().unwrap())
         .collect();
     let at = |part: &str| urls.iter().position(|url| url.contains(part));
-    // The repository and the article are listed, and npm's page after them.
-    let (repo, incident) = (at("github.com").unwrap(), at("wikipedia.org").unwrap());
-    assert!(
-        at("npmjs.com").is_none_or(|npm| npm > repo.max(incident)),
-        "{urls:?}"
-    );
+    // The repository and the article are listed, and npm's page with them.
+    let site = at("die-linke.de").unwrap();
+    for part in ["github.com", "wikipedia.org", "npmjs.com"] {
+        assert!(at(part).is_some_and(|page| page < site), "{part}: {urls:?}");
+    }
+}
+
+#[test]
+fn a_package_named_with_its_language_is_listed_within_the_limit() {
+    let mcp = scripted(|_| {
+        let mut package = package_page("pypi", "requests", None, None);
+        (package.hit.whole, package.hit.popularity) = (false, 0.97);
+        let sites = ["matplotlib.org", "python-requests.org", "bottlepy.org"]
+            .into_iter()
+            .chain(["trypyramid.com", "pythonspot.com", "python-poetry.org"])
+            .map(|domain| Hit {
+                text_score: 0.4,
+                ..hit(domain, 0.6, 0.6, false)
+            })
+            .collect();
+        results(sites, vec![package])
+    });
+    // With and without a limit: placed after every site, the limit cut it.
+    for args in [
+        json!({ "query": "requests python", "limit": 5 }),
+        json!({ "query": "requests python" }),
+    ] {
+        let reply = call(&mcp, "search", args.clone());
+        let urls = reply["result"]["structuredContent"]["ordered_results"].to_string();
+        assert!(urls.contains("pypi.org/project/requests"), "{args}: {urls}");
+    }
+    assert!(!crate::assembly::promote_package("requests python"));
 }

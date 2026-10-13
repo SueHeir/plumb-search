@@ -207,9 +207,12 @@ impl Mcp {
             |domain| self.backend.site(domain),
         );
         // Placed as the results page places them, which the info box needs.
-        // A package the search doesn't ask for outright is placed apart and
-        // after the rest, so it never takes the place of a page listed
-        // beside the sites: "left-pad" keeps its repository and article.
+        // A package the search doesn't ask for outright is placed apart, so
+        // it never takes the place of a page listed beside the sites:
+        // "left-pad" keeps its repository and article. It still goes where
+        // it would go on its own, ahead of the pages placed there, since
+        // after every site the limit cuts it: "requests python" lists PyPI's
+        // page.
         let promote_package = crate::assembly::promote_package(query);
         let (supplementary, found_pages): (Vec<_>, Vec<_>) = results
             .pages
@@ -225,14 +228,9 @@ impl Mcp {
             }
         };
         let mut placed = place(found_pages);
-        let after = results
-            .hits
-            .len()
-            .max(placed.iter().map(|p| p.at + 1).max().unwrap_or(0));
-        for mut page in place(supplementary) {
-            page.at = after;
-            page.under = None;
-            placed.push(page);
+        for page in place(supplementary) {
+            let at = placed.iter().position(|p| p.at >= page.at);
+            placed.insert(at.unwrap_or(placed.len()), page);
         }
         if let Some(page) = &guessed {
             placed.retain(|p| p.hit.page.url != page.url);
