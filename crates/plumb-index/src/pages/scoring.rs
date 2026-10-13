@@ -1147,7 +1147,7 @@ pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
 /// words of "javascript array sort" are more read than MDN's page on it,
 /// and would crowd it out.
 pub(crate) fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
-    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE2_SET];
+    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET];
     for set in kept {
         if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
             continue;
