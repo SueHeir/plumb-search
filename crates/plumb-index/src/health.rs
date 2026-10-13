@@ -247,6 +247,25 @@ const MEDICAL_WORDS: &[&str] = &[
     "constipation",
     "heartburn",
     "indigestion",
+    "toothache",
+    "earache",
+    "nosebleed",
+    "nosebleeds",
+    "sunburn",
+    "sciatica",
+    "palpitations",
+    "bloating",
+    "dandruff",
+    "snoring",
+    "ingrown",
+    "wart",
+    "warts",
+    "cyst",
+    "cysts",
+    "hernia",
+    "bunion",
+    "bunions",
+    "lice",
     // Common drugs (the pill-shop names count too, see `is_medical`).
     "ibuprofen",
     "acetaminophen",
@@ -320,8 +339,8 @@ const MEDICAL_PHRASES: &[&str] = &[
     "side effects",
     "blood pressure",
     "heart attack",
+    "kidney stone",
     "kidney stones",
-    "sore throat",
     "pink eye",
     "panic attack",
     "panic attacks",
@@ -330,8 +349,30 @@ const MEDICAL_PHRASES: &[&str] = &[
     "signs of",
     "acid reflux",
     "food poisoning",
-    "chest pain",
     "back pain",
+    "pain relief",
+    "upset stomach",
+    "frozen shoulder",
+    "shin splints",
+    "carpal tunnel",
+    "cold sore",
+    "cold sores",
+    "canker sore",
+    "canker sores",
+    "black eye",
+    "head injury",
+    "hair loss",
+    "shortness of breath",
+    "blood in urine",
+    "blood in stool",
+    "common cold",
+    "head cold",
+    // Not "dry" alone: "dry rub ribs".
+    "dry skin",
+    "dry eye",
+    "dry eyes",
+    "dry mouth",
+    "dry scalp",
     "blood clot",
     // A fever, not a film or a drink: "saturday night fever", "fever-tree".
     "fever in",
@@ -400,7 +441,189 @@ const NOT_MEDICAL: &[&str] = &[
     "china syndrome",
     "rash guard",
     "rash decision",
+    "sight for sore eyes",
+    "stiff upper lip",
 ];
+
+/// What hurts or is wrong in a part of the body. Beside a body part it
+/// makes a search medical: "knee pain", "swollen ankles", "numbness on
+/// top of foot". Alone or about a thing it doesn't: "broken arrow",
+/// "pulled pork shoulder".
+const COMPLAINTS: &[&str] = &[
+    "pain",
+    "painful",
+    "ache",
+    "aches",
+    "aching",
+    "sore",
+    "swollen",
+    "swelling",
+    "itch",
+    "itchy",
+    "itching",
+    "numb",
+    "numbness",
+    "tingling",
+    "cramp",
+    "cramps",
+    "cramping",
+    "spasm",
+    "spasms",
+    "twitching",
+    "stiff",
+    "stiffness",
+    "tightness",
+    "weakness",
+    "broken",
+    "fracture",
+    "fractured",
+    "cracked",
+    "sprain",
+    "sprained",
+    "torn",
+    "pulled",
+    "dislocated",
+    "bruise",
+    "bruised",
+    "bruising",
+    "injury",
+    "injuries",
+    "injured",
+    "infected",
+    "bleeding",
+    "burning",
+    "ringing",
+    "lump",
+    "lumps",
+    "bump",
+    "bumps",
+    "blister",
+    "blisters",
+    "chapped",
+    "runny",
+    "stuffy",
+    "blocked",
+    "blurry",
+    "blurred",
+];
+
+/// Parts of the body a complaint is felt in. Not "head", "back" or
+/// "heart", which go with too much else: "cracked head gasket", "pulled
+/// back hair", "broken heart". "Back pain" is a phrase.
+const BODY_PARTS: &[&str] = &[
+    "ear",
+    "ears",
+    "eye",
+    "eyes",
+    "eyelid",
+    "vision",
+    "nose",
+    "sinus",
+    "sinuses",
+    "mouth",
+    "lip",
+    "lips",
+    "tongue",
+    "tooth",
+    "teeth",
+    "gums",
+    "jaw",
+    "throat",
+    "neck",
+    "lymph",
+    "gland",
+    "glands",
+    "shoulder",
+    "shoulders",
+    "arm",
+    "arms",
+    "armpit",
+    "elbow",
+    "elbows",
+    "wrist",
+    "wrists",
+    "hand",
+    "hands",
+    "finger",
+    "fingers",
+    "thumb",
+    "knuckles",
+    "chest",
+    "breast",
+    "breasts",
+    "rib",
+    "ribs",
+    "spine",
+    "tailbone",
+    "stomach",
+    "abdomen",
+    "abdominal",
+    "belly",
+    "liver",
+    "kidney",
+    "kidneys",
+    "bladder",
+    "pelvis",
+    "pelvic",
+    "groin",
+    "testicle",
+    "testicles",
+    "hip",
+    "hips",
+    "leg",
+    "legs",
+    "thigh",
+    "thighs",
+    "hamstring",
+    "knee",
+    "knees",
+    "acl",
+    "meniscus",
+    "shin",
+    "shins",
+    "calf",
+    "calves",
+    "ankle",
+    "ankles",
+    "achilles",
+    "foot",
+    "feet",
+    "heel",
+    "heels",
+    "toe",
+    "toes",
+    "toenail",
+    "skin",
+    "scalp",
+    "joint",
+    "joints",
+    "muscle",
+    "muscles",
+    "tendon",
+    "ligament",
+];
+
+/// Words that say where in a body part: "pain in left arm", "numbness on
+/// top of foot". Only these may come between a complaint and its body
+/// part, so "pulled pork shoulder" and "dry rub ribs" are about food.
+const PLACE_WORDS: &[&str] = &[
+    "in", "on", "of", "the", "my", "a", "an", "both", "left", "right", "top", "bottom", "side",
+    "front", "inner", "outer", "inside", "outside", "upper", "lower", "under", "behind", "around",
+    "between",
+];
+
+/// Whether `words` say something is wrong in a part of the body: a
+/// complaint with a body part next to it, or with only place words
+/// between them.
+fn complaint_in_body(words: &[&str]) -> bool {
+    let not_place = |word: &&&str| !PLACE_WORDS.contains(*word);
+    let body = |word: Option<&&str>| word.is_some_and(|word| BODY_PARTS.contains(word));
+    words.iter().enumerate().any(|(i, word)| {
+        COMPLAINTS.contains(word)
+            && (body(words[..i].iter().rev().find(not_place))
+                || body(words[i + 1..].iter().find(not_place)))
+    })
+}
 
 /// Whether `query` asks about an illness, a symptom or a drug.
 pub(crate) fn is_medical(query: &str) -> bool {
@@ -428,6 +651,7 @@ pub(crate) fn is_medical(query: &str) -> bool {
             .iter()
             .any(|test| padded.contains(&format!(" {test} ")))
             && words.iter().any(|word| LAB_READINGS.contains(word))
+        || complaint_in_body(&words)
 }
 
 /// Health sources searchers ask for by name, by the domain the index has
@@ -503,10 +727,11 @@ fn same_site(a: &str, b: &str) -> bool {
 /// Whether a word of `query` is the name of `hit`'s site and neither
 /// medical nor `common` (in many sites' titles): "medscape" for
 /// medscape.com, "hellopharmacist" for hellopharmacist.com. Such a search
-/// asks that site, not the authorities. An illness, a drug or a lab test
-/// that is also a site's name is what the search is about: diabetes.org
-/// for "diabetes symptoms", rdw.nl for "high RDW". And first.org is not
-/// asked for by "first dose".
+/// asks that site, not the authorities. An illness, a drug, a lab test or
+/// a part of the body that is also a site's name is what the search is
+/// about: diabetes.org for "diabetes symptoms", rdw.nl for "high RDW",
+/// hands.net for "tingling in hands". And first.org is not asked for by
+/// "first dose".
 fn names_site(query: &str, hit: &Hit, common: &dyn Fn(&str) -> bool) -> bool {
     let Some(domain) = plumb_core::registrable_domain(&hit.domain) else {
         return false;
@@ -517,6 +742,7 @@ fn names_site(query: &str, hit: &Hit, common: &dyn Fn(&str) -> bool) -> bool {
         .any(|word| word == label)
         && !is_medical(label)
         && !LAB_TESTS.contains(&label)
+        && !BODY_PARTS.contains(&label)
         && !common(label)
 }
 
@@ -783,6 +1009,18 @@ mod tests {
             "low platelet count",
             "high white blood cell count",
             "low blood sugar",
+            "knee pain",
+            "swollen ankles",
+            "broken toe",
+            "ringing in ears",
+            "numbness on top of foot",
+            "pain in left arm",
+            "pain with ovarian cyst",
+            "sunburn relief",
+            "dry eyes",
+            "blood in urine",
+            "sore throat",
+            "common cold 7 to 10 days",
         ] {
             assert!(is_medical(query), "{query}");
         }
@@ -804,6 +1042,14 @@ mod tests {
             "alt key",
             "blood sugar sex magik",
             "high school",
+            "broken arrow",
+            "broken heart",
+            "growing pains",
+            "pulled pork shoulder",
+            "dry rub ribs",
+            "cracked head gasket",
+            "quick dry nail polish",
+            "a sight for sore eyes",
         ] {
             assert!(!is_medical(query), "{query}");
         }
@@ -1164,6 +1410,12 @@ mod tests {
             // Or by the lab test it asks about: rdw.nl is the Dutch
             // vehicle authority.
             ("high RDW", vec!["rdw.nl", "rdw.example"], vec![]),
+            // Or by the body part.
+            (
+                "tingling in hands",
+                vec!["hands.net", "hands.example"],
+                vec![],
+            ),
         ] {
             let mut hits = listed
                 .iter()
