@@ -48,7 +48,7 @@ pub use self::placing::{
     MAX_PAGES_LISTED, MAX_SITE_PAGES, MIN_PARTIAL_SCORE, OPERATOR_PAGES, PARTIAL_AFTER,
     WEAK_SITE_MATCH,
 };
-pub(crate) use self::placing::{asked_as_question, kept_below, named_page_site};
+pub(crate) use self::placing::{asked_as_question, is_year, kept_below, named_page_site};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
 pub use self::sites::base_title;
 

@@ -12,6 +12,7 @@ use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{DocAddress, Term};
 
 use crate::names::typed_domain;
+use crate::pages::is_year;
 use crate::rank::bm25_of;
 use crate::schema::Fields;
 use crate::{analysis, FILLER_WORDS, MAX_QUERY_WORDS};
@@ -356,7 +357,9 @@ impl ParsedQuery {
 
     /// Which of `docs` lack one of the query's main words: those other
     /// than [`FILLER_WORDS`] and [`plumb_core::FUNCTION_WORDS`]. None for a
-    /// query of one main word or fewer.
+    /// query of one main word or fewer. A year is not asked of a site: it
+    /// says which one, and wimbledon.com is what "wimbledon tickets 2026"
+    /// wants without the year on its homepage.
     pub(crate) fn missing_main_words(
         &self,
         searcher: &tantivy::Searcher,
@@ -368,7 +371,7 @@ impl ParsedQuery {
         if main.len() < 2 || docs.is_empty() {
             return Ok(missing);
         }
-        for i in main {
+        for i in main.into_iter().filter(|&i| !is_year(&self.words[i])) {
             let mut clauses = Clauses::default();
             self.word_clauses(i, searcher, f, &mut clauses)?;
             for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs.to_vec())? {

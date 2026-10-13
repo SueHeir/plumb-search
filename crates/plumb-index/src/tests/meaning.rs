@@ -947,3 +947,57 @@ fn a_number_alone_matches_nothing_in_a_query_of_other_words() {
     // A site the query starts by naming keeps its place.
     assert_eq!(found("163 mail")[0], "163.com");
 }
+
+#[test]
+fn a_year_is_not_asked_of_a_site() {
+    let records = vec![
+        site(
+            "hurricanes.example",
+            Some("National Hurricane Center"),
+            Some("Atlantic hurricane season outlooks and advisories."),
+            &[],
+            &[],
+            ranked(40_000, 300),
+        ),
+        site(
+            "atlantic.example",
+            Some("The Atlantic"),
+            Some("News and essays."),
+            &[],
+            &[],
+            ranked(30_000, 300),
+        ),
+        site(
+            "storms.example",
+            Some("Storms"),
+            Some("Hurricane season 2026 storm tracker."),
+            &[],
+            &[],
+            ranked(20_000, 300),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let meaning = near_and_far(&[("storms.example", 0.5)], &[]);
+    let found = |query: &str| {
+        let hits = searcher
+            .search_meaning(
+                query,
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(found("atlantic hurricane season")[0], "hurricanes.example");
+    // The year says which season: the site without it stays, and one
+    // without another word still goes.
+    let year = found("2026 atlantic hurricane season");
+    assert!(year.contains(&"hurricanes.example".to_string()), "{year:?}");
+    assert!(!year.contains(&"atlantic.example".to_string()), "{year:?}");
+}
