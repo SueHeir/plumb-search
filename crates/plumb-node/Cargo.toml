@@ -18,15 +18,15 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 getrandom = "0.3.4"
 idna = "1.1.0"
-plumb-answer = { version = "0.2.1", path = "../plumb-answer" }
-plumb-core = { version = "0.2.1", path = "../plumb-core" }
-plumb-crawl = { version = "0.2.1", path = "../plumb-crawl" }
-plumb-embed = { version = "0.2.1", path = "../plumb-embed" }
+plumb-answer = { version = "0.3.0", path = "../plumb-answer" }
+plumb-core = { version = "0.3.0", path = "../plumb-core" }
+plumb-crawl = { version = "0.3.0", path = "../plumb-crawl" }
+plumb-embed = { version = "0.3.0", path = "../plumb-embed" }
 plumb-format = { path = "../plumb-format" }
-plumb-index = { version = "0.2.1", path = "../plumb-index" }
-plumb-net = { version = "0.2.1", path = "../plumb-net" }
-plumb-ingest = { version = "0.2.1", path = "../plumb-ingest" }
-plumb-plugin = { version = "0.2.1", path = "../plumb-plugin" }
+plumb-index = { version = "0.3.0", path = "../plumb-index" }
+plumb-net = { version = "0.3.0", path = "../plumb-net" }
+plumb-ingest = { version = "0.3.0", path = "../plumb-ingest" }
+plumb-plugin = { version = "0.3.0", path = "../plumb-plugin" }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 rcgen = "0.13.2"
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
@@ -54,7 +54,7 @@ sha2 = "0.10.9"
 
 [dev-dependencies]
 ed25519-dalek = "3"
-plumb-private = { version = "0.2.1", path = "../plumb-private" }
+plumb-private = { version = "0.3.0", path = "../plumb-private" }
 # Writes and signs the sets the tests have a node take and read.
 plumb-tools = { path = "../plumb-tools" }
 tempfile = "3.27.0"
