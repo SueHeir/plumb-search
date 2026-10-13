@@ -430,12 +430,15 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
             }
         }
     }
-    // A docs page found by its words never comes before the best site but
-    // its own, whatever the model says: "python package index" wants
-    // pypi.org first.
+    // A docs page found by its words, or another site's page while the
+    // query names the best site's owner, never comes before the best site
+    // but its own, whatever the model says: "python package index" wants
+    // pypi.org first, "minecraft" minecraft.net.
+    let names_best =
+        crate::pages::named_page_site(&new_hits, placed.iter().map(|p| &p.hit)) == Some(0);
     for page in alone
         .iter_mut()
-        .filter(|p| p.at == 0 && crate::pages::docs_kept_below(&p.hit, &new_hits))
+        .filter(|p| p.at == 0 && crate::pages::kept_below(&p.hit, &new_hits, names_best))
     {
         page.at = 1;
     }
@@ -693,6 +696,117 @@ mod tests {
             None => LearnedPlace::Last,
         };
         assert_eq!(placed[0].hit.learned, Some(expected));
+    }
+
+    #[test]
+    fn another_sites_page_named_like_the_official_site_never_leads() {
+        let model = named_first_model();
+        let named = |set: &str, url: &str| PageHit {
+            page: Page::from_set(
+                set,
+                Article {
+                    title: "Minecraft".into(),
+                    item: Some(url.into()),
+                    views: 4_000,
+                    ..Article::default()
+                },
+            )
+            .unwrap(),
+            score: 0.96,
+            named: true,
+            popularity: 0.92,
+            whole: false,
+            learned: None,
+        };
+        let led = |page: PageHit, official: bool| {
+            let mut best = site("minecraft.net", 1.3, true);
+            best.official = official;
+            let mut hits = vec![best, site("minecraft.wiki", 1.0, true)];
+            let mut placed = place_pages("minecraft", &hits, vec![page]);
+            reorder(&model, "minecraft", &mut hits, &mut placed);
+            assert_eq!(hits[0].domain, "minecraft.net");
+            let expected = match hits.get(placed[0].at) {
+                Some(site) => LearnedPlace::Before(site.domain.clone()),
+                None => LearnedPlace::Last,
+            };
+            assert_eq!(placed[0].hit.learned, Some(expected));
+            placed[0].at == 0
+        };
+        let museum = "https://computerhistory.org/minecraft/";
+        // A museum's page on Minecraft, or a news site's, comes after
+        // minecraft.net.
+        assert!(!led(named(crate::pages::SUBPAGES_SET, museum), true));
+        let news = "https://www.cnet.com/tags/minecraft/";
+        assert!(!led(named(crate::pages::REFERENCE_SET, news), true));
+        // The official site's own page, one named while the best site is
+        // not an official one, and the article are left to the model.
+        let own = "https://www.minecraft.net/en-us/about-minecraft";
+        assert!(led(named(crate::pages::SUBPAGES_SET, own), true));
+        assert!(led(named(crate::pages::SUBPAGES_SET, museum), false));
+        let mut article = named(crate::pages::SUBPAGES_SET, museum);
+        article.page = Page::from_article(
+            "en",
+            Article {
+                title: "Minecraft".into(),
+                views: 4_000,
+                ..Article::default()
+            },
+        );
+        assert!(led(article, true));
+    }
+
+    #[test]
+    fn another_sites_page_found_for_what_the_best_site_is_of_never_leads() {
+        // Lists whole pages first, as the model has for "red dead
+        // redemption 2", whose IGN guide has all its words.
+        let whole = Node::Split {
+            feature: FEATURES.iter().position(|f| *f == "p_whole").unwrap(),
+            threshold: 0.5,
+            left: Box::new(Node::Leaf { value: 0.0 }),
+            right: Box::new(Node::Leaf { value: 1.0 }),
+        };
+        let model = Model::new(vec![whole], None);
+        let guide = PageHit {
+            page: Page::from_set(
+                crate::pages::SUBPAGES_SET,
+                Article {
+                    title: "Red Dead Redemption 2 Guide".into(),
+                    item: Some("https://www.ign.com/wikis/red-dead-redemption-2".into()),
+                    views: 4_000,
+                    ..Article::default()
+                },
+            )
+            .unwrap(),
+            score: 0.56,
+            named: false,
+            popularity: 0.87,
+            whole: true,
+            learned: None,
+        };
+        let mut game = article("Red Dead Redemption 2", true);
+        game.page.item = Some("Q20981587".into());
+        game.page.site = Some("rockstargames.com".into());
+        // The query names the game, so its official site, with the
+        // article under it, comes first; naming nothing whose site it is,
+        // the guide may lead.
+        for names_game in [true, false] {
+            let mut best = site("rockstargames.com", 1.3, false);
+            best.official = true;
+            let mut hits = vec![best, site("rdr2map.com", 1.0, false)];
+            let mut pages = vec![guide.clone()];
+            if names_game {
+                pages.push(game.clone());
+            }
+            let query = "red dead redemption 2";
+            let mut placed = place_pages(query, &hits, pages);
+            reorder(&model, query, &mut hits, &mut placed);
+            let at = |title: &str| placed.iter().find(|p| p.hit.page.title == title);
+            assert_eq!(at(&guide.page.title).unwrap().at == 0, !names_game);
+            if names_game {
+                let game = at(&game.page.title).unwrap();
+                assert_eq!(game.under.as_deref(), Some("rockstargames.com"));
+            }
+        }
     }
 
     #[test]

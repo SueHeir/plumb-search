@@ -748,17 +748,24 @@ fn evaluate(
             results.map(|results| (results, query_meaning))
         };
         let (mut results, mut query_meaning) = search(&q.query)?;
-        // As a node with pages does: words of things, not sites, are
-        // corrected from the pages' names ("anubas").
-        if results.spelling.is_none() && !args.exact {
+        // As a node with pages does (`add_pages`): a query that names a
+        // page is spelled right, the words the pages know are put back in a
+        // suggestion ("pkce" is not "pace"), and words of things, not
+        // sites, are corrected from the pages' names ("anubas").
+        let applied = results.spelling.as_ref().is_some_and(|s| s.applied);
+        if !args.exact && !applied {
             if let Some(pages) = pages.as_ref() {
-                let site_known =
-                    |word: &str| searcher.word_sites(word) >= plumb_index::KNOWN_WORD_SITES;
                 let spelled_right = pages
                     .search(&q.query, 10)?
                     .iter()
                     .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
-                if !spelled_right {
+                results.spelling = match results.spelling.take() {
+                    Some(spelling) if !spelled_right => pages.check_spelling(&q.query, spelling)?,
+                    _ => None,
+                };
+                if results.spelling.is_none() && !spelled_right {
+                    let site_known =
+                        |word: &str| searcher.word_sites(word) >= plumb_index::KNOWN_WORD_SITES;
                     results.spelling =
                         pages.suggest_spelling(&q.query, searcher.spelling_model(), &site_known)?;
                 }

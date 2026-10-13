@@ -235,13 +235,19 @@ fn short_docs_preserve_operators_ecosystems_and_navigation() {
         ..Article::default()
     });
     assert_eq!(
-        searcher.question_match(&question, &searcher.question_words("python tomllib"), None),
+        searcher.question_match(
+            &question,
+            &searcher.question_words("python tomllib"),
+            &searcher.question_words("python tomllib"),
+            None
+        ),
         (0.0, false)
     );
     assert!(
         searcher
             .question_match(
                 &question,
+                &searcher.question_words("parse configuration python"),
                 &searcher.question_words("parse configuration python"),
                 None
             )
