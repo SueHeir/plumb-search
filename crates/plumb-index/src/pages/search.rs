@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::facts::FactKind;
 use plumb_core::paper_query::PaperQuery;
 use plumb_core::{registrable_domain, Operators};
 use tantivy::collector::TopDocs;
@@ -30,11 +29,11 @@ pub(crate) enum Hint {
     Article,
     /// A paper of that title: "batch normalization paper".
     Paper,
-    /// Whatever is named so: "who is galileo", "ariana grande age".
-    Any,
     /// A person of that name, of whom something is asked: "obama
     /// daughters", "picasso paintings".
     Person,
+    /// Whatever is named so: "who is galileo", "ariana grande age".
+    Any,
 }
 
 /// Words before a name that ask about it.
@@ -141,11 +140,6 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     let name = name.trim();
     let hint = hint?;
     (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
-}
-
-/// Whether `page` is about a person: it has a birth date.
-fn is_person(page: &Page) -> bool {
-    page.facts.iter().any(|fact| fact.kind == FactKind::Born)
 }
 
 /// Least listeners of a song or album that [`PageSearcher::known_song`]
@@ -532,6 +526,13 @@ impl PageSearcher {
         };
         let mut found = self.search_once(&name, limit, scope)?;
         match hint {
+            // Only a person the name names, and not when a page is called
+            // the whole query: "black death" is not about the singer Black,
+            // nor "christmas songs" about Christmas.
+            Hint::Person => {
+                let called = hits.iter().any(|hit| hit.named);
+                found.retain(|hit| !called && hit.named && hit.page.is_person());
+            }
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             Hint::Paper => {
                 if found.iter().any(|hit| hit.page.set == PAPERS_SET) {
@@ -552,13 +553,6 @@ impl PageSearcher {
                 }
             }
             Hint::Any => {}
-            // Only a person the name names, and not when a page is called
-            // the whole query: "black death" is not about the singer Black,
-            // nor "christmas songs" about Christmas.
-            Hint::Person => {
-                let called = hits.iter().any(|hit| hit.named);
-                found.retain(|hit| !called && hit.named && is_person(&hit.page));
-            }
         }
         for hit in found {
             // Found both ways, a page keeps its better score and whatever
