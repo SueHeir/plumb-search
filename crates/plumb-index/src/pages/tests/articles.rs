@@ -53,6 +53,55 @@ fn words_that_say_what_is_wanted_keep_the_name() {
 }
 
 #[test]
+fn repository_words_find_the_repository() {
+    let mut tokio = Page::from_repo(Article {
+        title: "tokio-rs/tokio".into(),
+        aliases: vec!["tokio".into()],
+        views: 30_000,
+        ..Article::default()
+    });
+    tokio.site = Some("tokio.rs".into());
+    let reverse = Page::from_repo(Article {
+        title: "someone/reverse-proxy".into(),
+        views: 30_000,
+        ..Article::default()
+    });
+    let (_dir, s) = searcher(&[
+        tokio,
+        reverse,
+        page("Tokio Hotel", 200_000, &[]),
+        page("Repurchase agreement", 90_000, &["Reverse repo"]),
+    ]);
+    let sites = [site("github.com", false), site("tokio.rs", false)];
+    for query in [
+        "tokio github",
+        "tokio repo",
+        "tokio github repo",
+        "Tokio repository",
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(hits[0].page.title, "tokio-rs/tokio", "{query}");
+        assert!(hits[0].named, "{query}");
+        let placed = place_pages(query, &sites, hits.clone());
+        assert!(
+            placed.iter().any(|p| p.hit.page.title == "tokio-rs/tokio"),
+            "{query}"
+        );
+        // Without its site, it comes right after github.com.
+        let placed = place_pages(query, &[site("github.com", true)], hits);
+        assert_eq!(placed[0].at, 1, "{query}");
+    }
+    assert_eq!(
+        hinted_name("tokio github"),
+        Some(("tokio".into(), Hint::Repo))
+    );
+    assert_eq!(hinted_name("github"), None);
+    // A repository named only in part is not taken for the one asked for.
+    let hits = s.search("reverse repo", 5).unwrap();
+    assert_eq!(titles(&hits), ["Repurchase agreement"]);
+}
+
+#[test]
 fn articles_whose_title_is_part_of_the_query_are_found() {
     let (_dir, s) = searcher(&[
         page("Titanic", 400_000, &["RMS Titanic"]),

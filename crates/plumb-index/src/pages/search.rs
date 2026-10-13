@@ -17,8 +17,8 @@ use super::page::is_item_id;
 use super::scoring::truncate_keeping_inner_pages;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
-    KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET, POPULARITY_SCALE,
-    POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
+    GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET,
+    POPULARITY_SCALE, POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
 };
 use crate::analysis;
 
@@ -27,6 +27,8 @@ use crate::analysis;
 pub(crate) enum Hint {
     /// Its encyclopedia article: "lululemon wikipedia".
     Article,
+    /// Its repository on GitHub: "tokio github".
+    Repo,
     /// A paper of that title: "batch normalization paper".
     Paper,
     /// Whatever is named so: "who is galileo", "ariana grande age".
@@ -60,6 +62,10 @@ const HINT_LEADS: &[&str] = &[
 const HINT_TAILS: &[(&str, Hint)] = &[
     (" wikipedia", Hint::Article),
     (" wiki", Hint::Article),
+    (" github repo", Hint::Repo),
+    (" github", Hint::Repo),
+    (" repository", Hint::Repo),
+    (" repo", Hint::Repo),
     (" paper", Hint::Paper),
     (" papers", Hint::Paper),
     (" arxiv", Hint::Paper),
@@ -493,6 +499,8 @@ impl PageSearcher {
         let mut found = self.search_once(&name, limit, scope)?;
         match hint {
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
+            // Only a repository called so: "reverse repo" is finance.
+            Hint::Repo => found.retain(|hit| hit.named && hit.page.set == GITHUB_SET),
             Hint::Paper => {
                 if found.iter().any(|hit| hit.page.set == PAPERS_SET) {
                     found.retain(|hit| hit.page.set == PAPERS_SET);
