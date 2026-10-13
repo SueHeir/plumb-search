@@ -148,7 +148,7 @@ impl PageSearcher {
             }
         }
         // Packages, only ever found when the query asks for one: "serde
-        // crate", "latest version of requests python".
+        // crate", "latest version of requests python", "serde_json".
         let package_query = plumb_core::packages::package_query(query);
         let package_key = package_query
             .as_ref()
@@ -363,13 +363,18 @@ impl PageSearcher {
                     _ => false,
                 };
                 if asked {
+                    // Searched by its name alone ("serde_json"), the
+                    // package is asked for as a whole.
+                    let whole = std::iter::once(&page.title)
+                        .chain(&page.aliases)
+                        .any(|name| name.eq_ignore_ascii_case(query.trim()));
                     hits.push(PageHit {
                         score: ALIAS_MATCH
                             * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
                         page,
                         named: true,
                         popularity,
-                        whole: false,
+                        whole,
                         learned: None,
                     });
                 }

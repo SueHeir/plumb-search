@@ -502,6 +502,8 @@ fn is_date(date: &str) -> bool {
 /// and the registries it names (none for any). `None` when it does not
 /// ask for a package: no registry or package word ("serde crate", "lodash
 /// version"), or nothing left once those and filler words are taken out.
+/// A lone name spelled as no word is ("serde_json", "react-dom",
+/// "@types/node") asks for a well-known package of any registry.
 pub fn package_query(query: &str) -> Option<PackageQuery> {
     let mut registries: Vec<&'static Registry> = Vec::new();
     let mut asked = false;
@@ -530,6 +532,13 @@ pub fn package_query(query: &str) -> Option<PackageQuery> {
             rest.push(word);
         }
     }
+    if !asked && rest.len() == 1 && spelled_as_package(rest[0]) {
+        return Some(PackageQuery {
+            name: rest[0].to_string(),
+            registries: Vec::new(),
+            surely: false,
+        });
+    }
     if !asked || rest.is_empty() {
         return None;
     }
@@ -538,6 +547,18 @@ pub fn package_query(query: &str) -> Option<PackageQuery> {
         registries,
         surely,
     })
+}
+
+/// Whether `word` is spelled as a package's name and no word is: scoped
+/// ("@types/node"), or with `_`, `-` or `.` between letters or digits
+/// ("serde_json", "react-dom", "socket.io"). "boto3" may be a hash or a
+/// codec's name, as "md5" and "utf8" are.
+fn spelled_as_package(word: &str) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    (word.starts_with('@') && word.contains('/'))
+        || chars.windows(3).any(|w| {
+            w[0].is_alphanumeric() && matches!(w[1], '_' | '-' | '.') && w[2].is_alphanumeric()
+        })
 }
 
 /// See [`package_query`].
@@ -652,6 +673,15 @@ mod tests {
         );
         assert_eq!(package_query("gin go framework docs").unwrap().name, "gin");
         for query in ["react", "react docs", "python", "latest version", "crate"] {
+            assert_eq!(package_query(query), None, "{query}");
+        }
+        // A lone name no word is spelled like asks for a well-known one.
+        for name in ["serde_json", "react-dom", "@types/node", "socket.io"] {
+            let q = package_query(name).unwrap();
+            assert_eq!(q.name, name);
+            assert!(q.registries.is_empty() && !q.surely, "{name}");
+        }
+        for query in ["boto3", "md5", "lodash", "-v", "serde json"] {
             assert_eq!(package_query(query), None, "{query}");
         }
     }
