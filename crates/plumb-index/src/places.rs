@@ -624,17 +624,38 @@ impl PlaceSearcher {
             });
         };
         let radius = town_size(&center.kind).unwrap_or(LANDMARK_KM);
-        let mut hits = self.around(&asked.what, &center, radius, required_country, limit)?;
-        let mut radius_km = radius;
-        if hits.len() < FEW.min(limit) {
-            // A small town: look a little farther.
-            radius_km = radius * 3.0;
-            hits = self.around(&asked.what, &center, radius_km, required_country, limit)?;
+        let mut what = asked.what;
+        let (mut hits, mut radius_km) =
+            self.around_town(&what, &center, radius, required_country, limit)?;
+        // "luxury hotels", "24 hour pharmacy", "pet friendly hotels": a
+        // word no place is found by leaves few or none, so the kinds alone
+        // are looked for, then the last of them, after the places found
+        // as asked. The heading then says what was looked for.
+        for fewer in fewer_words(&what) {
+            // A few places named as asked of another kind are what was
+            // meant: "olive garden" is no kind of garden.
+            let stems = analysis::tokens(&self.stemmed, &fewer);
+            if hits.len() >= FEW.min(limit)
+                || hits.iter().any(|hit| !self.is_kind(&hit.place, &stems))
+            {
+                break;
+            }
+            let (more, km) = self.around_town(&fewer, &center, radius, required_country, limit)?;
+            let before = hits.len();
+            for hit in more {
+                if hits.len() < limit && !hits.iter().any(|h| same_place(&h.place, &hit.place)) {
+                    hits.push(hit);
+                }
+            }
+            if hits.len() > before {
+                what = fewer;
+                radius_km = radius_km.max(km);
+            }
         }
         // A resolved location with no matching businesses is an indexed
         // coverage result too, including explicit landmark searches.
         Ok(PlaceResults {
-            what: asked.what,
+            what,
             center: Some(center),
             near_me,
             guessed,
@@ -675,6 +696,37 @@ impl PlaceSearcher {
             }
         }
         Ok(None)
+    }
+
+    /// The places matching `what` within `radius` km of `center`, or three
+    /// times as far when there are few (a small town), and how far it
+    /// looked.
+    fn around_town(
+        &self,
+        what: &str,
+        center: &Place,
+        radius: f64,
+        required_country: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<PlaceHit>, f64)> {
+        let hits = self.around(what, center, radius, required_country, limit)?;
+        if hits.len() >= FEW.min(limit) {
+            return Ok((hits, radius));
+        }
+        let farther = radius * 3.0;
+        Ok((
+            self.around(what, center, farther, required_country, limit)?,
+            farther,
+        ))
+    }
+
+    /// Whether `place` is of the kind all of `stems` say, not only named
+    /// with them.
+    fn is_kind(&self, place: &Place, stems: &[String]) -> bool {
+        let words: HashSet<String> = analysis::tokens(&self.stemmed, &place.kind_words())
+            .into_iter()
+            .collect();
+        stems.iter().all(|stem| words.contains(stem))
     }
 
     /// The best `limit` places matching `what` within `km` of `center`.
@@ -749,15 +801,13 @@ impl PlaceSearcher {
         // Places of the kind asked for come before those that only have the
         // words in their name: sushi bars before an office called Sushi
         // Tech, for "sushi".
-        let is_kind = |place: &Place| {
-            let words: HashSet<String> = analysis::tokens(&self.stemmed, &place.kind_words())
-                .into_iter()
-                .collect();
-            stems.iter().all(|stem| words.contains(stem))
-        };
         let key = |hit: &PlaceHit| {
             let tier = f64::from(hit.place.rank / 1_000_000).clamp(1.0, 6.0);
-            let named_only = if is_kind(&hit.place) { 0.0 } else { 1e6 };
+            let named_only = if self.is_kind(&hit.place, &stems) {
+                0.0
+            } else {
+                1e6
+            };
             named_only + hit.km / (1.0 + 0.1 * (tier - 1.0))
         };
         let mut hits: Vec<(f64, PlaceHit)> = hits.into_iter().map(|h| (key(&h), h)).collect();
@@ -875,6 +925,26 @@ impl PlaceSearcher {
             .context("a place without its record")?;
         parse_place(stored)
     }
+}
+
+/// What to look for when `what` finds nothing because of words that name
+/// no kind of place: its kind words ("luxury hotels" -> "hotels"), then
+/// the last of them, the kind the others describe ("pet friendly hotels"
+/// -> "pet hotels" -> "hotels"). Nothing when every word is a kind's.
+fn fewer_words(what: &str) -> Vec<String> {
+    let words: Vec<&str> = what.split(' ').collect();
+    let kinds: Vec<&str> = words.iter().copied().filter(|w| is_kind_word(w)).collect();
+    let Some(last) = kinds.last() else {
+        return Vec::new();
+    };
+    if kinds.len() == words.len() {
+        return Vec::new();
+    }
+    let mut fewer = vec![kinds.join(" ")];
+    if kinds.len() > 1 {
+        fewer.push(last.to_string());
+    }
+    fewer
 }
 
 /// Whether `a` and `b` are one place mapped twice: close together, and
@@ -1293,6 +1363,46 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn words_no_place_is_found_by_leave_the_kind() {
+        let mut fixtures = places();
+        fixtures.extend([
+            at("Olive Garden", "amenity=restaurant", 39.74, -104.99),
+            at("Denver Botanic Gardens", "leisure=garden", 39.732, -104.96),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let found = |query: &str| {
+            let found = searcher.search(query, None, None, 5).unwrap().unwrap();
+            let names: Vec<String> = found.hits.iter().map(|h| h.place.name.clone()).collect();
+            (found.what, names)
+        };
+        assert_eq!(
+            found("pizza delivery in denver"),
+            ("pizza".into(), vec!["Blue Pan".into(), "Pizza Hut".into()])
+        );
+        assert_eq!(found("luxury hotels in paris").0, "hotels");
+        assert_eq!(found("luxury hotels in paris").1[0], "Hotel Eiffel");
+        // A place named as asked of another kind is what was meant.
+        assert_eq!(
+            found("olive garden in denver"),
+            ("olive garden".into(), vec!["Olive Garden".into()])
+        );
+        // Places found as asked come first.
+        assert_eq!(
+            found("blue pizza in denver"),
+            ("pizza".into(), vec!["Blue Pan".into(), "Pizza Hut".into()])
+        );
+        assert_eq!(found("pet friendly hotels in paris").0, "hotels");
+        assert_eq!(found("coffee shops open now in denver").0, "coffee shops");
+        // What is found as asked keeps every word, and kinds that are not
+        // there are not swapped for others.
+        assert_eq!(found("pizza in denver").0, "pizza");
+        assert_eq!(
+            found("chinese food in denver"),
+            ("chinese food".into(), vec![])
+        );
     }
 
     #[test]
