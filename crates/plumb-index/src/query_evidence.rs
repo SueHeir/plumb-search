@@ -71,6 +71,9 @@ pub(crate) struct LexicalEvidence {
     pub(crate) words: f32,
     pub(crate) coverage: f32,
     pub(crate) substantive: f32,
+    /// How many of the query's main words (weight 1 or more) any searched
+    /// field has.
+    pub(crate) main_words: usize,
     matched: Vec<bool>,
     weights: Vec<f32>,
 }
@@ -196,6 +199,7 @@ impl ParsedQuery {
                     let entry = evidence.get_mut(&addr).expect("bounded candidate");
                     entry.words += 1.0 / self.words.len() as f32;
                     entry.coverage += weight;
+                    entry.main_words += usize::from(weight >= 1.0);
                 }
             }
             if weight <= 0.0 {
