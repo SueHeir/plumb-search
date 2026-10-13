@@ -1083,7 +1083,7 @@ pub fn is_homepage_path(path: &str) -> bool {
 
 /// `en`, `us`, `en-us`, `pt_br`, `zh-hans`: two letters, optionally a `-` or
 /// `_` and two to four more.
-fn is_locale_segment(segment: &str) -> bool {
+pub fn is_locale_segment(segment: &str) -> bool {
     let (lang, region) = match segment.split_once(['-', '_']) {
         Some((lang, region)) => (lang, Some(region)),
         None => (segment, None),
