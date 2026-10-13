@@ -642,22 +642,19 @@ impl PlaceSearcher {
     }
 
     /// `found`, unless it found nothing and what it looked for is neither
-    /// a kind of place nor the name of a place other than a town that
-    /// Wikidata knows: "sort a list in python", "how many ounces in a cup"
-    /// and "keel in english" ask for no place (though some bar is called
-    /// Keel), while "pizza in gotham" and "the louvre in paris tx" do.
-    /// Near me is always a place search, so one that finds nothing still
-    /// says so.
+    /// a kind of place nor the name of a place other than a town: "sort a
+    /// list in python" and "how many ounces in a cup" ask for no place,
+    /// while "pizza in gotham" does. Near me is always a place search, so
+    /// one that finds nothing still says so.
     fn asks_for_places(&self, found: PlaceResults) -> Result<Option<PlaceResults>> {
         let kind = found.what.rsplit(' ').next().is_some_and(is_kind_word);
-        let notable = plumb_core::place::place_rank("", 0, true, false, 0);
         if found.hits.is_empty()
             && !found.near_me
             && !kind
             && !self
                 .named(&found.what)?
                 .iter()
-                .any(|place| !place.is_town() && place.rank >= notable)
+                .any(|place| !place.is_town())
         {
             return Ok(None);
         }
@@ -1699,20 +1696,10 @@ mod tests {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_none(), "{query}: {found:?}");
         }
-        // A kind of place, or the name of a place Wikidata knows, is still
-        // looked for; a restaurant's name elsewhere is no more a place
-        // than "keel" is in "keel in english".
-        for query in ["pizza in python", "tour eiffel in python"] {
+        // A kind of place, or a place's name, is still looked for.
+        for query in ["pizza in python", "blue pan in python"] {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_some(), "{query}");
-        }
-        for query in [
-            "blue pan in python",
-            "stock market today",
-            "court view montana",
-        ] {
-            let found = searcher.search(query, None, None, 5).unwrap();
-            assert!(found.is_none(), "{query}: {found:?}");
         }
         // Two Portland cities are still a choice, though a town shares
         // their name, and near me says it found nothing.
@@ -1723,6 +1710,21 @@ mod tests {
         );
         let near = searcher.search("starbuks near me", Some("Denver"), None, 5);
         assert!(near.unwrap().unwrap().hits.is_empty());
+    }
+
+    #[test]
+    fn a_guess_that_names_no_town_asks_for_none() {
+        let (_dir, searcher) = index(places());
+        // A state is no town, and a time alone says near me only of kinds
+        // of place: neither asks the searcher for a town.
+        for query in ["court view montana", "stock market today"] {
+            let found = searcher.search(query, None, None, 5).unwrap();
+            assert!(found.is_none(), "{query}: {found:?}");
+        }
+        let tonight = searcher.search("pizza tonight", None, None, 5).unwrap();
+        assert!(tonight.unwrap().near_me);
+        let open = searcher.search("market open now", None, None, 5).unwrap();
+        assert!(open.unwrap().near_me);
     }
 
     #[test]
