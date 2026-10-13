@@ -474,6 +474,27 @@ pub struct SearchOptions {
     pub recent: plumb_core::RecentNews,
 }
 
+impl SearchOptions {
+    /// [`SearchOptions::language`] for `query`: none when the query is
+    /// written partly in a script that language is not, "天気予報" with
+    /// English chosen, or the filter would leave out the very sites the
+    /// query is written for ([`plumb_core::written_outside`]).
+    pub fn language_for(&self, query: &str) -> Option<&str> {
+        self.language
+            .as_deref()
+            .filter(|wanted| !plumb_core::written_outside(wanted, query))
+    }
+
+    /// These options with [`SearchOptions::language_for`] `query` as the
+    /// language.
+    pub fn for_query(&self, query: &str) -> Self {
+        Self {
+            language: self.language_for(query).map(str::to_string),
+            ..self.clone()
+        }
+    }
+}
+
 /// A link into a site's own search for the words after its name:
 /// "github plumb search" -> search github.com for "plumb search".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
