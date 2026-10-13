@@ -91,6 +91,55 @@ fn little_known_sites_without_a_title_come_after_titled_ones() {
 }
 
 #[test]
+fn a_leading_www_names_no_site() {
+    let records = [
+        site(
+            "ikea.com",
+            Some("IKEA"),
+            None,
+            &["IKEA"],
+            &[],
+            popular(300, 20_000),
+        ),
+        // On a public suffix, so its domain label is "www".
+        site(
+            "www.gov.uk",
+            Some("Welcome to GOV.UK"),
+            None,
+            &[],
+            &[],
+            popular(100, 90_000),
+        ),
+        site(
+            "www.nhs.uk",
+            Some("NHS website for England"),
+            None,
+            &[],
+            &[],
+            popular(400, 40_000),
+        ),
+        site(
+            "prsa.org",
+            Some("Public Relations Society of America"),
+            None,
+            &[],
+            &[("www", 50)],
+            popular(20_000, 3_000),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    for query in ["www.ikea", "www ikea", "WWW.IKEA.COM"] {
+        let hits = searcher.search_with(query, 10, &keep_all()).unwrap();
+        assert_eq!(domains(&hits), ["ikea.com"], "{query}");
+    }
+    // An address whose site needs its "www" keeps it.
+    assert_eq!(top(&searcher, "www.gov.uk"), "www.gov.uk");
+    assert_eq!(crate::names::without_www("www.gov.uk"), "www.gov.uk");
+    assert_eq!(crate::names::without_www("www"), "www");
+    assert_eq!(crate::names::without_www("wwwikea.com"), "wwwikea.com");
+}
+
+#[test]
 fn a_little_known_namesake_of_the_words_leaves_the_rest_listed() {
     let records = [
         site(

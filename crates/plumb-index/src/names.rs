@@ -376,6 +376,28 @@ pub(crate) fn typed_domain(query: &str) -> Option<String> {
     registrable_domain(query)
 }
 
+/// `query` without the "www" an address starts with, which names no site:
+/// "www.ikea" is searched as "ikea", not also for the sites whose domain
+/// label is "www" (www.gov.uk, on a public suffix) or that links call
+/// "www". An address whose site needs it ("www.gov.uk") keeps it.
+pub(crate) fn without_www(query: &str) -> &str {
+    let query = query.trim();
+    let rest = match query.get(..4) {
+        Some(www) if www.eq_ignore_ascii_case("www.") || www.eq_ignore_ascii_case("www ") => {
+            query[4..].trim_start()
+        }
+        _ => return query,
+    };
+    // "www.gov.uk" needs it, as gov.uk is no site's address. "www.ikea"
+    // is a site's address on IKEA's own ending, but it means ikea.com.
+    let needs_it = rest.contains('.') && typed_domain(rest) != typed_domain(query);
+    if rest.contains(char::is_alphanumeric) && !needs_it {
+        rest
+    } else {
+        query
+    }
+}
+
 /// Whether `text` holds `words` consecutive words whose [`kind_key`] is
 /// `key` at the end of a phrase: "a free online encyclopedia, made by"
 /// names `onlineencyclopedia`, but "search engine optimization tools" does
