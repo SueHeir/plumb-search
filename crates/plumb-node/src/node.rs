@@ -1326,6 +1326,9 @@ struct Inner {
     inbox_lock: Mutex<()>,
     /// Held while the whole records file is in memory ([`Inner::hold_records`]).
     records_held: Mutex<()>,
+    /// Held by each job that takes up to a GB or so of memory while it runs
+    /// ([`Inner::one_big_job`]).
+    big_job: Mutex<()>,
     /// The page sets whose file is being downloaded or cut, so the two
     /// never write the same file at once.
     set_files_busy: Mutex<std::collections::HashSet<&'static str>>,
@@ -1571,6 +1574,7 @@ impl Inner {
             over_since: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
+            big_job: Mutex::new(()),
             set_files_busy: Mutex::default(),
             held_page_sets: Arc::default(),
             buckets_rebuilt: AtomicBool::new(false),
@@ -1992,6 +1996,15 @@ impl Inner {
     /// holding two copies at once. Held until the set is dropped.
     fn hold_records(&self) -> std::sync::MutexGuard<'_, ()> {
         self.records_held.locked()
+    }
+
+    /// Waits for the big job running to end, and holds off the others
+    /// until this one does: the page and place index builds, keeping the
+    /// vectors taken from a node and a round of embedding. Each fits a
+    /// small node on its own, but not all at once, as at a first start.
+    /// Taken before [`Inner::hold_records`], never after.
+    fn one_big_job(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.big_job.locked()
     }
 
     /// `Err(Stopped)` once the node is shutting down.

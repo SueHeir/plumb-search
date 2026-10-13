@@ -158,6 +158,7 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             nap(inner, LOOK_EVERY);
             continue;
         }
+        let big = inner.one_big_job();
         let (todo, more) = {
             // Read a record at a time, while no crawl or index build changes
             // the file.
@@ -180,7 +181,7 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             && taken_at.is_none_or(|at| at.elapsed() >= TAKE_EVERY);
         if let Some(net) = super::network::handle(inner).cloned().filter(|_| take_now) {
             taken_at = Some(Instant::now());
-            drop(todo);
+            drop((todo, big));
             match super::shared_vectors::take(inner, &net, &meaning, &vectors_path) {
                 // No trusted node connected yet: wait a little for one.
                 Ok(Taken::NoNode) if started_at.elapsed() < WAIT_FOR_NODES => {
@@ -230,10 +231,13 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
                 crate::web::group_thousands(embedded.done as u64)
             ));
         }
-        // With more sites waiting, the next turn picks the next best.
+        // With more sites waiting, the next turn picks the next best,
+        // after a pause that lets a big job waiting for this one go first.
         if !more || embedded.done == 0 {
             embedded_for = Some(index);
         }
+        drop(big);
+        nap(inner, TICK);
     }
     Ok(())
 }
