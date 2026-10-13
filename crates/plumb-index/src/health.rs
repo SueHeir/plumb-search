@@ -207,6 +207,35 @@ const MEDICAL_WORDS: &[&str] = &[
     "endometriosis",
     "uti",
     "adhd",
+    "tuberculosis",
+    "sclerosis",
+    "glaucoma",
+    "cataracts",
+    "osteoporosis",
+    "cirrhosis",
+    "fibrosis",
+    "scoliosis",
+    "epilepsy",
+    "autism",
+    "parkinsons",
+    "tinnitus",
+    "apnea",
+    "sepsis",
+    "leukemia",
+    "anaemia",
+    "malaria",
+    "cholera",
+    "dengue",
+    "rabies",
+    "tetanus",
+    "mumps",
+    "rubella",
+    "norovirus",
+    "rsv",
+    "mpox",
+    "acne",
+    "rosacea",
+    "hemorrhoids",
     // Common drugs (the pill-shop names count too, see `is_medical`).
     "ibuprofen",
     "acetaminophen",
@@ -225,6 +254,50 @@ const MEDICAL_WORDS: &[&str] = &[
     "insulin",
     "benadryl",
     "melatonin",
+    "ozempic",
+    "wegovy",
+    "semaglutide",
+    "mounjaro",
+    "tirzepatide",
+    "warfarin",
+    "eliquis",
+    "statin",
+    "statins",
+    "losartan",
+    "cetirizine",
+    "zyrtec",
+    "loratadine",
+    "claritin",
+    "fluoxetine",
+    "escitalopram",
+    "trazodone",
+    "bupropion",
+    "adderall",
+    "naloxone",
+    "fentanyl",
+    "heroin",
+    "epipen",
+    "antibiotic",
+    "antibiotics",
+];
+
+/// Words that say a longer search is about an illness, whatever the
+/// illness is called: "lyme disease", "bipolar disorder", "down
+/// syndrome", "vitamin d deficiency". Alone they may be a film or a band.
+const ILLNESS_WORDS: &[&str] = &[
+    "disease",
+    "diseases",
+    "disorder",
+    "disorders",
+    "syndrome",
+    "infection",
+    "infections",
+    "deficiency",
+    "allergy",
+    "allergies",
+    "vaccine",
+    "vaccines",
+    "vaccination",
 ];
 
 /// Phrases that make a search a medical one.
@@ -240,11 +313,22 @@ const MEDICAL_PHRASES: &[&str] = &[
     "treatment for",
     "how to treat",
     "signs of",
+    "acid reflux",
+    "food poisoning",
+    "chest pain",
+    "back pain",
+    "blood clot",
 ];
 
 /// Searches with these are about something else: the economy, a film, a
 /// band.
-const NOT_MEDICAL: &[&str] = &["great depression", "flu game", "shot of", "cancer zodiac"];
+const NOT_MEDICAL: &[&str] = &[
+    "great depression",
+    "flu game",
+    "shot of",
+    "cancer zodiac",
+    "china syndrome",
+];
 
 /// Whether `query` asks about an illness, a symptom or a drug.
 pub(crate) fn is_medical(query: &str) -> bool {
@@ -258,7 +342,11 @@ pub(crate) fn is_medical(query: &str) -> bool {
     }
     let words: Vec<&str> = query.split(' ').collect();
     words.iter().any(|word| {
-        MEDICAL_WORDS.contains(word) || PILL_SHOP_DRUGS.contains(word)
+        MEDICAL_WORDS.contains(word)
+            || PILL_SHOP_DRUGS.contains(word)
+            || words.len() > 1 && ILLNESS_WORDS.contains(word)
+            // An inflammation: hepatitis, meningitis, colitis.
+            || word.len() > 5 && word.ends_with("itis")
     }) || MEDICAL_PHRASES
         .iter()
         .any(|phrase| padded.contains(&format!(" {phrase} ")))
@@ -290,7 +378,8 @@ const SOURCES: &[(&str, &[&str])] = &[
 
 /// The sites `query` asks for as its source, by domain: a health source
 /// it names ([`SOURCES`]) or an address typed in it ("acetaminophen dose
-/// healthychildren.org"). Doses and abbreviations ("0.5mg", "e.g.") are
+/// healthychildren.org", "cetirizine (site:drugs.com)", which is not an
+/// operator). Doses and abbreviations ("0.5mg", "e.g.") are
 /// not addresses. A typed address keeps its own host unless it only adds
 /// "www.": ecdc.europa.eu is not europa.eu, whose homepage is the EU's.
 fn named_sources(query: &str) -> Vec<String> {
@@ -314,6 +403,7 @@ fn named_sources(query: &str) -> Vec<String> {
         .collect();
     for word in query.split_whitespace() {
         let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+        let word = word.strip_prefix("site:").unwrap_or(word);
         let ends_in_letters = word
             .rsplit_once('.')
             .is_some_and(|(_, end)| end.len() > 1 && end.chars().all(|c| c.is_ascii_alphabetic()));
@@ -334,17 +424,38 @@ fn same_site(a: &str, b: &str) -> bool {
     a.trim_start_matches("www.") == b.trim_start_matches("www.")
 }
 
+/// Whether a word of `query` is the name of `hit`'s site and neither
+/// medical nor `common` (in many sites' titles): "medscape" for
+/// medscape.com, "hellopharmacist" for hellopharmacist.com. Such a search
+/// asks that site, not the authorities. An illness or a drug that is also
+/// a site's name is what the search is about: diabetes.org for "diabetes
+/// symptoms". And first.org is not asked for by "first dose".
+fn names_site(query: &str, hit: &Hit, common: &dyn Fn(&str) -> bool) -> bool {
+    let Some(domain) = plumb_core::registrable_domain(&hit.domain) else {
+        return false;
+    };
+    let label = domain.split('.').next().unwrap_or_default();
+    normalize_text(query)
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| word == label)
+        && !is_medical(label)
+        && !common(label)
+}
+
 /// `hits` for a medical `query` with the health authorities first, under
 /// a well-known site the query names (diabetes.org for "diabetes"):
 /// those already listed move up, the others come from `site`. A source
 /// the query asks for ([`named_sources`]) goes above them, from `site`
-/// too when it isn't listed. At most `limit` hits stay.
+/// too when it isn't listed, and so does a listed site it names by a word
+/// that is neither medical nor `common` ([`names_site`]). At most `limit`
+/// hits stay.
 pub(crate) fn authorities_first(
     query: &str,
     country: Option<&str>,
     hits: &mut Vec<Hit>,
     limit: usize,
     site: &dyn Fn(&str) -> Option<Hit>,
+    common: &dyn Fn(&str) -> bool,
 ) {
     if limit == 0 || crate::names::typed_domain(query).is_some() || !is_medical(query) {
         return;
@@ -361,6 +472,11 @@ pub(crate) fn authorities_first(
             }
         }
     }
+    let (named, rest) = std::mem::take(hits)
+        .into_iter()
+        .partition::<Vec<Hit>, _>(|hit| names_site(query, hit, common));
+    *hits = rest;
+    sources.extend(named);
     let mut first = Vec::new();
     for domain in authorities(country).iter().take(AUTHORITIES) {
         if sources
@@ -397,14 +513,20 @@ pub(crate) fn authorities_first(
     hits.truncate(limit);
 }
 
-/// The sources a medical `query` asks for ([`named_sources`]) first among
-/// the sites again, once the learned ranking has had its say: it lists a
-/// homepage [`authorities_first`] put in under the authorities ("NHS
-/// paracetamol for children dose" had nhs.uk fourth). Pages listed on
+/// The sources a medical `query` asks for ([`named_sources`]) and the
+/// sites it names by a word neither medical nor `common` ([`names_site`])
+/// first among the sites again, once the learned ranking has had its say:
+/// it lists a homepage [`authorities_first`] put in under the authorities
+/// ("NHS paracetamol for children dose" had nhs.uk fourth). Pages listed on
 /// their own keep their places, and the moved sites trade scores so that
 /// scores still go down the list, as [`crate::learned::reorder`] leaves
 /// them.
-pub fn sources_lead(query: &str, hits: &mut Vec<Hit>, placed: &mut [PlacedPage]) {
+pub fn sources_lead(
+    query: &str,
+    hits: &mut Vec<Hit>,
+    placed: &mut [PlacedPage],
+    common: &dyn Fn(&str) -> bool,
+) {
     if plumb_core::Operators::parse(query).any()
         || crate::names::typed_domain(query).is_some()
         || !is_medical(query)
@@ -417,6 +539,11 @@ pub fn sources_lead(query: &str, hits: &mut Vec<Hit>, placed: &mut [PlacedPage])
             if !lead.contains(&at) {
                 lead.push(at);
             }
+        }
+    }
+    for (at, hit) in hits.iter().enumerate() {
+        if !lead.contains(&at) && names_site(query, hit, common) {
+            lead.push(at);
         }
     }
     let mut new_hits: Vec<Hit> = lead.iter().map(|&at| hits[at].clone()).collect();
@@ -549,6 +676,19 @@ mod tests {
             "Migraine",
             "tramadol",
             "signs of a concussion",
+            "lyme disease",
+            "bipolar disorder",
+            "down syndrome",
+            "vitamin d deficiency",
+            "hepatitis b",
+            "multiple sclerosis",
+            "tuberculosis",
+            "parkinson's disease",
+            "sleep apnea",
+            "acid reflux",
+            "ozempic",
+            "bridging fibrosis",
+            "what does heroin do",
         ] {
             assert!(is_medical(query), "{query}");
         }
@@ -558,6 +698,10 @@ mod tests {
             "side quest",
             "pizza in seattle",
             "depression era glass prices in ohio",
+            "disorder",
+            "the china syndrome",
+            "academia",
+            "mitosis vs meiosis",
         ] {
             assert!(!is_medical(query), "{query}");
         }
@@ -630,9 +774,14 @@ mod tests {
     #[test]
     fn typed_medical_hosts_and_jurisdiction_keep_their_intent() {
         let mut hits = vec![hit("viagra.com", true, 0.6)];
-        authorities_first("viagra.com", Some("GB"), &mut hits, 5, &|domain| {
-            Some(hit(domain, false, 0.6))
-        });
+        authorities_first(
+            "viagra.com",
+            Some("GB"),
+            &mut hits,
+            5,
+            &|domain| Some(hit(domain, false, 0.6)),
+            &|_| true,
+        );
         assert_eq!(domains(&hits), ["viagra.com"]);
         assert_eq!(authorities(Some("GB"))[0], "www.nhs.uk");
         assert!(!authorities(Some("IE")).contains(&"www.nhs.uk"));
@@ -643,9 +792,14 @@ mod tests {
         let mut guidance = hit("mayoclinic.org", false, 0.7);
         guidance.url = "https://www.mayoclinic.org/drugs-supplements/lisinopril/".to_string();
         let mut hits = vec![guidance];
-        authorities_first("lisinopril side effects", None, &mut hits, 3, &|domain| {
-            Some(hit(domain, false, 0.6))
-        });
+        authorities_first(
+            "lisinopril side effects",
+            None,
+            &mut hits,
+            3,
+            &|domain| Some(hit(domain, false, 0.6)),
+            &|_| true,
+        );
         assert_eq!(domains(&hits)[0], "mayoclinic.org");
         assert!(hits[0].url.contains("lisinopril"));
         assert!(hits[1..].iter().all(|hit| hit.missing_words));
@@ -712,7 +866,9 @@ mod tests {
             homepage,
             hit("sildemedx.com", false, 0.05),
         ];
-        authorities_first("ibuprofen dosage", Some("US"), &mut hits, 5, &site);
+        authorities_first("ibuprofen dosage", Some("US"), &mut hits, 5, &site, &|_| {
+            true
+        });
         assert_eq!(
             domains(&hits),
             [
@@ -729,7 +885,7 @@ mod tests {
             hit("diabetes.org", true, 0.7),
             hit("diabetes-m.com", false, 0.2),
         ];
-        authorities_first("diabetes", Some("GB"), &mut hits, 3, &site);
+        authorities_first("diabetes", Some("GB"), &mut hits, 3, &site, &|_| true);
         assert_eq!(
             domains(&hits),
             ["diabetes.org", "www.nhs.uk", "medlineplus.gov"]
@@ -748,7 +904,7 @@ mod tests {
                 if listed {
                     hits.push(hit("cdc.gov", false, 0.8));
                 }
-                authorities_first(query, None, &mut hits, 5, &site);
+                authorities_first(query, None, &mut hits, 5, &site, &|_| true);
                 assert_eq!(
                     domains(&hits),
                     [
@@ -779,7 +935,7 @@ mod tests {
                 hit("lisinoprilgo7.com", false, 0.1),
                 hit(source, false, 0.6),
             ];
-            authorities_first(query, Some("US"), &mut hits, 5, &|_| None);
+            authorities_first(query, Some("US"), &mut hits, 5, &|_| None, &|_| true);
             let listed = domains(&hits);
             assert_eq!(listed[0], source, "{query}");
             assert_eq!(listed.last(), Some(&"lisinoprilgo7.com"), "{query}");
@@ -792,6 +948,7 @@ mod tests {
             &mut hits,
             4,
             &|domain| (domain != "healthychildren.org").then(|| hit(domain, false, 0.6)),
+            &|_| true,
         );
         assert_eq!(
             domains(&hits),
@@ -816,6 +973,7 @@ mod tests {
             &mut hits,
             4,
             &|domain| (domain != "ecdc.europa.eu").then(|| hit(domain, false, 0.6)),
+            &|_| true,
         );
         assert_eq!(
             domains(&hits),
@@ -843,7 +1001,7 @@ mod tests {
                 hit("first.org", false, 0.7),
                 hit("who.int", false, 0.7),
             ];
-            authorities_first(query, None, &mut hits, 3, &site);
+            authorities_first(query, None, &mut hits, 3, &site, &|_| true);
             assert_eq!(
                 domains(&hits),
                 ["medlineplus.gov", "mayoclinic.org", "clevelandclinic.org"],
@@ -853,11 +1011,80 @@ mod tests {
 
         // Not medical, or no authority in the index: unchanged.
         let mut hits = vec![hit("pizzahut.com", true, 0.7)];
-        authorities_first("pizza", None, &mut hits, 5, &site);
+        authorities_first("pizza", None, &mut hits, 5, &site, &|_| true);
         assert_eq!(domains(&hits), ["pizzahut.com"]);
-        authorities_first("flu symptoms", None, &mut hits, 5, &|_| None);
+        authorities_first("flu symptoms", None, &mut hits, 5, &|_| None, &|_| true);
         assert_eq!(domains(&hits), ["pizzahut.com"]);
     }
+    #[test]
+    fn a_site_the_search_names_goes_above_the_authorities() {
+        let site = |domain: &str| Some(hit(domain, false, 0.6));
+        let common = |word: &str| ["first", "health"].contains(&word);
+        let authorities = ["medlineplus.gov", "mayoclinic.org", "clevelandclinic.org"];
+        // An address after "site:" that is not an operator, in brackets.
+        assert_eq!(
+            named_sources("mucinex zyrtec (site:drugs.com)"),
+            ["drugs.com"]
+        );
+        for (query, listed, named) in [
+            (
+                "cetirizine (site:drugs.com)",
+                vec!["cetirizine.example", "drugs.com"],
+                vec!["drugs.com"],
+            ),
+            (
+                "zyrtec mucinex hellopharmacist",
+                vec!["hellopharmacist.com", "www.mucinex.com", "novopharma.tn"],
+                vec!["hellopharmacist.com", "www.mucinex.com"],
+            ),
+            (
+                "cetirizine medscape interactions",
+                vec!["covid19-druginteractions.org", "www.medscape.com"],
+                vec!["www.medscape.com"],
+            ),
+            (
+                "can you take zyrtec and mucinex together",
+                vec!["www.mucinex.com", "www.csaci.ca"],
+                vec!["www.mucinex.com"],
+            ),
+            // Named by the illness the search is about, or by a word many
+            // sites have: below the authorities.
+            (
+                "diabetes symptoms",
+                vec!["diabetes.org", "diabetes.example"],
+                vec![],
+            ),
+            (
+                "measles vaccine first dose",
+                vec!["first.org", "measles.example"],
+                vec![],
+            ),
+        ] {
+            let mut hits = listed
+                .iter()
+                .map(|domain| hit(domain, false, 0.3))
+                .collect();
+            authorities_first(query, None, &mut hits, 8, &site, &common);
+            let found = domains(&hits);
+            assert_eq!(found[..named.len()], named, "{query}");
+            assert_eq!(found[named.len()..named.len() + 3], authorities, "{query}");
+        }
+        // And again once the learned ranking has had its say.
+        let mut hits = ["medlineplus.gov", "first.org", "hellopharmacist.com"]
+            .map(|domain| hit(domain, false, 0.3))
+            .to_vec();
+        sources_lead(
+            "zyrtec hellopharmacist first dose",
+            &mut hits,
+            &mut [],
+            &common,
+        );
+        assert_eq!(
+            domains(&hits),
+            ["hellopharmacist.com", "medlineplus.gov", "first.org"]
+        );
+    }
+
     #[test]
     fn named_sources_lead_again_after_the_learned_order() {
         use crate::pages::{Page, PageHit};
@@ -898,6 +1125,7 @@ mod tests {
             "NHS paracetamol for children dose age weight",
             &mut hits,
             &mut placed,
+            &|_| true,
         );
         assert_eq!(
             domains(&hits),
@@ -926,7 +1154,7 @@ mod tests {
         ] {
             let mut hits = listed();
             let mut placed = vec![page.clone()];
-            sources_lead(query, &mut hits, &mut placed);
+            sources_lead(query, &mut hits, &mut placed, &|_| true);
             assert_eq!(domains(&hits), domains(&listed()), "{query}");
             assert_eq!(placed, vec![page.clone()], "{query}");
         }
