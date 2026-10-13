@@ -147,6 +147,9 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
     });
     let mut embedded_for = None;
     let mut taken_at: Option<Instant> = None;
+    // Searches have meaning from here. Trusted nodes are waited for from
+    // the network join on.
+    inner.joined();
     let started_at = Instant::now();
     while !inner.stopping() {
         let Some((index, _)) = inner.current_summary() else {
