@@ -95,6 +95,14 @@ const WHERE_WORDS: &[&[&str]] = &[&["in"], &["near"], &["around"], &["close", "t
 /// Kinds of town a query may name without "in" or "near": "denver
 /// pizza", "barber brooklyn".
 const GUESSED_TOWNS: &[&str] = &["place=city", "place=borough"];
+/// Words a name is written with in full or short, and a search may say
+/// either way: "st paul" is Saint Paul, "ft lauderdale" Fort Lauderdale.
+const SHORT_WORDS: &[(&str, &str)] = &[
+    ("st", "saint"),
+    ("ste", "sainte"),
+    ("ft", "fort"),
+    ("mt", "mount"),
+];
 /// Words ending a query that say when it is open, not where: "open now".
 const HOURS: &[&[&str]] = &[
     &["open", "now"],
@@ -813,21 +821,19 @@ impl PlaceSearcher {
     /// Whether a city or borough (a town a query may name without "in")
     /// is called `name`.
     fn names_a_city(&self, name: &str) -> Result<bool> {
-        let Some(key) = analysis::tokens(&self.joined, name).pop() else {
+        let Some(key) = self.key_query(name) else {
             return Ok(false);
-        };
-        let term = |field, text: &str| {
-            Box::new(TermQuery::new(
-                Term::from_field_text(field, text),
-                IndexRecordOption::Basic,
-            )) as Box<dyn Query>
         };
         let kinds = GUESSED_TOWNS
             .iter()
-            .map(|kind| (Occur::Should, term(self.fields.kind, kind)))
+            .map(|kind| {
+                let term = Term::from_field_text(self.fields.kind, kind);
+                let query = TermQuery::new(term, IndexRecordOption::Basic);
+                (Occur::Should, Box::new(query) as Box<dyn Query>)
+            })
             .collect();
         let query = BooleanQuery::new(vec![
-            (Occur::Must, term(self.fields.keys, &key)),
+            (Occur::Must, Box::new(key)),
             (Occur::Must, Box::new(BooleanQuery::new(kinds))),
         ]);
         Ok(self.reader.searcher().search(&query, &Count)? > 0)
@@ -1073,13 +1079,10 @@ impl PlaceSearcher {
     /// Places whose name or other name is `name`, the most notable first,
     /// only those within `km` of a place when `near` gives one.
     fn named_within(&self, name: &str, near: Option<(&Place, f64)>) -> Result<Vec<Place>> {
-        let Some(key) = analysis::tokens(&self.joined, name).pop() else {
+        let Some(key) = self.key_query(name) else {
             return Ok(Vec::new());
         };
-        let key: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.fields.keys, &key),
-            IndexRecordOption::Basic,
-        ));
+        let key: Box<dyn Query> = Box::new(key);
         let query = match near {
             None => key,
             Some((center, km)) => Box::new(BooleanQuery::new(vec![
@@ -1101,6 +1104,39 @@ impl PlaceSearcher {
             }
         }
         Ok(places)
+    }
+
+    /// Places whose name or other name is `name`, its [`SHORT_WORDS`]
+    /// written either way.
+    fn key_query(&self, name: &str) -> Option<BooleanQuery> {
+        let normalized = normalize_text(name);
+        let swapped: Vec<&str> = normalized
+            .split(' ')
+            .map(|word| {
+                SHORT_WORDS
+                    .iter()
+                    .find_map(|&(short, full)| {
+                        (word == short)
+                            .then_some(full)
+                            .or((word == full).then_some(short))
+                    })
+                    .unwrap_or(word)
+            })
+            .collect();
+        let mut keys: Vec<String> = [normalized.clone(), swapped.join(" ")]
+            .iter()
+            .filter_map(|name| analysis::tokens(&self.joined, name).pop())
+            .collect();
+        keys.dedup();
+        let terms: Vec<(Occur, Box<dyn Query>)> = keys
+            .iter()
+            .map(|key| {
+                let term = Term::from_field_text(self.fields.keys, key);
+                let query = TermQuery::new(term, IndexRecordOption::Basic);
+                (Occur::Should, Box::new(query) as Box<dyn Query>)
+            })
+            .collect();
+        (!terms.is_empty()).then(|| BooleanQuery::new(terms))
     }
 
     /// Places in the cells within `km` of `center`.
@@ -2124,6 +2160,38 @@ mod tests {
         );
         let california = searcher.locate("ontario ca", None).unwrap().unwrap();
         assert_eq!(california.region.as_deref(), Some("CA"));
+    }
+
+    #[test]
+    fn a_town_is_found_by_its_short_words_either_way() {
+        let town = |name: &str, population: u64, region: &str, country: &str, lat, lon| Place {
+            kind: "place=town".into(),
+            rank: place_rank("place=town", population, false, false, 3),
+            ..city(name, population, region, country, lat, lon)
+        };
+        let mut fixtures = places();
+        fixtures.extend([
+            city("Saint Paul", 311_000, "MN", "US", 44.95, -93.09),
+            town("St. Paul", 5_800, "AB", "CA", 53.99, -111.29),
+            city("Fort Lauderdale", 182_000, "FL", "US", 26.12, -80.14),
+            town("Mount Shasta", 3_200, "CA", "US", 41.31, -122.31),
+            city("Saint Augustine", 15_000, "FL", "US", 29.89, -81.31),
+            at("St. Augustine", "place=village", 0.29, 32.59),
+            town("Sault Ste. Marie", 72_000, "ON", "CA", 46.52, -84.35),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let found = |text: &str| {
+            let place = searcher.locate(text, Some("US")).unwrap().unwrap();
+            (place.name, place.region.unwrap_or_default())
+        };
+        let said = |name: &str, region: &str| (name.to_string(), region.to_string());
+        assert_eq!(found("st paul"), said("Saint Paul", "MN"));
+        assert_eq!(found("st. paul ab"), said("St. Paul", "AB"));
+        assert_eq!(found("saint paul alberta"), said("St. Paul", "AB"));
+        assert_eq!(found("ft lauderdale"), said("Fort Lauderdale", "FL"));
+        assert_eq!(found("mt shasta"), said("Mount Shasta", "CA"));
+        assert_eq!(found("st augustine"), said("Saint Augustine", "FL"));
+        assert_eq!(found("sault sainte marie"), said("Sault Ste. Marie", "ON"));
     }
 
     #[test]
