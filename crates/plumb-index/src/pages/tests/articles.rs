@@ -125,6 +125,38 @@ fn fact_questions_find_the_article_they_ask_about() {
 }
 
 #[test]
+fn an_article_is_found_by_its_alias_past_popular_site_pages_with_the_word() {
+    // Site pages are as popular as their sites, more than all but the most
+    // read articles: hundreds with "NFL" in their titles filled the
+    // candidates, and the article named by "nfl" was never seen.
+    let mut pages = vec![
+        page("United States", 5_000_000, &[]),
+        page("National Football League", 51_000, &["Nfl", "The NFL"]),
+        page("NFL+", 363, &[]),
+    ];
+    pages.extend((0..CANDIDATES + 50).map(|i| {
+        Page::from_set(
+            SUBPAGES_SET,
+            Article {
+                title: format!("NFL Scores Week {i}"),
+                item: Some(format!("https://sports{i}.example/nfl/scores")),
+                views: 5_000,
+                ..Article::default()
+            },
+        )
+        .unwrap()
+    }));
+    let (_dir, s) = searcher(&pages);
+    let hits = s.search("nfl", 5).unwrap();
+    assert_eq!(
+        hits.first().map(|h| (h.page.title.as_str(), h.named)),
+        Some(("National Football League", true)),
+        "{:?}",
+        titles(&hits)
+    );
+}
+
+#[test]
 fn articles_whose_title_is_part_of_the_query_are_found() {
     let (_dir, s) = searcher(&[
         page("Titanic", 400_000, &["RMS Titanic"]),
