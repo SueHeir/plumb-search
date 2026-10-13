@@ -118,7 +118,15 @@ const PLACE_KEYS: &[&str] = &[
     "aeroway",
     "railway",
     "boundary",
+    "natural",
 ];
+/// Values of `natural` that are sights people search around ("hotels
+/// near lake tahoe", "near mount fuji") when Wikidata knows them. Those
+/// no English article names plainly are dropped once the articles are
+/// read: most mountains and lakes have none.
+const NATURAL_SIGHTS: &[&str] = &["water", "peak", "volcano", "beach"];
+/// Values of `water` that make a lake, not a river or a canal.
+const LAKE_WATERS: &[&str] = &["lake", "reservoir", "lagoon"];
 /// Values of `place` that are towns or parts of them.
 const TOWN_VALUES: &[&str] = &[
     "city",
@@ -227,6 +235,11 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
                 "aeroway" => value == "aerodrome",
                 "railway" => value == "station",
                 "boundary" => value == "national_park",
+                "natural" => {
+                    NATURAL_SIGHTS.contains(&value)
+                        && get("wikidata").is_some()
+                        && get("water").is_none_or(|water| LAKE_WATERS.contains(&water))
+                }
                 _ => value != "no" && value != "vacant",
             };
             if !kept || value.contains(';') {
@@ -697,9 +710,10 @@ fn titled_region(title: &str, lon: f64) -> Option<(String, &'static str)> {
 /// English Wikipedia article on its Wikidata item, from the articles file
 /// `path`: "Big Ben" for the Elizabeth Tower, "Philly" for Philadelphia.
 /// The best known place of an item that is no town, and that the title
-/// names plainly, is a landmark ([`landmark_rank`]). A place with its
-/// town's item (a town hall) takes nothing from it.
-fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<()> {
+/// names plainly, is a landmark ([`landmark_rank`]); a lake or mountain
+/// that is not one is dropped. A place with its town's item (a town hall)
+/// takes nothing from it.
+fn add_article_names(found: &mut Vec<(Place, Option<u64>)>, path: &Path) -> Result<()> {
     let mut places_of: HashMap<u64, ItemPlaces> = HashMap::new();
     for (i, (place, item)) in found.iter().enumerate() {
         let Some(item) = item else { continue };
@@ -782,6 +796,7 @@ fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<
             .filter(|(_, item)| item.is_some_and(|item| articles.contains_key(&item)))
             .count()
     );
+    found.retain(|(place, _)| !place.kind.starts_with("natural=") || place.is_landmark());
     Ok(())
 }
 
@@ -1289,6 +1304,28 @@ mod tests {
         );
         let rock = &[("name", "Seal Rock"), ("place", "island")];
         assert!(place_of(&tags(rock), "w4".into(), false).is_none());
+        // And a lake or a mountain Wikidata knows, not a river.
+        let lake = &[
+            ("name", "Lake Tahoe"),
+            ("natural", "water"),
+            ("water", "lake"),
+            ("wikidata", "Q107374"),
+        ];
+        assert_eq!(
+            place_of(&tags(lake), "r5".into(), false).unwrap().kind,
+            "natural=water"
+        );
+        let peak = &[("name", "Mount Hood"), ("natural", "peak")];
+        assert!(place_of(&tags(peak), "n6".into(), true).is_none());
+        let peak = &[peak[0], peak[1], ("wikidata", "Q217577")];
+        assert!(place_of(&tags(peak), "n6".into(), true).is_some());
+        let river = &[
+            ("name", "Thames"),
+            ("natural", "water"),
+            ("water", "river"),
+            ("wikidata", "Q19686"),
+        ];
+        assert!(place_of(&tags(river), "r7".into(), false).is_none());
     }
 
     #[test]
@@ -1340,13 +1377,16 @@ mod tests {
                 },
                 Some(1003),
             ),
+            // A lake an article names, and a mountain none does.
+            (at("Lake Tahoe", "natural=water", "r13"), Some(107374)),
+            (at("Mount Nobody", "natural=peak", "n14"), Some(99)),
         ];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wikipedia-en.tsv");
         std::fs::write(
             &path,
             format!(
-                "{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}",
                 plumb_core::article::ARTICLES_HEADER,
                 "a line with no columns\n",
                 "90000\tBig Ben\tclock tower\tQ41225\t\tElizabeth Tower|BigBen|10.57232|Clock Tower (Westminster)|Big Ben, London\n",
@@ -1355,6 +1395,7 @@ mod tests {
                 "70000\tStarbucks\tcoffeehouse chain\tQ37158\t\t\n",
                 "2293\tNiagara Falls, Ontario\tcity\tQ274120\t\tNiagara Falls, ON|Crowland Township\n",
                 "900\tGori, Georgia\ttown\tQ1003\t\t\n",
+                "60000\tLake Tahoe\tlake\tQ107374\t\tTahoe\n",
             ),
         )
         .unwrap();
@@ -1383,6 +1424,9 @@ mod tests {
         assert_eq!(falls.country.as_deref(), Some("CA"));
         assert_eq!(falls.aliases, ["Crowland Township"]);
         assert_eq!(found[11].0.region, None);
+        // The lake is a landmark; the mountain no article names is gone.
+        assert!(found[12].0.is_landmark());
+        assert_eq!(found.len(), 13);
     }
 
     #[test]

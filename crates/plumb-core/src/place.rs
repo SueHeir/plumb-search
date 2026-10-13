@@ -163,12 +163,19 @@ pub fn town_size(kind: &str) -> Option<f64> {
 }
 
 /// How far around a place that is no town, in km, places count as near
-/// it: national parks, nature reserves and islands are wide. `None` for
-/// the rest.
+/// it: national parks, nature reserves, islands, lakes, mountains and
+/// beaches are wide. `None` for the rest.
 pub fn area_size(kind: &str) -> Option<f64> {
     matches!(
         kind,
-        "boundary=national_park" | "leisure=nature_reserve" | "place=island" | "place=archipelago"
+        "boundary=national_park"
+            | "leisure=nature_reserve"
+            | "place=island"
+            | "place=archipelago"
+            | "natural=water"
+            | "natural=peak"
+            | "natural=volcano"
+            | "natural=beach"
     )
     .then_some(10.0)
 }
@@ -655,6 +662,7 @@ pub fn kind_label(kind: &str) -> String {
         "shop" => format!("{value} shop"),
         "office" => format!("{value} office"),
         "craft" => format!("{value} workshop"),
+        "natural" if value == "water" => "lake".to_string(),
         _ => value,
     };
     if let Some(first) = label.get(..1) {
@@ -769,6 +777,7 @@ mod tests {
     fn kinds_have_labels_and_words() {
         assert_eq!(kind_label("amenity=cafe"), "Café");
         assert_eq!(kind_label("shop=kite"), "Kite shop");
+        assert_eq!(kind_label("natural=water"), "Lake");
         let pizza = Place {
             kind: "amenity=restaurant".into(),
             tags: vec!["cuisine=pizza;italian".into()],
@@ -835,6 +844,7 @@ mod tests {
         assert!(!village.is_landmark());
         assert_eq!(area_size("leisure=nature_reserve"), Some(10.0));
         assert_eq!(area_size("place=island"), Some(10.0));
+        assert_eq!(area_size("natural=peak"), Some(10.0));
         assert_eq!(area_size("tourism=museum"), None);
     }
 
