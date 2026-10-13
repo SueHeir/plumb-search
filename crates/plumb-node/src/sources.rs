@@ -161,8 +161,11 @@ pub fn asks_the_time(text: &str) -> bool {
 
 /// The word or two `text` (normalized) asks the meaning of: "define
 /// prioritize", "prioritize definition", "meaning of ubiquitous", "what
-/// does ubiquitous mean".
+/// does ubiquitous mean", "what does asap stand for".
 fn defined_word(text: &str) -> Option<String> {
+    let text = text
+        .strip_prefix("whats ")
+        .map_or(text.to_string(), |rest| format!("what is {rest}"));
     let word = text
         .strip_prefix("define ")
         .or_else(|| text.strip_prefix("definition of "))
@@ -173,8 +176,10 @@ fn defined_word(text: &str) -> Option<String> {
         .or_else(|| text.strip_suffix(" meaning"))
         .or_else(|| text.strip_suffix(" define"))
         .or_else(|| {
-            text.strip_prefix("what does ")
-                .and_then(|rest| rest.strip_suffix(" mean"))
+            let rest = text.strip_prefix("what does ")?;
+            [" mean", " stand for", " stands for"]
+                .iter()
+                .find_map(|tail| rest.strip_suffix(tail))
         })?
         .trim();
     let word = word.strip_prefix("the word ").unwrap_or(word);
@@ -612,6 +617,14 @@ mod tests {
         assert_eq!(
             defined_word("what does ubiquitous mean"),
             Some("ubiquitous".into())
+        );
+        assert_eq!(
+            defined_word("what does asap stand for"),
+            Some("asap".into())
+        );
+        assert_eq!(
+            defined_word("whats the meaning of serendipity"),
+            Some("serendipity".into())
         );
     }
 

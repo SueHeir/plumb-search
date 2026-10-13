@@ -4305,10 +4305,14 @@ async fn legacy_complete_set_timestamp_precedes_the_first_key_and_builds_once() 
         1
     );
     assert_eq!(std::fs::read(&file).unwrap(), bytes);
-    assert!(get(node.addr(), "/search?q=legacy+curie")
-        .await
-        .2
-        .contains("Legacy_Curie"));
+    // The page index can be in use before the first site index is: until
+    // then a search answers with the setup page.
+    wait_for(node.addr(), "the first index", |status| {
+        status.phase == Phase::Ready
+    })
+    .await;
+    let (_, _, body) = get(node.addr(), "/search?q=legacy+curie").await;
+    assert!(body.contains("Legacy_Curie"), "{body}");
     node.shutdown().await.unwrap();
 }
 
