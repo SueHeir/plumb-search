@@ -16,9 +16,9 @@ use super::building::schema;
 use super::page::is_item_id;
 use super::scoring::truncate_keeping_inner_pages;
 use super::{
-    Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
-    KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET, POPULARITY_SCALE,
-    POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
+    Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, ASKING_WORDS,
+    CANDIDATES, FILMS_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO,
+    PAPERS_SET, POPULARITY_SCALE, POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
 };
 use crate::analysis;
 
@@ -154,6 +154,21 @@ fn asked_name(text: &str) -> Option<&str> {
         && !words().any(|word| NOT_NAMES.contains(&word)))
     .then_some(name)
 }
+
+/// Words of a title that only set two things side by side: "the
+/// difference between mitosis and meiosis".
+const COMPARING_WORDS: &[&str] = &[
+    "vs",
+    "versus",
+    "v",
+    "difference",
+    "differences",
+    "between",
+    "compared",
+    "comparison",
+    "better",
+    "or",
+];
 
 /// The two things a comparison sets side by side, each looked up as a
 /// name: "mitosis" and "meiosis" of "mitosis vs meiosis" or "difference
@@ -742,7 +757,9 @@ impl PageSearcher {
     /// The pages named by each of the things a comparison sets side by
     /// side ([`compared`]): the articles on mitosis and meiosis for
     /// "mitosis vs meiosis". `None` when one of `hits` already compares
-    /// them, as "Crocodiles vs. Alligators" does "crocodile vs alligator".
+    /// them, as "Crocodiles vs. Alligators" does "crocodile vs alligator":
+    /// a page whose title has nothing else of substance. "Power
+    /// consumption: SSD vs HDD" asks something narrower.
     fn compared_pages(
         &self,
         sides: &[String; 2],
@@ -751,8 +768,20 @@ impl PageSearcher {
         scope: Option<&dyn Query>,
     ) -> Result<Option<Vec<PageHit>>> {
         let compares = |hit: &PageHit| {
-            let title = hit.page.title.to_lowercase();
-            sides.iter().all(|side| title.contains(side.as_str()))
+            let mut title = hit.page.title.to_lowercase();
+            for side in sides {
+                let Some(at) = title.find(side.as_str()) else {
+                    return false;
+                };
+                title.replace_range(at..at + side.len(), " ");
+            }
+            // What is left of "crocodiles vs. alligators" is "s vs. s".
+            analysis::tokens(&self.words, &title).iter().all(|word| {
+                word.len() == 1
+                    || crate::is_function_word(word)
+                    || ASKING_WORDS.contains(&word.as_str())
+                    || COMPARING_WORDS.contains(&word.as_str())
+            })
         };
         if hits.iter().any(compares) {
             return Ok(None);
