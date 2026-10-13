@@ -1044,15 +1044,18 @@ pub fn open_or_build_with_budget(
     wanted: &Wanted,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 ) -> Result<Option<(String, PageSearcher)>> {
-    open_or_build_with(data_dir, wanted, budget, None)
+    open_or_build_with(data_dir, wanted, budget, None, &mut || Ok(()))
 }
 
-/// [`open_or_build_with_budget`], leaving out what `denylist` denies.
+/// [`open_or_build_with_budget`], leaving out what `denylist` denies. A
+/// build asks `go_on` as it goes and ends at its first error, building
+/// nothing (see [`plumb_index::pages::build_page_index_with_budget`]).
 pub fn open_or_build_with(
     data_dir: &Path,
     wanted: &Wanted,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
     denylist: Option<&plumb_format::deny::Denylist>,
+    go_on: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Option<(String, PageSearcher)>> {
     let Some(key) = wanted.key() else {
         return Ok(None);
@@ -1103,7 +1106,7 @@ pub fn open_or_build_with(
         .filter(allowed);
         pages = Box::new(pages.chain(read));
     }
-    let stats = plumb_index::pages::build_page_index_with_budget(&dir, pages, budget)?;
+    let stats = plumb_index::pages::build_page_index_with_budget(&dir, pages, budget, go_on)?;
     info!(
         "built the page index of {} pages in {:.1}s",
         stats.pages,
@@ -1527,9 +1530,10 @@ mod tests {
         let (key, searcher) = open_or_build(data, &wanted).unwrap().unwrap();
         assert_eq!(searcher.num_pages(), 2);
         let wanted = wanted.with_denylist(Some("2026-10-12T00:00:00Z:on".into()));
-        let (denied, searcher) = open_or_build_with(data, &wanted, None, Some(&list))
-            .unwrap()
-            .unwrap();
+        let (denied, searcher) =
+            open_or_build_with(data, &wanted, None, Some(&list), &mut || Ok(()))
+                .unwrap()
+                .unwrap();
         assert_ne!(denied, key, "a denylist names its own index");
         assert_eq!(searcher.num_pages(), 1);
         let hits = searcher.search("curie", 5).unwrap();

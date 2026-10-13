@@ -203,6 +203,7 @@ pub(super) fn run(inner: Arc<Inner>) {
                 &wanted,
                 inner.storage.clone(),
                 denylist.as_ref().map(|(list, _)| list.as_ref()),
+                &mut || inner.check_stop(),
             ) {
                 Ok(found) => {
                     built = Some((page_sets_key, Instant::now()));
@@ -223,6 +224,8 @@ pub(super) fn run(inner: Arc<Inner>) {
                     }
                     failed = None;
                 }
+                // Stopped mid-build: the next start builds it again.
+                Err(_) if inner.stopping() => break,
                 Err(err) => {
                     warn!("page sets: {err:#}");
                     inner
