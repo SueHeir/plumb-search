@@ -575,14 +575,11 @@ impl PlaceSearcher {
         required_country: Option<&str>,
         limit: usize,
     ) -> Result<Option<PlaceResults>> {
+        // A business named with its town comes last, when no other
+        // reading finds a town: "pizza hut denver" is not pizza near a
+        // place called Hut Denver.
         let mut readings = place_query_readings(query);
-        if readings.is_empty() {
-            readings.extend(self.named_business_query(
-                query,
-                preferred_country,
-                required_country,
-            )?);
-        }
+        readings.extend(self.named_business_query(query, preferred_country, required_country)?);
         for asked in readings {
             let location = match &asked.near {
                 Near::Me => match home {
@@ -697,8 +694,7 @@ impl PlaceSearcher {
             // a place, since every search on a node comes here.
             let mut city = false;
             for k in 1..=near.len() {
-                city = city
-                    || self.named_with(&near[..k].join(" "), self.fields.kind, GUESSED_TOWNS)?;
+                city = city || self.names_a_city(&near[..k].join(" "))?;
             }
             if !city {
                 continue;
@@ -711,12 +707,14 @@ impl PlaceSearcher {
             else {
                 continue;
             };
-            // Only a place called that is a business named: "bible
-            // reading" asks for no Bible church in Reading, Pennsylvania.
+            // Only a place called that, as far out as places are listed,
+            // is a business named: "bible reading" asks for no Bible
+            // church in Reading, Pennsylvania, and "boulder denver" for no
+            // town near Denver.
             let what = what.join(" ");
             let km = 3.0 * town_size(&town.kind).unwrap_or(LANDMARK_KM);
-            let cells = cells_around(town.lat, town.lon, km);
-            if self.named_with(&what, self.fields.cell, &cells)? {
+            let named = self.named_within(&what, Some((town, km)))?;
+            if named.iter().any(|place| !place.is_town()) {
                 return Ok(Some(PlaceQuery {
                     what,
                     near: Near::Named(name),
@@ -758,9 +756,9 @@ impl PlaceSearcher {
         stems.iter().all(|stem| words.contains(stem))
     }
 
-    /// Whether a place called `name` has one of `values` in `field`: is
-    /// of one of those kinds, or in one of those cells.
-    fn named_with(&self, name: &str, field: Field, values: &[impl AsRef<str>]) -> Result<bool> {
+    /// Whether a city or borough (a town a query may name without "in")
+    /// is called `name`.
+    fn names_a_city(&self, name: &str) -> Result<bool> {
         let Some(key) = analysis::tokens(&self.joined, name).pop() else {
             return Ok(false);
         };
@@ -770,13 +768,13 @@ impl PlaceSearcher {
                 IndexRecordOption::Basic,
             )) as Box<dyn Query>
         };
-        let values = values
+        let kinds = GUESSED_TOWNS
             .iter()
-            .map(|value| (Occur::Should, term(field, value.as_ref())))
+            .map(|kind| (Occur::Should, term(self.fields.kind, kind)))
             .collect();
         let query = BooleanQuery::new(vec![
             (Occur::Must, term(self.fields.keys, &key)),
-            (Occur::Must, Box::new(BooleanQuery::new(values))),
+            (Occur::Must, Box::new(BooleanQuery::new(kinds))),
         ]);
         Ok(self.reader.searcher().search(&query, &Count)? > 0)
     }
@@ -1269,6 +1267,8 @@ mod tests {
             at("Starbucks", "amenity=cafe", 39.74, -104.99),
             at("Starbucks", "amenity=cafe", 43.66, -70.26),
             city("Reading", 95_000, "PA", "US", 40.34, -75.93),
+            city("Aurora", 390_000, "CO", "US", 39.73, -104.83),
+            at("IKEA", "shop=furniture", 39.74, -104.45),
             at(
                 "Bible Baptist Church",
                 "amenity=place_of_worship",
@@ -1290,6 +1290,19 @@ mod tests {
         // Nothing in Reading is called Bible.
         let bible = searcher.search("bible reading", None, Some("US"), 5);
         assert!(bible.unwrap().is_none());
+        // A town by Denver is no business, and an IKEA 46 km out is
+        // farther than places are listed.
+        for query in ["aurora denver", "ikea denver"] {
+            let found = searcher.search(query, None, Some("US"), 5).unwrap();
+            assert!(found.is_none(), "{query}: {found:?}");
+        }
+        // Not pizza near a place called Hut Denver.
+        let hut = searcher
+            .search("pizza hut denver", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hut.center.unwrap().name, "Denver");
+        assert_eq!(hut.hits[0].place.name, "Pizza Hut");
     }
 
     fn at(name: &str, kind: &str, lat: f64, lon: f64) -> Place {
