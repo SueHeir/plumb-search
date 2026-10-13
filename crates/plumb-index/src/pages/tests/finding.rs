@@ -559,7 +559,7 @@ fn words_of_things_are_corrected_from_page_names() {
         pages.push(page(&format!("Anubis statue {i}"), 10, &[]));
         pages.push(page(&format!("Budapest hotels {i}"), 10, &[]));
     }
-    pages.push(page("Anubas (beetle)", 1, &[]));
+    pages.push(page("Anubas tomb", 1, &[]));
     for i in 0..5 {
         pages.push(page(&format!("Perfi album {i}"), 10, &[]));
     }
@@ -574,7 +574,8 @@ fn words_of_things_are_corrected_from_page_names() {
             .unwrap()
             .map(|s| s.query)
     };
-    // Even a word one page has is taken for a slip of a far commoner one.
+    // Even a word one page's name has is taken for a slip of a far
+    // commoner one.
     assert_eq!(suggest("anubas").as_deref(), Some("anubis"));
     assert_eq!(
         suggest("budafest hotels").as_deref(),
@@ -662,6 +663,11 @@ fn names_are_not_taken_for_slips() {
     add("Arguement", 3);
     add("Scale", 200);
     add("Scald", 3);
+    add("Magick", 200);
+    add("Bake", 200);
+    // Only one page has each: no more than "anubas" has.
+    pages.push(page("Magicka", 10, &[]));
+    pages.push(page("Baidu Baike", 10, &[]));
     pages.push(page("Htop", 10, &[]));
     pages.push(Page::from_word(Article {
         title: "saute".into(),
@@ -690,6 +696,8 @@ fn names_are_not_taken_for_slips() {
             ("c", "t", 0.001),
             ("u", "ue", 0.01),
             ("e", "d", 0.001),
+            ("k", "ka", 0.01),
+            ("a", "ai", 0.01),
         ],
         1e-6,
     );
@@ -704,6 +712,7 @@ fn names_are_not_taken_for_slips() {
     assert_eq!(suggest("etias").as_deref(), Some("elias"));
     // A page names it with another word typed.
     assert_eq!(suggest("jean meeus"), None);
+    assert_eq!(suggest("astronomical algorithms jean meeus"), None);
     // Typed in capitals, an abbreviation.
     assert_eq!(suggest("ETIAS"), None);
     // An article is named by it.
@@ -713,6 +722,9 @@ fn names_are_not_taken_for_slips() {
     assert_eq!(suggest("saute"), None);
     // It is a near spelling of the article's title.
     assert_eq!(suggest("arguement").as_deref(), Some("argument"));
+    // However few pages have it, a name is no slip.
+    assert_eq!(suggest("trifling glyph of magicka"), None);
+    assert_eq!(suggest("great wall baidu baike"), None);
 }
 
 #[test]

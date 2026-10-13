@@ -372,10 +372,9 @@ impl PageSearcher {
     /// commoner the near word is weighed by [`PAGE_SLIP_WEIGHT`]; that
     /// holds for a word the pages know too ("recieve", "definately").
     /// A word typed in capitals is kept, and so is a word that names
-    /// something ([`PageSearcher::names_something`]) when it would only be
-    /// taken for a slip; a word hardly any page has is a slip of a far
-    /// commoner one even so ("anubas" is a beetle). `None` when no word
-    /// changes.
+    /// something ([`PageSearcher::names_something`]), however few pages
+    /// have it: "magicka" is not "magick", nor "baidu baike" "baidu bake".
+    /// `None` when no word changes.
     pub fn suggest_spelling(
         &self,
         query: &str,
@@ -418,8 +417,7 @@ impl PageSearcher {
             }
             let typed_docs = docs(word)?;
             let needed = MIN_PAGE_FIX_PAGES.max(PAGE_FIX_RATIO.saturating_mul(typed_docs));
-            // The likeliest fix, and whether it is only a slip people make.
-            let mut best: Option<(f64, String, bool)> = None;
+            let mut best: Option<(f64, String)> = None;
             for (term, distance) in
                 crate::spell::near_terms(&searcher, self.fields.words, word, edits)?
             {
@@ -437,7 +435,6 @@ impl PageSearcher {
                     None => -7.0 * f64::from(distance),
                 };
                 let likelihood = cost + (term_docs as f64).ln();
-                let mut only_a_slip = false;
                 if let Some(model) = model {
                     let commoner = (term_docs as f64 / typed_docs.max(1) as f64).ln();
                     // As likely as the word typed, a word no page has
@@ -448,14 +445,13 @@ impl PageSearcher {
                     if !rare && !slip {
                         continue;
                     }
-                    only_a_slip = !rare;
                 }
-                if best.as_ref().is_none_or(|(b, ..)| likelihood > *b) {
-                    best = Some((likelihood, term, only_a_slip));
+                if best.as_ref().is_none_or(|(b, _)| likelihood > *b) {
+                    best = Some((likelihood, term));
                 }
             }
-            if let Some((_, term, only_a_slip)) = best {
-                if !(only_a_slip && self.names_something(word, &typed)?) {
+            if let Some((_, term)) = best {
+                if !self.names_something(word, &typed)? {
                     *word = term;
                 }
             }
