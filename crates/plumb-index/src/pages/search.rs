@@ -176,6 +176,36 @@ pub(crate) fn compared(query: &str) -> Option<[String; 2]> {
     Some([side(a)?, side(b)?])
 }
 
+/// Words before a name that ask for one side of it: "benefits of
+/// meditation", "uses of graphene". Unlike [`HINT_LEADS`], they also start
+/// the names of articles on that side ("Causes of the French Revolution"),
+/// so the name is looked up only when nothing is called the whole query.
+const ASPECT_LEADS: &[&str] = &[
+    "benefits of ",
+    "health benefits of ",
+    "uses of ",
+    "importance of ",
+    "characteristics of ",
+    "advantages and disadvantages of ",
+    "advantages of ",
+    "disadvantages of ",
+    "pros and cons of ",
+    "effects of ",
+    "side effects of ",
+    "examples of ",
+    "types of ",
+    "causes of ",
+    "symptoms of ",
+    "history of ",
+];
+
+/// The name an [`ASPECT_LEADS`] query asks about: "meditation" of
+/// "benefits of meditation".
+pub(crate) fn aspect_asked(query: &str) -> Option<String> {
+    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?')).to_lowercase();
+    asked_name(ASPECT_LEADS.iter().find_map(|lead| q.strip_prefix(lead))?).map(str::to_string)
+}
+
 /// Words after a name that say what about it is wanted.
 const HINT_TAILS: &[(&str, Hint)] = &[
     (" wikipedia", Hint::Article),
@@ -687,7 +717,8 @@ impl PageSearcher {
         // name, so the name is searched for too. So is what a fact question
         // asks about, or "when was isaac newton born" lists Newton's mother
         // and namesakes, whose descriptions hold its words, and not him;
-        // but not when the query is itself a name ("age of empires"). Of
+        // but not when the query is itself a name ("age of empires"), and
+        // so is what "benefits of meditation" asks about. Of
         // that search only the pages the subject names are kept: "madrid
         // spanish" (of "madrid spanish capital city") names nothing, and
         // the clubs it describes would push Madrid out.
@@ -695,8 +726,10 @@ impl PageSearcher {
         let asked = hinted.is_none();
         let Some((name, hint)) = hinted.or_else(|| {
             plumb_core::facts::fact_asked(query)
+                .map(|asked| asked.subject)
+                .or_else(|| aspect_asked(query))
                 .filter(|_| !hits.iter().any(|hit| hit.named))
-                .map(|asked| (asked.subject, Hint::Any))
+                .map(|subject| (subject, Hint::Any))
         }) else {
             return Ok(None);
         };

@@ -17,7 +17,7 @@ use plumb_core::{Operators, SafeSearch};
 
 use super::docs::naming_docs;
 use super::placing::subpage_asked;
-use super::search::{compared, hinted_name, last_word_in_other_number, Hint};
+use super::search::{aspect_asked, compared, hinted_name, last_word_in_other_number, Hint};
 use super::sites::{base_title, describes_an_organization, site_is_titled};
 use super::*;
 
