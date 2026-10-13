@@ -1,4 +1,6 @@
-//! Sums: `12 * (3 + 4)`, `2^10`, `sqrt(2)`, `15% of 80`, `5!`.
+//! Sums: `12 * (3 + 4)`, `2^10`, `sqrt(2)`, `15% of 80`, `5!`, and the same
+//! in words: "2 to the power of 10", "square root of 2", "15 percent of 80",
+//! "10 factorial", "log base 2 of 8".
 //!
 //! A query is a sum only when all of it reads as one, with at least one
 //! operation in it, so "2024" and "f1" stay searches. Two numbers joined by
@@ -390,6 +392,39 @@ impl Parser {
     }
 }
 
+/// Sums said in words, and the symbols [`tokens`] reads for them.
+const SAID: &[(&str, &str)] = &[
+    (" square root of ", " √"),
+    (" cube root of ", " cbrt "),
+    (" sqrt of ", " √"),
+    // Before " log of ", which is inside it.
+    (" natural log of ", " ln "),
+    (" ln of ", " ln "),
+    (" log base 2 of ", " log2 "),
+    (" log base 10 of ", " log "),
+    (" log of ", " log "),
+    (" factorial ", "! "),
+    (" to the power of ", " ^ "),
+    (" divided by ", " / "),
+    (" multiplied by ", " * "),
+    (" times ", " * "),
+    (" plus ", " + "),
+    (" minus ", " - "),
+    (" percent ", "% "),
+    (" squared ", "² "),
+    (" cubed ", "³ "),
+];
+
+/// `text` lowercased, with a sum said in words written in symbols: "square
+/// root of 144", "2 to the power of 10", "15 percent of 80".
+fn in_symbols(text: &str) -> String {
+    let padded = format!(" {} ", text.to_lowercase());
+    let text = SAID
+        .iter()
+        .fold(padded, |text, (said, symbol)| text.replace(said, symbol));
+    text.trim().to_string()
+}
+
 /// Whether `text` is two whole numbers joined by `/` or `-` with nothing
 /// around them: "9/11", "24/7", "1-800".
 fn is_name_like(text: &str) -> bool {
@@ -402,7 +437,15 @@ fn is_name_like(text: &str) -> bool {
 
 pub(crate) fn answer(query: &str) -> Option<Answer> {
     let mut text = query.trim();
-    for prefix in ["calculate ", "calc ", "what is ", "what's ", "whats ", "="] {
+    for prefix in [
+        "calculate ",
+        "calc ",
+        "what is ",
+        "what's ",
+        "whats ",
+        "=",
+        "the ",
+    ] {
         // Matched on the text itself: lowercasing can change byte lengths.
         if text
             .get(..prefix.len())
@@ -411,12 +454,12 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
             text = text[prefix.len()..].trim();
         }
     }
-    let text = text.trim_end_matches(['=', '?']).trim();
-    if is_name_like(text) {
+    let text = in_symbols(text.trim_end_matches(['=', '?']));
+    if is_name_like(&text) {
         return None;
     }
     let mut parser = Parser {
-        tokens: tokens(text)?,
+        tokens: tokens(&text)?,
         at: 0,
         operations: 0,
     };
@@ -472,6 +515,53 @@ mod tests {
         assert_eq!(calc("(1+2").unwrap(), "3");
         assert_eq!(calc("log(1000)").unwrap(), "3");
         assert_eq!(calc("5²").unwrap(), "25");
+    }
+
+    #[test]
+    fn works_out_sums_said_in_words() {
+        for (query, sum) in [
+            ("square root of 144", "12"),
+            ("what is the square root of 144?", "12"),
+            ("Square Root Of 144", "12"),
+            ("cube root of 27", "3"),
+            ("5 squared", "25"),
+            ("2 cubed", "8"),
+            ("2 to the power of 10", "1,024"),
+            ("15 percent of 80", "12"),
+            ("100 divided by 7", "14.2857142857"),
+            ("3 multiplied by 4", "12"),
+            ("what is 7 times 8", "56"),
+            ("10 minus 3 plus 2", "9"),
+            ("10 factorial", "3,628,800"),
+            ("what is 5 factorial", "120"),
+            ("log of 100", "2"),
+            ("what is the log of 100", "2"),
+            ("log base 2 of 8", "3"),
+            ("log base 10 of 1000", "3"),
+            ("natural log of 1", "0"),
+            ("ln of e", "1"),
+            ("sqrt of 16", "4"),
+        ] {
+            assert_eq!(calc(query).as_deref(), Some(sum), "{query:?}");
+        }
+        for query in [
+            "disney plus",
+            "new york times",
+            "the times",
+            "times square",
+            "plus size",
+            "square root",
+            "power of 10",
+            "4 times",
+            "factorial",
+            "3 factorial design",
+            "log base 2",
+            "natural log",
+            "natural logarithm",
+            "round of 16",
+        ] {
+            assert_eq!(answer(query), None, "{query:?}");
+        }
     }
 
     #[test]

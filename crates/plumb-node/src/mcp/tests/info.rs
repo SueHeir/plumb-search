@@ -575,3 +575,218 @@ fn facts_entity_profiles_keep_the_existing_music_fallback() {
         .unwrap()
         .starts_with("https://genius.com/search?"));
 }
+
+/// Finds `articles` for every name, and each of `songs` for its search.
+struct Profiles {
+    articles: Vec<plumb_index::pages::PageHit>,
+    songs: Vec<(&'static str, PlacedPage)>,
+}
+
+impl SearchBackend for Profiles {
+    fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+    fn num_docs(&self) -> u64 {
+        0
+    }
+    fn entities(
+        &self,
+        query: &str,
+        _: usize,
+        _: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        // As in the page index, a film's title alone finds its article,
+        // not the films set's page.
+        Ok(self
+            .articles
+            .iter()
+            .filter(|hit| {
+                hit.page.set != plumb_index::pages::FILMS_SET
+                    || !hit.page.title.eq_ignore_ascii_case(query)
+            })
+            .cloned()
+            .collect())
+    }
+    fn search_full(&self, query: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
+        Ok(SearchResults {
+            pages: self
+                .songs
+                .iter()
+                .filter(|(asked, _)| *asked == query)
+                .map(|(_, song)| song.clone())
+                .collect(),
+            ..Default::default()
+        })
+    }
+}
+
+#[test]
+fn lyrics_come_from_the_song_asked_for() {
+    let article = |title: &str, item: &str, description: &str| plumb_index::pages::PageHit {
+        named: true,
+        ..shelved(Page::from_article(
+            "en",
+            plumb_core::article::Article {
+                title: title.into(),
+                description: Some(description.into()),
+                item: Some(item.into()),
+                ..Default::default()
+            },
+        ))
+    };
+    let song = |title: &str, by: &str, genius: &str| PlacedPage {
+        hit: plumb_index::pages::PageHit {
+            named: true,
+            ..shelved(
+                Page::from_music(plumb_core::article::Article {
+                    title: title.into(),
+                    description: Some(format!("Song by {by}, 1992")),
+                    aliases: vec![format!("{title} {by}")],
+                    item: Some("recording/70595637-9310-45f2-a266-58f8de4874a7".into()),
+                    profiles: vec![plumb_core::profiles::Profile {
+                        service: "genius-song".into(),
+                        id: genius.into(),
+                    }],
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+        },
+        under: None,
+        at: 0,
+    };
+    let lyrics = |backend: Profiles, query: &str| {
+        Mcp::new(Arc::new(backend), None)
+            .search(query, None, &SearchOptions::default())
+            .unwrap()["profile"]
+            .clone()
+    };
+    // Two articles are called "Creep"; MusicBrainz lists Radiohead's
+    // first, with its page on Genius.
+    let creep = Profiles {
+        articles: vec![
+            article(
+                "Creep (Radiohead song)",
+                "Q1140405",
+                "1992 single by Radiohead",
+            ),
+            article("Creep (TLC song)", "Q2304339", "1994 single by TLC"),
+        ],
+        songs: vec![(
+            "creep song",
+            song("Creep", "Radiohead", "Radiohead-creep-lyrics"),
+        )],
+    };
+    let profile = lyrics(creep, "creep lyrics");
+    assert_eq!(profile["url"], "https://genius.com/Radiohead-creep-lyrics");
+    // "Pyramid Song" is Radiohead's, never Wolfmother's "Pyramid", which a
+    // search for "pyramid song" finds as a song.
+    let pyramid = Profiles {
+        articles: vec![article(
+            "Pyramid Song",
+            "Q1755624",
+            "2001 single by Radiohead",
+        )],
+        songs: vec![(
+            "pyramid song",
+            song("Pyramid", "Wolfmother", "Wolfmother-pyramid-lyrics"),
+        )],
+    };
+    assert!(lyrics(pyramid, "pyramid song lyrics").is_null());
+}
+
+#[test]
+fn listings_are_of_the_kind_of_work_they_list() {
+    let article = |title: &str, item: &str, imdb: Option<&str>| plumb_index::pages::PageHit {
+        named: true,
+        ..shelved(Page::from_article(
+            "en",
+            plumb_core::article::Article {
+                title: title.into(),
+                item: Some(item.into()),
+                profiles: imdb
+                    .map(|id| plumb_core::profiles::Profile {
+                        service: "imdb".into(),
+                        id: id.into(),
+                    })
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        ))
+    };
+    let profile = |articles, query: &str| {
+        let backend = Profiles {
+            articles,
+            songs: Vec::new(),
+        };
+        Mcp::new(Arc::new(backend), None)
+            .search(query, None, &SearchOptions::default())
+            .unwrap()["profile"]
+            .clone()
+    };
+    let barbie = || {
+        vec![
+            article("Barbie", "Q167447", None),
+            article("Barbie (film)", "Q55606767", Some("tt1517268")),
+        ]
+    };
+    assert_eq!(
+        profile(barbie(), "barbie cast")["url"],
+        "https://www.imdb.com/title/tt1517268/"
+    );
+    // Other profiles are still the doll's, which has none; two shows of
+    // the name stay ambiguous.
+    assert!(profile(barbie(), "barbie youtube").is_null());
+    let offices = vec![
+        article(
+            "The Office (American TV series)",
+            "Q23831",
+            Some("tt0386676"),
+        ),
+        article(
+            "The Office (British TV series)",
+            "Q23834",
+            Some("tt0290978"),
+        ),
+    ];
+    assert!(profile(offices, "the office cast").is_null());
+    // A store of games lists the game, not the god.
+    let mut hades = vec![
+        article("Hades", "Q42272", None),
+        article("Hades (video game)", "Q63000000", None),
+    ];
+    hades[1].page.profiles = vec![plumb_core::profiles::Profile {
+        service: "steam".into(),
+        id: "1145360".into(),
+    }];
+    assert_eq!(
+        profile(hades, "hades steam")["url"],
+        "https://store.steampowered.com/app/1145360/"
+    );
+    // "top gun movie" names the 1955 film of the films set, but asks for
+    // the film called Top Gun, found by its name alone.
+    let imdb = |id: &str| {
+        vec![plumb_core::profiles::Profile {
+            service: "imdb".into(),
+            id: id.into(),
+        }]
+    };
+    let mut old = shelved(
+        Page::from_film(plumb_core::article::Article {
+            title: "Top Gun".into(),
+            description: Some("Film by Henry Levin, 1955".into()),
+            item: Some("Q7824830/Top_Gun_(1955_film)".into()),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    old.named = true;
+    old.page.profiles = imdb("tt0048734");
+    let mut top_gun = article("Top Gun", "Q49003", Some("tt0092099"));
+    top_gun.page.description = Some("1986 action drama film by Tony Scott".into());
+    assert_eq!(
+        profile(vec![old, top_gun], "top gun movie cast")["url"],
+        "https://www.imdb.com/title/tt0092099/"
+    );
+}

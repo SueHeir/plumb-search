@@ -31,6 +31,7 @@ use tantivy::IndexReader;
 
 mod building;
 mod docs;
+mod named_site;
 mod page;
 mod papers;
 mod placing;
@@ -39,15 +40,17 @@ mod search;
 mod sites;
 
 pub use self::building::{build_page_index, build_page_index_with_budget, GO_ON_EVERY};
-pub(crate) use self::docs::docs_kept_below;
 pub use self::docs::{docs_query_topic, docs_symbol_matches};
+pub(crate) use self::page::is_site_page_set;
 pub use self::placing::{
-    add_named_site, drop_namesakes_of_words, keep_page_rules, lift_named_sites, operators_allow,
-    options_allow, page_key, place_operator_pages, place_pages, DEMAND_MARGIN, MAX_PAGES_LISTED,
-    MAX_SITE_PAGES, MIN_PARTIAL_SCORE, OPERATOR_PAGES, PARTIAL_AFTER, WEAK_SITE_MATCH,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, keep_page_rules, lift_named_sites,
+    operators_allow, options_allow, page_key, place_operator_pages, place_pages, DEMAND_MARGIN,
+    MAX_PAGES_LISTED, MAX_SITE_PAGES, MIN_PARTIAL_SCORE, OPERATOR_PAGES, PARTIAL_AFTER,
+    WEAK_SITE_MATCH,
 };
-pub(crate) use self::placing::{asked_as_question, named_page_site};
+pub(crate) use self::placing::{asked_as_question, kept_below, named_page_site};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
+pub use self::sites::base_title;
 
 /// `name` of a page one of whose aliases the query is.
 pub const ALIAS_MATCH: f32 = 0.9;
@@ -73,6 +76,13 @@ pub const QUESTION_QUERY_WORDS: usize = 3;
 
 /// Least share of those words a question's title and tags must have.
 pub const QUESTION_SHARE: f32 = 0.75;
+/// How much a word that only asks ([`ASKING_WORDS`]) counts toward a
+/// question's [`QUESTION_SHARE`]: nearly every question has some, so they
+/// say little of what it asks. Counted whole, "how to change a car battery"
+/// found "How many amps should my car pull while it is turned off?" by
+/// "how", "car" and "battery". A word no page knows, likely a typo, counts
+/// as little: "how to undo git comit" still finds the question.
+const UNSURE_WORD_SHARE: f32 = 0.5;
 
 /// Least number of pages whose names have a word for the word to be
 /// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
@@ -126,6 +136,7 @@ pub const PAGE_INDEX_VERSION: &str = "v6-paper-dates-rich-symbol-docs-scope";
 const ASKING_WORDS: &[&str] = &[
     "about",
     "are",
+    "can",
     "define",
     "definition",
     "did",
@@ -139,6 +150,7 @@ const ASKING_WORDS: &[&str] = &[
     "mean",
     "meaning",
     "means",
+    "should",
     "was",
     "were",
     "what",
