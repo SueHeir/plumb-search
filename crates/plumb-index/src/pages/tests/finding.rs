@@ -500,6 +500,8 @@ fn words_of_things_are_corrected_from_page_names() {
     assert_eq!(suggest("budapest"), None);
     assert_eq!(suggest("anub"), None);
     assert_eq!(suggest("budafest2"), None);
+    // A web address is a name, not words.
+    assert_eq!(suggest("budafest.com"), None);
     // A rare word is no slip of another rare one: few pages say "perfi".
     // Nor of a common one with another first letter: "erft".
     assert_eq!(suggest("perft"), None);

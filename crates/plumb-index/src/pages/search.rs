@@ -325,6 +325,11 @@ impl PageSearcher {
         model: Option<&crate::spell_model::Model>,
         site_known: &dyn Fn(&str) -> bool,
     ) -> Result<Option<crate::Spelling>> {
+        // A web address is a name, not words: "amazn.com" is not "amazon
+        // com". The sites suggest the address it is a slip of.
+        if crate::names::typed_domain(query).is_some() {
+            return Ok(None);
+        }
         let searcher = self.reader.searcher();
         let docs = |word: &str| -> Result<u64> {
             Ok(searcher.doc_freq(&Term::from_field_text(self.fields.words, word))?)
