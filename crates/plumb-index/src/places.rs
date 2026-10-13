@@ -883,8 +883,10 @@ impl PlaceSearcher {
                     (qualifier.is_empty() || place_is_in(place, &qualifier))
                         && named_country.is_none_or(|country| country_matches(place, country))
                         && named_state.is_none_or(|state| {
+                            // Uruguay's Florida is in its department FL.
                             let region = place.region.as_deref().unwrap_or_default();
-                            region == state || (state == "WA" && region == "DC")
+                            place.country.as_deref() == Some("US")
+                                && (region == state || (state == "WA" && region == "DC"))
                         })
                 })
                 .collect();
@@ -1560,6 +1562,7 @@ mod tests {
         let mut fixtures = places();
         fixtures.extend([
             city("Florida", 58_000, "Valle del Cauca", "CO", 3.32, -76.23),
+            city("Florida", 33_000, "FL", "UY", -34.10, -56.21),
             city("Montana", 40_000, "Montana", "BG", 43.41, 23.22),
             city("Washington", 690_000, "DC", "US", 38.90, -77.04),
             at("Hotel Florida", "tourism=hotel", 3.321, -76.231),
