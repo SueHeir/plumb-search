@@ -1,5 +1,5 @@
 //! The subpages page set: inner pages of the sites in
-//! [`plumb_core::subpages::SUBPAGE_SITES`] (universities and labs, big
+//! [`crate::subpage_sites::SUBPAGE_SITES`] (universities and labs, big
 //! companies, government, entertainment, museums), written like reference
 //! pages ([`crate::build::reference`]): named by their own title without the
 //! site's name, described by their own description or the start of their
@@ -12,10 +12,10 @@
 use std::collections::HashMap;
 
 use plumb_core::article::Article;
-use plumb_core::subpages::SubpageSite;
 
 use crate::build::docs::FetchedDoc;
 use crate::build::reference::reference_articles;
+use crate::subpage_sites::SubpageSite;
 
 /// Pages of a site whose titles share a bracketed ending for it to be the
 /// site's name.
@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn a_bracketed_ending_many_pages_share_is_the_sites() {
-        let site = plumb_core::subpages::site("chessprogramming.org").unwrap();
+        let site = crate::subpage_sites::site("chessprogramming.org").unwrap();
         let docs = vec![
             doc(
                 "https://www.chessprogramming.org/Perft_Results",

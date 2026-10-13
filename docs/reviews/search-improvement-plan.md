@@ -271,7 +271,7 @@ Preserve population count years and current-statement filtering. Add provenance 
 
 ## Change 11 Expand specific destination pages
 
-Start with measurable targets: California court tenant guidance, official agency forms/standards, company investor and newsroom sections, and practical repair/recipe instructions. Extend `plumb-core/src/subpages.rs` and `reference.rs` through source profiles with roots, index pages, task types, jurisdiction, language, and version/date policies.
+Start with measurable targets: California court tenant guidance, official agency forms/standards, company investor and newsroom sections, and practical repair/recipe instructions. Extend `plumb-tools/src/subpage_sites.rs` and `reference_sites.rs` through source profiles with roots, index pages, task types, jurisdiction, language, and version/date policies.
 
 Use the DeepSeek wanted-site evidence to select bounded first batches: verify current coverage for irs.gov, ssa.gov, studentaid.gov, treasurydirect.gov, tools.usps.com, tfl.gov.uk, nhs.uk and cdc.gov. For docs, verify jenkins.io, docs.pytest.org, prometheus.io, typescript-eslint.io, vite.dev, docs.gitlab.com and grafana.com. Distinguish missing host profiles, permitted roots, absent task pages, and present-but-unretrievable records. For each fetched source, require a few useful task pages and reject Site Index/search/error/redirect/empty pages as successful coverage. Forms, health guidance, and travel operations are separate content types; avoid publishing a large shallow sitemap sample and calling the gap closed.
 

@@ -296,6 +296,8 @@ A node does this on its own with `plumb run --search-by-meaning` (the desktop ap
 | `crates/plumb-net` | The Plumb network: daily crawl assignments, signed crawl batches with Merkle proofs, and the libp2p node (relays, hole punching, gossip, bucket-based network search) |
 | `crates/plumb-answer` | Instant answers worked out from the query alone: sums, unit and currency conversions, the time in a place |
 | `crates/plumb-node` | The `plumb` command line tool, the long-running node behind `plumb run`, and the web page |
+| `crates/plumb-tools` | `plumb-tools`, the commands a node never runs: building the page sets and map, evals and ranking training, fact checks, and running a node's work by hand |
+| `crates/plumb-format` | The data format nodes and set builders exchange (`plumb-set/1`): items, signed manifests, key notes and the denylist |
 | `crates/plumb-private` | Private search in the browser: fetches buckets and ranks them, compiled to WebAssembly; see [docs/private-search.md](docs/private-search.md) |
 | `crates/plumb-plugin` | The kit for writing plugins in Rust; `plugins/` has Hacker News, YouTube Music, Reddit, GitHub and Steam plugins. See [docs/plugins.md](docs/plugins.md) |
 | `crates/plumb-desktop` | The desktop app: a [Tauri](https://v2.tauri.app) window around a node running inside it. A plain `cargo build` leaves it out; see [docs/desktop.md](docs/desktop.md) |

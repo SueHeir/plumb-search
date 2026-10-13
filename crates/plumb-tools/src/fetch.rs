@@ -392,7 +392,7 @@ const REFERENCE_SITES_AT_ONCE: usize = 32;
 /// stopped run carries on.
 fn run_reference(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     use crate::build::reference::reference_articles;
-    use plumb_core::reference::{ReferenceSite, REFERENCE_SITES};
+    use crate::reference_sites::{ReferenceSite, REFERENCE_SITES};
 
     let sites: Vec<&'static ReferenceSite> = if args.reference_sites.is_empty() {
         REFERENCE_SITES.iter().collect()
@@ -400,8 +400,8 @@ fn run_reference(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
         args.reference_sites
             .iter()
             .map(|key| {
-                plumb_core::reference::site(key).with_context(|| {
-                    format!("unknown reference site {key:?}; see plumb_core::reference")
+                crate::reference_sites::site(key).with_context(|| {
+                    format!("unknown reference site {key:?}; see plumb_tools::reference_sites")
                 })
             })
             .collect::<Result<_>>()?
@@ -434,7 +434,7 @@ fn run_reference(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
 /// carries on.
 fn run_subpages(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     use crate::build::subpages::subpage_articles;
-    use plumb_core::subpages::{SubpageKind, SubpageSite, SUBPAGE_SITES};
+    use crate::subpage_sites::{SubpageKind, SubpageSite, SUBPAGE_SITES};
 
     let kinds: Vec<SubpageKind> = args
         .subpage_kinds
@@ -457,8 +457,8 @@ fn run_subpages(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
         args.subpage_sites
             .iter()
             .map(|key| {
-                plumb_core::subpages::site(key).with_context(|| {
-                    format!("unknown subpage site {key:?}; see plumb_core::subpages")
+                crate::subpage_sites::site(key).with_context(|| {
+                    format!("unknown subpage site {key:?}; see plumb_tools::subpage_sites")
                 })
             })
             .collect::<Result<_>>()?

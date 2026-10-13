@@ -1,5 +1,5 @@
 //! The reference page set: inner pages of the sites in
-//! [`plumb_core::reference::REFERENCE_SITES`] (health, dictionaries,
+//! [`crate::reference_sites::REFERENCE_SITES`] (health, dictionaries,
 //! recipes, how-tos, government), each written as an article whose item
 //! is the page's address.
 //!
@@ -15,9 +15,9 @@
 use std::collections::{HashMap, HashSet};
 
 use plumb_core::article::{Article, MAX_ARTICLE_DESCRIPTION_CHARS};
-use plumb_core::reference::ReferenceSite;
 
 use crate::build::docs::{FetchedDoc, NOT_PAGES};
+use crate::reference_sites::ReferenceSite;
 
 /// Views of a page right at the root of a site of weight 1.
 pub const VIEWS_PER_WEIGHT: u64 = 1_000;
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn articles_drop_the_sites_name_and_shared_text() {
-        let site = plumb_core::reference::site("healthline.com").unwrap();
+        let site = crate::reference_sites::site("healthline.com").unwrap();
         let docs = vec![
             doc(
                 "https://www.healthline.com/health/foul-smelling-stool",
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn language_is_declared_per_page_even_on_a_multilingual_host() {
-        let site = plumb_core::reference::site("gesund.bund.de").unwrap();
+        let site = crate::reference_sites::site("gesund.bund.de").unwrap();
         let docs: Vec<FetchedDoc> = [
             ("de", Some("de-DE")),
             ("en", Some("en")),
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn a_title_most_pages_share_is_none() {
-        let site = plumb_core::reference::site("healthline.com").unwrap();
+        let site = crate::reference_sites::site("healthline.com").unwrap();
         let docs: Vec<FetchedDoc> = (0..3)
             .map(|i| {
                 doc(

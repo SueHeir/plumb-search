@@ -136,7 +136,7 @@ mod tests {
     /// A tiny BERT cross-encoder with random weights, as
     /// `cross-encoder/ms-marco-MiniLM-L6-v2` lays out its files.
     fn write_test_reranker(dir: &Path) -> Result<()> {
-        let (config, tokenizer) = crate::model::tiny_config_and_tokenizer();
+        let (config, tokenizer) = plumb_embed::tiny_config_and_tokenizer();
         std::fs::write(dir.join("config.json"), &config)?;
         std::fs::write(dir.join("tokenizer.json"), tokenizer)?;
         let config: bert::Config = serde_json::from_str(&config)?;

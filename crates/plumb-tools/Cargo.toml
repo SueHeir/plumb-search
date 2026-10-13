@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 bzip2 = "0.6.1"
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 flate2 = "1.1.10"
@@ -36,6 +39,7 @@ sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["bzip
 sha2 = "0.10.9"
 tar = "0.4.46"
 tempfile = "3.27.0"
+tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-regex"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
 url = "2.5.8"

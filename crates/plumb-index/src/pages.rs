@@ -962,7 +962,7 @@ pub const FILMS_SET: &str = "films";
 pub const DOCS_SET: &str = "docs";
 /// The set of inner pages of well-known reference sites: health,
 /// dictionaries, recipes, how-tos, government (see
-/// `plumb_core::reference`).
+/// `plumb_tools::reference_sites`).
 pub const REFERENCE_SET: &str = "reference";
 /// Opt-in staged reference pages with the stricter title relevance gate.
 /// Legacy `reference` remains readable until a complete, coverage-checked
@@ -970,7 +970,7 @@ pub const REFERENCE_SET: &str = "reference";
 pub const REFERENCE2_SET: &str = "reference2";
 /// The set of inner pages of other well-known sites: universities and
 /// labs, big companies, government agencies, entertainment and museums
-/// (see `plumb_core::subpages`). Found like reference pages, but listed
+/// (see `plumb_tools::subpage_sites`). Found like reference pages, but listed
 /// only when the search asks for them (`subpage_asked`).
 ///
 /// Named "subpages2", not "subpages": nodes before v0.2.1 list the
