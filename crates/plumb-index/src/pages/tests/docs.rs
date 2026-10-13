@@ -1029,4 +1029,27 @@ fn docs_pages_asked_for_as_a_tutorial_or_examples_are_named() {
             .all(|hit| hit.page.title != "asyncio — Asynchronous I/O"),
         "{hits:?}"
     );
+    // A page titled so keeps its place first: the argparse tutorial.
+    let argparse = docs_page(
+        "https://docs.python.org/3/library/argparse.html",
+        "argparse — Parser for command-line options, arguments and subcommands",
+        &["Python argparse", "argparse Python"],
+        "The argparse module makes it easy to write user-friendly command-line interfaces.",
+    );
+    let howto = docs_page(
+        "https://docs.python.org/3/howto/argparse.html",
+        "Argparse Tutorial",
+        &["Python Argparse Tutorial", "Argparse Tutorial Python"],
+        "This tutorial is intended to be a gentle introduction to argparse.",
+    );
+    let (_dir2, searcher) = super::searcher(&[argparse, howto]);
+    let hits = searcher.search("python argparse tutorial", 10).unwrap();
+    assert_eq!(hits[0].page.title, "Argparse Tutorial", "{hits:?}");
+    let sites = [site("python.org", true), site("other.com", false)];
+    let placed = place_pages("python argparse tutorial", &sites, hits);
+    let first = placed.iter().find(|p| p.under.is_none());
+    assert_eq!(
+        first.map(|p| p.hit.page.title.as_str()),
+        Some("Argparse Tutorial")
+    );
 }
