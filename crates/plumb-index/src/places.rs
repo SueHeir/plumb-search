@@ -22,7 +22,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use plumb_core::place::{
     area_size, distance_km, is_kind_word, normalize_region, parse_place, town_size, write_place,
-    Place, US_STATES,
+    Place, CANADIAN_PROVINCES, US_STATES,
 };
 use plumb_core::{country_of_any_name, joined, normalize_text};
 use serde::{Deserialize, Serialize};
@@ -95,18 +95,18 @@ const WHERE_WORDS: &[&[&str]] = &[&["in"], &["near"], &["around"], &["close", "t
 /// Kinds of town a query may name without "in" or "near": "denver
 /// pizza", "barber brooklyn".
 const GUESSED_TOWNS: &[&str] = &["place=city", "place=borough"];
-/// Words ending a query that say when, not where: "open now".
-const WHEN: &[&[&str]] = &[
+/// Words ending a query that say when it is open, not where: "open now".
+const HOURS: &[&[&str]] = &[
     &["open", "now"],
     &["open", "late"],
     &["open", "today"],
     &["open", "24", "hours"],
     &["24", "hours"],
     &["24", "7"],
-    &["now"],
-    &["today"],
-    &["tonight"],
 ];
+/// Words ending a query that say when, as of places as of much else:
+/// "pizza tonight", "stock market today".
+const WHEN: &[&[&str]] = &[&["now"], &["today"], &["tonight"]];
 /// First words of a query about a town itself, not places in it: "time in
 /// tokyo", "weather in denver", "capital of washington".
 const ABOUT_TOWN: &[&str] = &[
@@ -175,13 +175,15 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         .map(str::to_string)
         .collect();
     // "plumber boston open now": when is not where.
-    let mut said_when = false;
-    while let Some(when) = WHEN
+    let (mut said_when, mut said_hours) = (false, false);
+    while let Some(when) = HOURS
         .iter()
+        .chain(WHEN)
         .find(|when| words.len() > when.len() && words[words.len() - when.len()..] == ***when)
     {
         words.truncate(words.len() - when.len());
         said_when = true;
+        said_hours |= HOURS.contains(when);
     }
     if words
         .iter()
@@ -287,8 +289,15 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         }
     }
     // "coffee open now", "pharmacy open late": a kind of place asked for
-    // at a time, with no town, is near the searcher.
-    if said_when && words.last().is_some_and(|w| is_kind_word(w)) {
+    // at a time, with no town, is near the searcher. A time alone says
+    // that only of words that are all kinds of place: "pizza tonight",
+    // not "stock market today".
+    let kinds = |words: &[String]| {
+        words
+            .iter()
+            .all(|w| FILLER.contains(&w.as_str()) || is_kind_word(w))
+    };
+    if said_when && words.last().is_some_and(|w| is_kind_word(w)) && (said_hours || kinds(&words)) {
         readings.extend(near_me(what_of(&words)));
     }
     readings
@@ -609,10 +618,12 @@ impl PlaceSearcher {
             // words. A choice of towns is offered only when the likeliest
             // is big: "stock market" offers no choice of suburbs called
             // Stock. Otherwise the query may still split another way.
-            let guessed_wrong = match location.candidates.first() {
-                Some(place) => !GUESSED_TOWNS.contains(&place.kind.as_str()),
-                None => location.status == LocationStatus::UnknownLocation,
-            };
+            // A guess that names no town at all ("court view alaska") is
+            // no reading either.
+            let guessed_wrong = location
+                .candidates
+                .first()
+                .is_none_or(|place| !GUESSED_TOWNS.contains(&place.kind.as_str()));
             if asked.said_where || (!guessed_wrong && location.selected().is_some()) {
                 let found = self.found(asked, location, required_country, limit)?;
                 return self.asks_for_places(found);
@@ -631,19 +642,22 @@ impl PlaceSearcher {
     }
 
     /// `found`, unless it found nothing and what it looked for is neither
-    /// a kind of place nor the name of a place other than a town: "sort a
-    /// list in python" and "how many ounces in a cup" ask for no place,
-    /// while "pizza in gotham" does. Near me is always a place search, so
-    /// one that finds nothing still says so.
+    /// a kind of place nor the name of a place other than a town that
+    /// Wikidata knows: "sort a list in python", "how many ounces in a cup"
+    /// and "keel in english" ask for no place (though some bar is called
+    /// Keel), while "pizza in gotham" and "the louvre in paris tx" do.
+    /// Near me is always a place search, so one that finds nothing still
+    /// says so.
     fn asks_for_places(&self, found: PlaceResults) -> Result<Option<PlaceResults>> {
         let kind = found.what.rsplit(' ').next().is_some_and(is_kind_word);
+        let notable = plumb_core::place::place_rank("", 0, true, false, 0);
         if found.hits.is_empty()
             && !found.near_me
             && !kind
             && !self
                 .named(&found.what)?
                 .iter()
-                .any(|place| !place.is_town())
+                .any(|place| !place.is_town() && place.rank >= notable)
         {
             return Ok(None);
         }
@@ -941,14 +955,18 @@ impl PlaceSearcher {
             .filter(|w| !w.is_empty())
             .map(str::to_string)
             .collect();
-        // A US state named alone is no town either: "hotels in florida"
-        // is not Florida in Uruguay. A town of its name in the state still
-        // is ("new york"), and "washington" is the capital too.
+        // A US state or Canadian province named alone is no town either:
+        // "hotels in florida" is not Florida in Uruguay, nor "reserves in
+        // ontario" Ontario, California. A town of its name in the state
+        // still is ("new york", "quebec"), and "washington" is the capital
+        // too.
         let whole = words.join(" ");
         let named_state = US_STATES
             .iter()
-            .find(|(_, name)| normalize_text(name) == whole)
-            .map(|(code, _)| *code);
+            .map(|state| (state, "US"))
+            .chain(CANADIAN_PROVINCES.iter().map(|province| (province, "CA")))
+            .find(|((_, name), _)| normalize_text(name) == whole)
+            .map(|((code, _), country)| (*code, country));
         // A town first, however the words split ("boulder co" is Boulder in
         // Colorado before it is a gym called Boulder & Co.), then any place.
         // A landmark counts as a town: "yellowstone" is the park before a
@@ -965,11 +983,19 @@ impl PlaceSearcher {
                 .filter(|place| {
                     (qualifier.is_empty() || place_is_in(place, &qualifier))
                         && named_country.is_none_or(|country| country_matches(place, country))
-                        && named_state.is_none_or(|state| {
+                        && named_state.is_none_or(|(state, country)| {
                             // Uruguay's Florida is in its department FL.
-                            let region = place.region.as_deref().unwrap_or_default();
-                            place.country.as_deref() == Some("US")
-                                && (region == state || (state == "WA" && region == "DC"))
+                            let (region, of) = (place.region.as_deref(), place.country.as_deref());
+                            let in_state = of == Some(country)
+                                && region.is_some_and(|region| {
+                                    region == state || (state == "WA" && region == "DC")
+                                });
+                            // Older places files know no Canadian town's
+                            // province.
+                            in_state
+                                || (country == "CA"
+                                    && region.is_none()
+                                    && of.is_none_or(|of| of == "CA"))
                         })
                 })
                 .collect();
@@ -1673,10 +1699,20 @@ mod tests {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_none(), "{query}: {found:?}");
         }
-        // A kind of place, or a place's name, is still looked for.
-        for query in ["pizza in python", "blue pan in python"] {
+        // A kind of place, or the name of a place Wikidata knows, is still
+        // looked for; a restaurant's name elsewhere is no more a place
+        // than "keel" is in "keel in english".
+        for query in ["pizza in python", "tour eiffel in python"] {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_some(), "{query}");
+        }
+        for query in [
+            "blue pan in python",
+            "stock market today",
+            "court view montana",
+        ] {
+            let found = searcher.search(query, None, None, 5).unwrap();
+            assert!(found.is_none(), "{query}: {found:?}");
         }
         // Two Portland cities are still a choice, though a town shares
         // their name, and near me says it found nothing.
@@ -2022,9 +2058,16 @@ mod tests {
             city("Montana", 40_000, "Montana", "BG", 43.41, 23.22),
             city("Washington", 690_000, "DC", "US", 38.90, -77.04),
             at("Hotel Florida", "tourism=hotel", 3.321, -76.231),
+            city("Ontario", 175_000, "CA", "US", 34.06, -117.65),
+            // As a places file that read no provinces has it.
+            Place {
+                region: None,
+                country: None,
+                ..city("Québec", 550_000, "QC", "CA", 46.81, -71.21)
+            },
         ]);
         let (_dir, searcher) = index(fixtures);
-        for state in ["florida", "Montana"] {
+        for state in ["florida", "Montana", "ontario"] {
             let found = searcher.resolve(state, Some("US"), None).unwrap();
             assert_eq!(found.status, LocationStatus::MissingLocation, "{state}");
             assert!(found.candidates.is_empty(), "{state}");
@@ -2044,6 +2087,12 @@ mod tests {
         );
         let capital = searcher.locate("washington", None).unwrap().unwrap();
         assert_eq!(capital.region.as_deref(), Some("DC"));
+        assert_eq!(
+            searcher.locate("quebec", None).unwrap().unwrap().name,
+            "Québec"
+        );
+        let california = searcher.locate("ontario ca", None).unwrap().unwrap();
+        assert_eq!(california.region.as_deref(), Some("CA"));
     }
 
     #[test]
