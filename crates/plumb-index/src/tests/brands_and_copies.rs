@@ -229,6 +229,127 @@ fn copies_of_the_named_site_on_other_domains_are_left_out() {
 }
 
 #[test]
+fn hyphenated_look_alikes_of_the_named_site_are_left_out() {
+    let mut official = site(
+        "you-tube.org",
+        Some("You Tube Trust"),
+        None,
+        &[],
+        &[],
+        obscure(250_000, 4),
+    );
+    official.about = Some("charity".into());
+    let records = [
+        site(
+            "youtube.com",
+            Some("YouTube"),
+            Some("Enjoy the videos and music you love."),
+            &["YouTube"],
+            &[("youtube", 900)],
+            popular(2, 9_000),
+        ),
+        // Titled to pass for the real one.
+        site(
+            "yout-ube.com",
+            Some("Watch YouTube Videos with No Ads on Auto-Repeat"),
+            None,
+            &[],
+            &[("youtube", 2)],
+            obscure(90_000, 30),
+        ),
+        site("you-tube.ru", None, None, &[], &[], obscure(300_000, 1)),
+        site(
+            "youtube-tools.net",
+            Some("YouTube tools"),
+            Some("Download thumbnails and tags of YouTube videos."),
+            &[],
+            &[],
+            obscure(200_000, 2),
+        ),
+        official,
+    ];
+    let (_dir, searcher) = build(&records);
+    let order = domains(&searcher.search_with("youtube", 10, &keep_all()).unwrap()).join(" ");
+    assert!(order.starts_with("youtube.com"), "{order}");
+    assert!(!order.contains("yout-ube.com"), "{order}");
+    assert!(!order.contains("you-tube.ru"), "{order}");
+    // The name and more is not the name split up.
+    assert!(order.contains("youtube-tools.net"), "{order}");
+    assert!(order.contains("you-tube.org"), "{order}");
+    // Typed, the look-alike is what was asked for.
+    assert_eq!(top(&searcher, "yout-ube.com"), "yout-ube.com");
+}
+
+#[test]
+fn copies_go_when_the_named_site_is_not_first() {
+    let records = [
+        // Better known, and the query is in its description, but not its
+        // name: it ranks above the site the query names.
+        site(
+            "google.com",
+            Some("Google"),
+            Some("Search, Gmail, Maps and more."),
+            &["Google"],
+            &[("google", 5_000)],
+            popular(1, 90_000),
+        ),
+        site(
+            "gmail.com",
+            None,
+            None,
+            &[],
+            &[("gmail", 900)],
+            popular(40, 3_000),
+        ),
+        site("gmail.cm", None, None, &[], &[], obscure(300_000, 1)),
+    ];
+    let (_dir, searcher) = build(&records);
+    let order = domains(&searcher.search_with("gmail", 10, &keep_all()).unwrap()).join(" ");
+    assert!(order.contains("gmail.com"), "{order}");
+    assert!(!order.contains("gmail.cm"), "{order}");
+}
+
+#[test]
+fn the_query_spelled_as_a_domain_goes_next_to_the_site_it_names() {
+    let records = [
+        site(
+            "facebook.com",
+            Some("Facebook"),
+            Some("Log in to Facebook to connect with friends."),
+            &["Facebook"],
+            &[("facebook", 900)],
+            popular(3, 9_000),
+        ),
+        site(
+            "facebook-login.com",
+            None,
+            None,
+            &[],
+            &[],
+            obscure(150_000, 5),
+        ),
+        site(
+            "facebooklogin.com",
+            Some("Facebook Login"),
+            None,
+            &[],
+            &[],
+            obscure(160_000, 4),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let order = domains(
+        &searcher
+            .search_with("facebook login", 10, &keep_all())
+            .unwrap(),
+    )
+    .join(" ");
+    assert_eq!(order, "facebook.com");
+    // Typed, it is found.
+    assert_eq!(top(&searcher, "facebook-login.com"), "facebook-login.com");
+}
+
+#[test]
 fn the_site_a_suggestion_names_is_listed_second() {
     let hit = |domain: &str, score: f32| Hit {
         domain: domain.into(),

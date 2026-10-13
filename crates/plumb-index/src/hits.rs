@@ -1,12 +1,15 @@
 //! The hits a search returns: each one's fields, and the lists of them
-//! tidied (copies of a site left out, a suggested or docs site moved up,
-//! untitled sites moved down).
+//! tidied (copies and look-alikes of a site left out, a suggested or docs
+//! site moved up, untitled sites moved down).
+
+use std::collections::HashSet;
 
 use anyhow::Result;
 use plumb_core::{is_function_word, normalize_text, registrable_domain};
 use tantivy::schema::Value;
 use tantivy::TantivyDocument;
 
+use crate::names::without_intent_words;
 use crate::rank::Ranked;
 use crate::{health, Hit, Searcher, WELL_KNOWN_LINK_SCORE};
 
@@ -401,6 +404,50 @@ pub(crate) fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&
     hits.into_iter()
         .zip(copies)
         .filter_map(|(hit, copy)| (!copy).then_some(hit))
+        .collect()
+}
+
+/// Which of `hits` are look-alikes of a well-known site `query` names
+/// that is listed with them, wherever it ranks (gmail.com under
+/// google.com for "gmail"). Little-known sites that are no one's
+/// official one, and:
+///
+/// - Its label on another ending with nothing to say what it is (no
+///   title or description): gmail.ru, gmail.co for "gmail", paypal.biz
+///   for "paypal". A bare facebook.co under facebook.com only looks like
+///   a trap. Country sites of the brand stay: they are well known
+///   (amazon.de) or crawled (toyota.jp).
+/// - Its label split by a hyphen, whatever its title says: po-ki.hu for
+///   "poki", yout-ube.com for "youtube", chat-gpt.ru for "chatgpt".
+/// - A query that is its name and words like "login", spelled as one
+///   label: facebook-login.com and facebooklogin.com for "facebook
+///   login", paypal-login.us for "paypal login". Not the name with other
+///   words (googlemaps.com for "google maps" is Google's).
+///
+/// `typed`, the domain the query is, never is.
+pub(crate) fn look_alikes(hits: &[Hit], query: &str, typed: Option<&str>) -> Vec<bool> {
+    let label = |hit: &Hit| hit.domain.split('.').next().unwrap_or("").to_string();
+    let joined =
+        |label: &str| -> String { label.chars().filter(|c| !matches!(c, '-' | '_')).collect() };
+    let brands: HashSet<String> = hits
+        .iter()
+        .filter(|hit| hit.named && hit.link_score >= WELL_KNOWN_LINK_SCORE)
+        .map(label)
+        .collect();
+    // A query that ends in words like "login", spelled as one label.
+    let spelled = without_intent_words(query).map(|_| normalize_text(query).replace(' ', ""));
+    hits.iter()
+        .map(|hit| {
+            let own = label(hit);
+            let bare = hit.title.is_none() && hit.description.is_none();
+            !brands.is_empty()
+                && hit.link_score < WELL_KNOWN_LINK_SCORE
+                && !hit.official
+                && typed != Some(hit.domain.as_str())
+                && ((bare && brands.contains(&own))
+                    || (joined(&own) != own && brands.contains(&joined(&own)))
+                    || spelled.as_deref() == Some(joined(&own).as_str()))
+        })
         .collect()
 }
 
