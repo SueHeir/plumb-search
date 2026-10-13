@@ -206,10 +206,10 @@ impl Mcp {
         // Placed as the results page places them, which the info box needs.
         // A package the search doesn't ask for outright is placed apart, so
         // it never takes the place of a page listed beside the sites:
-        // "left-pad" keeps its repository and article. It still goes where
-        // it would go on its own, ahead of the pages placed there, since
-        // after every site the limit cuts it: "requests python" lists PyPI's
-        // page.
+        // "left-pad javascript" keeps its repository and article. It still
+        // goes where it would go on its own, ahead of the pages placed
+        // there, since after every site the limit cuts it: "requests
+        // python" lists PyPI's page.
         let promote_package = crate::assembly::promote_package(query);
         let (supplementary, found_pages): (Vec<_>, Vec<_>) = results
             .pages

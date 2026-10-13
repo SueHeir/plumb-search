@@ -494,6 +494,24 @@ impl PageSearcher {
                 learned: None,
             });
         }
+        // A name alone is a package's only when nothing else is called so:
+        // "content-type" is the header's, "left-pad" its repository's.
+        if let Some(key) = package_key.filter(|_| package_query.is_some_and(|asked| asked.alone)) {
+            let called = |page: &Page| {
+                std::iter::once(&page.title)
+                    .chain(&page.aliases)
+                    .chain(&page.names)
+                    .any(|name| {
+                        analysis::tokens(&self.joined, name).pop().as_deref() == Some(key.as_str())
+                    })
+            };
+            if hits
+                .iter()
+                .any(|hit| hit.named && hit.page.package.is_none() && called(&hit.page))
+            {
+                hits.retain(|hit| hit.page.package.is_none());
+            }
+        }
         match words.as_slice() {
             [word] => self.name_by_surname(word, &joined, &mut hits),
             [title, name @ ..] => self.name_by_title(title, name, &joined, &mut hits),

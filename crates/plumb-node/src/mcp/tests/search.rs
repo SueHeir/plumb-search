@@ -856,7 +856,7 @@ fn missing_troubleshooting_results_do_not_promote_a_package_as_the_answer() {
 fn a_package_not_asked_for_leaves_the_other_pages_their_places() {
     let mcp = scripted(|_| {
         let mut package = package_page("npm", "left-pad", None, None);
-        package.hit.popularity = 0.9;
+        (package.hit.whole, package.hit.popularity) = (false, 0.9);
         let mut repo = article("x", None, None);
         repo.hit.page = Page::from_repo(plumb_core::article::Article {
             title: "left-pad/left-pad".into(),
@@ -873,7 +873,11 @@ fn a_package_not_asked_for_leaves_the_other_pages_their_places() {
         };
         results(vec![site], vec![package, repo, incident])
     });
-    let reply = call(&mcp, "search", json!({ "query": "left-pad", "limit": 5 }));
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "left-pad javascript", "limit": 5 }),
+    );
     let answer = &reply["result"]["structuredContent"];
     let urls: Vec<&str> = answer["ordered_results"]
         .as_array()

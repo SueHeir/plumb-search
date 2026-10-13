@@ -448,7 +448,16 @@ fn a_well_known_package_searched_by_its_name_alone_leads() {
         package("crates", "serde_json", 900_000_000),
         package("npm", "react-dom", 800_000_000),
         package("npm", "@types/node", 800_000_000),
-        package("npm", "left-pad", 2_000),
+        package("npm", "is-thirteen", 2_000),
+        page("Media type", 50_000, &["Content-Type"]),
+        package("npm", "content-type", 900_000_000),
+        Page::from_repo(plumb_core::article::Article {
+            title: "left-pad/left-pad".into(),
+            aliases: vec!["left-pad".into()],
+            views: 1_000,
+            ..Default::default()
+        }),
+        package("npm", "left-pad", 500_000_000),
     ]);
     let found = |query: &str| -> Vec<PageHit> {
         searcher
@@ -475,11 +484,20 @@ fn a_well_known_package_searched_by_its_name_alone_leads() {
         let package = placed.iter().find(|p| p.hit.page.url == url).unwrap();
         assert_eq!(package.at, 0, "{query}");
     }
-    // A name that may be a word still asks for nothing, and a little-used
-    // package is no answer to its bare name.
-    assert!(found("serde").is_empty());
-    assert!(found("left-pad").is_empty());
+    // A name that may be a word still asks for nothing, a little-used
+    // package is no answer to its bare name, and nor is a package called
+    // what something else is: the header and the repository come first.
+    for query in ["serde", "is-thirteen", "content-type", "left-pad"] {
+        assert!(found(query).is_empty(), "{query}");
+    }
+    let hits = searcher.search("content-type", 10).unwrap();
+    assert!(hits[0].page.title == "Media type" && hits[0].named);
     // With a registry's word, the package is named but not the whole search.
-    let hits = found("serde_json crate");
-    assert!(hits.len() == 1 && hits[0].named && !hits[0].whole);
+    for query in ["serde_json crate", "content-type npm"] {
+        let hits = found(query);
+        assert!(
+            hits.len() == 1 && hits[0].named && !hits[0].whole,
+            "{query}"
+        );
+    }
 }
