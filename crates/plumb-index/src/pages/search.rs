@@ -173,7 +173,7 @@ impl PageSearcher {
     pub fn open(dir: &Path) -> Result<Self> {
         let index = Index::open_in_dir(dir)
             .with_context(|| format!("opening the page index in {}", dir.display()))?;
-        analysis::register(index.tokenizers());
+        analysis::register_pages(index.tokenizers());
         let (schema, fields) = schema();
         if index.schema() != schema {
             bail!(
@@ -192,8 +192,8 @@ impl PageSearcher {
         Ok(PageSearcher {
             reader,
             fields,
-            words: analysis::words_analyzer(),
-            joined: analysis::joined_analyzer(),
+            words: analysis::page_words_analyzer(),
+            joined: analysis::page_joined_analyzer(),
             stemmed: analysis::stemmed_analyzer(),
             stats,
             requested_language: None,

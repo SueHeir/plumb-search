@@ -704,3 +704,21 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
     assert_eq!(sites[1].title.as_deref(), Some("Welcome to Steam"));
     assert_eq!(sites[2].title.as_deref(), Some("California Post"));
 }
+
+#[test]
+fn a_sharp_after_a_letter_is_searched_as_written_out() {
+    let (_dir, s) = searcher(&[
+        page("C (programming language)", 600_000, &[]),
+        page("C Sharp (programming language)", 400_000, &[]),
+        page("C minor", 6_000, &[]),
+        page("C-sharp minor", 3_000, &[]),
+    ]);
+    let first = |query: &str| s.search(query, 5).unwrap().remove(0);
+    let hit = first("c#");
+    assert_eq!(hit.page.title, "C Sharp (programming language)");
+    assert!(hit.named);
+    assert_eq!(first("C# minor").page.title, "C-sharp minor");
+    // Without the sign, still C.
+    assert_eq!(first("c").page.title, "C (programming language)");
+    assert_eq!(first("c minor").page.title, "C minor");
+}

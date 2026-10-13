@@ -120,7 +120,7 @@ pub fn build_page_index_with_budget(
     let (schema, fields) = schema();
     let index = crate::storage::create_index(staging.path(), schema, budget, staging.lifecycle())
         .with_context(|| format!("creating the page index in {}", dir.display()))?;
-    analysis::register(index.tokenizers());
+    analysis::register_pages(index.tokenizers());
     let mut writer = index
         .writer_with_num_threads(1, 64 << 20)
         .context("opening the page index for writing")?;
