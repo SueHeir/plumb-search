@@ -31,6 +31,8 @@ Search at https://plumbsearch.org. It keeps no access log, and its results pages
 
 To make it your browser's search engine, open a Plumb page and add it from the address bar (in Firefox, right-click the address bar and choose **Add "Plumb Search"**), or add `https://plumbsearch.org/search?q=%s` by hand.
 
+To search it from Zotero and add the papers, books and pages you find to your library, install the [Zotero plugin](zotero/README.md).
+
 ## What it does
 
 - **Official sites first.** Names outrank text, and look-alike sites stuffed with a brand's keywords are kept below the real one.
@@ -303,7 +305,7 @@ A node does this on its own with `plumb run --search-by-meaning` (the desktop ap
 | `crates/plumb-desktop` | The desktop app: a [Tauri](https://v2.tauri.app) window around a node running inside it. A plain `cargo build` leaves it out; see [docs/desktop.md](docs/desktop.md) |
 | `crates/plumb-e2e` | End-to-end tests that run the Docker image, kill containers mid-work and restart them |
 
-`fixtures/` holds the synthetic test data and `eval/brand_queries.tsv` the brand-name test list for real data.
+`zotero/` holds the Zotero plugin. `fixtures/` holds the synthetic test data and `eval/brand_queries.tsv` the brand-name test list for real data.
 
 ## Data sources
 

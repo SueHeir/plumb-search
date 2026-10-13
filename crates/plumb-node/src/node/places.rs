@@ -13,8 +13,8 @@ use tracing::warn;
 use super::Inner;
 use crate::pages::thousands;
 use crate::places::{
-    open_or_build_with_budget, remove_indexes_except_with_budget, remove_other_indexes_with_budget,
-    wanted,
+    open_built, open_or_build_with_budget, remove_indexes_except_with_budget,
+    remove_other_indexes_with_budget, wanted,
 };
 
 /// Wait after a failed build before trying the same places again.
@@ -67,9 +67,14 @@ pub(super) fn refresh(
     }
     let found = match &wanted {
         None => None,
+        // An index already built is only opened: that needs no turn.
         Some(wanted) => {
-            let _big = inner.one_big_job();
-            match open_or_build_with_budget(&inner.paths.data, wanted, inner.storage.clone()) {
+            let built = open_built(&inner.paths.data, wanted).map(Ok);
+            let found = built.unwrap_or_else(|| {
+                let _big = inner.one_big_job();
+                open_or_build_with_budget(&inner.paths.data, wanted, inner.storage.clone())
+            });
+            match found {
                 Ok(found) => Some(found),
                 Err(err) => {
                     warn!("places: {err:#}");
