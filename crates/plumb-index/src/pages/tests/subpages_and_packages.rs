@@ -396,3 +396,47 @@ fn packages_are_found_only_when_asked_for() {
     let hit = searcher.search("serde crate", 10).unwrap().remove(0);
     assert!(hit.named && hit.page.set_name() == "crates.io");
 }
+
+#[test]
+fn a_well_known_package_searched_by_its_name_alone_leads() {
+    let (_dir, searcher) = searcher(&[
+        page("JSON", 5_000_000, &[]),
+        package("crates", "serde", 1_000_000_000),
+        package("crates", "serde_json", 900_000_000),
+        package("npm", "react-dom", 800_000_000),
+        package("npm", "@types/node", 800_000_000),
+        package("npm", "left-pad", 2_000),
+    ]);
+    let found = |query: &str| -> Vec<PageHit> {
+        searcher
+            .search(query, 10)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.package.is_some())
+            .collect()
+    };
+    for (query, url) in [
+        ("serde_json", "https://crates.io/crates/serde_json"),
+        ("react-dom", "https://www.npmjs.com/package/react-dom"),
+        ("@types/node", "https://www.npmjs.com/package/@types/node"),
+    ] {
+        let hits = found(query);
+        assert_eq!(hits.len(), 1, "{query}: {hits:?}");
+        assert!(
+            hits[0].page.url == url && hits[0].named && hits[0].whole,
+            "{query}"
+        );
+        // Asked for as a whole, it comes before a site sharing a word.
+        let sites = [site("json.org", false), site("serde.rs", false)];
+        let placed = place_pages(query, &sites, searcher.search(query, 10).unwrap());
+        let package = placed.iter().find(|p| p.hit.page.url == url).unwrap();
+        assert_eq!(package.at, 0, "{query}");
+    }
+    // A name that may be a word still asks for nothing, and a little-used
+    // package is no answer to its bare name.
+    assert!(found("serde").is_empty());
+    assert!(found("left-pad").is_empty());
+    // With a registry's word, the package is named but not the whole search.
+    let hits = found("serde_json crate");
+    assert!(hits.len() == 1 && hits[0].named && !hits[0].whole);
+}
