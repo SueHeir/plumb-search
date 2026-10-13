@@ -118,7 +118,11 @@ pub fn has_no_text(record: &SiteRecord) -> bool {
 /// Whether `record` is a site to summarize: one with no text that is
 /// still there under its own name.
 fn wanted(record: &SiteRecord) -> bool {
-    record.gone_at.is_none() && record.redirect.is_none() && has_no_text(record)
+    let folded = record
+        .redirect
+        .as_ref()
+        .and_then(|r| r.folds_into(&record.domain));
+    record.gone_at.is_none() && folded.is_none() && has_no_text(record)
 }
 
 fn pick_of(record: &SiteRecord) -> Pick {
@@ -271,6 +275,9 @@ mod tests {
             inner: false,
         });
         assert!(!wanted(&record));
+        // Sent to a sign-in or an inner page, it is still a site of its own.
+        record.redirect.as_mut().unwrap().inner = true;
+        assert!(wanted(&record));
     }
 
     #[test]
