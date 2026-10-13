@@ -1415,16 +1415,24 @@ pub fn build_page_index(
     dir: &Path,
     pages: impl IntoIterator<Item = Page>,
 ) -> Result<PageIndexStats> {
-    build_page_index_with_budget(dir, pages, None)
+    build_page_index_with_budget(dir, pages, None, &mut || Ok(()))
 }
 
+/// [`build_page_index`], counting against `budget`. `go_on` is asked every
+/// [`GO_ON_EVERY`] pages, and its error ends the build with `dir` as it
+/// was, so a node that stops doesn't wait for the rest.
 pub fn build_page_index_with_budget(
     dir: &Path,
     pages: impl IntoIterator<Item = Page>,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    go_on: &mut dyn FnMut() -> Result<()>,
 ) -> Result<PageIndexStats> {
-    build_with(dir, pages, budget, true)
+    build_with(dir, pages, budget, true, go_on)
 }
+
+/// How many pages [`build_page_index_with_budget`] adds between asking
+/// whether to go on.
+pub const GO_ON_EVERY: u64 = 10_000;
 
 /// Builds the page index of `pages` in `dir` as 0.2.0 did, without the
 /// fields it lacked ([`schema_with`]): for tests of an upgrade from it.
@@ -1433,7 +1441,7 @@ pub fn build_older_page_index(
     dir: &Path,
     pages: impl IntoIterator<Item = Page>,
 ) -> Result<PageIndexStats> {
-    build_with(dir, pages, None, false)
+    build_with(dir, pages, None, false, &mut || Ok(()))
 }
 
 /// [`build_page_index_with_budget`], or with `current` false
@@ -1443,6 +1451,7 @@ fn build_with(
     pages: impl IntoIterator<Item = Page>,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
     current: bool,
+    go_on: &mut dyn FnMut() -> Result<()>,
 ) -> Result<PageIndexStats> {
     let staging = Staging::new_with_budget(dir, budget.clone())?;
     let (schema, fields) = schema_with(current);
@@ -1457,6 +1466,9 @@ fn build_with(
     // read.
     let mut most_by_set: std::collections::HashMap<String, u64> = Default::default();
     for page in pages {
+        if stats.pages > 0 && stats.pages % GO_ON_EVERY == 0 {
+            go_on()?;
+        }
         let most = most_by_set
             .entry(page.set.clone())
             .and_modify(|most| *most = (*most).max(page.views))
@@ -4580,6 +4592,21 @@ mod tests {
         let (_dir, current) = searcher(&pages);
         assert!(!current.is_older());
         assert_eq!(current.search_papers(&after, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_build_told_to_stop_leaves_nothing() {
+        let pages = (0..=GO_ON_EVERY).map(|i| page(&format!("Page {i}"), i, &[]));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pages");
+        let mut asked = 0;
+        let stopped = build_page_index_with_budget(&path, pages, None, &mut || {
+            asked += 1;
+            bail!("stopping")
+        });
+        assert!(stopped.is_err());
+        assert_eq!(asked, 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
