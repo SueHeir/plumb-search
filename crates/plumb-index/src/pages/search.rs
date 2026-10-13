@@ -120,8 +120,8 @@ const MAX_ASKED_WORDS: usize = 4;
 /// happens or whether it is good for you asks about: "refrigerator" of
 /// "how does a refrigerator work", "eiffel tower" of "how tall is the
 /// eiffel tower". `None` for other questions ("how do i make pancakes",
-/// where "how do" starts any question), for "it", and for more than
-/// [`MAX_ASKED_WORDS`] words.
+/// where "how do" starts any question), and when what it names is not a
+/// name ([`asked_name`]): "it", or a clause.
 fn asked_how(q: &str) -> Option<&str> {
     let between = ASKED_BETWEEN.iter().find_map(|(leads, tails)| {
         let rest = leads.iter().find_map(|lead| q.strip_prefix(lead))?;
@@ -134,24 +134,28 @@ fn asked_how(q: &str) -> Option<&str> {
             .find_map(|verb| rest.strip_prefix(verb))?;
         MEASURES.contains(&measure).then_some(rest)
     };
-    let about = without_article(between.or_else(measured)?);
-    let words = || about.split(' ');
-    (words().count() <= MAX_ASKED_WORDS && !words().any(|word| NOT_NAMES.contains(&word)))
-        .then_some(about)
+    asked_name(between.or_else(measured)?)
 }
 
-/// `text` without a leading "a", "an" or "the".
-fn without_article(text: &str) -> &str {
-    ["a ", "an ", "the "]
+/// `text` as the name a question asks about, without a leading "a", "an"
+/// or "the". `None` when it is empty, has more than [`MAX_ASKED_WORDS`]
+/// words or has one of [`NOT_NAMES`].
+fn asked_name(text: &str) -> Option<&str> {
+    let name = ["a ", "an ", "the "]
         .iter()
         .find_map(|article| text.strip_prefix(article))
-        .unwrap_or(text)
+        .unwrap_or(text);
+    let words = || name.split(' ');
+    (!name.is_empty()
+        && words().count() <= MAX_ASKED_WORDS
+        && !words().any(|word| NOT_NAMES.contains(&word)))
+    .then_some(name)
 }
 
 /// The two things a comparison sets side by side, each looked up as a
 /// name: "mitosis" and "meiosis" of "mitosis vs meiosis" or "difference
 /// between mitosis and meiosis". `None` for other queries, and when a
-/// side has more than [`MAX_ASKED_WORDS`] words.
+/// side is not a name ([`asked_name`]).
 pub(crate) fn compared(query: &str) -> Option<[String; 2]> {
     let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?'))
         .to_lowercase()
@@ -168,10 +172,7 @@ pub(crate) fn compared(query: &str) -> Option<[String; 2]> {
             .iter()
             .find_map(|word| q.split_once(word))
     })?;
-    let side = |text: &str| {
-        let text = without_article(text.trim());
-        (!text.is_empty() && text.split(' ').count() <= MAX_ASKED_WORDS).then(|| text.to_string())
-    };
+    let side = |text: &str| asked_name(text.trim()).map(str::to_string);
     Some([side(a)?, side(b)?])
 }
 
