@@ -344,7 +344,7 @@ impl Mcp {
                     .map(|hit| (hit.domain.as_str(), hit.named));
                 crate::assembly::recent(
                     query,
-                    node.recent(query, top),
+                    node.recent(query, top, options.language.as_deref()),
                     options,
                     limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
                     |domain| node.blocks_adult(domain),

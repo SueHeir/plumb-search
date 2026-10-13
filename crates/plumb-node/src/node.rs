@@ -2409,8 +2409,13 @@ impl StatusSource for Inner {
         crate::icons::IconStore::new(&self.paths.icons).get(domain)
     }
 
-    fn recent(&self, query: &str, top: Option<(&str, bool)>) -> Option<crate::news::Recent> {
-        let mut recent = self.news.recent(query, top, now_unix())?;
+    fn recent(
+        &self,
+        query: &str,
+        top: Option<(&str, bool)>,
+        language: Option<&str>,
+    ) -> Option<crate::news::Recent> {
+        let mut recent = self.news.recent(query, top, now_unix(), language)?;
         recent
             .headlines
             .retain(|headline| !self.denies(&headline.url));
