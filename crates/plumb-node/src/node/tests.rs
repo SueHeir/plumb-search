@@ -4495,6 +4495,36 @@ async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
 }
 
 #[test]
+fn absorbing_the_inbox_waits_for_whoever_holds_the_records() {
+    let dir = tempfile::tempdir().unwrap();
+    write_jsonl(
+        &dir.path().join("records.jsonl"),
+        &[SiteRecord::new("held.example")],
+    )
+    .unwrap();
+    let config = test_config(dir.path());
+    let rank = RankConfig::default();
+    let opened = open_data_dir(&config, rank).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let inner = Arc::new(Inner::new(config, rank, opened, stopped, None));
+    std::fs::create_dir_all(&inner.paths.net).unwrap();
+    super::network::append_inbox(&inner, &[SiteRecord::new("sent.example")]).unwrap();
+    // The embedding job holds them while it folds the journal away.
+    let held = inner.hold_records();
+    let absorbing = {
+        let inner = inner.clone();
+        std::thread::spawn(move || super::network::absorb_inbox(&inner).unwrap())
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let journal = crate::records::journal_path(&inner.paths.records);
+    assert!(!journal.exists(), "nothing is appended meanwhile");
+    drop(held);
+    assert_eq!(absorbing.join().unwrap(), 1);
+    let records = crate::records::load_records(&inner.paths.records).unwrap();
+    assert!(records.get("sent.example").is_some());
+}
+
+#[test]
 fn two_inbox_absorptions_cross_the_real_fold_threshold_under_receiving_contention() {
     use std::io::Write;
     use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -6121,6 +6151,39 @@ fn hold_denylist(
     })
     .unwrap();
     plumb_tools::set::sign_set(&dir, publisher, None, None).unwrap();
+}
+
+#[test]
+fn a_held_denylist_stays_in_use_when_a_new_one_would_be_refused() {
+    use plumb_format::deny::Switch;
+    use plumb_format::PublicKey;
+
+    let dir = tempfile::tempdir().unwrap();
+    let publisher = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+    let entry = plumb_tools::set::DenyEntryArgs {
+        category: "csam".into(),
+        target: None,
+        hash_of: Some("https://chase.com/".into()),
+        any_query: false,
+        places: Vec::new(),
+        id: None,
+    };
+    hold_denylist(dir.path(), &publisher, &[entry]);
+    // Taken while the clock read later than it does now, as after it is
+    // set back: a list dated this far ahead is refused when taken.
+    let set = super::signed_sets::set_dir(dir.path(), "plumb/denylist").unwrap();
+    let path = set.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    manifest["generation"] = "2099-01-01T00:00:00Z".into();
+    plumb_format::sign::sign(&mut manifest, &publisher).unwrap();
+    std::fs::write(&path, manifest.to_string()).unwrap();
+    let key = PublicKey::of(&publisher);
+    assert!(crate::sets::check_set(&set, Some(&key), &[]).is_err());
+    let (list, _) = super::denylist::read_held(dir.path(), &[key], Switch::On)
+        .unwrap()
+        .unwrap();
+    assert!(list.denies_url("https://chase.com/").is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

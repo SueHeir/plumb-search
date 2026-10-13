@@ -41,6 +41,13 @@ pub fn check_set(dir: &Path, trusted: Option<&PublicKey>, notes: &[Note]) -> Res
     check_first_parts(dir, trusted, notes, usize::MAX)
 }
 
+/// [`check_set`] for a set the node took before, as of its generation
+/// ([`Manifest::from_held_json`]): one it held at its last start stays in
+/// use at the next.
+pub fn check_held(dir: &Path, trusted: Option<&PublicKey>, notes: &[Note]) -> Result<Checked> {
+    check_as_of(dir, trusted, notes, usize::MAX, None)
+}
+
 /// [`check_set`] for a node that holds only the first `parts` parts of a
 /// set, as it may of a page set: the manifest is checked whole, and the
 /// parts it holds.
@@ -50,9 +57,24 @@ pub fn check_first_parts(
     notes: &[Note],
     parts: usize,
 ) -> Result<Checked> {
+    check_as_of(dir, trusted, notes, parts, Some(&now()))
+}
+
+/// The checks of [`check_first_parts`] at `now`, or with `None` as of the
+/// set's generation.
+fn check_as_of(
+    dir: &Path,
+    trusted: Option<&PublicKey>,
+    notes: &[Note],
+    parts: usize,
+    now: Option<&str>,
+) -> Result<Checked> {
     let text = fs::read_to_string(dir.join(MANIFEST))
         .with_context(|| format!("reading {}", dir.join(MANIFEST).display()))?;
-    let (manifest, signer) = Manifest::from_signed_json(&text, &now())?;
+    let (manifest, signer) = match now {
+        Some(now) => Manifest::from_signed_json(&text, now)?,
+        None => Manifest::from_held_json(&text)?,
+    };
     match trusted {
         Some(trusted) => manifest.trusted(&signer, trusted, notes)?,
         None => ensure!(
@@ -87,7 +109,7 @@ pub fn read_items(dir: &Path) -> Result<(Manifest, Vec<Item>)> {
 pub fn for_each_item(dir: &Path, mut each: impl FnMut(Item) -> Result<()>) -> Result<Manifest> {
     let text = fs::read_to_string(dir.join(MANIFEST))
         .with_context(|| format!("reading {}", dir.join(MANIFEST).display()))?;
-    let (manifest, _) = Manifest::from_signed_json(&text, &now())?;
+    let (manifest, _) = Manifest::from_held_json(&text)?;
     for part in manifest.files.iter().filter(|part| !part.blob) {
         let path = dir.join(&part.path);
         let reader = BufReader::new(zstd::Decoder::new(File::open(&path)?)?);

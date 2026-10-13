@@ -222,6 +222,17 @@ impl Manifest {
         Ok((manifest, key))
     }
 
+    /// [`Manifest::from_signed_json`] as of the manifest's own generation,
+    /// for one a node took before: a delegation that has run out since, or
+    /// a clock set back, doesn't make the node drop what it holds.
+    pub fn from_held_json(text: &str) -> Result<(Manifest, PublicKey)> {
+        let value: Value = serde_json::from_str(text).context("the manifest is not JSON")?;
+        let generation = value["generation"]
+            .as_str()
+            .context("the manifest has no generation")?;
+        Self::from_signed_json(text, generation)
+    }
+
     /// Checks that a node that trusts `trusted` and holds the handovers and
     /// revocations in `notes` takes this manifest, signed by `signer`: its
     /// publisher must be the key `trusted` hands over to, and `signer` must
@@ -603,6 +614,8 @@ mod tests {
         assert_eq!((manifest.publisher, signer), (root_key, builder_key));
         manifest.trusted(&signer, &root_key, &[]).unwrap();
         assert!(Manifest::from_signed_json(&text, "2027-01-10T00:00:01Z").is_err());
+        // A node that took it before reads it as of its generation.
+        assert_eq!(Manifest::from_held_json(&text).unwrap().1, builder_key);
 
         let other_sets = note(
             "delegate",

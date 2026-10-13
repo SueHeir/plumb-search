@@ -792,6 +792,9 @@ fn append_lines(
 /// crash in between folds them in again at the next start, which merging
 /// makes harmless.
 pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
+    // Held throughout: a fold of the journal (the embedding job's) would
+    // otherwise remove it while records are still appended to it.
+    let _records = inner.hold_records();
     let paths = &inner.paths;
     if !paths.absorbing.exists() {
         let _guard = inner.inbox_lock.locked();
@@ -838,7 +841,6 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     if store.wants_compaction() {
         // Folded a record at a time; a file only a whole set can fold
         // (a site on two lines) keeps its journal for the next build.
-        let _records = inner.hold_records();
         store.fold_with_check(|| inner.check_stop())?;
     }
     plumb_core::storage::remove_file(&paths.absorbing, inner.storage.as_deref())

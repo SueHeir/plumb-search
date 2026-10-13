@@ -42,7 +42,7 @@ use tracing::{info, warn};
 
 use super::signed_sets::set_dir;
 use super::Inner;
-use crate::sets::{check_set, read_items};
+use crate::sets::{check_held, read_items};
 
 /// The project's denylist set.
 pub(super) const DENYLIST: &str = "plumb/denylist";
@@ -64,7 +64,7 @@ pub(super) fn read_held(
     };
     let mut failed = None;
     for publisher in publishers {
-        if let Err(err) = check_set(&dir, Some(publisher), &[]) {
+        if let Err(err) = check_held(&dir, Some(publisher), &[]) {
             failed = Some(err);
             continue;
         }
