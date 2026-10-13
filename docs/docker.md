@@ -404,10 +404,12 @@ Compose also builds the image when it cannot pull it. A local build is tagged
 replaces it with the published image.
 
 The build needs BuildKit, the default builder since Docker 23. The first
-build compiles everything, which took 2.5 to 4.5 minutes on a 4-core machine.
-Later builds keep the downloaded crates and compiled dependencies in BuildKit
-cache mounts and recompile only what changed. `--build-arg RUST_VERSION=1.99`
-pins the Rust toolchain; the default is the newest 1.x release.
+build compiles everything, which took about 16 minutes on a 4-core machine.
+The dependencies are compiled in a layer of their own (with cargo-chef), so
+later builds recompile only the workspace's crates until Cargo.lock or a
+Cargo.toml changes; after a code change that took under 5 minutes.
+`--build-arg RUST_VERSION=1.99` pins the Rust toolchain; the default is the
+newest 1.x release.
 
 ## Disk and memory
 
