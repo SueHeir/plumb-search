@@ -216,6 +216,17 @@ const MEDICAL_WORDS: &[&str] = &[
     "acne",
     "rosacea",
     "hemorrhoids",
+    // Symptoms.
+    "headache",
+    "headaches",
+    "nausea",
+    "dizziness",
+    "vomiting",
+    "diarrhea",
+    "diarrhoea",
+    "constipation",
+    "heartburn",
+    "indigestion",
     // Common drugs (the pill-shop names count too, see `is_medical`).
     "ibuprofen",
     "acetaminophen",
@@ -263,7 +274,8 @@ const MEDICAL_WORDS: &[&str] = &[
 
 /// Words that say a longer search is about an illness, whatever the
 /// illness is called: "lyme disease", "bipolar disorder", "down
-/// syndrome", "vitamin d deficiency". Alone they may be a film or a band.
+/// syndrome", "vitamin d deficiency", or a symptom of one: "dry cough",
+/// "rash on arms". Alone they may be a film or a band.
 const ILLNESS_WORDS: &[&str] = &[
     "disease",
     "diseases",
@@ -278,6 +290,9 @@ const ILLNESS_WORDS: &[&str] = &[
     "vaccine",
     "vaccines",
     "vaccination",
+    "cough",
+    "coughing",
+    "rash",
 ];
 
 /// Phrases that make a search a medical one.
@@ -298,6 +313,13 @@ const MEDICAL_PHRASES: &[&str] = &[
     "chest pain",
     "back pain",
     "blood clot",
+    // A fever, not a film or a drink: "saturday night fever", "fever-tree".
+    "fever in",
+    "high fever",
+    "low grade fever",
+    "hay fever",
+    "scarlet fever",
+    "yellow fever",
 ];
 
 /// Searches with these are about something else: the economy, a film, a
@@ -308,6 +330,8 @@ const NOT_MEDICAL: &[&str] = &[
     "shot of",
     "cancer zodiac",
     "china syndrome",
+    "rash guard",
+    "rash decision",
 ];
 
 /// Whether `query` asks about an illness, a symptom or a drug.
@@ -669,6 +693,14 @@ mod tests {
             "ozempic",
             "bridging fibrosis",
             "what does heroin do",
+            "headache behind eyes",
+            "nausea after eating",
+            "dizziness when standing up",
+            "diarrhea remedies",
+            "heartburn",
+            "dry cough",
+            "rash on arms",
+            "fever in toddlers",
         ] {
             assert!(is_medical(query), "{query}");
         }
@@ -682,6 +714,10 @@ mod tests {
             "the china syndrome",
             "academia",
             "mitosis vs meiosis",
+            "rash",
+            "rash guard",
+            "saturday night fever",
+            "fever-tree tonic",
         ] {
             assert!(!is_medical(query), "{query}");
         }
