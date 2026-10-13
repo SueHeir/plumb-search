@@ -557,6 +557,57 @@ fn slips_people_make_are_corrected_though_pages_name_them() {
 }
 
 #[test]
+fn names_are_not_taken_for_slips() {
+    let mut pages = Vec::new();
+    let mut add = |title: &str, count: usize| {
+        for i in 0..count {
+            pages.push(page(&format!("{title} {i}"), 10, &[]));
+        }
+    };
+    add("Meets", 200);
+    add("Jean Meeus", 3);
+    add("Elias", 200);
+    add("ETIAS", 3);
+    add("Http", 200);
+    add("Htop", 3);
+    add("Sauce", 200);
+    add("Saute", 3);
+    pages.push(page("Htop", 10, &[]));
+    pages.push(Page::from_word(Article {
+        title: "saute".into(),
+        description: Some("(verb) To fry quickly in a little fat.".into()),
+        ..Article::default()
+    }));
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(
+        &[
+            ("t", "u", 0.001),
+            ("l", "t", 0.001),
+            ("t", "o", 0.001),
+            ("c", "t", 0.001),
+        ],
+        1e-6,
+    );
+    let suggest = |query: &str| {
+        searcher
+            .suggest_spelling(query, Some(&model), &|_| false)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    // Alone, each is a likely slip of a commoner word.
+    assert_eq!(suggest("meeus").as_deref(), Some("meets"));
+    assert_eq!(suggest("etias").as_deref(), Some("elias"));
+    // A page names it with another word typed.
+    assert_eq!(suggest("jean meeus"), None);
+    // Typed in capitals, an abbreviation.
+    assert_eq!(suggest("ETIAS"), None);
+    // An article is named by it.
+    assert_eq!(suggest("htop"), None);
+    // Wiktionary has it.
+    assert_eq!(suggest("saute"), None);
+}
+
+#[test]
 fn spellings_keep_the_words_pages_know() {
     let mut pages = Vec::new();
     for i in 0..3 {
