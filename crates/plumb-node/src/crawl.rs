@@ -1,7 +1,7 @@
-//! `plumb crawl`: fetches homepages and merges what they say into the
-//! records, including links that discover new domains. A long-running node
-//! ([`crate::node`]) crawls through the same [`select_targets`] and
-//! [`crawl_rolling`].
+//! Crawling: fetches homepages and merges what they say into the records,
+//! including links that discover new domains. A long-running node
+//! ([`crate::node`]) crawls through [`select_targets`] and
+//! [`crawl_rolling`], and so does `plumb-tools crawl`, by hand.
 //!
 //! # Which homepages
 //!
@@ -39,7 +39,7 @@
 //! started and not saved gets its old marks back instead.
 //! Everything goes to the records file's journal ([`crate::records`]),
 //! flushed to disk at once and folded into the file now and then, and when
-//! `plumb crawl` ends.
+//! `plumb-tools crawl` ends.
 //!
 //! # Offline
 //!
@@ -49,10 +49,9 @@
 //! reason, means that the network is down, or that a firewall, a proxy or
 //! a setting on this side is in the way (an HTTP client that cannot be
 //! built fails every site), rather than the sites. That batch is not saved.
-//! `plumb crawl` waits and fetches it again, after 30 seconds, then 1, 2
-//! and 4 minutes ([`OFFLINE_WAITS`]), since a home router that was swamped
-//! usually recovers; when the batch still looks offline, it stops with an
-//! error. A node does not wait: it tries again at its next round.
+//! `plumb-tools crawl` waits and fetches it again a few times
+//! ([`crawl_rolling`]'s `offline_waits`), then stops with an error. A node
+//! does not wait: it tries again at its next round.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -60,20 +59,16 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use plumb_core::{now_unix, RecordSet, SiteRecord};
-use plumb_crawl::{
-    to_records, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler,
-};
+use plumb_crawl::{to_records, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use tracing::{info, warn};
 
-use crate::cli::CrawlArgs;
-use crate::records::{load_records, Change, RecordStore};
-use crate::runtime;
+use crate::records::{Change, RecordStore};
 
-pub(crate) const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+pub const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
 /// Homepages fetched per batch: the unit that is saved, and that is judged
 /// for being offline.
-pub(crate) const CRAWL_BATCH_SIZE: usize = 500;
+pub const CRAWL_BATCH_SIZE: usize = 500;
 
 /// How long a site that could not be reached waits before it is tried
 /// again; the wait doubles with each further failure in a row, up to the
@@ -91,15 +86,6 @@ pub(crate) const OFFLINE_MIN_EXPECTED: usize = 20;
 /// A batch is offline when at least this share, in percent, of its
 /// homepages that should answer could not be fetched.
 pub(crate) const OFFLINE_FAILED_PERCENT: usize = 90;
-
-/// How long `plumb crawl` waits before fetching a batch that looked offline
-/// again, one wait per try; after the last, the crawl stops.
-const OFFLINE_WAITS: [Duration; 4] = [
-    Duration::from_secs(30),
-    Duration::from_secs(60),
-    Duration::from_secs(120),
-    Duration::from_secs(240),
-];
 
 /// What choosing homepages to crawl reads of a site: a whole
 /// [`SiteRecord`], or the little a node keeps of each site during a crawl
@@ -148,7 +134,9 @@ impl CrawlSite for SiteRecord {
 
 /// The sites a crawl changes as it goes ([`crawl_rolling`]): a whole
 /// [`RecordSet`], or what a node keeps of each site during a round.
-pub(crate) trait CrawlSet {
+// A crawl only counts the sites; nothing asks whether a set is empty.
+#[allow(clippy::len_without_is_empty)]
+pub trait CrawlSet {
     /// When `domain`'s homepage was last tried, and how many tries in a row
     /// failed to reach it; nothing for a site not held.
     fn marks(&self, domain: &str) -> (Option<u64>, u32);
@@ -188,109 +176,13 @@ impl CrawlSet for RecordSet {
     }
 }
 
-pub fn run(args: CrawlArgs) -> Result<()> {
-    let runtime = runtime()?;
-    let cfg = CrawlConfig {
-        concurrency: args.concurrency,
-        dns_lookups: args.dns_lookups,
-        use_system_proxy: args.use_system_proxy,
-        ..CrawlConfig::default()
-    };
-    let mut fetcher = Rolling {
-        crawler: HomepageCrawler::new(cfg),
-        concurrency: args.concurrency,
-        runtime: runtime.handle(),
-    };
-    crawl_file_with(&args, &OFFLINE_WAITS, &mut fetcher)
-}
-
-/// `plumb crawl`, with homepages fetched by `fetch` a batch at a time.
-#[cfg(test)]
-fn crawl_file(
-    args: &CrawlArgs,
-    mut fetch: impl FnMut(Vec<CrawlTarget>) -> Vec<CrawlResult>,
-) -> Result<()> {
-    let mut fetcher = Batches {
-        crawl: |batch| Some(fetch(batch)),
-        queued: Vec::new(),
-    };
-    crawl_file_with(args, &[], &mut fetcher)
-}
-
-/// `plumb crawl`, with homepages fetched by `fetcher` and a batch that looks
-/// offline fetched again after each of `offline_waits`.
-fn crawl_file_with(
-    args: &CrawlArgs,
-    offline_waits: &[Duration],
-    fetcher: &mut impl Fetcher,
-) -> Result<()> {
-    let mut set = load_records(&args.records)?;
-    let out = args.out.as_deref().unwrap_or(&args.records);
-    let mut store = RecordStore::open(out);
-    if out != args.records {
-        // The journal of `out` holds changes to `out`, which starts as what
-        // was read.
-        store.compact(&set)?;
-    }
-    let window = args
-        .skip_crawled_within_days
-        .saturating_mul(SECONDS_PER_DAY);
-    let targets = select_targets(set.iter(), args.top, now_unix(), window);
-    info!(
-        "crawling {} of {} homepages, {} at a time",
-        targets.len(),
-        set.len(),
-        args.concurrency
-    );
-    let totals = crawl_rolling(
-        &mut set,
-        &targets,
-        CRAWL_BATCH_SIZE,
-        &mut store,
-        offline_waits,
-        fetcher,
-        |_| Ok(()),
-    )?;
-    let written = store.compact(&set)?;
-
-    let o = &totals.outcomes;
-    println!(
-        "crawled {} homepages: {} fetched, {} blocked by robots.txt, {} errors",
-        totals.attempted,
-        o.fetched,
-        o.robots_disallowed,
-        o.errors()
-    );
-    if o.errors() > 0 {
-        println!(
-            "  errors: {} HTTP status, {} not HTML, {} bot checks, {} redirected off-site, \
-             {} failed ({} could not be reached)",
-            o.http_status, o.not_html, o.bot_check, o.offsite_redirect, o.failed, o.unreachable
-        );
-    }
-    println!("discovered {} new domains", totals.discovered);
-    println!("wrote {written} records to {}", out.display());
-    if let RunEnd::Offline(offline) = totals.end {
-        let proxy = if args.use_system_proxy {
-            ""
-        } else {
-            " (if this machine reaches the internet through a proxy, add --use-system-proxy)"
-        };
-        bail!(
-            "stopped crawling: {offline}. Check the network connection{proxy} and run the \
-             crawl again"
-        );
-    }
-    Ok(())
-}
-
 /// The homepages to fetch at `now`, at most `budget`: half of them from sites
 /// never tried and half from sites due again ([`due_at`]), best link score
 /// first within each half; a half with too few candidates leaves the rest of
 /// its share to the other, and an odd budget gives the extra one to sites
 /// never tried. The picks come best link score first, ties by domain, as
 /// targets made by [`target_for`].
-pub(crate) fn select_targets<'a, S: CrawlSite + 'a>(
+pub fn select_targets<'a, S: CrawlSite + 'a>(
     records: impl Iterator<Item = &'a S>,
     budget: usize,
     now: u64,
@@ -392,18 +284,18 @@ pub(crate) fn is_connection_failure(outcome: &CrawlOutcome) -> bool {
 
 /// What a whole crawl run did, over all its batches.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RunTotals {
+pub struct RunTotals {
     /// Homepages tried, in batches that were saved.
-    pub(crate) attempted: usize,
-    pub(crate) outcomes: CrawlSummary,
+    pub attempted: usize,
+    pub outcomes: CrawlSummary,
     /// Domains that were not in the records before the run.
-    pub(crate) discovered: usize,
-    pub(crate) end: RunEnd,
+    pub discovered: usize,
+    pub end: RunEnd,
 }
 
 /// Why a crawl run ended.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunEnd {
+pub enum RunEnd {
     /// Every target was tried.
     #[default]
     Finished,
@@ -416,12 +308,12 @@ pub(crate) enum RunEnd {
 /// A batch in which nearly every homepage that should answer could not be
 /// fetched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct OfflineBatch {
+pub struct OfflineBatch {
     /// Homepages that should have answered but could not be fetched.
-    pub(crate) failed: usize,
+    pub failed: usize,
     /// Homepages in the batch that should answer: never tried, or reached
     /// on their last try.
-    pub(crate) expected: usize,
+    pub expected: usize,
 }
 
 impl fmt::Display for OfflineBatch {
@@ -437,7 +329,7 @@ impl fmt::Display for OfflineBatch {
 
 /// Fetches homepages for [`crawl_rolling`]: it starts the targets it is
 /// given and says when they are done.
-pub(crate) trait Fetcher {
+pub trait Fetcher {
     /// Targets [`crawl_rolling`] keeps started beyond the `batch_size` it
     /// waits for, so fetches go on while a batch's slowest sites finish.
     fn ahead(&self) -> usize {
@@ -503,7 +395,7 @@ pub(crate) fn crawl_in_batches(
 /// thread sleeps meanwhile; each batch gets every wait). On a stop, or a
 /// batch still offline after the last wait, every site started and not
 /// done gets its old marks back.
-pub(crate) fn crawl_rolling(
+pub fn crawl_rolling(
     set: &mut impl CrawlSet,
     targets: &[CrawlTarget],
     batch_size: usize,
@@ -631,10 +523,10 @@ pub(crate) fn crawl_rolling(
 
 /// A [`Fetcher`] that keeps `cfg.concurrency` homepages in flight with a
 /// [`HomepageCrawler`], driven on `runtime`.
-pub(crate) struct Rolling<'a> {
-    pub(crate) crawler: HomepageCrawler,
-    pub(crate) concurrency: usize,
-    pub(crate) runtime: &'a tokio::runtime::Handle,
+pub struct Rolling<'a> {
+    pub crawler: HomepageCrawler,
+    pub concurrency: usize,
+    pub runtime: &'a tokio::runtime::Handle,
 }
 
 impl Rolling<'_> {
@@ -815,18 +707,18 @@ impl BatchMerger {
 
 /// Crawl outcomes counted by kind.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CrawlSummary {
-    pub(crate) fetched: usize,
-    pub(crate) robots_disallowed: usize,
-    pub(crate) http_status: usize,
-    pub(crate) not_html: usize,
+pub struct CrawlSummary {
+    pub fetched: usize,
+    pub robots_disallowed: usize,
+    pub http_status: usize,
+    pub not_html: usize,
     /// Bot checks standing in for the homepage.
-    pub(crate) bot_check: usize,
-    pub(crate) offsite_redirect: usize,
-    pub(crate) failed: usize,
+    pub bot_check: usize,
+    pub offsite_redirect: usize,
+    pub failed: usize,
     /// Of `failed`, the homepages that could not be reached at all
     /// ([`is_connection_failure`]).
-    pub(crate) unreachable: usize,
+    pub unreachable: usize,
 }
 
 impl CrawlSummary {
@@ -861,7 +753,7 @@ impl CrawlSummary {
     }
 
     /// Everything that was neither fetched nor blocked by robots.txt.
-    pub(crate) fn errors(&self) -> usize {
+    pub fn errors(&self) -> usize {
         self.http_status + self.not_html + self.bot_check + self.offsite_redirect + self.failed
     }
 }

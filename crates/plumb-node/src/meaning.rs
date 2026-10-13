@@ -1,6 +1,6 @@
-//! Search by meaning: `plumb embed`, the embeddings `search`, `serve` and
-//! `eval` use with `--vectors` and `--model`, and the ones a node keeps with
-//! `plumb run --search-by-meaning`.
+//! Search by meaning: the embeddings `plumb-tools embed` makes, which
+//! `plumb serve`, `plumb-tools search` and `eval` use with `--vectors` and
+//! `--model`, and the ones a node keeps with `plumb run --search-by-meaning`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -10,22 +10,18 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::RecordSet;
-use plumb_embed::{
-    site_text_words, text_hash, Embedder, Vectors, MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
-};
+use plumb_embed::{site_text_words, text_hash, Embedder, Vectors, MODEL_FILES, MODEL_NAME};
 use plumb_index::Meaning;
 use tracing::{info, warn};
 
-use crate::block_on;
-use crate::cli::{EmbedArgs, MeaningArgs, QueryInstruction};
-use crate::records::load_records;
+use crate::cli::{MeaningArgs, QueryInstruction};
 
 /// Sites nearest a query in meaning: closeness is spread over them, and
 /// the search ranks the nearest of them and the most popular.
 const NEAREST: usize = 1_000;
 /// Vectors made between saves of the vectors file, so a stopped run keeps
 /// most of its work.
-pub(crate) const SAVE_EVERY: usize = 10_000;
+pub const SAVE_EVERY: usize = 10_000;
 /// Vectors made between progress reports.
 const REPORT_EVERY: usize = 1_000;
 
@@ -48,7 +44,7 @@ impl MeaningIndex {
         let vectors = Vectors::load(vectors)?;
         if !made_by(&vectors, &embedder) {
             bail!(
-                "the vectors were made by another model than the one in {}; run plumb embed again",
+                "the vectors were made by another model than the one in {}; run plumb-tools embed again",
                 model_dir.display()
             );
         }
@@ -259,7 +255,7 @@ impl Meaning for QueryMeaning<'_> {
 }
 
 /// Loads the model in `dir`.
-pub(crate) fn load_embedder(dir: &Path) -> Result<Embedder> {
+pub fn load_embedder(dir: &Path) -> Result<Embedder> {
     Embedder::load(dir).with_context(|| format!("loading the model in {}", dir.display()))
 }
 
@@ -268,7 +264,7 @@ fn made_by(vectors: &Vectors, embedder: &Embedder) -> bool {
 }
 
 /// The vectors saved in `path` when `embedder` made them, else none.
-pub(crate) fn load_vectors_for(path: &Path, embedder: &Embedder) -> Result<Vectors> {
+pub fn load_vectors_for(path: &Path, embedder: &Embedder) -> Result<Vectors> {
     match Vectors::load(path) {
         Ok(vectors) if made_by(&vectors, embedder) => Ok(vectors),
         Ok(_) => {
@@ -282,7 +278,7 @@ pub(crate) fn load_vectors_for(path: &Path, embedder: &Embedder) -> Result<Vecto
 
 /// What [`embed_records`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Embedded {
+pub struct Embedded {
     /// Sites embedded.
     pub done: usize,
     /// Sites whose text could not be embedded.
@@ -300,7 +296,7 @@ pub(crate) struct Embedded {
 /// can take hours, and holding every record that long, next to the copy an
 /// index build or crawl loads, is more than a small server has. Only the
 /// domain, hash and text of the sites to embed are kept.
-pub(crate) fn embed_records(
+pub fn embed_records(
     embedder: &Embedder,
     vectors: &RwLock<Vectors>,
     records: RecordSet,
@@ -578,41 +574,10 @@ pub(crate) async fn ensure_gemma_with_budget(
     Ok(())
 }
 
-/// `plumb embed`: downloads the model when missing, then makes a vector
-/// for every site in the records file whose text changed since the last
-/// run, and drops the vectors of sites no longer there.
-pub fn run_embed(args: EmbedArgs) -> Result<()> {
-    block_on(ensure_model(&args.model, MODEL_BASE_URL))??;
-    let embedder = load_embedder(&args.model)?;
-    let records = load_records(&args.records)
-        .with_context(|| format!("loading records {}", args.records.display()))?;
-    let vectors = RwLock::new(load_vectors_for(&args.vectors, &embedder)?);
-    let threads = args
-        .threads
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let embedded = embed_records(
-        &embedder,
-        &vectors,
-        records,
-        threads,
-        &|| false,
-        &mut |vectors| Vectors::save_shared(vectors, &args.vectors),
-        &mut |_, _| {},
-    )?;
-    println!(
-        "{} site vectors in {} ({} embedded now, {} failed)",
-        vectors.read().unwrap_or_else(PoisonError::into_inner).len(),
-        args.vectors.display(),
-        embedded.done,
-        embedded.failed
-    );
-    Ok(())
-}
-
 /// Downloads the model's files into `dir` from `base_url` (each of
 /// [`MODEL_FILES`] appended), those not there yet; nothing when `dir`
 /// names an embedding server ([`plumb_embed::SERVER_FILE`]).
-pub(crate) async fn ensure_model(dir: &Path, base_url: &str) -> Result<()> {
+pub async fn ensure_model(dir: &Path, base_url: &str) -> Result<()> {
     ensure_model_with_budget(dir, base_url, None).await
 }
 
@@ -661,8 +626,7 @@ pub(crate) async fn download_file_with_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plumb_core::{write_jsonl, SiteRecord};
-    use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
+    use plumb_core::SiteRecord;
 
     fn record(domain: &str, title: &str) -> SiteRecord {
         let mut record = SiteRecord::new(domain);
@@ -697,83 +661,5 @@ mod tests {
         let vectors = vectors.into_inner().unwrap();
         assert_eq!(vectors.len(), 1);
         assert!(vectors.get("zzz.example").is_some());
-    }
-
-    #[test]
-    fn embeds_changed_sites_only_and_searches_by_meaning() {
-        let dir = tempfile::tempdir().unwrap();
-        let model = dir.path().join("model");
-        plumb_embed::write_test_model(&model).unwrap();
-        let records_path = dir.path().join("records.jsonl");
-        let vectors_path = dir.path().join("vectors.bin");
-        let mut records = vec![
-            record("tesla.com", "Tesla electric cars and solar energy"),
-            record("bank.example", "The credit union bank"),
-            SiteRecord::new("notext.com"),
-        ];
-        write_jsonl(&records_path, &records).unwrap();
-        let args = EmbedArgs {
-            records: records_path.clone(),
-            model: model.clone(),
-            vectors: vectors_path.clone(),
-            threads: Some(2),
-        };
-        run_embed(args).unwrap();
-        let first = Vectors::load(&vectors_path).unwrap();
-        assert_eq!(first.len(), 2, "a site with no text gets no vector");
-        let tesla = first.get("tesla.com").unwrap().1.to_vec();
-
-        // A changed site is embedded again; a gone one is dropped.
-        records[1].title = Some("American airline flights".into());
-        records.remove(0);
-        write_jsonl(&records_path, &records).unwrap();
-        run_embed(EmbedArgs {
-            records: records_path,
-            model: model.clone(),
-            vectors: vectors_path.clone(),
-            threads: None,
-        })
-        .unwrap();
-        let second = Vectors::load(&vectors_path).unwrap();
-        assert_eq!(second.len(), 1);
-        assert_ne!(
-            second.get("bank.example").unwrap().0,
-            first.get("bank.example").unwrap().0
-        );
-
-        // The same text gives the same vector on every run.
-        let embedder = Embedder::load(&model).unwrap();
-        assert_eq!(
-            embedder
-                .embed(&plumb_embed::site_text(&record(
-                    "tesla.com",
-                    "Tesla electric cars and solar energy"
-                )))
-                .unwrap(),
-            tesla
-        );
-
-        // Searching with the vectors finds the site nearest in meaning,
-        // even with no word in common.
-        let index = dir.path().join("index");
-        build_index(&index, &records).unwrap();
-        let searcher = Searcher::open(&index).unwrap();
-        let meaning = MeaningIndex::open(&model, &vectors_path).unwrap();
-        let query = meaning.query("solar").unwrap();
-        let results = searcher
-            .search_meaning(
-                "solar",
-                10,
-                &RankConfig::default(),
-                &SearchOptions::default(),
-                Some(&query),
-            )
-            .unwrap();
-        assert_eq!(results.hits[0].domain, "bank.example");
-
-        // Vectors of another model are refused.
-        let other = dir.path().join("other");
-        plumb_embed::write_test_model(&other).unwrap();
-        assert!(MeaningIndex::open(&other, &vectors_path).is_err());
     }
 }

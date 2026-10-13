@@ -67,6 +67,31 @@ pub enum Command {
     /// copy of a records file with each site's counts, which its link
     /// score counts in.
     FactTrust(crate::fact_trust::FactTrustArgs),
+    /// Fetch the homepages of a records file's best-scored sites and merge
+    /// what they say, as a node's crawl rounds do.
+    Crawl(crate::crawl::CrawlArgs),
+    /// Build a node's search index from a records file.
+    Index(crate::search::IndexArgs),
+    /// Search an index from the command line.
+    Search(crate::search::SearchArgs),
+    /// Show what an index's spelling model learned from its words: the
+    /// commonest slips, how likely given typos are, and completions.
+    Spelling(crate::search::SpellingArgs),
+    /// Make a vector of each site's text with a small embedding model
+    /// (downloaded on first use), so searches can find sites by meaning.
+    Embed(crate::embed::EmbedArgs),
+    /// Count the sites in a node's records that look dead, the ones
+    /// `plumb run --drop-dead-sites` takes out of its index, without
+    /// changing anything. Reads the whole records file into memory.
+    DeadSites(crate::dead_sites::DeadSitesArgs),
+    /// Learn each kind of Wikidata fact (capital, founder, CEO...) as a
+    /// map between the vectors of Wikipedia articles, and measure how well
+    /// the maps find facts they were not shown (an experiment).
+    Relations(crate::relations::RelationsArgs),
+    /// Follow a relation from a thing to what it is related to, through
+    /// several steps if asked ("headquarters > capital"), or check a claim,
+    /// with the maps `relations` wrote (an experiment).
+    Relate(crate::relations::RelateArgs),
     /// How much of a records file the best sites take (by link score), by
     /// kind and at 100k, 250k, 500k... sites, and optionally a copy cut
     /// down to the best of them. The records file is left as it is.
@@ -872,5 +897,88 @@ mod tests {
         assert_eq!(rank.exact_label_bonus, 0.1);
         assert_eq!(rank.alpha, plumb_index::RankConfig::default().alpha);
         assert!(parse(&["eval", "--index", "i", "--queries", "q", "--rank", "0.1"]).is_err());
+    }
+
+    #[test]
+    fn search_takes_query_words() {
+        let cli = parse(&["search", "--index", "idx", "--json", "us", "bank"]).unwrap();
+        let Command::Search(args) = cli.command else {
+            panic!("not search");
+        };
+        assert_eq!(args.query, ["us", "bank"]);
+        assert_eq!(args.limit, 10);
+        assert!(args.json);
+        assert!(parse(&["search", "--index", "idx"]).is_err());
+        assert!(parse(&["search", "--index", "idx", "--limit", "0", "x"]).is_err());
+        assert!(parse(&["search", "--index", "idx", "--alpha", "1.5", "x"]).is_err());
+    }
+
+    #[test]
+    fn paper_search_cli_takes_typed_dates_and_order() {
+        let cli = parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--paper",
+            "--after",
+            "2025",
+            "--before",
+            "2026-09-30",
+            "--order",
+            "newest",
+            "transformer",
+        ])
+        .unwrap();
+        let Command::Search(args) = cli.command else {
+            panic!("not search");
+        };
+        assert!(args.paper);
+        let query = plumb_core::paper_query::PaperQuery::with_options(
+            &args.query.join(" "),
+            args.after.as_deref(),
+            args.before.as_deref(),
+            args.order.as_deref(),
+        )
+        .unwrap();
+        assert!(query.newest);
+        assert_eq!(query.before.unwrap().day, Some(20260930));
+        assert!(parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--after",
+            "2025",
+            "transformer"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--paper",
+            "--order",
+            "bad",
+            "transformer"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn crawl_defaults() {
+        let cli = parse(&["crawl", "--records", "r.jsonl"]).unwrap();
+        let Command::Crawl(args) = cli.command else {
+            panic!("not crawl");
+        };
+        assert_eq!(args.top, 1000);
+        assert_eq!(args.skip_crawled_within_days, 30);
+        assert_eq!(args.concurrency, 16);
+        assert_eq!(args.out, None);
+        assert!(!args.use_system_proxy);
+        assert!(parse(&["crawl", "--records", "r", "--concurrency", "0"]).is_err());
+        let cli = parse(&["crawl", "--records", "r", "--use-system-proxy"]).unwrap();
+        let Command::Crawl(args) = cli.command else {
+            panic!("not crawl");
+        };
+        assert!(args.use_system_proxy);
     }
 }

@@ -71,6 +71,6 @@ Places are one of the page sets: the panel's **Page sets** part has a choice for
 To try a places file without a node:
 
 ```sh
-plumb search --index data/indexes/000123 --places places.tsv.gz --town "Boulder, CO" coffee near me
+plumb-tools search --index data/indexes/000123 --places places.tsv.gz --town "Boulder, CO" coffee near me
 plumb serve --index data/indexes/000123 --places places.tsv.gz
 ```

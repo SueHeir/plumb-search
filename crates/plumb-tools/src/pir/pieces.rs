@@ -14,8 +14,8 @@ use std::collections::BinaryHeap;
 use anyhow::{ensure, Result};
 use plumb_core::keys::{PIECES, PIECES_PER_BUCKET};
 
-use crate::bucket::BUCKETS;
-use crate::hash::Hash;
+use plumb_net::bucket::BUCKETS;
+use plumb_net::hash::Hash;
 
 /// The row of every piece, as little-endian `u16`s in piece order.
 #[derive(Debug, Clone, PartialEq, Eq)]

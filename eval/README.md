@@ -120,7 +120,7 @@ model, for trying a second pass.
 put an `embedding-server.json` in DIR (see `plumb_embed::SERVER_FILE`)
 with the server's `/v1/embeddings` address, the model's name, and
 optionally `dim` (values kept, for Matryoshka models) and the model's
-`query_prefix` and `text_prefix`. `plumb embed --model DIR` then makes the
+`query_prefix` and `text_prefix`. `plumb-tools embed --model DIR` then makes the
 sites' vectors with it and `plumb-tools eval --model DIR --vectors FILE` embeds
 the searches with it, so a model Plumb cannot run yet (llama.cpp's
 `llama-server --embedding`) can be measured before anyone ports it. Server

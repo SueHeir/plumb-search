@@ -23,7 +23,7 @@
 //! Slow work runs on Tokio's blocking threads and checks for shutdown only
 //! where stopping leaves nothing half-done; downloads and the homepage
 //! fetches of a crawl are simply dropped. Crawls pick homepages and save
-//! their results as `plumb crawl` does ([`crate::crawl`]).
+//! their results as `plumb-tools crawl` does ([`crate::crawl`]).
 
 use std::borrow::Borrow;
 use std::collections::HashSet;
@@ -62,7 +62,7 @@ use crate::records::{
 use crate::web::{duration_words, group_thousands};
 
 /// A homepage fetched or answered this recently is not due for a crawl, as
-/// with `plumb crawl --skip-crawled-within-days 30`. Sites that could not
+/// with `plumb-tools crawl --skip-crawled-within-days 30`. Sites that could not
 /// be reached are retried sooner (see [`crate::crawl`]).
 const RECRAWL_AFTER_DAYS: u64 = 30;
 

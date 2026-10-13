@@ -1,5 +1,5 @@
 //! An immutable, authenticated table of fixed-size rows for private
-//! retrieval: every bucket of a [`crate::BucketTable`], with the crawl
+//! retrieval: every bucket of a [`plumb_net::BucketTable`], with the crawl
 //! proofs it had when the snapshot was made, cut into the same number of
 //! equal pages.
 //!
@@ -42,11 +42,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use libp2p::identity::{Keypair, PublicKey};
 use libp2p::PeerId;
+use plumb_net::bucket::BUCKETS;
+use plumb_net::hash::Hash;
+use plumb_net::proto::BucketRecord;
 use serde::{Deserialize, Serialize};
-
-use crate::bucket::BUCKETS;
-use crate::hash::Hash;
-use crate::proto::BucketRecord;
 
 use super::pieces::PieceMap;
 

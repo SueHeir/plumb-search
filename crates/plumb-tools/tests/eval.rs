@@ -1,11 +1,12 @@
-//! End-to-end tests of `plumb-tools eval` over the synthetic fixtures in
-//! `fixtures/`, ingested and indexed as `plumb ingest` and `plumb index` do.
+//! End-to-end tests of `plumb-tools index`, `search` and `eval` over the
+//! synthetic fixtures in `fixtures/`, ingested as `plumb ingest` does.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use clap::Parser;
+use plumb_index::Hit;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -64,8 +65,34 @@ fn build_fixture_index(dir: &Path) -> PathBuf {
         &"--out",
         &records,
     ]);
-    node(&[&"index", &"--records", &records, &"--index", &index]);
+    plumb_ok(&args(&[
+        &"index",
+        &"--records",
+        &records,
+        &"--index",
+        &index,
+    ]));
     index
+}
+
+#[test]
+fn search_the_fixtures() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index = build_fixture_index(tmp.path());
+    let json = plumb_ok(&args(&[
+        &"search", &"--index", &index, &"--json", &"us", &"bank",
+    ]));
+    let hits: Vec<Hit> = serde_json::from_str(&json).expect("search --json output");
+    assert_eq!(hits.first().map(|h| h.domain.as_str()), Some("usbank.com"));
+    assert!(hits.len() <= 10);
+    // The look-alike is indexed but far below the site named, so it is
+    // left off the page.
+    assert!(!hits.iter().any(|h| h.domain == "usbank-login-help.com"));
+
+    let text = plumb_ok(&args(&[
+        &"search", &"--index", &index, &"--limit", &"3", &"chase",
+    ]));
+    assert!(text.starts_with(" 1. chase.com "), "{text}");
 }
 
 #[test]

@@ -13,8 +13,9 @@ use crate::websearch::{parse_web_search, WebSearch};
 /// Plumb Search: a self-hostable search engine.
 ///
 /// The easy way: `plumb run --data DIR` sets everything up and keeps the
-/// index fresh. Step by step: fetch-data, ingest, crawl (optional), index,
-/// then search, serve or eval.
+/// index fresh. Step by step: `plumb-tools fetch-data`, `plumb ingest`,
+/// `plumb-tools crawl` (optional) and `plumb-tools index`, then `plumb
+/// serve`.
 #[derive(Debug, Parser)]
 #[command(name = "plumb", version)]
 pub struct Cli {
@@ -31,27 +32,11 @@ pub enum Command {
     Run(Box<RunArgs>),
     /// Fold seed data and earlier records into one records file.
     Ingest(IngestArgs),
-    /// Fetch the homepages of the best-scored records and merge what they say.
-    Crawl(CrawlArgs),
-    /// Build the search index from a records file.
-    Index(IndexArgs),
-    /// Search the index from the command line.
-    Search(SearchArgs),
-    /// Show what an index's spelling model learned from its words: the
-    /// commonest slips, how likely given typos are, and completions.
-    Spelling(SpellingArgs),
     /// Serve the search page and a JSON API over HTTP.
     Serve(ServeArgs),
-    /// Make a vector of each site's text with a small embedding model
-    /// (downloaded on first use), so searches can find sites by meaning.
-    Embed(EmbedArgs),
     /// Let the Plumb Search app on another computer change this node's
     /// settings: `on` makes a new token (shown once), `off` stops it.
     RemoteControl(RemoteControlArgs),
-    /// Count the sites in a node's records that look dead, the ones
-    /// `plumb run --drop-dead-sites` takes out of its index, without
-    /// changing anything. Reads the whole records file into memory.
-    DeadSites(DeadSitesArgs),
     /// How a node's ranking experiments (its `experiments.json`) are
     /// doing: each against its layer's control, with 95% confidence
     /// intervals. Reads the results; changes nothing.
@@ -61,10 +46,6 @@ pub enum Command {
     /// my searches to train Plumb's ranking"), with how much each site is
     /// wanted once corrected for its place on the page.
     ClickLabels(ClickLabelsArgs),
-    /// Learn each kind of Wikidata fact (capital, founder, CEO...) as a
-    /// map between the vectors of Wikipedia articles, and measure how well
-    /// the maps find facts they were not shown (an experiment).
-    Relations(crate::relations::RelationsArgs),
     /// Let AI apps on this computer (Claude Desktop, Claude Code, ...) ask
     /// Plumb for official sites and look-alikes: an MCP server over stdin
     /// and stdout.
@@ -124,29 +105,11 @@ pub struct McpArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country, requires = "index")]
     pub country: Option<String>,
-    /// Also offer the tool `relate`, from the relation maps `plumb
-    /// relations` wrote to this directory (an experiment).
-    #[arg(long, value_name = "DIR")]
-    pub relations: Option<PathBuf>,
-    /// The model that made the maps' vectors, so names that are not among
-    /// the maps' articles can be embedded.
-    #[arg(long, value_name = "DIR", requires = "relations")]
-    pub relations_model: Option<PathBuf>,
     /// Answer tool calls with the short text alone, leaving out the same
     /// answer as JSON (`structuredContent`), for AI apps that give the
     /// model the JSON.
     #[arg(long)]
     pub text_answers: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct DeadSitesArgs {
-    /// The node's data directory, as given to `plumb run --data`.
-    #[arg(long, value_name = "DIR")]
-    pub data: PathBuf,
-    /// How many of the best-known dead sites to name.
-    #[arg(long, value_name = "N", default_value_t = 20)]
-    pub show: usize,
 }
 
 #[derive(Debug, Args)]
@@ -204,27 +167,10 @@ pub enum RemoteControlAction {
     Status,
 }
 
-#[derive(Debug, Args)]
-pub struct EmbedArgs {
-    /// Records file whose sites to embed.
-    #[arg(long, value_name = "FILE")]
-    pub records: PathBuf,
-    /// Directory of the model's files, downloaded when missing.
-    #[arg(long, value_name = "DIR")]
-    pub model: PathBuf,
-    /// Vectors file, created or brought up to date: only sites whose text
-    /// changed are embedded again.
-    #[arg(long, value_name = "FILE")]
-    pub vectors: PathBuf,
-    /// Texts embedded at once [default: one per CPU].
-    #[arg(long, value_name = "N", value_parser = parse_positive)]
-    pub threads: Option<usize>,
-}
-
 /// Search by meaning too, for queries that name no site.
 #[derive(Debug, Clone, Default, Args)]
 pub struct MeaningArgs {
-    /// Vectors file made by `plumb embed`.
+    /// Vectors file made by `plumb-tools embed`.
     #[arg(long, value_name = "FILE", requires = "model")]
     pub vectors: Option<PathBuf>,
     /// Directory of the model that made the vectors.
@@ -296,7 +242,7 @@ pub struct RunArgs {
     pub crawl_per_refresh: Option<usize>,
     /// Take sites that look dead out of the index: homepages no crawl has
     /// reached for 60 days, after 6 tries in a row over a month or more
-    /// that got no answer at all (see `plumb dead-sites`, which counts them
+    /// that got no answer at all (see `plumb-tools dead-sites`, which counts them
     /// without changing anything). Never the best 10,000 sites, official
     /// websites, sites about this node's topics, or ones an About page puts
     /// first or a searcher opened. A dead site keeps a small record and
@@ -489,7 +435,7 @@ pub struct RunArgs {
     #[arg(long, requires = "network")]
     pub share_findings: bool,
     /// Also share the homepages crawled into this records file, such as one
-    /// `plumb crawl` is filling (its journal included), and add them to this
+    /// `plumb-tools crawl` is filling (its journal included), and add them to this
     /// node's own records: every half hour, those crawled since the last
     /// time and within the last 6 days.
     #[arg(long, value_name = "PATH", requires = "network")]
@@ -636,117 +582,6 @@ pub struct IngestArgs {
     /// keep what they hold, list the file under --records too.
     #[arg(long, value_name = "PATH")]
     pub out: PathBuf,
-}
-
-#[derive(Debug, Args)]
-pub struct CrawlArgs {
-    /// Records file to pick homepages from (JSON lines).
-    #[arg(long, value_name = "PATH")]
-    pub records: PathBuf,
-    /// How many homepages to fetch: half from sites never tried and half from
-    /// sites due again, best link score first in each (a half with too few
-    /// leaves the rest to the other).
-    #[arg(long, value_name = "N", default_value_t = 1000)]
-    pub top: usize,
-    /// Days before a homepage that was fetched, or answered with an error,
-    /// is due again. Sites that could not be reached at all are retried
-    /// after 1 day, then 2, 4, 8... days, up to this.
-    #[arg(long, value_name = "D", default_value_t = 30)]
-    pub skip_crawled_within_days: u64,
-    /// Homepage fetches in flight at once.
-    #[arg(long, value_name = "N", default_value_t = 16, value_parser = parse_positive)]
-    pub concurrency: usize,
-    /// Host name lookups in flight at once. Home routers drop lookups when
-    /// hundreds arrive together; lower this if many sites come back as
-    /// "could not be reached" at a high --concurrency.
-    #[arg(long, value_name = "N", default_value_t = 32, value_parser = parse_positive)]
-    pub dns_lookups: usize,
-    /// Where to write the updated records [default: overwrite --records].
-    /// Each batch of homepages is saved at once to a journal next to it
-    /// (PATH.journal), which is folded in at the end, so an interrupted crawl
-    /// keeps what it fetched; the next crawl or index of PATH picks it up.
-    #[arg(long, value_name = "PATH")]
-    pub out: Option<PathBuf>,
-    /// Fetch homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
-    /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
-    /// internet only through one. Without it, homepages are fetched directly.
-    #[arg(long)]
-    pub use_system_proxy: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct IndexArgs {
-    /// Records file to index (JSON lines).
-    #[arg(long, value_name = "PATH")]
-    pub records: PathBuf,
-    /// Index directory; an index already there is replaced.
-    #[arg(long, value_name = "DIR")]
-    pub index: PathBuf,
-}
-
-#[derive(Debug, Args)]
-pub struct SpellingArgs {
-    /// Index directory.
-    #[arg(long, value_name = "DIR")]
-    pub index: PathBuf,
-    /// How many of the learned slips to list, likeliest first.
-    #[arg(long, value_name = "N", default_value_t = 40)]
-    pub rules: usize,
-    /// A typo and the word meant, as `typed:meant` (`amtrack:amtrak`): how
-    /// likely the slip is and how common each word is. May be repeated.
-    #[arg(long, value_name = "TYPED:MEANT")]
-    pub pair: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct SearchArgs {
-    /// Site index directory, or a page index with --paper.
-    #[arg(long, value_name = "DIR")]
-    pub index: PathBuf,
-    /// Number of results.
-    #[arg(long, value_name = "N", default_value_t = 10, value_parser = parse_positive)]
-    pub limit: usize,
-    /// Weight of the popularity prior in the ranking, from 0 to 1
-    /// [default: the index's default].
-    #[arg(long, value_name = "A", value_parser = parse_alpha)]
-    pub alpha: Option<f32>,
-    /// Print the hits as JSON.
-    #[arg(long)]
-    pub json: bool,
-    /// Search only papers in a locally built page index.
-    #[arg(long)]
-    pub paper: bool,
-    /// Inclusive publication lower bound, YYYY or YYYY-MM-DD.
-    #[arg(long, requires = "paper")]
-    pub after: Option<String>,
-    /// Inclusive publication upper bound, YYYY or YYYY-MM-DD.
-    #[arg(long, requires = "paper")]
-    pub before: Option<String>,
-    /// Paper ordering; newest preserves relevance tiers.
-    #[arg(long, requires = "paper", value_parser = ["relevance", "newest"])]
-    pub order: Option<String>,
-    /// Home country, a two-letter code such as US or DE: its sites rank a
-    /// little higher, other countries' a little lower [default: none].
-    #[arg(long, value_name = "CODE", value_parser = parse_country)]
-    pub country: Option<String>,
-    /// Leave out other countries' sites (needs --country).
-    #[arg(long, requires = "country")]
-    pub only_country: bool,
-    /// Search for the query without suggesting a spelling.
-    #[arg(long)]
-    pub exact: bool,
-    #[command(flatten)]
-    pub meaning: MeaningArgs,
-    /// A places file (places.tsv.gz from `fetch-pages --set places`): also
-    /// list the places the query asks for. Indexed next to it on first use.
-    #[arg(long, value_name = "PATH")]
-    pub places: Option<PathBuf>,
-    /// The town "near me" means, with --places.
-    #[arg(long, value_name = "TOWN", requires = "places")]
-    pub town: Option<String>,
-    /// What to search for, e.g. `us bank`.
-    #[arg(required = true, value_name = "QUERY")]
-    pub query: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -914,70 +749,6 @@ mod tests {
     }
 
     #[test]
-    fn search_takes_query_words() {
-        let cli = parse(&["search", "--index", "idx", "--json", "us", "bank"]).unwrap();
-        let Command::Search(args) = cli.command else {
-            panic!("not search");
-        };
-        assert_eq!(args.query, ["us", "bank"]);
-        assert_eq!(args.limit, 10);
-        assert!(args.json);
-        assert!(parse(&["search", "--index", "idx"]).is_err());
-        assert!(parse(&["search", "--index", "idx", "--limit", "0", "x"]).is_err());
-        assert!(parse(&["search", "--index", "idx", "--alpha", "1.5", "x"]).is_err());
-    }
-
-    #[test]
-    fn paper_search_cli_takes_typed_dates_and_order() {
-        let cli = parse(&[
-            "search",
-            "--index",
-            "pages",
-            "--paper",
-            "--after",
-            "2025",
-            "--before",
-            "2026-09-30",
-            "--order",
-            "newest",
-            "transformer",
-        ])
-        .unwrap();
-        let Command::Search(args) = cli.command else {
-            panic!("not search");
-        };
-        assert!(args.paper);
-        let query = plumb_core::paper_query::PaperQuery::with_options(
-            &args.query.join(" "),
-            args.after.as_deref(),
-            args.before.as_deref(),
-            args.order.as_deref(),
-        )
-        .unwrap();
-        assert!(query.newest);
-        assert_eq!(query.before.unwrap().day, Some(20260930));
-        assert!(parse(&[
-            "search",
-            "--index",
-            "pages",
-            "--after",
-            "2025",
-            "transformer"
-        ])
-        .is_err());
-        assert!(parse(&[
-            "search",
-            "--index",
-            "pages",
-            "--paper",
-            "--order",
-            "bad",
-            "transformer"
-        ])
-        .is_err());
-    }
-
-    #[test]
     fn serve_defaults() {
         let cli = parse(&["serve", "--index", "idx"]).unwrap();
         let Command::Serve(args) = cli.command else {
@@ -1078,24 +849,5 @@ mod tests {
             panic!("not run");
         };
         assert!(args.no_refresh);
-    }
-
-    #[test]
-    fn crawl_defaults() {
-        let cli = parse(&["crawl", "--records", "r.jsonl"]).unwrap();
-        let Command::Crawl(args) = cli.command else {
-            panic!("not crawl");
-        };
-        assert_eq!(args.top, 1000);
-        assert_eq!(args.skip_crawled_within_days, 30);
-        assert_eq!(args.concurrency, 16);
-        assert_eq!(args.out, None);
-        assert!(!args.use_system_proxy);
-        assert!(parse(&["crawl", "--records", "r", "--concurrency", "0"]).is_err());
-        let cli = parse(&["crawl", "--records", "r", "--use-system-proxy"]).unwrap();
-        let Command::Crawl(args) = cli.command else {
-            panic!("not crawl");
-        };
-        assert!(args.use_system_proxy);
     }
 }
