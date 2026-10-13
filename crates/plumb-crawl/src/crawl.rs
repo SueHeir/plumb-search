@@ -475,6 +475,12 @@ async fn crawl_outcome(client: &Client, cfg: &CrawlConfig, target: &CrawlTarget)
                     also_tried.push(url.to_string());
                 }
             }
+            // A crawl batch holds its pages a while; only following links
+            // needs their links to their own site.
+            CrawlOutcome::Fetched(mut page) => {
+                page.meta.own_links = Vec::new();
+                return CrawlOutcome::Fetched(page);
+            }
             outcome => return outcome,
         }
     }

@@ -9,19 +9,20 @@
 //! site's links toward pages with the words ([`plumb_crawl::follow_links`],
 //! run by `node/wanted_pages.rs`), keeps the pages found, and searches
 //! them next to the page sets as the [`WANTED_SET`] set, shown as a site's
-//! inner pages are. Links that a page found makes to another site with
-//! the words make that site wanted too, one hop out from the search's own
-//! sites.
+//! inner pages are. A page found that links to another site with the
+//! words makes that site wanted too, one hop out from the search's own
+//! sites, after them.
 //!
-//! The words stay on the node, and are forgotten after
-//! [`WANT_KEPT`]; the sites see only the fetches, as a crawl's. Kept in
-//! memory and on disk, at most [`MAX_SITES`] sites and 50,000 pages (fewer
-//! under a storage limit), come to about 40 MB:
+//! The words stay on the node, and are forgotten after [`WANT_KEPT`]; the
+//! sites see only the fetches, as a crawl's. Kept in memory and on disk,
+//! at most [`MAX_SITES`] sites and 50,000 pages (fewer under a storage
+//! limit), come to about 40 MB:
 //!
 //! ```text
 //! DIR/wanted/
-//!   wanted.json   the sites wanted, their searches' words and leads, and the pages found
-//!   index-N/      the pages' index, rebuilt when pages come in
+//!   sites.json   the sites wanted, their searches' words and leads
+//!   pages.json   the pages found, and the number of their index
+//!   index-N/     the pages' index, built again when pages come or go
 //! ```
 
 use std::cmp::Reverse;
@@ -43,7 +44,8 @@ use tracing::warn;
 const DAY: u64 = 24 * 60 * 60;
 /// How long a search's words are kept.
 pub const WANT_KEPT: u64 = 30 * DAY;
-/// Sites kept, the most recently wanted.
+/// Sites kept: the searches' own before those one hop out, the most
+/// recently wanted first.
 pub const MAX_SITES: usize = 2_000;
 /// Searches kept for each site, the latest.
 const MAX_WANTS: usize = 8;
@@ -62,13 +64,17 @@ const MAX_HOPS: u8 = 1;
 /// A page's views are this over its depth, so the nearer the homepage the
 /// more it weighs, as with the subpages set.
 const VIEWS: u64 = 1_000;
-const FILE: &str = "wanted.json";
+const SITES_FILE: &str = "sites.json";
+const PAGES_FILE: &str = "pages.json";
 const INDEX_PREFIX: &str = "index-";
 
-/// The sites a node's searches wanted pages of, and the pages found.
+/// The sites a node's searches wanted pages of, and the pages found. The
+/// sites, which every search may change, and the pages, which only the
+/// background job does, are locked apart.
 pub struct WantedPages {
     dir: PathBuf,
-    state: RwLock<State>,
+    sites: RwLock<Sites>,
+    pages: RwLock<Pages>,
     saving: Mutex<()>,
     budget: Option<Arc<plumb_core::storage::StorageBudget>>,
     /// The pages' index and its number.
@@ -76,17 +82,18 @@ pub struct WantedPages {
 }
 
 #[derive(Debug, Default)]
-struct State {
-    saved: Saved,
+struct Sites {
+    sites: BTreeMap<String, Site>,
     dirty: bool,
-    /// Whether the index holds the pages as they are.
-    built: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct Saved {
-    sites: BTreeMap<String, Site>,
-    pages: Vec<Found>,
+struct Pages {
+    pages: BTreeMap<String, Found>,
+    /// The number of the index built of these pages; 0 while there is none.
+    index: u64,
+    #[serde(skip)]
+    dirty: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -103,13 +110,15 @@ struct Site {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Want {
     words: Vec<String>,
+    /// When a search wanted it: for a site one hop out, when the search
+    /// that led there did.
     at: u64,
     /// Sites away from the search's own: 0 for them, 1 for a site one of
     /// their pages found links to.
     hops: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Found {
     #[serde(flatten)]
     page: WantedPage,
@@ -123,6 +132,13 @@ impl Site {
         self.wants.iter().map(|want| want.at).max().unwrap_or(0)
     }
 
+    /// Which sites come first: the ones searches named, then the most
+    /// recently wanted.
+    fn order(&self) -> (u8, Reverse<u64>) {
+        let hops = self.wants.iter().map(|want| want.hops).min();
+        (hops.unwrap_or(MAX_HOPS), Reverse(self.last_wanted()))
+    }
+
     /// Whether its links are to be followed at `now`: a search wanted it
     /// since the last look, or leads are left from a look a day ago.
     fn is_due(&self, now: u64) -> bool {
@@ -134,102 +150,109 @@ impl Site {
     }
 }
 
-impl State {
-    fn want(&mut self, domain: &str, homepage: &str, words: Vec<String>, hops: u8, now: u64) {
-        let site = self.saved.sites.entry(domain.to_string()).or_default();
+impl Sites {
+    fn want(&mut self, domain: &str, homepage: &str, want: Want) {
+        let site = self.sites.entry(domain.to_string()).or_default();
         if site.homepage.is_empty() {
             site.homepage = homepage.to_string();
         }
-        let hops = match site.wants.iter().position(|want| want.words == words) {
-            Some(i) => site.wants.remove(i).hops.min(hops),
-            None => hops,
+        let want = match site.wants.iter().position(|old| old.words == want.words) {
+            Some(i) => {
+                let old = site.wants.remove(i);
+                Want {
+                    at: old.at.max(want.at),
+                    hops: old.hops.min(want.hops),
+                    ..want
+                }
+            }
+            None => want,
         };
-        site.wants.push(Want {
-            words,
-            at: now,
-            hops,
-        });
+        site.wants.push(want);
         if site.wants.len() > MAX_WANTS {
             site.wants.remove(0);
         }
         self.dirty = true;
     }
 
-    /// Keeps `page`, found at `now`; whether it is new.
-    fn keep(&mut self, page: WantedPage, now: u64) -> bool {
-        self.dirty = true;
-        self.built = false;
-        match self
-            .saved
-            .pages
-            .iter_mut()
-            .find(|found| found.page.url == page.url)
-        {
-            Some(found) => {
-                *found = Found { page, at: now };
-                false
-            }
-            None => {
-                self.saved.pages.push(Found { page, at: now });
-                true
-            }
-        }
-    }
-
-    /// Forgets searches older than [`WANT_KEPT`], sites no search wants,
-    /// the least recently wanted sites past [`MAX_SITES`] and the least
-    /// recently found pages past `max_pages`.
-    fn prune(&mut self, now: u64, max_pages: usize) {
-        let before = (self.saved.sites.len(), self.saved.pages.len());
-        for site in self.saved.sites.values_mut() {
+    /// Forgets searches older than [`WANT_KEPT`], sites no search wants
+    /// any more, and the sites past [`MAX_SITES`].
+    fn prune(&mut self, now: u64) {
+        let count = |sites: &BTreeMap<String, Site>| -> (usize, usize) {
+            let wants = sites.values().map(|site| site.wants.len()).sum();
+            (sites.len(), wants)
+        };
+        let before = count(&self.sites);
+        for site in self.sites.values_mut() {
             site.wants.retain(|want| want.at + WANT_KEPT > now);
         }
-        self.saved.sites.retain(|_, site| !site.wants.is_empty());
-        if self.saved.sites.len() > MAX_SITES {
-            let mut latest: Vec<u64> = self.saved.sites.values().map(Site::last_wanted).collect();
-            latest.sort_unstable_by_key(|&at| Reverse(at));
-            let oldest_kept = latest[MAX_SITES - 1];
-            self.saved
-                .sites
-                .retain(|_, site| site.last_wanted() >= oldest_kept);
+        self.sites.retain(|_, site| !site.wants.is_empty());
+        if self.sites.len() > MAX_SITES {
+            let mut order: Vec<_> = self.sites.values().map(Site::order).collect();
+            order.sort_unstable();
+            let last_kept = order[MAX_SITES - 1];
+            self.sites.retain(|_, site| site.order() <= last_kept);
         }
-        if self.saved.pages.len() > max_pages {
-            self.saved.pages.sort_by_key(|found| Reverse(found.at));
-            self.saved.pages.truncate(max_pages);
-            self.built = false;
-        }
-        if before != (self.saved.sites.len(), self.saved.pages.len()) {
+        if count(&self.sites) != before {
             self.dirty = true;
         }
     }
 }
 
+impl Pages {
+    /// Keeps `page`, found at `now`; whether it is new or changed, which
+    /// calls for a new index.
+    fn keep(&mut self, page: WantedPage, now: u64) -> bool {
+        let changed = self.pages.get(&page.url).is_none_or(|old| old.page != page);
+        self.pages.insert(page.url.clone(), Found { page, at: now });
+        if changed {
+            self.index = 0;
+        }
+        self.dirty = true;
+        changed
+    }
+
+    /// Forgets the least recently found pages past `max_pages`.
+    fn prune(&mut self, max_pages: usize) {
+        if self.pages.len() <= max_pages {
+            return;
+        }
+        let mut found: Vec<(u64, String)> = self
+            .pages
+            .values()
+            .map(|found| (found.at, found.page.url.clone()))
+            .collect();
+        found.sort_unstable();
+        for (_, url) in &found[..found.len() - max_pages] {
+            self.pages.remove(url);
+        }
+        self.index = 0;
+        self.dirty = true;
+    }
+}
+
 impl WantedPages {
-    /// The store in `dir`, with what was saved there and its newest index.
+    /// The store in `dir`, with what was saved there, and the index of its
+    /// pages when it was built of the pages saved.
     pub fn open(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
-        let saved: Saved = match std::fs::read(dir.join(FILE)) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|err| {
-                warn!("cannot read the pages wanted: {err}");
-                Saved::default()
-            }),
-            Err(_) => Saved::default(),
-        };
-        let index = newest_index(&dir).and_then(|(number, path)| {
-            PageSearcher::open(&path)
-                .ok()
-                .map(|searcher| (number, Arc::new(searcher)))
-        });
+        let sites = read_json(&dir.join(SITES_FILE)).unwrap_or_default();
+        let pages: Pages = read_json(&dir.join(PAGES_FILE)).unwrap_or_default();
+        let index = newest_index(&dir)
+            .filter(|(number, _)| *number == pages.index)
+            .and_then(|(number, path)| {
+                let searcher = PageSearcher::open(&path).ok()?;
+                Some((number, Arc::new(searcher)))
+            });
         WantedPages {
-            state: RwLock::new(State {
-                built: index.is_some() || saved.pages.is_empty(),
-                saved,
+            sites: RwLock::new(Sites {
+                sites,
                 dirty: false,
             }),
+            pages: RwLock::new(pages),
+            index: RwLock::new(index),
             dir,
             saving: Mutex::new(()),
             budget: None,
-            index: RwLock::new(index),
         }
     }
 
@@ -284,26 +307,44 @@ impl WantedPages {
             .iter()
             .filter_map(|placed| registrable_domain(&placed.hit.page.url))
             .collect();
-        let mut state = self.state.write_locked();
-        for (hit, want) in wants {
-            if want.len() <= MAX_WANT_WORDS && !shown.contains(&hit.domain) && allowed(&hit.url) {
-                state.want(&hit.domain, &hit.url, want, 0, now);
+        let mut sites = self.sites.write_locked();
+        for (hit, words) in wants {
+            let site = registrable_domain(&hit.domain).unwrap_or_else(|| hit.domain.clone());
+            if words.len() <= MAX_WANT_WORDS && !shown.contains(&site) && allowed(&hit.url) {
+                let want = Want {
+                    words,
+                    at: now,
+                    hops: 0,
+                };
+                sites.want(&hit.domain, &hit.url, want);
             }
         }
     }
 
-    /// The sites whose links are to be followed at `now`, the most recently
-    /// wanted first, at most `max_sites` of them and `max_fetches` pages
-    /// each.
-    pub fn due(&self, now: u64, max_sites: usize, max_fetches: usize) -> Vec<FollowTarget> {
-        let state = self.state.read_locked();
-        let mut due: Vec<(&String, &Site)> = state
-            .saved
+    /// Forgets old searches, and the sites and pages past the most kept.
+    pub fn prune(&self, now: u64, max_pages: usize) {
+        self.sites.write_locked().prune(now);
+        self.pages.write_locked().prune(max_pages);
+    }
+
+    /// The sites whose links are to be followed at `now`, whose homepage
+    /// `allowed` lets through: the searches' own first, then the most
+    /// recently wanted, at most `max_sites` of them and `max_fetches`
+    /// pages each.
+    pub fn due(
+        &self,
+        now: u64,
+        max_sites: usize,
+        max_fetches: usize,
+        allowed: impl Fn(&str) -> bool,
+    ) -> Vec<FollowTarget> {
+        let sites = self.sites.read_locked();
+        let mut due: Vec<(&String, &Site)> = sites
             .sites
             .iter()
-            .filter(|(_, site)| site.is_due(now))
+            .filter(|(_, site)| site.is_due(now) && allowed(&site.homepage))
             .collect();
-        due.sort_by_key(|(_, site)| Reverse(site.last_wanted()));
+        due.sort_by_key(|(_, site)| site.order());
         due.into_iter()
             .take(max_sites)
             .map(|(domain, site)| FollowTarget {
@@ -319,100 +360,134 @@ impl WantedPages {
     /// Keeps what following `targets`' links found: the `https` pages
     /// `allowed` lets through, which answer the searches that wanted them,
     /// the leads left, and the other sites the pages link to with a
-    /// search's words. Then forgets what [`State::prune`] does. Gives the
-    /// number of new pages.
+    /// search's words. Gives the number of pages new or changed.
     pub fn apply(
         &self,
         targets: &[FollowTarget],
         followed: Vec<Followed>,
         now: u64,
-        max_pages: usize,
         allowed: impl Fn(&str) -> bool,
     ) -> usize {
-        let mut state = self.state.write_locked();
-        let mut new = 0;
-        for visit in followed {
-            let Some(target) = targets.iter().find(|target| target.domain == visit.domain) else {
-                continue;
-            };
-            let mut answered = HashSet::new();
-            for (page, want) in visit.pages {
-                if page.url.starts_with("https://") && allowed(&page.url) {
-                    answered.insert(want);
-                    new += usize::from(state.keep(page, now));
+        let target = |domain: &str| targets.iter().find(|target| target.domain == domain);
+        let mut changed = 0;
+        let mut answered: HashSet<(String, Vec<String>)> = HashSet::new();
+        {
+            let mut pages = self.pages.write_locked();
+            for visit in &followed {
+                let Some(target) = target(&visit.domain) else {
+                    continue;
+                };
+                for (page, want) in &visit.pages {
+                    if page.url.starts_with("https://") && allowed(&page.url) {
+                        changed += usize::from(pages.keep(page.clone(), now));
+                        let words = target.wants.get(*want).cloned().unwrap_or_default();
+                        answered.insert((visit.domain.clone(), words));
+                    }
                 }
             }
-            let Some(site) = state.saved.sites.get_mut(&visit.domain) else {
+        }
+        let mut sites = self.sites.write_locked();
+        sites.dirty = true;
+        for visit in followed {
+            let Some(target) = target(&visit.domain) else {
+                continue;
+            };
+            let Some(site) = sites.sites.get_mut(&visit.domain) else {
                 continue;
             };
             site.looked_at = now;
             site.leads = visit.leads;
+            site.leads.retain(|lead| allowed(&lead.url));
             site.leads.truncate(MAX_SITE_LEADS);
-            let hops = |words: &Vec<String>| {
-                site.wants
-                    .iter()
-                    .find(|want| &want.words == words)
-                    .map_or(MAX_HOPS, |want| want.hops)
-            };
-            let elsewhere: Vec<(Lead, Vec<String>, u8)> = visit
+            // A site one hop out takes the words and time of the search
+            // that led there.
+            let elsewhere: Vec<(Lead, Want)> = visit
                 .elsewhere
                 .into_iter()
                 .filter_map(|(lead, want)| {
                     let words = target.wants.get(want)?;
-                    Some((lead, words.clone(), hops(words) + 1))
+                    let cause = site.wants.iter().find(|w| &w.words == words)?;
+                    let want = Want {
+                        hops: cause.hops + 1,
+                        ..cause.clone()
+                    };
+                    (want.hops <= MAX_HOPS && allowed(&lead.url)).then_some((lead, want))
                 })
-                .filter(|(lead, _, hops)| *hops <= MAX_HOPS && allowed(&lead.url))
                 .collect();
-            let answered: Vec<&Vec<String>> = answered
-                .into_iter()
-                .filter_map(|want| target.wants.get(want))
-                .collect();
-            site.wants.retain(|want| !answered.contains(&&want.words));
-            for (lead, words, hops) in elsewhere {
-                let Some(domain) = registrable_domain(&lead.url).filter(|d| *d != visit.domain)
+            let domain = visit.domain;
+            site.wants
+                .retain(|want| !answered.contains(&(domain.clone(), want.words.clone())));
+            let own = registrable_domain(&domain);
+            for (lead, want) in elsewhere {
+                let Some(other) = registrable_domain(&lead.url).filter(|d| Some(d) != own.as_ref())
                 else {
                     continue;
                 };
-                state.want(&domain, &format!("https://{domain}/"), words, hops, now);
-                let leads = &mut state.saved.sites.entry(domain).or_default().leads;
+                sites.want(&other, &format!("https://{other}/"), want);
+                let leads = &mut sites.sites.entry(other).or_default().leads;
                 if !leads.iter().any(|known| known.url == lead.url) && leads.len() < MAX_SITE_LEADS
                 {
                     leads.push(lead);
                 }
             }
         }
-        state.prune(now, max_pages);
-        new
+        changed
     }
 
-    /// Saves what changed since the last save.
+    /// Saves what changed since the last save, privately: the searches'
+    /// words are no one else's business.
     pub fn save(&self) -> io::Result<()> {
         // One save at a time, so an older copy never lands after a newer one.
         let _saving = self.saving.locked();
-        let bytes = {
-            let mut state = self.state.write_locked();
-            if !state.dirty {
-                return Ok(());
-            }
-            state.dirty = false;
-            serde_json::to_vec(&state.saved)?
+        // Copied under the locks, written outside them.
+        let sites = {
+            let mut sites = self.sites.write_locked();
+            let copy = sites.dirty.then(|| sites.sites.clone());
+            sites.dirty = false;
+            copy
         };
-        let path = self.dir.join(FILE);
-        let written = plumb_core::storage::create_directory(&self.dir, self.budget.as_ref())
-            .map_err(io::Error::other)
-            .and_then(|()| {
-                plumb_core::storage::write_atomic(
-                    &path,
-                    &path.with_extension("json.tmp"),
-                    &bytes,
-                    self.budget.as_ref(),
-                    None,
-                )
+        let pages = {
+            let mut pages = self.pages.write_locked();
+            let copy = pages.dirty.then(|| Pages {
+                pages: pages.pages.clone(),
+                index: pages.index,
+                dirty: false,
             });
+            pages.dirty = false;
+            copy
+        };
+        let written = self.write_files(sites.as_ref(), pages.as_ref());
         if written.is_err() {
-            self.state.write_locked().dirty = true;
+            self.sites.write_locked().dirty |= sites.is_some();
+            self.pages.write_locked().dirty |= pages.is_some();
         }
         written
+    }
+
+    fn write_files(
+        &self,
+        sites: Option<&BTreeMap<String, Site>>,
+        pages: Option<&Pages>,
+    ) -> io::Result<()> {
+        let files = [
+            (SITES_FILE, sites.map(serde_json::to_vec).transpose()?),
+            (PAGES_FILE, pages.map(serde_json::to_vec).transpose()?),
+        ];
+        for (name, bytes) in files {
+            let Some(bytes) = bytes else {
+                continue;
+            };
+            plumb_core::storage::create_directory(&self.dir, self.budget.as_ref())
+                .map_err(io::Error::other)?;
+            let path = self.dir.join(name);
+            plumb_core::storage::write_atomic_private(
+                &path,
+                &path.with_extension("json.tmp"),
+                &bytes,
+                self.budget.as_ref(),
+            )?;
+        }
+        Ok(())
     }
 
     /// Builds the pages' index again when pages came or went since the
@@ -420,42 +495,42 @@ impl WantedPages {
     /// few seconds and up to about 100 MB.
     pub fn build_index(&self) -> Result<()> {
         let mut pages: Vec<WantedPage> = {
-            let mut state = self.state.write_locked();
-            if state.built {
+            let pages = self.pages.read_locked();
+            let built = self.index.read_locked().as_ref().map(|(n, _)| *n);
+            let current = match built {
+                Some(built) => built == pages.index,
+                None => pages.pages.is_empty(),
+            };
+            if current {
                 return Ok(());
             }
-            state.built = true;
-            state
-                .saved
+            pages
                 .pages
-                .iter()
+                .values()
                 .map(|found| found.page.clone())
                 .collect()
         };
         // Each set's most viewed page comes first (see
         // `build_page_index_with_budget`).
         pages.sort_by_key(|page| page.depth);
-        let number = self.index.read_locked().as_ref().map_or(1, |(n, _)| n + 1);
-        let built = if pages.is_empty() {
-            Ok(None)
-        } else {
-            self.build(number, pages).map(Some)
+        let number = newest_index(&self.dir).map_or(1, |(n, _)| n + 1);
+        let built = match pages.is_empty() {
+            true => None,
+            false => Some((number, Arc::new(self.build(number, pages)?))),
         };
-        let built = match built {
-            Ok(built) => built,
-            Err(err) => {
-                self.state.write_locked().built = false;
-                return Err(err);
-            }
-        };
-        *self.index.write_locked() = built.map(|searcher| (number, Arc::new(searcher)));
-        self.remove_indexes_but(number);
+        let kept = built.as_ref().map_or(0, |(n, _)| *n);
+        *self.index.write_locked() = built;
+        {
+            let mut pages = self.pages.write_locked();
+            pages.index = kept;
+            pages.dirty = true;
+        }
+        self.remove_indexes_but(kept);
         Ok(())
     }
 
     fn build(&self, number: u64, pages: Vec<WantedPage>) -> Result<PageSearcher> {
         let dir = self.dir.join(format!("{INDEX_PREFIX}{number}"));
-        plumb_core::storage::remove_directory(&dir, self.budget.as_deref())?;
         let pages = pages.into_iter().filter_map(|page| {
             Page::from_set(
                 WANTED_SET,
@@ -492,6 +567,13 @@ impl WantedPages {
             }
         }
     }
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes)
+        .inspect_err(|err| warn!("cannot read {}: {err}", path.display()))
+        .ok()
 }
 
 fn index_number(name: &str) -> Option<u64> {

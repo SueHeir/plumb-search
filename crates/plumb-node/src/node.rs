@@ -1036,52 +1036,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         worker::run(inner.clone()),
     ));
     tokio::spawn(release_memory_now_and_then(inner.clone()));
-    let mut jobs = Vec::new();
-    if inner.config.search_by_meaning {
-        let what = "search by meaning";
-        jobs.push((
-            supervise(&inner, what, |inner| {
-                tokio::task::spawn_blocking(move || embedding::run(inner))
-            }),
-            what,
-        ));
-    }
-    if inner.config.crawl_only {
-        // Only searching needs these.
-        info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
-    } else {
-        jobs.push((
-            supervise(&inner, "page sets", |inner| {
-                tokio::task::spawn_blocking(move || pages::run(inner))
-            }),
-            "page sets",
-        ));
-        jobs.push((
-            supervise(&inner, "checking feeds", |inner| {
-                tokio::spawn(news::run(inner))
-            }),
-            "checking feeds",
-        ));
-        jobs.push((
-            supervise(&inner, "the adult blocklist", |inner| {
-                tokio::spawn(adult::run(inner))
-            }),
-            "the adult blocklist",
-        ));
-    }
-    if inner.config.wanted_pages {
-        let what = "following links for searches";
-        jobs.push((
-            supervise(&inner, what, |inner| tokio::spawn(wanted_pages::run(inner))),
-            what,
-        ));
-    }
-    jobs.push((
-        supervise(&inner, "signed sets", |inner| {
-            tokio::spawn(signed_sets::run(inner))
-        }),
-        "signed sets",
-    ));
+    let jobs = start_jobs(&inner);
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -1094,6 +1049,37 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         worker,
         jobs,
     })
+}
+
+/// Starts the background jobs besides the worker, each with what it is
+/// called; a node that only crawls runs fewer.
+fn start_jobs(inner: &Arc<Inner>) -> Vec<(JoinHandle<()>, &'static str)> {
+    let mut jobs = Vec::new();
+    let mut job = |what: &'static str, start: fn(Arc<Inner>) -> JoinHandle<()>| {
+        jobs.push((supervise(inner, what, start), what));
+    };
+    if inner.config.search_by_meaning {
+        job("search by meaning", |inner| {
+            tokio::task::spawn_blocking(move || embedding::run(inner))
+        });
+    }
+    if inner.config.crawl_only {
+        // Only searching needs these.
+        info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
+    } else {
+        job("page sets", |inner| {
+            tokio::task::spawn_blocking(move || pages::run(inner))
+        });
+        job("checking feeds", |inner| tokio::spawn(news::run(inner)));
+        job("the adult blocklist", |inner| {
+            tokio::spawn(adult::run(inner))
+        });
+        job("following links for searches", |inner| {
+            tokio::spawn(wanted_pages::run(inner))
+        });
+    }
+    job("signed sets", |inner| tokio::spawn(signed_sets::run(inner)));
+    jobs
 }
 
 /// How often a running node hands the memory its threads freed back to the

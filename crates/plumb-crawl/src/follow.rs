@@ -15,7 +15,9 @@
 //!
 //! Every page is fetched as a homepage is ([`Visit`]): robots.txt asked,
 //! the per-host delay kept, redirects followed only on the same site, no
-//! private addresses.
+//! private addresses. A caller's check (the node's denylist) can leave out
+//! addresses besides: they are not fetched, and a page that redirects to
+//! one is neither kept nor followed.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -32,6 +34,12 @@ use crate::{build_client, http_url, CrawlConfig, CrawlOutcome, PageMeta, Visit};
 pub const MAX_DEPTH: u8 = 4;
 /// Most leads a visit gives back.
 pub const MAX_LEADS: usize = 50;
+/// Most links to other sites a visit gives back.
+const MAX_ELSEWHERE: usize = 5;
+/// Longest link text kept of a lead, in characters.
+const MAX_LABEL_CHARS: usize = 100;
+/// Longest address followed, in bytes.
+const MAX_URL_BYTES: usize = 1_000;
 /// Longest title kept of a page found, in characters.
 const MAX_TITLE_CHARS: usize = 200;
 /// Longest description kept, in characters.
@@ -114,8 +122,8 @@ pub struct Followed {
     /// Links on the site with words of a want that were not fetched, best
     /// first, at most [`MAX_LEADS`].
     pub leads: Vec<Lead>,
-    /// Links from the pages found to other sites with words of a want, and
-    /// which want.
+    /// Links from the pages found to other sites with enough of a want's
+    /// words, and which want, at most [`MAX_ELSEWHERE`].
     pub elsewhere: Vec<(Lead, usize)>,
     /// Pages asked for.
     pub fetched: usize,
@@ -223,9 +231,14 @@ fn wanted_page(
 }
 
 /// Visits each of `targets` (see the module's notes), a few sites at once
-/// (`cfg.concurrency`), each page fetched within `cfg.target_deadline`.
-/// Must run inside a Tokio runtime.
-pub async fn follow_links(targets: Vec<FollowTarget>, cfg: &CrawlConfig) -> Vec<Followed> {
+/// (`cfg.concurrency`), each page fetched within `cfg.target_deadline`,
+/// and none whose address `allowed` refuses. Must run inside a Tokio
+/// runtime.
+pub async fn follow_links(
+    targets: Vec<FollowTarget>,
+    cfg: &CrawlConfig,
+    allowed: &(dyn Fn(&str) -> bool + Sync),
+) -> Vec<Followed> {
     let cfg = CrawlConfig {
         fetch_icons: false,
         ..cfg.clone()
@@ -234,14 +247,19 @@ pub async fn follow_links(targets: Vec<FollowTarget>, cfg: &CrawlConfig) -> Vec<
         return Vec::new();
     };
     stream::iter(targets)
-        .map(|target| follow(&client, &cfg, target))
+        .map(|target| follow(&client, &cfg, target, allowed))
         .buffer_unordered(cfg.concurrency.max(1))
         .collect()
         .await
 }
 
 /// One site's visit.
-async fn follow(client: &Client, cfg: &CrawlConfig, target: FollowTarget) -> Followed {
+async fn follow(
+    client: &Client,
+    cfg: &CrawlConfig,
+    target: FollowTarget,
+    allowed: &(dyn Fn(&str) -> bool + Sync),
+) -> Followed {
     let started = Instant::now();
     let wants: Vec<HashSet<String>> = target
         .wants
@@ -282,7 +300,7 @@ async fn follow(client: &Client, cfg: &CrawlConfig, target: FollowTarget) -> Fol
         let Ok(url) = http_url(&lead.url) else {
             continue;
         };
-        if !seen.insert(without_fragment(&url)) {
+        if !seen.insert(without_fragment(&url)) || !allowed(url.as_str()) {
             continue;
         }
         followed.fetched += 1;
@@ -295,18 +313,22 @@ async fn follow(client: &Client, cfg: &CrawlConfig, target: FollowTarget) -> Fol
         if let Ok(at) = Url::parse(&page.final_url) {
             seen.insert(without_fragment(&at));
         }
+        if !allowed(&page.final_url) {
+            continue;
+        }
         let found = (lead.depth > 0)
             .then(|| wanted_page(&wants, &page.final_url, &page.meta, lead.depth))
             .flatten();
-        if let Some((_, want)) = &found {
+        if let Some(&(_, want)) = found.as_ref() {
+            // Links to other sites with enough of the same words.
             for link in &page.meta.links {
-                if link_share(&wants[*want..=*want], &link.text, &link.url) > 0.0 {
-                    let lead = Lead {
-                        url: link.url.clone(),
-                        label: link.text.clone(),
-                        depth: 1,
-                    };
-                    followed.elsewhere.push((lead, *want));
+                let mut words = match_words(&link.text);
+                words.extend(path_words(&link.url));
+                if followed.elsewhere.len() < MAX_ELSEWHERE
+                    && has_enough(&wants[want..=want], &words).is_some()
+                {
+                    let lead = new_lead(&link.url, &link.text, 1);
+                    followed.elsewhere.extend(lead.map(|lead| (lead, want)));
                 }
             }
         }
@@ -315,7 +337,6 @@ async fn follow(client: &Client, cfg: &CrawlConfig, target: FollowTarget) -> Fol
             queue.extend(links_to_follow(&wants, &page.meta, lead.depth + 1));
         }
     }
-    followed.elsewhere.truncate(MAX_LEADS);
     followed.leads = leads_left(queue, &seen);
     followed
 }
@@ -324,18 +345,13 @@ async fn follow(client: &Client, cfg: &CrawlConfig, target: FollowTarget) -> Fol
 /// their share of a want's words; when the homepage (`depth` 1) has none
 /// with the words, its menu links to lists of the site's pages.
 fn links_to_follow(wants: &[HashSet<String>], meta: &PageMeta, depth: u8) -> Vec<(f32, Lead)> {
-    let lead = |link: &plumb_core::key_pages::OwnLink| Lead {
-        url: link.url.clone(),
-        label: link.label.clone(),
-        depth,
-    };
     let cost = DEPTH_COST * f32::from(depth);
     let matching: Vec<(f32, Lead)> = meta
         .own_links
         .iter()
         .map(|link| (link_share(wants, &link.label, &link.url), link))
         .filter(|(share, _)| *share > 0.0)
-        .map(|(share, link)| (share - cost, lead(link)))
+        .filter_map(|(share, link)| Some((share - cost, new_lead(&link.url, &link.label, depth)?)))
         .collect();
     if !matching.is_empty() || depth > 1 {
         return matching;
@@ -343,9 +359,19 @@ fn links_to_follow(wants: &[HashSet<String>], meta: &PageMeta, depth: u8) -> Vec
     meta.own_links
         .iter()
         .filter(|link| link.in_nav && is_hub(&link.label))
+        .filter_map(|link| Some((HUB_SHARE, new_lead(&link.url, &link.label, depth)?)))
         .take(MAX_HUBS)
-        .map(|link| (HUB_SHARE, lead(link)))
         .collect()
+}
+
+/// A link to follow, its text cut short; none when its address is too
+/// long to be a page's.
+fn new_lead(url: &str, label: &str, depth: u8) -> Option<Lead> {
+    (url.len() <= MAX_URL_BYTES).then(|| Lead {
+        url: url.to_string(),
+        label: truncate_chars(label, MAX_LABEL_CHARS).to_string(),
+        depth,
+    })
 }
 
 /// Whether a menu link's text says it leads to a list of the site's pages.

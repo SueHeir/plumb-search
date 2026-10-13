@@ -48,9 +48,7 @@ pub use extract::{
     MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS, MAX_PAGE_TEXT_WORDS, MAX_SECTIONS, MAX_SECTION_WORDS,
 };
 pub use feed::{parse_date, read_feed};
-pub use follow::{
-    follow_links, match_words, FollowTarget, Followed, Lead, WantedPage, MAX_DEPTH, MAX_LEADS,
-};
+pub use follow::{follow_links, match_words, FollowTarget, Followed, Lead, WantedPage};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
 pub use records::{to_records, CRAWL_VERSION, REREAD_BELOW};

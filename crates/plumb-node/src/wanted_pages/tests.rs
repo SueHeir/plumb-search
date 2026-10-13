@@ -49,7 +49,7 @@ fn results(hits: &[(&str, &str)], pages: &[&str]) -> SearchResults {
 
 fn wants(store: &WantedPages, now: u64) -> Vec<(String, Vec<Vec<String>>)> {
     store
-        .due(now, 10, 5)
+        .due(now, 10, 5, |_| true)
         .into_iter()
         .map(|target| (target.domain, target.wants))
         .collect()
@@ -101,7 +101,7 @@ fn pages_found_answer_their_search_and_branch_out_once() {
         NOW,
         |_| true,
     );
-    let targets = store.due(NOW + LOOK_AGAIN, 10, 5);
+    let targets = store.due(NOW + LOOK_AGAIN, 10, 5, |_| true);
     let lead = |url: &str| Lead {
         url: url.into(),
         label: "Contribution limits".into(),
@@ -131,10 +131,10 @@ fn pages_found_answer_their_search_and_branch_out_once() {
     };
     let then = NOW + LOOK_AGAIN;
     // Only the https page is kept.
-    assert_eq!(store.apply(&targets, vec![followed], then, 10, |_| true), 1);
+    assert_eq!(store.apply(&targets, vec![followed], then, |_| true), 1);
     // The IRS search is answered; the page found links to ssa.gov, which
     // is wanted for it in turn, with that link to follow.
-    let due = store.due(then + LOOK_AGAIN, 10, 5);
+    let due = store.due(then + LOOK_AGAIN, 10, 5, |_| true);
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].domain, "ssa.gov");
     assert_eq!(due[0].homepage, "https://ssa.gov/");
@@ -146,10 +146,11 @@ fn pages_found_answer_their_search_and_branch_out_once() {
         elsewhere: vec![(lead("https://www.example.gov/limits"), 0)],
         ..Followed::default()
     };
-    store.apply(&due, vec![followed], then + LOOK_AGAIN, 10, |_| true);
-    assert!(store.due(then + 2 * FOLLOW_LEADS_AGAIN, 10, 5).is_empty());
-    let state = store.state.read_locked();
-    assert!(!state.saved.sites.contains_key("example.gov"));
+    store.apply(&due, vec![followed], then + LOOK_AGAIN, |_| true);
+    assert!(store
+        .due(then + 2 * FOLLOW_LEADS_AGAIN, 10, 5, |_| true)
+        .is_empty());
+    assert!(!store.sites.read_locked().sites.contains_key("example.gov"));
 }
 
 #[test]
@@ -162,26 +163,29 @@ fn a_site_is_looked_at_again_when_wanted_again_or_a_day_on_for_its_leads() {
         NOW,
         |_| true,
     );
-    let targets = store.due(NOW, 10, 5);
+    let targets = store.due(NOW, 10, 5, |_| true);
     let followed = Followed {
         domain: "irs.gov".into(),
         leads: vec![Lead::default()],
         ..Followed::default()
     };
-    store.apply(&targets, vec![followed], NOW, 10, |_| true);
-    assert!(store.due(NOW + LOOK_AGAIN, 10, 5).is_empty());
-    assert_eq!(store.due(NOW + FOLLOW_LEADS_AGAIN, 10, 5).len(), 1);
+    store.apply(&targets, vec![followed], NOW, |_| true);
+    assert!(store.due(NOW + LOOK_AGAIN, 10, 5, |_| true).is_empty());
+    assert_eq!(
+        store.due(NOW + FOLLOW_LEADS_AGAIN, 10, 5, |_| true).len(),
+        1
+    );
     store.note(
         "irs contribution limits",
         &results(&IRS[..1], &[]),
         NOW + 1,
         |_| true,
     );
-    assert!(store.due(NOW + LOOK_AGAIN - 1, 10, 5).is_empty());
-    assert_eq!(store.due(NOW + LOOK_AGAIN, 10, 5).len(), 1);
+    assert!(store.due(NOW + LOOK_AGAIN - 1, 10, 5, |_| true).is_empty());
+    assert_eq!(store.due(NOW + LOOK_AGAIN, 10, 5, |_| true).len(), 1);
     // A month on, the search is forgotten.
-    store.state.write_locked().prune(NOW + WANT_KEPT + 1, 10);
-    assert!(store.due(NOW + WANT_KEPT + 1, 10, 5).is_empty());
+    store.prune(NOW + WANT_KEPT + 1, 10);
+    assert!(store.due(NOW + WANT_KEPT + 1, 10, 5, |_| true).is_empty());
 }
 
 #[test]
@@ -218,7 +222,7 @@ fn pages_kept_are_searched_and_saved() {
         ],
         ..Followed::default()
     };
-    store.apply(&targets, vec![followed.clone()], NOW, 10, |_| true);
+    store.apply(&targets, vec![followed.clone()], NOW, |_| true);
     store.save().unwrap();
     store.build_index().unwrap();
     let hits = store
@@ -235,7 +239,8 @@ fn pages_kept_are_searched_and_saved() {
         pages: vec![found("limits", "Retirement plan contribution limits")],
         ..followed
     };
-    store.apply(&targets, vec![newer], NOW + 1, 1, |_| true);
+    store.apply(&targets, vec![newer], NOW + 1, |_| true);
+    store.prune(NOW + 1, 1);
     store.build_index().unwrap();
     let indexes = std::fs::read_dir(dir.path())
         .unwrap()
@@ -255,5 +260,71 @@ fn pages_kept_are_searched_and_saved() {
         .unwrap();
     let urls: Vec<&str> = hits.iter().map(|hit| hit.page.url.as_str()).collect();
     assert_eq!(urls, ["https://www.irs.gov/limits"]);
-    assert!(reopened.state.read_locked().built);
+    // An index older than the pages saved is not searched.
+    {
+        let mut pages = reopened.pages.write_locked();
+        pages.index = 0;
+        pages.dirty = true;
+    }
+    reopened.save().unwrap();
+    assert!(WantedPages::open(dir.path()).searcher().is_none());
+    #[cfg(unix)]
+    for file in [SITES_FILE, PAGES_FILE] {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.path().join(file))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "{file} is private");
+    }
+}
+
+#[test]
+fn sites_searches_named_come_before_sites_one_hop_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = WantedPages::open(dir.path());
+    store.note(
+        "irs contribution limits",
+        &results(&IRS[..1], &[]),
+        NOW,
+        |_| true,
+    );
+    let targets = store.due(NOW, 10, 5, |_| true);
+    let lead = Lead {
+        url: "https://www.ssa.gov/limits".into(),
+        ..Lead::default()
+    };
+    let followed = Followed {
+        domain: "irs.gov".into(),
+        elsewhere: vec![(lead, 0)],
+        ..Followed::default()
+    };
+    store.apply(&targets, vec![followed], NOW, |_| true);
+    // Wanted by a search before the one that led to ssa.gov, Vanguard
+    // still comes first.
+    store.note(
+        "vanguard roth conversion",
+        &results(&IRS[2..3], &[]),
+        NOW - 10,
+        |_| true,
+    );
+    let due = store.due(NOW + LOOK_AGAIN, 1, 5, |_| true);
+    assert_eq!(due[0].domain, "vanguard.com");
+    let due = store.due(NOW + LOOK_AGAIN, 2, 5, |_| true);
+    assert_eq!(due[1].domain, "ssa.gov");
+}
+
+#[test]
+fn forgetting_a_search_is_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = WantedPages::open(dir.path());
+    let irs = results(&IRS[..1], &[]);
+    store.note("irs contribution limits", &irs, NOW, |_| true);
+    store.note("irs tax brackets", &irs, NOW + WANT_KEPT / 2, |_| true);
+    store.save().unwrap();
+    store.prune(NOW + WANT_KEPT, 10);
+    store.save().unwrap();
+    let saved = std::fs::read_to_string(dir.path().join(SITES_FILE)).unwrap();
+    assert!(saved.contains("bracket"));
+    assert!(!saved.contains("contribution"));
 }

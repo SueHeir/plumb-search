@@ -101,7 +101,9 @@ fn health_site(requested: Arc<Mutex<Vec<String>>>) -> Router {
         ))
 }
 
-async fn follow_on_test_site(target: FollowTarget) -> (Followed, Vec<String>) {
+/// Follows `target`'s links on the health site, refusing addresses that
+/// end in `refused`.
+async fn follow_on_test_site(target: FollowTarget, refused: &str) -> (Followed, Vec<String>) {
     let requested = Arc::new(Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -113,7 +115,7 @@ async fn follow_on_test_site(target: FollowTarget) -> (Followed, Vec<String>) {
         resolve: vec![("health.example".into(), ([127, 0, 0, 1], port).into())],
         ..CrawlConfig::default()
     };
-    let mut followed = follow_links(vec![target], &cfg).await;
+    let mut followed = follow_links(vec![target], &cfg, &|url| !url.ends_with(refused)).await;
     let requested = requested.lock().unwrap().clone();
     (followed.pop().unwrap(), requested)
 }
@@ -133,7 +135,8 @@ fn target(wants: &[&str], leads: Vec<Lead>, max_fetches: usize) -> FollowTarget 
 
 #[tokio::test]
 async fn follows_a_hub_to_the_page_with_the_words() {
-    let (followed, requested) = follow_on_test_site(target(&["dengue"], Vec::new(), 4)).await;
+    let (followed, requested) =
+        follow_on_test_site(target(&["dengue"], Vec::new(), 4), "/refused").await;
     let found: Vec<&str> = followed
         .pages
         .iter()
@@ -160,7 +163,8 @@ async fn follows_a_hub_to_the_page_with_the_words() {
 
 #[tokio::test]
 async fn stops_at_its_fetches_and_leaves_the_rest_as_leads() {
-    let (followed, requested) = follow_on_test_site(target(&["dengue"], Vec::new(), 3)).await;
+    let (followed, requested) =
+        follow_on_test_site(target(&["dengue"], Vec::new(), 3), "/refused").await;
     assert_eq!(followed.fetched, 3);
     let pages: Vec<&str> = requested
         .iter()
@@ -183,7 +187,8 @@ async fn a_lead_with_the_words_goes_before_the_homepage() {
         label: "Malaria".into(),
         depth: 2,
     };
-    let (followed, requested) = follow_on_test_site(target(&["malaria"], vec![lead], 1)).await;
+    let (followed, requested) =
+        follow_on_test_site(target(&["malaria"], vec![lead], 1), "/refused").await;
     assert_eq!(followed.pages.len(), 1);
     assert_eq!(followed.pages[0].0.title, "Malaria");
     assert!(!requested.iter().any(|path| path == "/"));
@@ -191,6 +196,20 @@ async fn a_lead_with_the_words_goes_before_the_homepage() {
 
 #[tokio::test]
 async fn the_homepage_is_never_a_page_found() {
-    let (followed, _) = follow_on_test_site(target(&["health org"], Vec::new(), 2)).await;
+    let (followed, _) =
+        follow_on_test_site(target(&["health org"], Vec::new(), 2), "/refused").await;
     assert!(followed.pages.is_empty());
+}
+
+#[tokio::test]
+async fn an_address_the_caller_refuses_is_never_fetched() {
+    let (followed, requested) =
+        follow_on_test_site(target(&["dengue"], Vec::new(), 4), "/sheets/dengue").await;
+    let found: Vec<&str> = followed
+        .pages
+        .iter()
+        .map(|(p, _)| p.title.as_str())
+        .collect();
+    assert_eq!(found, ["Dengue vaccines"]);
+    assert!(!requested.iter().any(|path| path == "/sheets/dengue"));
 }

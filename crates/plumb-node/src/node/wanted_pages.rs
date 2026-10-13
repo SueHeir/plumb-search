@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use plumb_core::locks::RwLocked;
 use plumb_core::now_unix;
 use plumb_crawl::{follow_links, CrawlConfig};
 use tracing::{info, warn};
@@ -29,14 +30,18 @@ const ROUND_EVERY: Duration = Duration::from_secs(10 * 60);
 #[cfg(test)]
 const ROUND_EVERY: Duration = Duration::from_millis(200);
 
-/// Runs until the node stops.
+/// Runs until the node stops. Turned off (`--no-wanted-pages`), it only
+/// forgets old searches on time.
 pub(super) async fn run(inner: Arc<Inner>) {
-    // An index left unbuilt by the last run is built first.
-    build(&inner).await;
     loop {
-        if inner.pause().is_none() {
+        let max_pages = max_pages(inner.settings().storage_limit_mb);
+        inner.wanted_pages.prune(now_unix(), max_pages);
+        // Pages found are shown next to the page sets' only.
+        let shown = inner.pages.read_locked().is_some();
+        if inner.config.wanted_pages && shown && inner.pause().is_none() {
             round(&inner).await;
         }
+        keep(&inner).await;
         tokio::select! {
             () = inner.stopped() => break,
             () = tokio::time::sleep(ROUND_EVERY) => {}
@@ -63,9 +68,10 @@ fn max_pages(storage_limit_mb: u64) -> usize {
 }
 
 async fn round(inner: &Arc<Inner>) {
+    let may_want = |url: &str| inner.may_want(url);
     let targets = inner
         .wanted_pages
-        .due(now_unix(), SITES_PER_ROUND, FETCHES_PER_SITE);
+        .due(now_unix(), SITES_PER_ROUND, FETCHES_PER_SITE, may_want);
     if targets.is_empty() {
         return;
     }
@@ -76,36 +82,40 @@ async fn round(inner: &Arc<Inner>) {
         ..CrawlConfig::default()
     };
     let followed = tokio::select! {
-        followed = follow_links(targets.clone(), &cfg) => followed,
+        followed = follow_links(targets.clone(), &cfg, &may_want) => followed,
         () = inner.stopped() => return,
     };
     if let Err(err) = inner.add_downloaded(cfg.downloaded.swap(0, Ordering::Relaxed)) {
         warn!("cannot count the downloads of wanted pages: {err:#}");
     }
     let fetched: usize = followed.iter().map(|visit| visit.fetched).sum();
-    let max_pages = max_pages(inner.settings().storage_limit_mb);
-    let new = inner
-        .wanted_pages
-        .apply(&targets, followed, now_unix(), max_pages, |url| {
-            inner.may_want(url)
-        });
+    let sites = targets.len();
+    let applying = Arc::clone(inner);
+    let changed = tokio::task::spawn_blocking(move || {
+        let may_want = |url: &str| applying.may_want(url);
+        applying
+            .wanted_pages
+            .apply(&targets, followed, now_unix(), may_want)
+    })
+    .await
+    .unwrap_or_default();
     info!(
-        "followed links on {} sites for this node's searches: {fetched} pages fetched, {new} new \
-         pages kept",
-        targets.len()
+        "followed links on {sites} sites for this node's searches: {fetched} pages fetched, \
+         {changed} pages new or changed"
     );
-    build(inner).await;
 }
 
-/// Saves the store and builds its index again off the async threads.
-async fn build(inner: &Arc<Inner>) {
-    let building = Arc::clone(inner);
-    let built = tokio::task::spawn_blocking(move || {
-        building.wanted_pages.save()?;
-        building.wanted_pages.build_index()
+/// Builds the pages' index again if they changed, and saves the store,
+/// off the async threads.
+async fn keep(inner: &Arc<Inner>) {
+    let keeping = Arc::clone(inner);
+    let kept = tokio::task::spawn_blocking(move || {
+        let built = keeping.wanted_pages.build_index();
+        keeping.wanted_pages.save()?;
+        built
     })
     .await;
-    match built {
+    match kept {
         Ok(Ok(())) => {}
         Ok(Err(err)) => warn!("cannot keep the wanted pages: {err:#}"),
         Err(err) => warn!("cannot keep the wanted pages: {err}"),

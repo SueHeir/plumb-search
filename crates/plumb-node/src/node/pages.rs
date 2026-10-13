@@ -17,10 +17,11 @@ use std::time::{Duration, Instant};
 use std::io::Write;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, Operators};
+use plumb_core::{now_unix, registrable_domain, Operators, SafeSearch};
 use plumb_index::pages::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
     options_allow, place_operator_pages, place_pages, PageHit, PageSearcher, OPERATOR_PAGES,
+    WANTED_SET,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -1204,16 +1205,12 @@ pub(super) fn add_pages(
     options: &SearchOptions,
     results: &mut SearchResults,
 ) {
-    let sets = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone());
+    let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
+        return;
+    };
     let wanted = (inner.config.wanted_pages)
         .then(|| inner.wanted_pages.searcher())
         .flatten();
-    // A node that keeps no page set still shows the pages it found.
-    let (searcher, wanted) = match (sets, wanted) {
-        (Some(sets), wanted) => (sets, wanted),
-        (None, Some(wanted)) => (wanted, None),
-        (None, None) => return,
-    };
     let options = &for_query(inner, options, query);
     let searcher = searcher.in_language(options.language.as_deref());
     let wanted = wanted.map(|wanted| wanted.in_language(options.language.as_deref()));
@@ -1260,19 +1257,19 @@ pub(super) fn add_pages(
                 drop_namesakes_of_words(&mut results.hits, &found);
             }
             lift_named_sites(&mut results.hits, &found);
-            let first = found.first().map(|hit| hit.page.url.clone());
-            if let Err(err) = searcher.add_named_site_page(query, &results.hits, &mut found) {
-                warn!("searching the pages of a site the query names: {err:#}");
-            }
-            // The page sets' page of a site the query names goes before
-            // one found for this node's searches.
-            let added = found.first().map(|hit| &hit.page.url) != first.as_ref();
-            if let Some(wanted) = wanted.as_ref().filter(|_| !added) {
-                if let Err(err) = wanted.add_named_site_page(query, &results.hits, &mut found) {
-                    warn!("searching the wanted pages of a site the query names: {err:#}");
-                }
-            }
-            found.retain(|hit| options_allow(options, &hit.page));
+            add_named_site_page(&searcher, wanted.as_ref(), query, &results.hits, &mut found);
+            // A page found for this node's searches may be of a site the
+            // adult blocklist took in after it was fetched.
+            let adult = inner
+                .adult_list()
+                .filter(|_| options.safe != SafeSearch::Off);
+            let adult = |hit: &PageHit| {
+                hit.page.set == WANTED_SET
+                    && adult.as_ref().is_some_and(|list| {
+                        registrable_domain(&hit.page.url).is_some_and(|d| list.contains(&d))
+                    })
+            };
+            found.retain(|hit| options_allow(options, &hit.page) && !adult(hit));
             if let Err(err) = searcher.note_demand(&mut results.hits) {
                 warn!("reading what sites' articles are read: {err:#}");
             }
@@ -1343,6 +1340,28 @@ pub(super) fn add_pages(
     }
 }
 
+/// Puts first in `found` the page of a site `query` names
+/// ([`PageSearcher::add_named_site_page`]): the page sets' when they have
+/// one, else one found for this node's searches.
+fn add_named_site_page(
+    searcher: &PageSearcher,
+    wanted: Option<&PageSearcher>,
+    query: &str,
+    sites: &[plumb_index::Hit],
+    found: &mut Vec<PageHit>,
+) {
+    let first = found.first().map(|hit| hit.page.url.clone());
+    if let Err(err) = searcher.add_named_site_page(query, sites, found) {
+        warn!("searching the pages of a site the query names: {err:#}");
+    }
+    let added = found.first().map(|hit| &hit.page.url) != first.as_ref();
+    if let Some(wanted) = wanted.filter(|_| !added) {
+        if let Err(err) = wanted.add_named_site_page(query, sites, found) {
+            warn!("searching the wanted pages of a site the query names: {err:#}");
+        }
+    }
+}
+
 /// Most pages found for this node's searches ([`crate::wanted_pages`])
 /// that one search takes in.
 const WANTED_PER_SEARCH: usize = 3;
@@ -1353,12 +1372,15 @@ const WANTED_PER_SEARCH: usize = 3;
 fn add_wanted(wanted: &PageSearcher, query: &str, found: &mut Vec<PageHit>) {
     match wanted.search(query, WANTED_PER_SEARCH) {
         Ok(more) => {
+            let before = found.len();
             for hit in more {
                 if !found.iter().any(|known| known.page.url == hit.page.url) {
                     found.push(hit);
                 }
             }
-            found.sort_by(|a, b| b.score.total_cmp(&a.score));
+            if found.len() > before {
+                found.sort_by(|a, b| b.score.total_cmp(&a.score));
+            }
         }
         Err(err) => warn!("searching the wanted pages: {err:#}"),
     }

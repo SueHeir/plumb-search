@@ -56,18 +56,22 @@ async fn a_search_sends_the_node_through_a_site_s_links_and_shows_what_it_found(
     write_jsonl(&dir.path().join("records.jsonl"), &[record]).unwrap();
     // A page found before: the test site answers only plain http, and
     // only https pages are kept.
+    let malaria = "https://healthexample.org/sheets/malaria";
     let found = serde_json::json!({
-        "sites": {},
-        "pages": [{
-            "url": "https://healthexample.org/sheets/malaria",
-            "title": "Malaria",
-            "depth": 2,
-            "at": now_unix(),
-        }],
+        "pages": {malaria: {"url": malaria, "title": "Malaria", "depth": 2, "at": now_unix()}},
+        "index": 0,
     });
     std::fs::create_dir_all(dir.path().join("wanted")).unwrap();
-    std::fs::write(dir.path().join("wanted/wanted.json"), found.to_string()).unwrap();
+    std::fs::write(dir.path().join("wanted/pages.json"), found.to_string()).unwrap();
+    // Pages found are shown next to the page sets' only.
+    let lighthouse = plumb_core::Article {
+        title: "Lighthouse".into(),
+        views: 900,
+        ..Default::default()
+    };
+    super::agents::write_set_file(dir.path(), "wikipedia-en", &[lighthouse]);
     let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
     config.wanted_pages = true;
     config
         .page_reader
@@ -108,9 +112,18 @@ async fn a_search_sends_the_node_through_a_site_s_links_and_shows_what_it_found(
 
     // Off, the node neither shows the pages found nor looks for more.
     let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
     config.wanted_pages = false;
     let node = start(config).await.unwrap();
-    wait_for(node.addr(), "the index", ready_and_idle).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !get(node.addr(), "/search?q=lighthouse")
+        .await
+        .2
+        .contains("wiki/Lighthouse")
+    {
+        assert!(Instant::now() < deadline, "no page sets");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let (_, _, body) = get(node.addr(), "/search?q=health+example+malaria").await;
     assert!(!body.contains("sheets/malaria"), "{body}");
     node.shutdown().await.unwrap();
