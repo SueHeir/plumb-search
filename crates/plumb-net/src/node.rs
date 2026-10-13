@@ -2346,8 +2346,11 @@ impl Task {
     /// for other nodes to take are left out. Returns the last batch's id.
     fn publish(&mut self, records: Vec<SiteRecord>) -> Result<Option<Hash>> {
         let now = now_unix();
+        let me = *self.swarm.local_peer_id();
+        let share = self.config.share_ppm;
+        let assigned = |epoch, domain: &str| is_assigned(epoch, &me, domain, share);
         let mut last = None;
-        for (epoch, records) in by_crawl_epoch(records, now) {
+        for (epoch, records) in by_crawl_epoch(records, now, assigned) {
             for chunk in batch_chunks(&records) {
                 if let Some(id) = self.publish_batch(chunk, epoch, now)? {
                     last = Some(id);
@@ -4928,12 +4931,30 @@ fn resend_pending(
 
 /// `records` by the epoch their homepage was crawled in (records not
 /// crawled, such as linked sites, in the current one), leaving out crawls
-/// too old for other nodes to take and ones from the future.
-fn by_crawl_epoch(records: Vec<SiteRecord>, now: u64) -> BTreeMap<u64, Vec<SiteRecord>> {
+/// too old for other nodes to take and ones from the future. A crawl goes
+/// with the epoch before its own when it was this node's to crawl then
+/// (`assigned`) and not in its own: a crawl round picks its sites by the
+/// epoch it starts in and can run on past midnight, and a batch of an
+/// epoch takes crawls until the end of the next ([`crate::batch`]).
+fn by_crawl_epoch(
+    records: Vec<SiteRecord>,
+    now: u64,
+    assigned: impl Fn(u64, &str) -> bool,
+) -> BTreeMap<u64, Vec<SiteRecord>> {
     let current = epoch_of(now);
     let mut by_epoch: BTreeMap<u64, Vec<SiteRecord>> = BTreeMap::new();
     for record in records {
-        let epoch = record.crawled_at.map_or(current, epoch_of);
+        let epoch = match record.crawled_at.map(epoch_of) {
+            None => current,
+            Some(own)
+                if own > 0
+                    && !assigned(own, &record.domain)
+                    && assigned(own - 1, &record.domain) =>
+            {
+                own - 1
+            }
+            Some(own) => own,
+        };
         if epoch + MAX_BATCH_AGE_EPOCHS > current && epoch <= current {
             by_epoch.entry(epoch).or_default().push(record);
         }
@@ -5816,7 +5837,7 @@ mod tests {
             at("lastweek.com", Some(now - MAX_BATCH_AGE_EPOCHS * day)),
             at("tomorrow.com", Some(now + 2 * day)),
         ];
-        let grouped = by_crawl_epoch(records, now);
+        let grouped = by_crawl_epoch(records, now, |_, _| true);
         let domains: Vec<(u64, Vec<&str>)> = grouped
             .iter()
             .map(|(epoch, rs)| (*epoch, rs.iter().map(|r| r.domain.as_str()).collect()))
@@ -5829,6 +5850,45 @@ mod tests {
                 (today, vec!["today.com", "linked.com"]),
             ]
         );
+    }
+
+    #[test]
+    fn a_crawl_past_midnight_goes_with_the_epoch_it_was_assigned_in() {
+        let day = crate::assign::EPOCH_SECS;
+        let midnight = 1_790_035_200;
+        assert_eq!(midnight % day, 0);
+        let today = epoch_of(midnight);
+        let at = |domain: &str, crawled_at: u64| {
+            let mut r = SiteRecord::new(domain);
+            r.crawled_at = Some(crawled_at);
+            r
+        };
+        let records = vec![
+            at("before.com", midnight - 60),
+            at("after.com", midnight + 60),
+            at("both.com", midnight + 60),
+            at("today.com", midnight + 60),
+        ];
+        // Each site is this node's in the epochs listed.
+        let assigned = |epoch: u64, domain: &str| match domain {
+            "before.com" | "after.com" => epoch == today - 1,
+            "both.com" => true,
+            _ => epoch == today,
+        };
+        let grouped = by_crawl_epoch(records, midnight + 120, assigned);
+        let domains: Vec<(u64, Vec<&str>)> = grouped
+            .iter()
+            .map(|(epoch, rs)| (*epoch, rs.iter().map(|r| r.domain.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            domains,
+            vec![
+                (today - 1, vec!["before.com", "after.com"]),
+                (today, vec!["both.com", "today.com"]),
+            ]
+        );
+        // A batch of the day before takes the crawl after midnight.
+        assert!(crate::batch::in_crawl_window(midnight + 60, today - 1));
     }
 
     #[test]
