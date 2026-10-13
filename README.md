@@ -51,7 +51,7 @@ There are no ads and no tracking. Plumb does not crawl the full text of the web:
 
 A node serves the same search page, keeps crawling homepages, and joins the Plumb network by default. A new node copies the best sites of a node it trusts (plumbsearch.org by default) and is searchable within a few minutes. No port forwarding is needed.
 
-**Server or homelab** ([docs/docker.md](docs/docker.md)): the image is published as `ghcr.io/sueheir/plumb-search`. Use `:0.2` to stay on this release line, or `:latest` to follow each new release.
+**Server or homelab** ([docs/docker.md](docs/docker.md)): the image is published as `ghcr.io/sueheir/plumb-search`. Use `:0.3` to stay on this release line, or `:latest` to follow each new release.
 
 ```sh
 git clone https://github.com/SueHeir/plumb-search.git
