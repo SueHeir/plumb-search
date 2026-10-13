@@ -19,11 +19,12 @@
 //! <dir>/<bucket>.json   {"fetched_at": .., "answers": [[BucketRecord, ..], ..]}
 //! ```
 
+use plumb_core::locks::Locked;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -391,7 +392,7 @@ impl BucketCache {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u32, Entry>> {
-        self.fetched.lock().unwrap_or_else(PoisonError::into_inner)
+        self.fetched.locked()
     }
 }
 

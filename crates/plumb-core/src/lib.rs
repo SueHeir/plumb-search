@@ -20,6 +20,7 @@ pub mod films;
 pub mod key_pages;
 pub mod keys;
 mod kinds;
+pub mod locks;
 pub mod news;
 #[cfg(feature = "oblivious")]
 pub mod oblivious;

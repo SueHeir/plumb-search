@@ -45,6 +45,7 @@
 //! control against a copy of itself (an A/A test) is a good first run:
 //! its intervals should take in 0.
 
+use plumb_core::locks::Locked;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
@@ -368,7 +369,7 @@ impl Lab {
         let mut token = [0u8; 8];
         getrandom::fill(&mut token).ok()?;
         let token = u64::from_le_bytes(token);
-        let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut live = self.live.locked();
         for &arm in arms {
             let id = self.experiment(arm).id.clone();
             live.results.entry(id).or_default().searches += 1;
@@ -394,7 +395,7 @@ impl Lab {
     /// Counts the result at place `k` (0 for the first) opened from the
     /// page `token`; a page not shown lately counts nothing.
     pub fn note_click(&self, token: u64, k: usize) {
-        let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut live = self.live.locked();
         let Some(page) = live.pages.get_mut(&token) else {
             return;
         };
@@ -439,7 +440,7 @@ impl Lab {
 
     /// What each experiment's searches did so far.
     pub fn counts(&self, experiment: &Experiment) -> Counts {
-        let live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+        let live = self.live.locked();
         live.results
             .get(&experiment.id)
             .cloned()

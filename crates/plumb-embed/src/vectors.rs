@@ -9,6 +9,7 @@
 //! and the rows set since the file was loaded, until
 //! [`Vectors::save_shared`] saves them and reads them from the new file.
 
+use plumb_core::locks::{Locked, RwLocked};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::{File, OpenOptions};
@@ -17,7 +18,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{self, AtomicU64};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{bail, Context, Result};
 use hashbrown::HashTable;
@@ -460,7 +461,7 @@ impl Vectors {
         budget: Option<Arc<plumb_core::storage::StorageBudget>>,
     ) -> Result<()> {
         let (written, rows, version) = {
-            let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
+            let held = vectors.read_locked();
             let (written, rows) = held.write_file_with_budget(path, budget)?;
             (written, rows, held.version)
         };
@@ -468,7 +469,7 @@ impl Vectors {
         {
             let file = FileBytes::read(&written)
                 .with_context(|| format!("reading vectors from {}", path.display()))?;
-            let mut held = vectors.write().unwrap_or_else(PoisonError::into_inner);
+            let mut held = vectors.write_locked();
             if held.version == version && held.rows.len() == rows.len() {
                 let old = (
                     std::mem::replace(&mut held.file, file),
@@ -646,7 +647,7 @@ impl FileBytes {
     fn attach_lease(&self, incoming: Arc<plumb_core::storage::FileLease>) -> bool {
         #[cfg(unix)]
         if let Self::Mapped { lease, .. } = self {
-            let mut lease = lease.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut lease = lease.locked();
             if lease.is_none() {
                 *lease = Some(incoming);
                 return true;

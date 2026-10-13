@@ -28,10 +28,11 @@
 //! [`KEEP_DAYS`] days are dropped. Until [`MIN_CLICKS`] clicks are counted
 //! the node goes by [`PositionBias::prior`].
 
+use plumb_core::locks::Locked;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -298,7 +299,7 @@ impl PositionStore {
 
     /// Changes the counts with `change` and saves them.
     pub fn update<T>(&self, change: impl FnOnce(&mut Positions) -> T) -> Result<T> {
-        let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+        let _writing = WRITING.locked();
         let mut positions = self.load();
         if positions.salt.is_empty() {
             positions.salt = crate::history::new_profile()?;
@@ -477,7 +478,7 @@ impl LabelStore {
 
     /// Changes the examples with `change` and saves them.
     pub fn update(&self, change: impl FnOnce(&mut Labels)) -> Result<()> {
-        let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+        let _writing = WRITING.locked();
         let mut labels = self.load();
         change(&mut labels);
         if let Some(dir) = self.path.parent() {

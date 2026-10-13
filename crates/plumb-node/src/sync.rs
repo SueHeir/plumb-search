@@ -26,11 +26,12 @@
 //! agree on the last copy (an answer was lost), they merge without it:
 //! nothing is lost, though something deleted may come back.
 
+use plumb_core::locks::Locked;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -444,7 +445,7 @@ fn update_links<R>(dir: &Path, profile: &str, change: impl FnOnce(&mut Links) ->
     let Some(path) = links_path(dir, profile) else {
         bail!("not a profile id: {profile:?}");
     };
-    let _writing = LINKS_WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+    let _writing = LINKS_WRITING.locked();
     let mut links = links(dir, profile);
     let result = change(&mut links);
     if links.nodes.is_empty() {
@@ -524,7 +525,7 @@ pub fn make_code(profile: &str) -> Result<String> {
         .map(|b| char::from(TOKEN_ALPHABET[usize::from(b % 32)]))
         .collect();
     let now = now_unix();
-    let mut codes = CODES.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut codes = CODES.locked();
     codes.retain(|c| c.until > now);
     if codes.len() >= MAX_CODES {
         codes.remove(0);
@@ -541,7 +542,7 @@ pub fn make_code(profile: &str) -> Result<String> {
 /// for a wrong or old one, or while too many wrong ones came lately.
 fn take_code(token: &str) -> Option<String> {
     let now = now_unix();
-    let mut failed = FAILED.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut failed = FAILED.locked();
     if now >= failed.0 + FAILED_WINDOW {
         *failed = (now, 0);
     }
@@ -549,7 +550,7 @@ fn take_code(token: &str) -> Option<String> {
         return None;
     }
     let token = normal_token(token);
-    let mut codes = CODES.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut codes = CODES.locked();
     codes.retain(|c| c.until > now);
     match codes.iter().position(|c| c.token == token) {
         Some(i) => Some(codes.remove(i).profile),
@@ -641,7 +642,7 @@ fn try_answer(dir: &Path, peer: PeerId, request: ProfileRequest) -> Result<Profi
                 bail!("this profile is not shared with your node");
             };
             let remote = Snapshot::from_bytes(&state)?;
-            let _syncing = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+            let _syncing = SYNCING.locked();
             let base = link
                 .base
                 .as_ref()
@@ -714,7 +715,7 @@ pub async fn sync_with(dir: &Path, net: &impl Asker, profile: &str, peer: PeerId
     match answer {
         Ok(ProfileResponse::Synced { round, state }) => {
             let remote = Snapshot::from_bytes(&state)?;
-            let _syncing = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+            let _syncing = SYNCING.locked();
             // What was sent is the base: the answer has all of it and what
             // the other node changed, this node only what changed since.
             Snapshot::merge_into(dir, profile, Some(&sent), &remote)?;
@@ -796,7 +797,7 @@ pub async fn join(
     }
     let remote = Snapshot::from_bytes(&state)?;
     {
-        let _syncing = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+        let _syncing = SYNCING.locked();
         Snapshot::merge_into(dir, &profile, None, &remote)?;
         if let Some(current) = current.filter(|c| *c != profile) {
             absorb(dir, current, &profile)?;

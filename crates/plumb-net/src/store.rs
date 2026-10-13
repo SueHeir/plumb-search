@@ -12,6 +12,7 @@
 //! a node with little room deletes other crawlers' oldest batches sooner
 //! ([`BatchStore::prune_to_bytes`]).
 
+use plumb_core::locks::Locked;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -52,10 +53,7 @@ impl DeliveryAck {
     }
 
     pub fn acknowledge(&self) -> Result<()> {
-        let _retirement = self
-            .retirement
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _retirement = self.retirement.locked();
         // Retention may have retired the source while its receiver was busy.
         if !self.batch.try_exists()? {
             return Ok(());
@@ -675,9 +673,7 @@ impl BatchStore {
     /// and allocation. Proof cleanup visits this batch's records, not all sites.
     fn remove(&mut self, old: HashSet<Hash>) {
         let retirement = self.delivery_retirement.clone();
-        let _retirement = retirement
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _retirement = retirement.locked();
         let budget = self.storage().cloned();
         let _mutation = budget.as_ref().map(|budget| budget.mutation());
         for id in old {

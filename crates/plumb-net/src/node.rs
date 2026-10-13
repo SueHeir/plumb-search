@@ -47,10 +47,11 @@
 //!   in the search scope (see [`crate::leads`]). On meeting a node, it asks
 //!   for the newest leads it holds.
 
+use plumb_core::locks::{Locked, RwLocked};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -578,10 +579,7 @@ impl NetHandle {
     }
 
     pub fn status(&self) -> NetStatus {
-        self.status
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.status.locked().clone()
     }
 
     /// Signs `records` (crawl results) as a batch, keeps it and tells the
@@ -611,10 +609,7 @@ impl NetHandle {
             loop {
                 let (cached, refresh) =
                     crate::search::cache_search_with_refresh(query, &self.cache, now_unix());
-                self.pending_buckets
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .queue(refresh);
+                self.pending_buckets.locked().queue(refresh);
                 if cached.pending == 0 || !cached.found.is_empty() {
                     break cached;
                 }
@@ -676,10 +671,7 @@ impl NetHandle {
     /// scheduled round may still finish and store its answers after this call;
     /// it cannot resurrect retries from the cleared queue.
     pub fn clear_search_cache(&self) {
-        self.pending_buckets
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        self.pending_buckets.locked().clear();
         self.cache.clear();
     }
 
@@ -742,10 +734,7 @@ impl NetHandle {
             };
             match sent {
                 Ok(_) => {
-                    self.status
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .reports_sent += 1;
+                    self.status.locked().reports_sent += 1;
                     return Ok(());
                 }
                 Err(err) => {
@@ -760,10 +749,7 @@ impl NetHandle {
     /// What the reports this node holds say people pick, recounted every
     /// [`RECOUNT_MINUTES`] minutes while new reports come in.
     pub fn popularity(&self) -> Arc<PopularityTable> {
-        self.popularity
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.popularity.read_locked().clone()
     }
 
     /// Counts the reports held now rather than at the next recount.
@@ -924,10 +910,7 @@ impl NetHandle {
 
     /// Tokens held that `issuer` signed.
     pub fn tokens_held(&self, issuer: &PeerId) -> usize {
-        self.wallet
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .held(issuer)
+        self.wallet.locked().held(issuer)
     }
 
     /// Signs `draft` as a lead of this node's, keeps it and passes it on to
@@ -978,20 +961,11 @@ impl NetHandle {
     pub async fn shutdown(&self) {
         self.replay_stopped
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(rounds) = self
-            .rounds
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
+        if let Some(rounds) = self.rounds.locked().take() {
             rounds.abort();
         }
         let _ = self.commands.send(Command::Stop);
-        let task = self
-            .task
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let task = self.task.locked().take();
         if let Some(task) = task {
             let _ = task.await;
         }
@@ -1399,11 +1373,7 @@ pub async fn start(
         }
     }
     let pace = Arc::new(Pace::new(config.round_every));
-    status
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .rounds
-        .every_secs = pace.every().map(|e| e.as_secs());
+    status.locked().rounds.every_secs = pace.every().map(|e| e.as_secs());
     let pending_buckets = Arc::new(Mutex::new(PendingBuckets::default()));
     let (round_updates, _) = watch::channel(0);
     let rounds = pace.every().is_some().then(|| {
@@ -1530,7 +1500,7 @@ async fn background_rounds(
                     if peers.is_empty() {
                         return; // Queued IDs stay queued until a later due slot.
                     }
-                    let (generation, queued) = pending.lock().unwrap_or_else(PoisonError::into_inner).take_round();
+                    let (generation, queued) = pending.locked().take_round();
                     let found = crate::search::background_round_for(
                         &peers, ROUND_WAIT, now_unix(), Some(&wallet), &cache, queued.clone()
                     ).await;
@@ -1543,7 +1513,7 @@ async fn background_rounds(
                     let retry = queued.iter().copied()
                         .filter(|&bucket| !crate::search::bucket_ready(&cache, bucket, now))
                         .collect();
-                    pending.lock().unwrap_or_else(PoisonError::into_inner).finish(generation, &queued, retry);
+                    pending.locked().finish(generation, &queued, retry);
                     updates.send_modify(|generation| *generation = generation.wrapping_add(1));
                 });
             }
@@ -1557,7 +1527,7 @@ async fn background_rounds(
 const ROUND_WAIT: Duration = Duration::from_secs(4);
 
 fn count_round(status: &Mutex<NetStatus>, round: &NetSearch) {
-    let mut status = status.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut status = status.locked();
     let rounds = &mut status.rounds;
     rounds.sent += 1;
     rounds.answers += round.answered as u64;
@@ -2748,10 +2718,7 @@ impl Task {
         let tx = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
             // Counted with the store let go: STAR counting takes a while.
-            let held = reports
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .snapshots(now_unix());
+            let held = reports.locked().snapshots(now_unix());
             let table = crate::reports::count(held);
             let saved = serde_json::to_vec_pretty(&table)
                 .context("encoding the popularity table")
@@ -2771,7 +2738,7 @@ impl Task {
             let picks = table.picks.len();
             info!("counted the popularity reports: {picks} picks");
             let table = Arc::new(table);
-            *popularity.write().unwrap_or_else(PoisonError::into_inner) = table.clone();
+            *popularity.write_locked() = table.clone();
             if let Some(reply) = reply {
                 let _ = reply.send(table);
             }
@@ -3516,7 +3483,7 @@ impl Task {
                         // can be 16 MB.
                         BatchRequest::Get(id) => {
                             let (held, budget) = {
-                                let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+                                let store = store.locked();
                                 (store.located(&id), store.storage().cloned())
                             };
                             let batch = held.map_or(Ok(None), |path| {
@@ -3536,8 +3503,7 @@ impl Task {
                         }
                         BatchRequest::List { since_epoch } => BatchResponse::Headers(
                             store
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner)
+                                .locked()
                                 .headers_since(since_epoch, MAX_LISTED_BATCHES),
                         ),
                     };
@@ -3732,10 +3698,7 @@ impl Task {
         let store = self.store.clone();
         let answers = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let saved = store
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert_for_delivery(&batch, delivery);
+            let saved = store.locked().insert_for_delivery(&batch, delivery);
             let _ = answers.send(Answer::StoredBatch {
                 id,
                 crawler,
@@ -3751,11 +3714,11 @@ impl Task {
     }
 
     fn lock_store(&self) -> std::sync::MutexGuard<'_, BatchStore> {
-        self.store.lock().unwrap_or_else(PoisonError::into_inner)
+        self.store.locked()
     }
 
     fn lock_reports(&self) -> std::sync::MutexGuard<'_, ReportStore> {
-        self.reports.lock().unwrap_or_else(PoisonError::into_inner)
+        self.reports.locked()
     }
 
     /// Keeps a report if it checks out and is new. Returns `None` for one
@@ -3836,10 +3799,7 @@ impl Task {
                     let tx = self.answers_tx.clone();
                     tokio::task::spawn_blocking(move || {
                         // Copied out with the store let go.
-                        let held = reports
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .snapshot(epoch);
+                        let held = reports.locked().snapshot(epoch);
                         let list = crate::reports::list(held, MAX_LISTED_REPORTS);
                         let _ = tx.send(Answer::Report(channel, ReportResponse::Reports(list)));
                     });
@@ -3945,11 +3905,7 @@ impl Task {
             return;
         }
         for peer in peers {
-            let held = self
-                .wallet
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .held(&peer);
+            let held = self.wallet.locked().held(&peer);
             let recent = self
                 .token_asks
                 .get(&peer)
@@ -4646,8 +4602,7 @@ impl Task {
                 let kept = pending.finish(&issued).and_then(|tokens| {
                     let n = tokens.len();
                     self.wallet
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
+                        .locked()
                         .add(&issuer, &issued.key, tokens)
                         .map(|()| n)
                 });
@@ -4687,7 +4642,7 @@ impl Task {
     }
 
     fn with_status(&self, change: impl FnOnce(&mut NetStatus)) {
-        change(&mut self.status.lock().unwrap_or_else(PoisonError::into_inner));
+        change(&mut self.status.locked());
     }
 
     fn update_status(&mut self) {
@@ -4831,7 +4786,7 @@ fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> 
         // Where each site's proofs are is in memory; the batches are read
         // after the lock is let go, so gossip and fetches aren't held up.
         let (sources, mut reader) = {
-            let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+            let store = store.locked();
             let sources: Vec<Vec<(Hash, usize)>> = lines
                 .iter()
                 .map(|record| {
@@ -5002,7 +4957,7 @@ fn resend_pending(
             return;
         }
         let (batch, budget) = {
-            let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+            let store = store.locked();
             (store.get(id), store.storage().cloned())
         };
         let batch = match batch {
@@ -5033,10 +4988,7 @@ fn resend_pending(
         if is_trusted {
             confirmed.extend(accept_news(&batch, made));
         }
-        let acknowledgment = store
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .delivery_ack(id, is_trusted);
+        let acknowledgment = store.locked().delivery_ack(id, is_trusted);
         if confirmed.is_empty() || acknowledgment.acknowledged() {
             continue;
         }

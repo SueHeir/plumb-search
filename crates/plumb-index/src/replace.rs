@@ -27,13 +27,14 @@
 //! same id every time it starts. So a process keeps a list of the names it
 //! uses ([`Claim`]), and only those count as its own.
 
+use plumb_core::locks::Locked;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -441,7 +442,7 @@ impl Claim {
     }
 
     fn names() -> std::sync::MutexGuard<'static, Vec<OsString>> {
-        CLAIMED.lock().unwrap_or_else(PoisonError::into_inner)
+        CLAIMED.locked()
     }
 }
 

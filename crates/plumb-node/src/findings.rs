@@ -17,11 +17,12 @@
 //! order, or most of them ("tokio latest version" and "latest version of
 //! tokio" match; "tokio" alone does not match "tokio select macro").
 
+use plumb_core::locks::Locked;
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{collapse_whitespace, truncate_chars};
@@ -227,7 +228,7 @@ impl Findings {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Finding>> {
-        self.list.lock().unwrap_or_else(PoisonError::into_inner)
+        self.list.locked()
     }
 
     /// Keeps `finding`. One for the same search and page replaces it.

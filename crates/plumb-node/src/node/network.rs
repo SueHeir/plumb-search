@@ -46,6 +46,7 @@
 //!   fill.json          how far filling free space got
 //! ```
 
+use plumb_core::locks::Locked;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -301,10 +302,7 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
     }
     if inner.config.share_popularity {
         let picks = PickLog::open(&inner.paths.net.join(PICKS_FILE));
-        *inner
-            .picks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(picks);
+        *inner.picks.locked() = Some(picks);
         info!("sharing popularity: results opened here are reported anonymously");
         tokio::spawn(report_picks(inner.clone()));
     }
@@ -370,21 +368,14 @@ pub(super) fn handle(inner: &Inner) -> Option<&Arc<NetHandle>> {
 
 /// Whether the node notes and reports the results opened on its page.
 pub(super) fn shares_popularity(inner: &Inner) -> bool {
-    inner
-        .picks
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_some()
+    inner.picks.locked().is_some()
 }
 
 /// Notes that `domain` was opened from the results for `query`, when the
 /// node shares popularity. Queries that are never reported (see
 /// `plumb_net::popularity::pick_query`) are not kept.
 pub(super) fn record_pick(inner: &Inner, query: &str, domain: &str) {
-    let mut picks = inner
-        .picks
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut picks = inner.picks.locked();
     if let Some(picks) = picks.as_mut() {
         if let Err(err) = picks.record(query, domain, now_unix()) {
             warn!("cannot note a pick: {err:#}");
@@ -442,8 +433,7 @@ pub(super) async fn report_one(inner: &Inner) -> Result<bool> {
     let now = now_unix();
     let due = inner
         .picks
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .locked()
         .as_mut()
         .and_then(|picks| picks.next_due(now));
     let Some((query, domain)) = due else {
@@ -456,12 +446,7 @@ pub(super) async fn report_one(inner: &Inner) -> Result<bool> {
     .await
     .context("the report task failed")??;
     net.send_report(&report, REPORT_WAIT).await?;
-    if let Some(picks) = inner
-        .picks
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_mut()
-    {
+    if let Some(picks) = inner.picks.locked().as_mut() {
         picks.sent(&query, &domain, now)?;
     }
     Ok(true)
@@ -711,10 +696,7 @@ fn append_inbox_reserved(
         serde_json::to_writer(&mut lines, record).context(UnsupportedInboxPayload)?;
         lines.write_all(b"\n").context(UnsupportedInboxPayload)?;
     }
-    let _guard = inner
-        .inbox_lock
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = inner.inbox_lock.locked();
     let budget = inner.storage.as_ref();
     let _mutation = budget.map(|budget| budget.mutation());
     let old = plumb_core::storage::existing_file_bytes(path)?;
@@ -812,10 +794,7 @@ fn append_lines(
 pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     let paths = &inner.paths;
     if !paths.absorbing.exists() {
-        let _guard = inner
-            .inbox_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = inner.inbox_lock.locked();
         let _mutation = inner.storage.as_ref().map(|budget| budget.mutation());
         match fs::rename(&paths.inbox, &paths.absorbing) {
             Ok(()) => {}
@@ -925,10 +904,7 @@ pub(super) fn keep_found(inner: &Inner, records: Vec<SiteRecord>) {
     let Some(backend) = index.backend.as_ref() else {
         return;
     };
-    let mut kept = inner
-        .kept_found
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut kept = inner.kept_found.locked();
     let new: Vec<SiteRecord> = records
         .into_iter()
         .filter(|record| {

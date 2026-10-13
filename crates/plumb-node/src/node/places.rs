@@ -2,7 +2,8 @@
 //! places file and settings, next to the page index (the places file is
 //! taken from trusted nodes with the other page sets, in [`super::pages`]).
 
-use std::sync::{Arc, PoisonError};
+use plumb_core::locks::RwLocked;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use plumb_core::place::Place;
@@ -40,8 +41,7 @@ pub(super) fn refresh(
     let key = wanted.as_ref().map(crate::places::key);
     let current = inner
         .places
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
+        .read_locked()
         .as_ref()
         .map(|(key, _)| key.clone());
     retired.retain(|reader| reader.strong_count() > 0);
@@ -84,7 +84,7 @@ pub(super) fn refresh(
     let kept = found.as_ref().map(|(k, _)| k.clone());
     let places = found.as_ref().map_or(0, |(_, s)| s.num_places());
     let old = std::mem::replace(
-        &mut *inner.places.write().unwrap_or_else(PoisonError::into_inner),
+        &mut *inner.places.write_locked(),
         found.map(|(k, s)| (k, Arc::new(s))),
     );
     if let Some((_, reader)) = old {
@@ -127,8 +127,7 @@ pub(super) fn known_homes(inner: &Inner) -> Option<Vec<(f64, f64)>> {
     }
     let searcher = inner
         .places
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
+        .read_locked()
         .as_ref()
         .map(|(_, s)| s.clone())?;
     let mut homes: Vec<(f64, f64)> = towns
@@ -145,8 +144,7 @@ pub(super) fn known_homes(inner: &Inner) -> Option<Vec<(f64, f64)>> {
 pub(super) fn locate(inner: &Inner, text: &str, country: Option<&str>) -> Option<Place> {
     let searcher: Arc<PlaceSearcher> = inner
         .places
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
+        .read_locked()
         .as_ref()
         .map(|(_, s)| s.clone())?;
     searcher.locate(text, country).unwrap_or_else(|err| {
@@ -164,8 +162,7 @@ pub(super) fn search(
 ) -> Option<PlaceResults> {
     let searcher: Arc<PlaceSearcher> = inner
         .places
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
+        .read_locked()
         .as_ref()
         .map(|(_, s)| s.clone())?;
     match searcher.search(query, home, country, PLACES_PER_SEARCH) {

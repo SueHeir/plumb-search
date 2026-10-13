@@ -2,10 +2,11 @@
 //! `plumb serve`, `plumb-tools search` and `eval` use with `--vectors` and
 //! `--model`, and the ones a node keeps with `plumb run --search-by-meaning`.
 
+use plumb_core::locks::RwLocked;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
@@ -99,7 +100,7 @@ impl MeaningIndex {
     }
 
     fn read(&self) -> RwLockReadGuard<'_, Vectors> {
-        self.vectors.read().unwrap_or_else(PoisonError::into_inner)
+        self.vectors.read_locked()
     }
 
     /// How close `query` is in meaning to each site; `None` when the query
@@ -151,14 +152,11 @@ impl SharedMeaning {
     }
 
     pub fn get(&self) -> Option<Arc<MeaningIndex>> {
-        self.0
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.0.read_locked().clone()
     }
 
     pub fn set(&self, meaning: Arc<MeaningIndex>) {
-        *self.0.write().unwrap_or_else(PoisonError::into_inner) = Some(meaning);
+        *self.0.write_locked() = Some(meaning);
     }
 }
 
@@ -331,7 +329,7 @@ pub(crate) fn sites_to_embed(
     records: RecordSet,
     words: usize,
 ) -> Vec<ToEmbed> {
-    let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
+    let write = || vectors.write_locked();
     {
         let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
         write().retain(|domain| domains.contains(domain));
@@ -340,7 +338,7 @@ pub(crate) fn sites_to_embed(
     let total = records.len();
     let mut todo = Vec::new();
     {
-        let vectors = vectors.read().unwrap_or_else(PoisonError::into_inner);
+        let vectors = vectors.read_locked();
         for record in records {
             let text = site_text_words(&record, words);
             if text.is_empty() {
@@ -388,7 +386,7 @@ pub(crate) fn sites_to_embed_from_file(
     let mut total = 0usize;
     let best_first = |a: &ToEmbed, b: &ToEmbed| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1));
     {
-        let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
+        let held = vectors.read_locked();
         crate::outline::for_each_record(path, |record| {
             total += 1;
             domains.insert(domain_hash(&record.domain));
@@ -413,8 +411,7 @@ pub(crate) fn sites_to_embed_from_file(
         more = true;
     }
     vectors
-        .write()
-        .unwrap_or_else(PoisonError::into_inner)
+        .write_locked()
         .retain(|domain| domains.contains(&domain_hash(domain)));
     // The most popular sites first, as sites_to_embed orders them.
     todo.sort_by(best_first);
@@ -423,7 +420,7 @@ pub(crate) fn sites_to_embed_from_file(
         "{}{} of {total} sites need a vector ({} have one)",
         if more { "the best " } else { "" },
         todo.len(),
-        vectors.read().unwrap_or_else(PoisonError::into_inner).len()
+        vectors.read_locked().len()
     );
     Ok((todo, more))
 }
@@ -441,7 +438,7 @@ pub(crate) fn wanted_texts(
         .with_budget(budget)
         .fold()?;
     let mut wanted = std::collections::HashMap::new();
-    let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
+    let held = vectors.read_locked();
     crate::outline::for_each_record(path, |record| {
         let text = site_text_words(&record, words);
         if text.is_empty() {
@@ -473,7 +470,7 @@ pub(crate) fn embed_sites(
     save: &mut dyn FnMut(&RwLock<Vectors>) -> Result<()>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
-    let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
+    let write = || vectors.write_locked();
     let started = Instant::now();
     let done = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);

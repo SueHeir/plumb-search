@@ -52,11 +52,12 @@
 //! [`SEED_PEER_WAIT`], or it sends too few sites (a network just started),
 //! the node downloads the seed data as before.
 
+use plumb_core::locks::Locked;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -922,18 +923,15 @@ async fn pause(inner: &Inner, wait: Duration) -> bool {
 
 impl Inner {
     pub(super) fn fill_state(&self) -> FillState {
-        self.fill
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.fill.locked().clone()
     }
 
     fn set_fill(&self, state: FillState) {
-        *self.fill.lock().unwrap_or_else(PoisonError::into_inner) = state;
+        *self.fill.locked() = state;
     }
 
     fn update_fill(&self, change: impl FnOnce(&mut FillState)) {
-        change(&mut self.fill.lock().unwrap_or_else(PoisonError::into_inner));
+        change(&mut self.fill.locked());
     }
 }
 

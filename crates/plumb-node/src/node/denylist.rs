@@ -27,9 +27,10 @@
 //!
 //! [`NodeConfig::project_denylist`]: super::NodeConfig::project_denylist
 
+use plumb_core::locks::RwLocked;
 use std::borrow::Cow;
 use std::path::Path;
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 
 use anyhow::Result;
 use plumb_core::SiteRecord;
@@ -104,18 +105,14 @@ impl Inner {
     /// The denylist in use, once the node holds one.
     pub(super) fn denylist(&self) -> Option<Arc<Denylist>> {
         self.denylist
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
+            .read_locked()
             .as_ref()
             .map(|(list, _)| list.clone())
     }
 
     /// The denylist in use with its stamp ([`read_held`]).
     pub(super) fn denylist_stamped(&self) -> Option<(Arc<Denylist>, String)> {
-        self.denylist
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.denylist.read_locked().clone()
     }
 
     /// Reads the denylist the node holds and puts it in use. A list that
@@ -128,10 +125,7 @@ impl Inner {
         };
         match read_held(&self.paths.data, &self.config.set_publishers, switch) {
             Ok(Some((list, stamp))) => {
-                *self
-                    .denylist
-                    .write()
-                    .unwrap_or_else(PoisonError::into_inner) = Some((Arc::new(list), stamp));
+                *self.denylist.write_locked() = Some((Arc::new(list), stamp));
             }
             Ok(None) => {}
             Err(err) => warn!("{err:#}"),
