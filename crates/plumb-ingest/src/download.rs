@@ -57,7 +57,7 @@ pub const WIKIDATA_PREFIXES: &str = "PREFIX wd: <http://www.wikidata.org/entity/
 /// File name [`download_tranco`] saves to.
 pub const TRANCO_FILE_NAME: &str = "tranco-top-1m.csv.zip";
 
-/// File name [`download_wikidata_official_sites`] saves to.
+/// File name [`download_wikidata_official_sites_paced`] saves to.
 pub const WIKIDATA_FILE_NAME: &str = "wikidata-official-sites.tsv";
 
 /// Progress is logged about this often when the download size is unknown.
@@ -730,45 +730,6 @@ impl Write for LinePrefix {
     }
 }
 
-/// Asks Wikidata's SPARQL endpoint for items with an official website (P856)
-/// and at least `min_sitelinks` sitelinks (a notability filter), and writes
-/// `dir/wikidata-official-sites.tsv` with the header `item\tlabel\twebsite`.
-///
-/// Wikidata's public query service stops every query after 60 seconds, and
-/// listing all these items takes longer than that. So they are asked for in
-/// bands of sitelink counts ([`wikidata_sitelink_bands`]), one query after
-/// another. Each band takes 20 to 50 seconds even when small, since most of
-/// the work is the same scan of every item with an official website, so
-/// whether it ends within the limit depends on how busy the service is: a
-/// band that is stopped is asked for again after a wait. See
-/// [`download_wikidata_official_sites_paced`]. Each band is saved as it comes
-/// in, so a later call asks only for the bands still missing.
-pub async fn download_wikidata_official_sites(
-    client: &reqwest::Client,
-    dir: &Path,
-    min_sitelinks: u32,
-) -> Result<PathBuf> {
-    download_wikidata_official_sites_from(client, WIKIDATA_SPARQL_URL, dir, min_sitelinks).await
-}
-
-/// [`download_wikidata_official_sites`], asking the SPARQL endpoint at
-/// `endpoint` instead of [`WIKIDATA_SPARQL_URL`], such as a mirror.
-pub async fn download_wikidata_official_sites_from(
-    client: &reqwest::Client,
-    endpoint: &str,
-    dir: &Path,
-    min_sitelinks: u32,
-) -> Result<PathBuf> {
-    download_wikidata_official_sites_paced(
-        client,
-        endpoint,
-        dir,
-        min_sitelinks,
-        WikidataPacing::default(),
-    )
-    .await
-}
-
 /// How [`download_wikidata_official_sites_paced`] spaces out its queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WikidataPacing {
@@ -865,14 +826,23 @@ const TIMEOUT_MARKERS: [&str; 2] = [
     "com.bigdata.bop.engine.QueryTimeoutException",
 ];
 
-/// [`download_wikidata_official_sites_from`] with the waits of `pacing`.
+/// Asks the SPARQL endpoint at `endpoint` ([`WIKIDATA_SPARQL_URL`], or a
+/// mirror) for items with an official website (P856) and at least
+/// `min_sitelinks` sitelinks (a notability filter), and writes
+/// `dir/wikidata-official-sites.tsv` with the header `item\tlabel\twebsite`.
 ///
-/// The bands of [`wikidata_sitelink_bands`] are asked for one at a time,
-/// lowest first, waiting `pacing.pause` before each but the first, and each
-/// answer is logged. Every band that comes in whole is saved at once in
-/// `dir/wikidata-official-sites.bands/`; a download finds the bands an
-/// earlier one saved there (in the last week, for the same or a lower
-/// minimum) and asks only for the rest. Once every band is in, their rows go
+/// Wikidata's public query service stops every query after 60 seconds, and
+/// listing all these items takes longer than that. So they are asked for in
+/// bands of sitelink counts ([`wikidata_sitelink_bands`]), one query after
+/// another. Each band takes 20 to 50 seconds even when small, since most of
+/// the work is the same scan of every item with an official website, so
+/// whether it ends within the limit depends on how busy the service is.
+///
+/// The bands are asked for lowest first, waiting `pacing.pause` before each
+/// but the first, and each answer is logged. Every band that comes in whole
+/// is saved at once in `dir/wikidata-official-sites.bands/`; a download
+/// finds the bands an earlier one saved there (in the last week, for the
+/// same or a lower minimum) and asks only for the rest. Once every band is in, their rows go
 /// into the TSV, through a `.part` file renamed when complete, and the saved
 /// bands are removed.
 ///
@@ -1304,7 +1274,7 @@ const WIKIDATA_BAND_STARTS: [u32; 7] = [25, 30, 36, 45, 60, 85, 130];
 /// high: no Wikidata item has nearly that many sitelinks.
 const OPEN_BAND_SPLIT_LIMIT: u32 = 1_000;
 
-/// The bands of sitelink counts that [`download_wikidata_official_sites`]
+/// The bands of sitelink counts that [`download_wikidata_official_sites_paced`]
 /// asks for, lowest first. Together they cover every count from
 /// `min_sitelinks` up, each once: below 25 each count is a band of its own,
 /// then come 25-29, 30-35, 36-44, 45-59, 60-84, 85-129 and 130 or more.

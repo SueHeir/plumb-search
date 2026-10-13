@@ -223,20 +223,10 @@ pub async fn search(
     round(buckets, &keys, kept, peers, wait, now, wallet, cache, out).await
 }
 
-/// A background round (see [`crate::rounds`]): buckets this node has not
-/// fetched lately, asked for exactly as a search's are, and kept in
-/// `cache`.
-pub async fn background_round(
-    peers: &[BucketPeer],
-    wait: Duration,
-    now: u64,
-    wallet: Option<&Mutex<Wallet>>,
-    cache: &BucketCache,
-) -> NetSearch {
-    background_round_for(peers, wait, now, wallet, cache, Vec::new()).await
-}
-
-/// Only the scheduler calls this, with at most one round of queued bucket IDs.
+/// A background round (see [`crate::rounds`]): the `queued` buckets and
+/// others this node has not fetched lately, asked for exactly as a
+/// search's are, and kept in `cache`. Only the scheduler calls this, with
+/// at most one round of queued bucket IDs.
 pub(crate) async fn background_round_for(
     peers: &[BucketPeer],
     wait: Duration,
@@ -853,7 +843,7 @@ fn throwaway(wait: Duration) -> Result<libp2p::Swarm<Fetcher>> {
 
 /// Asks `peer` for `bucket` under a new identity, on a swarm made for this
 /// one request. The node sees where the request comes from; a search uses
-/// [`fetch_oblivious`] whenever it can.
+/// [`fetch_oblivious_with`] whenever it can.
 pub async fn fetch_bucket(
     peer: &BucketPeer,
     bucket: u32,
@@ -900,22 +890,11 @@ pub async fn fetch_bucket_with(
     }
 }
 
-/// Asks `target` for `bucket` through `relay`, under a new identity: gets
-/// the target's key from the relay, seals the request to it, and has the
-/// relay pass it on (see [`crate::oblivious`]). The relay sees this node's
-/// address but not the bucket; the target sees the bucket but only the
-/// relay's address.
-pub async fn fetch_oblivious(
-    relay: &BucketPeer,
-    target: &PeerId,
-    bucket: u32,
-    wait: Duration,
-    now: u64,
-) -> Result<BucketResponse> {
-    fetch_oblivious_with(relay, target, &BucketRequest::new(bucket), wait, now).await
-}
-
-/// [`fetch_oblivious`] for any request. One that spends a token is padded
+/// Asks `target` for what `request` asks through `relay`, under a new
+/// identity: gets the target's key from the relay, seals the request to
+/// it, and has the relay pass it on (see [`crate::oblivious`]). The relay
+/// sees this node's address but not the request; the target sees the
+/// request but only the relay's address. One that spends a token is padded
 /// to [`PRIORITY_REQUEST_SIZE`] rather than the free requests' size.
 pub async fn fetch_oblivious_with(
     relay: &BucketPeer,
@@ -956,7 +935,7 @@ pub async fn fetch_oblivious_with(
 }
 
 /// Hands `report` to `target` through `relay`, under a new identity, sealed
-/// the same way as [`fetch_oblivious`] and padded to
+/// the same way as [`fetch_oblivious_with`] and padded to
 /// [`REPORT_REQUEST_SIZE`]: the relay sees this node's address but not the
 /// report, the target the report but only the relay's address. Returns
 /// whether the target took it (it may already hold it).

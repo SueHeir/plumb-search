@@ -230,7 +230,7 @@ fn url_path(url: &str) -> String {
 }
 
 /// Reads a tab separated file with the header `item\tlabel\twebsite` (the
-/// format [`crate::download::download_wikidata_official_sites`] writes).
+/// format [`crate::download::download_wikidata_official_sites_paced`] writes).
 /// `item` may be a bare id (`Q739868`) or an entity URL
 /// (`http://www.wikidata.org/entity/Q739868`); it is stored as the bare id.
 /// Rows whose website has no registrable domain (see [`OfficialSite::new`])

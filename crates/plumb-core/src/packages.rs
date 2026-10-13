@@ -257,11 +257,6 @@ pub fn registry(key: &str) -> Option<&'static Registry> {
     REGISTRIES.iter().find(|r| r.key == key)
 }
 
-/// The registry ecosyste.ms calls `name`.
-pub fn registry_on_ecosystems(name: &str) -> Option<&'static Registry> {
-    REGISTRIES.iter().find(|r| r.ecosystems == name)
-}
-
 impl Registry {
     /// Whether `name` looks like a name of this registry's packages.
     pub fn accepts(&self, name: &str) -> bool {
