@@ -4110,7 +4110,7 @@ async fn an_agent_finds_a_page_another_node_s_agent_shared_and_reads_it() {
             "query": "lighthouse lamp oil",
             "url": page,
             "why": "the keepers' guide says what each lamp burns",
-            "answer": "Colza oil, as the 1890 guide on Grandpa's shelf says",
+            "answer": "Colza oil, as the Victorian guide on Grandpa's shelf says",
             "task": "restoring Grandpa's lighthouse lamp",
             "share": true,
         }),
@@ -4153,7 +4153,8 @@ async fn an_agent_finds_a_page_another_node_s_agent_shared_and_reads_it() {
     );
     // Not its search, answer or task: only what was meant to be shared.
     let said = answer.to_string();
-    for private in ["1890", "Grandpa", "restoring", "lamp oil\""] {
+    // Words, not numbers: a year can turn up in a timestamp.
+    for private in ["Victorian", "Grandpa", "restoring", "lamp oil\""] {
         assert!(!said.contains(private), "{private} in {said}");
     }
     // A lead is not among the results, which come from crawls.
