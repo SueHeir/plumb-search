@@ -577,9 +577,13 @@ pub(crate) async fn extras(
     options: &SearchOptions,
     town: Option<&str>,
 ) -> answers::Extras {
+    let country = options.country.as_deref();
     let answer = match instant_answer(state, query, town).await {
         Some(answer) => Some(answer),
-        None => weather::answer(state, query, town, options.country.as_deref()).await,
+        None => match answers::town_time(state, query, country).await {
+            Some(answer) => Some(answer),
+            None => weather::answer(state, query, town, country).await,
+        },
     };
     let mut profile = None;
     for name in answers::profile_lookups(query) {
