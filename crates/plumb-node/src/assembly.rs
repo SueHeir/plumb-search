@@ -329,10 +329,9 @@ pub(crate) fn site_named_for(place: &Place, hits: Vec<Hit>) -> Option<Hit> {
 
 /// The sites for a query that lists places around a town ("brewery in
 /// denver"): the places' own sites (`local`, from [`local_sites`])
-/// first, then the sites that say what was looked for, then the rest;
-/// sites named after the town (the city's own site, its football team)
-/// are left out when places have sites to show. At most `limit`, or as
-/// many as there were.
+/// first, then the sites that say what was looked for, then the rest,
+/// and last the sites named after the town (the city's own site, its
+/// football team). At most `limit`, or as many as there were.
 pub(crate) fn local_first(
     found: &PlaceResults,
     hits: &mut Vec<Hit>,
@@ -371,11 +370,12 @@ pub(crate) fn local_first(
         .into_iter()
         .filter(|hit| !sorted.iter().any(|s| s.domain == hit.domain))
         .partition(says_what);
-    let local = sorted.len();
     sorted.extend(what);
     // Sites named after the town (its government, university, football
-    // team) are not what was asked for; with the places' own sites to
-    // show, they are left out.
+    // team) are not what was asked for, so they go last, where the
+    // places' own sites may leave them no room. What room there is they
+    // fill: "things to do in nashville" has few places with sites, and
+    // the Opry and the Nashville Zoo say Nashville in their names.
     let town_name = found
         .center
         .as_ref()
@@ -389,13 +389,9 @@ pub(crate) fn local_first(
                     .as_deref()
                     .is_some_and(|t| normalize_text(t).replace(' ', "").contains(&town_name)))
     };
-    // Without any, they go last: Seattle's climbing gyms have no sites of
-    // their own, and seattle.gov is still not one.
     let (named, other): (Vec<Hit>, Vec<Hit>) = town.into_iter().partition(named_after_town);
     sorted.extend(other);
-    if local == 0 {
-        sorted.extend(named);
-    }
+    sorted.extend(named);
     sorted.truncate(keep);
     *hits = sorted;
 }

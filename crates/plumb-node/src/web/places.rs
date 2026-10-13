@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn town_sites_go_last_when_the_places_have_no_sites() {
+    fn town_sites_go_last() {
         let site = |domain: &str, title: &str| Hit {
             domain: domain.into(),
             url: format!("https://{domain}/"),
@@ -539,6 +539,15 @@ mod tests {
         local_first(&business, &mut hits, local, 10);
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
         assert_eq!(domains, ["slicelife.com", "denvergov.org"]);
+        // After the places' own sites too, while there is room.
+        let local = || vec![site("bluepan.com", "Blue Pan")];
+        let mut roomy = hits.clone();
+        local_first(&found(), &mut roomy, local(), 3);
+        let domains: Vec<&str> = roomy.iter().map(|h| h.domain.as_str()).collect();
+        assert_eq!(domains, ["bluepan.com", "slicelife.com", "denvergov.org"]);
+        local_first(&found(), &mut hits, local(), 2);
+        let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
+        assert_eq!(domains, ["bluepan.com", "slicelife.com"]);
     }
 
     #[test]
