@@ -302,15 +302,18 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         }
     }
     // "coffee open now", "pharmacy open late": a kind of place asked for
-    // at a time, with no town, is near the searcher. A time alone says
-    // that only of words that are all kinds of place: "pizza tonight",
-    // not "stock market today".
+    // at a time, with no town, is near the searcher, and so is the
+    // "nearest pharmacy". A time alone says that only of words that are
+    // all kinds of place: "pizza tonight", not "stock market today".
     let kinds = |words: &[String]| {
         words
             .iter()
             .all(|w| FILLER.contains(&w.as_str()) || is_kind_word(w))
     };
-    if said_when && words.last().is_some_and(|w| is_kind_word(w)) && (said_hours || kinds(&words)) {
+    let said_nearest = words.iter().any(|w| w == "nearest" || w == "closest");
+    if words.last().is_some_and(|w| is_kind_word(w))
+        && (said_nearest || (said_when && (said_hours || kinds(&words))))
+    {
         readings.extend(near_me(what_of(&words)));
     }
     readings
@@ -1592,8 +1595,27 @@ mod tests {
             Some(("pharmacy".into(), Near::Me))
         );
         assert_eq!(query("pizza tonight"), Some(("pizza".into(), Near::Me)));
+        // After any town the words may name ("gas" is none).
+        for (nearest, what) in [
+            ("nearest gas station", "gas station"),
+            ("where is the closest hospital", "hospital"),
+        ] {
+            let near_me = PlaceQuery {
+                what: what.into(),
+                near: Near::Me,
+                said_where: true,
+            };
+            assert_eq!(place_query_readings(nearest).last(), Some(&near_me));
+        }
+        // A town still says where.
+        assert_eq!(
+            query("nearest pharmacy in denver"),
+            Some(("pharmacy".into(), Near::Named("denver".into())))
+        );
         // Not for words that are no kind of place.
         assert_eq!(query("chrome open now"), None);
+        assert_eq!(query("nearest neighbor search"), None);
+        assert_eq!(query("closest pair of points"), None);
         assert_eq!(query("news today"), None);
         // Only "in", "near" and "near me" say where for sure.
         assert!(parse_place_query("pizza in denver").unwrap().said_where);
