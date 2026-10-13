@@ -137,3 +137,22 @@ async fn mcp_json_and_searxng_share_bounded_places_and_navigation_controls() {
         .unwrap();
     assert!(named.get("places").is_none());
 }
+
+#[tokio::test]
+async fn a_business_named_with_its_town_lists_its_places() {
+    // "first branch denver" says where without "in" or a kind of place:
+    // only the place index knows Denver is a town.
+    assert!(plumb_index::places::parse_place_query("first branch denver").is_none());
+    let (_, _, body) = send(
+        router(Arc::new(BankPlaces)),
+        "/api/search?q=first+branch+denver&full=1",
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["places"]["status"], "available", "{body}");
+    assert_eq!(json["places"]["hits"][0]["place"]["name"], "First Branch");
+    let mcp = crate::mcp::Mcp::new(Arc::new(BankPlaces), None)
+        .search("first branch denver", None, &SearchOptions::default())
+        .unwrap();
+    assert_eq!(mcp["places"]["hits"][0]["place"]["name"], "First Branch");
+}

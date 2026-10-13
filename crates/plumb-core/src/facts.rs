@@ -530,11 +530,28 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         .to_lowercase()
         .replace('’', "'");
     let q = crate::collapse_whitespace(&q);
-    let q = ["what is ", "what's ", "whats ", "what are ", "tell me "]
-        .iter()
-        .find_map(|lead| q.strip_prefix(lead))
-        .unwrap_or(&q)
-        .to_string();
+    // "what year was einstein born" asks when.
+    let q = match q.strip_prefix("what year ") {
+        Some(rest) => format!("when {rest}"),
+        None => q,
+    };
+    // The words that ask are not the subject's: "who is obama's wife",
+    // "who was the wife of henry viii".
+    let q = [
+        "what is ",
+        "what's ",
+        "whats ",
+        "what are ",
+        "what was ",
+        "who is ",
+        "who's ",
+        "who was ",
+        "tell me ",
+    ]
+    .iter()
+    .find_map(|lead| q.strip_prefix(lead))
+    .unwrap_or(&q)
+    .to_string();
     // "the capital of x"; the subject that ends the query keeps its own
     // "the" ("the art of war author"), dropped below unless a work's.
     let whole = q.as_str();
@@ -548,6 +565,7 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("how many people live in ", &[Population], false),
         ("how tall is ", &[Height, Elevation], false),
         ("how high is ", &[Height, Elevation], false),
+        ("how tall was ", &[Height, Elevation], false),
         ("height of ", &[Height, Elevation], false),
         ("elevation of ", &[Elevation], false),
         ("area of ", &[Area], false),
@@ -562,8 +580,6 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("who started ", &[Founder], false),
         ("who created ", &[Founder], false),
         ("ceo of ", &[Ceo], false),
-        ("who is the ceo of ", &[Ceo], false),
-        ("who's the ceo of ", &[Ceo], false),
         ("who runs ", &[Ceo], false),
         ("headquarters of ", &[Headquarters], false),
         ("where is the headquarters of ", &[Headquarters], false),
@@ -571,7 +587,6 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("currency in ", &[Currency], false),
         ("what currency is used in ", &[Currency], false),
         ("who wrote ", &[Author], false),
-        ("who is the author of ", &[Author], false),
         ("author of ", &[Author], false),
         ("writer of ", &[Author], false),
         ("who directed ", &[Director], false),
@@ -582,23 +597,13 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("who sculpted ", &[Creator], false),
         ("who designed ", &[Creator], false),
         ("who owns ", &[Owner], false),
-        ("who is the owner of ", &[Owner], false),
         ("owner of ", &[Owner], false),
         ("birthplace of ", &[Birthplace], false),
-        ("who is the wife of ", &[Spouse], false),
-        ("who is the husband of ", &[Spouse], false),
         ("wife of ", &[Spouse], false),
         ("husband of ", &[Spouse], false),
         ("spouse of ", &[Spouse], false),
-        ("who is the president of ", &[HeadOfState], false),
         ("president of ", &[HeadOfState], false),
-        ("who is the prime minister of ", &[HeadOfGovernment], false),
         ("prime minister of ", &[HeadOfGovernment], false),
-        (
-            "who is the leader of ",
-            &[HeadOfGovernment, HeadOfState],
-            false,
-        ),
         ("leader of ", &[HeadOfGovernment, HeadOfState], false),
         ("coordinates of ", &[Coordinates], false),
         ("gps coordinates of ", &[Coordinates], false),
@@ -620,6 +625,8 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         (" birthday", &[Born], false),
         (" date of birth", &[Born], false),
         (" birth date", &[Born], false),
+        (" date of death", &[Died], false),
+        (" death date", &[Died], false),
         (" age", &[Born], true),
         (" founder", &[Founder], false),
         (" founders", &[Founder], false),
@@ -636,6 +643,7 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         (" wife", &[Spouse], false),
         (" husband", &[Spouse], false),
         (" spouse", &[Spouse], false),
+        (" married to", &[Spouse], false),
         (" president", &[HeadOfState], false),
         (" prime minister", &[HeadOfGovernment], false),
         (" leader", &[HeadOfGovernment, HeadOfState], false),
@@ -652,8 +660,6 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("when was ", " born", &[Born]),
         ("when is ", " birthday", &[Born]),
         ("where was ", " born", &[Birthplace]),
-        ("who is ", " married to", &[Spouse]),
-        ("who was ", " married to", &[Spouse]),
         ("when did ", " die", &[Died]),
         ("when was ", " founded", &[Founded]),
         ("when was ", " established", &[Founded]),
@@ -700,7 +706,9 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
     .trim();
     // "nepal's capital", "what is australia's capital".
     let subject = subject.strip_suffix("'s").unwrap_or(subject).trim();
-    if kinds.is_empty() || subject.is_empty() || subject.split(' ').count() > 6 {
+    // "who is the ceo" names no one.
+    if kinds.is_empty() || subject.is_empty() || subject == "the" || subject.split(' ').count() > 6
+    {
         return None;
     }
     Some(FactQuestion {
@@ -857,6 +865,17 @@ mod tests {
                 "neptune",
             ),
             ("radius of the earth", Radius, "earth"),
+            // How people ask about people.
+            ("who is kamala harris husband", Spouse, "kamala harris"),
+            ("who is obama's wife", Spouse, "obama"),
+            ("who was abraham lincoln's wife", Spouse, "abraham lincoln"),
+            ("who was the wife of henry viii", Spouse, "henry viii"),
+            ("who's the ceo of apple", Ceo, "apple"),
+            ("what was einstein's birthday", Born, "einstein"),
+            ("what year was einstein born", Born, "einstein"),
+            ("what year did elvis die", Died, "elvis"),
+            ("einstein date of death", Died, "einstein"),
+            ("how tall was abraham lincoln", Height, "abraham lincoln"),
         ] {
             assert_eq!(asked(q), Some((kind, subject.into(), false)), "{q}");
         }
@@ -912,5 +931,7 @@ mod tests {
         assert_eq!(asked("capital one"), None);
         assert_eq!(asked("python"), None);
         assert_eq!(asked("capital"), None);
+        assert_eq!(asked("who is ada lovelace"), None);
+        assert_eq!(asked("who is the ceo"), None);
     }
 }

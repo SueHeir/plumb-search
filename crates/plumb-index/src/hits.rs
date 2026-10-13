@@ -3,7 +3,7 @@
 //! untitled sites moved down).
 
 use anyhow::Result;
-use plumb_core::{normalize_text, registrable_domain};
+use plumb_core::{is_function_word, normalize_text, registrable_domain};
 use tantivy::schema::Value;
 use tantivy::TantivyDocument;
 
@@ -40,34 +40,50 @@ impl Searcher {
     /// either, nor is one with another name to show for a title
     /// (cars.com for "used cars"): vanguard.com for "vanguard". Nor is a site that scores
     /// within [`UNTITLED_CLOSE_SHARE`] of the first.
+    ///
+    /// A bare site the query does not name is left out, first or not, when
+    /// only meaning found it: no word of `query` is in its text or its
+    /// address. Nothing a person sees then ties it to the search, and the
+    /// vectors of sites with little text are near many queries the model
+    /// barely knows ("pyenv" found five expired domains). emmys.com for
+    /// "emmy awards" shows its word in its address, so it stays.
     pub(crate) fn untitled_last(
         &self,
         searcher: &tantivy::Searcher,
         mut ranked: Vec<Ranked>,
+        query: &str,
         limit: usize,
     ) -> Result<Vec<Ranked>> {
         let window = limit.saturating_add(UNTITLED_LOOKAHEAD).min(ranked.len());
-        if window < 2 {
-            return Ok(ranked);
-        }
         let rest = ranked.split_off(window);
-        let close = ranked[0].score * UNTITLED_CLOSE_SHARE;
-        let mut titled = Vec::with_capacity(rest.len() + window);
-        let mut bare = Vec::new();
-        for (i, site) in ranked.into_iter().enumerate() {
-            let untitled = i > 0
-                && !site.label_names_query
+        let words = normalize_text(query);
+        let words: Vec<&str> = words
+            .split(' ')
+            .filter(|word| word.chars().count() >= 3 && !is_function_word(word))
+            .collect();
+        let mut kept = Vec::with_capacity(window);
+        for site in ranked {
+            let bare = !site.label_names_query
                 && site.link_score < WELL_KNOWN_LINK_SCORE
-                && site.score < close
                 && !self.says_what_it_is(searcher, site.addr)?
                 && !self.has_aliases(searcher, site.addr)?;
-            if untitled {
-                bare.push(site);
+            if !(bare && !site.named && found_by_meaning_alone(&site, &words)) {
+                kept.push((site, bare));
+            }
+        }
+        let close = kept
+            .first()
+            .map_or(0.0, |(first, _)| first.score * UNTITLED_CLOSE_SHARE);
+        let mut titled = Vec::with_capacity(rest.len() + kept.len());
+        let mut untitled = Vec::new();
+        for (i, (site, bare)) in kept.into_iter().enumerate() {
+            if i > 0 && bare && site.score < close {
+                untitled.push(site);
             } else {
                 titled.push(site);
             }
         }
-        titled.extend(bare);
+        titled.extend(untitled);
         titled.extend(rest);
         Ok(titled)
     }
@@ -101,7 +117,7 @@ impl Searcher {
             .as_deref()
             .is_some_and(|url| reads_another_site(url, &domain));
         let url = stored_url
-            .filter(|_| !borrowed)
+            .filter(|url| !borrowed && !is_check_address(url))
             .unwrap_or_else(|| format!("https://{domain}/"));
         let own = |field| text(field).filter(|_| !borrowed);
         let about = text(self.fields.about);
@@ -113,9 +129,11 @@ impl Searcher {
             // A title in the wrong encoding ("����") says nothing.
             title: own(self.fields.title).filter(|title| !title.contains('\u{FFFD}')),
             official: about.is_some(),
-            // The site's own description, else Wikipedia's, else what
-            // Wikidata says it is.
-            description: own(self.fields.description).or(about),
+            // The site's own description, unless its template left it
+            // unfilled, else Wikipedia's, else what Wikidata says it is.
+            description: own(self.fields.description)
+                .filter(|description| !is_unfilled(description))
+                .or(about),
             domain,
             score: ranked.score,
             text_score: ranked.text_score,
@@ -139,11 +157,70 @@ impl Searcher {
     }
 }
 
+/// Whether no word of a site's text matched the query and its address,
+/// without its ending, holds none of `words` ([`Searcher::untitled_last`]).
+fn found_by_meaning_alone(site: &Ranked, words: &[&str]) -> bool {
+    site.query_evidence.as_ref().is_some_and(|evidence| {
+        let address = evidence
+            .domain
+            .rsplit_once('.')
+            .map_or(evidence.domain.as_str(), |(name, _)| name)
+            .to_lowercase();
+        evidence.lexical_score <= 0.0 && !words.iter().any(|word| address.contains(word))
+    })
+}
+
 /// Whether `url`, a site's homepage address, is on another site than
 /// `domain`: prevention.nih.gov for nih.gov, play.google.com for
 /// google.com ([`plumb_core::subsites`]).
 pub(crate) fn reads_another_site(url: &str, domain: &str) -> bool {
     registrable_domain(url).is_some_and(|site| site != domain)
+}
+
+/// Whether `url`, where a crawl of a homepage ended, is a bot check's
+/// address (https://www.skyscanner.nl/sttc/px/captcha-v2/index.html?uuid=…,
+/// https://www.dreamwidth.org/captcha?returnto=…): a link to it leads only
+/// to a stale check, so the site's root is linked instead.
+fn is_check_address(url: &str) -> bool {
+    let path = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .map_or("", |(_, path)| path);
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    path.contains("captcha") || path.starts_with("cdn-cgi/")
+}
+
+/// Descriptions, after [`normalize_text`], that a site's template was
+/// meant to fill in.
+const UNFILLED: &[&str] = &[
+    "description",
+    "desc",
+    "site description",
+    "meta description",
+    "description here",
+    "your description here",
+    "null",
+    "undefined",
+];
+
+/// Whether `description` is a template's placeholder no one filled in,
+/// which says nothing of the site: "{{description}}" (frengly.com), "{{
+/// page.excerpt }}", "null", "YOUR DESCRIPTION HERE", or a name and
+/// "desc" ("surbl desc" on surbl.org).
+pub(crate) fn is_unfilled(description: &str) -> bool {
+    let text = description.trim();
+    let words = normalize_text(text);
+    [("{{", "}}"), ("{%", "%}"), ("${", "}")]
+        .iter()
+        .any(|(open, close)| text.starts_with(open) && text.ends_with(close))
+        || UNFILLED.contains(&words.as_str())
+        || words
+            .split_once(' ')
+            .is_some_and(|(_, last)| last == "desc")
 }
 
 /// The text of `hit` that search operators look at, besides its domain.

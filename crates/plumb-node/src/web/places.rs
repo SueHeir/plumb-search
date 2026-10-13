@@ -529,6 +529,16 @@ mod tests {
         local_first(&found(), &mut hits, Vec::new(), 10);
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
         assert_eq!(domains, ["slicelife.com", "denvergov.org"]);
+        // A business named with its town leaves the results as they are.
+        let business = PlaceResults {
+            what: "subway".into(),
+            guessed: true,
+            ..found()
+        };
+        let local = vec![site("subway.com", "Subway sandwiches")];
+        local_first(&business, &mut hits, local, 10);
+        let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
+        assert_eq!(domains, ["slicelife.com", "denvergov.org"]);
     }
 
     #[test]

@@ -13,16 +13,23 @@ When a query only might say where ("denver brewery", with no "in" or "near") and
 - `WHAT in WHERE`, `WHAT near WHERE`, `WHAT around WHERE`, `WHAT close to WHERE`.
 - `WHAT near me`, `WHAT nearby`, `nearby WHAT`.
 - `WHERE WHAT` or `WHAT WHERE` when WHAT is a kind of place ("denver pizza", "sushi fort collins").
+- `NAME WHERE` when WHERE is a city and a place in or near it, other than a town, is called NAME ("starbucks denver", "pizza hut denver"), and no site is named by the whole query. These list the places but leave the results in their order, since NAME may also be a word for something else ("subway new york").
 
 Words like "best", "good" or "cheap" are left out of WHAT. WHAT must be in a place's name or among the words for its kind: a café is found by "cafe", "coffee" and "coffee shop", a supermarket by "grocery store".
 
-WHERE is a town (or village, suburb or neighbourhood) by its name or another name ("nyc", "philly"), optionally with its state or country: "portland maine", "paris, france", "denver co". Among towns of one name the bigger wins, and one in the searcher's country a little more. WHERE can also be any named place, such as a stadium or a museum. A landmark, a place the English Wikipedia article on it names plainly ("Big Ben", "Louvre", "Yellowstone National Park"), counts as a town: "hotels near yellowstone" is the park, not the village in Alberta, though a city of the name still comes first.
+WHERE is a town (or village, suburb or neighbourhood) by its name or another name ("nyc", "philly"), optionally with its state or country: "portland maine", "paris, france", "denver co". Among towns of one name the bigger wins, and one in the searcher's country a little more; when two are close in size Plumb asks which, unless they are within 30 km of each other ("kansas city", "niagara falls"), when it searches around the bigger. WHERE can also be a named place that has a Wikidata item, such as a stadium or a museum; any other place, such as a shop or an office, only with its town ("coffee near union station denver"). A landmark, a place the English Wikipedia article on it names plainly ("Big Ben", "Louvre", "Yellowstone National Park"), counts as a town: "hotels near yellowstone" is the park, not the village in Alberta, though a city of the name still comes first. A WHERE guessed without "in" or "near" must be a city or borough, or a choice of towns whose likeliest is one ("portland pizza").
 
 Places are listed within a town's size of its centre (12 km for a city, 6 for a town, 10 around a national park or nature reserve, 3 for a village or around another named place). Places of the kind asked for come first, then those that only have the words in their name (for "sushi", sushi bars before an office called Sushi Tech). Within each, nearest first, with places that have a website, a brand or a Wikidata item a little ahead. When fewer than three are found, Plumb looks three times as far.
+
+A search that finds no place, and whose WHAT is neither a kind of place nor the name of a place other than a town, lists none (a "near me" search still says it found nothing): "sort a list in python" and "calories in a shot" ask for no place, while "pizza in gotham" says it knows no Gotham.
 
 ## Near me
 
 "Near me" is the town you give on the **About you** page or the welcome page, kept on the node for your browser only (on a public server, in your browser). Plumb never works out where you are from your address or anything else. Without a town, a "near me" search says how to give one.
+
+## The time in a town
+
+"time in boulder" or "what time is it in porto" is answered for any city or town in the places, not only the few hundred places the answer knows by name: by the clock its country keeps, or in the US, Canada and Australia its state's. A town in a state that keeps two (Texas, Ontario, New South Wales) gets none unless the answer knows it by name, and one in another country that keeps several (Russia, Brazil, Portugal) gets one only when it is much nearer one zone's main city than any city keeping another time: a town near a line between two clocks gets no answer rather than a wrong one.
 
 ## What is kept
 
