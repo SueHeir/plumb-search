@@ -1,0 +1,132 @@
+/* The search window, in Zotero's own colors, light and dark. */
+
+#plumb-search-window {
+  background: var(--material-background);
+  color: var(--fill-primary);
+}
+
+#search {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+  gap: 8px;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.bar.end {
+  justify-content: flex-end;
+}
+
+.bar label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#query {
+  flex: 1;
+  font-size: 1.15em;
+  padding: 4px 8px;
+}
+
+#status {
+  margin: 0;
+  min-height: 1.3em;
+  color: var(--fill-secondary);
+}
+
+#results {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: var(--material-border-quarternary);
+  border-radius: 5px;
+}
+
+#results li + li {
+  border-top: var(--material-border-quinary);
+}
+
+#results label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+#results label:hover {
+  background: var(--fill-senary);
+}
+
+#results input {
+  margin: 3px 0 0;
+}
+
+.text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.kind {
+  display: inline-block;
+  margin-inline-end: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--fill-quinary);
+  color: var(--fill-secondary);
+  font-size: 0.85em;
+}
+
+.title {
+  font-weight: 600;
+}
+
+.about {
+  color: var(--fill-secondary);
+}
+
+.link {
+  color: var(--accent-blue);
+  font-size: 0.9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.link:hover,
+.link:focus-visible {
+  text-decoration: underline;
+}
+
+.state {
+  color: var(--fill-secondary);
+  white-space: nowrap;
+}
+
+.state[data-state="added"] {
+  color: var(--accent-green);
+}
+
+.state[data-state="failed"] {
+  color: var(--accent-red);
+}
+
+#into {
+  flex: 1;
+  color: var(--fill-secondary);
+  text-align: end;
+}
