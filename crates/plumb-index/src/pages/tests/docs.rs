@@ -948,3 +948,46 @@ fn docs_pages_are_named_by_what_their_title_and_address_share() {
     assert!(searcher.search("functions", 10).unwrap().is_empty());
     assert!(searcher.search("open", 10).unwrap().is_empty());
 }
+
+#[test]
+fn manual_pages_are_named_without_their_section() {
+    let man = |name: &str, section: &str| {
+        docs_page(
+            &format!(
+                "https://man7.org/linux/man-pages/man{}/{name}.{section}.html",
+                &section[..1]
+            ),
+            &format!("{name}({section})"),
+            &[],
+            "man7.org > Linux > man-pages",
+        )
+    };
+    let pages = [
+        man("ls", "1"),
+        man("flatpak-remote-ls", "1"),
+        man("ls", "1p"),
+        man("tar", "1"),
+        man("git-get-tar-commit-id", "1"),
+    ];
+    let (_dir, searcher) = searcher(&pages);
+    for (query, title) in [
+        ("man ls", "ls(1)"),
+        ("man tar", "tar(1)"),
+        ("linux tar", "tar(1)"),
+    ] {
+        let hits = searcher.search(query, 10).unwrap();
+        assert_eq!(hits[0].page.title, title, "{query}: {hits:?}");
+        assert!(hits[0].named, "{query}");
+        // It comes before a site called "man" something.
+        let sites = [site("manchester.ac.uk", false), site("other.com", false)];
+        let placed = place_pages(query, &sites, hits);
+        let first = placed.iter().find(|p| p.at == 0 && p.under.is_none());
+        assert_eq!(
+            first.map(|p| p.hit.page.title.as_str()),
+            Some(title),
+            "{query}"
+        );
+    }
+    // A bare name may be anything.
+    assert!(searcher.search("ls", 10).unwrap().is_empty());
+}

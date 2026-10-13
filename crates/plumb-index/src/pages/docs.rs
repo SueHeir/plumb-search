@@ -435,11 +435,20 @@ fn docs_host_requested(site: &plumb_core::docs::DocsSite, ops: &Operators) -> bo
         })
 }
 
-/// `text` as a docs symbol: lower case, without call parentheses, and
-/// only letters, digits, `_`, `.`, `:` and inner hyphens ("border-radius",
+/// `text` as a docs symbol: lower case, without call parentheses or a
+/// manual page's section ("ls(1)" documents ls), and only letters,
+/// digits, `_`, `.`, `:` and inner hyphens ("border-radius",
 /// "Content-Type").
 fn canonical_docs_symbol(text: &str) -> Option<String> {
     let text = text.trim().trim_end_matches("()");
+    let text = match text.strip_suffix(')').and_then(|t| t.rsplit_once('(')) {
+        Some((name, section))
+            if !section.is_empty() && section.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            name
+        }
+        _ => text,
+    };
     (!text.is_empty()
         && text.len() < 256
         && text.chars().any(char::is_alphabetic)
