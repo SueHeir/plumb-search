@@ -204,6 +204,11 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
             }
             format!("place={value}")
         }
+        // An island is searched around ("hotels in maui") when Wikidata
+        // knows it; there are tens of thousands of nameless rocks.
+        Some(value @ ("island" | "archipelago")) if get("wikidata").is_some() => {
+            format!("place={value}")
+        }
         _ => {
             let (key, value) = PLACE_KEYS
                 .iter()
@@ -1233,6 +1238,18 @@ mod tests {
         assert_eq!(park.kind, "boundary=national_park");
         let county = &[("name", "Mariposa County"), ("boundary", "administrative")];
         assert!(place_of(&tags(county), "r2".into(), false).is_none());
+        // So is an island Wikidata knows, however it is mapped.
+        let maui = &[
+            ("name", "Maui"),
+            ("place", "island"),
+            ("wikidata", "Q183222"),
+        ];
+        assert_eq!(
+            place_of(&tags(maui), "r3".into(), false).unwrap().kind,
+            "place=island"
+        );
+        let rock = &[("name", "Seal Rock"), ("place", "island")];
+        assert!(place_of(&tags(rock), "w4".into(), false).is_none());
     }
 
     #[test]

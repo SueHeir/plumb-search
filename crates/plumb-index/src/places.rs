@@ -979,7 +979,11 @@ impl PlaceSearcher {
                 .into_iter()
                 .filter(|place| {
                     (qualifier.is_empty() || place_is_in(place, &qualifier))
-                        && named_country.is_none_or(|country| country_matches(place, country))
+                        // Nor an island the country is on: "hotels in
+                        // jamaica" asks for a town.
+                        && named_country.is_none_or(|country| {
+                            place.is_town() && country_matches(place, country)
+                        })
                         && named_state.is_none_or(|(state, country)| {
                             // Uruguay's Florida is in its department FL.
                             let (region, of) = (place.region.as_deref(), place.country.as_deref());
@@ -1920,6 +1924,22 @@ mod tests {
             },
             at("Lake Hotel", "tourism=hotel", 44.55, -110.40),
             at("Hotel Westminster", "tourism=hotel", 51.499, -0.127),
+            // An island, a village of its name, and an island country.
+            Place {
+                rank: plumb_core::place::landmark_rank(60_000),
+                ..at("Maui", "place=island", 20.8, -156.33)
+            },
+            Place {
+                country: Some("PH".into()),
+                ..at("Maui", "place=village", 13.9, 124.15)
+            },
+            at("Wailea Beach Resort", "tourism=hotel", 20.68, -156.44),
+            Place {
+                rank: plumb_core::place::landmark_rank(80_000),
+                country: Some("JM".into()),
+                ..at("Jamaica", "place=island", 18.15, -77.3)
+            },
+            at("Jamaica Inn", "tourism=hotel", 18.16, -77.31),
         ]);
         // The park is meant, and searched wide: its hotel is 9 km off.
         let park = searcher
@@ -1937,6 +1957,15 @@ mod tests {
         // The village is still found by its province.
         let village = searcher.locate("yellowstone ab", None).unwrap().unwrap();
         assert_eq!(village.kind, "place=village");
+        // An island is searched around as widely as a park.
+        let maui = searcher
+            .search("hotels in maui", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(maui.center.unwrap().kind, "place=island");
+        assert_eq!(maui.hits[0].place.name, "Wailea Beach Resort");
+        let jamaica = searcher.resolve("jamaica", None, None).unwrap();
+        assert_eq!(jamaica.status, LocationStatus::MissingLocation);
     }
 
     #[test]

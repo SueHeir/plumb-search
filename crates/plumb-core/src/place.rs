@@ -163,9 +163,14 @@ pub fn town_size(kind: &str) -> Option<f64> {
 }
 
 /// How far around a place that is no town, in km, places count as near
-/// it: national parks and nature reserves are wide. `None` for the rest.
+/// it: national parks, nature reserves and islands are wide. `None` for
+/// the rest.
 pub fn area_size(kind: &str) -> Option<f64> {
-    matches!(kind, "boundary=national_park" | "leisure=nature_reserve").then_some(10.0)
+    matches!(
+        kind,
+        "boundary=national_park" | "leisure=nature_reserve" | "place=island" | "place=archipelago"
+    )
+    .then_some(10.0)
 }
 
 /// Tiers of [`place_rank`], a million apart.
@@ -821,6 +826,7 @@ mod tests {
         };
         assert!(!village.is_landmark());
         assert_eq!(area_size("leisure=nature_reserve"), Some(10.0));
+        assert_eq!(area_size("place=island"), Some(10.0));
         assert_eq!(area_size("tourism=museum"), None);
     }
 
