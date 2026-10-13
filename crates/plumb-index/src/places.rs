@@ -22,6 +22,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use plumb_core::place::{
     distance_km, is_kind_word, normalize_region, parse_place, town_size, write_place, Place,
+    US_STATES,
 };
 use plumb_core::{country_of_any_name, joined, normalize_text};
 use serde::{Deserialize, Serialize};
@@ -859,6 +860,14 @@ impl PlaceSearcher {
             .filter(|w| !w.is_empty())
             .map(str::to_string)
             .collect();
+        // A US state named alone is no town either: "hotels in florida"
+        // is not Florida in Uruguay. A town of its name in the state still
+        // is ("new york"), and "washington" is the capital too.
+        let whole = words.join(" ");
+        let named_state = US_STATES
+            .iter()
+            .find(|(_, name)| normalize_text(name) == whole)
+            .map(|(code, _)| *code);
         // A town first, however the words split ("boulder co" is Boulder in
         // Colorado before it is a gym called Boulder & Co.), then any place.
         let mut other = None;
@@ -872,6 +881,12 @@ impl PlaceSearcher {
                 .filter(|place| {
                     (qualifier.is_empty() || place_is_in(place, &qualifier))
                         && named_country.is_none_or(|country| country_matches(place, country))
+                        && named_state.is_none_or(|state| {
+                            // Uruguay's Florida is in its department FL.
+                            let region = place.region.as_deref().unwrap_or_default();
+                            place.country.as_deref() == Some("US")
+                                && (region == state || (state == "WA" && region == "DC"))
+                        })
                 })
                 .collect();
             // "union station denver", "soho london": a place by the town
@@ -901,7 +916,7 @@ impl PlaceSearcher {
             requested: text.to_string(),
             status: if conflict {
                 LocationStatus::ConflictingConstraints
-            } else if named_country.is_some() {
+            } else if named_country.is_some() || named_state.is_some() {
                 LocationStatus::MissingLocation
             } else {
                 LocationStatus::UnknownLocation
@@ -1649,6 +1664,39 @@ mod tests {
             .search("Poilâne Atlantis", None, Some("US"), 5)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn a_us_state_named_alone_is_no_town_elsewhere() {
+        let mut fixtures = places();
+        fixtures.extend([
+            city("Florida", 58_000, "Valle del Cauca", "CO", 3.32, -76.23),
+            city("Florida", 33_000, "FL", "UY", -34.10, -56.21),
+            city("Montana", 40_000, "Montana", "BG", 43.41, 23.22),
+            city("Washington", 690_000, "DC", "US", 38.90, -77.04),
+            at("Hotel Florida", "tourism=hotel", 3.321, -76.231),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        for state in ["florida", "Montana"] {
+            let found = searcher.resolve(state, Some("US"), None).unwrap();
+            assert_eq!(found.status, LocationStatus::MissingLocation, "{state}");
+            assert!(found.candidates.is_empty(), "{state}");
+        }
+        let hotels = searcher
+            .search("hotels in florida", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert!(hotels.center.is_none() && hotels.hits.is_empty());
+        // The town is still found with its country, and towns named like
+        // their state, or "washington", still are.
+        let colombia = searcher.locate("florida colombia", None).unwrap().unwrap();
+        assert_eq!(colombia.country.as_deref(), Some("CO"));
+        assert_eq!(
+            searcher.locate("new york", None).unwrap().unwrap().name,
+            "New York"
+        );
+        let capital = searcher.locate("washington", None).unwrap().unwrap();
+        assert_eq!(capital.region.as_deref(), Some("DC"));
     }
 
     #[test]
