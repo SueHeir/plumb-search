@@ -67,6 +67,12 @@ pub trait SearchBackend: Send + Sync {
         let _ = domain;
         None
     }
+    /// Whether many sites' titles have `word`
+    /// ([`Searcher::is_common_word`]). By default every word is.
+    fn common_word(&self, word: &str) -> bool {
+        let _ = word;
+        true
+    }
 
     /// The town (or else other place) `text` names, for a weather answer;
     /// see [`plumb_index::places::PlaceSearcher::locate`]. By default none.
@@ -274,6 +280,10 @@ impl SearchBackend for IndexBackend {
 
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         self.map.as_ref()?.get()
+    }
+
+    fn common_word(&self, word: &str) -> bool {
+        self.searcher.is_common_word(word)
     }
 
     fn site(&self, domain: &str) -> Option<Hit> {
