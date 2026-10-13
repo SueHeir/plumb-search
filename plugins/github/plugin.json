@@ -5,6 +5,7 @@
   "keywords": ["gh", "github"],
   "hints": ["github", "repository", "repositories", "source code", "open source", "open-source"],
   "ids": ["github"],
-  "pages": ["github.com"],
+  "suggest": "button",
+  "pages": ["github.com", "www.github.com"],
   "cache_seconds": 3600
 }

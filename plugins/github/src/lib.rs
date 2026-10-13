@@ -1,13 +1,13 @@
 //! A Plumb Search plugin for GitHub, through its official API
 //! (<https://docs.github.com/en/rest>):
 //!
-//! - `gh rust http client`, `tokio github`, or a search that says GitHub,
-//!   repository, source code or open source anywhere in it, finds
-//!   repositories, with their stars, language and last push;
-//! - a search about software, or about whoever makes it, finds them
-//!   unasked when the node knows its GitHub account ("python asyncio
-//!   tutorial"), and one that only names it ("rust", "linus torvalds")
-//!   lists that account's most starred repositories;
+//! - `gh rust http client` or `tokio github` finds repositories, with their
+//!   stars, language and last push;
+//! - a search that says GitHub, repository, source code or open source,
+//!   or one about something whose GitHub account the node knows ("python
+//!   asyncio tutorial"), offers a link to the same, and one that only
+//!   names that thing ("rust", "linus torvalds") lists the account's most
+//!   starred repositories;
 //! - GitHub repositories among the node's own results get a star count
 //!   badge;
 //! - a browser extension can ask it about a repository's page.
@@ -36,9 +36,12 @@ const REPOSITORIES: usize = 8;
 /// Repositories among the node's results looked up at once.
 const MARKED_UP: usize = 30;
 
-/// Words for GitHub itself, left out of what GitHub is asked, since all it
-/// finds are repositories ("tokio github", "pyenv source code"). Longest
-/// first.
+/// So few repositories found that READMEs are searched too.
+const FEW: usize = 3;
+
+/// Words for GitHub itself, left out of what GitHub is asked when a search
+/// ends with them, since all it finds are repositories ("tokio github repo",
+/// "pyenv source code"). Longest first.
 const GITHUB_WORDS: &[&str] = &[
     "github repository",
     "github repo",
@@ -51,43 +54,6 @@ const GITHUB_WORDS: &[&str] = &[
     "repository",
     "repos",
     "repo",
-];
-
-/// Words that ask for GitHub wherever they are in a search: `plugin.json`'s
-/// `hints`, which run the plugin for such a search.
-const ASKING_WORDS: &[&str] = &[
-    "github",
-    "repository",
-    "repositories",
-    "source code",
-    "open source",
-    "open-source",
-];
-
-/// Words in the description of what a search is about that say it is
-/// software, or makes it, so a search about it finds repositories unasked:
-/// "rust" does, while "netflix", a company that also has a GitHub account,
-/// does not.
-const SOFTWARE_WORDS: &[&str] = &[
-    "software",
-    "programming",
-    "programmer",
-    "developer",
-    "open-source",
-    "open source",
-    "computer scientist",
-    "framework",
-    "library",
-    "javascript",
-    "runtime",
-    "compiler",
-    "database",
-    "web browser",
-    "operating system",
-    "development environment",
-    "code editor",
-    "text editor",
-    "package manager",
 ];
 
 /// First path segments of github.com pages that are not someone's account.
@@ -234,6 +200,13 @@ impl From<GraphRepo> for Repo {
 #[derive(Debug, Deserialize)]
 struct GraphAnswer<T> {
     data: Option<T>,
+    #[serde(default)]
+    errors: Vec<GraphError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphError {
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,9 +253,12 @@ fn search(query: &Query) -> Result<Vec<Item>, Error> {
         return Ok(Vec::new());
     };
     let mut repos = find(token.as_deref(), &ask)?;
-    if repos.is_empty() {
+    if repos.len() < FEW {
         if let Some(wider) = ask.in_readmes() {
-            repos = find(token.as_deref(), &wider)?;
+            let more = find(token.as_deref(), &wider)?;
+            if more.len() > repos.len() {
+                repos = more;
+            }
         }
     }
     Ok(repos
@@ -301,8 +277,10 @@ struct Ask {
 
 impl Ask {
     /// The same search in READMEs too, for a search of several words that
-    /// found nothing in names, descriptions and topics ("pyenv common build
-    /// problems").
+    /// found fewer than [`FEW`] repositories by their names, descriptions
+    /// and topics: "pyenv common build problems" finds none, and "Swatinem
+    /// rust-cache Action" only two forks, since an owner's name is in
+    /// neither.
     fn in_readmes(&self) -> Option<Ask> {
         (!self.by_stars && !self.q.contains(':') && self.q.split_whitespace().count() > 1).then(
             || Ask {
@@ -313,22 +291,17 @@ impl Ask {
     }
 }
 
-/// What to ask GitHub for `query`, if anything: a search that runs the
-/// plugin only for what it is about asks only about software.
+/// What to ask GitHub for `query`, if anything.
 fn ask(query: &Query) -> Option<Ask> {
-    let terms = without(&query.terms, GITHUB_WORDS);
+    let terms = trimmed(&query.terms);
     if terms.is_empty() {
         // "github" alone is a search for the site.
         return None;
     }
-    let asked = query.keyword.is_some() || without(&query.text, ASKING_WORDS) != words(&query.text);
     let about = query.about.as_ref();
     let account = about
         .and_then(|about| about.id("github"))
         .filter(|account| is_account(account));
-    if !asked && !(account.is_some() && about.is_some_and(is_software)) {
-        return None;
-    }
     if let (Some(about), Some(account)) = (about, account) {
         if names(&terms, about, account) {
             return Some(Ask {
@@ -337,7 +310,10 @@ fn ask(query: &Query) -> Option<Ask> {
             });
         }
     }
-    if let Some((owner, name)) = named_repository(&terms) {
+    // An address: `https://github.com/tokio-rs/tokio` or without `https://`.
+    if let Some((owner, name)) =
+        repository(&terms).or_else(|| repository(&format!("https://{terms}")))
+    {
         return Some(Ask {
             q: format!("repo:{owner}/{name}"),
             by_stars: false,
@@ -349,36 +325,22 @@ fn ask(query: &Query) -> Option<Ask> {
     })
 }
 
-/// The words of `text`, one space apart.
-fn words(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// `text` without `phrases` (lower case, longest first), in any case.
-fn without(text: &str, phrases: &[&str]) -> String {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let mut kept = Vec::new();
-    let mut at = 0;
-    'words: while at < words.len() {
-        for phrase in phrases {
+/// `terms` without the [`GITHUB_WORDS`] they end with.
+fn trimmed(terms: &str) -> String {
+    let mut words: Vec<&str> = terms.split_whitespace().collect();
+    'trim: loop {
+        for phrase in GITHUB_WORDS {
             let n = phrase.split(' ').count();
-            if words
-                .get(at..at + n)
-                .is_some_and(|found| found.join(" ").to_lowercase() == *phrase)
-            {
-                at += n;
-                continue 'words;
+            let Some(at) = words.len().checked_sub(n) else {
+                continue;
+            };
+            if words[at..].join(" ").to_lowercase() == *phrase {
+                words.truncate(at);
+                continue 'trim;
             }
         }
-        kept.push(words[at]);
-        at += 1;
+        return words.join(" ");
     }
-    kept.join(" ")
-}
-
-fn is_software(about: &About) -> bool {
-    let description = about.description.as_deref().unwrap_or("").to_lowercase();
-    SOFTWARE_WORDS.iter().any(|word| description.contains(word))
 }
 
 /// Whether `terms` only name what the search is about ("rust" for "Rust
@@ -398,21 +360,6 @@ fn folded(text: &str) -> String {
         .join(" ")
 }
 
-/// The repository `terms` are the name or address of, and nothing else:
-/// `tokio-rs/tokio` or `github.com/tokio-rs/tokio`.
-fn named_repository(terms: &str) -> Option<(String, String)> {
-    if terms.contains(char::is_whitespace) || !terms.contains('/') {
-        return None;
-    }
-    let address = terms
-        .strip_prefix("https://")
-        .or_else(|| terms.strip_prefix("http://"))
-        .unwrap_or(terms);
-    let address = address.strip_prefix("www.").unwrap_or(address);
-    let path = address.strip_prefix("github.com/").unwrap_or(address);
-    repository(&format!("https://github.com/{path}"))
-}
-
 /// The repositories GitHub finds for `ask`: through GraphQL with a token,
 /// which says what you starred, or through the REST search without one.
 fn find(token: Option<&str>, ask: &Ask) -> Result<Vec<Repo>, Error> {
@@ -427,6 +374,10 @@ fn find(token: Option<&str>, ask: &Ask) -> Result<Vec<Repo>, Error> {
         let response = Request::get(url)
             .header("Accept", "application/vnd.github+json")
             .send()?;
+        if response.status == 422 {
+            // The repository or account asked about is not there.
+            return Ok(Vec::new());
+        }
         let found: RestFound = limited(response)?.json()?;
         return Ok(found.items.into_iter().map(Repo::from).collect());
     };
@@ -448,8 +399,8 @@ fn limited(response: Response) -> Result<Response, Error> {
     if matches!(response.status, 403 | 429) && response.header("x-ratelimit-remaining") == Some("0")
     {
         return Err(Error::Other(
-            "GitHub has answered all the searches it allows for now \
-             (10 a minute without a token in config.json)"
+            "GitHub has answered all the searches it allows for now; \
+             without a token in config.json, that is 10 a minute"
                 .into(),
         ));
     }
@@ -459,7 +410,11 @@ fn limited(response: Response) -> Result<Response, Error> {
 fn searched(body: &[u8]) -> Result<Vec<Repo>, Error> {
     let answer: GraphAnswer<GraphSearch> = serde_json::from_slice(body)?;
     let Some(data) = answer.data else {
-        return Err(Error::Other("GitHub answered with no data".into()));
+        let why = answer.errors.into_iter().next().map(|e| e.message);
+        return Err(Error::Other(format!(
+            "GitHub answered with no data: {}",
+            why.as_deref().unwrap_or("it gave no reason")
+        )));
     };
     Ok(data
         .search
@@ -722,14 +677,9 @@ mod tests {
         assert_eq!(repo("https://example.org/github.com/a/b"), None);
     }
 
-    fn asked(text: &str, keyword: Option<&str>, about: Option<About>) -> Option<Ask> {
-        let terms = match keyword {
-            Some(keyword) => without(text, &[keyword]),
-            None => text.to_string(),
-        };
+    fn asked(terms: &str, keyword: Option<&str>, about: Option<About>) -> Option<Ask> {
         ask(&Query {
-            text: text.into(),
-            terms,
+            terms: terms.into(),
             keyword: keyword.map(String::from),
             about,
             ..Query::default()
@@ -762,36 +712,41 @@ mod tests {
     #[test]
     fn asks_github_what_a_search_wants_from_it() {
         assert_eq!(
-            asked("gh rust http client", Some("gh"), None),
+            asked("rust http client", Some("gh"), None),
             plain("rust http client")
         );
+        // GitHub's words go only from the end.
+        assert_eq!(asked("tokio github repo", None, None), plain("tokio"));
+        assert_eq!(asked("pyenv Source Code", None, None), plain("pyenv"));
+        assert_eq!(asked("maven repository", None, None), plain("maven"));
         assert_eq!(
             asked("Swatinem rust-cache GitHub Action", None, None),
-            plain("Swatinem rust-cache Action")
-        );
-        assert_eq!(asked("pyenv source code", None, None), plain("pyenv"));
-        assert_eq!(
-            asked("tokio github repo", Some("github"), None),
-            plain("tokio")
+            plain("Swatinem rust-cache GitHub Action")
         );
         assert_eq!(
-            asked("open source pdf editor", None, None),
-            plain("open source pdf editor")
+            asked("source code pro font", None, None),
+            plain("source code pro font")
         );
         assert_eq!(
-            asked("gh tokio-rs/tokio", Some("gh"), None),
+            asked("repository pattern", Some("gh"), None),
+            plain("repository pattern")
+        );
+        // An address is that repository; a name with a slash is searched.
+        assert_eq!(
+            asked("https://github.com/tokio-rs/tokio", Some("gh"), None),
             plain("repo:tokio-rs/tokio")
         );
         assert_eq!(
-            asked("gh https://github.com/tokio-rs/tokio", Some("gh"), None),
+            asked("github.com/tokio-rs/tokio", Some("gh"), None),
             plain("repo:tokio-rs/tokio")
         );
+        assert_eq!(asked("tcp/ip", Some("gh"), None), plain("tcp/ip"));
         // "github" alone is a search for the site.
         assert_eq!(asked("github repository", None, None), None);
     }
 
     #[test]
-    fn asks_about_software_with_an_account_unasked() {
+    fn lists_an_account_for_a_search_that_only_names_it() {
         let rust = || {
             about(
                 "Rust (programming language)",
@@ -801,35 +756,16 @@ mod tests {
         };
         assert_eq!(asked("rust", None, rust()), by_stars("rust-lang"));
         assert_eq!(asked("Rust-Lang", None, rust()), by_stars("rust-lang"));
+        assert_eq!(asked("rust github", None, rust()), by_stars("rust-lang"));
         assert_eq!(
             asked("rust http client", None, rust()),
             plain("rust http client")
         );
-        let linus = about(
-            "Linus Torvalds",
-            "Finnish and American software engineer (born 1969)",
-            "torvalds",
-        );
+        let linus = about("Linus Torvalds", "Finnish software engineer", "torvalds");
         assert_eq!(asked("linus torvalds", None, linus), by_stars("torvalds"));
-
-        // A company with an account is asked about only when asked for.
-        let microsoft = || {
-            about(
-                "Microsoft",
-                "American multinational technology company",
-                "microsoft",
-            )
-        };
-        assert_eq!(asked("microsoft", None, microsoft()), None);
-        assert_eq!(
-            asked("microsoft github", Some("github"), microsoft()),
-            by_stars("microsoft")
-        );
-        // Without an account, or anything known, nothing is asked unasked.
-        assert_eq!(asked("frp reverse proxy", None, None), None);
         let mut no_account = rust();
         no_account.as_mut().unwrap().ids.clear();
-        assert_eq!(asked("rust", None, no_account), None);
+        assert_eq!(asked("rust", None, no_account), plain("rust"));
     }
 
     #[test]
@@ -841,13 +777,6 @@ mod tests {
         assert_eq!(plain("pyenv").unwrap().in_readmes(), None);
         assert_eq!(by_stars("rust-lang").unwrap().in_readmes(), None);
         assert_eq!(plain("repo:a/b").unwrap().in_readmes(), None);
-    }
-
-    #[test]
-    fn hints_in_plugin_json_are_the_asking_words() {
-        let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../plugin.json")).unwrap();
-        assert_eq!(manifest["hints"], json!(ASKING_WORDS));
     }
 
     #[test]
