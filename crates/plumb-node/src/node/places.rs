@@ -68,6 +68,7 @@ pub(super) fn refresh(
     let found = match &wanted {
         None => None,
         Some(wanted) => {
+            let _big = inner.one_big_job();
             match open_or_build_with_budget(&inner.paths.data, wanted, inner.storage.clone()) {
                 Ok(found) => Some(found),
                 Err(err) => {

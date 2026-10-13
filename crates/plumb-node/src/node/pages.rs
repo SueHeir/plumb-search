@@ -198,13 +198,17 @@ pub(super) fn run(inner: Arc<Inner>) {
                 );
                 *inner.pages.write_locked() = Some((older, Arc::new(searcher)));
             }
-            match open_or_build_with(
-                &inner.paths.data,
-                &wanted,
-                inner.storage.clone(),
-                denylist.as_ref().map(|(list, _)| list.as_ref()),
-                &mut || inner.check_stop(),
-            ) {
+            let found = {
+                let _big = inner.one_big_job();
+                open_or_build_with(
+                    &inner.paths.data,
+                    &wanted,
+                    inner.storage.clone(),
+                    denylist.as_ref().map(|(list, _)| list.as_ref()),
+                    &mut || inner.check_stop(),
+                )
+            };
+            match found {
                 Ok(found) => {
                     built = Some((page_sets_key, Instant::now()));
                     let pages = found.as_ref().map_or(0, |(_, s)| s.num_pages());

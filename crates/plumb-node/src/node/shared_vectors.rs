@@ -250,6 +250,7 @@ fn keep(
     from: &str,
     read: impl FnOnce(&mut Each) -> Result<()>,
 ) -> Result<usize> {
+    let _big = inner.one_big_job();
     let wanted = {
         let _records = inner.hold_records();
         wanted_texts(
