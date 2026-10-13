@@ -26,6 +26,7 @@ use plumb_core::article::articles_of;
 use plumb_core::place::{
     brews_where_served, distance_km, landmark_rank, normalize_region, place_rank, Place,
     BREWERY_TAG, CANADIAN_PROVINCES, MAX_PLACE_ALIASES, MAX_PLACE_NAME_CHARS, MAX_WEBSITE_CHARS,
+    US_STATES,
 };
 use plumb_core::{joined, normalize_country};
 use plumb_ingest::open_maybe_gz;
@@ -138,6 +139,8 @@ const OUTER_WAYS: usize = 32;
 /// A Wikidata item tagged on more places than this is a brand or a
 /// mistake, not any one of them, and lends them no names.
 const PLACES_PER_ITEM: u32 = 3;
+/// Every US state and Canadian province lies west of this longitude.
+const AMERICAS_EAST_LON: f64 = -50.0;
 
 /// What step 1 finds: a place, its Wikidata item, and where it is or what
 /// leads there.
@@ -639,6 +642,24 @@ fn is_plain(name: &str) -> bool {
     !name.contains(['(', ','])
 }
 
+/// The state or province, and its country, that the title of a North
+/// American town's article names: ("ON", "CA") for "Niagara Falls,
+/// Ontario". The town at `lon` must be in the Americas: "Gori, Georgia" is
+/// the Georgian town.
+fn titled_region(title: &str, lon: f64) -> Option<(String, &'static str)> {
+    let (_, qualifier) = title.rsplit_once(", ")?;
+    let region = normalize_region(qualifier);
+    let is = |table: &[(&str, &str)]| table.iter().any(|(code, _)| *code == region);
+    let country = if is(US_STATES) {
+        "US"
+    } else if is(CANADIAN_PROVINCES) {
+        "CA"
+    } else {
+        return None;
+    };
+    (lon < AMERICAS_EAST_LON).then_some((region, country))
+}
+
 /// Gives each place the plain title and other names (redirects) of the
 /// English Wikipedia article on its Wikidata item, from the articles file
 /// `path`: "Big Ben" for the Elizabeth Tower, "Philly" for Philadelphia.
@@ -703,6 +724,14 @@ fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<
         };
         if of.town && !place.is_town() {
             continue;
+        }
+        // A town's article says which side of a border it is on, where
+        // its places' addresses may not (both Niagara Falls).
+        if is_settlement(&place.kind) && place.region.is_none() {
+            if let Some((region, country)) = titled_region(&article.title, place.lon) {
+                place.region = Some(region);
+                place.country.get_or_insert_with(|| country.to_string());
+            }
         }
         let names = std::iter::once(&article.title).chain(&article.aliases);
         for name in names.filter(|name| is_plain(name)) {
@@ -1166,19 +1195,36 @@ mod tests {
                 Some(41225),
             ),
             (at("City Hall", "amenity=townhall", "n10"), Some(1345)),
+            // Towns on two sides of a border, and a namesake overseas.
+            (
+                Place {
+                    lon: -79.08,
+                    ..at("Niagara Falls", "place=city", "n11")
+                },
+                Some(274120),
+            ),
+            (
+                Place {
+                    lon: 44.11,
+                    ..at("Gori", "place=town", "n12")
+                },
+                Some(1003),
+            ),
         ];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wikipedia-en.tsv");
         std::fs::write(
             &path,
             format!(
-                "{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}",
                 plumb_core::article::ARTICLES_HEADER,
                 "a line with no columns\n",
                 "90000\tBig Ben\tclock tower\tQ41225\t\tElizabeth Tower|BigBen|10.57232|Clock Tower (Westminster)|Big Ben, London\n",
                 "80000\tPhiladelphia\tcity\tQ1345\t\tPhilly|Philadelphia, Pennsylvania|City of Brotherly Love\n",
                 "20\tCafé Louvre (Prague)\tcafé\tQ7\t\tCafe Louvre\n",
                 "70000\tStarbucks\tcoffeehouse chain\tQ37158\t\t\n",
+                "2293\tNiagara Falls, Ontario\tcity\tQ274120\t\tNiagara Falls, ON|Crowland Township\n",
+                "900\tGori, Georgia\ttown\tQ1003\t\t\n",
             ),
         )
         .unwrap();
@@ -1201,6 +1247,12 @@ mod tests {
         assert_eq!(found[8].0.aliases, ["Big Ben"]);
         assert!(!found[8].0.is_landmark());
         assert!(found[9].0.aliases.is_empty() && !found[9].0.is_landmark());
+        // A North American town's title says its province.
+        let falls = &found[10].0;
+        assert_eq!(falls.region.as_deref(), Some("ON"));
+        assert_eq!(falls.country.as_deref(), Some("CA"));
+        assert_eq!(falls.aliases, ["Crowland Township"]);
+        assert_eq!(found[11].0.region, None);
     }
 
     #[test]
