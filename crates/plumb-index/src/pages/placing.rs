@@ -9,7 +9,6 @@ use plumb_core::{
 use tantivy::tokenizer::TextAnalyzer;
 
 use super::docs::{docs_found_by_words, docs_kept_below};
-use super::search::hinted_name;
 use super::sites::{base_title, describes_an_organization, is_government, site_is_titled, squash};
 use super::{
     LearnedPlace, Page, PageHit, PlacedPage, ASKING_WORDS, DOCS_SET, FILMS_SET, GITHUB_SET,
@@ -66,16 +65,12 @@ pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -
 /// answer, nor is carbon3d.com for "thinkpad x1 carbon" or mini.com for
 /// "ipad mini". A site the name starts with stays (apple.com, found by
 /// "mac", for "mac mini"), and so does one with no vector to judge it by.
-/// Words around the name that say what is wanted ([`hinted_name`]) may
-/// name a site of their own, so a query with them keeps its sites:
-/// biography.com for "marie curie biography".
 pub fn drop_far_namesakes(
     sites: &mut Vec<crate::Hit>,
     pages: &[PageHit],
-    query: &str,
     floor: Option<f32>,
 ) -> usize {
-    let Some(floor) = floor.filter(|_| hinted_name(query).is_none()) else {
+    let Some(floor) = floor else {
         return 0;
     };
     drop_namesakes(sites, pages, |hit| {

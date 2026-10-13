@@ -782,7 +782,18 @@ impl Searcher {
                 // "back bay hilton", not valley.com in "elephant valley". An
                 // official site is known by its Wikidata name, not by its
                 // domain label (valley.com is Valley National Bank's).
+                // Nor for one that has no other main word of the query and
+                // is not among the sites nearest it in meaning, unless the
+                // query starts with its name: that is a namesake of one
+                // word (x.com for "derivative of sin x", web.com for "visit
+                // japan web"). delta.com has "flights" for "flights to paris
+                // delta", and target.com is near "coffee maker target".
+                let namesake = evidence[&r.addr].main_words <= 1
+                    && r.query_evidence.as_ref().is_some_and(|e| {
+                        e.partial_name_words == 0 && e.semantic_closeness.is_some_and(|c| c <= 0.0)
+                    });
                 if named_inside.contains(&r.addr)
+                    && !namesake
                     && (r.link_score >= WELL_KNOWN_LINK_SCORE
                         || (alias_inside.contains(&r.addr)
                             && self.is_official(&searcher, r.addr)?))

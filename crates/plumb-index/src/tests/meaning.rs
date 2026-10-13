@@ -486,6 +486,16 @@ fn a_word_or_two_of_a_longer_search_is_no_answer() {
     assert_eq!(found("cricket scores", &scores, &now)[0], "cricket.com.au");
     // So does a name further in ("back bay hilton").
     assert!(found("grasshopper cricket", &scores, &now).contains(&"cricket.com.au".to_string()));
+    // Not one nowhere near the query in meaning with no other word of it:
+    // that is a namesake of the word (x.com for "derivative of sin x").
+    let nowhere = near_and_far(&[], &[("cricket.com.au", 0.0)]);
+    let cricket = "cricket.com.au".to_string();
+    assert!(!found("grasshopper cricket", &nowhere, &now).contains(&cricket));
+    assert!(found("grasshopper cricket", &nowhere, &off).contains(&cricket));
+    // Another word of the query, or the query starting with the name,
+    // keeps it.
+    assert!(found("australia grasshopper cricket", &nowhere, &now).contains(&cricket));
+    assert_eq!(found("cricket scores", &nowhere, &now)[0], "cricket.com.au");
 }
 
 #[test]

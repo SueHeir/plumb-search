@@ -1225,12 +1225,7 @@ pub(super) fn add_pages(
                     index.backend().site(domain)
                 });
             }
-            drop_far_namesakes(
-                &mut results.hits,
-                &found,
-                query,
-                inner.rank.meaning_only_relevance,
-            );
+            drop_far_namesakes(&mut results.hits, &found, inner.rank.meaning_only_relevance);
             if inner.rank.drop_namesakes {
                 drop_namesakes_of_words(&mut results.hits, &found);
             }

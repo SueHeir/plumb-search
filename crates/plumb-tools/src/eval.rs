@@ -820,7 +820,7 @@ fn evaluate(
                         searcher.site(domain).ok().flatten()
                     });
                 }
-                drop_far_namesakes(&mut lifted, &found, &searched, cfg.meaning_only_relevance);
+                drop_far_namesakes(&mut lifted, &found, cfg.meaning_only_relevance);
                 if cfg.drop_namesakes {
                     drop_namesakes_of_words(&mut lifted, &found);
                 }

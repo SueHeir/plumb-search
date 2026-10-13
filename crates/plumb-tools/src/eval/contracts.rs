@@ -546,12 +546,7 @@ fn observe(
                 setup.searcher.site(d).ok().flatten()
             });
         }
-        drop_far_namesakes(
-            &mut found.hits,
-            &filtered,
-            words,
-            cfg.meaning_only_relevance,
-        );
+        drop_far_namesakes(&mut found.hits, &filtered, cfg.meaning_only_relevance);
         if cfg.drop_namesakes {
             drop_namesakes_of_words(&mut found.hits, &filtered);
         }

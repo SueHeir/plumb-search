@@ -236,25 +236,12 @@ fn sites_only_a_later_word_of_a_named_article_finds_are_left_out() {
     let mut earbuds = found("AirPods Pro", Some("pro.example"), true, 0.9);
     earbuds.page.item = Some("Q72725578".into());
     let floor = crate::RankConfig::default().meaning_only_relevance;
-    let query = "airpods pro";
-    // Not named in full, no floor, or words that say what is wanted: all
-    // stay.
+    // Not named in full, or no floor: all stay.
     earbuds.named = false;
-    assert_eq!(
-        drop_far_namesakes(&mut sites, &[earbuds.clone()], query, floor),
-        0
-    );
+    assert_eq!(drop_far_namesakes(&mut sites, &[earbuds.clone()], floor), 0);
     earbuds.named = true;
-    assert_eq!(
-        drop_far_namesakes(&mut sites, &[earbuds.clone()], query, None),
-        0
-    );
-    let hinted = "airpods pro wikipedia";
-    assert_eq!(
-        drop_far_namesakes(&mut sites, &[earbuds.clone()], hinted, floor),
-        0
-    );
-    assert_eq!(drop_far_namesakes(&mut sites, &[earbuds], query, floor), 1);
+    assert_eq!(drop_far_namesakes(&mut sites, &[earbuds.clone()], None), 0);
+    assert_eq!(drop_far_namesakes(&mut sites, &[earbuds], floor), 1);
     let order: Vec<&str> = sites.iter().map(|s| s.domain.as_str()).collect();
     // The site the name starts with, one near in meaning, one with no
     // vector and the article's own site stay.
