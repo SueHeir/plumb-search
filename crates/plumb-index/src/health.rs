@@ -12,6 +12,16 @@ use crate::{Hit, WELL_KNOWN_LINK_SCORE};
 /// How many health authorities go first.
 const AUTHORITIES: usize = 3;
 
+/// What a drug offer says, after [`normalize_text`], to sell without a
+/// prescription: "Buy Generic Viagra ✓ ED Drugs Online No Rx".
+const NO_PRESCRIPTION: &[&str] = &[
+    "no prescription",
+    "without prescription",
+    "without a prescription",
+    "prescription not required",
+    "no rx",
+];
+
 /// The reason for a source-quality decision. The legacy domain heuristic
 /// is explicitly distinct from an observed prescription-free sales offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +84,21 @@ pub fn source_quality(
         });
     }
     let offer = title.into_iter().chain(description).any(|text| {
+        // A part of its own: "Online-drug-store | Big Discounts | Without a
+        // Prescription | Free Shipping".
+        if text
+            .split(['|', '-', '–', '—', ':'])
+            .map(normalize_text)
+            .any(|part| {
+                let part = part
+                    .strip_suffix(" required")
+                    .or_else(|| part.strip_suffix(" needed"))
+                    .unwrap_or(&part);
+                NO_PRESCRIPTION.contains(&part)
+            })
+        {
+            return true;
+        }
         let text = normalize_text(text);
         let words: Vec<_> = text.split_whitespace().collect();
         // An article quoting or warning about an offer is not an offer.
@@ -89,14 +114,9 @@ pub fn source_quality(
                     .is_some_and(|word| PILL_SHOP_DRUGS.contains(word));
         selling
             && drug
-            && [
-                " no prescription ",
-                " without prescription ",
-                " without a prescription ",
-                " prescription not required ",
-            ]
-            .iter()
-            .any(|phrase| format!(" {text} ").contains(phrase))
+            && NO_PRESCRIPTION
+                .iter()
+                .any(|phrase| format!(" {text} ").contains(&format!(" {phrase} ")))
     });
     let reason = if offer {
         SourceQualityReason::UnprescribedDrugOffer
@@ -571,11 +591,31 @@ mod tests {
         .unwrap();
         assert_eq!(offer.reason, SourceQualityReason::UnprescribedDrugOffer);
         assert!(offer.informational_penalty());
+        for (title, description) in [
+            ("Buy Generic Viagra [$0,99] ✓ ED Drugs Online No Rx", None),
+            (
+                "Online-drug-store | Big Discounts | Save up to 90% | Without a Prescription",
+                None,
+            ),
+            (
+                "Certified Canadian Pharmacies Online - No Prescription Required",
+                Some("Explore our medications."),
+            ),
+        ] {
+            let offer = source_quality("small-source.pics", Some(title), description, Some(0.2));
+            assert_eq!(
+                offer.map(|offer| offer.reason),
+                Some(SourceQualityReason::UnprescribedDrugOffer),
+                "{title}"
+            );
+        }
         for title in [
             "Viagra side effects and prescription safety",
             "Why you should never buy Viagra without a prescription",
             "Buy amoxicillin with a prescription",
             "Buy books about Viagra without a prescription", // the subject is books
+            "Is no prescription needed for ibuprofen?",
+            "Pocketpills | Telehealth Online Pharmacy | Free Prescription Delivery",
         ] {
             // Only direct drug offers qualify, not a quoted phrase in an
             // informational article or an unrelated transaction.

@@ -71,6 +71,9 @@ pub(crate) struct LexicalEvidence {
     pub(crate) words: f32,
     pub(crate) coverage: f32,
     pub(crate) substantive: f32,
+    /// How many of the query's main words (weight 1 or more) any searched
+    /// field has.
+    pub(crate) main_words: usize,
     matched: Vec<bool>,
     weights: Vec<f32>,
 }
@@ -196,6 +199,7 @@ impl ParsedQuery {
                     let entry = evidence.get_mut(&addr).expect("bounded candidate");
                     entry.words += 1.0 / self.words.len() as f32;
                     entry.coverage += weight;
+                    entry.main_words += usize::from(weight >= 1.0);
                 }
             }
             if weight <= 0.0 {
@@ -206,7 +210,7 @@ impl ParsedQuery {
                 if field == fields.terms && self.terms_boost <= 0.0 {
                     continue;
                 }
-                substantive.add(Term::from_field_text(field, &self.words[i]), 1.0);
+                substantive.add_word(field, &self.words[i], 1.0);
                 if let Some(other) = &self.others[i] {
                     substantive.add(Term::from_field_text(field, other), 1.0);
                 }

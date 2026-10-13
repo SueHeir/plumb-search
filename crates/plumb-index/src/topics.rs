@@ -116,7 +116,7 @@ impl Searcher {
         let alpha = unit_or(cfg.alpha, default.alpha);
         let country_boost = unit_or(cfg.country_boost, default.country_boost);
         let home = options.country.as_deref().and_then(normalize_country);
-        let language = options.language.as_deref().and_then(crate::language_code);
+        let language = self.language_for(options, query);
         let mut columns: Vec<Option<Columns>> = Vec::new();
         for segment in searcher.segment_readers() {
             let fast = segment.fast_fields();

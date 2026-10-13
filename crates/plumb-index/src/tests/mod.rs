@@ -11,6 +11,7 @@ mod ranking;
 mod semantic_retention;
 mod spelling;
 mod subject_evidence;
+mod unspaced;
 
 use std::fs;
 use std::path::Path;

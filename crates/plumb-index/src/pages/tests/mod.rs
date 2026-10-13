@@ -5,6 +5,7 @@ mod articles;
 mod docs;
 mod finding;
 mod media;
+mod named_site;
 mod papers_and_entities;
 mod placing;
 mod subpages_and_packages;

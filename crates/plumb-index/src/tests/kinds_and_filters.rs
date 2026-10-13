@@ -2,6 +2,7 @@
 //! search operators.
 
 use super::*;
+use crate::hits::is_unfilled;
 
 fn bank_corpus() -> Vec<SiteRecord> {
     let bank = |domain: &str, alias: &str, country: &str, rank: u32| {
@@ -458,6 +459,77 @@ fn borrowed_and_garbled_titles_are_not_shown() {
 }
 
 #[test]
+fn unfilled_template_descriptions_and_check_addresses_are_not_shown() {
+    let mut frengly = site(
+        "frengly.com",
+        Some("Free Online Translator - online translate www"),
+        Some("{{description}}"),
+        &[],
+        &[],
+        ranked(20_000, 40),
+    );
+    frengly.url = Some("https://frengly.com/".into());
+    let mut surbl = site(
+        "surbl.org",
+        Some("SURBL"),
+        Some("surbl desc"),
+        &[],
+        &[],
+        ranked(30_000, 30),
+    );
+    surbl.about = Some("anti-spam blocklist".into());
+    // Crawled into a check, whose address leads nowhere now.
+    let mut skyscanner = site(
+        "skyscanner.nl",
+        Some("Skyscanner"),
+        Some("Vergelijk goedkope vluchtprijzen"),
+        &[],
+        &[],
+        ranked(9_000, 200),
+    );
+    skyscanner.url =
+        Some("https://www.skyscanner.nl/sttc/px/captcha-v2/index.html?url=Lz8=&uuid=5103".into());
+    let mut records = corpus();
+    records.extend([frengly, surbl, skyscanner]);
+    let (_dir, searcher) = build(&records);
+    let first = |q: &str| searcher.search(q, 10).unwrap().into_iter().next().unwrap();
+    let frengly = first("frengly");
+    assert_eq!(frengly.domain, "frengly.com");
+    assert_eq!(frengly.description, None);
+    // What Wikidata says it is, in place of the placeholder.
+    let surbl = first("surbl");
+    assert_eq!(surbl.domain, "surbl.org");
+    assert_eq!(surbl.description.as_deref(), Some("anti-spam blocklist"));
+    assert_eq!(first("skyscanner").url, "https://skyscanner.nl/");
+    assert_eq!(first("frengly").url, "https://frengly.com/");
+}
+
+#[test]
+fn unfilled_descriptions_are_told_from_short_ones() {
+    for text in [
+        "{{description}}",
+        "{{ page.excerpt }}",
+        "${siteDescription}",
+        "null",
+        "YOUR DESCRIPTION HERE",
+        "Site description",
+        "surbl desc",
+    ] {
+        assert!(is_unfilled(text), "{text:?}");
+    }
+    for text in [
+        "Logic-less {{mustache}} templates.",
+        "Todo sobre el iPhone de Apple.",
+        "Sort results asc or desc",
+        "Description of the Dutch East India Company",
+        "Null hypothesis explained",
+        "Descriptive statistics",
+    ] {
+        assert!(!is_unfilled(text), "{text:?}");
+    }
+}
+
+#[test]
 fn site_search_needs_the_site_first_and_more_than_a_common_word() {
     let mut records = corpus();
     let mut get = site("get.gov", Some("Get"), None, &[], &[], ranked(50_000, 10));
@@ -614,6 +686,142 @@ fn safe_search_and_language_leave_sites_out() {
 }
 
 #[test]
+fn a_query_in_another_script_than_the_language_keeps_its_sites() {
+    let mut rakuten = site(
+        "rakuten.example",
+        Some("楽天市場 | ショッピング"),
+        None,
+        &[],
+        &[],
+        ranked(50, 50_000),
+    );
+    rakuten.language = Some("ja".into());
+    let records = [
+        rakuten,
+        // Says no language, but its title is Arabic.
+        site(
+            "aljazeera.example",
+            Some("الجزيرة نت: آخر أخبار اليوم"),
+            None,
+            &[],
+            &[],
+            ranked(60, 50_000),
+        ),
+        site(
+            "bankru.example",
+            Some("Bank Россия — официальный сайт банка"),
+            None,
+            &[],
+            &[],
+            ranked(755, 5_000),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let english = SearchOptions {
+        language: Some("en".into()),
+        ..SearchOptions::default()
+    };
+    let found = |query: &str| {
+        let hits = searcher
+            .search_full(query, 10, &RankConfig::default(), &english)
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    // English chosen, but the query is written in the sites' script.
+    assert_eq!(found("楽天市場"), ["rakuten.example"]);
+    assert_eq!(found("الجزيرة"), ["aljazeera.example"]);
+    assert_eq!(found("россия"), ["bankru.example"]);
+    // A query in Latin letters keeps the filter.
+    assert!(found("bank").is_empty());
+    assert_eq!(english.language_for("bank"), Some("en"));
+    assert_eq!(english.language_for("楽天"), None);
+    assert_eq!(searcher.language_for(&english, "楽天"), None);
+}
+
+#[test]
+fn a_query_in_another_language_keeps_its_sites() {
+    let declared = |domain: String, title: String, language: &str| {
+        let mut record = site(&domain, Some(&title), None, &[], &[], ranked(900, 5_000));
+        record.language = Some(language.into());
+        record
+    };
+    let mut records = Vec::new();
+    for town in [
+        "Hamburg", "Bremen", "Köln", "Bonn", "Essen", "Kiel", "Ulm", "Trier", "Jena", "Fulda",
+        "Hagen", "Mainz",
+    ] {
+        let name = town.to_lowercase();
+        records.push(declared(
+            format!("wetter-{name}.example"),
+            format!("Wetter {town}"),
+            "de",
+        ));
+        records.push(declared(
+            format!("weather-{name}.example"),
+            format!("Weather {town}"),
+            "en",
+        ));
+        records.push(declared(
+            format!("hotels-{name}.example"),
+            format!("Hotels {town}"),
+            "en",
+        ));
+    }
+    records.push(declared("dwd.example".into(), "Wetter Berlin".into(), "de"));
+    records.push(declared(
+        "gasthof.example".into(),
+        "Hotels Berlin".into(),
+        "de",
+    ));
+    let (_dir, searcher) = build(&records);
+    let english = SearchOptions {
+        language: Some("en".into()),
+        ..SearchOptions::default()
+    };
+    let found = |query: &str| {
+        let hits = searcher
+            .search_full(query, 10, &RankConfig::default(), &english)
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    // "wetter" is on German sites only, so the search is German.
+    assert_eq!(searcher.language_for(&english, "wetter berlin"), None);
+    assert_eq!(found("wetter berlin")[0], "dwd.example");
+    // "hotels" is on English sites, so the filter stays.
+    assert_eq!(
+        searcher.language_for(&english, "hotels berlin").as_deref(),
+        Some("en")
+    );
+    assert!(!found("hotels berlin").contains(&"gasthof.example".to_string()));
+    // Words too few sites have, and numbers, decide nothing.
+    for query in ["berlin", "weather 2026", "zzz"] {
+        assert_eq!(
+            searcher.language_for(&english, query).as_deref(),
+            Some("en"),
+            "{query}"
+        );
+    }
+    // The same the other way round.
+    let german = SearchOptions {
+        language: Some("de".into()),
+        ..SearchOptions::default()
+    };
+    assert_eq!(searcher.language_for(&german, "weather berlin"), None);
+    assert_eq!(
+        searcher.language_for(&german, "wetter berlin").as_deref(),
+        Some("de")
+    );
+}
+
+#[test]
 fn search_operators_narrow_the_results() {
     let mut records = corpus();
     records.push(site(
@@ -691,4 +899,54 @@ fn brand_names_find_the_official_site() {
     }
     assert_eq!(top(&searcher, "chase"), "chase.com");
     assert_eq!(top(&searcher, "wikipedia"), "wikipedia.org");
+}
+
+#[test]
+fn a_well_known_site_the_query_starts_by_naming_keeps_its_language() {
+    let foreign = |domain: &str, title: &str, alias: &[&str], language: &str, signals| {
+        let mut record = site(domain, Some(title), None, alias, &[], signals);
+        record.language = Some(language.into());
+        record
+    };
+    let mut records = corpus();
+    records.extend([
+        foreign(
+            "realmadrid.example",
+            "Real Madrid CF | Web oficial",
+            &["Real Madrid"],
+            "es",
+            popular(500, 50_000),
+        ),
+        // Well known, but by one common word.
+        foreign(
+            "free.example",
+            "Free: Freebox, forfaits et jeux",
+            &["Free"],
+            "fr",
+            popular(300, 50_000),
+        ),
+        // Named by two words, but known to few.
+        foreign(
+            "realestate.example",
+            "Real Estate Immobilien",
+            &[],
+            "de",
+            obscure(5_000_000, 20),
+        ),
+    ]);
+    let (_dir, searcher) = build(&records);
+    let english = SearchOptions {
+        language: Some("en".into()),
+        ..SearchOptions::default()
+    };
+    for (query, domain, kept) in [
+        ("real madrid tickets", "realmadrid.example", true),
+        ("free games", "free.example", false),
+        ("real estate agents", "realestate.example", false),
+    ] {
+        let found =
+            |options: &SearchOptions| search_in(&searcher, query, options).contains(&domain.into());
+        assert!(found(&SearchOptions::default()), "{query}");
+        assert_eq!(found(&english), kept, "{query}");
+    }
 }

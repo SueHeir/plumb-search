@@ -104,8 +104,12 @@ impl MeaningIndex {
     }
 
     /// How close `query` is in meaning to each site; `None` when the query
-    /// cannot be embedded.
+    /// cannot be embedded, or is written in what the model cannot read
+    /// ([`Embedder::reads`]).
     pub fn query(&self, query: &str) -> Option<QueryMeaning<'_>> {
+        if !self.embedder.reads(query) {
+            return None;
+        }
         let embed = |text: &str| match self.embedder.embed(text) {
             Ok(vector) => Some(vector),
             Err(_) => {

@@ -52,6 +52,53 @@ fn subpages_are_found_like_reference_pages() {
 }
 
 #[test]
+fn subpages_named_like_an_article_come_after_it() {
+    let subpage = |url: &str, title: &str, views: u64| {
+        Page::from_set(
+            SUBPAGES_SET,
+            Article {
+                title: title.into(),
+                item: Some(url.into()),
+                views,
+                ..Article::default()
+            },
+        )
+        .unwrap()
+    };
+    let article = |title: &str, views: u64, site: Option<&str>| {
+        let mut article = page(title, views, &[]);
+        article.item = Some(format!("Q{views}"));
+        article.site = site.map(str::to_string);
+        article
+    };
+    let (_dir, searcher) = searcher(&[
+        article("United States", 10_000_000, None),
+        article("Napoleon", 30_000, None),
+        article("Yosemite National Park", 20_000, Some("nps.gov")),
+        subpage(
+            "https://www.nps.gov/yose/",
+            "Yosemite National Park",
+            10_000,
+        ),
+        subpage("https://chessprogramming.org/Napoleon", "Napoleon", 4_000),
+    ]);
+    let first = |query: &str| {
+        let hits = searcher.search(query, 10).unwrap();
+        assert_eq!(hits.len(), 2, "{query}: {hits:?}");
+        hits[0].page.url.clone()
+    };
+    // Read by the site's weight, the chess engine would come first.
+    assert_eq!(first("napoleon"), "https://en.wikipedia.org/wiki/Napoleon");
+    // Under a site the query names, the one page listed is the article.
+    let hits = searcher.search("napoleon", 10).unwrap();
+    let placed = place_pages("napoleon", &[site("napoleon.org", true)], hits);
+    let listed: Vec<&str> = placed.iter().map(|p| p.hit.page.set.as_str()).collect();
+    assert_eq!(listed, ["wikipedia-en"]);
+    // The park's own page stays first.
+    assert_eq!(first("yosemite national park"), "https://www.nps.gov/yose/");
+}
+
+#[test]
 fn declared_subpage_language_survives_retrieval_and_placement() {
     for (language, title, query) in [
         ("es", "Receta fácil de galleta", "recetas fáciles galletas"),
@@ -98,6 +145,49 @@ fn declared_subpage_language_survives_retrieval_and_placement() {
             assert_eq!(placed.len(), 1, "{language} /{path}");
             assert_eq!(placed[0].hit.page.url, page.url);
         }
+    }
+}
+
+#[test]
+fn tag_archives_are_listed_only_on_their_site() {
+    let hit = |url: &str, title: &str| PageHit {
+        page: Page::from_set(
+            SUBPAGES_SET,
+            Article {
+                title: title.into(),
+                description: Some("Explore Johnson & Johnson's lupus resources.".into()),
+                item: Some(url.into()),
+                views: 2_000,
+                ..Article::default()
+            },
+        )
+        .unwrap(),
+        score: 0.9,
+        named: true,
+        popularity: 0.9,
+        whole: false,
+        learned: None,
+    };
+    let lupus = hit("https://www.jnj.com/tag/lupus", "Lupus");
+    let sites =
+        |domains: &[&str]| -> Vec<crate::Hit> { domains.iter().map(|d| site(d, false)).collect() };
+    // Named by its title, it says nothing of lupus.
+    assert!(!subpage_asked("lupus", &sites(&["lupus.org"]), &lupus));
+    assert!(!subpage_asked("lupus", &[], &lupus));
+    // Unless the search is on its site.
+    assert!(subpage_asked(
+        "johnson and johnson lupus",
+        &sites(&["jnj.com"]),
+        &lupus
+    ));
+    // A page about the subject, or a tag in a page's name, is no archive.
+    for url in [
+        "https://www.who.int/health-topics/hypertension",
+        "https://www.jnj.com/lupus/tag",
+        "https://example.com/tag",
+        "https://example.com/products/name-tag",
+    ] {
+        assert!(subpage_asked("lupus", &[], &hit(url, "Lupus")), "{url}");
     }
 }
 

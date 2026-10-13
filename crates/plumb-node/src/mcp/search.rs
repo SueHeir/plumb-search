@@ -192,7 +192,12 @@ impl Mcp {
             query,
             i64::try_from(now).unwrap_or(i64::MAX),
             self.rates.as_ref(),
-        );
+        )
+        .or_else(|| {
+            let town = plumb_answer::asked_town(query)?;
+            let place = self.backend.locate(&town, options.country.as_deref())?;
+            crate::web::answers::time_in_place(&place)
+        });
         crate::assembly::route_sources(
             query,
             answer.as_ref().map(|a| a.kind),
@@ -308,28 +313,20 @@ impl Mcp {
         let names_a_page = placed.iter().any(|placed| placed.hit.named);
         let profile = answers::profile_lookups(query).iter().find_map(|name| {
             let entities = self.backend.entities(name, 20, options).ok()?;
-            match answers::resolve_entity(name, &entities, None) {
-                answers::EntityResolution::Resolved(page) => {
-                    let profile = answers::profile_answer_from_page(query, page);
-                    if profile.is_some() || !name.ends_with(" song") {
-                        return profile;
-                    }
-                    // An article on a song may have no Genius link while
-                    // its explicitly requested MusicBrainz song has one.
+            let entities = answers::profile_candidates(query, name, entities);
+            let resolution = answers::resolve_entity(name, &entities, None);
+            if let answers::EntityResolution::Resolved(page) = &resolution {
+                let profile = answers::profile_answer_from_page(query, page);
+                if profile.is_some() {
+                    return profile;
                 }
-                answers::EntityResolution::Ambiguous(_) => return None,
-                answers::EntityResolution::Unresolved => {}
+            }
+            if !answers::searches_songs(query, &resolution) {
+                return None;
             }
             self.lookup(name, PROFILE_SEARCH_LIMIT, options)
                 .ok()
-                .and_then(|found| {
-                    let songs: Vec<_> = found
-                        .pages
-                        .into_iter()
-                        .filter(|placed| placed.hit.page.set == plumb_index::pages::MUSIC_SET)
-                        .collect();
-                    answers::profile_answer(query, &songs)
-                })
+                .and_then(|found| answers::songs_profile(query, &resolution, found.pages))
         });
         let info = match &profile {
             Some(profile) => answers::info_from_page(&profile.page, &results.hits),
@@ -346,7 +343,7 @@ impl Mcp {
                     .map(|hit| (hit.domain.as_str(), hit.named));
                 crate::assembly::recent(
                     query,
-                    node.recent(query, top),
+                    node.recent(query, top, options.language.as_deref()),
                     options,
                     limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
                     |domain| node.blocks_adult(domain),
