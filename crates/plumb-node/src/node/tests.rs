@@ -4152,8 +4152,9 @@ async fn an_agent_finds_a_page_another_node_s_agent_shared_and_reads_it() {
         "{text}"
     );
     // Not its search, answer or task: only what was meant to be shared.
+    // "1890" alone is in some timestamps.
     let said = answer.to_string();
-    for private in ["1890", "Grandpa", "restoring", "lamp oil\""] {
+    for private in ["1890 guide", "Grandpa", "restoring", "lamp oil\""] {
         assert!(!said.contains(private), "{private} in {said}");
     }
     // A lead is not among the results, which come from crawls.
