@@ -301,7 +301,8 @@ pub(crate) fn document(
     let mut doc = TantivyDocument::default();
     doc.add_text(f.domain, domain);
     // A homepage read on another site's host says what that site is.
-    let borrowed = non_empty(&record.url).is_some_and(|url| crate::reads_another_site(url, domain));
+    let borrowed =
+        non_empty(&record.url).is_some_and(|url| crate::hits::reads_another_site(url, domain));
     if let Some(url) = non_empty(&record.url).filter(|_| !borrowed) {
         doc.add_text(f.url, url.trim());
     }
@@ -473,7 +474,8 @@ pub(crate) fn document(
 /// itself, not its description, which it may stuff with search words.
 pub(crate) fn spelling_texts(record: &SiteRecord, redirect_names: &[String]) -> Vec<String> {
     let domain = record.domain.as_str();
-    let borrowed = non_empty(&record.url).is_some_and(|url| crate::reads_another_site(url, domain));
+    let borrowed =
+        non_empty(&record.url).is_some_and(|url| crate::hits::reads_another_site(url, domain));
     let mut texts = vec![label_text(domain)];
     texts.extend(redirect_names.iter().cloned());
     texts.extend(
