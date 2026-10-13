@@ -186,8 +186,8 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
     }
     // A state or province, which says what country its code is in: WA is
     // Washington's and Western Australia's. It is not kept as a place.
-    if !node && get("boundary") == Some("administrative") {
-        let (country, region) = get("ISO3166-2")?.split_once('-')?;
+    let code = get("ISO3166-2").filter(|_| !node && get("boundary") == Some("administrative"));
+    if let Some((country, region)) = code.and_then(|code| code.split_once('-')) {
         return Some(Place {
             name: cut(name, MAX_PLACE_NAME_CHARS),
             kind: STATE_KIND.to_string(),
