@@ -445,6 +445,40 @@ const NOT_MEDICAL: &[&str] = &[
     "stiff upper lip",
 ];
 
+/// Words that say the patient is a pet: "parvo symptoms in dogs", "cat
+/// vomiting" ask a vet, not MedlinePlus. Not "canine" ("canine tooth
+/// pain") or "horse" ("charley horse").
+const PET_WORDS: &[&str] = &[
+    "dog",
+    "dogs",
+    "puppy",
+    "puppies",
+    "cat",
+    "cats",
+    "kitten",
+    "kittens",
+    "feline",
+    "pet",
+    "pets",
+    "veterinary",
+    "kennel",
+    "parvo",
+];
+
+/// Words that say a pet is how a person was hurt or examined: "dog bite",
+/// "cat allergy", "pet scan".
+const FROM_PETS: &[&str] = &[
+    "bite",
+    "bites",
+    "bitten",
+    "scratch",
+    "scratches",
+    "allergy",
+    "allergies",
+    "allergic",
+    "scan",
+];
+
 /// What hurts or is wrong in a part of the body. Beside a body part it
 /// makes a search medical: "knee pain", "swollen ankles", "numbness on
 /// top of foot". Alone or about a thing it doesn't: "broken arrow",
@@ -625,7 +659,7 @@ fn complaint_in_body(words: &[&str]) -> bool {
     })
 }
 
-/// Whether `query` asks about an illness, a symptom or a drug.
+/// Whether `query` asks about a person's illness, symptom or drug.
 pub(crate) fn is_medical(query: &str) -> bool {
     let query = normalize_text(query);
     let padded = format!(" {query} ");
@@ -636,6 +670,10 @@ pub(crate) fn is_medical(query: &str) -> bool {
         return false;
     }
     let words: Vec<&str> = query.split(' ').collect();
+    let has = |list: &[&str]| words.iter().any(|word| list.contains(word));
+    if has(PET_WORDS) && !has(FROM_PETS) {
+        return false;
+    }
     words.iter().any(|word| {
         MEDICAL_WORDS.contains(word)
             || PILL_SHOP_DRUGS.contains(word)
@@ -1021,6 +1059,9 @@ mod tests {
             "blood in urine",
             "sore throat",
             "common cold 7 to 10 days",
+            "dog bite infection",
+            "cat allergy symptoms",
+            "pet scan for cancer",
         ] {
             assert!(is_medical(query), "{query}");
         }
@@ -1050,6 +1091,10 @@ mod tests {
             "cracked head gasket",
             "quick dry nail polish",
             "a sight for sore eyes",
+            "parvo symptoms in dogs",
+            "dog diarrhea",
+            "cat vomiting",
+            "kennel cough symptoms",
         ] {
             assert!(!is_medical(query), "{query}");
         }
