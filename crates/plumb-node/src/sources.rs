@@ -193,6 +193,11 @@ const MEANING_LEADS: &[&str] = &[
     "how do you spell ",
     "how do i spell ",
     "spelling of ",
+    "how to pronounce ",
+    "how do you pronounce ",
+    "how do i pronounce ",
+    "pronunciation of ",
+    "pronounce ",
 ];
 /// Words after a word that ask what a dictionary gives of it. Not
 /// " plural" or " past tense": "first person plural" and "simple past
@@ -221,8 +226,8 @@ const OTHERS_TAILS: &[&str] = &[" synonym", " synonyms", " antonym", " antonyms"
 /// The word or two `text` (normalized) asks about, and what it asks:
 /// "define prioritize", "prioritize definition", "what does ubiquitous
 /// mean", "what does asap stand for", "plural of mouse", "how to spell
-/// necessary" ask a dictionary; "synonyms for good", "opposite of brave"
-/// a thesaurus.
+/// necessary", "how do you pronounce gif", "is irregardless a word" ask a
+/// dictionary; "synonyms for good", "opposite of brave" a thesaurus.
 fn word_asked(text: &str) -> Option<(String, WordAsk)> {
     let text = text
         .strip_prefix("whats ")
@@ -235,12 +240,23 @@ fn word_asked(text: &str) -> Option<(String, WordAsk)> {
             .iter()
             .find_map(|tail| rest.strip_suffix(tail))
     };
+    let is_word = || {
+        let rest = text.strip_prefix("is ")?;
+        [" a word", " a real word"]
+            .iter()
+            .find_map(|tail| rest.strip_suffix(tail))
+    };
     let meaning = |word| (word, WordAsk::Meaning);
     let others = |word| (word, WordAsk::Others);
     let (word, asked) = lead(MEANING_LEADS)
         .map(meaning)
         .or_else(|| lead(OTHERS_LEADS).map(others))
-        .or_else(|| tail(MEANING_TAILS).or_else(what_does).map(meaning))
+        .or_else(|| {
+            tail(MEANING_TAILS)
+                .or_else(what_does)
+                .or_else(is_word)
+                .map(meaning)
+        })
         .or_else(|| tail(OTHERS_TAILS).map(others))?;
     let word = word.trim();
     let word = word.strip_prefix("the word ").unwrap_or(word);
@@ -677,6 +693,9 @@ mod tests {
             "plural of",
             "first person plural",
             "simple past tense",
+            "how to pronounce my name",
+            "english pronunciation",
+            "is this a good word to use here",
         ] {
             assert_eq!(word_asked(query), None, "{query}");
         }
@@ -699,6 +718,14 @@ mod tests {
                 WordAsk::Meaning,
             ),
             ("define synonym", "synonym", WordAsk::Meaning),
+            ("how do you pronounce gif", "gif", WordAsk::Meaning),
+            (
+                "pronunciation of worcestershire",
+                "worcestershire",
+                WordAsk::Meaning,
+            ),
+            ("is irregardless a word", "irregardless", WordAsk::Meaning),
+            ("is alot a real word", "alot", WordAsk::Meaning),
             ("synonyms for good", "good", WordAsk::Others),
             ("another word for very happy", "very happy", WordAsk::Others),
             (
