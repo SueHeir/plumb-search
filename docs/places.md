@@ -16,9 +16,11 @@ When a query only might say where ("denver brewery", with no "in" or "near") and
 
 Words like "best", "good" or "cheap" are left out of WHAT. WHAT must be in a place's name or among the words for its kind: a café is found by "cafe", "coffee" and "coffee shop", a supermarket by "grocery store".
 
-WHERE is a town (or village, suburb or neighbourhood) by its name or another name ("nyc"), optionally with its state or country: "portland maine", "paris, france", "denver co". Among towns of one name the bigger wins, and one in the searcher's country a little more. WHERE can also be any named place, such as a stadium or a museum.
+WHERE is a town (or village, suburb or neighbourhood) by its name or another name ("nyc"), optionally with its state or country: "portland maine", "paris, france", "denver co". Among towns of one name the bigger wins, and one in the searcher's country a little more. WHERE can also be a named place that has a Wikidata item, such as a stadium or a museum; any other place, such as a shop or an office, only with its town ("coffee near union station denver"). A WHERE guessed without "in" or "near" must be a city or borough, or a choice of them ("portland pizza").
 
 Places are listed within a town's size of its centre (12 km for a city, 6 for a town, 3 for a village or around a named place). Places of the kind asked for come first, then those that only have the words in their name (for "sushi", sushi bars before an office called Sushi Tech). Within each, nearest first, with places that have a website, a brand or a Wikidata item a little ahead. When fewer than three are found, Plumb looks three times as far.
+
+A search that finds no place, and whose WHAT is neither a kind of place nor any place's name, lists none: "sort a list in python" and "calories in a shot" ask for no place, while "pizza in gotham" says it knows no Gotham.
 
 ## Near me
 
