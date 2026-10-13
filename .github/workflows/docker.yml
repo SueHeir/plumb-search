@@ -10,6 +10,13 @@
 #   release or ahead to unreleased main. This is Docker's "distribute build
 #   across multiple runners" pattern:
 #   https://docs.docker.com/build/ci/github-actions/multi-platform/
+#
+# The layers main builds are kept as the cache of later builds, one tag per
+# platform (`buildcache-linux-amd64`, `buildcache-linux-arm64`) in the same
+# public package, where storage is free. Not in the Actions cache: its 10 GB
+# is shared with CI's Rust caches, and the arm64 layers, which only main
+# reads, were evicted within half an hour. Pull requests read the amd64
+# cache and write none.
 name: Docker image
 
 on:
@@ -49,6 +56,9 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
+      - name: Prepare
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -61,8 +71,7 @@ jobs:
           build-args: |
             PLUMB_BUILD_REVISION=${{ github.sha }}
             PLUMB_BUILD_DIRTY=false
-          cache-from: type=gha,scope=linux-amd64
-          cache-to: type=gha,scope=linux-amd64,mode=max
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-linux-amd64
 
       - name: Smoke test
         env:
@@ -148,8 +157,10 @@ jobs:
           build-args: |
             PLUMB_BUILD_REVISION=${{ github.sha }}
             PLUMB_BUILD_DIRTY=false
-          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,scope=${{ env.PLATFORM_PAIR }},mode=max
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ env.PLATFORM_PAIR }}
+          # A failed cache upload leaves the next build slower, not this
+          # image unpublished.
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ env.PLATFORM_PAIR }},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
 
       - name: Export digest
         env:
