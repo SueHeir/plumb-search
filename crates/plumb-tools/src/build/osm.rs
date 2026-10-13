@@ -27,7 +27,7 @@ use plumb_core::place::{
     brews_where_served, distance_km, landmark_rank, normalize_region, place_rank, Place,
     BREWERY_TAG, MAX_PLACE_ALIASES, MAX_PLACE_NAME_CHARS, MAX_WEBSITE_CHARS,
 };
-use plumb_core::{normalize_country, normalize_text};
+use plumb_core::{joined, normalize_country};
 use plumb_ingest::open_maybe_gz;
 use tracing::info;
 
@@ -296,22 +296,28 @@ fn cut(text: &str, chars: usize) -> String {
 }
 
 /// Adds `alias` to the other names of the place called `name`, unless it
-/// is that name or one of them written another way, or `most` are kept.
+/// is that name or one of them written another way ("LasVegas"), names
+/// nothing in letters (a redirect from "10.57232"), or `most` are kept.
 fn push_alias(name: &str, aliases: &mut Vec<String>, alias: &str, most: usize) {
-    let key = normalize_text(alias);
-    if !key.is_empty()
+    let key = joined(alias);
+    if key.contains(char::is_alphabetic)
         && aliases.len() < most.min(MAX_PLACE_ALIASES)
-        && key != normalize_text(name)
-        && !aliases.iter().any(|a| normalize_text(a) == key)
+        && key != joined(name)
+        && !aliases.iter().any(|a| joined(a) == key)
     {
         aliases.push(cut(alias.trim(), MAX_PLACE_NAME_CHARS));
     }
 }
 
-/// The number of the Wikidata item `tags` name: 41225 for `Q41225`.
+/// The number of the Wikidata item `tags` name: 41225 for `Q41225`. None
+/// when it is the item of the place's brand, which names no one shop.
 fn item_of(tags: &[(&str, &str)]) -> Option<u64> {
-    let (_, item) = tags.iter().find(|(k, _)| *k == "wikidata")?;
-    item.trim().strip_prefix('Q')?.parse().ok()
+    let tag = |key: &str| tags.iter().find(|(k, _)| *k == key).map(|(_, v)| v.trim());
+    let item = tag("wikidata")?;
+    if tag("brand:wikidata") == Some(item) {
+        return None;
+    }
+    item.strip_prefix('Q')?.parse().ok()
 }
 
 /// A website as tagged, as a link: `www.example.com` ->
@@ -1032,6 +1038,9 @@ mod tests {
         .unwrap();
         assert_eq!(airport.aliases, ["JFK"]);
         assert_eq!(item_of(&tags(&[("wikidata", "Q8685")])), Some(8685));
+        // A shop tagged with its brand's item is not the brand.
+        let brand = [("wikidata", "Q37158"), ("brand:wikidata", "Q37158")];
+        assert_eq!(item_of(&tags(&brand)), None);
         let city = place_of(
             &tags(&[
                 ("name", "Philadelphia"),
@@ -1093,7 +1102,7 @@ mod tests {
             format!(
                 "{}{}{}{}{}",
                 plumb_core::article::ARTICLES_HEADER,
-                "90000\tBig Ben\tclock tower\tQ41225\t\tElizabeth Tower|Clock Tower (Westminster)|Big Ben, London\n",
+                "90000\tBig Ben\tclock tower\tQ41225\t\tElizabeth Tower|BigBen|10.57232|Clock Tower (Westminster)|Big Ben, London\n",
                 "80000\tPhiladelphia\tcity\tQ1345\t\tPhilly|Philadelphia, Pennsylvania|City of Brotherly Love\n",
                 "20\tCafé Louvre (Prague)\tcafé\tQ7\t\tCafe Louvre\n",
                 "70000\tStarbucks\tcoffeehouse chain\tQ37158\t\t\n",
@@ -1101,6 +1110,8 @@ mod tests {
         )
         .unwrap();
         add_article_names(&mut found, &path).unwrap();
+        // Its name again, a name written another way, a redirect with no
+        // letters and qualified titles add nothing.
         let tower = &found[0].0;
         assert_eq!(tower.aliases, ["Big Ben"]);
         assert!(tower.is_landmark());
