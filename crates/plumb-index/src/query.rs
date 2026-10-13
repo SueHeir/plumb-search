@@ -382,7 +382,9 @@ impl Clauses {
     pub(crate) fn add_word(&mut self, field: Field, word: &str, boost: f32) {
         let pieces = analysis::pieces(word);
         if pieces.len() > 1 {
-            let terms = pieces.iter().map(|piece| Term::from_field_text(field, piece));
+            let terms = pieces
+                .iter()
+                .map(|piece| Term::from_field_text(field, piece));
             self.add_all(terms.collect(), boost);
         }
         self.add(Term::from_field_text(field, word), boost);
@@ -397,8 +399,9 @@ impl Clauses {
 
     pub(crate) fn into_query(self) -> BooleanQuery {
         // Fields indexed without frequencies fall back to `Basic`.
-        let term_query =
-            |term| -> Box<dyn Query> { Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)) };
+        let term_query = |term| -> Box<dyn Query> {
+            Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+        };
         let clauses = self
             .0
             .into_iter()
