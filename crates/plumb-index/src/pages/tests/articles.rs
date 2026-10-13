@@ -287,6 +287,9 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("are eggs good for you", "eggs"),
         ("does creatine work", "creatine"),
         ("do charcoal masks really work", "charcoal masks"),
+        ("who invented the telephone", "telephone"),
+        ("who discovered penicillin", "penicillin"),
+        ("when was the printing press invented", "printing press"),
     ] {
         assert_eq!(
             hinted_name(query),
@@ -310,6 +313,8 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         "how to make money work",
         "how many hours do nurses work",
         "is the new bridge over the river safe",
+        "who invented it",
+        "when was it invented",
     ] {
         assert_eq!(hinted_name(query), None, "{query:?}");
     }

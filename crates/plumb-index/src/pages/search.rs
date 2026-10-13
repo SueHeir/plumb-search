@@ -79,7 +79,8 @@ const MEASURES: &[&str] = &[
 /// Questions that name what they ask about between a lead and a tail:
 /// "refrigerator" of "how does a refrigerator work", "metabolism" of "how
 /// metabolism works", "meiosis" of "where does meiosis occur", "coffee" of
-/// "is coffee bad for you". The first pair a question has decides.
+/// "is coffee bad for you", "penicillin" of "who discovered penicillin".
+/// The first pair a question has decides.
 const ASKED_BETWEEN: &[(&[&str], &[&str])] = &[
     (&["how does ", "how do "], &[" work"]),
     (&["how "], &[" works", " work"]),
@@ -101,6 +102,8 @@ const ASKED_BETWEEN: &[(&[&str], &[&str])] = &[
         ],
     ),
     (&["does ", "do "], &[" really work", " work"]),
+    (&["who invented ", "who discovered "], &[""]),
+    (&["when was ", "when were "], &[" invented", " discovered"]),
 ];
 
 /// Words that make what a question names a clause or a pronoun, not a
