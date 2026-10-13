@@ -489,6 +489,9 @@ impl PageSearcher {
                 learned: None,
             });
         }
+        if let [word] = words.as_slice() {
+            self.name_by_surname(word, &joined, &mut hits);
+        }
         let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
@@ -868,6 +871,59 @@ impl PageSearcher {
             }
         }
         (best, false)
+    }
+
+    /// Names the person a query of one `word` (whose key is `joined`) is
+    /// the surname of when Wikipedia has no redirect from it: "thatcher"
+    /// is Margaret Thatcher and "kafka" Franz Kafka, not the film Kafka.
+    /// Only when they are read [`super::SURNAME_MARGIN`] times as much as
+    /// every other article with the word in its title ("darwin" is a city
+    /// too, "ford" two presidents), and no article is called the word
+    /// ("swift", "clinton") nor a company's site ("tesla", "hilton").
+    fn name_by_surname(&self, word: &str, joined: &str, hits: &mut [PageHit]) {
+        let called =
+            |name: &str| analysis::tokens(&self.joined, name).pop().as_deref() == Some(joined);
+        let articles = || {
+            hits.iter()
+                .enumerate()
+                .filter(|(_, hit)| hit.page.is_article())
+        };
+        let taken = articles().any(|(_, hit)| {
+            std::iter::once(&hit.page.title)
+                .chain(&hit.page.aliases)
+                .any(|name| called(name))
+                || super::sites::describes_an_organization(hit.page.description.as_deref())
+                    && hit
+                        .page
+                        .site
+                        .as_deref()
+                        .and_then(|site| site.split('.').next())
+                        .is_some_and(called)
+        });
+        let titled = |hit: &PageHit| analysis::tokens(&self.words, &hit.page.title);
+        let Some((best, views)) = articles()
+            .filter(|(_, hit)| {
+                !hit.named
+                    && hit.page.is_person()
+                    && titled(hit).last().map(String::as_str) == Some(word)
+            })
+            .max_by_key(|(_, hit)| hit.page.views)
+            .map(|(at, hit)| (at, hit.page.views))
+        else {
+            return;
+        };
+        if taken
+            || articles().any(|(at, hit)| {
+                at != best
+                    && hit.page.views * super::SURNAME_MARGIN > views
+                    && titled(hit).iter().any(|title_word| title_word == word)
+            })
+        {
+            return;
+        }
+        let hit = &mut hits[best];
+        hit.named = true;
+        hit.score = ALIAS_MATCH * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity);
     }
 }
 
