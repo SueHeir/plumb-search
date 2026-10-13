@@ -405,9 +405,10 @@ impl PageSearcher {
     /// one the model learned and is likelier than the word with how much
     /// commoner the near word is weighed by [`PAGE_SLIP_WEIGHT`]; that
     /// holds for a word the pages know too ("recieve", "definately").
-    /// A word typed in capitals is kept, and so is a word that names
-    /// something ([`PageSearcher::names_something`]), however few pages
-    /// have it: "magicka" is not "magick", nor "baidu baike" "baidu bake".
+    /// A word typed in capitals, with letters English does not use, or in
+    /// a web address is kept, and so is a word that names something
+    /// ([`PageSearcher::names_something`]), however few pages have it:
+    /// "magicka" is not "magick", nor "baidu baike" "baidu bake".
     /// `None` when no word changes.
     pub fn suggest_spelling(
         &self,
@@ -425,15 +426,22 @@ impl PageSearcher {
             Ok(searcher.doc_freq(&Term::from_field_text(self.fields.words, word))?)
         };
         let typed = analysis::tokens(&self.words, query);
-        // Names and abbreviations: "ETIAS" is not "elias", nor "OLED" "old".
-        let capitals: HashSet<String> = query
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|part| {
-                part.chars().filter(|c| c.is_alphabetic()).count() > 1
-                    && !part.chars().any(char::is_lowercase)
-            })
-            .flat_map(|part| analysis::tokens(&self.words, part))
-            .collect();
+        // Names, abbreviations and addresses: "ETIAS" is not "elias", "OLED"
+        // not "old", nor "ratp.info" "rate info". Nor is a word typed with
+        // letters English does not use a slip of one without them: "Edlén"
+        // is not "ellen", nor the mojibake "mÃ©xico" "ma xiao".
+        let mut kept: HashSet<String> = HashSet::new();
+        for part in query.split_whitespace() {
+            let whole = part.contains('.') && registrable_domain(part).is_some()
+                || part.chars().any(|c| c.is_alphabetic() && !c.is_ascii());
+            for piece in part.split(|c: char| !c.is_alphanumeric()) {
+                let capitals = piece.chars().filter(|c| c.is_alphabetic()).count() > 1
+                    && !piece.chars().any(char::is_lowercase);
+                if whole || capitals {
+                    kept.extend(analysis::tokens(&self.words, piece));
+                }
+            }
+        }
         let mut fixed = typed.clone();
         for word in &mut fixed {
             let chars = word.chars().count();
@@ -441,7 +449,7 @@ impl PageSearcher {
             if edits == 0
                 || !word.chars().all(char::is_alphabetic)
                 || site_known(word)
-                || capitals.contains(word.as_str())
+                || kept.contains(word.as_str())
             {
                 continue;
             }
@@ -500,11 +508,11 @@ impl PageSearcher {
     /// Whether `word`, typed among `words`, is the name of something rather
     /// than a slip, however near a commoner word it is: Wiktionary has it as
     /// a word ("saute", "renter") or has its singular ("cloths": the set
-    /// leaves out forms of other words), an English Wikipedia article is
-    /// named by it ("Everlong", "htop", "Scald" for Burn), or a page's name
-    /// has it with another word typed ("Jean Meeus", "Baidu Baike"). A near
-    /// spelling of an article's title is not its name but the redirect
-    /// Wikipedia keeps for a misspelling ("Arguement" for Argument).
+    /// leaves out forms of other words), a page is named by it ("Everlong",
+    /// "htop", "Scald" for Burn), or a page's name has it with another word
+    /// typed ("Jean Meeus", "Baidu Baike"). A near spelling of an article's
+    /// title is not its name but the redirect Wikipedia keeps for a
+    /// misspelling ("Arguement" for Argument).
     fn names_something(&self, word: &str, words: &[String]) -> Result<bool> {
         let searcher = self.reader.searcher();
         let term = |field, text: &str| -> Box<dyn Query> {
@@ -523,13 +531,9 @@ impl PageSearcher {
                 return Ok(true);
             }
         }
-        let articles = BooleanQuery::new(vec![
-            (Occur::Must, term(self.fields.keys, word)),
-            (Occur::Must, self.scope_term("set:wikipedia-en")),
-        ]);
         let top = TopDocs::with_limit(TITLE_CANDIDATES)
             .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
-        for (_, address) in searcher.search(&articles, &top)? {
+        for (_, address) in searcher.search(term(self.fields.keys, word).as_ref(), &top)? {
             let document: TantivyDocument = searcher.doc(address)?;
             let Some(stored) = document
                 .get_first(self.fields.page)
@@ -541,7 +545,9 @@ impl PageSearcher {
             let title = analysis::tokens(&self.joined, base_title(&page.title))
                 .pop()
                 .unwrap_or_default();
-            if title == word || !crate::spell::within_edits(word, &title) {
+            // An article is also keyed by the names that lead to it, some
+            // of them misspellings of its title.
+            if title == word || page.is_article() && !crate::spell::within_edits(word, &title) {
                 return Ok(true);
             }
         }

@@ -722,6 +722,9 @@ fn names_are_not_taken_for_slips() {
     assert_eq!(suggest("astronomical algorithms jean meeus"), None);
     // Typed in capitals, an abbreviation.
     assert_eq!(suggest("ETIAS"), None);
+    // In a web address, or typed with letters English does not use.
+    assert_eq!(suggest("etias.eu visa"), None);
+    assert_eq!(suggest("étias"), None);
     // An article is named by it.
     assert_eq!(suggest("htop"), None);
     assert_eq!(suggest("scald"), None);
