@@ -12,7 +12,7 @@ use tantivy::{TantivyDocument, Term};
 
 use super::docs::docs_asked;
 use super::page::is_item_id;
-use super::sites::base_title;
+use super::sites::{base_title, subtitle};
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
     DESCRIBED_MISSING_FROM, DESCRIBED_QUERY_WORDS, DESCRIBED_WORD, DOCS_SET, FILMS_SET, GITHUB_SET,
@@ -847,10 +847,12 @@ impl PageSearcher {
         }
         // "Mozart (film)" and "Mozart!" are no better a match for "mozart"
         // than the redirect "Mozart" to "Wolfgang Amadeus Mozart":
-        // popularity decides between them.
+        // popularity decides between them, as between "No Way Home (1996
+        // film)" and "Spider-Man: No Way Home" for "no way home".
         if key(&page.title) == joined
             || key(base_title(&page.title)) == joined
             || page.aliases.iter().any(|alias| key(alias) == joined)
+            || page.is_article() && subtitle(&page.title).is_some_and(|sub| key(sub) == joined)
         {
             return (ALIAS_MATCH, true);
         }
