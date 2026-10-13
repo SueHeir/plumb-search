@@ -428,6 +428,65 @@ fn articles_are_found_by_their_leads() {
 }
 
 #[test]
+fn a_word_said_only_in_another_form_with_its_stem_is_another_word() {
+    let led = |title: &str, views: u64, description: &str, lead: &str| {
+        let mut page = page(title, views, &[]);
+        page.description = Some(description.into());
+        page.lead = Some(lead.into());
+        page
+    };
+    let (_dir, s) = searcher(&[
+        led(
+            "Thomas Cook Airlines",
+            760,
+            "Charter and scheduled airline of the United Kingdom (2003-2019)",
+            "Thomas Cook Airlines Ltd. was a British charter and scheduled airline \
+             headquartered in Manchester, England.",
+        ),
+        led(
+            "Robin Hood's Stone",
+            300,
+            "Scheduled monument in Liverpool",
+            "Robin Hood's Stone is a standing stone in Liverpool, England.",
+        ),
+        led(
+            "2027 Rugby World Cup",
+            9_000,
+            "Eleventh edition of the Rugby World Cup",
+            "The 2027 Rugby World Cup is scheduled to be the eleventh Rugby World Cup.",
+        ),
+        led(
+            "Fixture list",
+            2_000,
+            "List of the matches a league plays",
+            "A fixture list gives the schedules of the Premier League's clubs.",
+        ),
+    ]);
+    // "scheduled" has the stem of "schedule" but is another word, in a
+    // lead, a description, or beside a name with the query's words.
+    for query in [
+        "manchester united schedule",
+        "liverpool schedule",
+        "world cup schedule",
+    ] {
+        assert_eq!(
+            titles(&s.search(query, 5).unwrap()),
+            Vec::<&str>::new(),
+            "{query}"
+        );
+    }
+    // The word itself is said in the singular or the plural.
+    assert_eq!(
+        titles(&s.search("premier league schedule", 5).unwrap()),
+        ["Fixture list"]
+    );
+    assert_eq!(
+        titles(&s.search("rugby world cup scheduled", 5).unwrap()),
+        ["2027 Rugby World Cup"]
+    );
+}
+
+#[test]
 fn words_are_only_looked_up() {
     let word = |title: &str, description: &str, views: u64| {
         Page::from_word(Article {
