@@ -141,8 +141,16 @@ pub struct PlaceQuery {
 /// Splits `query` into what is looked for and where, when it says where.
 /// A query without "in", "near" or "near me" says where only when it is a
 /// kind of place and a town: "denver pizza" ([`PlaceSearcher::search`]
-/// checks the town).
+/// checks the town). This is the first of [`place_query_readings`].
 pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
+    place_query_readings(query).into_iter().next()
+}
+
+/// Every way `query` can be read as asking for places somewhere, the most
+/// likely first. Only a query that names its town without "in" or "near"
+/// has more than one: "coffee shop boulder" is coffee in "shop boulder" or
+/// a coffee shop in Boulder, and only the index knows which town there is.
+pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
     let mut words: Vec<String> = normalize_text(query)
         .split(' ')
         .filter(|w| !w.is_empty())
@@ -163,7 +171,7 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
         .find(|w| !FILLER.contains(w))
         .is_some_and(|w| ABOUT_TOWN.contains(&w))
     {
-        return None;
+        return Vec::new();
     }
     let what_of = |words: &[String]| -> Option<String> {
         let what: Vec<&str> = words
@@ -178,37 +186,40 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
     let ends_with = |suffix: &[&str]| {
         words.len() > suffix.len() && words[words.len() - suffix.len()..] == *suffix
     };
+    let near_me = |what: Option<String>| -> Vec<PlaceQuery> {
+        what.map(|what| PlaceQuery {
+            what,
+            near: Near::Me,
+            said_where: true,
+        })
+        .into_iter()
+        .collect()
+    };
     for suffix in NEAR_ME {
         if ends_with(suffix) {
-            return Some(PlaceQuery {
-                what: what_of(&words[..words.len() - suffix.len()])?,
-                near: Near::Me,
-                said_where: true,
-            });
+            return near_me(what_of(&words[..words.len() - suffix.len()]));
         }
     }
     if words.first().is_some_and(|w| w == "nearby") && words.len() > 1 {
-        return Some(PlaceQuery {
-            what: what_of(&words[1..])?,
-            near: Near::Me,
-            said_where: true,
-        });
+        return near_me(what_of(&words[1..]));
     }
     // The last "in" or "near" with words on both sides.
     for at in (1..words.len().saturating_sub(1)).rev() {
         for marker in WHERE_WORDS {
             let end = at + marker.len();
             if end < words.len() && words[at..end] == **marker {
-                let what = what_of(&words[..at])?;
+                let Some(what) = what_of(&words[..at]) else {
+                    return Vec::new();
+                };
                 let mut place = &words[end..];
                 if place.first().is_some_and(|w| w == "the") && place.len() > 1 {
                     place = &place[1..];
                 }
-                return Some(PlaceQuery {
+                return vec![PlaceQuery {
                     what,
                     near: Near::Named(place.join(" ")),
                     said_where: true,
-                });
+                }];
             }
         }
     }
@@ -221,49 +232,48 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
         let at = words.len() - count;
         let country = words[at..].join(" ");
         if country_of_name(&country).is_some() {
-            if let Some(mut asked) = parse_place_query(&words[..at].join(" ")) {
-                if let Near::Named(name) = &mut asked.near {
-                    name.push(' ');
-                    name.push_str(&country);
-                    return Some(asked);
-                }
+            let qualified: Vec<PlaceQuery> = place_query_readings(&words[..at].join(" "))
+                .into_iter()
+                .filter_map(|mut asked| match &mut asked.near {
+                    Near::Named(name) => {
+                        name.push(' ');
+                        name.push_str(&country);
+                        Some(asked)
+                    }
+                    Near::Me => None,
+                })
+                .collect();
+            if !qualified.is_empty() {
+                return qualified;
             }
         }
     }
+    let mut readings = Vec::new();
+    let guessed = |what: String, town: &[String]| PlaceQuery {
+        what,
+        near: Near::Named(town.join(" ")),
+        said_where: false,
+    };
     if words.len() >= 2 {
         for town_words in (1..=3.min(words.len() - 1)).rev() {
             let (what, town) = words.split_at(words.len() - town_words);
             // What is looked for ends in a kind of place: "pizza", "best
             // climbing gym", "cheap bookstore".
             if what.last().is_some_and(|w| is_kind_word(w)) {
-                if let Some(what) = what_of(what) {
-                    return Some(PlaceQuery {
-                        what,
-                        near: Near::Named(town.join(" ")),
-                        said_where: false,
-                    });
-                }
+                readings.extend(what_of(what).map(|what| guessed(what, town)));
             }
             let (town, what) = words.split_at(town_words);
             if what.iter().all(|w| is_kind_word(w)) {
-                return Some(PlaceQuery {
-                    what: what.join(" "),
-                    near: Near::Named(town.join(" ")),
-                    said_where: false,
-                });
+                readings.extend(what_of(what).map(|what| guessed(what, town)));
             }
         }
     }
     // "coffee open now", "pharmacy open late": a kind of place asked for
     // at a time, with no town, is near the searcher.
     if said_when && words.last().is_some_and(|w| is_kind_word(w)) {
-        return Some(PlaceQuery {
-            what: what_of(&words)?,
-            near: Near::Me,
-            said_where: true,
-        });
+        readings.extend(near_me(what_of(&words)));
     }
-    None
+    readings
 }
 
 /// `query` without the "near me" that ends it ("safeway near me" ->
@@ -554,40 +564,56 @@ impl PlaceSearcher {
         required_country: Option<&str>,
         limit: usize,
     ) -> Result<Option<PlaceResults>> {
-        let asked = match parse_place_query(query) {
-            Some(asked) => Some(asked),
-            None => self.named_business_query(query, preferred_country, required_country)?,
-        };
-        let Some(asked) = asked else {
-            return Ok(None);
-        };
-        let location = match &asked.near {
-            Near::Me => match home {
-                Some(home) => self.resolve(home, preferred_country, required_country)?,
-                None => LocationResolution {
-                    status: LocationStatus::MissingLocation,
-                    requested: String::new(),
-                    candidates: Vec::new(),
-                },
-            },
-            Near::Named(name) => self.resolve(name, preferred_country, required_country)?,
-        };
-        let center = location.selected().cloned();
-        if let Some(place) = &center {
-            // A town guessed from words ("toy story", "hotel
-            // california", "crypto exchange") is only taken for a big
-            // one: Story in France and Crypto in Poland are villages
-            // whose names are words.
-            if !asked.said_where && !GUESSED_TOWNS.contains(&place.kind.as_str()) {
-                return Ok(None);
-            }
-        } else if !asked.said_where && location.status == LocationStatus::UnknownLocation {
-            return Ok(None);
+        let mut readings = place_query_readings(query);
+        if readings.is_empty() {
+            readings.extend(self.named_business_query(
+                query,
+                preferred_country,
+                required_country,
+            )?);
         }
+        for asked in readings {
+            let location = match &asked.near {
+                Near::Me => match home {
+                    Some(home) => self.resolve(home, preferred_country, required_country)?,
+                    None => LocationResolution {
+                        status: LocationStatus::MissingLocation,
+                        requested: String::new(),
+                        candidates: Vec::new(),
+                    },
+                },
+                Near::Named(name) => self.resolve(name, preferred_country, required_country)?,
+            };
+            // A town guessed from words ("toy story", "hotel california",
+            // "crypto exchange") is only taken for a big one: Story in
+            // France and Crypto in Poland are villages whose names are
+            // words. Otherwise the query may still split another way.
+            let guessed_wrong = match location.selected() {
+                Some(place) => !GUESSED_TOWNS.contains(&place.kind.as_str()),
+                None => location.status == LocationStatus::UnknownLocation,
+            };
+            if asked.said_where || !guessed_wrong {
+                return self
+                    .found(asked, location, required_country, limit)
+                    .map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The places `asked` for around `location`.
+    fn found(
+        &self,
+        asked: PlaceQuery,
+        location: LocationResolution,
+        required_country: Option<&str>,
+        limit: usize,
+    ) -> Result<PlaceResults> {
+        let center = location.selected().cloned();
         let near_me = asked.near == Near::Me;
         let guessed = !asked.said_where;
         let Some(center) = center else {
-            return Ok(Some(PlaceResults {
+            return Ok(PlaceResults {
                 what: asked.what,
                 center: None,
                 near_me,
@@ -595,7 +621,7 @@ impl PlaceSearcher {
                 radius_km: 0.0,
                 hits: Vec::new(),
                 location: Some(location),
-            }));
+            });
         };
         let radius = town_size(&center.kind).unwrap_or(LANDMARK_KM);
         let mut hits = self.around(&asked.what, &center, radius, required_country, limit)?;
@@ -607,7 +633,7 @@ impl PlaceSearcher {
         }
         // A resolved location with no matching businesses is an indexed
         // coverage result too, including explicit landmark searches.
-        Ok(Some(PlaceResults {
+        Ok(PlaceResults {
             what: asked.what,
             center: Some(center),
             near_me,
@@ -615,7 +641,7 @@ impl PlaceSearcher {
             radius_km,
             hits,
             location: Some(location),
-        }))
+        })
     }
 
     /// A named business followed by an actually indexed city: "Poilâne
@@ -1219,6 +1245,54 @@ mod tests {
             .unwrap();
         assert_eq!(hotels.hits[0].place.name, "Hotel Eiffel");
         assert_eq!(hotels.hits[1].place.name, "Hôtel de Béhague");
+    }
+
+    #[test]
+    fn a_town_named_without_in_is_found_however_the_words_split() {
+        let mut fixtures = places();
+        fixtures.extend([
+            Place {
+                tags: vec![plumb_core::place::BREWERY_TAG.into()],
+                ..at("Wynkoop Brewing", "amenity=pub", 39.7534, -105.0001)
+            },
+            at("Little Man", "amenity=ice_cream", 39.7593, -105.0111),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let first = |query: &str, home: Option<&str>| {
+            let found = searcher.search(query, home, None, 5).unwrap();
+            let found = found.unwrap_or_else(|| panic!("{query}: no places"));
+            assert_eq!(found.center.unwrap().name, "Denver", "{query}");
+            found.hits[0].place.name.clone()
+        };
+        // Two-word kinds, before or after the town: "shop denver" and
+        // "denver coffee" are no towns.
+        assert_eq!(first("coffee shop denver", None), "Huckleberry and Co");
+        assert_eq!(first("denver coffee shop", None), "Huckleberry and Co");
+        assert_eq!(first("ice cream denver", None), "Little Man");
+        // Plurals in -ies, and "places" left out of what is looked for.
+        assert_eq!(first("denver breweries", None), "Wynkoop Brewing");
+        assert_eq!(first("denver pizza places", None), "Blue Pan");
+        // A two-word kind at a time is near the searcher.
+        assert_eq!(
+            first("coffee shop open now", Some("Denver")),
+            "Huckleberry and Co"
+        );
+        let readings: Vec<(String, Near)> = place_query_readings("coffee shop boulder")
+            .into_iter()
+            .map(|q| (q.what, q.near))
+            .collect();
+        assert_eq!(
+            readings[0],
+            ("coffee".into(), Near::Named("shop boulder".into()))
+        );
+        assert!(readings.contains(&("coffee shop".into(), Near::Named("boulder".into()))));
+        // Still nothing for names that split into no town.
+        for name in ["toy story", "pizza hut", "bank of america"] {
+            assert!(
+                searcher.search(name, None, None, 5).unwrap().is_none(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
