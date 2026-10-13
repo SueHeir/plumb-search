@@ -38,10 +38,11 @@ pub(crate) async fn run_places(
     home: Option<&str>,
     country: Option<&str>,
 ) -> Option<plumb_index::places::PlaceResults> {
+    // Not only queries that say where: "starbucks denver" names a town
+    // too, which only the place index knows.
     if plumb_core::Operators::parse(query).any() {
         return None;
     }
-    plumb_index::places::parse_place_query(query)?;
     let backend = Arc::clone(&state.backend);
     let (query, home, country) = (
         query.to_string(),

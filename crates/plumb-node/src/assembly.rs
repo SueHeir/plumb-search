@@ -1,6 +1,6 @@
 //! Small, pure assembly rules shared by MCP and web adapters.
 
-use plumb_core::place::{Place, OSM_COPYRIGHT_URL};
+use plumb_core::place::{is_kind_word, Place, OSM_COPYRIGHT_URL};
 use plumb_core::{normalize_text, SafeSearch};
 use plumb_index::pages::PlacedPage;
 use plumb_index::places::{parse_place_query, LocationStatus, Near, PlaceResults};
@@ -41,13 +41,13 @@ pub(crate) fn places(
     if plumb_core::Operators::parse(query).any() {
         return None;
     }
-    let asked = parse_place_query(query)?;
     let had_results = found.is_some();
     let found = not_a_name(found, hits);
     if had_results && found.is_none() {
         return None;
     }
     let mut found = found.or_else(|| {
+        let asked = parse_place_query(query)?;
         asked.said_where.then(|| PlaceResults {
             what: asked.what,
             center: None,
@@ -335,7 +335,11 @@ pub(crate) fn local_first(
     local: Vec<Hit>,
     limit: usize,
 ) {
-    if found.center.is_none() || found.near_me {
+    // A business named with its town ("starbucks denver") adds its places
+    // but leaves the results as they are: the name may also be a word for
+    // something else ("subway new york").
+    let business = found.guessed && !found.what.rsplit(' ').next().is_some_and(is_kind_word);
+    if found.center.is_none() || found.near_me || business {
         return;
     }
     let roots: Vec<String> = normalize_text(&found.what)
