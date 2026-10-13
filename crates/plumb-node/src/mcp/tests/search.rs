@@ -851,3 +851,41 @@ fn missing_troubleshooting_results_do_not_promote_a_package_as_the_answer() {
     assert!(text.starts_with("No results for"), "{text}");
     assert!(text.contains("Related package information:"), "{text}");
 }
+
+#[test]
+fn a_package_not_asked_for_leaves_the_other_pages_their_places() {
+    let mcp = scripted(|_| {
+        let mut package = package_page("npm", "left-pad", None, None);
+        package.hit.popularity = 0.9;
+        let mut repo = article("x", None, None);
+        repo.hit.page = Page::from_repo(plumb_core::article::Article {
+            title: "left-pad/left-pad".into(),
+            aliases: vec!["left-pad".into()],
+            views: 1_000,
+            ..Default::default()
+        });
+        repo.hit.whole = false;
+        let mut incident = article("Npm left-pad incident", None, None);
+        incident.hit.score = 0.8;
+        let site = Hit {
+            text_score: 0.2,
+            ..hit("die-linke.de", 0.5, 0.6, false)
+        };
+        results(vec![site], vec![package, repo, incident])
+    });
+    let reply = call(&mcp, "search", json!({ "query": "left-pad", "limit": 5 }));
+    let answer = &reply["result"]["structuredContent"];
+    let urls: Vec<&str> = answer["ordered_results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["url"].as_str().unwrap())
+        .collect();
+    let at = |part: &str| urls.iter().position(|url| url.contains(part));
+    // The repository and the article are listed, and npm's page after them.
+    let (repo, incident) = (at("github.com").unwrap(), at("wikipedia.org").unwrap());
+    assert!(
+        at("npmjs.com").is_none_or(|npm| npm > repo.max(incident)),
+        "{urls:?}"
+    );
+}
