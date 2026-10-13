@@ -32,6 +32,9 @@ pub(crate) enum Hint {
     /// A person of that name, of whom something is asked: "obama
     /// daughters", "picasso paintings".
     Person,
+    /// A monarch or pope of that name and number: "henry viii" of "henry
+    /// the 8th" ([`regnal_name`]).
+    Regnal,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
 }
@@ -580,14 +583,23 @@ impl PageSearcher {
         // but not when the query is itself a name ("age of empires"). Of
         // that search only the pages the subject names are kept: "madrid
         // spanish" (of "madrid spanish capital city") names nothing, and
-        // the clubs it describes would push Madrid out.
+        // the clubs it describes would push Madrid out. A monarch or pope
+        // typed with a number is searched in Roman numerals when no article
+        // is named as typed: "charles 3", "henry the 8th".
         let hinted = hinted_name(query);
         let asked = hinted.is_none();
-        let Some((name, hint)) = hinted.or_else(|| {
-            plumb_core::facts::fact_asked(query)
-                .filter(|_| !hits.iter().any(|hit| hit.named))
-                .map(|asked| (asked.subject, Hint::Any))
-        }) else {
+        let Some((name, hint)) = hinted
+            .or_else(|| {
+                plumb_core::facts::fact_asked(query)
+                    .filter(|_| !hits.iter().any(|hit| hit.named))
+                    .map(|asked| (asked.subject, Hint::Any))
+            })
+            .or_else(|| {
+                regnal_name(query)
+                    .filter(|_| !hits.iter().any(|hit| hit.named && hit.page.is_article()))
+                    .map(|name| (name, Hint::Regnal))
+            })
+        else {
             return Ok(hits);
         };
         let mut found = self.search_once(&name, limit, scope)?;
@@ -602,6 +614,8 @@ impl PageSearcher {
                 let called = hits.iter().any(|hit| hit.named);
                 found.retain(|hit| !called && hit.named && hit.page.is_person());
             }
+            // Only a person: "henry v" also names Shakespeare's play.
+            Hint::Regnal => found.retain(|hit| hit.named && hit.page.is_person()),
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             Hint::Paper => {
                 if found.iter().any(|hit| hit.page.set == PAPERS_SET) {
@@ -817,6 +831,56 @@ pub(crate) fn last_word_in_other_number(query: &str) -> Option<String> {
         Some(head) => format!("{head} {other}"),
         None => other,
     })
+}
+
+/// Ordinals a monarch's number is written as after "the": "henry the
+/// eighth".
+const ORDINALS: &str = "first second third fourth fifth sixth seventh eighth ninth tenth \
+    eleventh twelfth thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth \
+    twentieth";
+
+/// `query` with the number it ends with, in digits or an ordinal, in
+/// Roman numerals, as Wikipedia titles monarchs and popes: "henry viii"
+/// for "henry 8", "henry 8th", "henry the 8th" and "henry the eighth".
+/// `None` when it ends with no number from 1 to 39 after a name of
+/// letters.
+pub(crate) fn regnal_name(query: &str) -> Option<String> {
+    let lower = query.to_lowercase();
+    let mut words: Vec<&str> = lower.split_whitespace().collect();
+    let last = words.pop()?;
+    let digits = ["st", "nd", "rd", "th"]
+        .iter()
+        .find_map(|suffix| last.strip_suffix(suffix))
+        .unwrap_or(last);
+    let mut number = match digits.parse::<usize>() {
+        Ok(number) => number,
+        Err(_) if words.last() == Some(&"the") => {
+            ORDINALS
+                .split_whitespace()
+                .position(|ordinal| ordinal == last)?
+                + 1
+        }
+        Err(_) => return None,
+    };
+    if words.last() == Some(&"the") {
+        words.pop();
+    }
+    if !(1..40).contains(&number)
+        || words.is_empty()
+        || !words
+            .iter()
+            .all(|word| word.chars().all(char::is_alphabetic))
+    {
+        return None;
+    }
+    let mut roman = String::new();
+    for (value, numeral) in [(10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")] {
+        while number >= value {
+            roman.push_str(numeral);
+            number -= value;
+        }
+    }
+    Some(format!("{} {roman}", words.join(" ")))
 }
 
 /// The text match ([`crate::Hit::text_score`]) below which a site the
