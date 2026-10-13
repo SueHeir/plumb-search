@@ -3,7 +3,7 @@
 //! is the page's address.
 //!
 //! The pages are fetched by `plumb-tools fetch-pages --set docs` (with
-//! `plumb_crawl::fetch_site_pages`); this turns what was fetched into the
+//! `crate::fetch::site_pages`); this turns what was fetched into the
 //! set's articles. A page is named by its own title (see
 //! [`plumb_core::docs::page_title`]), and called by that title after or
 //! before the product's name ("python sorting techniques", "javascript

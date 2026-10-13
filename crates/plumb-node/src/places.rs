@@ -212,6 +212,7 @@ fn is_near(place: &Place, near: &[(f64, f64)]) -> bool {
 
 /// Opens the place index for `wanted`, building it first when there is
 /// none.
+#[cfg(test)]
 pub fn open_or_build(data_dir: &Path, wanted: &WantedPlaces) -> Result<(String, PlaceSearcher)> {
     open_or_build_with_budget(data_dir, wanted, None)
 }
@@ -272,6 +273,7 @@ pub fn open_file(file: &Path) -> Result<PlaceSearcher> {
 }
 
 /// Deletes place indexes other than `keep`.
+#[cfg(test)]
 pub fn remove_other_indexes(data_dir: &Path, keep: Option<&str>) {
     remove_other_indexes_with_budget(data_dir, keep, None);
 }

@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use plumb_core::Article;
-use plumb_crawl::SitePagesTarget;
 use plumb_net::pages::{quality_path, QualityNote, QualityStage, SetQuality};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
 use super::cache::{self, Cached};
+use super::site_pages::SitePagesTarget;
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Options {

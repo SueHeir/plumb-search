@@ -534,11 +534,6 @@ impl Plugin {
         })
     }
 
-    /// Whether its results' buttons can be pressed.
-    pub fn acts(&self) -> bool {
-        self.acts
-    }
-
     /// The results of `shown` it is shown: those about something it knows
     /// (`ids`), or all of them for a plugin without `ids`.
     fn picks_shown(&self, shown: &[ShownResult]) -> Vec<ShownResult> {

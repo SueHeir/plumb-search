@@ -245,7 +245,7 @@ Docs deduplication keeps separately addressable pages that share a cleaned title
 
 A docs page's title alone ("Glossary") names nothing. It is named by its product's name and title ("python glossary", "glossary python") or, for pages whose title names a section ("Array.prototype.sort() — JavaScript"), by the section and title ("javascript array.prototype.sort()"), and then may come first. Like a question, it is also found by most of the words of its title, names and description ("sort a list in python") and listed after the best site, or first when the query asks for the whole page.
 
-This is the first set of inner pages of good sites; universities, professors, companies and other kinds follow the same way (`plumb_crawl::fetch_site_pages`), each as a set of its own that a node turns on or off under Page sets.
+This is the first set of inner pages of good sites; universities, professors, companies and other kinds follow the same way (`plumb-tools`' `fetch::site_pages`), each as a set of its own that a node turns on or off under Page sets.
 
 ## How pages and sites are listed together
 

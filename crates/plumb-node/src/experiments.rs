@@ -315,6 +315,7 @@ impl Lab {
         })
     }
 
+    #[cfg(test)]
     pub fn layers(&self) -> &[Layer] {
         &self.layers
     }

@@ -6,7 +6,7 @@
 //! index grows on its own: every crawl reports link text for, and
 //! discovers, other domains.
 //!
-//! - [`crawl_homepages`] fetches homepages (robots.txt, delays, redirect,
+//! - [`HomepageCrawler`] fetches homepages (robots.txt, delays, redirect,
 //!   size and time limits).
 //! - [`extract_page_meta`] reads names and outbound links out of a page.
 //! - [`to_records`] turns crawl results into [`plumb_core::SiteRecord`]s
@@ -29,15 +29,15 @@ mod feed;
 mod icon;
 mod read;
 mod records;
-mod site_pages;
 mod structured;
 mod terms;
 #[cfg(test)]
 mod test_alloc;
 
 pub use crawl::{
-    check_feeds, crawl_homepages, fetch_site_icons, log_summary, FeedCheck, FeedOutcome,
-    FeedTarget, HomepageCrawler,
+    allowed, build_client, check_feeds, error_text, fetch_site_icons, http_url, log_summary,
+    page_delay, read_body, redirect_target, same_site, Failure, FeedCheck, FeedOutcome, FeedTarget,
+    HomepageCrawler, Robots, Visit,
 };
 pub use extract::{
     extract_inner_page_meta, extract_page_meta, InnerPageExtraction, DOCS_EXTRACTOR_VERSION,
@@ -47,10 +47,6 @@ pub use feed::{parse_date, read_feed};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
 pub use records::{to_records, CRAWL_VERSION, REREAD_BELOW};
-pub use site_pages::{
-    fetch_site_pages, fetch_site_pages_with_extraction, SitePage, SitePageOutcome, SitePagesResult,
-    SitePagesTarget, MAX_SITEMAPS,
-};
 pub use terms::{pick_terms, words_of, TERM_WORDS};
 
 /// Sent with every request so site owners can see who is crawling and why.
@@ -72,7 +68,7 @@ pub const READ_USER_AGENT: &str = concat!(
 /// The product token matched against robots.txt `User-agent` lines.
 pub const ROBOTS_TOKEN: &str = "PlumbSearch";
 
-/// How [`crawl_homepages`] fetches pages.
+/// How [`HomepageCrawler`] fetches pages.
 #[derive(Debug, Clone)]
 pub struct CrawlConfig {
     pub user_agent: String,
@@ -160,7 +156,7 @@ pub struct CrawlTarget {
     #[serde(default)]
     pub url: String,
     /// A URL the site was reached at before (a record's `url`), tried when
-    /// `url` cannot be reached at all; see [`crawl_homepages`]. Ignored
+    /// `url` cannot be reached at all; see [`HomepageCrawler`]. Ignored
     /// unless it is on the same site as `url`: the same host, or one with
     /// the same registrable domain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,11 +171,6 @@ impl CrawlTarget {
             url: format!("https://{domain}/"),
             known_url: None,
         }
-    }
-
-    /// The same as [`CrawlTarget::new`].
-    pub fn homepage(domain: &str) -> Self {
-        Self::new(domain)
     }
 }
 
@@ -282,7 +273,7 @@ pub struct CrawledPage {
     pub icon: Option<Vec<u8>>,
 }
 
-/// What happened to one target. See [`crawl_homepages`] for when each
+/// What happened to one target. See [`HomepageCrawler`] for when each
 /// outcome is produced.
 // A fetched page is the common outcome, so boxing it would buy nothing.
 #[allow(clippy::large_enum_variant)]
@@ -326,7 +317,7 @@ pub enum CrawlOutcome {
     /// before the response was complete, or what came back was not HTTP.
     /// That says little about the site and is often temporary, so it is
     /// worth retrying sooner than other failures. Every fallback URL has
-    /// been tried by then (see [`crawl_homepages`]).
+    /// been tried by then (see [`HomepageCrawler`]).
     ///
     /// Otherwise `network` is false: robots.txt answered 5xx or 429 (RFC
     /// 9309 says not to crawl then), could not be parsed, or has rules that

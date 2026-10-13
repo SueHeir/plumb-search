@@ -20,6 +20,7 @@ pub enum Workload {
 }
 
 impl Workload {
+    #[cfg(test)]
     pub const PRESETS: [Workload; 3] = [Workload::Light, Workload::Balanced, Workload::Full];
 
     /// Homepages fetched at once; `custom` is what the custom workload

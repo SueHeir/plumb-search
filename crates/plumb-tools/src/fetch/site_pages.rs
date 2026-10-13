@@ -1,6 +1,6 @@
 //! Fetching a site's inner pages: the pages its sitemaps (or its index
 //! pages) list under the addresses asked for, each fetched like a homepage
-//! ([`crate::crawl_homepages`]): robots.txt obeyed for every URL, one
+//! ([`plumb_crawl::HomepageCrawler`]): robots.txt obeyed for every URL, one
 //! request at a time per host with the per-host delay (or the robots.txt
 //! `Crawl-delay`) between them, redirects followed only on the same site.
 //!
@@ -10,16 +10,14 @@
 use std::collections::HashSet;
 use std::io::Read;
 
+use plumb_crawl::{
+    allowed, build_client, error_text, http_url, page_delay, read_body, redirect_target, same_site,
+    CrawlConfig, CrawlOutcome, PageMeta, Robots, Visit,
+};
 use reqwest::header::ACCEPT;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 use url::Url;
-
-use crate::crawl::{
-    allowed, build_client, error_text, http_url, page_delay, read_body, redirect_target, same_site,
-    Robots, Visit,
-};
-use crate::{CrawlConfig, CrawlOutcome, PageMeta};
 
 /// Sitemap files read per site, sitemap indexes included.
 pub const MAX_SITEMAPS: usize = 200;
@@ -59,7 +57,7 @@ pub struct SitePage {
     pub meta: PageMeta,
 }
 
-/// What [`fetch_site_pages`] found for one site.
+/// What [`fetch_site_pages_with_extraction`] found for one site.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SitePagesResult {
     pub domain: String,
@@ -93,17 +91,13 @@ pub struct SitePageOutcome {
 /// in a homepage crawl; icons are not fetched and `cfg.target_deadline`
 /// does not apply (each request has `cfg.timeout`). A redirect off the
 /// roots, a repeat, a bot check or a page that is not HTML is skipped.
+/// `extraction` opts in to richer inner-page content; request, body,
+/// robots and redirect bounds are the same for every kind.
 /// Must run inside a Tokio runtime.
-pub async fn fetch_site_pages(target: &SitePagesTarget, cfg: &CrawlConfig) -> SitePagesResult {
-    fetch_site_pages_with_extraction(target, cfg, crate::InnerPageExtraction::Compact).await
-}
-
-/// Opt-in inner-page content; request, body, robots and redirect bounds
-/// are identical to [`fetch_site_pages`].
 pub async fn fetch_site_pages_with_extraction(
     target: &SitePagesTarget,
     cfg: &CrawlConfig,
-    extraction: crate::InnerPageExtraction,
+    extraction: plumb_crawl::InnerPageExtraction,
 ) -> SitePagesResult {
     let mut result = SitePagesResult {
         domain: target.domain.clone(),
@@ -162,7 +156,7 @@ pub async fn fetch_site_pages_with_extraction(
     let wanted = target.max_pages.max(1);
     let mut found = Found::new(&roots, wanted.saturating_mul(FOUND_FACTOR));
     for (at, body) in &indexes {
-        if crate::extract::extract_page_meta(at, &String::from_utf8_lossy(body))
+        if plumb_crawl::extract_page_meta(at, &String::from_utf8_lossy(body))
             .title
             .is_some()
         {
@@ -779,6 +773,13 @@ mod tests {
 
     use super::*;
 
+    /// [`fetch_site_pages_with_extraction`] with the compact content a
+    /// homepage crawl keeps.
+    async fn fetch_site_pages(target: &SitePagesTarget, cfg: &CrawlConfig) -> SitePagesResult {
+        fetch_site_pages_with_extraction(target, cfg, plumb_crawl::InnerPageExtraction::Compact)
+            .await
+    }
+
     #[test]
     fn bounded_selection_reserves_slots_across_roots() {
         let roots = [
@@ -931,7 +932,8 @@ mod tests {
             ..SitePagesTarget::default()
         };
         let result =
-            fetch_site_pages_with_extraction(&target, &cfg, crate::InnerPageExtraction::Docs).await;
+            fetch_site_pages_with_extraction(&target, &cfg, plumb_crawl::InnerPageExtraction::Docs)
+                .await;
         assert_eq!(result.pages.len(), 1);
         assert_eq!(result.skipped, 1);
         let search = result.pages[0].meta.search.as_ref().unwrap();

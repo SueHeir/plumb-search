@@ -286,6 +286,7 @@ impl Batch {
     }
 
     /// The proof that record `index` is in this batch.
+    #[cfg(test)]
     pub fn proof(&self, index: usize) -> RecordProof {
         self.proof_with(index, &self.leaves())
     }

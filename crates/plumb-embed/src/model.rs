@@ -147,6 +147,7 @@ impl Embedder {
     }
 
     /// The text of `record` this model embeds ([`crate::site_text_words`]).
+    #[cfg(test)]
     pub fn site_text(&self, record: &plumb_core::SiteRecord) -> String {
         crate::site_text_words(record, self.text_words())
     }

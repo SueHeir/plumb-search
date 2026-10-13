@@ -4,7 +4,7 @@
 //! is the page's address.
 //!
 //! The pages are fetched by `plumb-tools fetch-pages --set reference` (with
-//! `plumb_crawl::fetch_site_pages`); this turns what was fetched into the
+//! `crate::fetch::site_pages`); this turns what was fetched into the
 //! set's articles. A page is named by its own title without the site's
 //! name ("Foul-Smelling Stool: Causes and Treatment | Healthline" is
 //! "Foul-Smelling Stool: Causes and Treatment"), and described by its own

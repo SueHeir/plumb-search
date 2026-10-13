@@ -154,6 +154,7 @@ pub fn credits_for(crawled_at: u64) -> i64 {
 
 impl Ledger {
     /// An empty ledger kept only in memory.
+    #[cfg(test)]
     pub fn in_memory() -> Ledger {
         Ledger::default()
     }
@@ -339,6 +340,7 @@ impl std::fmt::Debug for Issuer {
 
 impl Issuer {
     /// An issuer with a fresh key, kept only in memory.
+    #[cfg(test)]
     pub fn in_memory() -> Result<Issuer> {
         let server = VoprfServer::new(&mut OsRng).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         Ok(Issuer {
@@ -544,11 +546,6 @@ struct Held {
 }
 
 impl Wallet {
-    /// An empty wallet kept only in memory.
-    pub fn in_memory() -> Wallet {
-        Wallet::default()
-    }
-
     /// Reads the wallet in `dir`, or starts an empty one there.
     pub fn open(dir: &Path) -> Result<Wallet> {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

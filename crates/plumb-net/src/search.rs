@@ -526,6 +526,7 @@ fn earns(checked: &[FoundSite]) -> bool {
 
 /// Search retained buckets locally, including stale and valid empty answers.
 /// This never sends requests, alters round deadlines, or extends proof validity.
+#[cfg(test)]
 pub fn cache_search(query: &str, cache: &BucketCache, now: u64) -> NetSearch {
     cache_search_with_refresh(query, cache, now).0
 }

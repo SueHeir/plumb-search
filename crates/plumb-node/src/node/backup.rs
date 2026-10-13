@@ -107,6 +107,7 @@ impl Backup {
     }
 
     /// What the backup holds, in words, for the panel.
+    #[cfg(test)]
     pub fn contents(&self) -> Vec<&'static str> {
         FILES
             .iter()

@@ -309,10 +309,6 @@ impl BucketWriter {
     /// Starts a table in `dir`, which must not exist yet. It is written in
     /// a staging directory next to it and moved there by
     /// [`BucketWriter::finish`].
-    pub fn new(dir: &Path) -> Result<BucketWriter> {
-        Self::new_with_budget(dir, None)
-    }
-
     pub fn new_with_budget(
         dir: &Path,
         budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
