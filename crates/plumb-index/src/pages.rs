@@ -35,6 +35,7 @@ mod named_site;
 mod page;
 mod papers;
 mod placing;
+mod repos;
 mod scoring;
 mod search;
 mod sites;
@@ -161,7 +162,7 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 const LEAD_CANDIDATES: usize = 20;
 
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v7-docs-address-symbols";
+pub const PAGE_INDEX_VERSION: &str = "v8-docs-address-symbols-subtitles";
 
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.

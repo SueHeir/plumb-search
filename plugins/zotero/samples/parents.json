@@ -1,0 +1,65 @@
+[
+  {
+    "key": "TLUNZV7I",
+    "version": 1,
+    "library": {
+      "type": "user",
+      "id": 0,
+      "name": "My Library",
+      "links": {
+        "self": {
+          "href": "http://localhost:23119/api/users/0",
+          "type": "application/json"
+        }
+      }
+    },
+    "links": {
+      "self": {
+        "href": "http://localhost:23119/api/users/0/items/TLUNZV7I",
+        "type": "application/json"
+      }
+    },
+    "meta": {
+      "creatorSummary": "Vaswani et al.",
+      "parsedDate": "2017-06-12",
+      "numChildren": 1
+    },
+    "data": {
+      "key": "TLUNZV7I",
+      "version": 1,
+      "itemType": "journalArticle",
+      "title": "Attention Is All You Need",
+      "abstractNote": "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks in an encoder-decoder configuration.",
+      "date": "2017-06-12",
+      "DOI": "10.48550/arXiv.1706.03762",
+      "url": "https://arxiv.org/abs/1706.03762",
+      "publicationTitle": "Advances in Neural Information Processing Systems",
+      "creators": [
+        {
+          "firstName": "Ashish",
+          "lastName": "Vaswani",
+          "creatorType": "author"
+        },
+        {
+          "firstName": "Noam",
+          "lastName": "Shazeer",
+          "creatorType": "author"
+        },
+        {
+          "firstName": "Niki",
+          "lastName": "Parmar",
+          "creatorType": "author"
+        }
+      ],
+      "tags": [
+        {
+          "tag": "transformers"
+        }
+      ],
+      "collections": [],
+      "relations": {},
+      "dateAdded": "2026-10-13T21:20:59Z",
+      "dateModified": "2026-10-13T21:20:59Z"
+    }
+  }
+]
