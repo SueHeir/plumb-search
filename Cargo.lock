@@ -5941,7 +5941,6 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
- "flate2",
  "futures",
  "html5ever",
  "image",
@@ -6228,6 +6227,7 @@ dependencies = [
  "plumb-net",
  "plumb-node",
  "reqwest",
+ "roxmltree",
  "rusqlite",
  "rustix 1.1.5",
  "serde",

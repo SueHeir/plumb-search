@@ -47,8 +47,10 @@ const ACCEPT_ICON: &str = "image/png,image/x-icon,image/*;q=0.8,*/*;q=0.5";
 /// `Accept` header for page requests.
 const ACCEPT_HTML: &str = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 
-/// Fetches each target's homepage, at most `cfg.concurrency` targets at a
-/// time, returning one result per target (in any order).
+/// Fetches homepages, keeping `cfg.concurrency` of them in flight as
+/// targets are added, so a site that never answers holds one slot, not
+/// the whole crawl. [`HomepageCrawler::next`] returns one result per
+/// target, in the order they finish.
 ///
 /// For each target the crawler starts at `target.url` (by default
 /// `https://<domain>/`) and follows redirects itself, one hop at a time:
@@ -84,7 +86,7 @@ const ACCEPT_HTML: &str = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 /// 4. The final response must be a 2xx ([`CrawlOutcome::HttpStatus`]
 ///    otherwise) and HTML or of no stated type ([`CrawlOutcome::NotHtml`]
 ///    otherwise). At most `cfg.max_bytes` of its body are read and parsed
-///    with [`extract_page_meta`] into [`CrawlOutcome::Fetched`], or into
+///    with [`extract_page_meta`](crate::extract_page_meta) into [`CrawlOutcome::Fetched`], or into
 ///    [`CrawlOutcome::BotCheck`] when the page is a bot check standing in
 ///    for the homepage.
 ///
@@ -105,34 +107,9 @@ const ACCEPT_HTML: &str = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 /// connecting to each site directly, which the crawler does unless
 /// `cfg.use_system_proxy` is set: a proxy looks up target names itself.
 ///
-/// Errors never stop the batch; each becomes that target's
+/// Errors never stop the crawl; each becomes that target's
 /// [`CrawlOutcome::Failed`], and so does a target not done within
 /// `cfg.target_deadline`. Must run inside a Tokio runtime.
-pub async fn crawl_homepages(targets: Vec<CrawlTarget>, cfg: &CrawlConfig) -> Vec<CrawlResult> {
-    if targets.is_empty() {
-        return Vec::new();
-    }
-    match build_client(cfg) {
-        Ok(client) => crawl_with(&client, targets, cfg).await,
-        Err(err) => {
-            let error = format!("building the HTTP client: {}", error_text(err));
-            warn!("cannot crawl {} homepages: {error}", targets.len());
-            targets
-                .into_iter()
-                .map(|target| CrawlResult {
-                    domain: target.domain,
-                    outcome: Failure::other(error.clone()).into(),
-                })
-                .collect()
-        }
-    }
-}
-
-/// Fetches homepages like [`crawl_homepages`], but keeps
-/// `cfg.concurrency` of them in flight as targets are added, instead of
-/// waiting for the slowest homepage of a batch before starting the next:
-/// a site that never answers holds one slot, not the whole crawl.
-/// [`HomepageCrawler::next`] returns results in the order they finish.
 pub struct HomepageCrawler {
     client: Result<Client, String>,
     cfg: Arc<CrawlConfig>,
@@ -158,11 +135,6 @@ impl HomepageCrawler {
     /// Adds homepages to fetch after those added before.
     pub fn push(&mut self, targets: impl IntoIterator<Item = CrawlTarget>) {
         self.queued.extend(targets);
-    }
-
-    /// Homepages added and not yet returned by [`Self::next`].
-    pub fn pending(&self) -> usize {
-        self.queued.len() + self.running.len()
     }
 
     /// The next homepage to finish; `None` once none is pending. Fetches
@@ -200,31 +172,10 @@ impl HomepageCrawler {
     }
 }
 
-/// [`crawl_homepages`] with the client built.
-async fn crawl_with(
-    client: &Client,
-    targets: Vec<CrawlTarget>,
-    cfg: &CrawlConfig,
-) -> Vec<CrawlResult> {
-    // buffer_unordered(0) would never start anything.
-    let concurrency = cfg.concurrency.max(1);
-    info!(
-        "crawling {} homepages, {concurrency} at a time",
-        targets.len()
-    );
-    let results: Vec<CrawlResult> = stream::iter(targets)
-        .map(|target| crawl_target(client, cfg, target))
-        .buffer_unordered(concurrency)
-        .collect()
-        .await;
-    log_summary(&results);
-    results
-}
-
 /// Fetches only the icon of each target's site, not its homepage: the
 /// `/favicon.ico` of its start URL's origin (`target.url`, or
 /// `https://<domain>/`), with robots.txt and the per-host delay obeyed as in
-/// a crawl ([`crawl_homepages`]). For a site whose homepage was crawled but
+/// a crawl ([`HomepageCrawler`]). For a site whose homepage was crawled but
 /// whose icon was never kept. `None` for a site with no icon this crawler
 /// can read, or no answer. Must run inside a Tokio runtime.
 pub async fn fetch_site_icons(
@@ -300,7 +251,7 @@ const ACCEPT_FEED: &str =
 
 /// Checks each target's feed, at most `cfg.concurrency` at a time, for its
 /// posts of the last week ([`crate::read_feed`]). A target with no known
-/// feed has its homepage fetched first, as [`crawl_homepages`] would (no
+/// feed has its homepage fetched first, as [`HomepageCrawler`] would (no
 /// icon, no fallback URLs), for the feed it names ([`crate::PageMeta::feed`]). The feed is
 /// fetched with the same rules as a homepage: robots.txt of each origin
 /// asked, per-host delays, at most `cfg.max_redirects` redirects (to any
@@ -448,7 +399,7 @@ async fn check_feed(client: &Client, cfg: &CrawlConfig, target: &FeedTarget) -> 
 }
 
 /// One client for the whole batch, so connections are reused.
-pub(crate) fn build_client(cfg: &CrawlConfig) -> reqwest::Result<Client> {
+pub fn build_client(cfg: &CrawlConfig) -> reqwest::Result<Client> {
     client_builder(cfg).build()
 }
 
@@ -543,7 +494,7 @@ fn start_url(target: &CrawlTarget) -> Result<Url, String> {
 }
 
 /// `raw` as an absolute http(s) URL with a host.
-pub(crate) fn http_url(raw: &str) -> Result<Url, String> {
+pub fn http_url(raw: &str) -> Result<Url, String> {
     let url = Url::parse(raw.trim()).map_err(|err| format!("invalid URL {raw:?}: {err}"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(format!("not an http(s) URL: {raw:?}"));
@@ -604,7 +555,7 @@ fn push_new(urls: &mut Vec<Url>, url: Url) {
 
 /// A failure, to report as [`CrawlOutcome::Failed`].
 #[derive(Debug, Clone)]
-pub(crate) struct Failure {
+pub struct Failure {
     error: String,
     network: bool,
 }
@@ -649,7 +600,7 @@ fn is_network_error(err: &reqwest::Error) -> bool {
 
 /// What robots.txt says about crawling an origin.
 #[derive(Clone)]
-pub(crate) enum Robots {
+pub enum Robots {
     /// A robots.txt was fetched and parsed; obey it.
     Rules(Arc<Robot>),
     /// There is no usable robots.txt (4xx, or a redirect chain that does
@@ -662,7 +613,7 @@ pub(crate) enum Robots {
 
 /// One target's crawl: the robots.txt of each origin it visits, and when
 /// each host it asked last answered.
-pub(crate) struct Visit<'a> {
+pub struct Visit<'a> {
     client: &'a Client,
     cfg: &'a CrawlConfig,
     robots: HashMap<Origin, Robots>,
@@ -672,11 +623,13 @@ pub(crate) struct Visit<'a> {
 
 impl<'a> Visit<'a> {
     /// The client requests are sent with.
-    pub(crate) fn client(&self) -> &'a Client {
+    pub fn client(&self) -> &'a Client {
         self.client
     }
 
-    pub(crate) fn new(client: &'a Client, cfg: &'a CrawlConfig) -> Self {
+    /// A visit that sends its requests with `client`, with no robots.txt
+    /// fetched yet.
+    pub fn new(client: &'a Client, cfg: &'a CrawlConfig) -> Self {
         Visit {
             client,
             cfg,
@@ -686,14 +639,17 @@ impl<'a> Visit<'a> {
         }
     }
 
-    pub(crate) fn set_inner_page_extraction(&mut self, extraction: crate::InnerPageExtraction) {
+    /// How much of each page [`Visit::fetch_homepage`] keeps;
+    /// [`InnerPageExtraction::Compact`](crate::InnerPageExtraction::Compact)
+    /// unless set.
+    pub fn set_inner_page_extraction(&mut self, extraction: crate::InnerPageExtraction) {
         self.extraction = extraction;
     }
 
     /// Fetches the page at `start`, following redirects that stay on its
     /// site and checking every URL against the robots.txt of its origin
     /// before requesting it.
-    pub(crate) async fn fetch_homepage(&mut self, domain: &str, start: &Url) -> CrawlOutcome {
+    pub async fn fetch_homepage(&mut self, domain: &str, start: &Url) -> CrawlOutcome {
         let mut url = start.clone();
         let mut redirects = 0;
         loop {
@@ -823,7 +779,7 @@ impl<'a> Visit<'a> {
     /// also where hosts written as private IP addresses are refused: the
     /// resolver only checks names, and icons, feeds and redirects can
     /// point anywhere.
-    pub(crate) async fn robots(&mut self, url: &Url) -> Robots {
+    pub async fn robots(&mut self, url: &Url) -> Robots {
         if !self.cfg.allow_private_addresses && crate::read::names_private_ip(url) {
             return Robots::DoNotCrawl(Failure::other(format!("{url}: a private address")));
         }
@@ -889,7 +845,7 @@ impl<'a> Visit<'a> {
     /// last answered (or failed to), and notes when this request is done.
     /// Counting from the answer rather than the request keeps slow hosts
     /// from being asked again right away.
-    pub(crate) async fn send(
+    pub async fn send(
         &mut self,
         url: &Url,
         delay: Duration,
@@ -1073,7 +1029,7 @@ fn regex_cost(body: &[u8]) -> usize {
 /// Whether `robot` allows `url`. A big robots.txt has many rules to try, so
 /// the matching runs away from the threads driving the fetches; if it
 /// fails, the URL counts as disallowed.
-pub(crate) async fn allowed(robot: &Arc<Robot>, url: &Url) -> bool {
+pub async fn allowed(robot: &Arc<Robot>, url: &Url) -> bool {
     let (robot, url) = (Arc::clone(robot), url.to_string());
     tokio::task::spawn_blocking(move || robot.allowed(&url))
         .await
@@ -1095,7 +1051,7 @@ fn robots_url(url: &Url) -> Url {
 /// How long to wait before a page request after the last request to the
 /// same host: `per_host_delay`, or the robots.txt `Crawl-delay` (seconds,
 /// capped at [`MAX_CRAWL_DELAY`]) when that is longer.
-pub(crate) fn page_delay(per_host_delay: Duration, crawl_delay: Option<f32>) -> Duration {
+pub fn page_delay(per_host_delay: Duration, crawl_delay: Option<f32>) -> Duration {
     let robots_delay = match crawl_delay {
         Some(secs) if secs > 0.0 => {
             Duration::from_secs_f32(secs.min(MAX_CRAWL_DELAY.as_secs_f32()))
@@ -1109,7 +1065,7 @@ pub(crate) fn page_delay(per_host_delay: Duration, crawl_delay: Option<f32>) -> 
 /// Where a redirect points: its `Location`, resolved against the response's
 /// URL, without credentials or fragment. `None` unless the status is 301,
 /// 302, 303, 307 or 308 and the `Location` makes an http(s) URL.
-pub(crate) fn redirect_target(response: &Response) -> Option<Url> {
+pub fn redirect_target(response: &Response) -> Option<Url> {
     if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
         return None;
     }
@@ -1128,7 +1084,7 @@ pub(crate) fn redirect_target(response: &Response) -> Option<Url> {
 
 /// Same host, or two hosts with the same registrable domain
 /// (`usbank.com` and `www.usbank.com`). Ports and schemes do not matter.
-pub(crate) fn same_site(a: &Url, b: &Url) -> bool {
+pub fn same_site(a: &Url, b: &Url) -> bool {
     if a.host_str().is_some() && a.host_str() == b.host_str() {
         return true;
     }
@@ -1157,7 +1113,7 @@ fn is_html(content_type: &str) -> bool {
 /// reading once the limit is reached and drops the rest. With gzip the
 /// limit applies to the decompressed bytes. Every byte read is added to
 /// `downloaded`.
-pub(crate) async fn read_body(
+pub async fn read_body(
     mut response: Response,
     max_bytes: usize,
     downloaded: &AtomicU64,
@@ -1186,7 +1142,7 @@ fn decode_html(body: &[u8]) -> Cow<'_, str> {
 }
 
 /// An error and its causes on one line, like `a: b: c`.
-pub(crate) fn error_text(err: reqwest::Error) -> String {
+pub fn error_text(err: reqwest::Error) -> String {
     format!("{:#}", anyhow::Error::new(err))
 }
 
@@ -1257,6 +1213,57 @@ mod tests {
     use super::*;
     use crate::test_alloc::peak_bytes;
     use crate::{to_records, OutLink, USER_AGENT};
+
+    /// Fetches each target's homepage, at most `cfg.concurrency` targets at a
+    /// time, returning one result per target (in any order), each as
+    /// [`HomepageCrawler`] would.
+    async fn crawl_homepages(targets: Vec<CrawlTarget>, cfg: &CrawlConfig) -> Vec<CrawlResult> {
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        match build_client(cfg) {
+            Ok(client) => crawl_with(&client, targets, cfg).await,
+            Err(err) => {
+                let error = format!("building the HTTP client: {}", error_text(err));
+                warn!("cannot crawl {} homepages: {error}", targets.len());
+                targets
+                    .into_iter()
+                    .map(|target| CrawlResult {
+                        domain: target.domain,
+                        outcome: Failure::other(error.clone()).into(),
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// [`crawl_homepages`] with the client built.
+    async fn crawl_with(
+        client: &Client,
+        targets: Vec<CrawlTarget>,
+        cfg: &CrawlConfig,
+    ) -> Vec<CrawlResult> {
+        // buffer_unordered(0) would never start anything.
+        let concurrency = cfg.concurrency.max(1);
+        info!(
+            "crawling {} homepages, {concurrency} at a time",
+            targets.len()
+        );
+        let results: Vec<CrawlResult> = stream::iter(targets)
+            .map(|target| crawl_target(client, cfg, target))
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
+        log_summary(&results);
+        results
+    }
+
+    impl CrawlTarget {
+        /// The same as [`CrawlTarget::new`].
+        fn homepage(domain: &str) -> Self {
+            Self::new(domain)
+        }
+    }
 
     /// A record's link texts as (text, number of linking sites).
     fn link_texts_of(record: &SiteRecord) -> Vec<(&str, u32)> {

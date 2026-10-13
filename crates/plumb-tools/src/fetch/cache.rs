@@ -4,10 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::build::docs::FetchedDoc;
 use anyhow::Result;
-use plumb_crawl::{CrawlConfig, SitePageOutcome, SitePagesTarget};
+use plumb_crawl::CrawlConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
+
+use super::site_pages::{fetch_site_pages_with_extraction, SitePageOutcome, SitePagesTarget};
 
 const SCHEMA: u32 = 1;
 /// Bump when extraction, passage/symbol limits or title policies change.
@@ -151,8 +153,7 @@ pub(super) async fn fetch(
             reused: true,
         };
     }
-    let result =
-        plumb_crawl::fetch_site_pages_with_extraction(target, cfg, policy.extraction).await;
+    let result = fetch_site_pages_with_extraction(target, cfg, policy.extraction).await;
     // Allowed skips (robots, non-HTML and duplicates) are recorded but do not
     // mean an interrupted run. Network/bot/HTTP failures cannot replace a host.
     let failed = result.outcomes.iter().any(|o| {

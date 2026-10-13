@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 
 mod cache;
 mod publication;
+mod site_pages;
 
 use crate::cli::{
     FetchDataArgs, FetchFactsArgs, FetchLeadsArgs, FetchPagesArgs, FetchProfilesArgs,
@@ -368,7 +369,7 @@ fn run_docs(args: &FetchPagesArgs, dest: &Path) -> Result<()> {
     let fetched = fetch_sites(args, sites, "docs", |site| {
         (
             site.key,
-            plumb_crawl::SitePagesTarget {
+            site_pages::SitePagesTarget {
                 domain: site.domain.into(),
                 roots: site.roots.iter().map(|r| r.to_string()).collect(),
                 sitemaps: site.sitemaps.iter().map(|r| r.to_string()).collect(),
@@ -409,7 +410,7 @@ fn run_reference(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     let fetched = fetch_sites(args, sites, "reference", |site| {
         (
             site.key(),
-            plumb_crawl::SitePagesTarget {
+            site_pages::SitePagesTarget {
                 domain: site.key().to_string(),
                 roots: site.roots(),
                 sitemaps: site.sitemaps.iter().map(|r| r.to_string()).collect(),
@@ -466,7 +467,7 @@ fn run_subpages(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     let fetched = fetch_sites(args, sites, "subpages", |site| {
         (
             site.key(),
-            plumb_crawl::SitePagesTarget {
+            site_pages::SitePagesTarget {
                 domain: site.key().to_string(),
                 roots: site.roots(),
                 sitemaps: site.site.sitemaps.iter().map(|r| r.to_string()).collect(),
@@ -488,7 +489,7 @@ fn fetch_sites<S: Copy + Send + std::fmt::Debug + 'static>(
     args: &FetchPagesArgs,
     sites: Vec<S>,
     prefix: &'static str,
-    target: impl Fn(S) -> (&'static str, plumb_crawl::SitePagesTarget),
+    target: impl Fn(S) -> (&'static str, site_pages::SitePagesTarget),
 ) -> Result<Vec<cache::SiteFetch<S>>> {
     if let Some(work) = &args.work {
         std::fs::create_dir_all(work)?;
