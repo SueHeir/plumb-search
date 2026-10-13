@@ -28,10 +28,10 @@ use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use plumb_core::keys::{bucket_of, lean_record, piece_of, record_keys, PIECES, PIECES_PER_BUCKET};
 use plumb_core::SiteRecord;
+use plumb_net::bucket::{BucketTable, BUCKETS};
 
 use super::pieces::PieceMap;
 use super::snapshot::{Layout, Snapshot};
-use crate::bucket::{BucketTable, BUCKETS};
 
 /// Size of every row.
 pub const LEAN_ROW_BYTES: u32 = 32 * 1024;
@@ -357,7 +357,7 @@ mod tests {
         // Text that does not compress, in the one piece of the key `bank`.
         for record in &mut records {
             let noise: String = (0u8..4)
-                .map(|i| crate::hash::Hash::of(&[record.domain.as_bytes(), &[i]]).to_hex())
+                .map(|i| plumb_net::hash::Hash::of(&[record.domain.as_bytes(), &[i]]).to_hex())
                 .collect();
             record.description = Some(noise);
         }

@@ -41,7 +41,6 @@ pub mod leads;
 pub mod node;
 pub mod oblivious;
 pub mod pages;
-pub mod pir;
 pub mod popularity;
 pub mod proto;
 pub mod reports;

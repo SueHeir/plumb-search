@@ -33,7 +33,7 @@
 //!    first.
 //! 3. Every [`NodeConfig::refresh_every`] it crawls
 //!    [`NodeConfig::crawl_per_refresh`] more homepages, rebuilds and swaps
-//!    again. As with `plumb crawl`, half of each round goes to sites never
+//!    again. As with `plumb-tools crawl`, half of each round goes to sites never
 //!    crawled and half to sites due again (30 days after their last visit,
 //!    sooner for sites that could not be reached), best-ranked first, so the
 //!    node keeps reaching new sites while it refreshes the best ones.
@@ -283,7 +283,7 @@ pub struct NodeConfig {
     /// trust rules still hold. Needs `network`.
     pub blackhole: bool,
     /// Also share the homepages crawled into this records file (with its
-    /// journal), such as one a `plumb crawl` is filling, and fold them into
+    /// journal), such as one a `plumb-tools crawl` is filling, and fold them into
     /// this node's records: every half hour, those crawled since the last
     /// time and within the last 6 days. Needs `network`.
     pub publish_records: Option<PathBuf>,

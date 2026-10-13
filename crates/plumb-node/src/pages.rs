@@ -212,7 +212,7 @@ impl SetInfo {
     }
 
     /// Reads up to `limit` pages of the set's file `path`, most read first.
-    pub(crate) fn read(&self, path: &Path, limit: u64) -> Result<impl Iterator<Item = Page>> {
+    pub fn read(&self, path: &Path, limit: u64) -> Result<impl Iterator<Item = Page>> {
         // Every set's file is an articles file (see `Page::from_set`).
         let id = self.id;
         if !Page::has_reader(id) {

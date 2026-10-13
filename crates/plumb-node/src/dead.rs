@@ -1,4 +1,4 @@
-//! Sites that look dead, and `plumb dead-sites`, which counts them.
+//! Sites that look dead, which `plumb-tools dead-sites` counts.
 //!
 //! A crawler retries a homepage it could not reach at all (no connection,
 //! no answer; see [`crate::crawl`]) after 1 day, then 2, 4, 8, 16... So
@@ -18,13 +18,7 @@
 //! keeps it from being found again as new. It is tried again every three
 //! recrawl windows, and a crawl that reaches it brings it back.
 
-use anyhow::Result;
-use plumb_core::{now_unix, SiteRecord};
-
-use crate::cli::DeadSitesArgs;
 use crate::crawl::{CrawlSite, SECONDS_PER_DAY};
-use crate::records::load_records;
-use crate::web::group_thousands;
 
 /// Tries in a row that could not reach a site before it can look dead.
 pub(crate) const DEAD_AFTER_FAILURES: u32 = 6;
@@ -47,7 +41,7 @@ pub(crate) fn looks_dead(record: &impl CrawlSite, now: u64) -> bool {
 /// The sites of `sites` that look dead at `now`, best link score first:
 /// none of the best [`NEVER_DEAD_BEST`], and none that `keeps`. `sites`
 /// gives every site, as many times as asked.
-pub(crate) fn find_dead<'a, S: CrawlSite + 'a, I: Iterator<Item = &'a S>>(
+pub fn find_dead<'a, S: CrawlSite + 'a, I: Iterator<Item = &'a S>>(
     sites: impl Fn() -> I,
     now: u64,
     keeps: impl Fn(&S) -> bool,
@@ -77,69 +71,9 @@ pub(crate) fn find_dead<'a, S: CrawlSite + 'a, I: Iterator<Item = &'a S>>(
     dead.into_iter().map(|(_, record)| record).collect()
 }
 
-/// `plumb dead-sites`: counts the sites in a node's records that look dead,
-/// as `plumb run --drop-dead-sites` would judge them, and names the best
-/// known, changing nothing. It keeps what a node keeps, except the node's
-/// focus topics given on its command line or in its settings.
-pub fn run(args: &DeadSitesArgs) -> Result<()> {
-    let set = load_records(&args.data.join("records.jsonl"))?;
-    let history = args.data.join("history");
-    let mut kept: std::collections::HashSet<String> = crate::about::all_pinned(&history)
-        .into_iter()
-        .chain(crate::history::all_opened(&history))
-        .collect();
-    kept.insert(plumb_core::HOME_SITE.to_owned());
-    let interests = crate::about::all_interests(&history);
-    let topics = crate::about::Topics::new(&interests);
-    let now = now_unix();
-    let dead = find_dead(
-        || set.iter(),
-        now,
-        |record: &SiteRecord| {
-            record.signals.official_site || kept.contains(&record.domain) || topics.matches(record)
-        },
-    );
-    let failing = set
-        .iter()
-        .filter(|record| record.gone_at.is_none() && record.crawl_failures > 0)
-        .count();
-    let gone = set.iter().filter(|record| record.gone_at.is_some()).count();
-    let never_reached = dead.iter().filter(|r| r.crawled_at.is_none()).count();
-    println!(
-        "{} sites in the records; {} could not be reached on their last try",
-        group_thousands(set.len() as u64),
-        group_thousands(failing as u64)
-    );
-    println!(
-        "{} look dead ({} never reached by any crawl); --drop-dead-sites would take them \
-         out of the index",
-        group_thousands(dead.len() as u64),
-        group_thousands(never_reached as u64)
-    );
-    if gone > 0 {
-        println!("{} were taken out already", group_thousands(gone as u64));
-    }
-    for record in dead.iter().take(args.show) {
-        let last = record.crawled_at.map_or_else(
-            || "never reached".to_owned(),
-            |at| {
-                format!(
-                    "last reached {} days ago",
-                    now.saturating_sub(at) / SECONDS_PER_DAY
-                )
-            },
-        );
-        println!(
-            "  {} ({} failed tries, {last})",
-            record.domain, record.crawl_failures
-        );
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use plumb_core::RecordSet;
+    use plumb_core::{RecordSet, SiteRecord};
 
     use super::*;
 

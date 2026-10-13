@@ -1,6 +1,7 @@
 //! End-to-end tests: run the `plumb` binary over the synthetic fixtures in
-//! `fixtures/` (ingest, index, search), and drive the web app's router
-//! directly with `tower::ServiceExt::oneshot`, without a network listener.
+//! `fixtures/` (ingest, then an index built as `plumb-tools index` builds
+//! it), and drive the web app's router directly with
+//! `tower::ServiceExt::oneshot`, without a network listener.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -66,20 +67,20 @@ fn build_fixture_index(dir: &Path) -> (PathBuf, String) {
         &"--out",
         &records,
     ]));
-    plumb_ok(&args(&[
-        &"index",
-        &"--records",
-        &records,
-        &"--index",
-        &index,
-    ]));
+    // One record a site, as ingest writes them: indexed a record at a time.
+    let outlined = dir.join("outlined.jsonl");
+    let (copy, outlines) = plumb_node::outline::outline_copy(&records, &outlined)
+        .unwrap()
+        .expect("one record a site");
+    plumb_node::outline::build_index(copy, outlines, &index, None, 0, None, &mut |_| Ok(()))
+        .unwrap();
     (index, ingest)
 }
 
 #[test]
-fn ingest_index_and_search_the_fixtures() {
+fn ingest_merges_every_fixture() {
     let tmp = tempfile::tempdir().unwrap();
-    let (index, ingest) = build_fixture_index(tmp.path());
+    let (_, ingest) = build_fixture_index(tmp.path());
 
     for source in ["tranco", "cc-ranks", "wat", "wikidata", "wrote"] {
         assert!(
@@ -108,21 +109,6 @@ fn ingest_index_and_search_the_fixtures() {
     assert_eq!(facebook.aliases, ["Facebook"]);
     // A domain only seen as a link target is discovered.
     assert!(records.iter().any(|r| r.domain == "github.com"));
-
-    let json = plumb_ok(&args(&[
-        &"search", &"--index", &index, &"--json", &"us", &"bank",
-    ]));
-    let hits: Vec<Hit> = serde_json::from_str(&json).expect("search --json output");
-    assert_eq!(hits.first().map(|h| h.domain.as_str()), Some("usbank.com"));
-    assert!(hits.len() <= 10);
-    // The look-alike is indexed but far below the site named, so it is
-    // left off the page.
-    assert!(!hits.iter().any(|h| h.domain == "usbank-login-help.com"));
-
-    let text = plumb_ok(&args(&[
-        &"search", &"--index", &index, &"--limit", &"3", &"chase",
-    ]));
-    assert!(text.starts_with(" 1. chase.com "), "{text}");
 }
 
 async fn get(app: &Router, uri: &str) -> (StatusCode, String, String) {

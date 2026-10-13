@@ -119,16 +119,6 @@ Lead shared by 1 other Plumb node, 1 trusted (2 days ago; unchecked, read it fir
 
 Each lead says which nodes reported it, how this node stands to each (`trusted`, `friend_of_friend` or `other`), when, and until when it holds, with `verified: false`: a lead is someone's report, not a crawl other crawlers checked, so an agent should read the page (`read_page`) before relying on it. Only leads from nodes the node's search scope asks are listed ([Who a search asks](network.md#agreement-between-crawlers)), never the node's own, and none whose page `check_lookalike` calls a look-alike. Like findings, leads are listed only to apps on the node's own computer. How they travel and how many a node keeps: [Shared findings](network.md#shared-findings).
 
-## Following relations (experiment)
-
-`plumb relations` learns each kind of Wikidata fact whose value is another thing (capital, founder, CEO, headquarters, currency and the rest) as a map between the EmbeddingGemma vectors of Wikipedia articles, made from each article's title and description. It reads a Wikipedia articles file with facts (from `plumb-tools fetch-facts`), embeds the articles in its facts, fits the maps, and reports how often they find the facts it held out:
-
-```sh
-plumb relations --articles wikipedia-en.tsv.gz --model <EmbeddingGemma dir> --out relations/
-```
-
-`plumb mcp --relations relations/` then offers a tool `relate` on top of the others: `relate(subject, relation)` lists the likeliest objects, each with a probability and whether Wikidata states it, and finds them for things Wikidata has no such fact about; `relation` can chain steps (`headquarters > capital`), followed by vector arithmetic in one call, so the step in between never fills a model's context; with `object` it says how likely a claim is instead. Add `--relations-model <dir>` to start from names that are not among the maps' articles. Answers that are not stated are guesses: on 2,000 facts of each kind, the right object came first for 21% (CEO) to 67% (currency) of held-out facts.
-
 ## How it is served
 
 - `POST /mcp` takes one JSON-RPC message and answers it with one JSON object; a notification gets `202 Accepted`. There is no event stream (`GET /mcp` answers 405) and no session.

@@ -6062,7 +6062,6 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "cbor4ii",
- "flate2",
  "futures",
  "libp2p",
  "ohttp",
@@ -6214,6 +6213,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "getrandom 0.3.4",
+ "libp2p",
  "osmpbf",
  "plumb-answer",
  "plumb-core",

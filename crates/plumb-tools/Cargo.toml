@@ -21,6 +21,7 @@ ed25519-dalek = "3"
 flate2 = "1.1.10"
 futures-util = "0.3.34"
 getrandom = "0.3.4"
+libp2p = { version = "0.57.0", default-features = false, features = ["ed25519", "serde"] }
 osmpbf = "0.3.8"
 plumb-answer = { version = "0.2.1", path = "../plumb-answer" }
 plumb-core = { version = "0.2.1", path = "../plumb-core" }

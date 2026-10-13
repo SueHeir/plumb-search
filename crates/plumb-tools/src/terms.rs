@@ -5,7 +5,7 @@
 //! `fetch-text` fetches homepages once and keeps their visible text (up to
 //! [`plumb_crawl::MAX_PAGE_TEXT_WORDS`] words) in a pages file. `terms` then picks each
 //! page's terms with one of several [`Method`]s and writes them into the
-//! records' `terms` field, so `plumb index` and `plumb-tools eval --rank
+//! records' `terms` field, so `plumb-tools index` and `plumb-tools eval --rank
 //! '{"terms_boost": ...}'` can compare the methods on the same pages.
 
 use std::collections::HashSet;

@@ -49,16 +49,14 @@ pub mod websearch;
 
 mod assembly;
 pub mod crawl;
-mod dead;
+pub mod dead;
 mod icons;
 mod ingest;
 pub mod limits;
 pub mod news;
 pub mod outline;
 pub mod records;
-mod relations;
 mod run;
-mod search;
 pub mod sets;
 pub mod site_rules;
 pub mod sources;
@@ -103,17 +101,10 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::Run(args) => run::run(*args),
         Command::Ingest(args) => ingest::run(args),
-        Command::Crawl(args) => crawl::run(args),
-        Command::Index(args) => search::run_index(args),
-        Command::Search(args) => search::run_search(args),
-        Command::Spelling(args) => search::run_spelling(&args),
         Command::Serve(args) => web::run(args),
-        Command::Embed(args) => meaning::run_embed(args),
         Command::RemoteControl(args) => run::remote_control(args),
-        Command::DeadSites(args) => dead::run(&args),
         Command::Experiments(args) => experiments::run(&args),
         Command::ClickLabels(args) => clicks::run(&args),
-        Command::Relations(args) => relations::run(&args),
         Command::Mcp(args) => mcp::run(args),
         Command::TryPlugin(args) => plugins::try_plugin(
             &args.plugin,
@@ -168,7 +159,7 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output> {
 }
 
 /// [`RankConfig::default`], with the popularity weight replaced when given.
-pub(crate) fn rank_config(alpha: Option<f32>) -> RankConfig {
+pub fn rank_config(alpha: Option<f32>) -> RankConfig {
     let mut cfg = RankConfig::default();
     if let Some(alpha) = alpha {
         cfg.alpha = alpha;

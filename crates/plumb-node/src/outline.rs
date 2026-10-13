@@ -668,7 +668,7 @@ fn write_folded_into<W: Write>(
 }
 
 /// [`outline`] for a reader that must not change the records file at
-/// `path`, such as `plumb index` next to a running node: the file with its
+/// `path`, such as `plumb-tools index` next to a running node: the file with its
 /// journal folded in is written to `copy` (when there is a journal), and
 /// the outlines are of `copy` then. Returns the file to read the records
 /// from with them; `None` as [`outline`] does.
@@ -686,7 +686,7 @@ pub fn outline_copy<'a>(
 
 /// How far [`build_index`] got, for its caller to show (and to stop it,
 /// by returning an error).
-pub(crate) enum Step {
+pub enum Step {
     /// Reading `sites` records, of which `docs` go in the index.
     Started { docs: usize, sites: usize },
     /// `done` of the `sites` read.
@@ -696,14 +696,14 @@ pub(crate) enum Step {
 }
 
 /// What [`build_index`] made.
-pub(crate) struct Built {
+pub struct Built {
     /// Sites in the index.
-    pub(crate) docs: usize,
+    pub docs: usize,
     /// Whether the buckets were written where asked.
-    pub(crate) buckets: bool,
+    pub buckets: bool,
     /// The domain and homepage of the best-ranked sites whose feeds to
     /// watch ([`wants_feed`]), as many as asked for.
-    pub(crate) feeds: Vec<(String, String)>,
+    pub feeds: Vec<(String, String)>,
 }
 
 /// Records read between calls of [`build_index`]'s `step`.
@@ -717,7 +717,7 @@ const STEP_EVERY: usize = 10_000;
 /// buckets of the same sites there ([`plumb_net::BucketWriter`]); a failure
 /// there is logged and leaves the index without. `step` is called as the
 /// build goes; an error from it stops the build.
-pub(crate) fn build_index(
+pub fn build_index(
     path: &Path,
     mut outlines: Vec<Outline>,
     index_dir: &Path,

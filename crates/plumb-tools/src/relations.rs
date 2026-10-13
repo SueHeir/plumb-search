@@ -1,6 +1,6 @@
-//! `plumb relations`: learns each kind of Wikidata fact (capital, founder,
-//! CEO...) as a map between the vectors of Wikipedia articles
-//! ([`plumb_embed::relations`]), and measures how well the maps find the
+//! `plumb-tools relations`: learns each kind of Wikidata fact (capital,
+//! founder, CEO...) as a map between the vectors of Wikipedia articles
+//! ([`maps`]), and measures how well the maps find the
 //! facts they were not shown.
 //!
 //! The articles file is read twice: first for the facts whose value is
@@ -24,11 +24,13 @@ use std::sync::Mutex;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use plumb_core::facts::{FactKind, ValueType, KINDS};
-use plumb_embed::relations::{dot, unit};
-use plumb_embed::{text_hash, Relation, Relations, Vectors, RELATIONS_FILE_NAME};
+use plumb_embed::{text_hash, Vectors};
 use plumb_index::pages::Page;
+use plumb_node::meaning::load_embedder;
 
-use crate::meaning::load_embedder;
+use maps::{dot, unit, Relation, Relations, RELATIONS_FILE_NAME};
+
+pub mod maps;
 
 /// File of the article vectors, next to the maps.
 pub const ARTICLE_VECTORS_FILE: &str = "article-vectors.bin";
@@ -65,6 +67,31 @@ pub struct RelationsArgs {
     /// Texts embedded at once [default: one per CPU].
     #[arg(long, value_name = "N")]
     pub threads: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct RelateArgs {
+    /// The directory `plumb-tools relations` wrote the maps to.
+    #[arg(long, value_name = "DIR")]
+    pub maps: PathBuf,
+    /// The model that made the maps' vectors, so names that are not among
+    /// the maps' articles can be embedded.
+    #[arg(long, value_name = "DIR")]
+    pub model: Option<PathBuf>,
+    /// The thing to start from, by name ("Toyota").
+    pub subject: String,
+    /// One relation, or several to follow in turn separated by >
+    /// ("headquarters > capital").
+    pub relation: String,
+    /// A claimed answer to check instead ("Kiichiro Toyoda").
+    #[arg(long)]
+    pub object: Option<String>,
+    /// Most answers.
+    #[arg(long, value_name = "N", default_value_t = 5)]
+    pub limit: usize,
+    /// Print the answer as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// A fact whose value is another article.
@@ -428,7 +455,7 @@ fn embed_entities(
                         if vectors.insert(item, text_hash(text), &vector).is_err() {
                             failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        if (n + 1).is_multiple_of(crate::meaning::SAVE_EVERY) {
+                        if (n + 1).is_multiple_of(plumb_node::meaning::SAVE_EVERY) {
                             if let Err(err) = vectors.save(path) {
                                 eprintln!("saving {}: {err:#}", path.display());
                             }
@@ -500,7 +527,7 @@ fn write_tables(
 pub const MAX_RELATE_ANSWERS: usize = 20;
 
 /// The maps, the articles they were fitted on and those articles' vectors,
-/// for following relations and checking claims (the MCP tool `relate`).
+/// for following relations and checking claims (`plumb-tools relate`).
 pub struct RelationStore {
     relations: Relations,
     items: Vec<String>,
@@ -522,7 +549,7 @@ struct Point {
 }
 
 impl RelationStore {
-    /// Reads what `plumb relations` wrote to `dir`. With `model` (the model
+    /// Reads what `plumb-tools relations` wrote to `dir`. With `model` (the model
     /// that made the vectors), names that are not articles there are
     /// embedded; without, they are not found.
     pub fn load(dir: &Path, model: Option<&Path>) -> Result<Self> {
@@ -730,7 +757,8 @@ fn round3(x: f32) -> f64 {
 }
 
 pub fn run(args: &RelationsArgs) -> Result<()> {
-    let set = crate::pages::SetInfo::find("wikipedia-en").context("no English Wikipedia set")?;
+    let set =
+        plumb_node::pages::SetInfo::find("wikipedia-en").context("no English Wikipedia set")?;
     if !args.articles.is_file() {
         bail!("no articles file at {}", args.articles.display());
     }
@@ -780,8 +808,88 @@ pub fn run(args: &RelationsArgs) -> Result<()> {
     Ok(())
 }
 
+/// `plumb-tools relate`: follows a relation, or checks a claim, with the
+/// maps `plumb-tools relations` wrote.
+pub fn run_relate(args: &RelateArgs) -> Result<()> {
+    let store = RelationStore::load(&args.maps, args.model.as_deref())?;
+    let answer = store.relate(
+        &args.subject,
+        &relation_chain(&args.relation),
+        args.object.as_deref(),
+        args.limit,
+    )?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&answer)?);
+    } else {
+        print!("{}", answer_text(&answer));
+    }
+    Ok(())
+}
+
+/// The kinds in a chain such as "Headquarters > capital".
+fn relation_chain(text: &str) -> Vec<String> {
+    text.split(['>', ',', '/'])
+        .map(|key| key.trim().to_lowercase().replace([' ', '-'], "_"))
+        .filter(|key| !key.is_empty())
+        .collect()
+}
+
+/// [`RelationStore::relate`]'s answer as lines of text.
+fn answer_text(answer: &serde_json::Value) -> String {
+    use serde_json::Value;
+    let text = |value: &Value, key: &str| value[key].as_str().unwrap_or("").trim().to_string();
+    let flag = |value: &Value, key: &str| value[key].as_bool().unwrap_or(false);
+    let stated = |value: &Value| {
+        if flag(value, "stated") {
+            "stated in Wikidata"
+        } else {
+            "a learned guess"
+        }
+    };
+    let subject = text(answer, "subject");
+    let chain: Vec<&str> = answer["relation"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    // "capital of headquarters of Toyota": the last step first.
+    let path = chain.iter().rev().copied().collect::<Vec<_>>().join(" of ");
+    if !flag(answer, "found") {
+        return format!("Plumb knows nothing named {subject} to find the {path} of.\n");
+    }
+    let from = text(answer, "subject_title");
+    if let Some(claim) = answer.get("claim") {
+        let object = text(claim, "object");
+        if !flag(claim, "found") {
+            return format!("Plumb knows nothing named {object} to check.\n");
+        }
+        return format!(
+            "{path} of {from}: {} has probability {:.2} ({}).\n",
+            text(claim, "object_title"),
+            claim["probability"].as_f64().unwrap_or(0.0),
+            stated(claim)
+        );
+    }
+    let mut out = format!("{path} of {from}, likeliest first:\n");
+    for item in answer["answers"].as_array().map_or(&[][..], Vec::as_slice) {
+        out.push_str(&text(item, "title"));
+        let description = text(item, "description");
+        if !description.is_empty() {
+            out.push_str(&format!(", {description}"));
+        }
+        out.push_str(&format!(
+            " ({:.2}, {}) [Wikidata {}]\n",
+            item["probability"].as_f64().unwrap_or(0.0),
+            stated(item),
+            text(item, "item")
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use plumb_core::facts::Fact;
 
@@ -870,7 +978,7 @@ pub(crate) mod tests {
 
     /// A store in `dir` where each country's capital is its vector turned
     /// a quarter of the way around, and the maps were fitted on that.
-    pub(crate) fn write_store(dir: &Path) {
+    fn write_store(dir: &Path) {
         let dim = 8;
         let model = [9u8; 32];
         let countries = ["Australia", "France", "Japan", "Peru", "Chad", "Fiji"];
@@ -968,6 +1076,36 @@ pub(crate) mod tests {
         );
         assert!(store.relate("France", &["ceo".into()], None, 5).is_err());
         assert!(store.relate("France", &[], None, 5).is_err());
+    }
+
+    #[test]
+    fn relate_answers_read_as_text() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(dir.path());
+        let store = RelationStore::load(dir.path(), None).unwrap();
+        assert_eq!(
+            relation_chain(" Head-quarters > capital,"),
+            ["head_quarters", "capital"]
+        );
+        let capital = relation_chain("Capital");
+
+        let text = answer_text(&store.relate("Fiji", &capital, None, 1).unwrap());
+        assert!(
+            text.starts_with("capital of Fiji, likeliest first:\nSuva ("),
+            "{text}"
+        );
+        assert!(text.ends_with("a learned guess) [Wikidata K5]\n"), "{text}");
+        let text = answer_text(&store.relate("France", &capital, Some("Paris"), 5).unwrap());
+        assert!(
+            text.starts_with("capital of France: Paris has probability"),
+            "{text}"
+        );
+        assert!(text.ends_with("(stated in Wikidata).\n"), "{text}");
+        let text = answer_text(&store.relate("Atlantis", &capital, None, 5).unwrap());
+        assert_eq!(
+            text,
+            "Plumb knows nothing named Atlantis to find the capital of.\n"
+        );
     }
 
     #[test]

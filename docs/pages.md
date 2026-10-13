@@ -72,6 +72,22 @@ plumb-tools fetch-facts --articles /scratch/wikipedia-en.tsv.gz --retry-facts /s
 
 Targeted repairs accept at most 100,000 item/property pairs and reuse the existing best-rank, ended-statement, population-year and namesake parsing. They make no worldwide scan. Reports are written after the ingestion call finishes; an interrupted process has no new checkpoint. The report is local ingestion diagnostics and is not transferred as article fact metadata. Population observation years continue to travel in the existing compact fact value. A retrieval timestamp never stands in for the year a population was counted.
 
+#### Following relations (experiment)
+
+`plumb-tools relations` learns each kind of Wikidata fact whose value is another thing (capital, founder, CEO, headquarters, currency and the rest) as a map between the EmbeddingGemma vectors of Wikipedia articles, made from each article's title and description. It reads an articles file with facts, embeds the articles in its facts, fits the maps, and reports how often they find the facts it held out:
+
+```sh
+plumb-tools relations --articles wikipedia-en.tsv.gz --model <EmbeddingGemma dir> --out relations/
+```
+
+`plumb-tools relate` then follows a relation from a thing to the likeliest objects, each with a probability and whether Wikidata states it, and finds them for things Wikidata has no such fact about. The relation can chain steps (`"headquarters > capital"`), followed by vector arithmetic in one call. With `--object` it says how likely a claim is instead, and with `--model <dir>` it starts from names that are not among the maps' articles:
+
+```sh
+plumb-tools relate --maps relations/ Toyota "headquarters > capital"
+```
+
+Answers that are not stated are guesses: on 2,000 facts of each kind, the right object came first for 21% (CEO) to 67% (currency) of held-out facts. No node runs either command.
+
 ### Leads and other names
 
 To find an article by what its first sentences say ("triassic jurassic cretaceous" finds Mesozoic) and by the other titles that lead to it ("manubrium" leads to a section of Sternum), add each article's lead and other names from Wikimedia's weekly dump of its search index:
