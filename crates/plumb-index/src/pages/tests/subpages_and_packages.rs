@@ -192,6 +192,88 @@ fn tag_archives_are_listed_only_on_their_site() {
 }
 
 #[test]
+fn section_pages_are_listed_only_on_their_site() {
+    let hit = |url: &str, title: &str| PageHit {
+        page: Page::from_set(
+            SUBPAGES_SET,
+            Article {
+                title: title.into(),
+                item: Some(url.into()),
+                views: 6_000,
+                ..Article::default()
+            },
+        )
+        .unwrap(),
+        score: 0.98,
+        named: true,
+        popularity: 0.98,
+        whole: false,
+        learned: None,
+    };
+    let sites =
+        |domains: &[&str]| -> Vec<crate::Hit> { domains.iter().map(|d| site(d, false)).collect() };
+    let news_sites = sites(&["news.google.com", "nytimes.com", "cnn.com"]);
+    for (url, title, query, own) in [
+        ("https://www.cam.ac.uk/news", "News", "news", "cam.ac.uk"),
+        (
+            "https://hai.stanford.edu/events",
+            "Upcoming Events",
+            "upcoming events",
+            "stanford.edu",
+        ),
+        (
+            "https://corporate.target.com/press/releases",
+            "Press Releases | Target Corporate",
+            "press releases",
+            "target.com",
+        ),
+        (
+            "https://www.stanford.edu/contact",
+            "Contact Us",
+            "contact us",
+            "stanford.edu",
+        ),
+        (
+            "https://openai.com/careers/",
+            "Careers",
+            "careers",
+            "openai.com",
+        ),
+        (
+            "https://www.billboard.com/c/business/business-news/",
+            "Business News",
+            "business news",
+            "billboard.com",
+        ),
+    ] {
+        let page = hit(url, title);
+        // Named by its title, it says nothing of what was searched for.
+        assert!(!subpage_asked(query, &news_sites, &page), "{url}");
+        assert!(!subpage_asked(query, &[], &page), "{url}");
+        // Unless the search is on its site.
+        assert!(subpage_asked(query, &sites(&[own]), &page), "{url}");
+    }
+    // A page about something is no section page.
+    for (url, title) in [
+        ("https://computerhistory.org/minecraft", "Minecraft"),
+        (
+            "https://www.cam.ac.uk/news/fusion",
+            "News from the fusion lab",
+        ),
+        ("https://press.example.edu/", "University Press"),
+        ("https://example.org/maya/calendar", "Mayan Calendar"),
+        ("https://example.org/guides/social-media", "Social Media"),
+        (
+            "https://example.org/events/winter-olympics",
+            "Events of the Winter Olympics",
+        ),
+    ] {
+        let query = plumb_core::normalize_text(title);
+        assert!(subpage_asked(&query, &[], &hit(url, title)), "{url}");
+    }
+}
+
+#[test]
 fn subpages_are_listed_only_when_asked_for() {
     let hit = |url: &str, title: &str, named: bool| PageHit {
         page: Page::from_set(

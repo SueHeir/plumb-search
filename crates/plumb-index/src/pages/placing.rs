@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use plumb_core::key_pages::PageIntent;
 use plumb_core::{
     adult_level, host_of, normalize_text, registrable_domain, AdultLevel, Operators, SafeSearch,
 };
@@ -285,7 +286,8 @@ const TITLE_STOP_WORDS: &[&str] = &[
 /// Values and company culture"). A big site's news, press releases and reviews
 /// share words with all sorts of searches: "seven summits" is not a
 /// leadership summit at jnj.com, nor "mount everest" a film review at
-/// ign.com. A tag archive is listed only on one of the best sites, named
+/// ign.com. A tag archive, or a page titled just what kind of page it is
+/// ([`is_section_page`]), is listed only on one of the best sites, named
 /// or not. Pages of other sets always may.
 pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
     if hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET {
@@ -302,7 +304,9 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
     // A site's list of its posts with one tag is titled just the tag, and
     // says nothing of it: jnj.com's "Lupus" ("Explore Johnson & Johnson's
     // lupus resources") was named by "lupus" and led it, above the article.
-    if is_tag_archive(&hit.page.url) {
+    // So is a site's news or contact page titled just that: cam.ac.uk's
+    // "News" was named by "news" and led it, above every news site.
+    if is_tag_archive(&hit.page.url) || is_section_page(&hit.page.title) {
         return on_best_site();
     }
     if hit.named {
@@ -383,6 +387,42 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
                 .split_once(mark)
                 .is_some_and(|(head, _)| has_most(head))
         })
+}
+
+/// Titles of a site's news and events pages, normalized. With the titles
+/// of its key pages ([`PageIntent::of_title`]: "Contact Us", "Careers"),
+/// they say what kind of page it is, not what it is about.
+const SECTION_TITLES: &[&str] = &[
+    "news and events",
+    "calendar",
+    "events calendar",
+    "press",
+    "press room",
+    "media",
+    "media center",
+    "media centre",
+    "whats on",
+];
+
+/// Last words of such titles, alone or after one other word: "News",
+/// "Latest News", "Business News", "Upcoming Events", "Press Releases".
+const SECTION_ENDS: &[&str] = &["news", "events", "releases", "announcements", "updates"];
+
+/// Whether `title`, before any site name after a bar or a dash, only says
+/// what kind of page it is: "News", "Upcoming Events", "Press Releases |
+/// Target Corporate", "Contact Us".
+fn is_section_page(title: &str) -> bool {
+    let head = [" | ", " - ", " – ", " — "]
+        .iter()
+        .filter_map(|mark| title.split_once(mark).map(|(head, _)| head))
+        .min_by_key(|head| head.len())
+        .unwrap_or(title);
+    let words = normalize_text(head);
+    let words: Vec<&str> = words.split_whitespace().collect();
+    let ends_so = words.len() <= 2 && words.last().is_some_and(|w| SECTION_ENDS.contains(w));
+    ends_so
+        || SECTION_TITLES.contains(&words.join(" ").as_str())
+        || PageIntent::of_title(head).is_some()
 }
 
 /// Whether `url` is a site's list of its posts with one tag:
