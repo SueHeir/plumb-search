@@ -646,7 +646,7 @@ pub(crate) fn resolve_entity<'a>(
             .iter()
             .copied()
             .filter(|hit| {
-                key(&hit.page.title) == subject
+                plumb_index::same_words(&hit.page.title, &subject)
                     || legal_name(&hit.page.title) == subject
                     || hit.named
                     || hit.whole
@@ -659,7 +659,7 @@ pub(crate) fn resolve_entity<'a>(
     let exact: Vec<_> = candidates
         .iter()
         .copied()
-        .filter(|hit| key(&hit.page.title) == subject)
+        .filter(|hit| plumb_index::same_words(&hit.page.title, &subject))
         .collect();
     if exact.len() == 1 {
         return EntityResolution::Resolved(&exact[0].page);
@@ -1187,6 +1187,36 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn a_name_typed_without_its_accents_is_the_title() {
+        let entity = |title: &str, item: &str| {
+            let mut hit = article(title, "", None);
+            hit.page.item = Some(item.into());
+            hit
+        };
+        // Both named by "beyonce": the singer's title is the name asked
+        // for, whatever its accent.
+        let candidates = [
+            entity("Beyoncé (album)", "Q15079464"),
+            entity("Beyoncé", "Q36153"),
+        ];
+        let EntityResolution::Resolved(page) = resolve_entity("beyonce", &candidates, None) else {
+            panic!("beyonce is Beyoncé");
+        };
+        assert_eq!(page.title, "Beyoncé");
+        let candidates = [
+            entity("Mötley Crüe", "Q151215"),
+            entity("Mötley Crüe (album)", "Q1546186"),
+        ];
+        assert!(matches!(
+            resolve_entity("motley crue", &candidates, None),
+            EntityResolution::Resolved(page) if page.title == "Mötley Crüe"
+        ));
+        // Other words are another name.
+        assert!(!plumb_index::same_words("Beyoncé", "beyonce knowles"));
+        assert!(plumb_index::same_words("AC/DC", "ac dc"));
     }
 
     #[test]
