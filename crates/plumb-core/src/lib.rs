@@ -1185,10 +1185,12 @@ pub fn domain_label(domain: &str) -> String {
 }
 
 /// Normalizes text for matching: lowercase, letters and digits only, every
-/// other run of characters becomes one space. Apostrophes are dropped
-/// (`McDonald's` -> `mcdonalds`) and runs of single-character tokens are
-/// joined, so `U.S. Bank` -> `us bank` and `A.T.M.` -> `atm`.
+/// other run of characters becomes one space. Apostrophes and combining
+/// marks are dropped (`McDonald's` -> `mcdonalds`, Thai `ข่าว` -> `ขาว`)
+/// and runs of single-character tokens are joined, so `U.S. Bank` ->
+/// `us bank` and `A.T.M.` -> `atm`.
 pub fn normalize_text(text: &str) -> String {
+    use unicode_categories::UnicodeCategories;
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
     for ch in text.chars() {
@@ -1196,8 +1198,10 @@ pub fn normalize_text(text: &str) -> String {
             // Only letters and digits of the lowercase form, so a second
             // pass changes nothing: `İ` lowercases to `i` plus a combining dot.
             current.extend(ch.to_lowercase().filter(|c| c.is_alphanumeric()));
-        } else if matches!(ch, '\'' | '\u{2019}' | '\u{02BC}') {
-            // Apostrophes join the two halves of a word.
+        } else if matches!(ch, '\'' | '\u{2019}' | '\u{02BC}') || ch.is_mark() {
+            // Apostrophes join the two halves of a word, and a mark is part
+            // of its letter: a Thai tone mark or the virama of Hindi's `न्द`
+            // is inside a word, not between two.
         } else if !current.is_empty() {
             tokens.push(std::mem::take(&mut current));
         }
@@ -1755,6 +1759,11 @@ mod tests {
         // `İ` lowercases to `i` plus a combining dot; the dot is dropped so
         // normalizing twice gives the same text.
         assert_eq!(normalize_text("İstanbul Havalimanı"), "istanbul havalimanı");
+        // Marks that are not letters stay inside their word: a Thai tone
+        // mark, Hindi's virama, an accent typed as a combining mark.
+        assert_eq!(normalize_text("รวมข่าว บันเทิง"), "รวมขาว บันเทิง");
+        assert_eq!(normalize_text("हिन्दी समाचार"), "हिनदी समाचार");
+        assert_eq!(normalize_text("cafe\u{301}s"), "cafes");
         for text in ["İstanbul", "Ǆemal", "ﬁnance", "Straße", "ΣΊΣΥΦΟΣ", "İİ.İ"] {
             let once = normalize_text(text);
             assert_eq!(normalize_text(&once), once, "{text:?}");

@@ -103,7 +103,7 @@ impl IndexBuild {
         let fields = Fields::new(&schema)?;
         let index = storage::create_index(staging.path(), schema, budget, staging.lifecycle())
             .with_context(|| format!("creating index in {}", staging.path().display()))?;
-        analysis::register(index.tokenizers());
+        analysis::register_sites(index.tokenizers());
         let writer: IndexWriter = index
             .writer(WRITER_HEAP_BYTES)
             .context("opening index writer")?;
