@@ -277,9 +277,14 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
             place_tags.push(format!("sport={}", sport.to_lowercase()));
         }
     }
+    // An embassy's or consulate's address can give the country it serves,
+    // not the one it is in: El Salvador's consulate in Camuy, Puerto Rico
+    // says SV, and was the only country the towns around it were given.
+    let diplomatic = matches!(kind.as_str(), "office=diplomatic" | "amenity=embassy");
     let country = get("addr:country")
         .or_else(|| get("is_in:country_code"))
-        .and_then(normalize_country);
+        .and_then(normalize_country)
+        .filter(|_| !diplomatic);
     // Canada's addresses give the province as addr:province, and so do
     // Italy's (MI, PE), whose would be taken for states and provinces.
     let province = get("addr:province")
@@ -895,6 +900,7 @@ fn winner(votes: &HashMap<String, u32>) -> Option<String> {
 /// nearest of `states` with that code, and takes from towns that know
 /// their country a region no state of it has: Rainy River, Ontario, voted
 /// Minnesota's by shops across the river, has no region rather than MN.
+/// A territory's towns are in its own country (Puerto Rico's in PR).
 fn countries_from_states(places: &mut [Place], settlements: &[usize], states: &[Place]) {
     // A state's region is its whole code; it is looked up by the part
     // after the country's: "WA" for AU-WA and US-WA.
@@ -926,14 +932,20 @@ fn countries_from_states(places: &mut [Place], settlements: &[usize], states: &[
                     .and_then(|(_, state)| state.country.clone());
             }
             // A territory's state is its own country's and its parent's:
-            // US-PR is Puerto Rico's and the US's.
+            // US-PR is Puerto Rico's and the US's, and its towns are in
+            // Puerto Rico, though some of their shops say US.
             Some(country) => {
                 let ours = |state: &&Place| {
                     state.country.as_ref() == Some(country)
                         || split(state).is_some_and(|(parent, _)| parent == country)
                 };
-                if !states.iter().any(ours) {
-                    places[i].region = None;
+                match states.iter().copied().find(ours) {
+                    None => places[i].region = None,
+                    Some(state) => {
+                        if split(state).is_some_and(|(parent, _)| parent == country) {
+                            places[i].country = state.country.clone();
+                        }
+                    }
                 }
             }
         }
@@ -1326,6 +1338,16 @@ mod tests {
             ("wikidata", "Q19686"),
         ];
         assert!(place_of(&tags(river), "r7".into(), false).is_none());
+        // A consulate's address says whose it is, not where.
+        let consulate = &[
+            ("name", "Consulado de El Salvador"),
+            ("office", "diplomatic"),
+            ("addr:state", "PR"),
+            ("addr:country", "SV"),
+        ];
+        let consulate = place_of(&tags(consulate), "n8".into(), true).unwrap();
+        assert_eq!(consulate.country, None);
+        assert_eq!(consulate.region.as_deref(), Some("PR"));
     }
 
     #[test]
@@ -1586,7 +1608,8 @@ mod tests {
         // Canada has no MN, so Rainy River keeps no region.
         assert_eq!(said(5), (None, Some("CA")));
         assert_eq!(said(8), (Some("PR"), Some("PR")));
-        // A town whose addresses put Puerto Rico in the US keeps its state.
+        // A town whose addresses put Puerto Rico in the US keeps its state,
+        // and is in Puerto Rico.
         let mut places = vec![
             at("Arecibo", "place=town", 18.47, -66.72),
             Place {
@@ -1596,7 +1619,7 @@ mod tests {
         ];
         fill_in_towns(&mut places, &states);
         assert_eq!(places[0].region.as_deref(), Some("PR"));
-        assert_eq!(places[0].country.as_deref(), Some("US"));
+        assert_eq!(places[0].country.as_deref(), Some("PR"));
         // Without the states, no country is made up.
         let mut places = vec![
             at("Perth", "place=city", -31.95, 115.86),
