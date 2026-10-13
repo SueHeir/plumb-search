@@ -66,10 +66,11 @@ pub(crate) async fn run_places(
 pub(crate) async fn place_sites(
     state: &AppState,
     found: &plumb_index::places::PlaceResults,
+    options: &SearchOptions,
 ) -> Vec<Hit> {
     let backend = Arc::clone(&state.backend);
     let found = found.clone();
-    tokio::task::spawn_blocking(move || {
+    let sites = tokio::task::spawn_blocking(move || {
         crate::assembly::linked_sites(
             &found,
             |domain| backend.site(domain),
@@ -77,7 +78,18 @@ pub(crate) async fn place_sites(
         )
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_default();
+    // Safe search holds for local sites as for any result.
+    let adult = |domain: &str| {
+        state
+            .node
+            .as_ref()
+            .is_some_and(|node| node.blocks_adult(domain))
+    };
+    sites
+        .into_iter()
+        .filter(|hit| options.safe == plumb_core::SafeSearch::Off || !adult(&hit.domain))
+        .collect()
 }
 
 /// Where the places go on a results page that does not start them at
@@ -290,7 +302,7 @@ pub(crate) async fn search_page(
             )
             .map(|places| places.found);
             if let Some(found) = &found_places {
-                let local = place_sites(&state, found).await;
+                let local = place_sites(&state, found, &settings.options).await;
                 places::local_first(found, &mut results.hits, local, limit);
             }
             // Places shown: none found around a town is no list.
@@ -664,9 +676,15 @@ pub(crate) fn route_sources(
     results: &mut SearchResults,
     limit: usize,
 ) {
-    crate::assembly::route_sources(query, answer, country, results, limit, |domain| {
-        state.backend.site(domain)
-    });
+    crate::assembly::route_sources(
+        query,
+        answer,
+        country,
+        results,
+        limit,
+        |domain| state.backend.site(domain),
+        |word| state.backend.common_word(word),
+    );
 }
 
 /// Results asked for when looking up whose profile a query asks for.
@@ -795,8 +813,8 @@ pub(crate) fn shown_results(
             .pages
             .iter()
             .map(|placed| &placed.hit.page)
-            .find(|page| page.site.as_deref() == Some(hit.domain.as_str()))
-            .and_then(about_of);
+            .filter(|page| page.site.as_deref() == Some(hit.domain.as_str()))
+            .find_map(about_of);
         shown.push(plumb_plugin::ShownResult {
             id: shown.len() as u32,
             url,

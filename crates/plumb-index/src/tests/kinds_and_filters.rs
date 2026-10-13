@@ -667,7 +667,86 @@ fn a_query_in_another_script_than_the_language_keeps_its_sites() {
     assert!(found("bank").is_empty());
     assert_eq!(english.language_for("bank"), Some("en"));
     assert_eq!(english.language_for("楽天"), None);
-    assert_eq!(english.for_query("楽天").language, None);
+    assert_eq!(searcher.language_for(&english, "楽天"), None);
+}
+
+#[test]
+fn a_query_in_another_language_keeps_its_sites() {
+    let declared = |domain: String, title: String, language: &str| {
+        let mut record = site(&domain, Some(&title), None, &[], &[], ranked(900, 5_000));
+        record.language = Some(language.into());
+        record
+    };
+    let mut records = Vec::new();
+    for town in [
+        "Hamburg", "Bremen", "Köln", "Bonn", "Essen", "Kiel", "Ulm", "Trier", "Jena", "Fulda",
+        "Hagen", "Mainz",
+    ] {
+        let name = town.to_lowercase();
+        records.push(declared(
+            format!("wetter-{name}.example"),
+            format!("Wetter {town}"),
+            "de",
+        ));
+        records.push(declared(
+            format!("weather-{name}.example"),
+            format!("Weather {town}"),
+            "en",
+        ));
+        records.push(declared(
+            format!("hotels-{name}.example"),
+            format!("Hotels {town}"),
+            "en",
+        ));
+    }
+    records.push(declared("dwd.example".into(), "Wetter Berlin".into(), "de"));
+    records.push(declared(
+        "gasthof.example".into(),
+        "Hotels Berlin".into(),
+        "de",
+    ));
+    let (_dir, searcher) = build(&records);
+    let english = SearchOptions {
+        language: Some("en".into()),
+        ..SearchOptions::default()
+    };
+    let found = |query: &str| {
+        let hits = searcher
+            .search_full(query, 10, &RankConfig::default(), &english)
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    // "wetter" is on German sites only, so the search is German.
+    assert_eq!(searcher.language_for(&english, "wetter berlin"), None);
+    assert_eq!(found("wetter berlin")[0], "dwd.example");
+    // "hotels" is on English sites, so the filter stays.
+    assert_eq!(
+        searcher.language_for(&english, "hotels berlin").as_deref(),
+        Some("en")
+    );
+    assert!(!found("hotels berlin").contains(&"gasthof.example".to_string()));
+    // Words too few sites have, and numbers, decide nothing.
+    for query in ["berlin", "weather 2026", "zzz"] {
+        assert_eq!(
+            searcher.language_for(&english, query).as_deref(),
+            Some("en"),
+            "{query}"
+        );
+    }
+    // The same the other way round.
+    let german = SearchOptions {
+        language: Some("de".into()),
+        ..SearchOptions::default()
+    };
+    assert_eq!(searcher.language_for(&german, "weather berlin"), None);
+    assert_eq!(
+        searcher.language_for(&german, "wetter berlin").as_deref(),
+        Some("de")
+    );
 }
 
 #[test]
@@ -748,4 +827,54 @@ fn brand_names_find_the_official_site() {
     }
     assert_eq!(top(&searcher, "chase"), "chase.com");
     assert_eq!(top(&searcher, "wikipedia"), "wikipedia.org");
+}
+
+#[test]
+fn a_well_known_site_the_query_starts_by_naming_keeps_its_language() {
+    let foreign = |domain: &str, title: &str, alias: &[&str], language: &str, signals| {
+        let mut record = site(domain, Some(title), None, alias, &[], signals);
+        record.language = Some(language.into());
+        record
+    };
+    let mut records = corpus();
+    records.extend([
+        foreign(
+            "realmadrid.example",
+            "Real Madrid CF | Web oficial",
+            &["Real Madrid"],
+            "es",
+            popular(500, 50_000),
+        ),
+        // Well known, but by one common word.
+        foreign(
+            "free.example",
+            "Free: Freebox, forfaits et jeux",
+            &["Free"],
+            "fr",
+            popular(300, 50_000),
+        ),
+        // Named by two words, but known to few.
+        foreign(
+            "realestate.example",
+            "Real Estate Immobilien",
+            &[],
+            "de",
+            obscure(5_000_000, 20),
+        ),
+    ]);
+    let (_dir, searcher) = build(&records);
+    let english = SearchOptions {
+        language: Some("en".into()),
+        ..SearchOptions::default()
+    };
+    for (query, domain, kept) in [
+        ("real madrid tickets", "realmadrid.example", true),
+        ("free games", "free.example", false),
+        ("real estate agents", "realestate.example", false),
+    ] {
+        let found =
+            |options: &SearchOptions| search_in(&searcher, query, options).contains(&domain.into());
+        assert!(found(&SearchOptions::default()), "{query}");
+        assert_eq!(found(&english), kept, "{query}");
+    }
 }

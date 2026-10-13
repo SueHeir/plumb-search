@@ -200,6 +200,7 @@ impl Mcp {
             &mut results,
             limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
             |domain| self.backend.site(domain),
+            |word| self.backend.common_word(word),
         );
         // Placed as the results page places them, which the info box needs.
         let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();

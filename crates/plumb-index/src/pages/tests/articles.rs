@@ -88,6 +88,11 @@ fn fact_questions_find_the_article_they_ask_about() {
         described("SS Mont-Blanc", 8_000, "French cargo ship"),
         page("Age of Empires", 80_000, &[]),
         page("Empires (film)", 2_000, &[]),
+        described("Madrid", 90_000, "Capital and largest city of Spain"),
+        described("Real Madrid CF", 300_000, "Spanish football club"),
+        described("Atlético Madrid", 120_000, "Spanish football club"),
+        described("Rome", 90_000, "Capital city of Italy"),
+        described("S.S. Lazio", 300_000, "Italian football club in Rome"),
     ]);
     let first = |q: &str| {
         let hits = s.search(q, 5).unwrap();
@@ -100,6 +105,16 @@ fn fact_questions_find_the_article_they_ask_about() {
     assert_eq!(
         first("how high is mont blanc"),
         Some(("Mont Blanc".into(), true))
+    );
+    // Only what the subject names is added: "madrid spanish" names
+    // nothing, and the clubs it describes are no answer.
+    assert_eq!(
+        first("madrid spanish capital city"),
+        Some(("Madrid".into(), false))
+    );
+    assert_eq!(
+        first("rome italian capital city"),
+        Some(("Rome".into(), false))
     );
     // A query that names something is not a question about its last words.
     let hits = s.search("age of empires", 5).unwrap();
@@ -366,4 +381,42 @@ fn words_are_only_looked_up() {
     assert_eq!(free.url, "https://en.wiktionary.org/wiki/free");
     assert_eq!(s.definition("awol").unwrap().unwrap().title, "AWOL");
     assert_eq!(s.definition("freedom").unwrap(), None);
+}
+
+#[test]
+fn what_is_asked_about_a_person_finds_their_article() {
+    let person = |title: &str, views: u64, aliases: &[&str]| {
+        let mut page = page(title, views, aliases);
+        page.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1961-08-04".into(),
+        }];
+        page
+    };
+    let (_dir, s) = searcher(&[
+        person("Barack Obama", 900_000, &["Obama"]),
+        person("Pablo Picasso", 400_000, &["Picasso"]),
+        page("Picasso (crater)", 9_000, &[]),
+        person("Steve Jobs", 700_000, &[]),
+        person("Black (singer)", 20_000, &[]),
+        page("Black Death", 300_000, &[]),
+        page("Christmas", 500_000, &[]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title.clone())
+            .collect()
+    };
+    assert_eq!(named("obama daughters"), ["Barack Obama"]);
+    assert_eq!(named("picasso paintings"), ["Pablo Picasso"]);
+    assert_eq!(named("steve jobs cause of death"), ["Steve Jobs"]);
+    // Only a person, and not when a page is called the whole query.
+    assert_eq!(named("black death"), ["Black Death"]);
+    assert!(named("christmas songs").is_empty());
+    assert_eq!(
+        hinted_name("Lebron James kids"),
+        Some(("lebron james".into(), Hint::Person))
+    );
 }

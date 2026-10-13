@@ -31,6 +31,7 @@ use tantivy::IndexReader;
 
 mod building;
 mod docs;
+mod named_site;
 mod page;
 mod papers;
 mod placing;
@@ -40,10 +41,12 @@ mod sites;
 
 pub use self::building::{build_page_index, build_page_index_with_budget, GO_ON_EVERY};
 pub use self::docs::{docs_query_topic, docs_symbol_matches};
+pub(crate) use self::page::is_site_page_set;
 pub use self::placing::{
-    add_named_site, drop_namesakes_of_words, keep_page_rules, lift_named_sites, operators_allow,
-    options_allow, page_key, place_operator_pages, place_pages, DEMAND_MARGIN, MAX_PAGES_LISTED,
-    MAX_SITE_PAGES, MIN_PARTIAL_SCORE, OPERATOR_PAGES, PARTIAL_AFTER, WEAK_SITE_MATCH,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, keep_page_rules, lift_named_sites,
+    operators_allow, options_allow, page_key, place_operator_pages, place_pages, DEMAND_MARGIN,
+    MAX_PAGES_LISTED, MAX_SITE_PAGES, MIN_PARTIAL_SCORE, OPERATOR_PAGES, PARTIAL_AFTER,
+    WEAK_SITE_MATCH,
 };
 pub(crate) use self::placing::{asked_as_question, kept_below, named_page_site};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
@@ -59,6 +62,38 @@ pub const PARTIAL_MATCH: f32 = 0.6;
 /// it ("manubrium" for Sternum). Not its name, so never above a page the
 /// query names, but enough to be listed.
 pub const OTHER_NAME_MATCH: f32 = 0.6;
+
+/// How many times as much a person must be read as any other article with
+/// their surname in its title to be named by it alone
+/// ([`PageSearcher::name_by_surname`]), or by a title and their name.
+const SURNAME_MARGIN: u64 = 3;
+
+/// Words before a person's name that are none of it: "sir isaac newton",
+/// "st francis of assisi" ([`PageSearcher::name_by_title`]).
+const HONORIFICS: &[&str] = &[
+    "sir", "dame", "dr", "mr", "mrs", "ms", "saint", "st", "lord", "lady", "tsar", "czar",
+];
+
+/// Titles before a person's name that their article's title or
+/// description says they held: "president kennedy" is John F. Kennedy,
+/// "President of the United States", and not Kennedy the commentator.
+const OFFICES: &[&str] = &[
+    "president",
+    "senator",
+    "governor",
+    "mayor",
+    "chancellor",
+    "chairman",
+    "pope",
+    "emperor",
+    "empress",
+    "king",
+    "queen",
+    "prince",
+    "princess",
+    "general",
+    "admiral",
+];
 
 /// How much popularity counts, against how well the query names the page.
 pub const POPULARITY_SHARE: f32 = 0.5;
@@ -82,7 +117,8 @@ const UNSURE_WORD_SHARE: f32 = 0.5;
 
 /// Least number of pages whose names have a word for the word to be
 /// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
-/// sites say them.
+/// sites say them. Unless it is a slip the sites show people make, of a
+/// word in far more pages ([`PAGE_SLIP_WEIGHT`]): "recieve" is in 68.
 pub const KNOWN_WORD_PAGES: u64 = 3;
 
 /// A word the pages hardly know is corrected to a near word found in this
@@ -92,6 +128,14 @@ pub const PAGE_FIX_RATIO: u64 = 20;
 /// ...and in at least this many: a slip of a rare word is no likelier than
 /// a rare word typed as meant ("kiwipete" is not "kimipet").
 pub const MIN_PAGE_FIX_PAGES: u64 = 20;
+
+/// The power how much commoner a word is in pages' names is weighed by,
+/// against a slip the spelling model learned ([`PageSearcher::suggest_spelling`]).
+/// Pages are named after things, so everyday words are rarer in their
+/// names than in what people type: "definitely" is in 228, "receive" in
+/// 3,668, and at a power of 1 neither "definately" nor "recieve" would be
+/// taken for a slip of them.
+pub const PAGE_SLIP_WEIGHT: f64 = 2.0;
 
 /// Most read articles about a site looked at for one about the site itself
 /// ([`PageSearcher::title_untitled`]).
@@ -125,7 +169,7 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 const LEAD_CANDIDATES: usize = 20;
 
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v6-paper-dates-rich-symbol-docs-scope";
+pub const PAGE_INDEX_VERSION: &str = "v9-docs-address-symbols-subtitles-sharps";
 
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.

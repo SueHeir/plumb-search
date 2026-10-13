@@ -584,6 +584,8 @@ fn words_of_things_are_corrected_from_page_names() {
     assert_eq!(suggest("budapest"), None);
     assert_eq!(suggest("anub"), None);
     assert_eq!(suggest("budafest2"), None);
+    // A web address is a name, not words.
+    assert_eq!(suggest("budafest.com"), None);
     // A rare word is no slip of another rare one: few pages say "perfi".
     // Nor of a common one with another first letter: "erft".
     assert_eq!(suggest("perft"), None);
@@ -595,6 +597,108 @@ fn words_of_things_are_corrected_from_page_names() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn slips_people_make_are_corrected_though_pages_name_them() {
+    let mut pages = Vec::new();
+    let mut add = |title: &str, count: usize| {
+        for i in 0..count {
+            pages.push(page(&format!("{title} {i}"), 10, &[]));
+        }
+    };
+    // Everyday words are rare in pages' names, and their slips are there
+    // too: song titles, misspelled redirects.
+    add("Receive", 200);
+    add("Recieve", 4);
+    add("Definitely", 40);
+    add("Definately", 1);
+    add("Pace", 200);
+    add("PKCE flow", 3);
+    add("Judgment", 40);
+    add("Judgement", 30);
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(
+        &[("ei", "ie", 0.001), ("i", "a", 0.001), ("g", "ge", 0.01)],
+        1e-6,
+    );
+    let nothing_known = |_: &str| false;
+    let suggest = |query: &str, model| {
+        searcher
+            .suggest_spelling(query, model, &nothing_known)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    assert_eq!(suggest("recieve", Some(&model)).as_deref(), Some("receive"));
+    assert_eq!(
+        suggest("definately", Some(&model)).as_deref(),
+        Some("definitely")
+    );
+    // An edit people are not seen to make leaves a word the pages know.
+    assert_eq!(suggest("pkce", Some(&model)), None);
+    // So does a word nearly as common as the near one.
+    assert_eq!(suggest("judgement", Some(&model)), None);
+    // Without the model, a word the pages know stays.
+    assert_eq!(suggest("recieve", None), None);
+}
+
+#[test]
+fn names_are_not_taken_for_slips() {
+    let mut pages = Vec::new();
+    let mut add = |title: &str, count: usize| {
+        for i in 0..count {
+            pages.push(page(&format!("{title} {i}"), 10, &[]));
+        }
+    };
+    add("Meets", 200);
+    add("Jean Meeus", 3);
+    add("Elias", 200);
+    add("ETIAS", 3);
+    add("Http", 200);
+    add("Htop", 3);
+    add("Sauce", 200);
+    add("Saute", 3);
+    add("Argument", 200);
+    add("Arguement", 3);
+    pages.push(page("Htop", 10, &[]));
+    let word = |title: &str, description: &str| {
+        Page::from_word(Article {
+            title: title.into(),
+            description: Some(description.into()),
+            ..Article::default()
+        })
+    };
+    pages.push(word("saute", "(verb) To fry quickly in a little fat."));
+    pages.push(word("arguement", "(noun) Misspelling of argument."));
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(
+        &[
+            ("t", "u", 0.001),
+            ("l", "t", 0.001),
+            ("t", "o", 0.001),
+            ("c", "t", 0.001),
+            ("u", "ue", 0.01),
+        ],
+        1e-6,
+    );
+    let suggest = |query: &str| {
+        searcher
+            .suggest_spelling(query, Some(&model), &|_| false)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    // Alone, each is a likely slip of a commoner word.
+    assert_eq!(suggest("meeus").as_deref(), Some("meets"));
+    assert_eq!(suggest("etias").as_deref(), Some("elias"));
+    // A page names it with another word typed.
+    assert_eq!(suggest("jean meeus"), None);
+    // Typed in capitals, an abbreviation.
+    assert_eq!(suggest("ETIAS"), None);
+    // An article is named by it.
+    assert_eq!(suggest("htop"), None);
+    // Wiktionary has it, and not only as a misspelling.
+    assert_eq!(suggest("saute"), None);
+    assert_eq!(suggest("arguement").as_deref(), Some("argument"));
 }
 
 #[test]
@@ -703,4 +807,143 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
     assert_eq!(sites[0].title.as_deref(), Some("New York Post"));
     assert_eq!(sites[1].title.as_deref(), Some("Welcome to Steam"));
     assert_eq!(sites[2].title.as_deref(), Some("California Post"));
+}
+
+#[test]
+fn a_famous_surname_alone_names_the_person() {
+    let person = |title: &str, views: u64| {
+        let mut person = page(title, views, &[]);
+        person.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1925-10-13".into(),
+        }];
+        person
+    };
+    let mut hilton = page("Hilton Worldwide", 3_448, &[]);
+    hilton.description = Some("American hospitality company".into());
+    hilton.site = Some("hilton.com".into());
+    let (_dir, s) = searcher(&[
+        person("Margaret Thatcher", 43_807),
+        person("Denis Thatcher", 3_863),
+        page("Thatcher effect", 900, &[]),
+        person("Franz Kafka", 32_449),
+        page("Kafka (film)", 1_200, &[]),
+        page("Kafka on the Shore", 4_270, &[]),
+        // Read too little more than another of the name.
+        person("Franklin D. Roosevelt", 69_007),
+        person("Theodore Roosevelt", 52_362),
+        // An article is called the word, or a company's site is.
+        person("Bruno Mars", 90_557),
+        page("Mars", 80_000, &[]),
+        person("Paris Hilton", 34_645),
+        hilton,
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("thatcher"), ["Margaret Thatcher"]);
+    assert_eq!(named("kafka"), ["Franz Kafka", "Kafka (film)"]);
+    assert!(named("roosevelt").is_empty());
+    assert_eq!(named("mars"), ["Mars"]);
+    assert!(named("hilton").is_empty());
+    // A surname and more words still name no one.
+    assert!(named("thatcher era").is_empty());
+}
+
+#[test]
+fn a_title_and_a_name_name_the_person_who_held_it() {
+    let person = |title: &str, views: u64, aliases: &[&str], description: &str| {
+        let mut person = page(title, views, aliases);
+        person.description = Some(description.into());
+        person.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1917-05-29".into(),
+        }];
+        person
+    };
+    let (_dir, s) = searcher(&[
+        person(
+            "John F. Kennedy",
+            75_228,
+            &["JFK"],
+            "President of the United States from 1961 to 1963",
+        ),
+        person(
+            "Kennedy (commentator)",
+            17_415,
+            &[],
+            "American television personality",
+        ),
+        person(
+            "Robert F. Kennedy",
+            31_922,
+            &[],
+            "American politician and lawyer (1925–1968)",
+        ),
+        person(
+            "Diana, Princess of Wales",
+            94_857,
+            &["Lady Diana Spencer"],
+            "Member of the British royal family (1961–1997)",
+        ),
+        page("Princess Diana (song)", 1_500, &[]),
+        person("Isaac Newton", 40_694, &[], "English polymath (1642–1727)"),
+        page("Newton (unit)", 4_568, &[]),
+        person(
+            "George W. Bush",
+            69_493,
+            &[],
+            "President of the United States from 2001 to 2009",
+        ),
+        person(
+            "George H. W. Bush",
+            41_000,
+            &[],
+            "President of the United States from 1989 to 1993",
+        ),
+        person(
+            "Abraham Lincoln",
+            80_000,
+            &["President Lincoln"],
+            "President of the United States",
+        ),
+        page("General Motors", 30_000, &[]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("president kennedy"), ["John F. Kennedy"]);
+    assert_eq!(named("princess diana")[0], "Diana, Princess of Wales");
+    assert_eq!(named("sir isaac newton"), ["Isaac Newton"]);
+    // Two presidents of the name, a page called the whole query, and no
+    // person of the name.
+    assert!(named("president bush").is_empty());
+    assert_eq!(named("president lincoln"), ["Abraham Lincoln"]);
+    assert_eq!(named("general motors"), ["General Motors"]);
+}
+
+#[test]
+fn a_sharp_after_a_letter_is_searched_as_written_out() {
+    let (_dir, s) = searcher(&[
+        page("C (programming language)", 600_000, &[]),
+        page("C Sharp (programming language)", 400_000, &[]),
+        page("C minor", 6_000, &[]),
+        page("C-sharp minor", 3_000, &[]),
+    ]);
+    let first = |query: &str| s.search(query, 5).unwrap().remove(0);
+    let hit = first("c#");
+    assert_eq!(hit.page.title, "C Sharp (programming language)");
+    assert!(hit.named);
+    assert_eq!(first("C# minor").page.title, "C-sharp minor");
+    // Without the sign, still C.
+    assert_eq!(first("c").page.title, "C (programming language)");
+    assert_eq!(first("c minor").page.title, "C minor");
 }

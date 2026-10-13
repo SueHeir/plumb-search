@@ -85,6 +85,41 @@ fn main_articles_beat_their_namesakes() {
 }
 
 #[test]
+fn namesakes_read_far_less_than_the_article_are_not_listed() {
+    let read = |title: &str, site: Option<&str>, score: f32, views: u64| {
+        let mut hit = found(title, site, true, score);
+        hit.page.views = views;
+        hit
+    };
+    let sites = [
+        site("royal.uk", false),
+        site("pwcgov.org", false),
+        site("prince.com", false),
+    ];
+    let placed = place_pages(
+        "prince william",
+        &sites,
+        vec![
+            read("William, Prince of Wales", Some("royal.uk"), 0.76, 400_000),
+            read("Prince William (TV series)", None, 0.54, 20),
+            read("Prince William (1788 ship)", None, 0.52, 5),
+        ],
+    );
+    let titles: Vec<&str> = placed.iter().map(|p| p.hit.page.title.as_str()).collect();
+    assert_eq!(titles, ["William, Prince of Wales"]);
+    // One read at least a fiftieth as much is listed.
+    let placed = place_pages(
+        "cleopatra",
+        &[site("cleorecs.com", false)],
+        vec![
+            read("Cleopatra", None, 0.85, 66_000),
+            read("Cleopatra (1963 film)", None, 0.70, 7_000),
+        ],
+    );
+    assert_eq!(placed.len(), 2);
+}
+
+#[test]
 fn pages_about_a_listed_site_go_under_it() {
     let sites = [site("python.org", true), site("pythonanywhere.com", false)];
     let placed = place_pages(
@@ -195,6 +230,66 @@ fn sites_with_some_words_of_a_named_article_are_left_out() {
     let order: Vec<&str> = sites.iter().map(|s| s.domain.as_str()).collect();
     // The article's own site stays.
     assert_eq!(order, ["toystory.disney.com", "toys.com"]);
+}
+
+#[test]
+fn sites_only_a_later_word_of_a_named_article_finds_are_left_out() {
+    // Each lacks a word of "airpods pro": (domain, words of it its name
+    // covers from the first, closeness in meaning).
+    let evidence = |domain: &str, partial_name_words: usize, closeness: Option<f32>| {
+        let mut hit = known_site(domain, false, 0.7);
+        hit.missing_words = true;
+        hit.query_evidence = Some(crate::CandidateEvidence {
+            domain: domain.into(),
+            lexical_score: 30.0,
+            semantic_closeness: closeness,
+            query_coverage: 0.5,
+            substantive_coverage: 0.5,
+            remaining_coverage: 0.5,
+            named_subject_words: 0,
+            named_subject_domain: None,
+            named_subject_reason: None,
+            subject_coverage: None,
+            subject_remaining_coverage: None,
+            full_name: false,
+            typed_domain: false,
+            partial_name_words,
+            relevance_tier: 0,
+            source_quality: None,
+        });
+        hit
+    };
+    let mut sites = vec![
+        site("airpodspro.ru", true),
+        // Named by "pro", an alias of the Public Record Office.
+        evidence("nationalarchives.gov.uk", 0, Some(0.0)),
+        evidence("airpods.example", 1, Some(0.1)),
+        evidence("earbuds.example", 0, Some(0.6)),
+        evidence("novector.example", 0, None),
+        evidence("pro.example", 0, Some(0.2)),
+    ];
+    let mut earbuds = found("AirPods Pro", Some("pro.example"), true, 0.9);
+    earbuds.page.item = Some("Q72725578".into());
+    let floor = crate::RankConfig::default().meaning_only_relevance;
+    // Not named in full, or no floor: all stay.
+    earbuds.named = false;
+    assert_eq!(drop_far_namesakes(&mut sites, &[earbuds.clone()], floor), 0);
+    earbuds.named = true;
+    assert_eq!(drop_far_namesakes(&mut sites, &[earbuds.clone()], None), 0);
+    assert_eq!(drop_far_namesakes(&mut sites, &[earbuds], floor), 1);
+    let order: Vec<&str> = sites.iter().map(|s| s.domain.as_str()).collect();
+    // The site the name starts with, one near in meaning, one with no
+    // vector and the article's own site stay.
+    assert_eq!(
+        order,
+        [
+            "airpodspro.ru",
+            "airpods.example",
+            "earbuds.example",
+            "novector.example",
+            "pro.example"
+        ]
+    );
 }
 
 #[test]
