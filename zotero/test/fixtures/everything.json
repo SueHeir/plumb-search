@@ -1,0 +1,123 @@
+{
+ "assembled": {
+  "rows": [
+   {
+    "kind": "page",
+    "page": {
+     "page": {
+      "set": "wikipedia-en",
+      "url": "https://en.wikipedia.org/wiki/Attention_Is_All_You_Need",
+      "title": "Attention Is All You Need",
+      "description": "2017 research paper by Google",
+      "views": 10414,
+      "item": "Q30249683",
+      "lead": "\"Attention Is All You Need\" is a 2017 research paper on machine learning authored by eight scientists and engineers working at Google."
+     },
+     "score": 0.790557,
+     "named": true,
+     "popularity": 0.581114,
+     "at": 0
+    }
+   },
+   {
+    "kind": "page",
+    "page": {
+     "page": {
+      "set": "papers",
+      "url": "https://doi.org/10.65215/2q58a426",
+      "title": "Attention Is All You Need",
+      "description": "Paper by Ashish Vaswani et al., 2025",
+      "views": 26826
+     },
+     "score": 0.7185672,
+     "named": true,
+     "popularity": 0.796418,
+     "whole": true,
+     "at": 0
+    }
+   },
+   {
+    "kind": "site",
+    "site": {
+     "domain": "you.com",
+     "url": "https://you.com/",
+     "title": "The Leading Web Search APIs for AI | You.com",
+     "description": "Skip the groundwork with our AI-ready Web Search APIs, delivering advanced search capabilities to power your next product.",
+     "score": 0.42812574,
+     "country": "US",
+     "official": true
+    },
+    "pages": []
+   },
+   {
+    "kind": "site",
+    "site": {
+     "domain": "all.biz",
+     "url": "https://all.biz/",
+     "title": "Allbiz — all products and services of the world on Allbiz",
+     "description": "Allbiz — connects sellers with buyers all around the world. Catalog of products, services and companies. More than 20,000,000 products offers and services can be found on Allbiz pages.",
+     "score": 0.40736276,
+     "official": true
+    },
+    "pages": []
+   }
+  ]
+ },
+ "hits": [
+  {
+   "domain": "you.com",
+   "url": "https://you.com/",
+   "title": "The Leading Web Search APIs for AI | You.com",
+   "description": "Skip the groundwork with our AI-ready Web Search APIs, delivering advanced search capabilities to power your next product.",
+   "score": 0.42812574,
+   "country": "US",
+   "official": true
+  },
+  {
+   "domain": "all.biz",
+   "url": "https://all.biz/",
+   "title": "Allbiz — all products and services of the world on Allbiz",
+   "description": "Allbiz — connects sellers with buyers all around the world. Catalog of products, services and companies. More than 20,000,000 products offers and services can be found on Allbiz pages.",
+   "score": 0.40736276,
+   "official": true
+  }
+ ],
+ "pages": [
+  {
+   "page": {
+    "set": "wikipedia-en",
+    "url": "https://en.wikipedia.org/wiki/Attention_Is_All_You_Need",
+    "title": "Attention Is All You Need",
+    "description": "2017 research paper by Google",
+    "views": 10414,
+    "item": "Q30249683",
+    "lead": "\"Attention Is All You Need\" is a 2017 research paper on machine learning authored by eight scientists and engineers working at Google."
+   },
+   "score": 0.790557,
+   "named": true,
+   "popularity": 0.581114,
+   "at": 0
+  },
+  {
+   "page": {
+    "set": "papers",
+    "url": "https://doi.org/10.65215/2q58a426",
+    "title": "Attention Is All You Need",
+    "description": "Paper by Ashish Vaswani et al., 2025",
+    "views": 26826
+   },
+   "score": 0.7185672,
+   "named": true,
+   "popularity": 0.796418,
+   "whole": true,
+   "at": 0
+  }
+ ],
+ "info": {
+  "title": "Attention Is All You Need",
+  "description": "2017 research paper by Google",
+  "lead": "\"Attention Is All You Need\" is a 2017 research paper on machine learning authored by eight scientists and engineers working at Google.",
+  "article": "https://en.wikipedia.org/wiki/Attention_Is_All_You_Need",
+  "wikidata": "https://www.wikidata.org/wiki/Q30249683"
+ }
+}

@@ -551,6 +551,66 @@ fn partial_names_score_lower() {
     assert!(s.search("marie antoinette", 1).unwrap().is_empty());
     assert!(s.search("", 1).unwrap().is_empty());
 }
+#[test]
+fn a_name_inside_a_longer_search_finds_its_page() {
+    let article = |title: &str, description: &str, views: u64, aliases: &[&str]| {
+        let mut article = page(title, views, aliases);
+        article.description = Some(description.into());
+        article.item = Some("Q1".into());
+        article
+    };
+    let asyncio = Page::from_docs(Article {
+        title: "asyncio".into(),
+        description: Some(
+            "asyncio is a library to write concurrent code using the async/await syntax.".into(),
+        ),
+        item: Some("https://docs.python.org/3/library/asyncio.html".into()),
+        views: 5_000,
+        aliases: vec!["Python asyncio".into(), "asyncio Python".into()],
+        ..Article::default()
+    })
+    .unwrap();
+    let (_dir, s) = searcher(&[
+        asyncio,
+        article(
+            "Upper Peninsula of Michigan",
+            "northern of the two peninsulas of Michigan",
+            60_000,
+            &["Upper Peninsula"],
+        ),
+        article("Michigan", "state of the United States", 500_000, &[]),
+        article("Ninja", "covert agent in feudal Japan", 300_000, &[]),
+        article(
+            "Terry Stafford",
+            "American singer-songwriter (1941–1996)",
+            1_001,
+            &[],
+        ),
+        article("Stafford", "town in Staffordshire, England", 20_000, &[]),
+        article(
+            "Death",
+            "permanent cessation of vital functions",
+            200_000,
+            &[],
+        ),
+    ]);
+    let listed = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 10).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named || hit.score >= MIN_PARTIAL_SCORE)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    // A docs page by its product and title, an article by its title.
+    assert_eq!(listed("python asyncio tutorial"), ["asyncio"]);
+    assert_eq!(listed("terry stafford death"), ["Terry Stafford"]);
+    assert_eq!(
+        listed("upper peninsula michigan map")[0],
+        "Upper Peninsula of Michigan"
+    );
+    // An article named by one word of two is no closer for the other.
+    assert!(listed("ninja terms").len() <= 1);
+}
 
 #[test]
 fn words_of_things_are_corrected_from_page_names() {
