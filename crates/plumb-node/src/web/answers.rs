@@ -549,8 +549,7 @@ pub(crate) fn fact_pages(pages: &[PlacedPage]) -> impl Iterator<Item = &PlacedPa
 }
 
 /// Resolving an entity does not inspect whether it has the requested
-/// fact. A missing fact must never select a namesake instead, except for
-/// a work's maker, which only works have ([`MAKERS`]).
+/// fact. A missing fact must never select a namesake instead.
 pub(crate) enum EntityResolution<'a> {
     Resolved(&'a Page),
     Ambiguous(Vec<&'a Page>),
@@ -558,6 +557,8 @@ pub(crate) enum EntityResolution<'a> {
 }
 
 /// What a question about a work's maker asks: the subject is the work.
+/// Only works have these, so a page without one is no answer to it, an
+/// exception to [`EntityResolution`]'s rule ([`works_made`]).
 const MAKERS: &[plumb_core::facts::FactKind] = {
     use plumb_core::facts::FactKind::*;
     &[Author, Director, Composer, Creator]
