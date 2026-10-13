@@ -848,7 +848,7 @@ pub(crate) fn search_about(
     if let Some(profile) = &extras.profile {
         return Some(crate::plugins::about_page(&profile.page));
     }
-    if plumb_core::Operators::parse(query).any() {
+    if plumb_core::Operators::parse(query).any() || answers::is_sum(extras.answer.as_ref()) {
         return None;
     }
     let placed = place_pages(
@@ -873,9 +873,11 @@ pub(crate) async fn plugin_about(
     options: &SearchOptions,
 ) -> Option<plumb_plugin::About> {
     let about = search_about(query, results, extras);
-    if about
-        .as_ref()
-        .is_some_and(|about| same_title(&about.title, query))
+    // A sum is about nothing, not a song its digits name either.
+    if answers::is_sum(extras.answer.as_ref())
+        || about
+            .as_ref()
+            .is_some_and(|about| same_title(&about.title, query))
     {
         return about;
     }

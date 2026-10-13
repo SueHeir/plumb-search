@@ -406,10 +406,10 @@ pub(crate) fn render_results_with(
         about.apply_pages(&mut pages, shown_hits.len());
     }
     // An info box is about what the whole query names, which operators
-    // ("site:", "-word") change.
+    // ("site:", "-word") change, and a sum names nothing.
     let info = if let Some(profile) = extras.and_then(|e| e.profile.as_ref()) {
         answers::info_from_page(&profile.page, &shown_hits)
-    } else if ops.any() {
+    } else if ops.any() || answers::is_sum(extras.and_then(|e| e.answer.as_ref())) {
         None
     } else {
         answers::info_box(&shown_hits, &pages)

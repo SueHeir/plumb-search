@@ -259,6 +259,13 @@ pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
     info_from_page(page_about(sites, pages)?, sites)
 }
 
+/// Whether the query was worked out as a sum, so it names no article: the
+/// results for "2*3" lead with 23 (number), its digits read without the
+/// sign, and those for "6*7" with the 6-7 meme.
+pub(crate) fn is_sum(answer: Option<&Answer>) -> bool {
+    answer.is_some_and(|answer| answer.kind == plumb_answer::Kind::Calculation)
+}
+
 /// The Wikipedia article or Wikidata item that results `sites` and
 /// `pages` (as placed among them) are clearly about, as [`info_box`]
 /// picks it.
