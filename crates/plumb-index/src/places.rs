@@ -56,6 +56,9 @@ const SAME_PLACE_KM: f64 = 0.3;
 /// How much a town in the searcher's country counts over a bigger one
 /// elsewhere, in [`plumb_core::place::place_rank`] tiers.
 const HOME_COUNTRY_TIERS: f64 = 0.2;
+/// Namesakes this close (km) are one area to search around, not a
+/// choice to ask about.
+const SAME_AREA_KM: f64 = 30.0;
 /// Required intrinsic rank separation to choose an unqualified namesake.
 /// Locale preference can order alternatives but cannot create this gap.
 const DISTINCT_LOCATION_TIERS: f64 = 0.15;
@@ -905,9 +908,17 @@ fn resolve_candidates(
             distinct.push(place);
         }
     }
-    let ambiguous = distinct.get(1).is_some_and(|next| {
-        town_score(&distinct[0], None) - town_score(next, None) < DISTINCT_LOCATION_TIERS
-    });
+    // Namesakes in one area are one place to search around: the Grand
+    // Canyon and its station, Kansas City in Missouri and in Kansas.
+    let ambiguous = distinct
+        .iter()
+        .skip(1)
+        .find(|next| {
+            distance_km(distinct[0].lat, distinct[0].lon, next.lat, next.lon) > SAME_AREA_KM
+        })
+        .is_some_and(|next| {
+            town_score(&distinct[0], None) - town_score(next, None) < DISTINCT_LOCATION_TIERS
+        });
     if ambiguous {
         distinct.sort_by(|a, b| town_score(b, country).total_cmp(&town_score(a, country)));
     }
@@ -969,6 +980,35 @@ mod tests {
 
     fn query(text: &str) -> Option<(String, Near)> {
         parse_place_query(text).map(|q| (q.what, q.near))
+    }
+
+    #[test]
+    fn namesakes_in_one_area_are_no_choice() {
+        let landmark = |kind: &str, tags: usize, lat: f64, lon: f64| Place {
+            rank: place_rank(kind, 0, true, false, tags),
+            region: Some("AZ".into()),
+            country: Some("US".into()),
+            ..at("Grand Canyon", kind, lat, lon)
+        };
+        let mut fixtures = places();
+        fixtures.extend([
+            landmark("tourism=attraction", 11, 36.098, -112.096),
+            landmark("railway=station", 5, 36.057, -112.137),
+            city("Kansas City", 510_000, "MO", "US", 39.10, -94.58),
+            city("Kansas City", 155_000, "KS", "US", 39.11, -94.63),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let canyon = searcher.resolve("grand canyon", None, None).unwrap();
+        assert_eq!(canyon.status, LocationStatus::Resolved);
+        assert_eq!(canyon.selected().unwrap().kind, "tourism=attraction");
+        let kansas_city = searcher.resolve("kansas city", None, None).unwrap();
+        assert_eq!(
+            kansas_city.selected().unwrap().region.as_deref(),
+            Some("MO")
+        );
+        // Namesakes far apart are still a choice.
+        let portland = searcher.resolve("portland", None, None).unwrap();
+        assert_eq!(portland.status, LocationStatus::AmbiguousLocation);
     }
 
     #[test]
