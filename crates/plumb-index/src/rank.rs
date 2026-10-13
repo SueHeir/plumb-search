@@ -599,9 +599,16 @@ impl Searcher {
             };
             let relevance_tier = u8::from(cfg.whole_query_relevance && convincing);
             // A site whose domain the whole query names stays whatever its
-            // language: "spiegel" finds spiegel.de with English chosen.
+            // language: "spiegel" finds spiegel.de with English chosen. So
+            // does a well-known site the query's first two words or more
+            // name: "real madrid tickets" keeps realmadrid.com, "deutsche
+            // bahn tickets" bahn.de. One word is too often a common one
+            // ("free games" is not free.fr's).
+            let known_name = name.typed
+                || name.label >= query.len
+                || name.words() >= 2 && link_score >= WELL_KNOWN_LINK_SCORE;
             if let (Some(wanted), Some(site)) = (&language, column.language(addr.doc_id)) {
-                if !language_fits(wanted, &site) && !name.typed && name.label < query.len {
+                if !language_fits(wanted, &site) && !known_name {
                     continue;
                 }
             }
