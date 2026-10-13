@@ -618,7 +618,9 @@ impl PageSearcher {
 
     /// The Wiktionary word `name` is ([`WIKTIONARY_SET`]), written as it
     /// is or with other capitals ("anadromous", "AWOL"): the best-known
-    /// such word, the one written alike first.
+    /// such word, or the one written alike when `name` has capitals. In
+    /// lower case it says nothing of them: "aka" asks for AKA, not the
+    /// little-known vine aka.
     pub fn definition(&self, name: &str) -> Result<Option<Page>> {
         let Some(joined) = analysis::tokens(&self.joined, name).pop() else {
             return Ok(None);
@@ -644,7 +646,7 @@ impl PageSearcher {
             if page.set != WIKTIONARY_SET || !page.title.eq_ignore_ascii_case(&wanted) {
                 continue;
             }
-            if page.title == wanted {
+            if page.title == wanted && wanted.chars().any(char::is_uppercase) {
                 return Ok(Some(page));
             }
             best.get_or_insert(page);
