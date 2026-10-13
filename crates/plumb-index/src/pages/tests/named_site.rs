@@ -271,6 +271,7 @@ fn a_typed_address_lists_the_page_held_at_it_first() {
         page("Albert Einstein College of Medicine", 5_000, &[]),
         page("Python (programming language)", 80_000, &["Python"]),
         page("Café", 3_000, &[]),
+        page("9", 2_000, &[]),
         question,
         repo,
         package("pypi", "requests", 1_000),
@@ -315,7 +316,10 @@ fn a_typed_address_lists_the_page_held_at_it_first() {
             "{query}"
         );
     }
-    // Listed already, it moves first rather than twice.
+    // Listed already, at another spelling of its address, it moves first
+    // rather than twice.
+    let mut listed_einstein = found("Albert Einstein", None, false, 0.5);
+    listed_einstein.page.url = "http://en.wikipedia.org/wiki/Albert_Einstein/".into();
     let mut placed = vec![
         PlacedPage {
             hit: found("Wikipedia", Some("wikipedia.org"), true, 0.9),
@@ -323,7 +327,7 @@ fn a_typed_address_lists_the_page_held_at_it_first() {
             at: 0,
         },
         PlacedPage {
-            hit: found("Albert Einstein", None, false, 0.5),
+            hit: listed_einstein,
             under: None,
             at: 2,
         },
@@ -339,22 +343,25 @@ fn a_typed_address_lists_the_page_held_at_it_first() {
         "en.wikipedia.org/wiki/Albert",
         "albert einstein",
         "github.com/torvalds",
+        // On a wiki a title with a "/" is not below its first part.
+        "en.wikipedia.org/wiki/9/11",
         // Another page's query.
         "irs.gov/forms?id=1099",
     ] {
         assert_eq!(listed(query, &mut Vec::new()), None, "{query}");
     }
-    // Nor a page the searcher's options leave out.
+    // The address names the page in whatever language the searcher reads.
     let german = crate::SearchOptions {
         language: Some("de".into()),
         ..crate::SearchOptions::default()
     };
     let mut placed = Vec::new();
-    s.list_typed_page(
-        "https://en.wikipedia.org/wiki/Albert_Einstein",
-        &german,
-        &mut placed,
-    )
-    .unwrap();
-    assert!(placed.is_empty());
+    s.in_language(Some("de"))
+        .list_typed_page(
+            "https://en.wikipedia.org/wiki/Albert_Einstein",
+            &german,
+            &mut placed,
+        )
+        .unwrap();
+    assert_eq!(placed[0].hit.page.title, "Albert Einstein");
 }

@@ -16,7 +16,8 @@ use super::placing::{options_allow, subpage_asked};
 use super::sites::squash;
 use super::{
     asked_as_question, Page, PageHit, PageSearcher, PlacedPage, ASKING_WORDS, PARTIAL_MATCH,
-    POPULARITY_SCALE, POPULARITY_SHARE, REFERENCE2_SET, REFERENCE_SET, SUBPAGES_SET,
+    POPULARITY_SCALE, POPULARITY_SHARE, REFERENCE2_SET, REFERENCE_SET, SUBPAGES_SET, WIKIDATA_SET,
+    WIKTIONARY_SET,
 };
 use crate::analysis;
 
@@ -123,22 +124,27 @@ impl PageSearcher {
     /// is the article, not Wikipedia's homepage, "github.com/torvalds/linux"
     /// the repository, and a Stack Overflow question's address with its
     /// title after the number the question. It counts as named by the
-    /// query, so an article gets the info box. Nothing changes for an
-    /// address without a path, one no page held is at, or a page `options`
-    /// leave out.
+    /// query, so an article gets the info box, in whatever language the
+    /// searcher reads. Nothing changes for an address without a path, one
+    /// no page held is at, or a page safe search leaves out.
     pub fn list_typed_page(
         &self,
         query: &str,
         options: &crate::SearchOptions,
         placed: &mut Vec<PlacedPage>,
     ) -> Result<()> {
+        let any_language = crate::SearchOptions {
+            language: None,
+            ..options.clone()
+        };
         let Some(hit) = self
             .page_at(query)?
-            .filter(|hit| options_allow(options, &hit.page))
+            .filter(|hit| options_allow(&any_language, &hit.page))
         else {
             return Ok(());
         };
-        placed.retain(|p| p.hit.page.url != hit.page.url);
+        let key = address_key(&hit.page.url);
+        placed.retain(|p| address_key(&p.hit.page.url) != key);
         placed.insert(
             0,
             PlacedPage {
@@ -169,7 +175,7 @@ impl PageSearcher {
             .split('/')
             .filter(|segment| !segment.is_empty())
             .take(ADDRESS_SEGMENTS)
-            .map(|segment| percent_decoded(segment).replace(['_', '-', '+'], " "))
+            .map(|segment| percent_decoded(segment).replace(['_', '-'], " "))
             .collect();
         let names = segments
             .iter()
@@ -215,7 +221,7 @@ impl PageSearcher {
         let searcher = self.reader.searcher();
         let mut best: Option<(usize, PageHit)> = None;
         for (_, address) in searcher.search(
-            self.language_query(&on_host).as_ref(),
+            &on_host,
             &TopDocs::with_limit(ADDRESS_CANDIDATES).order_by_score(),
         )? {
             let document: TantivyDocument = searcher.doc(address)?;
@@ -231,11 +237,14 @@ impl PageSearcher {
             };
             // A page whose address has a query is that page only: "?id=5"
             // is not "?id=6". A query on the typed address alone is a
-            // share link's ("?wprov=sfla1").
+            // share link's ("?wprov=sfla1"). On a wiki a "/" is part of a
+            // title, so "…/wiki/9/11" is not below "…/wiki/9".
+            let wiki =
+                page.is_article() || [WIKTIONARY_SET, WIKIDATA_SET].contains(&page.set.as_str());
             let holds = if at.contains('?') {
                 typed == at
             } else {
-                typed_path == at || typed_path.starts_with(&format!("{at}/"))
+                typed_path == at || (!wiki && typed_path.starts_with(&format!("{at}/")))
             };
             if !holds || best.as_ref().is_some_and(|(kept, _)| *kept >= at.len()) {
                 continue;
