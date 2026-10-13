@@ -24,6 +24,10 @@ use crate::analysis;
 /// its "Malaria rapid diagnostic test performance".
 const NAMED_SITE_PAGE_SHARE: f32 = 0.5;
 
+/// Best sites looked through for one whose name starts or ends the
+/// search.
+const NAMED_SITES: usize = 5;
+
 /// Pages of the site looked at for each way of finding them.
 const NAMED_SITE_CANDIDATES: usize = 20;
 
@@ -32,9 +36,9 @@ const NAMED_SITE_CANDIDATES: usize = 20;
 const TITLE_BREAKS: &[&str] = &[":", " - ", " | ", " -- ", " — ", " – ", " · "];
 
 impl PageSearcher {
-    /// Puts under the best of `sites` its inner page (of the subpages and
-    /// reference sets) that the rest of `query` names, when the query
-    /// starts or ends with that site's name: "census population clock"
+    /// Puts under the first of the best [`NAMED_SITES`] of `sites` whose
+    /// name starts or ends `query` its inner page (of the subpages and
+    /// reference sets) that the rest of the query names: "census population clock"
     /// carries census.gov's Population Clock, which the site's own name
     /// would otherwise leave to a newsroom story with "population" in it.
     /// The page's title has every word of the rest, and they are at least
@@ -49,14 +53,18 @@ impl PageSearcher {
         sites: &[crate::Hit],
         found: &mut Vec<PageHit>,
     ) -> Result<()> {
-        let Some(site) = sites.first().filter(|site| !site.named) else {
-            return Ok(());
-        };
-        if found.iter().any(|hit| hit.named) {
+        if sites.first().is_none_or(|site| site.named) || found.iter().any(|hit| hit.named) {
             return Ok(());
         }
         let words = analysis::tokens(&self.words, query);
-        let Some(rest) = rest_of_name(&words, site) else {
+        // Sites on the rest may come before it: who.int for "who
+        // diabetes".
+        let Some((site, rest)) = sites
+            .iter()
+            .take(NAMED_SITES)
+            .filter(|site| !site.named)
+            .find_map(|site| Some((site, rest_of_name(&words, site)?)))
+        else {
             return Ok(());
         };
         // The "s" of "where's" says nothing.
@@ -86,6 +94,7 @@ impl PageSearcher {
         site_words.retain(|word| !asked.contains(word));
         let named = Named {
             query,
+            site,
             sites,
             asked: &asked,
             site_words: &site_words,
@@ -98,11 +107,11 @@ impl PageSearcher {
         Ok(())
     }
 
-    /// The page of the first of `named.sites` whose title the words `rest`
-    /// name best, as [`PageSearcher::add_named_site_page`] takes it, with
-    /// [`Page::site`] set to the site: one placing would list.
+    /// The page of `named.site` whose title the words `rest` name best, as
+    /// [`PageSearcher::add_named_site_page`] takes it, with [`Page::site`]
+    /// set to the site: one placing would list.
     fn best_named_site_page(&self, named: &Named, rest: &[String]) -> Result<Option<PageHit>> {
-        let site = &named.sites[0];
+        let site = named.site;
         let ops = Operators {
             sites: vec![site.domain.clone()],
             ..Operators::default()
@@ -236,11 +245,12 @@ impl PageSearcher {
     }
 }
 
-/// What [`PageSearcher::best_named_site_page`] looks for: the search, its
-/// sites, the stemmed words of the rest of it, and the words of the site's
-/// name, which pages' titles repeat.
+/// What [`PageSearcher::best_named_site_page`] looks for: the search, the
+/// site it names and all its sites, the stemmed words of the rest of it,
+/// and the words of the site's name, which pages' titles repeat.
 struct Named<'a> {
     query: &'a str,
+    site: &'a crate::Hit,
     sites: &'a [crate::Hit],
     asked: &'a HashSet<String>,
     site_words: &'a HashSet<String>,

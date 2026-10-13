@@ -204,11 +204,21 @@ fn only_a_page_the_rest_of_the_search_names_is_taken() {
     // a title.
     assert!(taken("census births", &census).is_empty());
     assert!(taken("census unemployment", &census).is_empty());
-    // A site the whole query names, or one that is not first.
+    // A site the whole query names, or one below the best few.
     let named = [site("census.gov", true)];
     assert!(taken("census population clock", &named).is_empty());
-    let second = [site("worldometers.info", false), census[0].clone()];
-    assert!(taken("census population clock", &second).is_empty());
+    let mut others: Vec<crate::Hit> = ["a.org", "b.org", "c.org", "d.org", "e.org"]
+        .into_iter()
+        .map(|domain| site(domain, false))
+        .collect();
+    others.push(census[0].clone());
+    assert!(taken("census population clock", &others).is_empty());
+    // Sites on the rest of the search may come before the one it names.
+    others.remove(0);
+    assert_eq!(
+        taken("census population clock", &others),
+        ["Population Clock"]
+    );
     // A search that names a page is for that page.
     let mut found = vec![found("Census Population Clock", None, true, 0.9)];
     searcher
