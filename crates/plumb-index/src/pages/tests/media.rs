@@ -461,6 +461,10 @@ fn a_song_or_film_asked_about_is_named() {
     assert_eq!(named("where to watch titanic"), ["Titanic (1997 film)"]);
     assert_eq!(named("titanic actors"), ["Titanic (1997 film)"]);
     assert_eq!(named("who sang bohemian rhapsody"), ["Bohemian Rhapsody"]);
+    // "movie" asks for a film when the name names one, and else for
+    // whatever it names.
+    assert_eq!(named("titanic movie"), ["Titanic (1997 film)"]);
+    assert_eq!(named("california movie"), ["California"]);
     let first = &s.search("who sings the song bohemian rhapsody", 5).unwrap()[0];
     assert_eq!(first.page.title, "Bohemian Rhapsody");
     // Not when a page is called the whole query.

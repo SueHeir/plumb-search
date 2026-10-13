@@ -32,6 +32,10 @@ pub(crate) enum Hint {
     /// A work of one of these kinds of that name, of which something is
     /// asked: "titanic trailer", "let it be chords".
     Work(&'static [&'static str]),
+    /// A film, show or game of that name when there is one, else
+    /// whatever is named so: "titanic movie" for the 1997 film, not the
+    /// ship, but "tom hanks movie" still for Tom Hanks.
+    Screen,
     /// A person of that name, of whom something is asked: "obama
     /// daughters", "picasso paintings".
     Person,
@@ -205,7 +209,7 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" actors", Hint::Work(SCREEN)),
     (" cast", Hint::Any),
     (" author", Hint::Any),
-    (" movie", Hint::Any),
+    (" movie", Hint::Screen),
     (" film", Hint::Any),
     (" meaning", Hint::Any),
     (" mean", Hint::Any),
@@ -689,6 +693,14 @@ impl PageSearcher {
             Hint::Work(kinds) => {
                 let called = hits.iter().any(|hit| hit.named);
                 found.retain(|hit| !called && hit.named && hit.page.is_work_of(kinds));
+            }
+            // Only a film, show or game the name names, when it names
+            // one: "titanic movie" is not about the ship.
+            Hint::Screen => {
+                let screen = |hit: &PageHit| hit.named && hit.page.is_work_of(SCREEN);
+                if found.iter().any(screen) {
+                    found.retain(|hit| !hit.named || screen(hit));
+                }
             }
             Hint::Any => {}
         }
