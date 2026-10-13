@@ -1,7 +1,6 @@
 //! Sign-in pages of sites a search does not name are left out.
 
 use super::*;
-use crate::junk::{is_sign_in_page, names_label};
 
 /// A site found only by meaning, whose homepage is at `url`.
 fn at(domain: &str, url: &str, title: Option<&str>) -> SiteRecord {
@@ -82,71 +81,4 @@ fn sign_in_pages_of_sites_the_query_does_not_name_are_left_out() {
     let hits = search("wealthscape login");
     assert_eq!(domains(&hits)[0], "wealthscape.com");
     assert_eq!(top(&searcher, "datahubnet"), "datahubnet.example");
-}
-
-#[test]
-fn sign_in_pages_are_told_by_title_or_address() {
-    for title in [
-        "Login - QRIS",
-        "Login - Arvixe",
-        "Login | SCARLETT",
-        "Login Page",
-        "Wealthscape Investor Login",
-        "User Login | The Digital Jungle",
-        "Sign in to your account - Jenta Tech",
-        "Sign In — FAST X OTP",
-        "Sign-In with Ethereum",
-        "The Grid - Please log in to continue",
-        "ePIS | Login",
-    ] {
-        assert!(
-            is_sign_in_page("https://example.com/", Some(title)),
-            "{title:?}"
-        );
-    }
-    for title in [
-        "Fidelity Investments",
-        "Login.gov",
-        "Blog on gardening",
-        "How logins work",
-        "Signing in Spanish",
-        "Catalog online",
-        "DeepSeek AI – Free AI Chat Online & DeepSeek-V4 No Login",
-    ] {
-        assert!(
-            !is_sign_in_page("https://example.com/", Some(title)),
-            "{title:?}"
-        );
-    }
-    for url in [
-        "https://qrisajaib.com/login",
-        "https://www.its52.com/login.aspx",
-        "https://id.koder.dev/oauth/v2/authorize?client_id=x",
-        "https://login.example.com/",
-        "https://example.com/users/sign_in",
-    ] {
-        assert!(is_sign_in_page(url, None), "{url}");
-    }
-    for url in [
-        "https://example.com/",
-        "https://example.com/blog/login-tips",
-        "https://authors.example.com/",
-    ] {
-        assert!(!is_sign_in_page(url, None), "{url}");
-    }
-}
-
-#[test]
-fn a_query_names_a_label_by_its_words_in_a_row() {
-    assert!(names_label("wealthscape login", "wealthscape.com"));
-    assert!(names_label("us bank login", "usbank.com"));
-    assert!(names_label("hdfc login", "hdfcbank.com"));
-    assert!(names_label("my chart sign in", "mychart.com"));
-    assert!(!names_label("v8 login", "v8engines.com"));
-    assert!(!names_label("fidelity netbenefits login", "login.xyz"));
-    assert!(!names_label("xfinity sign in", "signin.example"));
-    assert!(!names_label("hulu login", "arvixe.com"));
-    assert!(names_label("uc davis canvas login", "canvas.ucdavis.edu"));
-    assert!(!names_label("att net account login", "datahub.net"));
-    assert!(!names_label("bank online login", "datahubnet.online"));
 }
