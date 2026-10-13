@@ -129,6 +129,10 @@ const ABOUT_TOWN: &[&str] = &[
     "crime",
     "jobs",
 ];
+/// First words of a question of how or why, which asks for no places
+/// whatever words follow: "how to merge cells in excel" wants no phone
+/// stores in Excel, Alabama.
+const ASKS_HOW: &[&str] = &["how", "why"];
 /// Words left out of what is looked for: "best pizza", "places to eat".
 const FILLER: &[&str] = &[
     "best", "good", "great", "cheap", "top", "nice", "nearest", "closest", "open", "the", "a",
@@ -187,7 +191,7 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         .iter()
         .map(String::as_str)
         .find(|w| !FILLER.contains(w))
-        .is_some_and(|w| ABOUT_TOWN.contains(&w))
+        .is_some_and(|w| ABOUT_TOWN.contains(&w) || ASKS_HOW.contains(&w))
     {
         return Vec::new();
     }
@@ -738,7 +742,10 @@ impl PlaceSearcher {
     ) -> Result<Option<PlaceQuery>> {
         let normalized = normalize_text(query);
         let words: Vec<&str> = normalized.split_whitespace().collect();
-        if !(2..=6).contains(&words.len()) || ABOUT_TOWN.contains(&words[0]) {
+        if !(2..=6).contains(&words.len())
+            || ABOUT_TOWN.contains(&words[0])
+            || ASKS_HOW.contains(&words[0])
+        {
             return Ok(None);
         }
         for count in (1..=3.min(words.len() - 1)).rev() {
@@ -1679,6 +1686,17 @@ mod tests {
                 ..at("English", "place=village", 38.33, -86.46)
             },
             at("Keel", "amenity=pub", 53.97, -10.08),
+            // Villages called Excel and Chrome.
+            Place {
+                rank: place_rank("place=village", 500, false, false, 3),
+                region: Some("AL".into()),
+                ..at("Excel", "place=village", 31.43, -87.34)
+            },
+            Place {
+                rank: place_rank("place=hamlet", 0, false, false, 3),
+                region: Some("NJ".into()),
+                ..at("Chrome", "place=hamlet", 40.57, -74.22)
+            },
         ]);
         let (_dir, searcher) = index(fixtures);
         for query in [
@@ -1689,6 +1707,10 @@ mod tests {
             "keel in english",
             "blue pan in python",
             "blue pan in gotham",
+            // "cells" is a word for phone stores, but a question of how
+            // asks for none.
+            "how to merge cells in excel",
+            "how to clear cache in chrome",
         ] {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_none(), "{query}: {found:?}");

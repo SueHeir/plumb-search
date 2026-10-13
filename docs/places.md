@@ -21,7 +21,7 @@ WHERE is a town (or village, suburb or neighbourhood) by its name or another nam
 
 Places are listed within a town's size of its centre (12 km for a city, 6 for a town, 10 around a national park or nature reserve, 3 for a village or around another named place). Places of the kind asked for come first, then those that only have the words in their name (for "sushi", sushi bars before an office called Sushi Tech). Within each, nearest first, with places that have a website, a brand or a Wikidata item a little ahead. When fewer than three are found, Plumb looks three times as far.
 
-A search that finds no place, and whose WHAT is no kind of place, lists none: "sort a list in python", "calories in a shot" and "keel in english" (a village in Indiana) ask for no place, while "pizza in gotham" says it knows no Gotham. A "near me" search still says it found nothing, and a place's name still offers the choice in a town of several names ("starbucks in portland") and asks for a town when only a state or country is named ("starbucks in texas").
+A search that finds no place, and whose WHAT is no kind of place, lists none: "sort a list in python", "calories in a shot" and "keel in english" (a village in Indiana) ask for no place, while "pizza in gotham" says it knows no Gotham. A "near me" search still says it found nothing, and a place's name still offers the choice in a town of several names ("starbucks in portland") and asks for a town when only a state or country is named ("starbucks in texas"). A question of how or why asks for no place either, whatever its words: "how to merge cells in excel" wants no phone stores in Excel, Alabama.
 
 ## Near me
 
