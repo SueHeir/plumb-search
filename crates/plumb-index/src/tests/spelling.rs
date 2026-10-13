@@ -302,6 +302,35 @@ fn misspelled_words_are_not_taken_for_a_site_s_name() {
 }
 
 #[test]
+fn well_known_names_one_slip_away_are_meant() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "shein.com",
+        Some("SHEIN"),
+        None,
+        &["SHEIN"],
+        &[],
+        popular(300, 30_000),
+    ));
+    for i in 0..30 {
+        records.push(site(
+            &format!("shine{i}.com"),
+            Some(&format!("Shine bright {i}")),
+            None,
+            &[],
+            &[],
+            obscure(5_000_000 + i, 10),
+        ));
+    }
+    let (_dir, searcher) = build(&records);
+    // "shine" is the commoner word, one swap from "shien" too, but
+    // shein.com is well known.
+    let results = search_spelled(&searcher, "shien");
+    assert_eq!(suggestion(&results), suggested("shein"));
+    assert!(domains(&results.hits).contains(&"shein.com"));
+}
+
+#[test]
 fn exact_names_are_not_corrected() {
     let (_dir, searcher) = build(&typo_corpus());
     for query in [
