@@ -414,7 +414,8 @@ impl PageSearcher {
 
     /// Whether `word`, typed among `words`, is the name of something rather
     /// than a slip, however near a commoner word it is: Wiktionary has it as
-    /// a word ("saute", "renter"), an English Wikipedia article is named by
+    /// a word ("saute", "renter"; not "arguement", which it has only as a
+    /// misspelling), an English Wikipedia article is named by
     /// it ("Everlong", "htop"), or a page's name has it with another word
     /// typed ("Jean Meeus", "Baidu Baike").
     fn names_something(&self, word: &str, words: &[String]) -> Result<bool> {
@@ -429,7 +430,14 @@ impl PageSearcher {
             let query = BooleanQuery::new(clauses.into_iter().map(|q| (Occur::Must, q)).collect());
             Ok(searcher.search(&query, &Count)? > 0)
         };
-        if searcher.doc_freq(&Term::from_field_text(self.fields.word, word))? > 0
+        // Sets built before misspellings were left out have "(noun)
+        // Misspelling of argument." as the word "arguement".
+        let a_word = |page: &Page| {
+            let text = page.description.as_deref().unwrap_or_default();
+            let first = text.split_once(") ").map_or(text, |(_, sense)| sense);
+            !first.to_lowercase().starts_with("misspelling of")
+        };
+        if self.definition(word)?.is_some_and(|page| a_word(&page))
             || found(vec![
                 term(self.fields.keys, word),
                 self.scope_term("set:wikipedia-en"),
