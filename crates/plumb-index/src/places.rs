@@ -62,6 +62,17 @@ const DISTINCT_LOCATION_TIERS: f64 = 0.15;
 /// Bounded location alternatives returned when the name is ambiguous.
 const LOCATION_ALTERNATIVES: usize = 5;
 
+/// The most words a town named after a place takes ("union station
+/// salt lake city").
+const TOWN_WORDS: usize = 4;
+/// Where in a town that is its centre: "parking in downtown denver".
+const DOWNTOWN: &[&str] = &[
+    "downtown",
+    "city center",
+    "city centre",
+    "town center",
+    "town centre",
+];
 /// Words a query may say "near me" with.
 const NEAR_ME: &[&[&str]] = &[
     &["near", "me"],
@@ -757,19 +768,7 @@ impl PlaceSearcher {
                 )
             })
             .collect();
-        let cells: Vec<(Occur, Box<dyn Query>)> = cells_around(center.lat, center.lon, km)
-            .into_iter()
-            .map(|c| {
-                (
-                    Occur::Should,
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(self.fields.cell, &c),
-                        IndexRecordOption::Basic,
-                    )) as Box<dyn Query>,
-                )
-            })
-            .collect();
-        clauses.push((Occur::Must, Box::new(BooleanQuery::new(cells))));
+        clauses.push((Occur::Must, Box::new(self.cells_query(center, km))));
         let searcher = self.reader.searcher();
         let found = searcher.search(
             &BooleanQuery::new(clauses),
@@ -867,7 +866,7 @@ impl PlaceSearcher {
         for k in (1..=words.len()).rev() {
             let name = words[..k].join(" ");
             let qualifier = words[k..].join(" ");
-            let matching: Vec<Place> = self
+            let mut matching: Vec<Place> = self
                 .named(&name)?
                 .into_iter()
                 .filter(|place| {
@@ -875,6 +874,13 @@ impl PlaceSearcher {
                         && named_country.is_none_or(|country| country_matches(place, country))
                 })
                 .collect();
+            // "union station denver", "soho london": a place by the town
+            // the qualifier names, not in a region of that name. A town is
+            // a few words, and each try resolves them again.
+            if matching.is_empty() && (1..=TOWN_WORDS).contains(&(words.len() - k)) {
+                matching =
+                    self.named_by_town(&name, &qualifier, preferred_country, required_country)?;
+            }
             let mut candidates: Vec<Place> = matching
                 .iter()
                 .filter(|place| {
@@ -906,22 +912,79 @@ impl PlaceSearcher {
 
     /// Places whose name or other name is `name`.
     fn named(&self, name: &str) -> Result<Vec<Place>> {
+        self.named_within(name, None)
+    }
+
+    /// Places called `name` within reach of the town `town` names
+    /// ("union station" by Denver), or for "downtown" the town itself.
+    fn named_by_town(
+        &self,
+        name: &str,
+        town: &str,
+        preferred_country: Option<&str>,
+        required_country: Option<&str>,
+    ) -> Result<Vec<Place>> {
+        let location = self.resolve(town, preferred_country, required_country)?;
+        let Some(town) = location.selected().filter(|town| town.is_town()) else {
+            return Ok(Vec::new());
+        };
+        let km = town_size(&town.kind).unwrap_or(LANDMARK_KM) * 3.0;
+        let mut found = self.named_within(name, Some((town, km)))?;
+        if found.is_empty() && DOWNTOWN.contains(&name) {
+            found.push(town.clone());
+        }
+        Ok(found)
+    }
+
+    /// Places whose name or other name is `name`, the most notable first,
+    /// only those within `km` of a place when `near` gives one.
+    fn named_within(&self, name: &str, near: Option<(&Place, f64)>) -> Result<Vec<Place>> {
         let Some(key) = analysis::tokens(&self.joined, name).pop() else {
             return Ok(Vec::new());
         };
+        let key: Box<dyn Query> = Box::new(TermQuery::new(
+            Term::from_field_text(self.fields.keys, &key),
+            IndexRecordOption::Basic,
+        ));
+        let query = match near {
+            None => key,
+            Some((center, km)) => Box::new(BooleanQuery::new(vec![
+                (Occur::Must, key),
+                (Occur::Must, Box::new(self.cells_query(center, km))),
+            ])),
+        };
         let searcher = self.reader.searcher();
         let found = searcher.search(
-            &TermQuery::new(
-                Term::from_field_text(self.fields.keys, &key),
-                IndexRecordOption::Basic,
-            ),
+            &query,
             &TopDocs::with_limit(TOWN_CANDIDATES)
                 .order_by_fast_field::<u64>("rank", tantivy::Order::Desc),
         )?;
-        found
-            .into_iter()
-            .map(|(_, address)| self.stored(&searcher.doc(address)?))
-            .collect()
+        let mut places = Vec::new();
+        for (_, address) in found {
+            let place = self.stored(&searcher.doc(address)?)?;
+            if near.is_none_or(|(c, km)| distance_km(c.lat, c.lon, place.lat, place.lon) <= km) {
+                places.push(place);
+            }
+        }
+        Ok(places)
+    }
+
+    /// Places in the cells within `km` of `center`.
+    fn cells_query(&self, center: &Place, km: f64) -> BooleanQuery {
+        BooleanQuery::new(
+            cells_around(center.lat, center.lon, km)
+                .into_iter()
+                .map(|c| {
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.cell, &c),
+                            IndexRecordOption::Basic,
+                        )) as Box<dyn Query>,
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn stored(&self, document: &TantivyDocument) -> Result<Place> {
@@ -1428,6 +1491,52 @@ mod tests {
         assert_eq!(locate("nyc", None).0, "New York");
         assert_eq!(locate("Boulder, CO", None), ("Boulder".into(), "CO".into()));
         assert!(searcher.locate("atlantis", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_place_is_found_by_the_town_named_after_it() {
+        let mut fixtures = places();
+        fixtures.extend([
+            at("Union Station", "railway=station", 39.7527, -105.0003),
+            Place {
+                region: Some("OR".into()),
+                ..at("Union Station", "railway=station", 45.5290, -122.6766)
+            },
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let center = |query: &str| {
+            let found = searcher.search(query, None, None, 5).unwrap().unwrap();
+            let center = found.center.unwrap_or_else(|| panic!("{query}: nowhere"));
+            (center.name, center.lat, found.hits[0].place.name.clone())
+        };
+        assert_eq!(
+            center("coffee near union station denver"),
+            ("Union Station".into(), 39.7527, "Huckleberry and Co".into())
+        );
+        assert_eq!(
+            center("hotels near the tour eiffel paris").2,
+            "Hotel Eiffel"
+        );
+        // Downtown is the town's centre when no place is called that.
+        assert_eq!(
+            center("parking in downtown denver"),
+            ("Denver".into(), 39.7392, "Union Station Park-n-Ride".into())
+        );
+        // A region still qualifies as before, and a town that is nowhere
+        // finds nothing.
+        assert_eq!(center("pizza near union station or").2, "Pizza Port");
+        let nowhere = searcher
+            .search("pizza in downtown gotham", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            nowhere.location.unwrap().status,
+            LocationStatus::UnknownLocation
+        );
+        // A long "where" is still read in a few lookups, not one for
+        // every way its words split.
+        let long = format!("pizza in {}", ["union station"; 30].join(" "));
+        assert!(searcher.search(&long, None, None, 5).unwrap().is_some());
     }
 
     #[test]

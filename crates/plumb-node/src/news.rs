@@ -486,8 +486,9 @@ impl NewsStore {
         Ok(())
     }
 
-    /// Source requests stay publisher-bound even when its feeds are unavailable.
-    /// Other queries match substantive topic terms within the existing time windows,
+    /// Requests for a curated publisher, or for a site's news "from" it,
+    /// stay publisher-bound even when its feeds are unavailable. Other
+    /// queries match substantive topic terms within the existing time windows,
     /// on sites whose language fits the search's `language` when it has one, as its
     /// results do; a site the query names is shown whatever its language.
     pub fn recent(
@@ -507,71 +508,30 @@ impl NewsStore {
             .filter(|w| !is_one_of(w, NEWS_WORDS) && !is_one_of(w, STOP_WORDS))
             .collect();
         let state = self.read();
-        if let Some((publisher, domains, source_topic)) =
-            requested_source(&operators.words, &topic, wants_news, &state)
-        {
-            let had_current_source = domains.iter().any(|domain| {
-                state.headlines.get(domain).is_some_and(|headlines| {
-                    headlines.iter().any(|h| {
-                        fresh(h.at, NEWS_WINDOW_SECS, now)
-                            && plumb_core::host_of(&h.url).is_some_and(|host| {
-                                domains
-                                    .iter()
-                                    .any(|d| host == *d || host.ends_with(&format!(".{d}")))
-                            })
-                    })
-                })
-            });
-            let mut headlines: Vec<RecentHeadline> = domains
-                .iter()
-                .flat_map(|domain| {
-                    state
-                        .headlines
-                        .get(domain)
-                        .into_iter()
-                        .flatten()
-                        .filter(|h| {
-                            fresh(h.at, NEWS_WINDOW_SECS, now) && allows_headline(&operators, h)
-                        })
-                        .filter(|h| {
-                            source_topic.is_empty() || topic_matches(&source_topic, &h.title, query)
-                        })
-                        // Feed discovery permits alternate feed hosts; article URLs must still belong to the publisher.
-                        .filter(|h| {
-                            plumb_core::host_of(&h.url).is_some_and(|host| {
-                                domains
-                                    .iter()
-                                    .any(|d| host == *d || host.ends_with(&format!(".{d}")))
-                            })
-                        })
-                        .map(|h| shown(domain, h))
-                })
-                .collect();
-            headlines.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.url.cmp(&b.url)));
-            drop_copies(&mut headlines);
-            headlines.truncate(MAX_SHOWN - 1);
-            let sources = domains
-                .iter()
-                .map(|domain| source_status(&state, domain))
-                .collect();
-            return Some(Recent {
-                site: Some(publisher),
-                status: if headlines.is_empty() {
-                    if had_current_source {
-                        "no_matching_headlines"
-                    } else {
-                        "source_unavailable"
-                    }
-                } else {
-                    "available"
-                }
-                .into(),
-                headlines,
-                sources,
-            });
+        let named = top.and_then(|(domain, named)| named.then_some(domain));
+        let source = requested_source(&operators.words, &topic, wants_news, &state);
+        // A query can name a site whose name only starts with a watched
+        // site's: "fox news" is foxnews.com and "abc news" is ABC News, not
+        // fox.com's or abc.es's posts. That named site is then the request.
+        let gives_way = source.as_ref().is_some_and(|source| {
+            source.bare && named.is_some_and(|domain| !source.domains.iter().any(|d| d == domain))
+        });
+        let spelled = gives_way
+            || !topic.is_empty()
+                && named.is_some_and(|domain| spells_site(&operators.words, domain));
+        if let Some(source) = source.filter(|_| !spelled) {
+            let bare = source.bare;
+            let block = source_block(&state, &operators, query, source, now);
+            // A watched site the query only names, with nothing current,
+            // leaves the block to the query's topic: "google news" is not
+            // google.com's quiet feed. A curated publisher, or a site asked
+            // for "from" or "by", stays the request.
+            if !bare || !block.headlines.is_empty() {
+                return Some(block);
+            }
         }
         // Ordinary named navigation may show that site's posts, but never invent a source request.
-        if let Some((domain, true)) = top.filter(|_| !wants_news || topic.is_empty()) {
+        if let Some((domain, true)) = top.filter(|_| spelled || !wants_news || topic.is_empty()) {
             let headlines: Vec<_> = state
                 .headlines
                 .get(domain)
@@ -710,24 +670,36 @@ impl NewsStore {
     }
 }
 
+/// The publisher a news query asks for, the sites it publishes on and
+/// the topic asked of it.
+struct Source {
+    publisher: String,
+    domains: Vec<String>,
+    topic: Vec<String>,
+    /// A watched site the query only names ("fox news" for fox.com), not
+    /// a curated publisher or one asked for "from" or "by".
+    bare: bool,
+}
+
 fn requested_source(
     query: &str,
     topic: &[String],
     wants_news: bool,
     state: &State,
-) -> Option<(String, Vec<String>, Vec<String>)> {
+) -> Option<Source> {
     if !wants_news {
         return None;
     }
     let normalized = plumb_core::normalize_text(query);
     let about = normalized.contains("about ");
-    let mut candidates: Vec<(String, Vec<String>, Vec<String>)> = PUBLISHERS
+    let mut candidates: Vec<(String, Vec<String>, Vec<String>, bool)> = PUBLISHERS
         .iter()
         .map(|(domain, domains, aliases)| {
             (
                 domain.to_string(),
                 domains.iter().map(|d| d.to_string()).collect(),
                 aliases.iter().map(|a| a.to_string()).collect(),
+                true,
             )
         })
         .collect();
@@ -739,7 +711,7 @@ fn requested_source(
         .collect();
     let mut known: HashSet<String> = candidates
         .iter()
-        .flat_map(|(_, domains, _)| domains.iter().cloned())
+        .flat_map(|(_, domains, _, _)| domains.iter().cloned())
         .collect();
     for domain in domains {
         if !known.insert(domain.to_string()) {
@@ -750,29 +722,117 @@ fn requested_source(
             domain.into(),
             vec![domain.into()],
             vec![label.into(), domain.into()],
+            false,
         ));
     }
     candidates
         .into_iter()
-        .find_map(|(publisher, domains, aliases)| {
+        .find_map(|(publisher, domains, aliases, curated)| {
             for alias in aliases {
                 let folded = fold_words(&alias);
                 if !about && topic == folded {
-                    return Some((publisher, domains, Vec::new()));
+                    return Some(Source {
+                        publisher,
+                        domains,
+                        topic: Vec::new(),
+                        bare: !curated,
+                    });
                 }
                 for marker in [" from ", " by "] {
                     let suffix = format!("{marker}{alias}");
                     if let Some(before) = normalized.strip_suffix(&suffix) {
-                        let source_topic = fold_words(before)
+                        let topic = fold_words(before)
                             .into_iter()
                             .filter(|w| !is_one_of(w, NEWS_WORDS) && !is_one_of(w, STOP_WORDS))
                             .collect();
-                        return Some((publisher, domains, source_topic));
+                        return Some(Source {
+                            publisher,
+                            domains,
+                            topic,
+                            bare: false,
+                        });
                     }
                 }
             }
             None
         })
+}
+
+/// The latest posts of `source`, newest first, about its topic if any.
+fn source_block(
+    state: &State,
+    operators: &plumb_core::Operators,
+    query: &str,
+    source: Source,
+    now: u64,
+) -> Recent {
+    let Source {
+        publisher,
+        domains,
+        topic,
+        ..
+    } = source;
+    let publishes = |url: &str| {
+        plumb_core::host_of(url).is_some_and(|host| {
+            domains
+                .iter()
+                .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+        })
+    };
+    let had_current_source = domains.iter().any(|domain| {
+        state.headlines.get(domain).is_some_and(|headlines| {
+            headlines
+                .iter()
+                .any(|h| fresh(h.at, NEWS_WINDOW_SECS, now) && publishes(&h.url))
+        })
+    });
+    let mut headlines: Vec<RecentHeadline> = domains
+        .iter()
+        .flat_map(|domain| {
+            state
+                .headlines
+                .get(domain)
+                .into_iter()
+                .flatten()
+                .filter(|h| fresh(h.at, NEWS_WINDOW_SECS, now) && allows_headline(operators, h))
+                .filter(|h| topic.is_empty() || topic_matches(&topic, &h.title, query))
+                // Feed discovery permits alternate feed hosts; article URLs must still belong to the publisher.
+                .filter(|h| publishes(&h.url))
+                .map(|h| shown(domain, h))
+        })
+        .collect();
+    headlines.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.url.cmp(&b.url)));
+    drop_copies(&mut headlines);
+    headlines.truncate(MAX_SHOWN - 1);
+    let status = match (headlines.is_empty(), had_current_source) {
+        (false, _) => "available",
+        (true, true) => "no_matching_headlines",
+        (true, false) => "source_unavailable",
+    };
+    Recent {
+        site: Some(publisher),
+        status: status.into(),
+        sources: domains
+            .iter()
+            .map(|domain| source_status(state, domain))
+            .collect(),
+        headlines,
+    }
+}
+
+/// Whether `query` spells the name of the site `domain`, its words run
+/// together: "fox news" for foxnews.com.
+fn spells_site(query: &str, domain: &str) -> bool {
+    let label = domain
+        .trim_start_matches("www.")
+        .split('.')
+        .next()
+        .unwrap_or("");
+    let squashed: String = plumb_core::normalize_text(query)
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    !label.is_empty() && squashed == label.to_lowercase()
 }
 
 fn source_status(state: &State, domain: &str) -> NewsSource {
@@ -1139,6 +1199,94 @@ mod tests {
             .recent("paper news", Some(("paper.org", false)), NOW, None)
             .unwrap();
         assert_eq!(recent.site.as_deref(), Some("paper.org"));
+    }
+
+    #[test]
+    fn a_site_named_with_news_is_not_a_shorter_sites_news() {
+        let (_dir, store) = store();
+        // fox.com is watched and quiet; foxnews.com and others post.
+        store.watch(vec![Watched {
+            domain: "fox.com".into(),
+            homepage: "https://www.fox.com/".into(),
+            ..Watched::default()
+        }]);
+        store.put_shared(
+            vec![
+                shared(
+                    "foxnews.com",
+                    vec![headline("foxnews.com", "Senate passes the budget", HOUR)],
+                ),
+                shared(
+                    "paper.org",
+                    vec![headline(
+                        "paper.org",
+                        "Fox network renews its hit show",
+                        HOUR,
+                    )],
+                ),
+                shared(
+                    "news.com",
+                    vec![headline("news.com", "Fox wins the ratings week", 2 * HOUR)],
+                ),
+            ],
+            NOW,
+        );
+        // The query spells the site it names, foxnews.com: its posts.
+        let named = store
+            .recent("fox news", Some(("foxnews.com", true)), NOW, None)
+            .unwrap();
+        assert_eq!(named.site.as_deref(), Some("foxnews.com"));
+        assert_eq!(titles(&named), ["Senate passes the budget"]);
+        // Not naming a site, it is not fox.com's quiet feed but news about Fox.
+        let topic = store.recent("fox news", None, NOW, None).unwrap();
+        assert_eq!(topic.site, None);
+        assert_eq!(
+            titles(&topic),
+            [
+                "Fox network renews its hit show",
+                "Fox wins the ratings week"
+            ]
+        );
+        // Asked for "from" it, a quiet site stays the request.
+        let asked = store
+            .recent("budget news from fox", None, NOW, None)
+            .unwrap();
+        assert_eq!(asked.site.as_deref(), Some("fox.com"));
+        assert_eq!(asked.status, "source_unavailable");
+    }
+
+    #[test]
+    fn a_named_site_outranks_a_watched_site_that_shares_its_first_word() {
+        let (_dir, store) = store();
+        store.watch(vec![Watched {
+            domain: "abc.es".into(),
+            homepage: "https://www.abc.es/".into(),
+            ..Watched::default()
+        }]);
+        store.put_shared(
+            vec![
+                shared(
+                    "abc.es",
+                    vec![headline("abc.es", "El Parlamento aprueba la ley", HOUR)],
+                ),
+                shared(
+                    "go.com",
+                    vec![headline("go.com", "Storm reaches the coast", HOUR)],
+                ),
+            ],
+            NOW,
+        );
+        // "abc news" names ABC News (go.com), not the Spanish paper abc.es.
+        let named = store
+            .recent("abc news", Some(("go.com", true)), NOW, None)
+            .unwrap();
+        assert_eq!(named.site.as_deref(), Some("go.com"));
+        assert_eq!(titles(&named), ["Storm reaches the coast"]);
+        // Naming abc.es itself, or nothing, it is abc.es's posts.
+        for top in [Some(("abc.es", true)), None] {
+            let paper = store.recent("abc news", top, NOW, None).unwrap();
+            assert_eq!(paper.site.as_deref(), Some("abc.es"));
+        }
     }
 
     #[test]
