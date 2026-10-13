@@ -61,6 +61,11 @@ pub const PARTIAL_MATCH: f32 = 0.6;
 /// query names, but enough to be listed.
 pub const OTHER_NAME_MATCH: f32 = 0.6;
 
+/// How many times as much a person must be read as any other article with
+/// their surname in its title to be named by it alone
+/// ([`PageSearcher::name_by_surname`]).
+const SURNAME_MARGIN: u64 = 3;
+
 /// How much popularity counts, against how well the query names the page.
 pub const POPULARITY_SHARE: f32 = 0.5;
 

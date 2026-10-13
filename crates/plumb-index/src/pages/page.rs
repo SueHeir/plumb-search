@@ -139,6 +139,13 @@ impl Page {
         self.set.starts_with("wikipedia-")
     }
 
+    /// Whether the page is about a person: it has a birth date.
+    pub fn is_person(&self) -> bool {
+        self.facts
+            .iter()
+            .any(|fact| fact.kind == plumb_core::facts::FactKind::Born)
+    }
+
     /// Whether the page is a question, of Stack Overflow or another Stack
     /// Exchange site.
     pub fn is_question(&self) -> bool {
