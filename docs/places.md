@@ -24,6 +24,10 @@ Places are listed within a town's size of its centre (12 km for a city, 6 for a 
 
 "Near me" is the town you give on the **About you** page or the welcome page, kept on the node for your browser only (on a public server, in your browser). Plumb never works out where you are from your address or anything else. Without a town, a "near me" search says how to give one.
 
+## Local sites
+
+A node also crawls the sites of the places near it: the websites of the places within 50 km of the towns on its About pages, nearest first, up to 5,000 sites. These are crawled whatever the network assigns the node that day, up to 100 a round, and again every 30 days like other sites. Trimming keeps them, and the denylist still applies. So each node fills in the cafés, shops and clinics of its own area, and its crawls reach the network like any others. Without a town on an About page, or crawling only, a node has no local sites.
+
 ## What is kept
 
 For each place: its name, its kind (an OpenStreetMap tag such as `amenity=cafe`), up to four more kinds such as `cuisine=pizza`, its coordinates, its street address, town, state or region, country, website and OpenStreetMap id. Towns also keep up to four other names. That is about 40 bytes a place in the file and about 100 in the index.
