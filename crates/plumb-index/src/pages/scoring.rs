@@ -72,7 +72,7 @@ impl PageSearcher {
         scope: Option<&dyn Query>,
     ) -> Result<Vec<PageHit>> {
         let words = analysis::tokens(&self.words, query);
-        let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
+        let Some(joined) = self.query_key(query)? else {
             return Ok(Vec::new());
         };
         if words.is_empty() {

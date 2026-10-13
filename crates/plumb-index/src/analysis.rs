@@ -9,6 +9,8 @@
 //! Token offsets point into the normalized text, not the original, so they
 //! must not be used for highlighting.
 
+use std::borrow::Cow;
+
 use plumb_core::{joined, normalize_text};
 use tantivy::tokenizer::{
     AsciiFoldingFilter, Language, LowerCaser, PreTokenizedString, RemoveLongFilter, Stemmer,
@@ -54,6 +56,39 @@ pub(crate) fn register_sites(manager: &TokenizerManager) {
         .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
         .build(),
     );
+}
+
+/// [`register`] for the pages' index, whose names are keyed with a sharp
+/// sign after a letter read out ([`page_joined_analyzer`]). The page index
+/// is rebuilt whenever [`crate::pages::PAGE_INDEX_VERSION`] changes; a
+/// sites' index is not, and would still hold "C# Corner" as "ccorner".
+pub(crate) fn register_pages(manager: &TokenizerManager) {
+    register(manager);
+    manager.register(JOINED_ANALYZER, page_joined_analyzer());
+}
+
+/// `text` with a sharp sign after a lone letter read out, as English writes
+/// it where the sign cannot go (Wikipedia's "C Sharp", "C-sharp minor"):
+/// `C# 12` -> `C sharp 12`. [`normalize_text`] drops the sign, and "c#"
+/// would name C.
+fn read_sharps(text: &str) -> Cow<'_, str> {
+    let sharp = |c: &char| matches!(c, '#' | '\u{266F}');
+    if !text.chars().any(|c| sharp(&c)) {
+        return Cow::Borrowed(text);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 8);
+    for (i, c) in chars.iter().enumerate() {
+        let lone_letter =
+            i > 0 && chars[i - 1].is_alphabetic() && (i < 2 || !chars[i - 2].is_alphanumeric());
+        let ends = chars.get(i + 1).is_none_or(|next| !next.is_alphanumeric());
+        if sharp(c) && lone_letter && ends {
+            out.push_str(" sharp");
+        } else {
+            out.push(*c);
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Whether `c` belongs to a script written without spaces between words:
@@ -176,11 +211,24 @@ pub(crate) fn words_analyzer() -> TextAnalyzer {
 
 /// The analyzer registered as [`JOINED_ANALYZER`].
 pub(crate) fn joined_analyzer() -> TextAnalyzer {
-    TextAnalyzer::builder(JoinedTokenizer::default())
-        .filter(AsciiFoldingFilter)
-        .filter(LowerCaser)
-        .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
-        .build()
+    joined_reading(false)
+}
+
+/// [`joined_analyzer`] reading a sharp sign after a letter
+/// ([`read_sharps`]): `C#` -> `csharp`, as "C Sharp" is keyed.
+pub(crate) fn page_joined_analyzer() -> TextAnalyzer {
+    joined_reading(true)
+}
+
+fn joined_reading(sharps: bool) -> TextAnalyzer {
+    TextAnalyzer::builder(JoinedTokenizer {
+        sharps,
+        ..JoinedTokenizer::default()
+    })
+    .filter(AsciiFoldingFilter)
+    .filter(LowerCaser)
+    .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
+    .build()
 }
 
 /// The tokens `analyzer` produces for `text`.
@@ -285,6 +333,8 @@ impl TokenStream for WordStream<'_> {
 /// the text has no letters or digits.
 #[derive(Clone, Default)]
 struct JoinedTokenizer {
+    /// Whether a sharp after a letter is read out ([`read_sharps`]).
+    sharps: bool,
     token: Token,
 }
 
@@ -297,10 +347,15 @@ impl Tokenizer for JoinedTokenizer {
     type TokenStream<'a> = SingleTokenStream<'a>;
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> SingleTokenStream<'a> {
+        let text = if self.sharps {
+            read_sharps(text)
+        } else {
+            text.into()
+        };
         self.token.reset();
         self.token
             .text
-            .extend(joined(text).chars().filter(|c| c.is_alphanumeric()));
+            .extend(joined(&text).chars().filter(|c| c.is_alphanumeric()));
         self.token.position = 0;
         self.token.offset_to = self.token.text.len();
         let pending = !self.token.text.is_empty();
@@ -349,6 +404,20 @@ mod tests {
         assert_eq!(words("STRASSE straße"), ["strasse", "strasse"]);
         assert!(words("  --- ... !!! ").is_empty());
         assert!(words("").is_empty());
+    }
+
+    #[test]
+    fn the_page_index_keys_a_sharp_after_a_letter_read_out() {
+        let page_key = |text| tokens(&page_joined_analyzer(), text);
+        assert_eq!(page_key("C#"), ["csharp"]);
+        assert_eq!(page_key("C Sharp"), ["csharp"]);
+        assert_eq!(page_key("F\u{266F} minor"), ["fsharpminor"]);
+        // Only after a lone letter at a word's end.
+        assert_eq!(page_key("#metoo issue #5"), ["metooissue5"]);
+        assert_eq!(page_key("abc# c#d"), ["abccd"]);
+        // Words, and the sites' index, keep dropping it.
+        assert_eq!(words("C# Corner"), ["c", "corner"]);
+        assert_eq!(joined_token("C#"), ["c"]);
     }
 
     #[test]

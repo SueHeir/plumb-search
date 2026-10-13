@@ -207,7 +207,7 @@ impl PageSearcher {
     pub fn open(dir: &Path) -> Result<Self> {
         let index = Index::open_in_dir(dir)
             .with_context(|| format!("opening the page index in {}", dir.display()))?;
-        analysis::register(index.tokenizers());
+        analysis::register_pages(index.tokenizers());
         let (schema, fields) = schema();
         if index.schema() != schema {
             bail!(
@@ -227,7 +227,7 @@ impl PageSearcher {
             reader,
             fields,
             words: analysis::words_analyzer(),
-            joined: analysis::joined_analyzer(),
+            joined: analysis::page_joined_analyzer(),
             stemmed: analysis::stemmed_analyzer(),
             stats,
             requested_language: None,
@@ -391,6 +391,25 @@ impl PageSearcher {
         }))
     }
 
+    /// The key `query` names pages by. A sharp after a letter is read out
+    /// ([`analysis::page_joined_analyzer`]) when a page is named so: "c#"
+    /// is C Sharp. Otherwise it is left out, as before: with no page on J
+    /// Sharp, "j#" is J.
+    pub(crate) fn query_key(&self, query: &str) -> Result<Option<String>> {
+        let read = analysis::tokens(&self.joined, query).pop();
+        let plain = analysis::tokens(&analysis::joined_analyzer(), query).pop();
+        if read == plain {
+            return Ok(read);
+        }
+        let searcher = self.reader.searcher();
+        Ok(match read {
+            Some(key) if searcher.doc_freq(&Term::from_field_text(self.fields.keys, &key))? > 0 => {
+                Some(key)
+            }
+            _ => plain,
+        })
+    }
+
     /// A suggested spelling of `query` from the words of the pages' names,
     /// for queries about things rather than sites ("anubas", "budafest"),
     /// whose words the sites index hardly has. Each word the pages do not
@@ -479,7 +498,7 @@ impl PageSearcher {
         }
         let stems = self.described_words(query);
         let words = analysis::tokens(&self.words, query);
-        let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
+        let Some(joined) = self.query_key(query)? else {
             return Ok(Vec::new());
         };
         let query_words: HashSet<&str> = words.iter().map(String::as_str).collect();
