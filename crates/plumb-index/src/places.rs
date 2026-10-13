@@ -18,11 +18,12 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::place::{
     area_size, distance_km, is_kind_word, normalize_region, parse_place, town_size, write_place,
-    Place, US_STATES,
+    Place, CANADIAN_PROVINCES, US_STATES,
 };
 use plumb_core::{country_of_any_name, joined, normalize_text};
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,10 @@ const TOWN_CANDIDATES: usize = 50;
 /// People in a borough or suburb that make it as much a town as a city of
 /// that size: Brooklyn, Manhattan, Setagaya.
 const CITY_SIZED: u64 = 200_000;
+/// People in a city that is still found by its name typed with a slip.
+const MISTYPED_CITY_PEOPLE: u64 = 100_000;
+/// More cities than have [`MISTYPED_CITY_PEOPLE`] (about 4,500 in the world).
+const BIG_CITIES_READ: usize = 20_000;
 /// How far around a named place that is not a town places are looked for.
 const LANDMARK_KM: f64 = 3.0;
 /// Fewer places than this within a town's size: look farther.
@@ -95,18 +100,26 @@ const WHERE_WORDS: &[&[&str]] = &[&["in"], &["near"], &["around"], &["close", "t
 /// Kinds of town a query may name without "in" or "near": "denver
 /// pizza", "barber brooklyn".
 const GUESSED_TOWNS: &[&str] = &["place=city", "place=borough"];
-/// Words ending a query that say when, not where: "open now".
-const WHEN: &[&[&str]] = &[
+/// Words a name is written with in full or short, and a search may say
+/// either way: "st paul" is Saint Paul, "ft lauderdale" Fort Lauderdale.
+const SHORT_WORDS: &[(&str, &str)] = &[
+    ("st", "saint"),
+    ("ste", "sainte"),
+    ("ft", "fort"),
+    ("mt", "mount"),
+];
+/// Words ending a query that say when it is open, not where: "open now".
+const HOURS: &[&[&str]] = &[
     &["open", "now"],
     &["open", "late"],
     &["open", "today"],
     &["open", "24", "hours"],
     &["24", "hours"],
     &["24", "7"],
-    &["now"],
-    &["today"],
-    &["tonight"],
 ];
+/// Words ending a query that say when, as of places as of much else:
+/// "pizza tonight", "stock market today".
+const WHEN: &[&[&str]] = &[&["now"], &["today"], &["tonight"]];
 /// First words of a query about a town itself, not places in it: "time in
 /// tokyo", "weather in denver", "capital of washington".
 const ABOUT_TOWN: &[&str] = &[
@@ -175,13 +188,15 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         .map(str::to_string)
         .collect();
     // "plumber boston open now": when is not where.
-    let mut said_when = false;
-    while let Some(when) = WHEN
+    let (mut said_when, mut said_hours) = (false, false);
+    while let Some(when) = HOURS
         .iter()
+        .chain(WHEN)
         .find(|when| words.len() > when.len() && words[words.len() - when.len()..] == ***when)
     {
         words.truncate(words.len() - when.len());
         said_when = true;
+        said_hours |= HOURS.contains(when);
     }
     // Nor in the middle, "pharmacy open now denver", for a time of two
     // words or more: one word alone may be part of a name ("now tv").
@@ -297,8 +312,15 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         }
     }
     // "coffee open now", "pharmacy open late": a kind of place asked for
-    // at a time, with no town, is near the searcher.
-    if said_when && words.last().is_some_and(|w| is_kind_word(w)) {
+    // at a time, with no town, is near the searcher. A time alone says
+    // that only of words that are all kinds of place: "pizza tonight",
+    // not "stock market today".
+    let kinds = |words: &[String]| {
+        words
+            .iter()
+            .all(|w| FILLER.contains(&w.as_str()) || is_kind_word(w))
+    };
+    if said_when && words.last().is_some_and(|w| is_kind_word(w)) && (said_hours || kinds(&words)) {
         readings.extend(near_me(what_of(&words)));
     }
     readings
@@ -531,6 +553,9 @@ pub struct PlaceSearcher {
     joined: TextAnalyzer,
     stemmed: TextAnalyzer,
     stats: PlaceIndexStats,
+    /// Cities of [`MISTYPED_CITY_PEOPLE`] or more, the biggest first, with
+    /// the keys of their names: a few thousand, read when first needed.
+    big_cities: OnceLock<Vec<(Vec<String>, Place)>>,
 }
 
 impl PlaceSearcher {
@@ -559,6 +584,7 @@ impl PlaceSearcher {
             joined: analysis::joined_analyzer(),
             stemmed: analysis::stemmed_analyzer(),
             stats,
+            big_cities: OnceLock::new(),
         })
     }
 
@@ -611,7 +637,12 @@ impl PlaceSearcher {
                         candidates: Vec::new(),
                     },
                 },
-                Near::Named(name) => self.resolve(name, preferred_country, required_country)?,
+                Near::Named(name) if asked.said_where => {
+                    self.resolve(name, preferred_country, required_country)?
+                }
+                Near::Named(name) => {
+                    self.resolve_as_typed(name, preferred_country, required_country)?
+                }
             };
             // A town guessed from words ("toy story", "hotel california",
             // "crypto exchange") is only taken for a big one: Story in
@@ -619,10 +650,12 @@ impl PlaceSearcher {
             // words. A choice of towns is offered only when the likeliest
             // is big: "stock market" offers no choice of suburbs called
             // Stock. Otherwise the query may still split another way.
-            let guessed_wrong = match location.candidates.first() {
-                Some(place) => !GUESSED_TOWNS.contains(&place.kind.as_str()),
-                None => location.status == LocationStatus::UnknownLocation,
-            };
+            // A guess that names no town at all ("court view alaska") is
+            // no reading either.
+            let guessed_wrong = location
+                .candidates
+                .first()
+                .is_none_or(|place| !GUESSED_TOWNS.contains(&place.kind.as_str()));
             if asked.said_where || (!guessed_wrong && location.selected().is_some()) {
                 let found = self.found(asked, location, required_country, limit)?;
                 return self.asks_for_places(found);
@@ -753,7 +786,7 @@ impl PlaceSearcher {
                 continue;
             }
             let name = near.join(" ");
-            let location = self.resolve(&name, preferred_country, required_country)?;
+            let location = self.resolve_as_typed(&name, preferred_country, required_country)?;
             let Some(town) = location
                 .selected()
                 .filter(|place| GUESSED_TOWNS.contains(&place.kind.as_str()))
@@ -812,21 +845,19 @@ impl PlaceSearcher {
     /// Whether a city or borough (a town a query may name without "in")
     /// is called `name`.
     fn names_a_city(&self, name: &str) -> Result<bool> {
-        let Some(key) = analysis::tokens(&self.joined, name).pop() else {
+        let Some(key) = self.key_query(name) else {
             return Ok(false);
-        };
-        let term = |field, text: &str| {
-            Box::new(TermQuery::new(
-                Term::from_field_text(field, text),
-                IndexRecordOption::Basic,
-            )) as Box<dyn Query>
         };
         let kinds = GUESSED_TOWNS
             .iter()
-            .map(|kind| (Occur::Should, term(self.fields.kind, kind)))
+            .map(|kind| {
+                let term = Term::from_field_text(self.fields.kind, kind);
+                let query = TermQuery::new(term, IndexRecordOption::Basic);
+                (Occur::Should, Box::new(query) as Box<dyn Query>)
+            })
             .collect();
         let query = BooleanQuery::new(vec![
-            (Occur::Must, term(self.fields.keys, &key)),
+            (Occur::Must, Box::new(key)),
             (Occur::Must, Box::new(BooleanQuery::new(kinds))),
         ]);
         Ok(self.reader.searcher().search(&query, &Count)? > 0)
@@ -928,12 +959,38 @@ impl PlaceSearcher {
     /// The town (or else other place) `text` names: "denver",
     /// "portland maine", "paris, france", "the eiffel tower".
     pub fn locate(&self, text: &str, country: Option<&str>) -> Result<Option<Place>> {
-        Ok(self.resolve(text, country, None)?.selected().cloned())
+        Ok(self
+            .resolve_as_typed(text, country, None)?
+            .selected()
+            .cloned())
     }
 
     /// Resolves the name without allowing a default-country boost to
-    /// override explicit qualifiers or decide a close namesake tie.
+    /// override explicit qualifiers or decide a close namesake tie. Where
+    /// nothing is called that, the big cities whose names it mistypes
+    /// ([`Self::mistyped_cities`]) are its candidates, to offer rather
+    /// than search: "nature" is a slip from Natore, Bangladesh too.
     pub fn resolve(
+        &self,
+        text: &str,
+        preferred_country: Option<&str>,
+        required_country: Option<&str>,
+    ) -> Result<LocationResolution> {
+        let mut found = self.resolve_as_typed(text, preferred_country, required_country)?;
+        if found.status == LocationStatus::UnknownLocation {
+            let words: Vec<String> = normalize_text(text)
+                .split(' ')
+                .filter(|word| !word.is_empty())
+                .map(str::to_string)
+                .collect();
+            found.candidates = self.mistyped_cities(&words, required_country)?;
+            found.candidates.truncate(LOCATION_ALTERNATIVES);
+        }
+        Ok(found)
+    }
+
+    /// [`Self::resolve`] by the name as typed.
+    fn resolve_as_typed(
         &self,
         text: &str,
         preferred_country: Option<&str>,
@@ -951,18 +1008,28 @@ impl PlaceSearcher {
             .filter(|w| !w.is_empty())
             .map(str::to_string)
             .collect();
-        // A US state named alone is no town either: "hotels in florida"
-        // is not Florida in Uruguay. A town of its name in the state still
-        // is ("new york"), and "washington" is the capital too.
+        // A US state or Canadian province named alone is no town either:
+        // "hotels in florida" is not Florida in Uruguay, nor "reserves in
+        // ontario" Ontario, California. A town of its name in the state
+        // still is ("new york", "quebec"), and "washington" is the capital
+        // too.
         let whole = words.join(" ");
+        let region = normalize_region(&whole);
         let named_state = US_STATES
             .iter()
-            .find(|(_, name)| normalize_text(name) == whole)
-            .map(|(code, _)| *code);
+            .map(|state| (state, "US"))
+            .chain(CANADIAN_PROVINCES.iter().map(|province| (province, "CA")))
+            .find(|((code, _), _)| *code == region)
+            .map(|((code, _), country)| (*code, country));
         // A town first, however the words split ("boulder co" is Boulder in
         // Colorado before it is a gym called Boulder & Co.), then any place.
         // A landmark counts as a town: "yellowstone" is the park before a
-        // village in Alberta.
+        // village in Alberta. Where the words split more than one way into
+        // towns, the biggest wins, so "san antonio texas" is the city in
+        // Texas, not a village in Oaxaca called San Antonio Texas; a city
+        // found is not looked past.
+        let mut towns: Option<Vec<Place>> = None;
+        let biggest = |places: &[Place]| places.iter().map(|place| place.rank).max();
         let mut other = None;
         let mut conflict = false;
         let notable = plumb_core::place::place_rank("", 0, true, false, 0);
@@ -974,12 +1041,24 @@ impl PlaceSearcher {
                 .into_iter()
                 .filter(|place| {
                     (qualifier.is_empty() || place_is_in(place, &qualifier))
-                        && named_country.is_none_or(|country| country_matches(place, country))
-                        && named_state.is_none_or(|state| {
+                        // Nor an island the country is on: "hotels in
+                        // jamaica" asks for a town.
+                        && named_country.is_none_or(|country| {
+                            place.is_town() && country_matches(place, country)
+                        })
+                        && named_state.is_none_or(|(state, country)| {
                             // Uruguay's Florida is in its department FL.
-                            let region = place.region.as_deref().unwrap_or_default();
-                            place.country.as_deref() == Some("US")
-                                && (region == state || (state == "WA" && region == "DC"))
+                            let (region, of) = (place.region.as_deref(), place.country.as_deref());
+                            let in_state = of == Some(country)
+                                && region.is_some_and(|region| {
+                                    region == state || (state == "WA" && region == "DC")
+                                });
+                            // Older places files know no Canadian town's
+                            // province.
+                            in_state
+                                || (country == "CA"
+                                    && region.is_none()
+                                    && of.is_none_or(|of| of == "CA"))
                         })
                 })
                 .collect();
@@ -998,6 +1077,7 @@ impl PlaceSearcher {
                 .cloned()
                 .collect();
             conflict |= !qualifier.is_empty() && !matching.is_empty() && candidates.is_empty();
+            self.prefer_as_typed(&name, &mut candidates);
             // A place that is no town, named alone, is somewhere to search
             // around only when Wikidata knows it: "planets in the solar
             // system" is not about an office called Solar System, nor
@@ -1008,11 +1088,27 @@ impl PlaceSearcher {
             let town_like = |place: &Place| place.is_town() || place.is_landmark();
             if candidates.iter().any(town_like) {
                 candidates.retain(town_like);
-                return Ok(resolve_candidates(text, candidates, preferred_country));
+                if towns
+                    .as_deref()
+                    .is_none_or(|towns| biggest(&candidates) > biggest(towns))
+                {
+                    towns = Some(candidates);
+                }
+                if towns
+                    .iter()
+                    .flatten()
+                    .any(|place| place.kind == "place=city")
+                {
+                    break;
+                }
+                continue;
             }
             if !candidates.is_empty() && other.is_none() {
                 other = Some(resolve_candidates(text, candidates, preferred_country));
             }
+        }
+        if let Some(towns) = towns {
+            return Ok(resolve_candidates(text, towns, preferred_country));
         }
         Ok(other.unwrap_or_else(|| LocationResolution {
             requested: text.to_string(),
@@ -1025,6 +1121,86 @@ impl PlaceSearcher {
             },
             candidates: Vec::new(),
         }))
+    }
+
+    /// Cities of [`MISTYPED_CITY_PEOPLE`] or more whose name is a slip
+    /// from how `words` begin, the rest saying where it is, for a WHERE
+    /// nothing is called: one slip in a name of six to eight letters, two
+    /// in a longer one ("hotels in cincinatti"). Shorter names are left
+    /// alone: "pizza in gotham" is no Gotha.
+    fn mistyped_cities(
+        &self,
+        words: &[String],
+        required_country: Option<&str>,
+    ) -> Result<Vec<Place>> {
+        let cities = self.big_cities()?;
+        for k in (1..=words.len()).rev() {
+            let qualifier = words[k..].join(" ");
+            let Some(key) = analysis::tokens(&self.joined, &words[..k].join(" ")).pop() else {
+                continue;
+            };
+            let slips = match key.chars().count() {
+                0..=5 => continue,
+                6..=8 => 1,
+                _ => 2,
+            };
+            let dfa = crate::spell::builder(slips).build_dfa(&key);
+            let found: Vec<(u8, &Place)> = cities
+                .iter()
+                .filter(|(_, place)| {
+                    (qualifier.is_empty() || place_is_in(place, &qualifier))
+                        && required_country.is_none_or(|country| country_matches(place, country))
+                })
+                .filter_map(|(keys, place)| {
+                    let slips = keys
+                        .iter()
+                        .filter_map(|key| match dfa.eval(key) {
+                            levenshtein_automata::Distance::Exact(slips) => Some(slips),
+                            levenshtein_automata::Distance::AtLeast(_) => None,
+                        })
+                        .min()?;
+                    Some((slips, place))
+                })
+                .collect();
+            // The fewest slips first, then the biggest city.
+            if let Some(fewest) = found.iter().map(|(slips, _)| *slips).min() {
+                return Ok(found
+                    .into_iter()
+                    .filter(|(slips, _)| *slips == fewest)
+                    .map(|(_, place)| place.clone())
+                    .collect());
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// [`Self::big_cities`], read the first time.
+    fn big_cities(&self) -> Result<&[(Vec<String>, Place)]> {
+        if let Some(cities) = self.big_cities.get() {
+            return Ok(cities);
+        }
+        let big =
+            plumb_core::place::place_rank("place=city", MISTYPED_CITY_PEOPLE, false, false, 0);
+        let searcher = self.reader.searcher();
+        let city = Term::from_field_text(self.fields.kind, "place=city");
+        let found = searcher.search(
+            &TermQuery::new(city, IndexRecordOption::Basic),
+            &TopDocs::with_limit(BIG_CITIES_READ)
+                .order_by_fast_field::<u64>("rank", tantivy::Order::Desc),
+        )?;
+        let mut cities = Vec::new();
+        for (rank, address) in found {
+            if rank.is_none_or(|rank| rank < u64::from(big)) {
+                break;
+            }
+            let place = self.stored(&searcher.doc(address)?)?;
+            let keys = std::iter::once(&place.name)
+                .chain(&place.aliases)
+                .filter_map(|name| analysis::tokens(&self.joined, name).pop())
+                .collect();
+            cities.push((keys, place));
+        }
+        Ok(self.big_cities.get_or_init(|| cities))
     }
 
     /// Places whose name or other name is `name`.
@@ -1041,7 +1217,7 @@ impl PlaceSearcher {
         preferred_country: Option<&str>,
         required_country: Option<&str>,
     ) -> Result<Vec<Place>> {
-        let location = self.resolve(town, preferred_country, required_country)?;
+        let location = self.resolve_as_typed(town, preferred_country, required_country)?;
         let Some(town) = location.selected().filter(|town| town.is_town()) else {
             return Ok(Vec::new());
         };
@@ -1056,13 +1232,10 @@ impl PlaceSearcher {
     /// Places whose name or other name is `name`, the most notable first,
     /// only those within `km` of a place when `near` gives one.
     fn named_within(&self, name: &str, near: Option<(&Place, f64)>) -> Result<Vec<Place>> {
-        let Some(key) = analysis::tokens(&self.joined, name).pop() else {
+        let Some(key) = self.key_query(name) else {
             return Ok(Vec::new());
         };
-        let key: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.fields.keys, &key),
-            IndexRecordOption::Basic,
-        ));
+        let key: Box<dyn Query> = Box::new(key);
         let query = match near {
             None => key,
             Some((center, km)) => Box::new(BooleanQuery::new(vec![
@@ -1084,6 +1257,85 @@ impl PlaceSearcher {
             }
         }
         Ok(places)
+    }
+
+    /// Keeps of `places` found by `name` those named it as typed, and the
+    /// rest only when clearly bigger: "st louis" is St. Louis, Missouri,
+    /// not Saint-Louis, Senegal, but "st paul" is Saint Paul, Minnesota,
+    /// not St. Paul, Alberta.
+    fn prefer_as_typed(&self, name: &str, places: &mut Vec<Place>) {
+        let typed = self.typed_keys(name);
+        let as_typed = |place: &Place| {
+            std::iter::once(&place.name)
+                .chain(&place.aliases)
+                .filter_map(|name| analysis::tokens(&self.joined, name).pop())
+                .any(|key| typed.contains(&key))
+        };
+        let best = places
+            .iter()
+            .filter(|place| as_typed(place))
+            .map(|place| town_score(place, None))
+            .fold(f64::NEG_INFINITY, f64::max);
+        places.retain(|place| {
+            as_typed(place) || town_score(place, None) >= best + DISTINCT_LOCATION_TIERS
+        });
+    }
+
+    /// Places whose name or other name is `name` ([`Self::typed_keys`]),
+    /// or `name` with its [`SHORT_WORDS`] written the other way: "st paul"
+    /// is Saint Paul, and "fort worth" is Ft. Worth.
+    fn key_query(&self, name: &str) -> Option<BooleanQuery> {
+        let normalized = normalize_text(name);
+        let swapped: Vec<&str> = normalized
+            .split(' ')
+            .map(|word| {
+                SHORT_WORDS
+                    .iter()
+                    .find_map(|&(short, full)| {
+                        (word == short)
+                            .then_some(full)
+                            .or((word == full).then_some(short))
+                    })
+                    .unwrap_or(word)
+            })
+            .collect();
+        let mut keys = self.typed_keys(name);
+        for key in self.typed_keys(&swapped.join(" ")) {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        let terms: Vec<(Occur, Box<dyn Query>)> = keys
+            .iter()
+            .map(|key| {
+                let term = Term::from_field_text(self.fields.keys, key);
+                let query = TermQuery::new(term, IndexRecordOption::Basic);
+                (Occur::Should, Box::new(query) as Box<dyn Query>)
+            })
+            .collect();
+        (!terms.is_empty()).then(|| BooleanQuery::new(terms))
+    }
+
+    /// The keys of `name` with and without a "the" before it: a search
+    /// leaves out the "the" of "hotels in the hague", and "bronx ny" is The
+    /// Bronx.
+    fn typed_keys(&self, name: &str) -> Vec<String> {
+        let name = normalize_text(name);
+        if name.is_empty() {
+            return Vec::new();
+        }
+        let other = match name.strip_prefix("the ") {
+            Some(rest) => rest.to_string(),
+            None => format!("the {name}"),
+        };
+        let mut keys: Vec<String> = Vec::new();
+        for text in [name, other] {
+            let key = analysis::tokens(&self.joined, &text).pop();
+            if let Some(key) = key.filter(|key| !keys.contains(key)) {
+                keys.push(key);
+            }
+        }
+        keys
     }
 
     /// Places in the cells within `km` of `center`.
@@ -1709,6 +1961,21 @@ mod tests {
     }
 
     #[test]
+    fn a_guess_that_names_no_town_asks_for_none() {
+        let (_dir, searcher) = index(places());
+        // A state is no town, and a time alone says near me only of kinds
+        // of place: neither asks the searcher for a town.
+        for query in ["court view montana", "stock market today"] {
+            let found = searcher.search(query, None, None, 5).unwrap();
+            assert!(found.is_none(), "{query}: {found:?}");
+        }
+        let tonight = searcher.search("pizza tonight", None, None, 5).unwrap();
+        assert!(tonight.unwrap().near_me);
+        let open = searcher.search("market open now", None, None, 5).unwrap();
+        assert!(open.unwrap().near_me);
+    }
+
+    #[test]
     fn a_town_named_without_in_is_found_however_the_words_split() {
         let mut fixtures = places();
         fixtures.extend([
@@ -1901,6 +2168,22 @@ mod tests {
             },
             at("Lake Hotel", "tourism=hotel", 44.55, -110.40),
             at("Hotel Westminster", "tourism=hotel", 51.499, -0.127),
+            // An island, a village of its name, and an island country.
+            Place {
+                rank: plumb_core::place::landmark_rank(60_000),
+                ..at("Maui", "place=island", 20.8, -156.33)
+            },
+            Place {
+                country: Some("PH".into()),
+                ..at("Maui", "place=village", 13.9, 124.15)
+            },
+            at("Wailea Beach Resort", "tourism=hotel", 20.68, -156.44),
+            Place {
+                rank: plumb_core::place::landmark_rank(80_000),
+                country: Some("JM".into()),
+                ..at("Jamaica", "place=island", 18.15, -77.3)
+            },
+            at("Jamaica Inn", "tourism=hotel", 18.16, -77.31),
         ]);
         // The park is meant, and searched wide: its hotel is 9 km off.
         let park = searcher
@@ -1918,6 +2201,15 @@ mod tests {
         // The village is still found by its province.
         let village = searcher.locate("yellowstone ab", None).unwrap().unwrap();
         assert_eq!(village.kind, "place=village");
+        // An island is searched around as widely as a park.
+        let maui = searcher
+            .search("hotels in maui", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(maui.center.unwrap().kind, "place=island");
+        assert_eq!(maui.hits[0].place.name, "Wailea Beach Resort");
+        let jamaica = searcher.resolve("jamaica", None, None).unwrap();
+        assert_eq!(jamaica.status, LocationStatus::MissingLocation);
     }
 
     #[test]
@@ -2041,9 +2333,18 @@ mod tests {
             city("Montana", 40_000, "Montana", "BG", 43.41, 23.22),
             city("Washington", 690_000, "DC", "US", 38.90, -77.04),
             at("Hotel Florida", "tourism=hotel", 3.321, -76.231),
+            city("Ontario", 175_000, "CA", "US", 34.06, -117.65),
+            city("Newfoundland", 1_000, "NJ", "US", 41.04, -74.43),
+            city("St. John's", 110_000, "NL", "CA", 47.56, -52.71),
+            // As a places file that read no provinces has it.
+            Place {
+                region: None,
+                country: None,
+                ..city("Québec", 550_000, "QC", "CA", 46.81, -71.21)
+            },
         ]);
         let (_dir, searcher) = index(fixtures);
-        for state in ["florida", "Montana"] {
+        for state in ["florida", "Montana", "ontario", "newfoundland"] {
             let found = searcher.resolve(state, Some("US"), None).unwrap();
             assert_eq!(found.status, LocationStatus::MissingLocation, "{state}");
             assert!(found.candidates.is_empty(), "{state}");
@@ -2063,6 +2364,170 @@ mod tests {
         );
         let capital = searcher.locate("washington", None).unwrap().unwrap();
         assert_eq!(capital.region.as_deref(), Some("DC"));
+        assert_eq!(
+            searcher.locate("quebec", None).unwrap().unwrap().name,
+            "Québec"
+        );
+        let california = searcher.locate("ontario ca", None).unwrap().unwrap();
+        assert_eq!(california.region.as_deref(), Some("CA"));
+        // A province is often called by the first part of its name.
+        let found = searcher.locate("st johns newfoundland", None).unwrap();
+        assert_eq!(found.unwrap().name, "St. John's");
+    }
+
+    #[test]
+    fn a_town_is_found_by_its_short_words_either_way() {
+        let town = |name: &str, population: u64, region: &str, country: &str, lat, lon| Place {
+            kind: "place=town".into(),
+            rank: place_rank("place=town", population, false, false, 3),
+            ..city(name, population, region, country, lat, lon)
+        };
+        let mut fixtures = places();
+        fixtures.extend([
+            city("Saint Paul", 311_000, "MN", "US", 44.95, -93.09),
+            town("St. Paul", 5_800, "AB", "CA", 53.99, -111.29),
+            city("Fort Lauderdale", 182_000, "FL", "US", 26.12, -80.14),
+            town("Mount Shasta", 3_200, "CA", "US", 41.31, -122.31),
+            city("Saint Augustine", 15_000, "FL", "US", 29.89, -81.31),
+            at("St. Augustine", "place=village", 0.29, 32.59),
+            town("Sault Ste. Marie", 72_000, "ON", "CA", 46.52, -84.35),
+            Place {
+                aliases: vec!["St. Louis".into()],
+                ..city("Saint Louis", 300_000, "MO", "US", 38.63, -90.20)
+            },
+            city("Saint-Louis", 260_000, "SL", "SN", 16.03, -16.49),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let found = |text: &str| {
+            let place = searcher.locate(text, Some("US")).unwrap();
+            let place = place.unwrap_or_else(|| panic!("{text}: nowhere"));
+            (place.name, place.region.unwrap_or_default())
+        };
+        let said = |name: &str, region: &str| (name.to_string(), region.to_string());
+        assert_eq!(found("st paul"), said("Saint Paul", "MN"));
+        assert_eq!(found("st. paul ab"), said("St. Paul", "AB"));
+        assert_eq!(found("saint paul alberta"), said("St. Paul", "AB"));
+        assert_eq!(found("ft lauderdale"), said("Fort Lauderdale", "FL"));
+        assert_eq!(found("mt shasta"), said("Mount Shasta", "CA"));
+        assert_eq!(found("st augustine"), said("Saint Augustine", "FL"));
+        assert_eq!(found("sault sainte marie"), said("Sault Ste. Marie", "ON"));
+        // As typed first: Senegal's Saint-Louis is no bigger.
+        assert_eq!(found("st louis"), said("Saint Louis", "MO"));
+    }
+
+    #[test]
+    fn a_town_whose_name_begins_with_the_is_found_without_it() {
+        let mut fixtures = places();
+        fixtures.extend([
+            Place {
+                aliases: vec!["The Hague".into()],
+                ..city("Den Haag", 550_000, "ZH", "NL", 52.08, 4.31)
+            },
+            Place {
+                kind: "place=town".into(),
+                rank: place_rank("place=town", 1_000, false, false, 3),
+                ..city("Hague", 1_000, "SK", "CA", 52.51, -106.42)
+            },
+            Place {
+                kind: "place=borough".into(),
+                ..city("The Bronx", 1_400_000, "NY", "US", 40.84, -73.87)
+            },
+            Place {
+                town: Some("Varaždin".into()),
+                ..at("Bronx", "place=quarter", 46.30, 16.34)
+            },
+            city("The Woodlands", 114_000, "TX", "US", 30.17, -95.50),
+            at("Bronx Café", "amenity=cafe", 40.841, -73.871),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let centre = |query: &str| {
+            let found = searcher
+                .search(query, None, Some("US"), 5)
+                .unwrap()
+                .unwrap();
+            found.center.map(|place| place.name).unwrap_or_default()
+        };
+        assert_eq!(centre("hotels in the hague"), "Den Haag");
+        assert_eq!(centre("coffee in the bronx"), "The Bronx");
+        assert_eq!(centre("cafe in bronx ny"), "The Bronx");
+        assert_eq!(centre("restaurants in the woodlands tx"), "The Woodlands");
+        let hague = searcher
+            .locate("hague saskatchewan", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hague.name, "Hague");
+    }
+
+    #[test]
+    fn the_biggest_town_the_words_name_wins_however_they_split() {
+        let mut fixtures = places();
+        fixtures.extend([
+            Place {
+                region: Some("OAX".into()),
+                country: Some("MX".into()),
+                ..at("San Antonio Texas", "place=village", 18.17, -96.13)
+            },
+            city("San Antonio", 1_400_000, "TX", "US", 29.42, -98.49),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let found = searcher.locate("san antonio texas", None).unwrap().unwrap();
+        assert_eq!(
+            (found.name.as_str(), found.region.as_deref()),
+            ("San Antonio", Some("TX"))
+        );
+        // With its own country, the village is still found.
+        let found = searcher
+            .locate("san antonio texas mexico", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.name, "San Antonio Texas");
+    }
+
+    #[test]
+    fn a_big_city_typed_with_a_slip_is_offered() {
+        let mut fixtures = places();
+        fixtures.extend([
+            city("Cincinnati", 309_000, "OH", "US", 39.10, -84.51),
+            city("Manchester", 115_000, "NH", "US", 42.99, -71.46),
+            city("Mancheston", 2_000_000, "TX", "US", 30.0, -95.0),
+            city("Tucson", 540_000, "AZ", "US", 32.22, -110.97),
+            city("Gorham", 17_000, "ME", "US", 43.68, -70.44),
+            Place {
+                kind: "place=town".into(),
+                rank: place_rank("place=town", 46_000, false, false, 3),
+                ..city("Gotha", 46_000, "TH", "DE", 50.95, 10.70)
+            },
+            at("Hotel Cincinnatian", "tourism=hotel", 39.101, -84.511),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        // Offered, not searched.
+        let offered = |query: &str| {
+            let found = searcher
+                .search(query, None, Some("US"), 5)
+                .unwrap()
+                .unwrap();
+            assert!(found.center.is_none() && found.hits.is_empty(), "{query}");
+            let location = found.location.unwrap();
+            assert_eq!(location.status, LocationStatus::UnknownLocation);
+            location
+                .candidates
+                .iter()
+                .map(|place| place.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(offered("hotels in cincinatti"), ["Cincinnati"]);
+        assert_eq!(offered("hotels in cincinatti ohio"), ["Cincinnati"]);
+        assert_eq!(offered("hotels near tuscon az"), ["Tucson"]);
+        // The fewest slips first, however big the city two slips off.
+        assert_eq!(offered("pizza in manchestar"), ["Manchester"]);
+        // Nor a small city, a town or a short name, nor in a guess.
+        for town in ["gorhams", "gothas", "gotham", "cincinatti tx"] {
+            assert!(offered(&format!("pizza in {town}")).is_empty(), "{town}");
+        }
+        assert_eq!(
+            searcher.search("cincinatti hotels", None, None, 5).unwrap(),
+            None
+        );
     }
 
     #[test]
