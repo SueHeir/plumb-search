@@ -166,7 +166,12 @@ impl Builder {
         let mut named_inner: HashMap<String, Vec<&OfficialSite>> = HashMap::new();
         let mut inner = 0u64;
         let mut invalid = 0u64;
+        let mut wiki_pages = 0u64;
         for site in sites {
+            if site.is_wiki_page() {
+                wiki_pages += 1;
+                continue;
+            }
             let front_page = site.is_root_homepage();
             if !front_page && !site.is_named_inner_page() {
                 inner += 1;
@@ -272,7 +277,7 @@ impl Builder {
         }
         warn_invalid("Wikidata official sites", invalid);
         info!(
-            "marked {official} official sites ({by_inner_page} by an inner page naming the site); skipped {shared} front pages claimed by more than {MAX_ITEMS_PER_HOMEPAGE} Wikidata items, and {inner} claims on a subdomain or an inner page"
+            "marked {official} official sites ({by_inner_page} by an inner page naming the site); skipped {shared} front pages claimed by more than {MAX_ITEMS_PER_HOMEPAGE} Wikidata items, {inner} claims on a subdomain or an inner page, and {wiki_pages} claims by a disambiguation page, category or template"
         );
     }
 
@@ -752,6 +757,56 @@ mod tests {
         let records = builder.finish(None);
         assert!(records[0].kinds.is_empty());
         assert_eq!(records[0].about, None);
+    }
+
+    #[test]
+    fn wiki_pages_claim_nothing() {
+        let claim = |item: &str, label: &str, domain: &str, kind: &str, about: &str| {
+            let mut site = site(item, label, domain);
+            site.kinds = vec![kind.to_string()];
+            site.about = Some(about.to_string());
+            site
+        };
+        let disambiguation = "Wikimedia disambiguation page";
+        let mut builder = Builder::new();
+        builder.add_official_sites(&[
+            claim(
+                "Q6840254",
+                "Microsoft Web Services",
+                "outlook.com",
+                disambiguation,
+                disambiguation,
+            ),
+            claim(
+                "Q227055",
+                "Mayenne",
+                "mayen.de",
+                disambiguation,
+                disambiguation,
+            ),
+            claim(
+                "Q516611",
+                "Mayen",
+                "mayen.de",
+                "town",
+                "town in Rhineland-Palatinate",
+            ),
+            claim(
+                "Q14407990",
+                "Template:Hall of Fame",
+                "hoophall.com",
+                "Wikimedia template",
+                "",
+            ),
+        ]);
+        let records = builder.finish(None);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].domain, "mayen.de");
+        assert_eq!(records[0].aliases, ["Mayen"]);
+        assert_eq!(
+            records[0].about.as_deref(),
+            Some("town in Rhineland-Palatinate")
+        );
     }
 
     #[test]

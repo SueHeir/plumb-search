@@ -12,6 +12,15 @@ use url::Url;
 
 use crate::{open_maybe_gz, snippet, too_long_note, Line, LineReader, MAX_LINE_BYTES};
 
+/// What Wikidata calls an item that is a page of the wikis
+/// ([`OfficialSite::is_wiki_page`]).
+const WIKI_PAGE_KINDS: [&str; 4] = [
+    "Wikimedia disambiguation page",
+    "Wikimedia human name disambiguation page",
+    "Wikimedia category",
+    "Wikimedia template",
+];
+
 /// One "official website" statement: an item, its label and the URL it
 /// claims. Build it with [`OfficialSite::new`], which derives the other fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +145,17 @@ impl OfficialSite {
     /// front page.
     pub fn is_named_inner_page(&self) -> bool {
         self.is_root_inner_page() && self.domain_name_share() * 3.0 >= 2.0
+    }
+
+    /// True when the item is a page of the wikis rather than a thing: a
+    /// disambiguation page, a category or a template ([`OfficialSite::kinds`]).
+    /// Some claim a website anyway, which names nothing: the disambiguation
+    /// page "Radioactive" claims a guitarist's site, and "Microsoft Web
+    /// Services" outlook.com.
+    pub fn is_wiki_page(&self) -> bool {
+        self.kinds
+            .iter()
+            .any(|kind| WIKI_PAGE_KINDS.contains(&kind.as_str()))
     }
 
     /// True when the item's label or one of its other names contains the
