@@ -67,9 +67,13 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
     "access denied",
     "bad gateway",
     "client challenge",
+    "domain for sale",
+    "domain parked",
     "down for maintenance",
     "internal server error",
     "page not found",
+    "parked domain",
+    "server busy",
     "service unavailable",
     "site maintenance",
     "site unavailable",
@@ -82,9 +86,10 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
 ];
 
 /// Whole titles, after [`normalize_text`], of a placeholder where a
-/// homepage should be: a web server's default page, a site not built yet,
-/// a suspended hosting account.
+/// homepage should be: a web server's default page or a suspended hosting
+/// account. A site not built yet is [`NOT_BUILT_ENDS`].
 const PLACEHOLDER_TITLES: &[&str] = &[
+    "caddy works",
     "welcome to nginx",
     "welcome to nginx on debian",
     "welcome to centos",
@@ -93,17 +98,21 @@ const PLACEHOLDER_TITLES: &[&str] = &[
     "test page for the apache http server",
     "iis windows server",
     "it works",
-    "coming soon",
-    "website coming soon",
-    "site coming soon",
-    "under construction",
-    "website under construction",
-    "site under construction",
     "account suspended",
     "this account has been suspended",
     "suspended domain",
     "default web site page",
     "web server s default page",
+];
+
+/// How a title part, after [`normalize_text`], of a site not built yet
+/// ends, after nothing but [`NOT_BUILT_WORDS`]: "Coming Soon", "This Web
+/// site coming soon", "Nobel — New website coming soon".
+const NOT_BUILT_ENDS: &[&str] = &["coming soon", "under construction"];
+
+/// Words that may come before a [`NOT_BUILT_ENDS`] in a title part.
+const NOT_BUILT_WORDS: &[&str] = &[
+    "new", "our", "page", "site", "the", "this", "web", "website",
 ];
 
 /// Words, after [`normalize_text`], of a homepage that only greets: "Hello!",
@@ -226,7 +235,10 @@ pub fn is_bot_check_page(
             return true;
         }
     }
-    let stand_in = |part: &str| STAND_IN_TITLE_PARTS.contains(&normalize_text(part).as_str());
+    let stand_in = |part: &str| {
+        let part = normalize_text(part);
+        STAND_IN_TITLE_PARTS.contains(&part.as_str()) || not_built_yet(&part)
+    };
     if title.is_some_and(|title| {
         title
             .split(TITLE_SEPARATORS)
@@ -240,6 +252,19 @@ pub fn is_bot_check_page(
         CHECK_PHRASES
             .iter()
             .any(|phrase| text.contains(&format!(" {phrase} ")))
+    })
+}
+
+/// Whether a normalized title part says the site is not built yet
+/// ([`NOT_BUILT_ENDS`]).
+fn not_built_yet(part: &str) -> bool {
+    NOT_BUILT_ENDS.iter().any(|end| {
+        part.strip_suffix(end).is_some_and(|rest| {
+            (rest.is_empty() || rest.ends_with(' '))
+                && rest
+                    .split_whitespace()
+                    .all(|word| NOT_BUILT_WORDS.contains(&word))
+        })
     })
 }
 
@@ -465,6 +490,12 @@ mod tests {
             ("example.com", "Example: Under Maintenance"),
             ("example.com", "503 Service Unavailable"),
             ("example.com", "Error"),
+            ("amazon.com.au", "Server Busy"),
+            ("labubu.st", "Domain Parked"),
+            (
+                "charlotterampling.net",
+                "Domain for Sale – charlotterampling.net | Brandable & Ready to Use",
+            ),
         ] {
             assert!(check(domain, title), "{title}");
         }
@@ -607,15 +638,21 @@ mod tests {
         for title in [
             "Welcome to nginx!",
             "Coming Soon",
+            "endgame.info — Coming Soon",
+            "This Web site coming soon",
+            "Nobel — New website coming soon",
             "Under Construction",
             "Account Suspended",
             "Index of /",
             "Apache2 Ubuntu Default Page: It works",
+            "Caddy works!",
         ] {
             assert!(check("example.com", title), "{title}");
         }
         for title in [
             "Gladiator II | Coming Soon to Theaters",
+            "Odeon | Films Now Showing and Coming Soon",
+            "Caddy - The Ultimate Server with Automatic HTTPS",
             "Nginx: Advanced Load Balancer",
             "Index Ventures",
         ] {
