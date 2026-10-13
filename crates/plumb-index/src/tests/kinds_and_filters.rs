@@ -667,7 +667,86 @@ fn a_query_in_another_script_than_the_language_keeps_its_sites() {
     assert!(found("bank").is_empty());
     assert_eq!(english.language_for("bank"), Some("en"));
     assert_eq!(english.language_for("楽天"), None);
-    assert_eq!(english.for_query("楽天").language, None);
+    assert_eq!(searcher.language_for(&english, "楽天"), None);
+}
+
+#[test]
+fn a_query_in_another_language_keeps_its_sites() {
+    let declared = |domain: String, title: String, language: &str| {
+        let mut record = site(&domain, Some(&title), None, &[], &[], ranked(900, 5_000));
+        record.language = Some(language.into());
+        record
+    };
+    let mut records = Vec::new();
+    for town in [
+        "Hamburg", "Bremen", "Köln", "Bonn", "Essen", "Kiel", "Ulm", "Trier", "Jena", "Fulda",
+        "Hagen", "Mainz",
+    ] {
+        let name = town.to_lowercase();
+        records.push(declared(
+            format!("wetter-{name}.example"),
+            format!("Wetter {town}"),
+            "de",
+        ));
+        records.push(declared(
+            format!("weather-{name}.example"),
+            format!("Weather {town}"),
+            "en",
+        ));
+        records.push(declared(
+            format!("hotels-{name}.example"),
+            format!("Hotels {town}"),
+            "en",
+        ));
+    }
+    records.push(declared("dwd.example".into(), "Wetter Berlin".into(), "de"));
+    records.push(declared(
+        "gasthof.example".into(),
+        "Hotels Berlin".into(),
+        "de",
+    ));
+    let (_dir, searcher) = build(&records);
+    let english = SearchOptions {
+        language: Some("en".into()),
+        ..SearchOptions::default()
+    };
+    let found = |query: &str| {
+        let hits = searcher
+            .search_full(query, 10, &RankConfig::default(), &english)
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    // "wetter" is on German sites only, so the search is German.
+    assert_eq!(searcher.language_for(&english, "wetter berlin"), None);
+    assert_eq!(found("wetter berlin")[0], "dwd.example");
+    // "hotels" is on English sites, so the filter stays.
+    assert_eq!(
+        searcher.language_for(&english, "hotels berlin").as_deref(),
+        Some("en")
+    );
+    assert!(!found("hotels berlin").contains(&"gasthof.example".to_string()));
+    // Words too few sites have, and numbers, decide nothing.
+    for query in ["berlin", "weather 2026", "zzz"] {
+        assert_eq!(
+            searcher.language_for(&english, query).as_deref(),
+            Some("en"),
+            "{query}"
+        );
+    }
+    // The same the other way round.
+    let german = SearchOptions {
+        language: Some("de".into()),
+        ..SearchOptions::default()
+    };
+    assert_eq!(searcher.language_for(&german, "weather berlin"), None);
+    assert_eq!(
+        searcher.language_for(&german, "wetter berlin").as_deref(),
+        Some("de")
+    );
 }
 
 #[test]
