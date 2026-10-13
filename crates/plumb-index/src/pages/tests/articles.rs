@@ -282,6 +282,8 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("where does photosynthesis take place", "photosynthesis"),
         ("where does meiosis occur", "meiosis"),
         ("where do babies come from", "babies"),
+        ("where is taylor swift from", "taylor swift"),
+        ("where are the beatles from", "beatles"),
         ("is coffee bad for you", "coffee"),
         ("is intermittent fasting healthy", "intermittent fasting"),
         ("are eggs good for you", "eggs"),
