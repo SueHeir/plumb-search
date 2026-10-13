@@ -1249,6 +1249,10 @@ pub(super) fn add_pages(
                 drop_namesakes_of_words(&mut results.hits, &found);
             }
             lift_named_sites(&mut results.hits, &found);
+            if let Err(err) = searcher.add_named_site_page(query, &results.hits, &mut found) {
+                warn!("searching the pages of a site the query names: {err:#}");
+            }
+            found.retain(|hit| options_allow(options, &hit.page));
             if let Err(err) = searcher.note_demand(&mut results.hits) {
                 warn!("reading what sites' articles are read: {err:#}");
             }

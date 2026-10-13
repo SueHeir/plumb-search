@@ -210,6 +210,62 @@ fn site_queries_list_every_page_on_the_site() {
 }
 
 #[test]
+fn a_site_shows_every_page_under_it() {
+    let under = |page: plumb_index::pages::Page| plumb_index::pages::PlacedPage {
+        hit: PageHit {
+            page,
+            score: 0.5,
+            named: false,
+            popularity: 0.1,
+            whole: false,
+            learned: None,
+        },
+        under: Some("census.gov".into()),
+        at: 0,
+    };
+    let clock = plumb_index::pages::Page::from_set(
+        plumb_index::pages::SUBPAGES_SET,
+        plumb_core::Article {
+            title: "Population Clock".into(),
+            item: Some("https://www.census.gov/popclock/".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let bureau = plumb_index::pages::Page::from_article(
+        "en",
+        plumb_core::Article {
+            title: "United States Census Bureau".into(),
+            ..Default::default()
+        },
+    );
+    let results = SearchResults {
+        pages: vec![under(clock), under(bureau)],
+        hits: vec![scored("census.gov", 0.9)],
+        site_search: None,
+        spelling: None,
+    };
+    let page = render_results(
+        "census population clock",
+        &results,
+        None,
+        &NetOutcome::NotAsked,
+        &no_settings(),
+        None,
+        10,
+        false,
+        &Icons::default(),
+    );
+    let clock = page
+        .find("https://www.census.gov/popclock/")
+        .expect("the clock");
+    let bureau = page
+        .find("United States Census Bureau")
+        .expect("the article");
+    assert!(clock < bureau, "{page}");
+}
+
+#[test]
 fn the_source_line_says_where_results_came_from() {
     let results = SearchResults {
         pages: Vec::new(),

@@ -516,7 +516,7 @@ fn observe(
             pages.add_other_number(words, &found.hits, &mut raw_pages, 10)?;
         }
     }
-    let filtered: Vec<_> = raw_pages
+    let mut filtered: Vec<_> = raw_pages
         .iter()
         .filter(|p| {
             options_allow(&options, &p.page)
@@ -552,6 +552,8 @@ fn observe(
         }
         lift_named_sites(&mut found.hits, &filtered);
         if let Some(pages) = &scoped_pages {
+            pages.add_named_site_page(words, &found.hits, &mut filtered)?;
+            filtered.retain(|p| options_allow(&options, &p.page));
             pages.note_demand(&mut found.hits)?;
         }
         placed = place_pages(words, &found.hits, filtered.clone());

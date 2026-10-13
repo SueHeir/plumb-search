@@ -31,6 +31,7 @@ use tantivy::IndexReader;
 
 mod building;
 mod docs;
+mod named_site;
 mod page;
 mod papers;
 mod placing;
@@ -40,6 +41,7 @@ mod sites;
 
 pub use self::building::{build_page_index, build_page_index_with_budget, GO_ON_EVERY};
 pub use self::docs::{docs_query_topic, docs_symbol_matches};
+pub(crate) use self::page::is_site_page_set;
 pub use self::placing::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, keep_page_rules, lift_named_sites,
     operators_allow, options_allow, page_key, place_operator_pages, place_pages, DEMAND_MARGIN,
