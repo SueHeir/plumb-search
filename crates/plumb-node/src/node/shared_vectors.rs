@@ -55,7 +55,9 @@ pub(super) fn servable(data: &Path, set: &str) -> Option<PathBuf> {
 /// What [`take`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Taken {
-    /// No trusted node that hands on files is connected.
+    /// No node to take them from could answer now: no trusted node that
+    /// hands on files is connected, or a node that may hold their signed
+    /// set was busy.
     NoNode,
     /// The vectors kept; 0 when no trusted node had any of this model.
     Kept(usize),
@@ -74,15 +76,19 @@ pub(super) fn take(
         debug!("site vectors not downloaded now: {}", pause.reason);
         return Ok(Taken::Kept(0));
     }
-    if let Some(kept) = take_set(inner, net, meaning, vectors_path)? {
-        return Ok(Taken::Kept(kept));
-    }
+    let set_busy = match take_set(inner, net, meaning, vectors_path)? {
+        FromSet::Kept(kept) => return Ok(Taken::Kept(kept)),
+        FromSet::Busy => true,
+        FromSet::None => false,
+    };
     let model = meaning.embedder().id();
     let dim = meaning.embedder().dim();
     let part = inner.paths.data.join(PART_FILE);
     let downloaded = download(inner, net, &set_name(&model), &part);
     let result = downloaded.and_then(|got| match got {
         Download::NoNode => Ok(Taken::NoNode),
+        // Better to wait for the busy node than to make them all here.
+        Download::NoFile if set_busy => Ok(Taken::NoNode),
         Download::NoFile => Ok(Taken::Kept(0)),
         Download::From(peer) => {
             let (their_model, their_dim, _) = Vectors::read_header(&part)?;
@@ -99,24 +105,25 @@ pub(super) fn take(
 
 /// Takes the signed set of the vectors this node's model makes, when a
 /// node has one a trusted publisher signed that is newer than any this
-/// node holds, and keeps the vectors this node wants from it; `None` when
-/// it took none. A set taken is removed once read: the vectors kept are in
-/// the node's own file. One the node holds already, as its publisher's
-/// own node does to hand it on, is left as it is.
+/// node holds, and keeps the vectors this node wants from it. A set taken
+/// is removed once read: the vectors kept are in the node's own file. One
+/// the node holds already, as its publisher's own node does to hand it
+/// on, is left as it is.
 fn take_set(
     inner: &Inner,
     net: &NetHandle,
     meaning: &MeaningIndex,
     vectors_path: &Path,
-) -> Result<Option<usize>> {
+) -> Result<FromSet> {
     let set = vectors_set(&meaning.embedder().id());
     let runtime = tokio::runtime::Handle::current();
     match runtime.block_on(super::signed_sets::look(inner, net, &set)) {
         Ok(Looked::Took(_)) => {}
-        Ok(_) => return Ok(None),
+        Ok(Looked::Busy) => return Ok(FromSet::Busy),
+        Ok(_) => return Ok(FromSet::None),
         Err(err) => {
             warn!("search by meaning: taking {set}: {err:#}");
-            return Ok(None);
+            return Ok(FromSet::None);
         }
     }
     let dir = super::signed_sets::set_dir(&inner.paths.data, &set).context("not a set name")?;
@@ -144,7 +151,17 @@ fn take_set(
     };
     let kept = keep(inner, meaning, vectors_path, &set, read);
     let _ = plumb_core::storage::remove_directory(&dir, inner.storage.as_deref());
-    kept.map(Some)
+    kept.map(FromSet::Kept)
+}
+
+/// What [`take_set`] did.
+enum FromSet {
+    /// The vectors kept from a newer set.
+    Kept(usize),
+    /// A node that may hold a newer set was busy.
+    Busy,
+    /// There was no newer set, or it could not be read.
+    None,
 }
 
 /// What hands [`keep`] each vector read: its site, the hash of the text

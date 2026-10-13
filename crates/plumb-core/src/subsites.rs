@@ -30,8 +30,10 @@ use std::sync::OnceLock;
 /// [`UMBRELLA_DOMAINS`] and of how seed data is read: bump it when they
 /// change, so that nodes fold their seed data in again (version 0 is
 /// before there were any lists; 2 refuses websites with user info, such as
-/// `https://mailto:someone@gmail.com`, and adds the names).
-pub const SITES_VERSION: u32 = 2;
+/// `https://mailto:someone@gmail.com`, and adds the names; 3 gives a front
+/// page that more items claim than one site carries to the item that owns
+/// it, such as nba.com to the NBA over its seasons).
+pub const SITES_VERSION: u32 = 3;
 
 /// Names of [`SUBDOMAIN_SITES`] that the seed data may not name: Wikidata
 /// gives Hacker News no official website the seed download keeps. A seed

@@ -127,7 +127,7 @@ pub(crate) async fn api_search(
             };
             let recent = crate::assembly::recent(
                 &query,
-                state.recent(&query, &results),
+                state.recent(&query, &results, &options),
                 &options,
                 params.limit(),
                 |domain| {
@@ -214,7 +214,7 @@ pub(crate) async fn api_recent(
         match run_search(&state, &query, params.limit(), &options).await {
             Ok(results) => crate::assembly::recent(
                 &query,
-                state.recent(&query, &results),
+                state.recent(&query, &results, &options),
                 &options,
                 params.limit(),
                 |domain| {

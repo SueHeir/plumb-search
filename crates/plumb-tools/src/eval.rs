@@ -20,8 +20,8 @@ use plumb_core::registrable_domain;
 use std::path::Path;
 
 use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, place_pages, Page, PageSearcher,
-    PlacedPage,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, place_pages,
+    Page, PageSearcher, PlacedPage,
 };
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
@@ -827,10 +827,12 @@ fn evaluate(
                         searcher.site(domain).ok().flatten()
                     });
                 }
+                drop_far_namesakes(&mut lifted, &found, cfg.meaning_only_relevance);
                 if cfg.drop_namesakes {
                     drop_namesakes_of_words(&mut lifted, &found);
                 }
                 lift_named_sites(&mut lifted, &found);
+                pages.add_named_site_page(&searched, &lifted, &mut found)?;
                 pages.note_demand(&mut lifted)?;
                 let mut placed = place_pages(&searched, &lifted, found);
                 // --features-out writes the hand-made order the learned
@@ -1124,7 +1126,8 @@ fn format_sweep(
 
 /// The address of the profile a node shows above the results for `query`
 /// ("bohemian rhapsody lyrics", "mrbeast youtube"), found as a node finds
-/// it, by searching for the words before the service.
+/// it: from the article the words before the service name, or else from
+/// the songs and albums a search for them finds.
 fn profile_shown(
     args: &EvalArgs,
     query: &str,
@@ -1137,12 +1140,22 @@ fn profile_shown(
         language: args.lang.clone(),
         ..SearchOptions::default()
     };
-    for name in plumb_node::web::answers::profile_lookups(query) {
+    use plumb_node::web::answers::{self, EntityResolution};
+    for name in answers::profile_lookups(query) {
+        let entities = answers::profile_candidates(query, &name, pages.entities(&name, 20)?);
+        let resolution = answers::resolve_entity(&name, &entities, None);
+        if let EntityResolution::Resolved(page) = &resolution {
+            if let Some(profile) = answers::profile_answer_from_page(query, page) {
+                return Ok(Some(profile.url));
+            }
+        }
+        if !answers::searches_songs(query, &resolution) {
+            continue;
+        }
         let mut sites = searcher.search_meaning(&name, 5, cfg, &options, None)?;
         pages.note_demand(&mut sites.hits)?;
-        let found = pages.search(&name, 10)?;
-        let placed = place_pages(&name, &sites.hits, found);
-        if let Some(profile) = plumb_node::web::answers::profile_answer(query, &placed) {
+        let found = place_pages(&name, &sites.hits, pages.search(&name, 10)?);
+        if let Some(profile) = answers::songs_profile(query, &resolution, found) {
             return Ok(Some(profile.url));
         }
     }

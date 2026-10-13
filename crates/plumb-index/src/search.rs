@@ -12,7 +12,8 @@ use plumb_core::{
     Operators,
 };
 use tantivy::collector::TopDocs;
-use tantivy::schema::Value;
+use tantivy::query::TermQuery;
+use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{DocAddress, Index, ReloadPolicy, TantivyDocument, Term};
 
 use crate::hits::{docs_site_first, hit_texts, suggested_site_second};
@@ -102,6 +103,23 @@ impl Searcher {
         self.reader.searcher().doc_freq(&term).is_ok_and(|n| n > 0)
     }
 
+    /// The language `domain`'s homepage says it is in
+    /// ([`plumb_core::SiteRecord::language`]), when the index holds the site
+    /// and knows it.
+    pub fn language(&self, domain: &str) -> Option<String> {
+        let searcher = self.reader.searcher();
+        let term = Term::from_field_text(self.fields.domain, domain);
+        let found = searcher
+            .search(
+                &TermQuery::new(term, IndexRecordOption::Basic),
+                &TopDocs::with_limit(1).order_by_score(),
+            )
+            .ok()?;
+        let document: TantivyDocument = searcher.doc(found.first()?.1).ok()?;
+        let language = document.get_first(self.fields.language)?.as_str()?;
+        (!language.is_empty()).then(|| language.to_string())
+    }
+
     /// The site `domain`, a canonical domain, as a result no query found:
     /// no score, no text match, not named.
     pub fn site(&self, domain: &str) -> Result<Option<Hit>> {
@@ -167,7 +185,8 @@ impl Searcher {
     ///
     /// The results are always for the query as typed. Typos get a suggested
     /// correction ([`SearchResults::spelling`], see [`spell`]) unless
-    /// [`SearchOptions::exact`] is set or the query is a hostname. A query
+    /// [`SearchOptions::exact`] is set; a hostname only the address of a
+    /// better-known site it is a slip of ([`Searcher::suggest_domain`]). A query
     /// that names a site in full gets one only when its first words are a
     /// typo away from the name of a well-known site
     /// ([`WELL_KNOWN_LINK_SCORE`]) with [`TYPO_POPULARITY_MARGIN`] more
@@ -265,8 +284,11 @@ impl Searcher {
         if !named.typed {
             self.add_news_sites(query_text, &mut results, limit, cfg, options)?;
         }
-        if options.exact || limit == 0 || named.typed {
+        if options.exact || limit == 0 {
             return Ok(results);
+        }
+        if named.typed {
+            return self.suggest_domain(query_text, results, limit, cfg, options, meaning);
         }
         // "paypal login" is also ranked as "paypal": a well-known site that
         // name alone names keeps the better of its two scores, so
@@ -437,6 +459,67 @@ impl Searcher {
             }),
             ..results
         })
+    }
+
+    /// `results` for `query_text`, a web address, with the address of the
+    /// site it is a slip of suggested ([`spell::fix_domain`]) when that
+    /// site has [`TYPO_POPULARITY_MARGIN`] more link score than the one
+    /// typed, and listed: first when no site has the address typed
+    /// ("amzon.com", "wwwmove.mil"), else second, under the look-alike
+    /// that has it ("gogle.com"). A site typed with popularity of its own
+    /// ([`KEEPS_ITS_NAME_LINK_SCORE`]) keeps its address.
+    fn suggest_domain(
+        &self,
+        query_text: &str,
+        mut results: SearchResults,
+        limit: usize,
+        cfg: &RankConfig,
+        options: &SearchOptions,
+        meaning: Option<&dyn Meaning>,
+    ) -> Result<SearchResults> {
+        let Some(typed) = crate::names::typed_domain(query_text) else {
+            return Ok(results);
+        };
+        let searcher = self.reader.searcher();
+        let link_score = |docs: &HashSet<DocAddress>| best_link_score(&searcher, docs);
+        let typed_docs = matching_docs(
+            &searcher,
+            vec![Term::from_field_text(self.fields.domain, &typed)],
+        )?;
+        let typed_link_score = link_score(&typed_docs);
+        if typed_link_score >= KEEPS_ITS_NAME_LINK_SCORE {
+            return Ok(results);
+        }
+        let model = self.spelling.as_ref().filter(|_| cfg.spelling_channel);
+        let Some((domain, score)) =
+            spell::fix_domain(&searcher, &self.fields, model, &typed, &link_score)?
+        else {
+            return Ok(results);
+        };
+        if score < typed_link_score + TYPO_POPULARITY_MARGIN {
+            return Ok(results);
+        }
+        let (found, _) = self.rank(&domain, 1, cfg, options, meaning)?;
+        let Some(mut site) = found.hits.into_iter().find(|hit| hit.domain == domain) else {
+            return Ok(results);
+        };
+        results.hits.retain(|hit| hit.domain != domain);
+        if typed_docs.is_empty() {
+            if let Some(first) = results.hits.first() {
+                site.score = site.score.max(first.score);
+            }
+            results.hits.insert(0, site);
+        } else {
+            results.hits.push(site);
+            suggested_site_second(&mut results.hits, &domain);
+        }
+        results.hits.truncate(limit);
+        results.spelling = Some(Spelling {
+            query: domain.clone(),
+            site: Some(domain),
+            applied: false,
+        });
+        Ok(results)
     }
 
     /// The sites [`Searcher::search_meaning`] ranks for `query_text` as

@@ -27,6 +27,10 @@ A search that finds no place, and whose WHAT is neither a kind of place nor the 
 
 "Near me" is the town you give on the **About you** page or the welcome page, kept on the node for your browser only (on a public server, in your browser). Plumb never works out where you are from your address or anything else. Without a town, a "near me" search says how to give one.
 
+## The time in a town
+
+"time in boulder" or "what time is it in porto" is answered for any city or town in the places, not only the few hundred places the answer knows by name: by the clock its country keeps, or in the US, Canada and Australia its state's. A town in a state that keeps two (Texas, Ontario, New South Wales) gets none unless the answer knows it by name, and one in another country that keeps several (Russia, Brazil, Portugal) gets one only when it is much nearer one zone's main city than any city keeping another time: a town near a line between two clocks gets no answer rather than a wrong one.
+
 ## What is kept
 
 For each place: its name, its kind (an OpenStreetMap tag such as `amenity=cafe`), up to four more kinds such as `cuisine=pizza`, its coordinates, its street address, town, state or region, country, website and OpenStreetMap id, and up to eight other names: OpenStreetMap's English, short and local names (and a town's other and official names, an airport's IATA code such as "JFK"), then the plain title and most read redirects of the English Wikipedia article on its Wikidata item ("Big Ben" for the Elizabeth Tower). That is about 40 bytes a place in the file and about 100 in the index.
