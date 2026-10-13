@@ -1049,6 +1049,7 @@ pub(super) fn known_song(
     query: &str,
     options: &SearchOptions,
 ) -> Option<plumb_index::pages::Page> {
+    let options = &options.for_query(query);
     let searcher = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone())?;
     match searcher.known_song(query) {
         Ok(song) => song.filter(|page| options_allow(options, page)),
@@ -1083,6 +1084,7 @@ pub(super) fn entities(
     };
     let ops = Operators::parse(query);
     let words = if ops.any() { ops.words.as_str() } else { query };
+    let options = &options.for_query(query);
     let searcher = searcher.in_language(options.language.as_deref());
     Ok(searcher
         .entities(words, KIND_PAGES)?
@@ -1127,6 +1129,7 @@ fn typed_pages(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let options = &options.for_query(query);
     let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
     if paper.constrained {
         return Ok(searcher
@@ -1160,6 +1163,7 @@ pub(super) fn papers(
     let Some(searcher) = searcher else {
         return Ok(Vec::new());
     };
+    let options = &options.for_query(&query.text());
     Ok(searcher
         .in_language(options.language.as_deref())
         .search_papers(query, KIND_PAGES)?
@@ -1189,6 +1193,7 @@ pub(super) fn add_pages(
     let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return;
     };
+    let options = &options.for_query(query);
     let searcher = searcher.in_language(options.language.as_deref());
     let ops = Operators::parse(query);
     if ops.any() {

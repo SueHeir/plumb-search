@@ -22,6 +22,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 mod boilerplate;
+mod charset;
 mod crawl;
 mod dns;
 mod extract;
