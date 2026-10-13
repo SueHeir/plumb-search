@@ -6,7 +6,7 @@ use axum::extract::{Query, State};
 use axum::http::{header, Extensions, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use plumb_core::{SafeSearch, SiteRecord};
+use plumb_core::SiteRecord;
 use plumb_index::pages::{place_operator_pages, place_pages};
 use plumb_index::{Hit, SearchResults};
 use serde::Serialize;
@@ -87,17 +87,7 @@ pub(crate) async fn api_search(
                 },
             );
             if let Some(found) = &places {
-                let local = place_sites(&state, &found.found)
-                    .await
-                    .into_iter()
-                    .filter(|hit| {
-                        options.safe == SafeSearch::Off
-                            || !state
-                                .node
-                                .as_ref()
-                                .is_some_and(|node| node.blocks_adult(&hit.domain))
-                    })
-                    .collect();
+                let local = place_sites(&state, &found.found, &options).await;
                 places::local_first(&found.found, &mut results.hits, local, params.limit());
             }
             let extras = extras(&state, &query, &options, None).await;

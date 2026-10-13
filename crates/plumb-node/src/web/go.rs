@@ -142,7 +142,7 @@ async fn place_site(
         run_places(state, query, town, options.country.as_deref()).await,
         hits,
     )?;
-    place_sites(state, &found)
+    place_sites(state, &found, options)
         .await
         .into_iter()
         .find(|hit| hit.domain == domain)
