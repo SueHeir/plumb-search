@@ -349,12 +349,17 @@ async fn refresh(
     .context("the list task failed")?
 }
 
-/// The sites of the adult list set held in `data`, with its generation
-/// (Unix seconds), when a publisher the node trusts signed it.
-fn held_set(data: &Path, publishers: &[plumb_format::PublicKey]) -> Option<(Vec<String>, u64)> {
+/// The adult list set held in `data`, with its generation (Unix seconds),
+/// when a publisher the node trusts signed it.
+fn held_set(data: &Path, publishers: &[plumb_format::PublicKey]) -> Option<(PathBuf, u64)> {
     let (dir, manifest) = super::signed_sets::held_trusted(data, ADULT_SITES, publishers)?;
     let generation = plumb_format::value::unix_seconds(&manifest.generation)?;
-    let (_, items) = crate::sets::read_items(&dir).ok()?;
+    Some((dir, generation.max(0) as u64))
+}
+
+/// The sites the adult list set in `dir` names.
+fn set_sites(dir: &Path) -> Option<Vec<String>> {
+    let (_, items) = crate::sets::read_items(dir).ok()?;
     let domains = items
         .iter()
         .filter(|item| !item.is_deleted() && item.labels.iter().any(|label| label == "adult"))
@@ -363,7 +368,7 @@ fn held_set(data: &Path, publishers: &[plumb_format::PublicKey]) -> Option<(Vec<
             _ => None,
         })
         .collect();
-    Some((domains, generation.max(0) as u64))
+    Some(domains)
 }
 
 impl Inner {
@@ -371,7 +376,7 @@ impl Inner {
     /// the list's file: saved as the file, dated by its generation.
     pub(super) fn adult_from_set(&self) {
         let data = &self.paths.data;
-        let Some((domains, generation)) = held_set(data, &self.config.set_publishers) else {
+        let Some((dir, generation)) = held_set(data, &self.config.set_publishers) else {
             return;
         };
         let file_time = std::fs::metadata(list_path(data))
@@ -379,9 +384,13 @@ impl Inner {
             .ok()
             .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map_or(0, |since| since.as_secs());
+        // Before reading the set's items, which are the whole list.
         if generation <= file_time {
             return;
         }
+        let Some(domains) = set_sites(&dir) else {
+            return;
+        };
         let text = domains.join("\n") + "\n";
         match save_shared_with_budget(
             &list_path(data),
@@ -456,7 +465,8 @@ mod tests {
         .unwrap();
         let key = SigningKey::from_bytes(&[7; 32]);
         plumb_tools::set::sign_set(&out, &key, None, None).unwrap();
-        let (mut domains, generation) = held_set(dir.path(), &[PublicKey::of(&key)]).unwrap();
+        let (held, generation) = held_set(dir.path(), &[PublicKey::of(&key)]).unwrap();
+        let mut domains = set_sites(&held).unwrap();
         domains.sort();
         assert_eq!(domains, ["adult.example", "other.example"]);
         let now = SystemTime::now()
