@@ -246,7 +246,7 @@ async fn collect(
     };
     let mut recent = crate::assembly::recent(
         query,
-        state.recent(query, &results),
+        state.recent(query, &results, options),
         options,
         limit,
         |domain| {
