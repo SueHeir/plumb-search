@@ -322,6 +322,10 @@ fn search_queries_for_plugins_are_cut_like_searches() {
         Some("rust lang")
     );
     assert_eq!(Mcp::search_query(&message("   ")), None);
+    assert_eq!(
+        Mcp::search_query(&message("ZÃ¼rich  hotels")).as_deref(),
+        Some("Zürich hotels")
+    );
     let long = Mcp::search_query(&message(&"a".repeat(1000))).unwrap();
     assert_eq!(long.chars().count(), MAX_QUERY_CHARS);
 }
