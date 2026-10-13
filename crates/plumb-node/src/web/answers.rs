@@ -556,18 +556,6 @@ pub(crate) enum EntityResolution<'a> {
     Unresolved,
 }
 
-/// What a question about a work's maker asks: the subject is the work.
-/// Only works have these, so a page without one is no answer to it, an
-/// exception to [`EntityResolution`]'s rule ([`works_made`]).
-const MAKERS: &[plumb_core::facts::FactKind] = {
-    use plumb_core::facts::FactKind::*;
-    &[Author, Director, Composer, Creator]
-};
-
-/// How many times as read as every other work the subject names the work
-/// a maker question means must be ("Titanic (1997 film)", not the 1953 one).
-const MOST_READ_WORK: u64 = 10;
-
 pub(crate) fn resolve_entity<'a>(
     subject: &str,
     candidates: &'a [plumb_index::pages::PageHit],
@@ -705,6 +693,18 @@ pub(crate) fn resolve_entity<'a>(
         _ => EntityResolution::Ambiguous(candidates.iter().map(|hit| &hit.page).collect()),
     }
 }
+
+/// What a question about a work's maker asks: the subject is the work.
+/// Only works have these, so a page without one is no answer to it, an
+/// exception to [`EntityResolution`]'s rule ([`works_made`]).
+const MAKERS: &[plumb_core::facts::FactKind] = {
+    use plumb_core::facts::FactKind::*;
+    &[Author, Director, Composer, Creator]
+};
+
+/// How many times as read as every other work the subject names the work
+/// a maker question means must be ("Titanic (1997 film)", not the 1953 one).
+const MOST_READ_WORK: u64 = 10;
 
 /// The works a question about a work's maker can be about, when it is one
 /// and `candidates` hold any: those `subject` (lowercased) names, by their
