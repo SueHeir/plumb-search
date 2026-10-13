@@ -503,6 +503,15 @@ const GOVERNMENT: &[(&[&str], &[OfficialPage])] = &[
             "REAL ID | USAGov",
         )],
     ),
+    (
+        &["social security card", "social security cards"],
+        &[(
+            "US",
+            "ssa.gov",
+            "https://www.ssa.gov/number-card",
+            "Social Security number and card | SSA",
+        )],
+    ),
 ];
 
 /// Words around a service's name that ask how to get or use it.
@@ -797,6 +806,17 @@ mod tests {
             page("real id requirements", None).as_deref(),
             Some("https://www.usa.gov/real-id")
         );
+        for query in [
+            "how to get a social security card",
+            "replace social security card",
+            "lost social security card",
+        ] {
+            assert_eq!(
+                page(query, None).as_deref(),
+                Some("https://www.ssa.gov/number-card"),
+                "{query}"
+            );
+        }
         // No page for that country, or words that ask for something else.
         assert_eq!(page("how to renew passport", Some("FR")), None);
         for query in [
@@ -808,6 +828,7 @@ mod tests {
             "passport office near me",
             "obama birth certificate",
             "birth certificate translation",
+            "social security card template",
         ] {
             assert_eq!(page(query, None), None, "{query}");
         }
