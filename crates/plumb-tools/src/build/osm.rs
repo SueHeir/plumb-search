@@ -141,6 +141,11 @@ const OUTER_WAYS: usize = 32;
 const PLACES_PER_ITEM: u32 = 3;
 /// Every US state and Canadian province lies west of this longitude.
 const AMERICAS_EAST_LON: f64 = -50.0;
+/// The kind of a state or province read for its ISO 3166-2 code.
+const STATE_KIND: &str = "boundary=administrative";
+/// Farther than the middle of any state is from its edge (Alaska's is
+/// about 2,000 km from Attu).
+const STATE_REACH_KM: f64 = 2_500.0;
 
 /// What step 1 finds: a place, its Wikidata item, and where it is or what
 /// leads there.
@@ -178,6 +183,19 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
         || get("end_date").is_some()
     {
         return None;
+    }
+    // A state or province, which says what country its code is in: WA is
+    // Washington's and Western Australia's. It is not kept as a place.
+    if !node && get("boundary") == Some("administrative") {
+        let (country, region) = get("ISO3166-2")?.split_once('-')?;
+        return Some(Place {
+            name: cut(name, MAX_PLACE_NAME_CHARS),
+            kind: STATE_KIND.to_string(),
+            region: Some(region.to_string()),
+            country: Some(normalize_country(country)?),
+            osm,
+            ..Place::default()
+        });
     }
     let kind = match get("place") {
         Some(value) if TOWN_VALUES.contains(&value) => {
@@ -514,11 +532,15 @@ pub fn read_places(paths: &[PathBuf], articles: Option<&Path>) -> Result<Vec<Pla
         found.sort_by(|a, b| a.0.osm.cmp(&b.0.osm));
         found.dedup_by(|a, b| a.0.osm == b.0.osm);
     }
+    let (states, mut found): (Vec<_>, Vec<_>) = found
+        .into_iter()
+        .partition(|(place, _)| place.kind == STATE_KIND);
     if let Some(articles) = articles {
         add_article_names(&mut found, articles)?;
     }
     let mut located: Vec<Place> = found.into_iter().map(|(place, _)| place).collect();
-    fill_in_towns(&mut located);
+    let states: Vec<Place> = states.into_iter().map(|(state, _)| state).collect();
+    fill_in_towns(&mut located, &states);
     located.sort_by(|a, b| {
         b.rank
             .cmp(&a.rank)
@@ -843,12 +865,60 @@ fn winner(votes: &HashMap<String, u32>) -> Option<String> {
         .map(|(value, _)| value.clone())
 }
 
+/// Gives towns that still have no country their neighbours', in their
+/// region when one there has it. They are filled in rounds, each from
+/// towns that knew theirs before it, towns that know their region first,
+/// so a town takes the side of the nearest town that knows before a guess
+/// can reach it from across a border; where none knows, the guess still
+/// goes on from town to town (northern Ontario).
+fn lend_countries(places: &mut [Place], grid: &TownGrid, settlements: &[usize]) {
+    let reach = 4.0 * TOWN_REACH_KM;
+    let mut unknown: Vec<usize> = settlements
+        .iter()
+        .copied()
+        .filter(|&i| places[i].country.is_none())
+        .collect();
+    loop {
+        let before = unknown.len();
+        for with_region in [true, false] {
+            let lent: Vec<(usize, usize)> = unknown
+                .iter()
+                .filter(|&&i| places[i].region.is_some() == with_region)
+                .filter_map(|&i| {
+                    let (lat, lon, region) = (places[i].lat, places[i].lon, &places[i].region);
+                    let near =
+                        |ok: &dyn Fn(&Place) -> bool| grid.nearest(places, lat, lon, reach, ok);
+                    near(&|t| {
+                        t.country.is_some()
+                            && t.region.is_some()
+                            && (region.is_none() || t.region == *region)
+                    })
+                    .or_else(|| near(&|t| t.country.is_some()))
+                    .map(|near| (i, near))
+                })
+                .collect();
+            for (i, near) in lent {
+                places[i].country = places[near].country.clone();
+                if places[i].region.is_none() {
+                    places[i].region = places[near].region.clone();
+                }
+            }
+        }
+        unknown.retain(|&i| places[i].country.is_none());
+        if unknown.len() == before {
+            break;
+        }
+    }
+}
+
 /// Gives towns the region their places' addresses mostly give, and the
 /// country those in that region mostly give, and places without a town,
 /// region or country in their address those of the nearest town that
 /// fits them. Across a border, the places on the other side say another
-/// region: both Niagara Falls are nearest to shops of both.
-pub fn fill_in_towns(places: &mut [Place]) {
+/// region: both Niagara Falls are nearest to shops of both. A town whose
+/// places give no country takes that of the nearest of `states` with its
+/// region's code, since Australia's addresses give none.
+pub fn fill_in_towns(places: &mut [Place], states: &[Place]) {
     let settlements: Vec<usize> = (0..places.len())
         .filter(|&i| is_settlement(&places[i].kind))
         .collect();
@@ -899,49 +969,30 @@ pub fn fill_in_towns(places: &mut [Place]) {
             places[i].country = winner(&countries);
         }
     }
-    // Towns none of whose places gave a country: their neighbours', in
-    // their region when one there has it. They are filled in rounds, each
-    // from towns that knew theirs before it, towns that know their region
-    // first, so a town takes the side of the nearest town that knows before
-    // a guess can reach it from across a border; where none knows, the
-    // guess still goes on from town to town (northern Ontario).
-    let reach = 4.0 * TOWN_REACH_KM;
-    let mut unknown: Vec<usize> = settlements
-        .iter()
-        .copied()
-        .filter(|&i| places[i].country.is_none())
-        .collect();
-    loop {
-        let before = unknown.len();
-        for with_region in [true, false] {
-            let lent: Vec<(usize, usize)> = unknown
-                .iter()
-                .filter(|&&i| places[i].region.is_some() == with_region)
-                .filter_map(|&i| {
-                    let (lat, lon, region) = (places[i].lat, places[i].lon, &places[i].region);
-                    let near =
-                        |ok: &dyn Fn(&Place) -> bool| grid.nearest(places, lat, lon, reach, ok);
-                    near(&|t| {
-                        t.country.is_some()
-                            && t.region.is_some()
-                            && (region.is_none() || t.region == *region)
-                    })
-                    .or_else(|| near(&|t| t.country.is_some()))
-                    .map(|near| (i, near))
-                })
-                .collect();
-            for (i, near) in lent {
-                places[i].country = places[near].country.clone();
-                if places[i].region.is_none() {
-                    places[i].region = places[near].region.clone();
-                }
-            }
-        }
-        unknown.retain(|&i| places[i].country.is_none());
-        if unknown.len() == before {
-            break;
+    // Towns that know their region but none of whose places gave a
+    // country: the country of the nearest state with that code.
+    let mut coded: HashMap<String, Vec<&Place>> = HashMap::new();
+    for state in states {
+        if let Some(code) = &state.region {
+            coded.entry(code.to_uppercase()).or_default().push(state);
         }
     }
+    for &i in &settlements {
+        let town = &places[i];
+        let Some(region) = town.region.as_ref().filter(|_| town.country.is_none()) else {
+            continue;
+        };
+        let country = coded
+            .get(&region.to_uppercase())
+            .into_iter()
+            .flatten()
+            .map(|state| (distance_km(town.lat, town.lon, state.lat, state.lon), state))
+            .filter(|(km, _)| *km < STATE_REACH_KM)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .and_then(|(_, state)| state.country.clone());
+        places[i].country = country;
+    }
+    lend_countries(places, &grid, &settlements);
     // The country most towns of each region are in.
     let mut countries: HashMap<&str, HashMap<String, u32>> = HashMap::new();
     for &i in &settlements {
@@ -1106,7 +1157,7 @@ mod tests {
             at("Capitol Hill", "place=neighbourhood", 39.73, -104.98),
             at("Far away", "amenity=cafe", 0.0, 0.0),
         ];
-        fill_in_towns(&mut places);
+        fill_in_towns(&mut places, &[]);
         assert_eq!(places[0].country.as_deref(), Some("US"));
         assert_eq!(places[0].region.as_deref(), Some("CO"));
         // Boulder had no addresses: it takes Denver's country.
@@ -1320,7 +1371,7 @@ mod tests {
         places.push(shop(43.088, -79.075, Some("CA"), "ON"));
         places.push(shop(43.089, -79.074, Some("CA"), "ON"));
         places.push(shop(43.100, -79.058, None, "NY"));
-        fill_in_towns(&mut places);
+        fill_in_towns(&mut places, &[]);
         let said = |i: usize| (places[i].region.clone(), places[i].country.clone());
         assert_eq!(said(0), (Some("NY".into()), Some("US".into())));
         assert_eq!(said(1), (Some("ON".into()), Some("CA".into())));
@@ -1355,11 +1406,71 @@ mod tests {
             town("Rocky Mountain House", 52.37, -114.92, Some("AB"), None),
             town("Red Deer", 52.27, -113.81, Some("AB"), Some("CA")),
         ];
-        fill_in_towns(&mut places);
+        fill_in_towns(&mut places, &[]);
         let said = |i: usize| (places[i].region.as_deref(), places[i].country.as_deref());
         assert_eq!(said(0), (Some("ON"), Some("CA")));
         assert_eq!(said(2), (Some("ON"), Some("CA")));
         assert_eq!(said(4), (Some("AB"), Some("CA")));
+    }
+
+    #[test]
+    fn a_town_takes_its_country_from_its_states_code() {
+        let state = |name: &str, code: &str, lat: f64, lon: f64| {
+            let tags = [
+                ("name", name),
+                ("boundary", "administrative"),
+                ("admin_level", "4"),
+                ("ISO3166-2", code),
+            ];
+            Place {
+                lat,
+                lon,
+                ..place_of(&tags, "r1".into(), false).unwrap()
+            }
+        };
+        let states = [
+            state("Western Australia", "AU-WA", -24.4, 121.0),
+            state("Washington", "US-WA", 47.3, -120.8),
+        ];
+        assert_eq!(states[0].kind, STATE_KIND);
+        // A boundary without a code is no place, and a node is no state.
+        let unnamed = [("name", "Shire"), ("boundary", "administrative")];
+        assert!(place_of(&unnamed, "r2".into(), false).is_none());
+        let node = [
+            ("name", "Western Australia"),
+            ("place", "state"),
+            ("boundary", "administrative"),
+            ("ISO3166-2", "AU-WA"),
+        ];
+        assert!(place_of(&node, "n1".into(), true).is_none());
+        let at = |name: &str, kind: &str, lat: f64, lon: f64| Place {
+            name: name.into(),
+            kind: kind.into(),
+            region: kind.starts_with("shop").then(|| "WA".into()),
+            lat,
+            lon,
+            ..Place::default()
+        };
+        // Perth's shops give their state and, as all over Australia, no
+        // country; Spokane's give no country either.
+        let mut places = vec![
+            at("Perth", "place=city", -31.95, 115.86),
+            at("Boffins", "shop=books", -31.951, 115.857),
+            at("Spokane", "place=city", 47.66, -117.43),
+            at("Auntie's", "shop=books", 47.658, -117.425),
+        ];
+        fill_in_towns(&mut places, &states);
+        let said = |i: usize| (places[i].region.as_deref(), places[i].country.as_deref());
+        assert_eq!(said(0), (Some("WA"), Some("AU")));
+        assert_eq!(said(1), (Some("WA"), Some("AU")));
+        assert_eq!(said(2), (Some("WA"), Some("US")));
+        // Without the states, no country is made up.
+        let mut places = vec![
+            at("Perth", "place=city", -31.95, 115.86),
+            at("Boffins", "shop=books", -31.951, 115.857),
+        ];
+        fill_in_towns(&mut places, &[]);
+        assert_eq!(places[0].country, None);
     }
 
     #[test]
