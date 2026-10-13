@@ -929,3 +929,21 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
     assert_eq!(named("president lincoln"), ["Abraham Lincoln"]);
     assert_eq!(named("general motors"), ["General Motors"]);
 }
+
+#[test]
+fn a_sharp_after_a_letter_is_searched_as_written_out() {
+    let (_dir, s) = searcher(&[
+        page("C (programming language)", 600_000, &[]),
+        page("C Sharp (programming language)", 400_000, &[]),
+        page("C minor", 6_000, &[]),
+        page("C-sharp minor", 3_000, &[]),
+    ]);
+    let first = |query: &str| s.search(query, 5).unwrap().remove(0);
+    let hit = first("c#");
+    assert_eq!(hit.page.title, "C Sharp (programming language)");
+    assert!(hit.named);
+    assert_eq!(first("C# minor").page.title, "C-sharp minor");
+    // Without the sign, still C.
+    assert_eq!(first("c").page.title, "C (programming language)");
+    assert_eq!(first("c minor").page.title, "C minor");
+}
