@@ -22,7 +22,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use plumb_core::place::{
     area_size, distance_km, is_kind_word, normalize_region, parse_place, town_size, write_place,
-    Place, US_STATES,
+    Place, CANADIAN_PROVINCES, US_STATES,
 };
 use plumb_core::{country_of_any_name, joined, normalize_text};
 use serde::{Deserialize, Serialize};
@@ -245,11 +245,17 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
     // other.
     // A country after the kind still qualifies the city: "Rome museums
     // Italy", rather than treating "Italy" as a town and "Rome" as part
-    // of the business name. Only country names, not ambiguous state codes.
+    // of the business name. So does a state's or province's name,
+    // "springfield city hall illinois", which alone names no town. Not
+    // their codes, which are words too ("in", "or").
     for count in (1..=3.min(words.len().saturating_sub(2))).rev() {
         let at = words.len() - count;
         let country = words[at..].join(" ");
-        if country_of_any_name(&country).is_some() {
+        let region = US_STATES
+            .iter()
+            .chain(CANADIAN_PROVINCES)
+            .any(|(_, name)| normalize_text(name) == country);
+        if region || country_of_any_name(&country).is_some() {
             let qualified: Vec<PlaceQuery> = place_query_readings(&words[..at].join(" "))
                 .into_iter()
                 .filter_map(|mut asked| match &mut asked.near {
@@ -1962,6 +1968,56 @@ mod tests {
         }
         let country = searcher.resolve("iceland", None, None).unwrap();
         assert_eq!(country.status, LocationStatus::MissingLocation);
+    }
+
+    #[test]
+    fn a_state_at_the_end_qualifies_a_town() {
+        let mut fixtures = places();
+        fixtures.extend([
+            city("Springfield", 170_000, "MO", "US", 37.21, -93.29),
+            city("Springfield", 155_000, "MA", "US", 42.10, -72.59),
+            city("Springfield", 114_000, "IL", "US", 39.80, -89.65),
+            at("Springfield City Hall", "amenity=townhall", 42.101, -72.591),
+            at("Springfield City Hall", "amenity=townhall", 39.801, -89.651),
+            city("Columbus", 900_000, "OH", "US", 39.96, -83.00),
+            city("Columbus", 200_000, "GA", "US", 32.46, -84.99),
+            at(
+                "Columbus Police Department",
+                "amenity=police",
+                32.461,
+                -84.991,
+            ),
+            at(
+                "Columbus Police Department",
+                "amenity=police",
+                39.961,
+                -83.001,
+            ),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        // Not a town in Illinois, which the state alone would ask for.
+        let hall = searcher
+            .search("springfield city hall illinois", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hall.center.unwrap().region.as_deref(), Some("IL"));
+        assert_eq!(hall.hits[0].place.lat, 39.801);
+        let police = searcher
+            .search("columbus police department ohio", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(police.center.unwrap().region.as_deref(), Some("OH"));
+        assert_eq!(police.hits[0].place.lat, 39.961);
+        let pizza = searcher
+            .search("denver pizza colorado", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pizza.hits[0].place.name, "Blue Pan");
+        // A state alone still names no town.
+        let state = searcher
+            .search("city hall illinois", None, Some("US"), 5)
+            .unwrap();
+        assert!(state.is_none_or(|found| found.center.is_none()));
     }
 
     #[test]
