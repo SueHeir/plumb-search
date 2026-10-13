@@ -351,9 +351,14 @@ pub trait StatusSource: Send + Sync {
     }
 
     /// The "Recent" block for `query`, whose best result is `top` (its
-    /// domain, and whether the query names it); see
-    /// [`crate::news::NewsStore::recent`].
-    fn recent(&self, _query: &str, _top: Option<(&str, bool)>) -> Option<crate::news::Recent> {
+    /// domain, and whether the query names it), searched in `language`;
+    /// see [`crate::news::NewsStore::recent`].
+    fn recent(
+        &self,
+        _query: &str,
+        _top: Option<(&str, bool)>,
+        _language: Option<&str>,
+    ) -> Option<crate::news::Recent> {
         None
     }
 
