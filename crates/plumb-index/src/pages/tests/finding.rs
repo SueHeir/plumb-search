@@ -827,3 +827,79 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
     assert_eq!(named("president lincoln"), ["Abraham Lincoln"]);
     assert_eq!(named("general motors"), ["General Motors"]);
 }
+
+#[test]
+fn a_name_with_capitals_inside_that_names_no_page_lists_questions_about_it() {
+    let question = |title: &str, tags: &str, views| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some(tags.into()),
+            item: Some(title.len().to_string()),
+            views,
+            ..Article::default()
+        })
+    };
+    let pages = vec![
+        question(
+            "Kubernetes pod stuck in CrashLoopBackOff",
+            "kubernetes",
+            90_000,
+        ),
+        question(
+            "What does CrashLoopBackOff mean for a pod?",
+            "kubernetes, pod",
+            40_000,
+        ),
+        question(
+            "Pod restarts with exit code 137",
+            "kubernetes, crashloopbackoff",
+            200_000,
+        ),
+        question(
+            "UnicodeDecodeError: 'utf-8' codec can't decode byte",
+            "python, unicode",
+            300_000,
+        ),
+        question(
+            "Connect ECONNREFUSED 127.0.0.1:3000 in Node",
+            "node.js",
+            80_000,
+        ),
+        question("How do I embed a YouTube video?", "html, youtube", 500_000),
+        page("YouTube", 9_000_000, &[]),
+        page("Kubernetes", 2_000_000, &[]),
+    ];
+    let (_dir, searcher) = searcher(&pages);
+    let sites = [site("crashlytics.com", false), site("other.com", false)];
+    for (query, title) in [
+        (
+            "CrashLoopBackOff",
+            "Kubernetes pod stuck in CrashLoopBackOff",
+        ),
+        (
+            "UnicodeDecodeError",
+            "UnicodeDecodeError: 'utf-8' codec can't decode byte",
+        ),
+        (
+            "ECONNREFUSED",
+            "Connect ECONNREFUSED 127.0.0.1:3000 in Node",
+        ),
+    ] {
+        let placed = place_pages(query, &sites, searcher.search(query, 10).unwrap());
+        let listed: Vec<&str> = placed.iter().map(|p| p.hit.page.title.as_str()).collect();
+        assert_eq!(listed.first(), Some(&title), "{query}: {listed:?}");
+        // A question with it only among its tags is not about it.
+        assert!(
+            !listed.contains(&"Pod restarts with exit code 137"),
+            "{query}"
+        );
+    }
+    // A name an article has, and a word in lower case, are as before.
+    for query in ["YouTube", "crashloopbackoff"] {
+        let placed = place_pages(query, &sites, searcher.search(query, 10).unwrap());
+        assert!(
+            placed.iter().all(|p| !p.hit.page.is_question()),
+            "{query}: {placed:?}"
+        );
+    }
+}
