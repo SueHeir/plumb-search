@@ -1,6 +1,7 @@
 //! What a results page shows besides the results: an instant answer above
-//! them ([`plumb_answer`]: sums, conversions, the time somewhere) and an
-//! info box beside them, about the one thing the query names.
+//! them ([`plumb_answer`]: sums, conversions, the time somewhere, and the
+//! time in a town found in the node's places) and an info box beside
+//! them, about the one thing the query names.
 //!
 //! Both are built from what the node holds. The only thing fetched for
 //! them is the European Central Bank's daily currency rates, once a
@@ -22,9 +23,11 @@
 //! the query names ([`definition_answer`]).
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use plumb_answer::{Answer, Rates, ECB_RATES_URL};
+use plumb_core::place::Place;
 use plumb_core::profiles::{services_asked, shown_profiles};
 use plumb_core::truncate_chars;
 use plumb_index::pages::{Page, PlacedPage, FILMS_SET, MUSIC_SET, WIKIDATA_SET};
@@ -33,7 +36,8 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use super::{escape_html, homepage_url, http_url};
+use super::weather::place_label;
+use super::{escape_html, homepage_url, http_url, AppState};
 use crate::country::country_name;
 
 /// Rates older than this are fetched again when next needed.
@@ -100,6 +104,44 @@ async fn fetch_rates() -> anyhow::Result<Rates> {
         .text()
         .await?;
     Rates::parse_ecb(&text).ok_or_else(|| anyhow::anyhow!("the rates file did not read"))
+}
+
+/// The time in a town [`plumb_answer`]'s own list lacks ("time in
+/// boulder", "what time is it in porto"), found in the node's places.
+/// `country` is the searcher's, to tell towns of one name apart.
+pub(super) async fn town_time(
+    state: &AppState,
+    query: &str,
+    country: Option<&str>,
+) -> Option<Answer> {
+    let name = plumb_answer::asked_town(query)?;
+    let backend = Arc::clone(&state.backend);
+    let country = country.map(str::to_string);
+    let place = tokio::task::spawn_blocking(move || backend.locate(&name, country.as_deref()))
+        .await
+        .ok()
+        .flatten()?;
+    time_in_place(&place)
+}
+
+/// The time in `place`, when it is a city or town (not a nightclub
+/// called Heaven) and the clock it keeps can be told.
+pub(crate) fn time_in_place(place: &Place) -> Option<Answer> {
+    if !matches!(
+        place.kind.as_str(),
+        "place=city" | "place=town" | "place=borough"
+    ) {
+        return None;
+    }
+    let town = plumb_answer::Town {
+        shown: &place_label(place),
+        country: place.country.as_deref()?,
+        region: place.region.as_deref(),
+        lat: place.lat,
+        lon: place.lon,
+    };
+    let now = i64::try_from(plumb_core::now_unix()).unwrap_or(i64::MAX);
+    plumb_answer::time_in_town(&town, now)
 }
 
 /// An instant answer, as a block above the results.
@@ -1010,6 +1052,32 @@ mod tests {
     use plumb_index::pages::{Page, PageHit};
 
     use super::*;
+
+    #[test]
+    fn tells_the_time_in_a_town_found() {
+        let place = |name: &str, kind: &str, region: Option<&str>, country: &str| Place {
+            rank: 0,
+            name: name.into(),
+            kind: kind.into(),
+            tags: Vec::new(),
+            lat: 40.01,
+            lon: -105.27,
+            town: None,
+            region: region.map(str::to_string),
+            country: Some(country.into()),
+            address: None,
+            website: None,
+            osm: "n1".into(),
+            aliases: Vec::new(),
+        };
+        let boulder = time_in_place(&place("Boulder", "place=city", Some("CO"), "US")).unwrap();
+        assert_eq!(boulder.question, "Time in Boulder, CO");
+        assert!(boulder.note.unwrap().contains("UTC-"));
+        // A nightclub called Heaven is no town, and El Paso's state keeps
+        // two clocks.
+        assert!(time_in_place(&place("Heaven", "amenity=nightclub", None, "GB")).is_none());
+        assert!(time_in_place(&place("El Paso", "place=city", Some("TX"), "US")).is_none());
+    }
 
     fn article(title: &str, description: &str, site: Option<&str>) -> PageHit {
         PageHit {
