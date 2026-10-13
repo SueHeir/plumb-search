@@ -217,16 +217,23 @@ pub fn open_or_build(data_dir: &Path, wanted: &WantedPlaces) -> Result<(String, 
     open_or_build_with_budget(data_dir, wanted, None)
 }
 
+/// The place index of `wanted`, when it is already built.
+pub fn open_built(data_dir: &Path, wanted: &WantedPlaces) -> Option<(String, PlaceSearcher)> {
+    let key = key(wanted);
+    let searcher = PlaceSearcher::open(&index_dir(data_dir, &key)).ok()?;
+    Some((key, searcher))
+}
+
 pub fn open_or_build_with_budget(
     data_dir: &Path,
     wanted: &WantedPlaces,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 ) -> Result<(String, PlaceSearcher)> {
+    if let Some(found) = open_built(data_dir, wanted) {
+        return Ok(found);
+    }
     let key = key(wanted);
     let dir = index_dir(data_dir, &key);
-    if let Ok(searcher) = PlaceSearcher::open(&dir) {
-        return Ok((key, searcher));
-    }
     let started = std::time::Instant::now();
     info!("indexing places from {}", wanted.file.display());
     let lease;
