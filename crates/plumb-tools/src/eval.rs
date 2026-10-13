@@ -789,7 +789,9 @@ fn evaluate(
                         searcher.site(domain).ok().flatten()
                     })
                 }
-                None => plumb_index::health::sources_lead(&searched, &mut hits, &mut []),
+                None => plumb_index::health::sources_lead(&searched, &mut hits, &mut [], &|word| {
+                    searcher.is_common_word(word)
+                }),
             }
         }
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
@@ -842,7 +844,12 @@ fn evaluate(
                             searcher.site(domain).ok().flatten()
                         })
                     }
-                    None => plumb_index::health::sources_lead(&searched, &mut lifted, &mut placed),
+                    None => plumb_index::health::sources_lead(
+                        &searched,
+                        &mut lifted,
+                        &mut placed,
+                        &|word| searcher.is_common_word(word),
+                    ),
                 }
                 if let Some(features) = features.as_deref_mut() {
                     let closeness = |domain: &str| {

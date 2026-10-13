@@ -174,6 +174,7 @@ pub(crate) fn route_sources(
     results: &mut plumb_index::SearchResults,
     limit: usize,
     site: impl Fn(&str) -> Option<Hit>,
+    common: impl Fn(&str) -> bool,
 ) {
     if plumb_core::Operators::parse(query).any() {
         return;
@@ -181,7 +182,7 @@ pub(crate) fn route_sources(
     let Some(route) = crate::sources::route(query, answer, country) else {
         // The source a health search names, first whatever the learned
         // order did.
-        plumb_index::health::sources_lead(query, &mut results.hits, &mut results.pages);
+        plumb_index::health::sources_lead(query, &mut results.hits, &mut results.pages, &common);
         return;
     };
     let keep = results.hits.len().max(limit);
