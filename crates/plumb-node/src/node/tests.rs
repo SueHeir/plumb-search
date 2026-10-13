@@ -356,7 +356,7 @@ async fn serves_a_records_file_put_there_by_hand() {
     assert!(head.contains("content-security-policy: default-src 'none'"));
     assert!(body.contains("<form action=\"/search\""), "{body}");
     assert!(
-        body.contains("sites indexed &middot; updated just now"),
+        body.contains("items indexed &middot; updated just now"),
         "{body}"
     );
     assert!(!body.contains("http-equiv=\"refresh\""));

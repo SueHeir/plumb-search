@@ -1040,6 +1040,7 @@ mod end_to_end {
                 wikidata_missing: false,
                 wikidata_error: None,
                 sites: 123_456,
+                places: 0,
                 index: None,
                 last_refresh: None,
                 next_refresh: None,

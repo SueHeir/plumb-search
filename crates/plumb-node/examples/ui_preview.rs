@@ -81,6 +81,7 @@ impl StatusSource for PreviewNode {
             wikidata_missing: false,
             wikidata_error: None,
             sites: 4,
+            places: 0,
             index: Some("preview".into()),
             last_refresh: None,
             next_refresh: None,

@@ -1496,8 +1496,8 @@ fn render_search_card(body: &mut String, status: &Status, origin: &str, _now: u6
         }
         Readiness::Ready => {
             let rest = format!(
-                "<p>{} sites indexed.</p>\n{buttons}",
-                group_thousands(status.sites)
+                "<p>{} items indexed.</p>\n{buttons}",
+                group_thousands(status.items())
             );
             card(body, "search ready", "Search", "Search is ready", &rest);
         }
@@ -2535,6 +2535,28 @@ fn render_browser(body: &mut String, origin: &str) {
     ));
 }
 
+/// [`Status::items`] with what they are: "1,260,123: 260,123 sites and
+/// 1,000,000 pages".
+fn items_in_words(status: &Status) -> String {
+    let pages = status.page_coverage.as_ref().map_or(0, |c| c.indexed_pages);
+    let parts: Vec<String> = [
+        (status.sites, "sites"),
+        (pages, "pages"),
+        (status.places, "places"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, what)| format!("{} {what}", group_thousands(count)))
+    .collect();
+    let total = group_thousands(status.items());
+    match parts.split_last() {
+        Some((last, rest)) if !rest.is_empty() => {
+            format!("{total}: {} and {last}", rest.join(", "))
+        }
+        _ => total,
+    }
+}
+
 fn render_about(body: &mut String, status: &Status, data_dir: Option<&Path>, now: u64) {
     body.push_str("<dl>\n");
     let mut row = |name: &str, value: String| {
@@ -2545,7 +2567,7 @@ fn render_about(body: &mut String, status: &Status, data_dir: Option<&Path>, now
         ));
     };
     row("Version", status.version.clone());
-    row("Sites indexed", group_thousands(status.sites));
+    row("Items indexed", items_in_words(status));
     if let Some(last) = status.last_refresh {
         row("Last updated", time_ago(last, now));
     }
@@ -2623,6 +2645,7 @@ mod tests {
             wikidata_missing: false,
             wikidata_error: None,
             sites: 0,
+            places: 0,
             index: None,
             last_refresh: None,
             next_refresh: None,
@@ -2857,6 +2880,11 @@ mod tests {
 
         let mut ready = status(Phase::Ready, Step::Idle);
         ready.sites = 260_123;
+        ready.page_coverage = Some(crate::node::PageCoverage {
+            indexed_pages: 1_000_000,
+            index_generation: None,
+            sets: Vec::new(),
+        });
         ready.last_refresh = Some(now_unix() - 3600);
         // Past 2 hours by a margin, so a tick before rendering can't make it "1 hour".
         ready.next_refresh = Some(now_unix() + 7230);
@@ -2865,7 +2893,7 @@ mod tests {
             body.contains("<p class=\"big\">Search is ready</p>"),
             "{body}"
         );
-        assert!(body.contains("260,123 sites indexed"), "{body}");
+        assert!(body.contains("1,260,123 items indexed"), "{body}");
         assert!(body.contains("Next round in 2 hours"), "{body}");
         assert!(!body.contains("<h2>Setup</h2>"), "setup is done: {body}");
         assert!(body.contains("Update now"), "{body}");
@@ -2889,6 +2917,28 @@ mod tests {
             "{body}"
         );
         assert!(!body.contains("Update now"), "{body}");
+    }
+
+    #[test]
+    fn counts_items_and_says_what_they_are() {
+        let mut ready = status(Phase::Ready, Step::Idle);
+        assert_eq!(items_in_words(&ready), "0");
+        ready.sites = 260_123;
+        assert_eq!(items_in_words(&ready), "260,123");
+        ready.page_coverage = Some(crate::node::PageCoverage {
+            indexed_pages: 1_000_000,
+            index_generation: None,
+            sets: Vec::new(),
+        });
+        assert_eq!(
+            items_in_words(&ready),
+            "1,260,123: 260,123 sites and 1,000,000 pages"
+        );
+        ready.places = 5_000;
+        assert_eq!(
+            items_in_words(&ready),
+            "1,265,123: 260,123 sites, 1,000,000 pages and 5,000 places"
+        );
     }
 
     #[test]

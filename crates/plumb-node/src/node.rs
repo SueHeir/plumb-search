@@ -648,6 +648,9 @@ pub struct Status {
     pub wikidata_error: Option<LastError>,
     /// Sites in the index being searched; 0 while setting up.
     pub sites: u64,
+    /// Places in the place index being searched; 0 with places off.
+    #[serde(default)]
+    pub places: u64,
     /// The directory under `indexes/` of the index being searched.
     pub index: Option<String>,
     /// When the last refresh (a round of crawling and the rebuild after it)
@@ -705,6 +708,15 @@ pub struct Status {
     /// File generation may be newer than the index while a rebuild is pending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_coverage: Option<PageCoverage>,
+}
+
+impl Status {
+    /// Everything the node searches, counted as items: its sites, the pages
+    /// of its page sets and its places.
+    pub fn items(&self) -> u64 {
+        let pages = self.page_coverage.as_ref().map_or(0, |c| c.indexed_pages);
+        self.sites + pages + self.places
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1617,6 +1629,11 @@ impl Inner {
                 None
             },
             sites: index.map_or(0, |(_, docs)| docs),
+            places: self
+                .places
+                .read_locked()
+                .as_ref()
+                .map_or(0, |(_, places)| places.num_places()),
             index: index.map(|(id, _)| store::index_name(id)),
             last_refresh: saved.last_refresh,
             next_refresh: self.next_refresh(&saved),

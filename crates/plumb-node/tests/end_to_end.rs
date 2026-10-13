@@ -145,7 +145,7 @@ async fn web_app_serves_the_fixture_index() {
     assert_eq!(status, StatusCode::OK);
     assert!(content_type.starts_with("text/html"));
     assert!(body.contains("<form action=\"/search\""));
-    assert!(body.contains("sites indexed"));
+    assert!(body.contains("items indexed"));
 
     let (status, _, body) = get(&app, "/search?q=us+bank").await;
     assert_eq!(status, StatusCode::OK);

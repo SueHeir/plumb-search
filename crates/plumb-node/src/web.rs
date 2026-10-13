@@ -3373,8 +3373,11 @@ fn private_toggle_link(on: bool, href: &str) -> String {
     )
 }
 
-/// The home page; a node's `status` adds what it is doing to the count of sites.
+/// The home page, with the count of items searched: the `docs` of a bare
+/// index, or all a node holds by its `status` ([`Status::items`]), and what
+/// the node is doing.
 fn render_home(docs: u64, status: Option<&Status>, now: u64, settings: &Settings) -> String {
+    let items = status.map_or(docs, Status::items);
     let note = status
         .and_then(|status| node_note(status, now))
         .map(|note| format!(" &middot; {}", escape_html(&note)))
@@ -3397,7 +3400,7 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64, settings: &Settings
         "<div class=\"wrap search-home\">{}<main class=\"home\">\n\
          <h1>Plumb Search</h1>\n\
          <p class=\"home-intro\">Find sites, articles, places and more.</p>\
-         {}{welcome}{recent}\n<p class=\"index-status\"><span class=\"status-dot\" aria-hidden=\"true\"></span>{} sites indexed{note}</p>{wikidata}\n\
+         {}{welcome}{recent}\n<p class=\"index-status\"><span class=\"status-dot\" aria-hidden=\"true\"></span>{} items indexed{note}</p>{wikidata}\n\
          <details class=\"search-help\"><summary>Search tips</summary>\
          <p>Try a site name, a topic, a calculation, or a place. Use \
          <code>site:</code> to search one domain and quotes for exact words.</p>\
@@ -3405,7 +3408,7 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64, settings: &Settings
          {FOOTER}\n</main></div>",
         app_bar("search", settings.manage),
         settings_form("", true, settings),
-        group_thousands(docs)
+        group_thousands(items)
     );
     page("Plumb Search", &body)
 }
@@ -5515,7 +5518,7 @@ mod tests {
             .contains("default-src 'none'"));
         assert!(body.contains("<form action=\"/search\""), "{body}");
         assert!(body.contains("name=\"viewport\""));
-        assert!(body.contains("12,345 sites indexed"));
+        assert!(body.contains("12,345 items indexed"));
     }
 
     #[tokio::test]
@@ -5973,10 +5976,10 @@ mod tests {
         let fake = backend(bank_hits());
         let (status, _, body) = get(Arc::clone(&fake), "/search?q=+++").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("sites indexed"));
+        assert!(body.contains("items indexed"));
         assert!(fake.calls.lock().unwrap().is_empty());
         let (_, _, body) = get(Arc::clone(&fake), "/search").await;
-        assert!(body.contains("sites indexed"));
+        assert!(body.contains("items indexed"));
     }
 
     #[tokio::test]
@@ -6111,6 +6114,7 @@ mod tests {
             wikidata_missing: false,
             wikidata_error: None,
             sites: 0,
+            places: 0,
             index: None,
             last_refresh: None,
             next_refresh: None,
@@ -6270,13 +6274,20 @@ mod tests {
             total: 10_000,
             unit: "homepages".into(),
         });
+        status.sites = 12_345;
+        status.places = 655;
+        status.page_coverage = Some(crate::node::PageCoverage {
+            indexed_pages: 100_000,
+            index_generation: None,
+            sets: Vec::new(),
+        });
         let node = node(status);
         let app = || node_router(fake.clone(), node.clone());
         let (code, _, body) = send(app(), "/").await;
         assert_eq!(code, StatusCode::OK);
         assert!(body.contains("<form action=\"/search\""), "{body}");
         assert!(
-            body.contains("12,345 sites indexed &middot; crawling homepages, 1,500 of 10,000</p>"),
+            body.contains("113,000 items indexed &middot; crawling homepages, 1,500 of 10,000</p>"),
             "{body}"
         );
         assert!(!body.contains("http-equiv"), "{body}");
