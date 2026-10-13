@@ -798,19 +798,8 @@ impl HeldPageSet {
             return None;
         }
         let name = format!("plumb/{}", set.id);
-        let dir = crate::node::signed_sets::set_dir(data_dir, &name)?;
-        let text = std::fs::read_to_string(dir.join(crate::sets::MANIFEST)).ok()?;
-        let (manifest, signer) =
-            plumb_format::Manifest::from_signed_json(&text, &crate::sets::now()).ok()?;
-        let trusted = publishers
-            .iter()
-            .any(|publisher| manifest.trusted(&signer, publisher, &[]).is_ok());
-        if manifest.set != name
-            || !trusted
-            || !manifest.not_understood().is_empty()
-            || manifest.is_denylist()
-            || manifest.is_site_rules()
-        {
+        let (dir, manifest) = crate::node::signed_sets::held_trusted(data_dir, &name, publishers)?;
+        if manifest.is_denylist() || manifest.is_site_rules() {
             return None;
         }
         let generation = plumb_format::value::unix_seconds(&manifest.generation)?;

@@ -2947,6 +2947,182 @@ async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_keeps_the_adult_list_set_it_holds_as_its_list() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let dir = seeded_dir();
+    let list = dir.path().join("porn-nl.txt");
+    std::fs::write(&list, "adult.example\nother.example\n").unwrap();
+    let out = super::signed_sets::set_dir(dir.path(), super::adult::ADULT_SITES).unwrap();
+    plumb_tools::set::adult_sites(&plumb_tools::set::AdultSitesArgs {
+        list,
+        name: super::adult::ADULT_SITES.into(),
+        out: out.clone(),
+        license: "Unlicense".into(),
+        attribution: "From the Block List Project".into(),
+        level: 3,
+    })
+    .unwrap();
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    plumb_tools::set::sign_set(&out, &publisher, None, None).unwrap();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    let node = start(config).await.unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !node
+        .inner
+        .adult_list()
+        .is_some_and(|list| list.contains("www.adult.example"))
+    {
+        assert!(Instant::now() < deadline, "the set never became the list");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Kept as the list's file, dated by the set's generation.
+    let kept = dir.path().join("safe").join("adult-domains.txt");
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "adult.example\nother.example\n"
+    );
+    let (manifest, _) = crate::sets::read_items(&out).unwrap();
+    let generation = plumb_format::value::unix_seconds(&manifest.generation).unwrap();
+    assert_eq!(
+        super::newer::stamp(&kept).unwrap().0,
+        u64::try_from(generation).unwrap()
+    );
+    node.shutdown().await.unwrap();
+}
+
+/// A node's buckets and signed sets, sending `served` for the map's part:
+/// the map with its first half zeroed, so only a node that goes on from
+/// the half it fetched before gets the map whole.
+struct WithMapSet(plumb_net::BucketTable, PathBuf, PathBuf);
+
+impl plumb_net::BucketSource for WithMapSet {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn set_manifest(&self, set: &str) -> Option<String> {
+        super::signed_sets::held_manifest(&self.1, set)
+    }
+
+    fn set_part_file(&self, sha256: &str) -> Option<PathBuf> {
+        let part = super::signed_sets::held_part(&self.1, sha256)?;
+        Some(if part.ends_with(crate::map::MAP_FILE) {
+            self.2.clone()
+        } else {
+            part
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_the_map_as_a_set_going_on_from_what_it_fetched() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let at = |path: &Path, seconds: u64| super::newer::set_time(path, seconds).unwrap();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let held = peer_dir.path().join("held");
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    let made = tempfile::tempdir().unwrap();
+    let source = crate::map::tests::sample_map(made.path());
+    at(&source, 1_790_000_000);
+    let out = super::signed_sets::set_dir(&held, super::signed_sets::MAP).unwrap();
+    plumb_tools::set::map(&plumb_tools::set::MapArgs {
+        pmtiles: source.clone(),
+        name: super::signed_sets::MAP.into(),
+        out: out.clone(),
+        license: "ODbL-1.0".into(),
+        attribution: "© OpenStreetMap contributors".into(),
+    })
+    .unwrap();
+    plumb_tools::set::sign_set(&out, &publisher, None, None).unwrap();
+    let map = std::fs::read(&source).unwrap();
+    let half = map.len() / 2;
+    let mut zeroed = map.clone();
+    zeroed[..half].fill(0);
+    let served = peer_dir.path().join("served.pmtiles");
+    std::fs::write(&served, &zeroed).unwrap();
+
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) = plumb_net::start(
+        peer_config,
+        Arc::new(WithMapSet(table, held.clone(), served)),
+    )
+    .await
+    .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dir = seeded_dir();
+    // An older map file, and the first half of the set's map from a take
+    // that stopped.
+    let file = crate::map::file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::copy(&source, &file).unwrap();
+    at(&file, 1_780_000_000);
+    let staging = dir
+        .path()
+        .join(super::signed_sets::DIR)
+        .join("plumb")
+        .join("map.new");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join(crate::map::MAP_FILE), &map[..half]).unwrap();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = Vec::new();
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+
+    // Taken, the set's map replaces the older file.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while file.exists() {
+        assert!(Instant::now() < deadline, "the map never came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let taken = super::signed_sets::set_dir(dir.path(), super::signed_sets::MAP)
+        .unwrap()
+        .join(crate::map::MAP_FILE);
+    assert_eq!(std::fs::read(&taken).unwrap(), map);
+    // Dated by its generation, as the file it was made from.
+    assert_eq!(super::newer::stamp(&taken).unwrap().0, 1_790_000_000);
+    assert_eq!(node.inner.map.newest().unwrap().0, taken);
+    assert!(node.inner.map.get().is_some());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_takes_signed_sets_from_any_node_but_only_from_trusted_publishers() {
     use ed25519_dalek::SigningKey;
     use plumb_format::PublicKey;

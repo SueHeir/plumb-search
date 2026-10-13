@@ -72,13 +72,14 @@ pub fn check_first_parts(
 }
 
 /// The manifest and the items of the set in `dir`, part by part, as they
-/// are. Check the set first ([`check_set`]): this reads what is there.
+/// are, leaving out blob parts. Check the set first ([`check_set`]): this
+/// reads what is there.
 pub fn read_items(dir: &Path) -> Result<(Manifest, Vec<Item>)> {
     let text = fs::read_to_string(dir.join(MANIFEST))
         .with_context(|| format!("reading {}", dir.join(MANIFEST).display()))?;
     let (manifest, _) = Manifest::from_signed_json(&text, &now())?;
     let mut items = Vec::new();
-    for part in &manifest.files {
+    for part in manifest.files.iter().filter(|part| !part.blob) {
         let path = dir.join(&part.path);
         let reader = BufReader::new(zstd::Decoder::new(File::open(&path)?)?);
         for line in reader.lines() {
@@ -97,7 +98,8 @@ pub fn id_hash(id: &str) -> u64 {
 
 /// Checks the first `parts` parts of the set `manifest` describes, in
 /// `dir`: each part's size, hash and count, and every item, whether or
-/// not the manifest is signed yet.
+/// not the manifest is signed yet. A blob part is checked by its size and
+/// hash alone.
 pub fn check_parts(dir: &Path, manifest: &Manifest, parts: usize) -> Result<Checked> {
     // Ids by hash: a page set's millions of ids would take hundreds of
     // megabytes as text.
@@ -111,6 +113,10 @@ pub fn check_parts(dir: &Path, manifest: &Manifest, parts: usize) -> Result<Chec
             "{} is not the file the manifest names (size or hash differs)",
             part.path
         );
+        if part.blob {
+            // Bytes an item names by hash, not items: its hash is its check.
+            continue;
+        }
         let reader = BufReader::new(zstd::Decoder::new(File::open(&path)?)?);
         let mut count = 0;
         for (n, line) in reader.lines().enumerate() {

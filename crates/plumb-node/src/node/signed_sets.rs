@@ -55,7 +55,10 @@ use crate::site_rules::{self, read_site_rules, use_site_rules};
 pub const PROJECT_KEY: &str = "ed25519:MMrfl7-ASNz-h2d2f0ru1EWjAws59Ls3D5TbdfJS98c";
 
 /// The sets every node takes, the denylist first.
-pub(super) const TAKEN_SETS: &[&str] = &[DENYLIST, SITE_RULES];
+pub(super) const TAKEN_SETS: &[&str] = &[DENYLIST, SITE_RULES, super::adult::ADULT_SITES];
+
+/// The map ([`crate::map`]), taken by a node that keeps one.
+pub(crate) const MAP: &str = "plumb/map";
 
 /// The folder of the signed sets in the data directory.
 pub(super) const DIR: &str = "sets";
@@ -88,6 +91,39 @@ pub fn project_key() -> PublicKey {
 /// The folder of the set `set` (`plumb/site-rules`), when it is a set name.
 pub(crate) fn set_dir(data: &Path, set: &str) -> Option<PathBuf> {
     is_set_name(set).then(|| data.join(DIR).join(set))
+}
+
+/// The folder and manifest of the set `set` held in `data`, when one of
+/// `publishers` signed it and this version reads it. The parts are
+/// checked as they are taken, so they are not here.
+pub(crate) fn held_trusted(
+    data: &Path,
+    set: &str,
+    publishers: &[PublicKey],
+) -> Option<(PathBuf, Manifest)> {
+    let dir = set_dir(data, set)?;
+    let text = fs::read_to_string(dir.join(MANIFEST)).ok()?;
+    let (manifest, signer) = Manifest::from_signed_json(&text, &now()).ok()?;
+    let trusted = publishers
+        .iter()
+        .any(|publisher| manifest.trusted(&signer, publisher, &[]).is_ok());
+    (manifest.set == set && trusted && manifest.not_understood().is_empty())
+        .then_some((dir, manifest))
+}
+
+/// The generation (Unix seconds) and size of the map held as the set
+/// [`MAP`], when a publisher in `publishers` signed it and its map file
+/// is there whole. Its generation is the time of the file it was made
+/// from (`plumb-tools set map`), so it compares with a map file's time.
+pub(crate) fn held_map(data: &Path, publishers: &[PublicKey]) -> Option<(u64, u64)> {
+    let (dir, manifest) = held_trusted(data, MAP, publishers)?;
+    let part = manifest
+        .files
+        .iter()
+        .find(|part| part.blob && part.path == crate::map::MAP_FILE)?;
+    let held = fs::metadata(dir.join(&part.path)).ok()?.len();
+    let generation = unix_seconds(&manifest.generation)?;
+    (held == part.bytes).then_some((generation.max(0) as u64, held))
 }
 
 /// The manifest held of `set`, as signed; never a personal set's.
@@ -192,6 +228,7 @@ enum Looked {
 /// Keeps the sets the node takes up to date until the node stops.
 pub(super) async fn run(inner: Arc<Inner>) {
     let mut stopped = inner.stopped.clone();
+    settle_map(&inner);
     loop {
         let Some(net) = network::handle(&inner).cloned() else {
             return;
@@ -204,11 +241,13 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 Ok(Looked::Took(generation)) => {
                     met = true;
                     info!("took {set} generation {generation}");
-                    // The denylist applies at once; the site rules from
-                    // the next start.
+                    // The denylist and the adult list apply at once; the
+                    // site rules from the next start.
+                    let inner = inner.clone();
                     if *set == DENYLIST {
-                        let inner = inner.clone();
                         let _ = tokio::task::spawn_blocking(move || inner.load_denylist()).await;
+                    } else if *set == super::adult::ADULT_SITES {
+                        let _ = tokio::task::spawn_blocking(move || inner.adult_from_set()).await;
                     }
                 }
                 Err(err) => {
@@ -220,6 +259,24 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 return;
             }
         }
+        // Not while the map file is taken over `/plumb/pages/1`.
+        let hold = super::pages::SetFileHold::take(&inner, super::pages::MAP_SET);
+        if let Some((held, max_bytes)) = hold.as_ref().and_then(|_| map_wanted(&inner)) {
+            match look_newer(&inner, &net, MAP, held, max_bytes).await {
+                Ok(Looked::NoPeer) => {}
+                Ok(Looked::Current) => met = true,
+                Ok(Looked::Took(generation)) => {
+                    met = true;
+                    info!("took {MAP} generation {generation}");
+                    settle_map(&inner);
+                }
+                Err(err) => {
+                    met = true;
+                    warn!("taking {MAP}: {err:#}");
+                }
+            }
+        }
+        drop(hold);
         for (set, pages) in page_sets_kept(&inner) {
             if inner.download_pause().is_some() {
                 break;
@@ -315,6 +372,19 @@ async fn ask_newest(inner: &Inner, net: &NetHandle, set: &str, held: Option<i64>
 /// node's own.
 async fn look(inner: &Inner, net: &NetHandle, set: &str) -> Result<Looked> {
     let held = held_generation(&inner.paths.data, set);
+    look_newer(inner, net, set, held, u64::MAX).await
+}
+
+/// [`look`] for a set the node has as new as `held` (Unix seconds),
+/// taking none whose blob parts (a file such as the map) come to more
+/// than `max_bytes`.
+async fn look_newer(
+    inner: &Inner,
+    net: &NetHandle,
+    set: &str,
+    held: Option<i64>,
+    max_bytes: u64,
+) -> Result<Looked> {
     match ask_newest(inner, net, set, held).await? {
         Offer::NoPeer => Ok(Looked::NoPeer),
         Offer::Current => Ok(Looked::Current),
@@ -323,6 +393,13 @@ async fn look(inner: &Inner, net: &NetHandle, set: &str) -> Result<Looked> {
             from,
             publisher,
         } => {
+            let manifest: Manifest = serde_json::from_str(&text)?;
+            let blobs = manifest.files.iter().filter(|part| part.blob);
+            let bytes: u64 = blobs.map(|part| part.bytes).sum();
+            if bytes > max_bytes {
+                debug!("{set}: the newer generation is much bigger (name it in --set-updates to take it)");
+                return Ok(Looked::Current);
+            }
             let all = Want {
                 parts: usize::MAX,
                 at_least: usize::MAX,
@@ -343,6 +420,60 @@ fn page_sets_kept(inner: &Inner) -> Vec<(&'static SetInfo, u64)> {
         .into_iter()
         .filter(|(set, _)| Page::has_reader(set.id))
         .collect()
+}
+
+/// Whether the node takes the map as a set now, the time of the map it
+/// has (the set's generation, or its map file's time when newer), so only
+/// a newer one is taken, and the most bytes it takes. As for the map
+/// file: a node with a storage limit takes one only when it already has a
+/// map, and a much bigger one only when `--set-updates` names it.
+fn map_wanted(inner: &Inner) -> Option<(Option<i64>, u64)> {
+    if inner.download_pause().is_some() {
+        return None;
+    }
+    let data = &inner.paths.data;
+    let mine = super::newer::stamp(&crate::map::file(data))
+        .into_iter()
+        .chain(held_map(data, &inner.config.set_publishers))
+        .max();
+    let may_grow = match inner.config.set_updates.allows(super::pages::MAP_SET) {
+        None if mine.is_some() => return None,
+        _ if inner.settings().storage_limit_mb > 0 && mine.is_none() => return None,
+        may_grow => may_grow.unwrap_or(false),
+    };
+    let max_bytes = match mine {
+        Some((_, size)) if !may_grow => size.saturating_mul(super::newer::MAX_GROWTH_PERCENT) / 100,
+        _ => u64::MAX,
+    };
+    Some((mine.map(|(time, _)| time as i64), max_bytes))
+}
+
+/// Dates the map held as a set by its generation, as a map file taken
+/// over `/plumb/pages/1` keeps its maker's time, so it is served to
+/// v0.2.0 nodes with that time, and removes an older map file, so the
+/// node keeps one map.
+fn settle_map(inner: &Inner) {
+    let data = &inner.paths.data;
+    let Some((generation, _)) = held_map(data, &inner.config.set_publishers) else {
+        return;
+    };
+    let Some(blob) = set_dir(data, MAP).map(|dir| dir.join(crate::map::MAP_FILE)) else {
+        return;
+    };
+    let settled = match super::newer::stamp(&blob) {
+        Some((time, _)) if time != generation => super::newer::set_time(&blob, generation),
+        _ => Ok(()),
+    };
+    let file = crate::map::file(data);
+    let removed = match super::newer::stamp(&file) {
+        Some((time, _)) if time < generation => {
+            storage::remove_file(&file, inner.storage.as_deref()).map_err(Into::into)
+        }
+        _ => Ok(()),
+    };
+    if let Err(err) = settled.and(removed) {
+        warn!("{MAP}: {err:#}");
+    }
 }
 
 /// How many of a manifest's first parts hold `pages` items: all of them
@@ -539,8 +670,8 @@ async fn take(
 }
 
 /// Readies `staging` for the parts `files` of a set: keeps each part a
-/// look that stopped fetched whole into it, removes anything else, and
-/// says which parts it kept.
+/// look that stopped fetched whole into it, and the start of one it was
+/// fetching, removes anything else, and says which parts it kept whole.
 fn keep_fetched(
     staging: &Path,
     files: &[FilePart],
@@ -563,8 +694,13 @@ fn keep_fetched(
                 && fs::metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() == part.bytes)
                 && measure(&path).is_ok_and(|(_, sha256)| sha256 == part.sha256)
         });
+        // Part of a part, which the next download goes on from.
+        let begun = files.iter().any(|part| {
+            part.path == name && fs::metadata(&path).is_ok_and(|meta| meta.len() < part.bytes)
+        });
         if whole {
             kept.insert(name.to_string());
+        } else if begun {
         } else if path.is_dir() {
             storage::remove_directory(&path, budget.as_deref())?;
         } else {
@@ -610,17 +746,20 @@ async fn download(
     skip: &[PeerId],
 ) -> std::result::Result<(), (Option<PeerId>, anyhow::Error)> {
     let budget = inner.storage.clone();
-    let mut file = {
-        let (dest, budget) = (dest.to_path_buf(), budget.clone());
-        tokio::task::spawn_blocking(move || {
-            let _ = storage::remove_file(&dest, budget.as_deref());
-            BudgetFile::create(&dest, budget)
+    // Goes on from what an earlier try fetched of it: a map is gigabytes.
+    let (mut file, mut offset) = {
+        let (dest, budget, bytes) = (dest.to_path_buf(), budget.clone(), part.bytes);
+        tokio::task::spawn_blocking(move || -> std::io::Result<(BudgetFile, u64)> {
+            let begun = fs::metadata(&dest).map_or(0, |meta| meta.len());
+            let begun = if begun < bytes { begun } else { 0 };
+            let mut file = BudgetFile::open_write(&dest, begun == 0, budget)?;
+            file.seek(std::io::SeekFrom::Start(begun))?;
+            Ok((file, begun))
         })
         .await
         .map_err(|err| (None, err.into()))?
         .map_err(|err| (None, err.into()))?
     };
-    let mut offset = 0u64;
     let mut busy = 0;
     while offset < part.bytes {
         if inner.stopping() {
@@ -677,17 +816,19 @@ async fn download(
             }
         }
     }
-    let dest = dest.to_path_buf();
+    let fetched = dest.to_path_buf();
     let measured = tokio::task::spawn_blocking(move || -> Result<(u64, String)> {
         file.flush()?;
         file.sync_all()?;
         drop(file);
-        measure(&dest)
+        measure(&fetched)
     })
     .await
     .map_err(|err| (None, err.into()))?
     .map_err(|err| (None, err))?;
     if measured != (part.bytes, part.sha256.clone()) {
+        // Not what was begun on either: start again.
+        let _ = storage::remove_file(dest, budget.as_deref());
         return Err((peer, anyhow::anyhow!("what it sent is not the part")));
     }
     Ok(())
@@ -695,6 +836,7 @@ async fn download(
 
 /// Copies a held part into the set being taken.
 fn copy(from: &Path, to: &Path, budget: Option<Arc<StorageBudget>>) -> Result<()> {
+    storage::remove_file(to, budget.as_deref())?;
     let mut source = fs::File::open(from)?;
     let mut dest = BudgetFile::create(to, budget)?;
     std::io::copy(&mut source, &mut dest)?;
@@ -782,7 +924,7 @@ mod tests {
         let (manifest, _) = Manifest::from_signed_json(&text, &now()).unwrap();
         let staging = temp.path().join("set.new");
         fs::create_dir_all(&staging).unwrap();
-        // The first part whole, the second cut short, and a stray file.
+        // The first part whole, the second begun, and a stray file.
         let [first, second, _] = &manifest.files[..] else {
             panic!("{:?}", manifest.files);
         };
@@ -792,12 +934,13 @@ mod tests {
         fs::write(staging.join("manifest.json"), "{}").unwrap();
         let kept = keep_fetched(&staging, &manifest.files, None).unwrap();
         assert_eq!(kept, [first.path.clone()].into_iter().collect());
+        // The begun one stays, for the next download to go on from.
         let mut left: Vec<String> = fs::read_dir(&staging)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         left.sort();
-        assert_eq!(left, std::slice::from_ref(&first.path));
+        assert_eq!(left, [first.path.clone(), second.path.clone()]);
         // With no folder, one is made.
         let fresh = temp.path().join("fresh.new");
         assert!(keep_fetched(&fresh, &manifest.files, None)

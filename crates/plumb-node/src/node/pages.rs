@@ -312,9 +312,12 @@ fn keep_files(inner: &Inner, done: &AtomicBool) {
                     fetch_failed.insert(set.id, Instant::now());
                 }
             }
+            let has_map = crate::map::file(&inner.paths.data).is_file()
+                || super::signed_sets::held_map(&inner.paths.data, &inner.config.set_publishers)
+                    .is_some();
             if !ended()
                 && !fetch_failed.contains_key(MAP_SET)
-                && (settings.storage_limit_mb == 0 || crate::map::file(&inner.paths.data).is_file())
+                && (settings.storage_limit_mb == 0 || has_map)
             {
                 if let Err(err) = keep_map(inner, &net, &mut checked) {
                     warn!("map file: {err:#}");
@@ -355,14 +358,14 @@ fn near_of(
 
 /// Holds a set's file for one writer: a download or a cut, never both,
 /// since each writes the file's `.part` and renames it over the file.
-struct SetFileHold<'a> {
+pub(super) struct SetFileHold<'a> {
     inner: &'a Inner,
     id: &'static str,
 }
 
 impl<'a> SetFileHold<'a> {
     /// `None` while another writer holds the file.
-    fn take(inner: &'a Inner, id: &'static str) -> Option<Self> {
+    pub(super) fn take(inner: &'a Inner, id: &'static str) -> Option<Self> {
         let taken = inner
             .set_files_busy
             .lock()
@@ -728,11 +731,18 @@ fn keep_map(
     {
         return Ok(());
     }
+    // Not while the map is taken as a set ([`super::signed_sets`]).
+    let Some(_hold) = SetFileHold::take(inner, MAP_SET) else {
+        return Ok(());
+    };
     let file = crate::map::file(&inner.paths.data);
-    // A node with no map file takes one whatever --set-updates says.
+    // The map held as a set counts as the node's map, so a file is taken
+    // only when it is newer.
+    let held = super::signed_sets::held_map(&inner.paths.data, &inner.config.set_publishers);
+    // A node with no map takes one whatever --set-updates says.
     let may_grow = match inner.config.set_updates.allows(MAP_SET) {
         Some(may_grow) => may_grow,
-        None if file.is_file() => return Ok(()),
+        None if file.is_file() || held.is_some() => return Ok(()),
         None => false,
     };
     if inner.download_pause().is_some() {
@@ -742,7 +752,11 @@ fn keep_map(
         return Ok(());
     };
     checked.insert(MAP_SET, Instant::now());
-    let (modified, size) = super::newer::stamp(&file).unwrap_or((0, 0));
+    let (modified, size) = super::newer::stamp(&file)
+        .into_iter()
+        .chain(held)
+        .max()
+        .unwrap_or((0, 0));
     let mine = super::newer::Mine {
         modified,
         size,

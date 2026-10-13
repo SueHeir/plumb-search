@@ -1539,6 +1539,8 @@ impl Inner {
         let backoff = worker::Backoff::new(config.retry_wait, config.max_retry_wait);
         let journal = journal::Journal::open(&opened.paths.data).with_budget(storage.clone());
         let map_data = opened.paths.data.clone();
+        let map = crate::map::MapFile::new(crate::map::file(&map_data))
+            .with_held_set(map_data, config.set_publishers.clone());
         let fill_state = fill::FillState::load(&opened.paths.net);
         let news = crate::news::NewsStore::open(&opened.paths.news).with_budget(storage.clone());
         Inner {
@@ -1587,7 +1589,7 @@ impl Inner {
             meaning_retry: AtomicBool::new(false),
             pages: RwLock::new(None),
             places: RwLock::new(None),
-            map: crate::map::MapFile::new(crate::map::file(&map_data)),
+            map,
             news,
             adult: RwLock::new(None),
             denylist: RwLock::new(None),

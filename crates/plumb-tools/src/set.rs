@@ -22,7 +22,7 @@ use base64::Engine;
 use clap::{Args, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
 use plumb_format::deny::{Entry, DENY};
-use plumb_format::manifest::is_set_name;
+use plumb_format::manifest::{is_set_name, BLOB_PARTS};
 use plumb_format::notes::{sign_note, NOTE_FORMAT};
 use plumb_format::sign::sign;
 use plumb_format::sites::{read_suffix_list, SITE_RULE};
@@ -85,6 +85,15 @@ pub enum SetCommand {
     /// (`delegate`), name the key that publishes from now on (`handover`),
     /// or withdraw a key (`revoke`).
     Note(NoteArgs),
+    /// Write an adult blocklist (one domain a line, as the Block List
+    /// Project publishes it) as the layer that labels those sites `adult`,
+    /// with a manifest still to be signed.
+    AdultSites(AdultSitesArgs),
+    /// Write a map file (`map.pmtiles` from `plumb-tools fetch-map`) as a
+    /// set: one item that names the file by its hash, and the file itself
+    /// as a blob part, linked rather than copied where it can be. Its
+    /// generation is the file's time. The manifest is still to be signed.
+    Map(MapArgs),
 }
 
 #[derive(Debug, Args)]
@@ -156,6 +165,46 @@ pub struct DenylistArgs {
     /// The zstd level of the parts.
     #[arg(long, default_value_t = 19)]
     pub level: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct AdultSitesArgs {
+    /// The list, one domain a line (`porn-nl.txt` from the Block List
+    /// Project, or a node's `safe/adult-domains.txt`).
+    #[arg(long, value_name = "FILE")]
+    pub list: PathBuf,
+    /// The set's name, `<scope>/<name>`.
+    #[arg(long, default_value = "plumb/adult-sites")]
+    pub name: String,
+    /// The folder to write. It must not exist yet, or be empty.
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// The list's license, an SPDX id: the Block List Project's own.
+    #[arg(long, default_value = "Unlicense")]
+    pub license: String,
+    #[arg(long, default_value = "From the Block List Project")]
+    pub attribution: String,
+    /// The zstd level of the parts.
+    #[arg(long, default_value_t = 19)]
+    pub level: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct MapArgs {
+    /// The map file, from `plumb-tools fetch-map`.
+    #[arg(long, value_name = "FILE")]
+    pub pmtiles: PathBuf,
+    /// The set's name, `<scope>/<name>`.
+    #[arg(long, default_value = "plumb/map")]
+    pub name: String,
+    /// The folder to write. It must not exist yet, or be empty.
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// OpenStreetMap's license, which the map's data is under.
+    #[arg(long, default_value = "ODbL-1.0")]
+    pub license: String,
+    #[arg(long, default_value = "© OpenStreetMap contributors, via Protomaps")]
+    pub attribution: String,
 }
 
 #[derive(Debug, Args)]
@@ -365,6 +414,25 @@ pub fn run(args: SetArgs) -> Result<()> {
                     checked.newer
                 );
             }
+            Ok(())
+        }
+        SetCommand::AdultSites(args) => {
+            let written = adult_sites(&args)?;
+            println!(
+                "{}: {} adult sites in {} parts, {} lines left out; sign it with `plumb-tools set sign`",
+                args.out.display(),
+                written.items,
+                written.parts,
+                written.left_out
+            );
+            Ok(())
+        }
+        SetCommand::Map(args) => {
+            map(&args)?;
+            println!(
+                "{}: the map as a blob part; sign it with `plumb-tools set sign`",
+                args.out.display()
+            );
             Ok(())
         }
         SetCommand::Note(args) => {
@@ -860,6 +928,105 @@ pub fn site_rules(args: &SiteRulesArgs) -> Result<(Written, usize, Vec<Moved>)> 
     Ok((written, hosts.len(), moved))
 }
 
+/// Writes the list in `args.list` as a layer on the sites it names, each
+/// labelled `adult`, for safe search to leave out.
+pub fn adult_sites(args: &AdultSitesArgs) -> Result<Written> {
+    ensure!(
+        is_set_name(&args.name),
+        "{:?} is not <scope>/<name>",
+        args.name
+    );
+    let text = fs::read_to_string(&args.list)
+        .with_context(|| format!("reading {}", args.list.display()))?;
+    let domains = plumb_core::safe::parse_adult_list(&text);
+    ensure!(
+        !domains.is_empty(),
+        "{} names no sites",
+        args.list.display()
+    );
+    let mut manifest = Map::new();
+    manifest.insert("format".into(), json!(FORMAT));
+    manifest.insert("set".into(), json!(args.name));
+    manifest.insert("generation".into(), json!(now()));
+    manifest.insert("license".into(), json!(args.license));
+    manifest.insert("attribution".into(), json!(args.attribution));
+    manifest.insert("extends".into(), json!(["site"]));
+    let items = domains.iter().map(|domain| {
+        serde_json::from_value(json!({
+            "id": domain, "extends": format!("site:{domain}"), "labels": ["adult"],
+        }))
+        .ok()
+    });
+    write_set(
+        items,
+        BTreeMap::new(),
+        manifest,
+        &args.out,
+        PART_ENDS,
+        args.level,
+    )
+}
+
+/// The kind of the item that names a map file.
+pub const MAP_KIND: &str = "map-tiles";
+
+/// Writes the map file `args.pmtiles` as a set: one item whose `tiles`
+/// names the file by hash, and the file as a blob part. The generation is
+/// the file's time, so a node can tell the set from a file of the same
+/// map that it took over `/plumb/pages/1`.
+pub fn map(args: &MapArgs) -> Result<Written> {
+    ensure!(
+        is_set_name(&args.name),
+        "{:?} is not <scope>/<name>",
+        args.name
+    );
+    let modified = fs::metadata(&args.pmtiles)
+        .and_then(|meta| meta.modified())
+        .with_context(|| format!("reading {}", args.pmtiles.display()))?;
+    let generation = chrono::DateTime::<chrono::Utc>::from(modified)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let (bytes, sha256) = measure(&args.pmtiles)?;
+    let mut manifest = Map::new();
+    manifest.insert("format".into(), json!(FORMAT));
+    manifest.insert("set".into(), json!(args.name));
+    manifest.insert("generation".into(), json!(generation));
+    manifest.insert("license".into(), json!(args.license));
+    manifest.insert("attribution".into(), json!(args.attribution));
+    manifest.insert("requires".into(), json!([BLOB_PARTS]));
+    let item: Item = serde_json::from_value(json!({
+        "id": "map", "kind": MAP_KIND, "fields": {"tiles": format!("blob:sha256-{sha256}")},
+    }))?;
+    let fields = BTreeMap::from([(
+        "tiles".to_string(),
+        serde_json::from_value(json!({"type": "ref"}))?,
+    )]);
+    let written = write_set(
+        std::iter::once(Some(item)),
+        fields,
+        manifest,
+        &args.out,
+        PART_ENDS,
+        3,
+    )?;
+    // The file itself beside the items, linked when it is on the same disk:
+    // a map is gigabytes.
+    let blob = args.out.join(plumb_node::map::MAP_FILE);
+    if fs::hard_link(&args.pmtiles, &blob).is_err() {
+        fs::copy(&args.pmtiles, &blob)
+            .with_context(|| format!("copying {}", args.pmtiles.display()))?;
+    }
+    let mut value = read_manifest(&args.out)?;
+    value["files"]
+        .as_array_mut()
+        .context("the manifest has no files")?
+        .push(json!({
+            "path": plumb_node::map::MAP_FILE, "count": 0, "bytes": bytes, "sha256": sha256, "blob": true,
+        }));
+    write_manifest(&args.out, &value)?;
+    Ok(written)
+}
+
 /// The entry `args` describes, checked as a node reads it.
 pub fn deny_entry(args: &DenyEntryArgs) -> Result<Item> {
     let target = match (&args.target, &args.hash_of) {
@@ -935,7 +1102,10 @@ pub fn write_set(
         encoder.write_all(b"\n")?;
         *count += 1;
         items += 1;
-        kinds.insert(item.kind);
+        // An extension takes its target's kind.
+        if !item.kind.is_empty() {
+            kinds.insert(item.kind);
+        }
         used.extend(item.fields.into_keys());
         if part_ends.contains(&items) {
             files.push(finish_part(out, part.take().expect("a part is open"))?);
@@ -1427,6 +1597,82 @@ mod tests {
         write_manifest(&dir, &value).unwrap();
         let checked = check_set(&dir, None, &[]).unwrap();
         assert_eq!((checked.items, checked.newer), (2, 1));
+    }
+
+    #[test]
+    fn an_adult_list_is_a_layer_that_labels_its_sites() {
+        let temp = tempfile::tempdir().unwrap();
+        let (list, dir) = (temp.path().join("porn-nl.txt"), temp.path().join("set"));
+        fs::write(
+            &list,
+            "# a list\nadult.example\nwww.other.example\nadult.example\n",
+        )
+        .unwrap();
+        let args = AdultSitesArgs {
+            list,
+            name: "plumb/adult-sites".into(),
+            out: dir.clone(),
+            license: "Unlicense".into(),
+            attribution: "From the Block List Project".into(),
+            level: 3,
+        };
+        assert_eq!(adult_sites(&args).unwrap().items, 2);
+        let key = SigningKey::from_bytes(&[5; 32]);
+        sign_set(&dir, &key, None, None).unwrap();
+        let checked = check_set(&dir, Some(&PublicKey::of(&key)), &[]).unwrap();
+        assert_eq!(checked.items, 2);
+        let (manifest, items) = plumb_node::sets::read_items(&dir).unwrap();
+        assert_eq!(manifest.extends, ["site"]);
+        assert!(manifest.kinds.is_empty());
+        assert_eq!(
+            items[0].extends,
+            Some("site:adult.example".parse().unwrap())
+        );
+        assert_eq!(items[1].id, "other.example");
+        assert!(items.iter().all(|item| item.labels == ["adult"]));
+    }
+
+    #[test]
+    fn a_map_file_is_a_blob_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let (file, dir) = (temp.path().join("map.pmtiles"), temp.path().join("set"));
+        fs::write(&file, b"tiles, as bytes no item could be").unwrap();
+        let args = MapArgs {
+            pmtiles: file.clone(),
+            name: "plumb/map".into(),
+            out: dir.clone(),
+            license: "ODbL-1.0".into(),
+            attribution: "OpenStreetMap".into(),
+        };
+        map(&args).unwrap();
+        let key = SigningKey::from_bytes(&[5; 32]);
+        sign_set(&dir, &key, None, None).unwrap();
+        let checked = check_set(&dir, Some(&PublicKey::of(&key)), &[]).unwrap();
+        assert_eq!((checked.items, checked.parts), (1, 2));
+        let (manifest, items) = plumb_node::sets::read_items(&dir).unwrap();
+        let (bytes, sha256) = measure(&file).unwrap();
+        assert!(manifest.files[1].blob && manifest.files[1].bytes == bytes);
+        assert_eq!(
+            items[0].fields["tiles"],
+            json!(format!("blob:sha256-{sha256}"))
+        );
+        let modified = fs::metadata(&file).unwrap().modified().unwrap();
+        let generation = plumb_format::value::unix_seconds(&manifest.generation).unwrap();
+        assert_eq!(
+            generation,
+            modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+        );
+        // The blob's hash is its check.
+        fs::remove_file(dir.join(plumb_node::map::MAP_FILE)).unwrap();
+        fs::write(
+            dir.join(plumb_node::map::MAP_FILE),
+            b"other tiles of the same size!!!!",
+        )
+        .unwrap();
+        assert!(check_set(&dir, None, &[]).is_err());
     }
 
     #[test]
