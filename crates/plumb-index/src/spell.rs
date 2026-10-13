@@ -11,7 +11,9 @@
 //!   [`MIN_FIX_LINK_SCORE`] can be the correction: look-alike sites have no
 //!   popularity to show, so a typo never leads to them. With the spelling
 //!   model, one word is not taken for a name when another word is a
-//!   likelier slip of it: "existance" is "existence", not distance.to.
+//!   likelier slip of it: "existance" is "existence", not distance.to;
+//!   unless the name is one slip away and the site well known ("shien" is
+//!   shein.com, though "shine" is a commoner word).
 //! - **Words.** Any other word that hardly appears in the index (in fewer
 //!   than [`KNOWN_WORD_DOCS`] sites) is replaced by the nearest known word
 //!   that appears in many more ([`FIX_DOCS_RATIO`] times as many). A rare
@@ -415,7 +417,7 @@ impl Speller<'_> {
                         .then_with(|| a.3.cmp(&b.3))
                 }),
             }
-            for (_, _, score, name) in found {
+            for (distance, _, score, name) in found {
                 // Each word may only be misspelled as much as its length
                 // allows, and none may vanish: "americanairlines fr" is not
                 // a typo of "americanairlines".
@@ -460,7 +462,14 @@ impl Speller<'_> {
                 }
                 // A word is no site's name when another word is a likelier
                 // slip of it: "sentance" is "sentence", not sundance.org.
-                if plausible && covers == 1 && self.likelier_word_than(&words[0], &fixed[0])? {
+                // A well-known site's name one slip away is, though the
+                // word is commoner: "shien" is shein.com, not "shine".
+                let well_known_slip = distance <= 1 && score >= WELL_KNOWN_LINK_SCORE;
+                if plausible
+                    && covers == 1
+                    && !well_known_slip
+                    && self.likelier_word_than(&words[0], &fixed[0])?
+                {
                     continue;
                 }
                 if plausible {
