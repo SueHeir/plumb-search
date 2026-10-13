@@ -104,7 +104,8 @@ pub(crate) struct ParsedQuery {
     /// [`COMPARISON_WORDS`] entry between two others is left out.
     pub(crate) words: Vec<String>,
     /// Each word in its other number ([`plumb_core::other_number`]), if it
-    /// has one: `videos` -> `video`.
+    /// has one: `videos` -> `video`. A word of Arabic script has its
+    /// [`analysis::folded`] form instead.
     pub(crate) others: Vec<Option<String>>,
     /// The whole query as one joined token: `U.S. Bank` -> `usbank`.
     pub(crate) joined: Option<String>,
@@ -150,7 +151,10 @@ impl ParsedQuery {
             }
         }
         distinct.truncate(MAX_QUERY_WORDS);
-        let others = distinct.iter().map(|word| other_number(word)).collect();
+        let others = distinct
+            .iter()
+            .map(|word| other_number(word).or_else(|| analysis::folded(word)))
+            .collect();
         let prefixes = |skip: usize| {
             tokens
                 .iter()
@@ -217,7 +221,9 @@ impl ParsedQuery {
 
     /// The clauses for the `i`th query word: the word in every field, and
     /// its other number in the fields of free text, a little weaker, so
-    /// "videos" finds a site about "video" but names stay exact.
+    /// "videos" finds a site about "video" but names stay exact. An Arabic
+    /// word's folded form is taken the same way: `اخبار` finds `أخبار`, a
+    /// little below what is written `اخبار`.
     ///
     /// The other number never counts for more than the word as typed: when
     /// "videos" is common and "video" rare, BM25 would make the rare form

@@ -79,11 +79,23 @@ fn arabic_is_found_however_its_alefs_and_yehs_are_written() {
         |domain: &str, title: &str| site(domain, Some(title), None, &[], &[], ranked(900, 5_000));
     let (_dir, searcher) = build(&[
         site_titled("ahly.example", "أخبار النادي الأهلي"),
+        site_titled("bank.example", "البنك الاهلي"),
+        site_titled("iran.example", "اخبار ایران"),
         site_titled("masry.example", "مصرى سات"),
     ]);
-    for query in ["أخبار", "اخبار", "الاهلي", "الأهلي", "اخـبـار"] {
-        assert_eq!(found(&searcher, query), ["ahly.example"], "{query}");
+    // Each spelling finds the other, the one typed first.
+    for (query, first, then) in [
+        ("الأهلي", "ahly.example", "bank.example"),
+        ("الاهلي", "bank.example", "ahly.example"),
+        ("أخبار", "ahly.example", "iran.example"),
+        ("اخبار", "iran.example", "ahly.example"),
+    ] {
+        assert_eq!(found(&searcher, query), [first, then], "{query}");
     }
+    let mut stretched = found(&searcher, "اخـبـار");
+    stretched.sort();
+    assert_eq!(stretched, ["ahly.example", "iran.example"]);
+    assert_eq!(found(&searcher, "ايران"), ["iran.example"]);
     for query in ["مصري", "مصرى"] {
         assert_eq!(found(&searcher, query), ["masry.example"], "{query}");
     }
