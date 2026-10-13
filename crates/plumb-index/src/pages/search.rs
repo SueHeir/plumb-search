@@ -186,12 +186,65 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" facts", Hint::Aspect),
     (" uses", Hint::Aspect),
     (" examples", Hint::Aspect),
-    (" function", Hint::Aspect),
-    (" structure", Hint::Aspect),
-    (" equation", Hint::Aspect),
-    (" formula", Hint::Aspect),
     (" diagram", Hint::Aspect),
 ];
+
+/// What a search asks of a thing of science, which the thing's article
+/// says, before its name with "of" or after it: "melting point of iron",
+/// "iron melting point". Longer first: "glucose chemical formula" is not
+/// about a "glucose chemical". Those a fact question asks ("atomic number
+/// of gold", "area of france", "radius of mars") are left to
+/// [`plumb_core::facts::fact_asked`].
+const PROPERTIES: &[&str] = &[
+    "melting point",
+    "boiling point",
+    "freezing point",
+    "chemical formula",
+    "formula",
+    "equation",
+    "structure",
+    "function",
+    "molar mass",
+    "atomic mass",
+    "atomic weight",
+    "density",
+    "half life",
+    "half-life",
+];
+
+/// Properties asked only before the name: "temperature of the sun",
+/// "volume of a sphere", but "oven temperature" is about an oven's
+/// setting and "sound volume" about a knob.
+const PROPERTIES_OF: &[&str] = &[
+    "mass",
+    "diameter",
+    "temperature",
+    "ph",
+    "volume",
+    "surface area",
+    "perimeter",
+    "circumference",
+];
+
+/// The thing `q` asks a property of ([`PROPERTIES`]): "iron" of "melting
+/// point of iron" and of "iron melting point", "sun" of "mass of the sun".
+fn property_of(q: &str) -> Option<&str> {
+    let before = PROPERTIES
+        .iter()
+        .chain(PROPERTIES_OF)
+        .find_map(|property| q.strip_prefix(property)?.strip_prefix(" of "));
+    let thing = before.or_else(|| {
+        PROPERTIES
+            .iter()
+            .find_map(|property| q.strip_suffix(property)?.strip_suffix(' '))
+    })?;
+    Some(
+        ["the ", "a ", "an "]
+            .iter()
+            .find_map(|article| thing.strip_prefix(article))
+            .unwrap_or(thing),
+    )
+}
 
 /// The name in `query` without the words around it that only say what is
 /// wanted, and what kind of page they ask for: "lululemon" of "lululemon
@@ -214,6 +267,7 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     if let Some((rest, tail_hint)) = HINT_TAILS
         .iter()
         .find_map(|(tail, h)| Some((name.strip_suffix(tail)?, *h)))
+        .or_else(|| Some((property_of(name)?, Hint::Aspect)))
     {
         name = rest;
         hint = Some(tail_hint);

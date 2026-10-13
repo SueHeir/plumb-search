@@ -71,6 +71,10 @@ fn a_search_for_one_part_of_a_thing_finds_the_thing() {
         page("Ibuprofen", 200_000, &[]),
         page("Shingles", 150_000, &["Herpes zoster"]),
         page("Volcano", 120_000, &[]),
+        page("Iron", 110_000, &[]),
+        page("Sun", 180_000, &[]),
+        page("Glucose", 90_000, &[]),
+        page("Sphere", 80_000, &[]),
         page("Side Effects (2013 film)", 300_000, &["Side Effects"]),
         page("Plaster", 90_000, &[]),
         page("Plaster cast", 20_000, &[]),
@@ -86,6 +90,12 @@ fn a_search_for_one_part_of_a_thing_finds_the_thing() {
         ("side effects of ibuprofen", "Ibuprofen"),
         ("shingles symptoms", "Shingles"),
         ("volcano facts", "Volcano"),
+        ("melting point of iron", "Iron"),
+        ("iron melting point", "Iron"),
+        ("what is the melting point of iron", "Iron"),
+        ("mass of the sun", "Sun"),
+        ("glucose chemical formula", "Glucose"),
+        ("volume of a sphere", "Sphere"),
     ] {
         assert_eq!(first(query), Some((title.into(), true)), "{query}");
     }
@@ -97,6 +107,8 @@ fn a_search_for_one_part_of_a_thing_finds_the_thing() {
         hits.iter().all(|h| h.page.title != "Plaster" || !h.named),
         "{hits:?}"
     );
+    // An everyday thing's temperature is a setting, not its article's.
+    assert_eq!(hinted_name("oven temperature"), None);
     // Papers keep those words.
     assert_eq!(
         hinted_name("loss function"),
