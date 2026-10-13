@@ -71,7 +71,12 @@ const fn on(
 /// is left out: "independence day" is a film as often as a day, and many
 /// countries'.
 const DAYS: &[Day] = &[
-    fixed(&["new years day", "new years", "new year"], "New Year's Day", 1, 1),
+    fixed(
+        &["new years day", "new years", "new year"],
+        "New Year's Day",
+        1,
+        1,
+    ),
     on(
         &[
             "martin luther king day",
