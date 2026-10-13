@@ -187,14 +187,14 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
     // A state or province, which says what country its code is in: WA is
     // Washington's and Western Australia's. It is not kept as a place.
     let code = get("ISO3166-2").filter(|_| !node && get("boundary") == Some("administrative"));
-    if let Some((country, region)) = code.and_then(|code| code.split_once('-')) {
+    if let Some((country, _)) = code.and_then(|code| code.split_once('-')) {
         // A territory with a country code of its own is in it: US-PR is
         // Puerto Rico, PR.
         let own = get("ISO3166-1:alpha2").or_else(|| get("ISO3166-1"));
         return Some(Place {
             name: cut(name, MAX_PLACE_NAME_CHARS),
             kind: STATE_KIND.to_string(),
-            region: Some(region.to_string()),
+            region: code.map(str::to_string),
             country: Some(
                 own.and_then(normalize_country)
                     .or_else(|| normalize_country(country))?,
@@ -876,6 +876,55 @@ fn winner(votes: &HashMap<String, u32>) -> Option<String> {
         .map(|(value, _)| value.clone())
 }
 
+/// Gives towns that know their region but no country the country of the
+/// nearest of `states` with that code, and takes from towns that know
+/// their country a region no state of it has: Rainy River, Ontario, voted
+/// Minnesota's by shops across the river, has no region rather than MN.
+fn countries_from_states(places: &mut [Place], settlements: &[usize], states: &[Place]) {
+    // A state's region is its whole code; it is looked up by the part
+    // after the country's: "WA" for AU-WA and US-WA.
+    fn split(state: &Place) -> Option<(&str, &str)> {
+        state.region.as_deref()?.split_once('-')
+    }
+    let mut coded: HashMap<String, Vec<&Place>> = HashMap::new();
+    for state in states {
+        if let Some((_, code)) = split(state) {
+            coded.entry(code.to_uppercase()).or_default().push(state);
+        }
+    }
+    for &i in settlements {
+        let town = &places[i];
+        let Some(states) = town
+            .region
+            .as_ref()
+            .and_then(|r| coded.get(&r.to_uppercase()))
+        else {
+            continue;
+        };
+        match &town.country {
+            None => {
+                places[i].country = states
+                    .iter()
+                    .map(|state| (distance_km(town.lat, town.lon, state.lat, state.lon), state))
+                    .filter(|(km, _)| *km < STATE_REACH_KM)
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .and_then(|(_, state)| state.country.clone());
+            }
+            // A territory's state is its own country's and its parent's:
+            // US-PR is Puerto Rico's and the US's.
+            Some(country) => {
+                let ours = |state: &&Place| {
+                    state.country.as_ref() == Some(country)
+                        || split(state).is_some_and(|(parent, _)| parent == country)
+                };
+                if !states.iter().any(ours) {
+                    places[i].region = None;
+                }
+            }
+        }
+    }
+}
+
 /// Gives towns that still have no country their neighbours', in their
 /// region when one there has it. They are filled in rounds, each from
 /// towns that knew theirs before it, towns that know their region first,
@@ -986,27 +1035,7 @@ pub fn fill_in_towns(places: &mut [Place], states: &[Place]) {
     // side's (Rainy River, Ontario is nearest to shops in Minnesota). The
     // towns those fill lend in turn.
     lend_countries(places, &grid, &settlements);
-    let mut coded: HashMap<String, Vec<&Place>> = HashMap::new();
-    for state in states {
-        if let Some(code) = &state.region {
-            coded.entry(code.to_uppercase()).or_default().push(state);
-        }
-    }
-    for &i in &settlements {
-        let town = &places[i];
-        let Some(region) = town.region.as_ref().filter(|_| town.country.is_none()) else {
-            continue;
-        };
-        let country = coded
-            .get(&region.to_uppercase())
-            .into_iter()
-            .flatten()
-            .map(|state| (distance_km(town.lat, town.lon, state.lat, state.lon), state))
-            .filter(|(km, _)| *km < STATE_REACH_KM)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .and_then(|(_, state)| state.country.clone());
-        places[i].country = country;
-    }
+    countries_from_states(places, &settlements, states);
     lend_countries(places, &grid, &settlements);
     // The country most towns of each region are in.
     let mut countries: HashMap<&str, HashMap<String, u32>> = HashMap::new();
@@ -1510,8 +1539,20 @@ mod tests {
         assert_eq!(said(1), (Some("WA"), Some("AU")));
         assert_eq!(said(2), (Some("WA"), Some("US")));
         assert_eq!(said(4), (Some("WA"), Some("AU")));
-        assert_eq!(said(5).1, Some("CA"));
+        // Canada has no MN, so Rainy River keeps no region.
+        assert_eq!(said(5), (None, Some("CA")));
         assert_eq!(said(8), (Some("PR"), Some("PR")));
+        // A town whose addresses put Puerto Rico in the US keeps its state.
+        let mut places = vec![
+            at("Arecibo", "place=town", 18.47, -66.72),
+            Place {
+                country: Some("US".into()),
+                ..shop("PR", 18.471, -66.721)
+            },
+        ];
+        fill_in_towns(&mut places, &states);
+        assert_eq!(places[0].region.as_deref(), Some("PR"));
+        assert_eq!(places[0].country.as_deref(), Some("US"));
         // Without the states, no country is made up.
         let mut places = vec![
             at("Perth", "place=city", -31.95, 115.86),
