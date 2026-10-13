@@ -949,7 +949,10 @@ impl PlaceSearcher {
     /// The town (or else other place) `text` names: "denver",
     /// "portland maine", "paris, france", "the eiffel tower".
     pub fn locate(&self, text: &str, country: Option<&str>) -> Result<Option<Place>> {
-        Ok(self.resolve(text, country, None)?.selected().cloned())
+        Ok(self
+            .resolve_as_typed(text, country, None)?
+            .selected()
+            .cloned())
     }
 
     /// Resolves the name without allowing a default-country boost to
@@ -1064,6 +1067,7 @@ impl PlaceSearcher {
                 .cloned()
                 .collect();
             conflict |= !qualifier.is_empty() && !matching.is_empty() && candidates.is_empty();
+            self.prefer_as_typed(&name, &mut candidates);
             // A place that is no town, named alone, is somewhere to search
             // around only when Wikidata knows it: "planets in the solar
             // system" is not about an office called Solar System, nor
@@ -1131,18 +1135,30 @@ impl PlaceSearcher {
                 _ => 2,
             };
             let dfa = crate::spell::builder(slips).build_dfa(&key);
-            let found: Vec<Place> = cities
+            let found: Vec<(u8, &Place)> = cities
                 .iter()
-                .filter(|(keys, place)| {
-                    keys.iter().any(|key| {
-                        matches!(dfa.eval(key), levenshtein_automata::Distance::Exact(_))
-                    }) && (qualifier.is_empty() || place_is_in(place, &qualifier))
+                .filter(|(_, place)| {
+                    (qualifier.is_empty() || place_is_in(place, &qualifier))
                         && required_country.is_none_or(|country| country_matches(place, country))
                 })
-                .map(|(_, place)| place.clone())
+                .filter_map(|(keys, place)| {
+                    let slips = keys
+                        .iter()
+                        .filter_map(|key| match dfa.eval(key) {
+                            levenshtein_automata::Distance::Exact(slips) => Some(slips),
+                            levenshtein_automata::Distance::AtLeast(_) => None,
+                        })
+                        .min()?;
+                    Some((slips, place))
+                })
                 .collect();
-            if !found.is_empty() {
-                return Ok(found);
+            // The fewest slips first, then the biggest city.
+            if let Some(fewest) = found.iter().map(|(slips, _)| *slips).min() {
+                return Ok(found
+                    .into_iter()
+                    .filter(|(slips, _)| *slips == fewest)
+                    .map(|(_, place)| place.clone())
+                    .collect());
             }
         }
         Ok(Vec::new())
@@ -1233,10 +1249,31 @@ impl PlaceSearcher {
         Ok(places)
     }
 
-    /// Places whose name or other name is `name`, its [`SHORT_WORDS`]
-    /// written either way, and with or without a "the" before it: a
-    /// search leaves out the "the" of "hotels in the hague", and "bronx ny"
-    /// is The Bronx.
+    /// Keeps of `places` found by `name` those named it as typed, and the
+    /// rest only when clearly bigger: "st louis" is St. Louis, Missouri,
+    /// not Saint-Louis, Senegal, but "st paul" is Saint Paul, Minnesota,
+    /// not St. Paul, Alberta.
+    fn prefer_as_typed(&self, name: &str, places: &mut Vec<Place>) {
+        let typed = self.typed_keys(name);
+        let as_typed = |place: &Place| {
+            std::iter::once(&place.name)
+                .chain(&place.aliases)
+                .filter_map(|name| analysis::tokens(&self.joined, name).pop())
+                .any(|key| typed.contains(&key))
+        };
+        let best = places
+            .iter()
+            .filter(|place| as_typed(place))
+            .map(|place| town_score(place, None))
+            .fold(f64::NEG_INFINITY, f64::max);
+        places.retain(|place| {
+            as_typed(place) || town_score(place, None) >= best + DISTINCT_LOCATION_TIERS
+        });
+    }
+
+    /// Places whose name or other name is `name` ([`Self::typed_keys`]),
+    /// or `name` with its [`SHORT_WORDS`] written the other way: "st paul"
+    /// is Saint Paul, and "fort worth" is Ft. Worth.
     fn key_query(&self, name: &str) -> Option<BooleanQuery> {
         let normalized = normalize_text(name);
         let swapped: Vec<&str> = normalized
@@ -1252,17 +1289,10 @@ impl PlaceSearcher {
                     .unwrap_or(word)
             })
             .collect();
-        let mut keys: Vec<String> = Vec::new();
-        for spelling in [normalized.clone(), swapped.join(" ")] {
-            let other = match spelling.strip_prefix("the ") {
-                Some(rest) => rest.to_string(),
-                None => format!("the {spelling}"),
-            };
-            for text in [spelling, other] {
-                let key = analysis::tokens(&self.joined, &text).pop();
-                if let Some(key) = key.filter(|key| !keys.contains(key)) {
-                    keys.push(key);
-                }
+        let mut keys = self.typed_keys(name);
+        for key in self.typed_keys(&swapped.join(" ")) {
+            if !keys.contains(&key) {
+                keys.push(key);
             }
         }
         let terms: Vec<(Occur, Box<dyn Query>)> = keys
@@ -1274,6 +1304,28 @@ impl PlaceSearcher {
             })
             .collect();
         (!terms.is_empty()).then(|| BooleanQuery::new(terms))
+    }
+
+    /// The keys of `name` with and without a "the" before it: a search
+    /// leaves out the "the" of "hotels in the hague", and "bronx ny" is The
+    /// Bronx.
+    fn typed_keys(&self, name: &str) -> Vec<String> {
+        let name = normalize_text(name);
+        if name.is_empty() {
+            return Vec::new();
+        }
+        let other = match name.strip_prefix("the ") {
+            Some(rest) => rest.to_string(),
+            None => format!("the {name}"),
+        };
+        let mut keys: Vec<String> = Vec::new();
+        for text in [name, other] {
+            let key = analysis::tokens(&self.joined, &text).pop();
+            if let Some(key) = key.filter(|key| !keys.contains(key)) {
+                keys.push(key);
+            }
+        }
+        keys
     }
 
     /// Places in the cells within `km` of `center`.
@@ -2320,10 +2372,16 @@ mod tests {
             city("Saint Augustine", 15_000, "FL", "US", 29.89, -81.31),
             at("St. Augustine", "place=village", 0.29, 32.59),
             town("Sault Ste. Marie", 72_000, "ON", "CA", 46.52, -84.35),
+            Place {
+                aliases: vec!["St. Louis".into()],
+                ..city("Saint Louis", 300_000, "MO", "US", 38.63, -90.20)
+            },
+            city("Saint-Louis", 260_000, "SL", "SN", 16.03, -16.49),
         ]);
         let (_dir, searcher) = index(fixtures);
         let found = |text: &str| {
-            let place = searcher.locate(text, Some("US")).unwrap().unwrap();
+            let place = searcher.locate(text, Some("US")).unwrap();
+            let place = place.unwrap_or_else(|| panic!("{text}: nowhere"));
             (place.name, place.region.unwrap_or_default())
         };
         let said = |name: &str, region: &str| (name.to_string(), region.to_string());
@@ -2334,6 +2392,8 @@ mod tests {
         assert_eq!(found("mt shasta"), said("Mount Shasta", "CA"));
         assert_eq!(found("st augustine"), said("Saint Augustine", "FL"));
         assert_eq!(found("sault sainte marie"), said("Sault Ste. Marie", "ON"));
+        // As typed first: Senegal's Saint-Louis is no bigger.
+        assert_eq!(found("st louis"), said("Saint Louis", "MO"));
     }
 
     #[test]
@@ -2405,10 +2465,12 @@ mod tests {
     }
 
     #[test]
-    fn a_big_city_is_found_by_its_name_typed_with_a_slip() {
+    fn a_big_city_typed_with_a_slip_is_offered() {
         let mut fixtures = places();
         fixtures.extend([
             city("Cincinnati", 309_000, "OH", "US", 39.10, -84.51),
+            city("Manchester", 115_000, "NH", "US", 42.99, -71.46),
+            city("Mancheston", 2_000_000, "TX", "US", 30.0, -95.0),
             city("Tucson", 540_000, "AZ", "US", 32.22, -110.97),
             city("Gorham", 17_000, "ME", "US", 43.68, -70.44),
             Place {
@@ -2437,6 +2499,8 @@ mod tests {
         assert_eq!(offered("hotels in cincinatti"), ["Cincinnati"]);
         assert_eq!(offered("hotels in cincinatti ohio"), ["Cincinnati"]);
         assert_eq!(offered("hotels near tuscon az"), ["Tucson"]);
+        // The fewest slips first, however big the city two slips off.
+        assert_eq!(offered("pizza in manchestar"), ["Manchester"]);
         // Nor a small city, a town or a short name, nor in a guess.
         for town in ["gorhams", "gothas", "gotham", "cincinatti tx"] {
             assert!(offered(&format!("pizza in {town}")).is_empty(), "{town}");
