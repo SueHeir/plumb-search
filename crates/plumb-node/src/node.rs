@@ -2178,7 +2178,7 @@ impl SearchBackend for Inner {
         home: Option<&str>,
         country: Option<&str>,
     ) -> Option<plumb_index::places::PlaceResults> {
-        places::search(self, query, home, country)
+        self.unless_denied_places(places::search(self, query, home, country))
     }
 
     fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
