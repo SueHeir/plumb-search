@@ -39,17 +39,6 @@ pub(crate) enum Hint {
     Any,
 }
 
-/// Words before a name that ask where to see a film or show, or how
-/// long one is.
-const SCREEN_LEADS: &[&str] = &[
-    "where to watch ",
-    "where can i watch ",
-    "where to stream ",
-    "where can i stream ",
-    "how many seasons of ",
-    "how many episodes of ",
-];
-
 /// What a song is called in its title or description ([`Page::is_work_of`]).
 const SONG: &[&str] = &["song", "single"];
 
@@ -62,6 +51,21 @@ const SCREEN: &[&str] = &[
     "sitcom",
     "show",
     "game",
+];
+
+/// Words before a name that ask who sang a song, where to see a film or
+/// show, or how long one is. Longer leads come first.
+const WORK_LEADS: &[(&str, &[&str])] = &[
+    ("who sings the song ", SONG),
+    ("who sang the song ", SONG),
+    ("who sings ", SONG),
+    ("who sang ", SONG),
+    ("where to watch ", SCREEN),
+    ("where can i watch ", SCREEN),
+    ("where to stream ", SCREEN),
+    ("where can i stream ", SCREEN),
+    ("how many seasons of ", SCREEN),
+    ("how many episodes of ", SCREEN),
 ];
 
 /// Words before a name that ask about it. "What's" is read as "what is";
@@ -230,9 +234,12 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     {
         name = rest;
         hint = Some(Hint::Any);
-    } else if let Some(rest) = SCREEN_LEADS.iter().find_map(|lead| name.strip_prefix(lead)) {
+    } else if let Some((rest, kinds)) = WORK_LEADS
+        .iter()
+        .find_map(|(lead, kinds)| Some((name.strip_prefix(lead)?, *kinds)))
+    {
         name = rest;
-        hint = Some(Hint::Work(SCREEN));
+        hint = Some(Hint::Work(kinds));
     }
     if let Some((rest, tail_hint)) = HINT_TAILS
         .iter()

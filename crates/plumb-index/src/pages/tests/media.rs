@@ -441,6 +441,12 @@ fn a_song_or_film_asked_about_is_named() {
         page("Power chord", 3_000, &["Power chords"]),
         page("Code review", 2_000, &[]),
         described("Code (film)", "2016 film", 100),
+        described("Bohemian Rhapsody", "1975 single by Queen", 20_000),
+        described(
+            "Bohemian Rhapsody (film)",
+            "2018 film by Bryan Singer",
+            40_000,
+        ),
     ]);
     let named = |q: &str| -> Vec<String> {
         let hits = s.search(q, 5).unwrap();
@@ -454,6 +460,9 @@ fn a_song_or_film_asked_about_is_named() {
     assert_eq!(named("titanic trailer"), ["Titanic (1997 film)"]);
     assert_eq!(named("where to watch titanic"), ["Titanic (1997 film)"]);
     assert_eq!(named("titanic actors"), ["Titanic (1997 film)"]);
+    assert_eq!(named("who sang bohemian rhapsody"), ["Bohemian Rhapsody"]);
+    let first = &s.search("who sings the song bohemian rhapsody", 5).unwrap()[0];
+    assert_eq!(first.page.title, "Bohemian Rhapsody");
     // Not when a page is called the whole query.
     assert_eq!(named("power chords"), ["Power chord"]);
     assert_eq!(named("code review"), ["Code review"]);
