@@ -14,11 +14,12 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 
 use super::building::schema;
 use super::page::is_item_id;
+use super::placing::options_allow;
 use super::scoring::truncate_keeping_inner_pages;
 use super::{
-    Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
-    KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET, POPULARITY_SCALE,
-    POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
+    Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, PlacedPage, ALIAS_MATCH,
+    CANDIDATES, FILMS_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO,
+    PAPERS_SET, POPULARITY_SCALE, POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
 };
 use crate::analysis;
 
@@ -202,6 +203,10 @@ pub const KNOWN_SONG_MARGIN: u64 = 5;
 
 /// How many of the first sites [`PageSearcher::note_demand`] notes.
 pub const DEMAND_NOTED: usize = 3;
+
+/// Pages looked at for one a suggested spelling names
+/// ([`PageSearcher::list_suggested_page`]).
+const SUGGESTED_PAGES: usize = 10;
 
 impl PageSearcher {
     pub fn open(dir: &Path) -> Result<Self> {
@@ -467,6 +472,48 @@ impl PageSearcher {
             site: None,
             applied: false,
         }))
+    }
+
+    /// Lists second among `placed` the page `spelling` names, as the site a
+    /// suggestion names is ([`crate::suggested_site_second`]): "isaac
+    /// newtonn" lists Isaac Newton under what has the letters typed rather
+    /// than a click away. Not when the results are for the spelling
+    /// already, the page is listed, or `options` leave it out. It counts
+    /// as named by the spelling, not the query, so it gets no info box.
+    pub fn list_suggested_page(
+        &self,
+        spelling: &crate::Spelling,
+        options: &crate::SearchOptions,
+        placed: &mut Vec<PlacedPage>,
+    ) -> Result<()> {
+        if spelling.applied {
+            return Ok(());
+        }
+        let found = self.search(&spelling.query, SUGGESTED_PAGES)?;
+        let Some(mut hit) = found.into_iter().find(|hit| {
+            hit.named
+                && options_allow(options, &hit.page)
+                && crate::health::page_allowed(&spelling.query, &hit.page)
+        }) else {
+            return Ok(());
+        };
+        if placed.iter().any(|p| p.hit.page.url == hit.page.url) {
+            return Ok(());
+        }
+        hit.named = false;
+        let at = placed
+            .iter()
+            .position(|p| p.under.is_none() && p.at >= 1)
+            .unwrap_or(placed.len());
+        placed.insert(
+            at,
+            PlacedPage {
+                hit,
+                under: None,
+                at: 1,
+            },
+        );
+        Ok(())
     }
 
     /// Named entity candidates before site blending or learned placement.

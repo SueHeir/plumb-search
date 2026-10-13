@@ -147,8 +147,11 @@ impl FrozenBackend {
                 &mut results.pages,
             );
         }
-        if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.as_deref()) {
-            plumb_index::suggested_site_second(&mut results.hits, site);
+        if let Some(spelling) = &results.spelling {
+            if let Some(site) = &spelling.site {
+                plumb_index::suggested_site_second(&mut results.hits, site);
+            }
+            pages.list_suggested_page(spelling, options, &mut results.pages)?;
         }
         pages.title_untitled(&mut results.hits)?;
         Ok(())

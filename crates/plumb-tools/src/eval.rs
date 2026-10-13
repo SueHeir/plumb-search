@@ -845,6 +845,9 @@ fn evaluate(
                         &mut placed,
                     );
                 }
+                if let Some(spelling) = &results.spelling {
+                    pages.list_suggested_page(spelling, &options, &mut placed)?;
+                }
                 match &route {
                     Some(route) => {
                         plumb_node::sources::lead_with(&mut lifted, &mut placed, route, |domain| {
