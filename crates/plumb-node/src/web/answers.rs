@@ -615,24 +615,6 @@ pub(crate) fn resolve_entity<'a>(
     if candidates.is_empty() {
         return EntityResolution::Unresolved;
     }
-    let legal_name = |title: &str| {
-        let title = key(title);
-        for suffix in [
-            ", inc.",
-            " inc.",
-            ", inc",
-            " inc",
-            " corporation",
-            " corp.",
-            " ltd.",
-            " limited",
-        ] {
-            if let Some(bare) = title.strip_suffix(suffix) {
-                return bare.to_string();
-            }
-        }
-        title
-    };
     if kinds.is_some_and(|kinds| {
         kinds
             .iter()
@@ -653,7 +635,7 @@ pub(crate) fn resolve_entity<'a>(
             })
             .collect();
         if named.len() > 1 {
-            return EntityResolution::Ambiguous(named.iter().map(|hit| &hit.page).collect());
+            return main_sense(&subject, &named);
         }
     }
     let exact: Vec<_> = candidates
@@ -684,7 +666,45 @@ pub(crate) fn resolve_entity<'a>(
     match candidates.as_slice() {
         [] => EntityResolution::Unresolved,
         [hit] => EntityResolution::Resolved(&hit.page),
-        _ => EntityResolution::Ambiguous(candidates.iter().map(|hit| &hit.page).collect()),
+        _ => main_sense(&subject, &candidates),
+    }
+}
+
+/// The bare name of a company's legal one ("Netflix, Inc."), lowercased.
+fn legal_name(title: &str) -> String {
+    let title = plumb_core::collapse_whitespace(title).to_lowercase();
+    for suffix in [
+        ", inc.",
+        " inc.",
+        ", inc",
+        " inc",
+        " corporation",
+        " corp.",
+        " ltd.",
+        " limited",
+    ] {
+        if let Some(bare) = title.strip_suffix(suffix) {
+            return bare.to_string();
+        }
+    }
+    title
+}
+
+/// Settles a tie between pages named like `subject` (lowercased): the one
+/// Wikipedia article known by the name in full, by its title, its legal
+/// name or a redirect ("Beethoven" to Ludwig van Beethoven), is Wikipedia's
+/// main sense of it, so items with no article and pages named so only
+/// before a qualifier ("Beethoven (film)") give way to it. Two such
+/// articles ("Apple" and "Apple Inc.") leave the question open.
+fn main_sense<'a>(subject: &str, tied: &[&'a plumb_index::pages::PageHit]) -> EntityResolution<'a> {
+    let mut own = tied.iter().filter(|hit| {
+        let title = &hit.page.title;
+        hit.page.is_article()
+            && (legal_name(title) == subject || hit.named && !title.trim_end().ends_with(')'))
+    });
+    match (own.next(), own.next()) {
+        (Some(hit), None) => EntityResolution::Resolved(&hit.page),
+        _ => EntityResolution::Ambiguous(tied.iter().map(|hit| &hit.page).collect()),
     }
 }
 
@@ -1187,6 +1207,53 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn facts_of_the_main_sense_of_a_name_despite_namesakes() {
+        use plumb_core::facts::{fact_asked, FactKind::*};
+        let entity = |title: &str, item: &str, facts: &[(plumb_core::facts::FactKind, &str)]| {
+            let mut hit = with_facts(article(title, "", None), facts);
+            hit.page.item = Some(item.into());
+            hit
+        };
+        let ask = |q: &str, candidates: &[PageHit]| {
+            let asked = fact_asked(q).unwrap();
+            match resolve_entity(&asked.subject, candidates, Some(&asked.kinds)) {
+                EntityResolution::Resolved(page) => fact_answer_from_page(&asked, page, 0),
+                _ => None,
+            }
+        };
+        // Named by a redirect ("Beethoven"), the person comes before the
+        // pages named so only before a qualifier.
+        let beethoven = [
+            entity("Beethoven (film)", "Q754892", &[]),
+            entity("Ludwig van Beethoven", "Q255", &[(Born, "1770-12-17")]),
+            entity("Beethoven (TV series)", "Q2566764", &[]),
+        ];
+        let born = ask("when was beethoven born", &beethoven).unwrap();
+        assert_eq!(born.answer, "December 17, 1770");
+        // A founding question too: the organization, not the band.
+        let un = [
+            entity("United Nations (band)", "Q7888317", &[(Founded, "2005")]),
+            entity("United Nations", "Q1065", &[(Founded, "1945-10-24")]),
+        ];
+        let founded = ask("when was the united nations founded", &un).unwrap();
+        assert_eq!(founded.answer, "October 24, 1945");
+        // An item with no article gives way to the article of its name.
+        let mut no_article = entity("Gold", "Q910023", &[]);
+        no_article.page.set = plumb_index::pages::WIKIDATA_SET.into();
+        let gold = [no_article, entity("Gold", "Q897", &[(AtomicNumber, "79")])];
+        assert_eq!(ask("atomic number of gold", &gold).unwrap().answer, "79");
+        // Named only before their qualifiers, namesakes stay a question.
+        let qualified = [
+            entity("Einstein (American TV series)", "Q910020", &[]),
+            entity("Einstein (film)", "Q910022", &[]),
+        ];
+        assert!(matches!(
+            resolve_entity("einstein", &qualified, None),
+            EntityResolution::Ambiguous(_)
+        ));
     }
 
     #[test]
