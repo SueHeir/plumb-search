@@ -1189,7 +1189,8 @@ pub fn domain_label(domain: &str) -> String {
 
 /// Normalizes text for matching: lowercase, letters and digits only, every
 /// other run of characters becomes one space. Apostrophes and combining
-/// marks are dropped (`McDonald's` -> `mcdonalds`, Thai `ข่าว` -> `ขาว`)
+/// marks are dropped (`McDonald's` -> `mcdonalds`, Thai `ข่าว` -> `ขาว`),
+/// letters Arabic is written with either way become one ([`matched_letter`])
 /// and runs of single-character tokens are joined, so `U.S. Bank` ->
 /// `us bank` and `A.T.M.` -> `atm`.
 pub fn normalize_text(text: &str) -> String {
@@ -1200,7 +1201,11 @@ pub fn normalize_text(text: &str) -> String {
         if ch.is_alphanumeric() {
             // Only letters and digits of the lowercase form, so a second
             // pass changes nothing: `İ` lowercases to `i` plus a combining dot.
-            current.extend(ch.to_lowercase().filter(|c| c.is_alphanumeric()));
+            current.extend(
+                ch.to_lowercase()
+                    .filter(|c| c.is_alphanumeric())
+                    .filter_map(matched_letter),
+            );
         } else if matches!(ch, '\'' | '\u{2019}' | '\u{02BC}') || ch.is_mark() {
             // Apostrophes join the two halves of a word, and a mark is part
             // of its letter: a Thai tone mark or the virama of Hindi's `न्द`
@@ -1229,6 +1234,21 @@ pub fn normalize_text(text: &str) -> String {
         }
     }
     out.join(" ")
+}
+
+/// The letter a word is matched by. Arabic is often typed without the
+/// hamza or madda over an alef (`اخبار` for `أخبار`), with a dotless yeh
+/// for a final yeh (`مصرى` for `مصري`), and with Persian yeh and kaf for
+/// the Arabic ones; each pair is matched as one. The tatweel only
+/// stretches a word (`اخـبـار`) and is no letter of it.
+fn matched_letter(letter: char) -> Option<char> {
+    match letter {
+        'أ' | 'إ' | 'آ' | 'ٱ' => Some('ا'),
+        'ى' | 'ی' => Some('ي'),
+        'ک' => Some('ك'),
+        'ـ' => None,
+        _ => Some(letter),
+    }
 }
 
 /// [`normalize_text`] without the spaces: `U.S. Bank` -> `usbank`. Lets a
@@ -1812,7 +1832,22 @@ mod tests {
         assert_eq!(normalize_text("รวมข่าว บันเทิง"), "รวมขาว บันเทิง");
         assert_eq!(normalize_text("हिन्दी समाचार"), "हिनदी समाचार");
         assert_eq!(normalize_text("cafe\u{301}s"), "cafes");
-        for text in ["İstanbul", "Ǆemal", "ﬁnance", "Straße", "ΣΊΣΥΦΟΣ", "İİ.İ"] {
+        // Arabic written with or without hamza, dotless or Persian yeh,
+        // stretched with tatweel.
+        assert_eq!(normalize_text("أخبار الأهلي"), "اخبار الاهلي");
+        assert_eq!(normalize_text("إعلان آخر"), normalize_text("اعلان اخر"));
+        assert_eq!(normalize_text("مصرى"), normalize_text("مصري"));
+        assert_eq!(normalize_text("ایران کتاب"), "ايران كتاب");
+        assert_eq!(normalize_text("اخـبـار"), "اخبار");
+        for text in [
+            "İstanbul",
+            "Ǆemal",
+            "ﬁnance",
+            "Straße",
+            "ΣΊΣΥΦΟΣ",
+            "İİ.İ",
+            "أخبار",
+        ] {
             let once = normalize_text(text);
             assert_eq!(normalize_text(&once), once, "{text:?}");
         }

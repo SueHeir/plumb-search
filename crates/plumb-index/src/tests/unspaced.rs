@@ -1,4 +1,5 @@
-//! Words of scripts written without spaces: Japanese, Chinese and Thai.
+//! Words of other scripts: Japanese, Chinese and Thai, written without
+//! spaces, and Arabic, written with or without some of its marks.
 
 use super::*;
 
@@ -70,4 +71,20 @@ fn a_word_is_found_inside_a_title_without_spaces() {
     // 東京タワー, and 予報天気 has the pieces' characters but not them.
     assert!(!found(&searcher, "東京タワー").contains(&"dome.example".to_string()));
     assert!(found(&searcher, "予報天気").is_empty());
+}
+
+#[test]
+fn arabic_is_found_however_its_alefs_and_yehs_are_written() {
+    let site_titled =
+        |domain: &str, title: &str| site(domain, Some(title), None, &[], &[], ranked(900, 5_000));
+    let (_dir, searcher) = build(&[
+        site_titled("ahly.example", "أخبار النادي الأهلي"),
+        site_titled("masry.example", "مصرى سات"),
+    ]);
+    for query in ["أخبار", "اخبار", "الاهلي", "الأهلي", "اخـبـار"] {
+        assert_eq!(found(&searcher, query), ["ahly.example"], "{query}");
+    }
+    for query in ["مصري", "مصرى"] {
+        assert_eq!(found(&searcher, query), ["masry.example"], "{query}");
+    }
 }
