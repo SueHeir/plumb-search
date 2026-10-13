@@ -366,7 +366,7 @@ pub(crate) fn sites_to_embed(
 /// record at a time (its journal folded in first, see [`crate::outline`])
 /// rather than holding every record: drops the vectors of sites not in the
 /// file, or with no text there (a homepage now read as a placeholder,
-/// [`plumb_core::is_bot_check_page`]), and returns the best `max` sites to
+/// [`plumb_core::is_stand_in_homepage`]), and returns the best `max` sites to
 /// embed, best first, and whether
 /// more wait for a vector. The text of each site to embed is held until it
 /// is embedded, so a node takes them `max` at a time.
@@ -678,8 +678,10 @@ mod tests {
         plumb_embed::write_test_model(&model).unwrap();
         let embedder = Embedder::load(&model).unwrap();
         let vectors = RwLock::new(Vectors::new(embedder.id(), embedder.dim()));
-        let embed = |title: &str| {
-            let records = [record("parked.example", title)].into_iter().collect();
+        let embed = |text: &str| {
+            let mut parked = record("parked.example", text);
+            parked.body_text = Some(text.into());
+            let records = [parked].into_iter().collect();
             embed_records(
                 &embedder,
                 &vectors,

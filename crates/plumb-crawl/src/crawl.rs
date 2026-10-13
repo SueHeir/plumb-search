@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use futures::stream::{self, FuturesUnordered, StreamExt};
-use plumb_core::{is_bot_check_page, now_unix, registrable_domain};
+use plumb_core::{is_stand_in_homepage, now_unix, registrable_domain};
 use reqwest::header::{
     ACCEPT, CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION,
 };
@@ -891,7 +891,7 @@ impl<'a> Visit<'a> {
         .await;
         match parsed {
             Ok(meta)
-                if is_bot_check_page(
+                if is_stand_in_homepage(
                     domain,
                     meta.title.as_deref(),
                     meta.description.as_deref(),

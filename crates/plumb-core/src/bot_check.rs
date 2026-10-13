@@ -226,9 +226,6 @@ pub fn is_bot_check_page(
             return true;
         }
     }
-    if only_greets(all()) {
-        return true;
-    }
     let stand_in = |part: &str| STAND_IN_TITLE_PARTS.contains(&normalize_text(part).as_str());
     if title.is_some_and(|title| {
         title
@@ -246,9 +243,39 @@ pub fn is_bot_check_page(
     })
 }
 
-/// Whether `texts`, all together, greet and say nothing else
-/// ([`GREETING_WORDS`]). "World" alone is not a greeting.
-fn only_greets<'a>(texts: impl Iterator<Item = &'a str>) -> bool {
+/// Whether a crawled homepage stands in for the site: a bot check or
+/// placeholder ([`is_bot_check_page`]), or a page that only greets
+/// ([`only_greets`]). A page someone asks to read is what it is, so the
+/// page reader asks [`is_bot_check_page`] alone.
+pub fn is_stand_in_homepage(
+    domain: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    headings: &[String],
+    body_text: Option<&str>,
+) -> bool {
+    is_bot_check_page(domain, title, description, headings, body_text)
+        || only_greets(title, description, headings, body_text)
+}
+
+/// Whether a homepage's whole text greets and says nothing else
+/// ([`GREETING_WORDS`]). Judged only with the page's text to hand: a crawl
+/// passed on as facts has its title alone, and a band's site titled
+/// "Hello" says more below it. "World" alone is not a greeting.
+fn only_greets(
+    title: Option<&str>,
+    description: Option<&str>,
+    headings: &[String],
+    body_text: Option<&str>,
+) -> bool {
+    if headings.is_empty() && body_text.is_none_or(|text| text.trim().is_empty()) {
+        return false;
+    }
+    let texts = title
+        .into_iter()
+        .chain(description)
+        .chain(headings.iter().map(String::as_str))
+        .chain(body_text);
     let mut greets = false;
     for text in texts {
         for word in normalize_text(text).split_whitespace() {
@@ -340,8 +367,8 @@ fn shows_the_user_agent(text: &str) -> bool {
 }
 
 impl SiteRecord {
-    /// Whether the record's page fields came from a bot check
-    /// ([`is_bot_check_page`]) rather than the site's homepage.
+    /// Whether the record's page fields came from a bot check or another
+    /// page standing in for the site's homepage ([`is_stand_in_homepage`]).
     ///
     /// So is a homepage read on another site's host: prevention.nih.gov's
     /// "NIH Office of Disease Prevention" kept for nih.gov, or
@@ -362,7 +389,7 @@ impl SiteRecord {
                 return true;
             }
         }
-        is_bot_check_page(
+        is_stand_in_homepage(
             &self.domain,
             self.title.as_deref(),
             self.description.as_deref(),
@@ -596,20 +623,28 @@ mod tests {
         }
         // Parked pages that only greet, whatever field the greeting is in.
         let page = |title: Option<&str>, description: Option<&str>, body: Option<&str>| {
-            is_bot_check_page("example.com", title, description, &[], body)
+            is_stand_in_homepage("example.com", title, description, &[], body)
         };
-        assert!(page(Some("Hello!"), None, None));
         assert!(page(None, None, Some("hello")));
         assert!(page(None, None, Some("hello hello")));
         assert!(page(Some(":: HELLO ::"), None, Some(":: HELLO ::")));
-        assert!(page(Some("Hello!"), Some("Hello!"), None));
-        assert!(page(Some("Hello World"), None, None));
+        assert!(page(Some("Hello!"), Some("Hello!"), Some("Hello")));
+        assert!(page(Some("Hello World"), None, Some("Hello, world!")));
         // A greeting with anything more is a homepage.
-        assert!(!page(Some("Hello"), Some("English band"), None));
+        assert!(!page(Some("Hello"), Some("English band"), Some("Hello")));
         assert!(!page(Some("Hello"), None, Some("Hello, we sell bikes")));
-        assert!(!page(Some("HELLO! US Edition - Latest news"), None, None));
-        assert!(!page(Some("Hello Kitty"), None, None));
-        assert!(!page(Some("World"), None, None));
+        assert!(!page(Some("Hello Kitty"), None, Some("Hello")));
+        assert!(!page(None, None, Some("World")));
+        // A title alone, as a crawl passed on as facts has it, is not enough.
+        assert!(!page(Some("Hello!"), None, None));
+        // Nor is it a bot check for a page someone asks to read.
+        assert!(!is_bot_check_page(
+            "example.com",
+            Some("Hello World"),
+            None,
+            &[],
+            Some("Hello, world!")
+        ));
     }
 
     #[test]

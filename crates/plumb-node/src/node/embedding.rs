@@ -138,6 +138,7 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             info!("search by meaning: {} site vectors loaded", vectors.len());
             let meaning = Arc::new(MeaningIndex::new(embedder, vectors));
             inner.meaning.set(Arc::clone(&meaning));
+            inner.set_meaning_work(None);
             meaning
         }
     };
