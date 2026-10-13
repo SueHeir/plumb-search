@@ -30,6 +30,15 @@ pub(crate) fn subtitle(title: &str) -> Option<&str> {
     (crate::analysis::tokens(&crate::analysis::stemmed_analyzer(), rest).len() >= 2).then_some(rest)
 }
 
+/// A title as people type it without the "'s" of a name before another
+/// word: "Ohm law" for "Ohm's law", "Halley Comet" for "Halley's Comet".
+/// `None` when it has no such word. A title that ends in one keeps it:
+/// "mcdonald" is a surname as much as McDonald's.
+pub(crate) fn without_possessive(title: &str) -> Option<String> {
+    let bare = title.replace("'s ", " ").replace("’s ", " ");
+    (bare != title).then_some(bare)
+}
+
 impl PageSearcher {
     /// Gives the sites among `sites` that have no title the title of the
     /// most read Wikipedia article about what each is the official website

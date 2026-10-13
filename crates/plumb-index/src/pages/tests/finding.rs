@@ -39,6 +39,35 @@ fn plurals_name_the_article_titled_in_the_singular() {
 }
 
 #[test]
+fn a_title_with_a_possessive_is_named_without_it() {
+    let (_dir, s) = searcher(&[
+        page("Ohm's law", 7_111, &[]),
+        page("Ohm's acoustic law", 81, &[]),
+        page("Halley's Comet", 13_861, &[]),
+        page("Maslow's hierarchy of needs", 19_592, &[]),
+        page("McDonald's", 50_000, &[]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        s.search(q, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("ohm law"), ["Ohm's law"]);
+    assert_eq!(named("halley comet"), ["Halley's Comet"]);
+    assert_eq!(
+        named("maslow hierarchy of needs"),
+        ["Maslow's hierarchy of needs"]
+    );
+    assert_eq!(named("ohm's law"), ["Ohm's law"]);
+    // A name is not a title that ends in it: "mcdonald" is a surname too.
+    assert!(named("mcdonald").is_empty());
+    assert!(named("ohm").is_empty());
+}
+
+#[test]
 fn whole_titles_win_then_popularity() {
     let (_dir, s) = searcher(&[
         page("Marie Curie", 80_000, &["Madame Curie"]),

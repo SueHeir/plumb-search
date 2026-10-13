@@ -990,6 +990,13 @@ impl PageSearcher {
         {
             return (ALIAS_MATCH, true);
         }
+        // "ohm law" is Ohm's law, as its redirect would say if it had one.
+        if page.is_article()
+            && super::sites::without_possessive(base_title(&page.title))
+                .is_some_and(|bare| key(&bare) == joined)
+        {
+            return (ALIAS_MATCH, true);
+        }
         let mut best = if page.names.iter().any(|name| key(name) == joined) {
             OTHER_NAME_MATCH
         } else {
