@@ -55,6 +55,7 @@ const CHECK_TITLES: &[&str] = &[
     "you have been blocked",
     "not found",
     "page not found",
+    "checking",
 ];
 
 /// Title parts, after [`normalize_text`], of a page standing in for the
@@ -81,8 +82,12 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
     "system down",
     "temporarily unavailable",
     "under maintenance",
+    // Canva's answer to a browser it does not know: "Unsupported client –
+    // Canva" on canva.com.
+    "unsupported client",
     "verifica tu identidad",
     "verify your identity",
+    "website suspended",
     "website unavailable",
 ];
 
@@ -129,17 +134,21 @@ const GREETING_WORDS: &[&str] = &["hello", "hi", "hey", "hallo", "hola", "welcom
 /// What a page title is split at into parts for [`STAND_IN_TITLE_PARTS`].
 const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»', '«', '/', '\\'];
 
-/// Title beginnings, after [`normalize_text`], that only a bot check has
-/// ("Just a moment...", "Checking your browser before accessing example.com",
-/// "Bot Verification | Example Council").
+/// Title beginnings, after [`normalize_text`], that only a bot check or a
+/// page standing in for the homepage has ("Just a moment...", "Checking
+/// your browser before accessing example.com", "Bot Verification | Example
+/// Council", "Redirecting Request. Please wait.", a defacer's "Hacked By
+/// …").
 const CHECK_TITLE_STARTS: &[&str] = &[
     "attention required",
     "bot verification",
     "checking your browser",
+    "hacked by",
     "human verification",
     "just a moment",
     "one moment please",
     "please wait",
+    "redirecting request",
     "security check",
 ];
 
@@ -503,6 +512,14 @@ mod tests {
             ("example.com", "503 Service Unavailable"),
             ("example.com", "Error"),
             ("amazon.com.au", "Server Busy"),
+            ("canva.com", "Unsupported client – Canva"),
+            ("oilpatchsurplus.com", "Website Suspended"),
+            ("grsaccess.com", "Redirecting Request. Please wait."),
+            ("kireie.com", "Checking..."),
+            (
+                "the-brooklyn-star.com",
+                "Hacked By Peyman Siyahi & M@raz Ali",
+            ),
             ("labubu.st", "Domain Parked"),
             (
                 "charlotterampling.net",
@@ -531,6 +548,9 @@ mod tests {
             "Downdetector",
             "Errors in Medicine Journal",
             "Not Found Records",
+            "Checking Accounts | Example Bank",
+            "Hacked: a podcast about hackers",
+            "Website suspended for a week: what we learned",
         ] {
             assert!(!check("example.com", title), "{title}");
         }
