@@ -285,9 +285,27 @@ const TITLE_STOP_WORDS: &[&str] = &[
 /// Values and company culture"). A big site's news, press releases and reviews
 /// share words with all sorts of searches: "seven summits" is not a
 /// leadership summit at jnj.com, nor "mount everest" a film review at
-/// ign.com. Pages of other sets always may.
+/// ign.com. A tag archive is listed only on one of the best sites, named
+/// or not. Pages of other sets always may.
 pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
-    if (hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET) || hit.named {
+    if hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET {
+        return true;
+    }
+    let domain = registrable_domain(&hit.page.url);
+    let on_best_site = || {
+        domain.is_some()
+            && sites
+                .iter()
+                .take(SUBPAGE_SITES)
+                .any(|site| registrable_domain(&site.domain) == domain)
+    };
+    // A site's list of its posts with one tag is titled just the tag, and
+    // says nothing of it: jnj.com's "Lupus" ("Explore Johnson & Johnson's
+    // lupus resources") was named by "lupus" and led it, above the article.
+    if is_tag_archive(&hit.page.url) {
+        return on_best_site();
+    }
+    if hit.named {
         return true;
     }
     // Retrieval/options already constrain known language. A locale-like
@@ -296,13 +314,7 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
     if language.is_none() && in_other_language(&hit.page.url) {
         return false;
     }
-    let domain = registrable_domain(&hit.page.url);
-    if domain.is_some()
-        && sites
-            .iter()
-            .take(SUBPAGE_SITES)
-            .any(|site| registrable_domain(&site.domain) == domain)
-    {
+    if on_best_site() {
         return true;
     }
     static STEMS: std::sync::LazyLock<TextAnalyzer> =
@@ -371,6 +383,22 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
                 .split_once(mark)
                 .is_some_and(|(head, _)| has_most(head))
         })
+}
+
+/// Whether `url` is a site's list of its posts with one tag:
+/// `https://www.jnj.com/tag/lupus`.
+fn is_tag_archive(url: &str) -> bool {
+    let path = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let segments: Vec<&str> = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .split('/')
+        .collect();
+    segments
+        .windows(2)
+        .skip(1)
+        .any(|pair| matches!(pair[0], "tag" | "tags") && !pair[1].is_empty())
 }
 
 /// Whether `word` is a year: four digits from 1000 to 2999.
