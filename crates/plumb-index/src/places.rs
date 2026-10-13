@@ -627,7 +627,12 @@ impl PlaceSearcher {
                         candidates: Vec::new(),
                     },
                 },
-                Near::Named(name) => self.resolve(name, preferred_country, required_country)?,
+                Near::Named(name) if asked.said_where => {
+                    self.resolve(name, preferred_country, required_country)?
+                }
+                Near::Named(name) => {
+                    self.resolve_as_typed(name, preferred_country, required_country)?
+                }
             };
             // A town guessed from words ("toy story", "hotel california",
             // "crypto exchange") is only taken for a big one: Story in
@@ -949,28 +954,26 @@ impl PlaceSearcher {
 
     /// Resolves the name without allowing a default-country boost to
     /// override explicit qualifiers or decide a close namesake tie. Where
-    /// nothing is called that, a big city whose name it mistypes
-    /// ([`Self::mistyped_cities`]).
+    /// nothing is called that, the big cities whose names it mistypes
+    /// ([`Self::mistyped_cities`]) are its candidates, to offer rather
+    /// than search: "nature" is a slip from Natore, Bangladesh too.
     pub fn resolve(
         &self,
         text: &str,
         preferred_country: Option<&str>,
         required_country: Option<&str>,
     ) -> Result<LocationResolution> {
-        let found = self.resolve_as_typed(text, preferred_country, required_country)?;
-        if found.status != LocationStatus::UnknownLocation {
-            return Ok(found);
+        let mut found = self.resolve_as_typed(text, preferred_country, required_country)?;
+        if found.status == LocationStatus::UnknownLocation {
+            let words: Vec<String> = normalize_text(text)
+                .split(' ')
+                .filter(|word| !word.is_empty())
+                .map(str::to_string)
+                .collect();
+            found.candidates = self.mistyped_cities(&words, required_country)?;
+            found.candidates.truncate(LOCATION_ALTERNATIVES);
         }
-        let words: Vec<String> = normalize_text(text)
-            .split(' ')
-            .filter(|word| !word.is_empty())
-            .map(str::to_string)
-            .collect();
-        let mistyped = self.mistyped_cities(&words, required_country)?;
-        if mistyped.is_empty() {
-            return Ok(found);
-        }
-        Ok(resolve_candidates(text, mistyped, preferred_country))
+        Ok(found)
     }
 
     /// [`Self::resolve`] by the name as typed.
@@ -2416,25 +2419,32 @@ mod tests {
             at("Hotel Cincinnatian", "tourism=hotel", 39.101, -84.511),
         ]);
         let (_dir, searcher) = index(fixtures);
-        let centre = |query: &str| {
-            let found = searcher.search(query, None, Some("US"), 5).unwrap();
-            found.and_then(|found| found.center).map(|place| place.name)
+        // Offered, not searched.
+        let offered = |query: &str| {
+            let found = searcher
+                .search(query, None, Some("US"), 5)
+                .unwrap()
+                .unwrap();
+            assert!(found.center.is_none() && found.hits.is_empty(), "{query}");
+            let location = found.location.unwrap();
+            assert_eq!(location.status, LocationStatus::UnknownLocation);
+            location
+                .candidates
+                .iter()
+                .map(|place| place.name.clone())
+                .collect::<Vec<_>>()
         };
-        assert_eq!(
-            centre("hotels in cincinatti").as_deref(),
-            Some("Cincinnati")
-        );
-        assert_eq!(
-            centre("hotels in cincinatti ohio").as_deref(),
-            Some("Cincinnati")
-        );
-        let tucson = searcher.locate("tuscon az", None).unwrap().unwrap();
-        assert_eq!(tucson.name, "Tucson");
-        // Nor a small city, a town or a short name.
+        assert_eq!(offered("hotels in cincinatti"), ["Cincinnati"]);
+        assert_eq!(offered("hotels in cincinatti ohio"), ["Cincinnati"]);
+        assert_eq!(offered("hotels near tuscon az"), ["Tucson"]);
+        // Nor a small city, a town or a short name, nor in a guess.
         for town in ["gorhams", "gothas", "gotham", "cincinatti tx"] {
-            let found = searcher.resolve(town, None, None).unwrap();
-            assert_eq!(found.status, LocationStatus::UnknownLocation, "{town}");
+            assert!(offered(&format!("pizza in {town}")).is_empty(), "{town}");
         }
+        assert_eq!(
+            searcher.search("cincinatti hotels", None, None, 5).unwrap(),
+            None
+        );
     }
 
     #[test]
