@@ -287,6 +287,9 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("are eggs good for you", "eggs"),
         ("does creatine work", "creatine"),
         ("do charcoal masks really work", "charcoal masks"),
+        ("what does the liver do", "liver"),
+        ("what does a pharmacist do", "pharmacist"),
+        ("what do bees do", "bees"),
         ("who invented the telephone", "telephone"),
         ("who discovered penicillin", "penicillin"),
         ("when was the printing press invented", "printing press"),
@@ -315,6 +318,8 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         "is the new bridge over the river safe",
         "who invented it",
         "when was it invented",
+        "what do you do",
+        "what do i do",
     ] {
         assert_eq!(hinted_name(query), None, "{query:?}");
     }
