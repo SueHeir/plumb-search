@@ -158,6 +158,91 @@ fn songs_and_albums_are_found_by_their_name_and_artist() {
 }
 
 #[test]
+fn works_are_found_by_their_article_with_their_maker() {
+    let work = |title: &str, description: &str, views: u64, aliases: &[&str]| {
+        let mut page = page(title, views, aliases);
+        page.description = Some(description.into());
+        page
+    };
+    let (_dir, s) = searcher(&[
+        work("OK Computer", "1997 studio album by Radiohead", 50_000, &[]),
+        work(
+            "OK Computer OKNOTOK 1997 2017",
+            "2017 compilation by Radiohead",
+            5_000,
+            &[],
+        ),
+        work(
+            "1989 (Taylor Swift album)",
+            "2014 studio album by Taylor Swift",
+            60_000,
+            &[],
+        ),
+        work("1989", "Calendar year", 90_000, &[]),
+        work(
+            "Nineteen Eighty-Four",
+            "1949 dystopian novel by George Orwell",
+            80_000,
+            &["1984"],
+        ),
+        work(
+            "Winston Smith (Nineteen Eighty-Four)",
+            "Protagonist of 1949 novel by George Orwell",
+            9_000,
+            &["Winston Smith"],
+        ),
+        work(
+            "The Hobbit",
+            "1937 children's fantasy novel by J. R. R. Tolkien",
+            70_000,
+            &[],
+        ),
+        song(
+            "Nevermind",
+            "Album by Nirvana",
+            "release-group/a1b2c3d4-387b-4658-8678-8678046e4cef",
+            90_000,
+        ),
+    ]);
+    for (query, title) in [
+        ("radiohead ok computer", "OK Computer"),
+        ("ok computer radiohead album", "OK Computer"),
+        ("ok computer by radiohead", "OK Computer"),
+        ("taylor swift 1989", "1989 (Taylor Swift album)"),
+        ("1989 by taylor swift", "1989 (Taylor Swift album)"),
+        ("1984 george orwell", "Nineteen Eighty-Four"),
+        ("1984 orwell book", "Nineteen Eighty-Four"),
+        ("the hobbit tolkien", "The Hobbit"),
+        ("the hobbit novel", "The Hobbit"),
+        // A song or album of the music set is asked for with its
+        // artist and what it is, too.
+        ("nevermind nirvana album", "Nevermind"),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert!(
+            hits[0].page.title == title && hits[0].named && hits[0].whole,
+            "{query}: {hits:?}"
+        );
+    }
+    // The title alone names the work but asks for nothing else, and
+    // the maker alone, a character of the work, another of the maker's
+    // titles or what the work is said twice asks for no work.
+    let hits = s.search("ok computer", 5).unwrap();
+    assert!(hits[0].page.title == "OK Computer" && !hits[0].whole);
+    for query in [
+        "radiohead",
+        "winston smith george orwell",
+        "1989 radiohead",
+        "nevermind album album",
+    ] {
+        assert!(
+            s.search(query, 5).unwrap().iter().all(|hit| !hit.whole),
+            "{query}"
+        );
+    }
+}
+
+#[test]
 fn a_title_alone_is_for_a_song_far_better_known_than_its_namesakes() {
     let creep = song(
         "Creep",

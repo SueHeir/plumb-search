@@ -613,11 +613,13 @@ pub fn is_kind_word(word: &str) -> bool {
         .filter(|w| w.ends_with(['s', 'x', 'h']))
         .or_else(|| word.strip_suffix('s'))
         .unwrap_or(word);
+    // "breweries", "bakeries", "pharmacies".
+    let ies = word.strip_suffix("ies").map(|stem| format!("{stem}y"));
     KINDS.iter().any(|(_, label, words)| {
         crate::normalize_text(label)
             .split(' ')
             .chain(words.split(' '))
-            .any(|w| w == word || w == one)
+            .any(|w| w == word || w == one || ies.as_deref() == Some(w))
     })
 }
 
@@ -722,7 +724,17 @@ mod tests {
         gym.tags = vec!["sport=climbing".into()];
         assert!(gym.is_specialty());
         for word in [
-            "pizza", "coffee", "hotels", "cafe", "gas", "museums", "sushi",
+            "pizza",
+            "coffee",
+            "hotels",
+            "cafe",
+            "gas",
+            "museums",
+            "sushi",
+            "breweries",
+            "bakeries",
+            "pharmacies",
+            "galleries",
         ] {
             assert!(is_kind_word(word), "{word}");
         }

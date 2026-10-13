@@ -364,6 +364,7 @@ impl Searcher {
                     tokens
                         .iter()
                         .take(name.words())
+                        .filter(|token| query.words.contains(token))
                         .collect::<HashSet<_>>()
                         .len(),
                 )
@@ -494,7 +495,7 @@ impl Searcher {
 
         let max_bm25 = candidates.iter().map(|&(bm25, _)| bm25).fold(0.0, f32::max);
         let mut ranked: Vec<Ranked> = Vec::with_capacity(candidates.len());
-        let language = options.language.as_deref().and_then(language_code);
+        let language = options.language_for(query_text).and_then(language_code);
         for (bm25, addr) in candidates {
             let column = &columns[addr.segment_ord as usize];
             if options.safe.hides(column.adult(addr.doc_id)) {

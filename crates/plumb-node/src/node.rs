@@ -2178,7 +2178,7 @@ impl SearchBackend for Inner {
         home: Option<&str>,
         country: Option<&str>,
     ) -> Option<plumb_index::places::PlaceResults> {
-        places::search(self, query, home, country)
+        self.unless_denied_places(places::search(self, query, home, country))
     }
 
     fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
@@ -2390,8 +2390,13 @@ impl StatusSource for Inner {
         crate::icons::IconStore::new(&self.paths.icons).get(domain)
     }
 
-    fn recent(&self, query: &str, top: Option<(&str, bool)>) -> Option<crate::news::Recent> {
-        let mut recent = self.news.recent(query, top, now_unix())?;
+    fn recent(
+        &self,
+        query: &str,
+        top: Option<(&str, bool)>,
+        language: Option<&str>,
+    ) -> Option<crate::news::Recent> {
+        let mut recent = self.news.recent(query, top, now_unix(), language)?;
         recent
             .headlines
             .retain(|headline| !self.denies(&headline.url));

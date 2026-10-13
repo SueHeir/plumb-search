@@ -480,8 +480,13 @@ impl StatusSource for FeedNews {
     fn status(&self) -> Status {
         node_status(Phase::Ready, Step::Idle)
     }
-    fn recent(&self, query: &str, top: Option<(&str, bool)>) -> Option<Recent> {
-        self.0.recent(query, top, now_unix())
+    fn recent(
+        &self,
+        query: &str,
+        top: Option<(&str, bool)>,
+        language: Option<&str>,
+    ) -> Option<Recent> {
+        self.0.recent(query, top, now_unix(), language)
     }
 }
 
@@ -490,7 +495,11 @@ async fn publisher_headlines_share_dates_sources_and_unavailable_status() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::news::NewsStore::open(dir.path());
     let now = now_unix();
-    store.watch(vec![("bbc.co.uk".into(), "https://www.bbc.co.uk/".into())]);
+    store.watch(vec![crate::news::Watched {
+        domain: "bbc.co.uk".into(),
+        homepage: "https://www.bbc.co.uk/".into(),
+        ..Default::default()
+    }]);
     store.apply(
         vec![plumb_crawl::FeedCheck {
             domain: "bbc.co.uk".into(),
