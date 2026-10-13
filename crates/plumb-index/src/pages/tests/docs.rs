@@ -888,3 +888,63 @@ fn docs_pages_of_an_api_named_as_code_lead() {
     // Only the whole name counts: "macOS" is not Rust's std::os::macos.
     assert!(docs_after_best("macOS", "apple.com"));
 }
+
+#[test]
+fn docs_pages_are_named_by_what_their_title_and_address_share() {
+    let mdn = "https://developer.mozilla.org/en-US/docs/Web";
+    let page = |path: &str, title: &str| docs_page(&format!("{mdn}/{path}"), title, &[], "");
+    let pages = [
+        page(
+            "API/Document/querySelectorAll",
+            "Document: querySelectorAll() method — Web APIs",
+        ),
+        page(
+            "CSS/Reference/Properties/border-radius",
+            "border-radius CSS property — CSS",
+        ),
+        page(
+            "CSS/Reference/Properties/border-bottom-left-radius",
+            "border-bottom-left-radius CSS property — CSS",
+        ),
+        page(
+            "CSS/Guides/Backgrounds_and_borders/Border-radius_generator",
+            "Border-radius generator — CSS",
+        ),
+        page(
+            "HTTP/Reference/Headers/Content-Type",
+            "Content-Type header — HTTP",
+        ),
+        docs_page(
+            "https://docs.python.org/3/library/functions.html",
+            "Built-in Functions — Python 3.14.0 documentation",
+            &[],
+            "",
+        ),
+        page("API/Window/open", "Window: open() method — Web APIs"),
+    ];
+    assert!(crate::pages::docs::docs_symbols(&pages[0]).contains(&"queryselectorall".to_string()));
+    assert!(crate::pages::docs::docs_symbols(&pages[1]).contains(&"border-radius".to_string()));
+    // A guide that starts with the name, and a title in words, name nothing.
+    assert!(crate::pages::docs::docs_symbols(&pages[3]).is_empty());
+    assert!(crate::pages::docs::docs_symbols(&pages[5]).is_empty());
+    assert!(crate::pages::docs::docs_symbols(&pages[6]).is_empty());
+    let (_dir, searcher) = searcher(&pages);
+    for (query, best, title) in [
+        ("querySelectorAll", "ixquick.com", &pages[0].title),
+        ("border-radius", "homeaffairs.gov.au", &pages[1].title),
+        ("css border-radius", "css-tricks.com", &pages[1].title),
+        ("Content-Type", "pubmed.ncbi.nlm.nih.gov", &pages[4].title),
+    ] {
+        let sites = [site(best, false), site("other.com", false)];
+        let placed = place_pages(query, &sites, searcher.search(query, 10).unwrap());
+        let first = placed.iter().find(|p| p.at == 0 && p.under.is_none());
+        assert_eq!(
+            first.map(|p| &p.hit.page.title),
+            Some(title),
+            "{query}: {placed:?}"
+        );
+    }
+    // A word is still not a symbol.
+    assert!(searcher.search("functions", 10).unwrap().is_empty());
+    assert!(searcher.search("open", 10).unwrap().is_empty());
+}
