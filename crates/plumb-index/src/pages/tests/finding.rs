@@ -829,19 +829,38 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
 }
 
 #[test]
-fn a_sharp_after_a_letter_is_searched_as_written_out() {
+fn a_sharp_after_a_letter_names_what_is_named_so() {
     let (_dir, s) = searcher(&[
         page("C (programming language)", 600_000, &[]),
-        page("C Sharp (programming language)", 400_000, &[]),
+        page("C Sharp (programming language)", 400_000, &["C#"]),
         page("C minor", 6_000, &[]),
         page("C-sharp minor", 3_000, &[]),
+        page("Q Sharp", 200, &["Q\u{266F}"]),
+        page("J", 20_000, &[]),
+        page("Sharp Corporation", 90_000, &["Sharp"]),
     ]);
     let first = |query: &str| s.search(query, 5).unwrap().remove(0);
     let hit = first("c#");
     assert_eq!(hit.page.title, "C Sharp (programming language)");
     assert!(hit.named);
     assert_eq!(first("C# minor").page.title, "C-sharp minor");
-    // Without the sign, still C.
-    assert_eq!(first("c").page.title, "C (programming language)");
+    assert_eq!(first("q#").page.title, "Q Sharp");
+    // Nothing is named J Sharp: "j#" is J, as before, and not a page
+    // called Sharp.
+    let found = s.search("j#", 5).unwrap();
+    assert_eq!(found[0].page.title, "J");
+    assert!(found[0].named);
+    assert!(found
+        .iter()
+        .all(|hit| hit.page.title != "Sharp Corporation"));
+    // Without the sign, still C, and C Sharp's other name is not "c".
+    let hit = first("c");
+    assert_eq!(hit.page.title, "C (programming language)");
+    assert!(hit.named);
+    assert!(s
+        .search("c", 5)
+        .unwrap()
+        .iter()
+        .all(|hit| !hit.named || hit.page.title != "C Sharp (programming language)"));
     assert_eq!(first("c minor").page.title, "C minor");
 }

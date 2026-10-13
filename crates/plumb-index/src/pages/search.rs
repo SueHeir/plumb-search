@@ -226,7 +226,7 @@ impl PageSearcher {
         Ok(PageSearcher {
             reader,
             fields,
-            words: analysis::page_words_analyzer(),
+            words: analysis::words_analyzer(),
             joined: analysis::page_joined_analyzer(),
             stemmed: analysis::stemmed_analyzer(),
             stats,
@@ -391,6 +391,25 @@ impl PageSearcher {
         }))
     }
 
+    /// The key `query` names pages by. A sharp after a letter is read out
+    /// ([`analysis::page_joined_analyzer`]) when a page is named so: "c#"
+    /// is C Sharp. Otherwise it is left out, as before: with no page on J
+    /// Sharp, "j#" is J.
+    pub(crate) fn query_key(&self, query: &str) -> Result<Option<String>> {
+        let read = analysis::tokens(&self.joined, query).pop();
+        let plain = analysis::tokens(&analysis::joined_analyzer(), query).pop();
+        if read == plain {
+            return Ok(read);
+        }
+        let searcher = self.reader.searcher();
+        Ok(match read {
+            Some(key) if searcher.doc_freq(&Term::from_field_text(self.fields.keys, &key))? > 0 => {
+                Some(key)
+            }
+            _ => plain,
+        })
+    }
+
     /// A suggested spelling of `query` from the words of the pages' names,
     /// for queries about things rather than sites ("anubas", "budafest"),
     /// whose words the sites index hardly has. Each word the pages do not
@@ -479,7 +498,7 @@ impl PageSearcher {
         }
         let stems = self.described_words(query);
         let words = analysis::tokens(&self.words, query);
-        let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
+        let Some(joined) = self.query_key(query)? else {
             return Ok(Vec::new());
         };
         let query_words: HashSet<&str> = words.iter().map(String::as_str).collect();

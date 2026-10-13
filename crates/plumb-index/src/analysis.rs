@@ -38,42 +38,6 @@ pub(crate) fn register(manager: &TokenizerManager) {
     manager.register(STEMMED_ANALYZER, stemmed_analyzer());
 }
 
-/// Registers the page index's analyzers, whose words and joined names read
-/// a sharp sign after a letter ([`read_sharps`]). Only the page index does:
-/// it is rebuilt whenever [`crate::pages::PAGE_INDEX_VERSION`] changes, so
-/// the titles it holds and the searches made in it read "C#" alike. A site
-/// index built before would hold "C# Corner" as "c corner" and stop
-/// matching it.
-pub(crate) fn register_pages(manager: &TokenizerManager) {
-    manager.register(WORDS_ANALYZER, page_words_analyzer());
-    manager.register(JOINED_ANALYZER, page_joined_analyzer());
-    manager.register(STEMMED_ANALYZER, stemmed_analyzer());
-}
-
-/// `text` with a sharp sign after a lone letter read out, as English writes
-/// it where the sign cannot go (Wikipedia's "C Sharp", "C-sharp minor"):
-/// `C# 12` -> `C sharp 12`. [`normalize_text`] drops the sign, and "c#"
-/// would be a search for C.
-fn read_sharps(text: &str) -> Cow<'_, str> {
-    let sharp = |c: &char| matches!(c, '#' | '\u{266F}');
-    if !text.chars().any(|c| sharp(&c)) {
-        return Cow::Borrowed(text);
-    }
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len() + 8);
-    for (i, c) in chars.iter().enumerate() {
-        let lone_letter =
-            i > 0 && chars[i - 1].is_alphabetic() && (i < 2 || !chars[i - 2].is_alphanumeric());
-        let ends = chars.get(i + 1).is_none_or(|next| !next.is_alphanumeric());
-        if sharp(c) && lone_letter && ends {
-            out.push_str(" sharp");
-        } else {
-            out.push(*c);
-        }
-    }
-    Cow::Owned(out)
-}
-
 /// [`register`] for the sites' index, whose word fields hold a run of
 /// [`unspaced`] script as its [`pieces`]. Queries are read with
 /// [`words_analyzer`] still, and a word is looked for by its pieces
@@ -92,6 +56,39 @@ pub(crate) fn register_sites(manager: &TokenizerManager) {
         .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
         .build(),
     );
+}
+
+/// [`register`] for the pages' index, whose names are keyed with a sharp
+/// sign after a letter read out ([`page_joined_analyzer`]). The page index
+/// is rebuilt whenever [`crate::pages::PAGE_INDEX_VERSION`] changes; a
+/// sites' index is not, and would still hold "C# Corner" as "ccorner".
+pub(crate) fn register_pages(manager: &TokenizerManager) {
+    register(manager);
+    manager.register(JOINED_ANALYZER, page_joined_analyzer());
+}
+
+/// `text` with a sharp sign after a lone letter read out, as English writes
+/// it where the sign cannot go (Wikipedia's "C Sharp", "C-sharp minor"):
+/// `C# 12` -> `C sharp 12`. [`normalize_text`] drops the sign, and "c#"
+/// would name C.
+fn read_sharps(text: &str) -> Cow<'_, str> {
+    let sharp = |c: &char| matches!(c, '#' | '\u{266F}');
+    if !text.chars().any(|c| sharp(&c)) {
+        return Cow::Borrowed(text);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 8);
+    for (i, c) in chars.iter().enumerate() {
+        let lone_letter =
+            i > 0 && chars[i - 1].is_alphabetic() && (i < 2 || !chars[i - 2].is_alphanumeric());
+        let ends = chars.get(i + 1).is_none_or(|next| !next.is_alphanumeric());
+        if sharp(c) && lone_letter && ends {
+            out.push_str(" sharp");
+        } else {
+            out.push(*c);
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Whether `c` belongs to a script written without spaces between words:
@@ -179,23 +176,11 @@ pub(crate) fn content_tokens(language: Option<&str>, text: &str) -> PreTokenized
 
 /// The analyzer registered as [`WORDS_ANALYZER`].
 pub(crate) fn words_analyzer() -> TextAnalyzer {
-    words_reading(false)
-}
-
-/// [`words_analyzer`] for the page index, reading sharps.
-pub(crate) fn page_words_analyzer() -> TextAnalyzer {
-    words_reading(true)
-}
-
-fn words_reading(sharps: bool) -> TextAnalyzer {
-    TextAnalyzer::builder(WordTokenizer {
-        sharps,
-        ..WordTokenizer::default()
-    })
-    .filter(AsciiFoldingFilter)
-    .filter(LowerCaser)
-    .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
-    .build()
+    TextAnalyzer::builder(WordTokenizer::default())
+        .filter(AsciiFoldingFilter)
+        .filter(LowerCaser)
+        .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
+        .build()
 }
 
 /// The analyzer registered as [`JOINED_ANALYZER`].
@@ -203,7 +188,8 @@ pub(crate) fn joined_analyzer() -> TextAnalyzer {
     joined_reading(false)
 }
 
-/// [`joined_analyzer`] for the page index, reading sharps.
+/// [`joined_analyzer`] reading a sharp sign after a letter
+/// ([`read_sharps`]): `C#` -> `csharp`, as "C Sharp" is keyed.
 pub(crate) fn page_joined_analyzer() -> TextAnalyzer {
     joined_reading(true)
 }
@@ -235,8 +221,6 @@ pub(crate) fn tokens(analyzer: &TextAnalyzer, text: &str) -> Vec<String> {
 /// a combining dot behind, and `İstanbul` should still match `istanbul`.
 #[derive(Clone, Default)]
 struct WordTokenizer {
-    /// Whether a sharp after a letter is read out ([`read_sharps`]).
-    sharps: bool,
     normalized: String,
     token: Token,
     /// Each word as its [`pieces`].
@@ -256,12 +240,7 @@ impl Tokenizer for WordTokenizer {
     type TokenStream<'a> = WordStream<'a>;
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> WordStream<'a> {
-        let text = if self.sharps {
-            read_sharps(text)
-        } else {
-            text.into()
-        };
-        self.normalized = normalize_text(&text);
+        self.normalized = normalize_text(text);
         self.token.reset();
         WordStream {
             words: self.normalized.split(' '),
@@ -391,19 +370,15 @@ mod tests {
     }
 
     #[test]
-    fn the_page_index_reads_a_sharp_after_a_letter() {
-        let page_words = |text| tokens(&page_words_analyzer(), text);
-        assert_eq!(page_words("C# 12"), ["c", "sharp", "12"]);
-        assert_eq!(
-            page_words("A Tour of C#."),
-            ["a", "tour", "of", "c", "sharp"]
-        );
-        assert_eq!(page_words("F\u{266F} minor"), ["f", "sharp", "minor"]);
-        assert_eq!(tokens(&page_joined_analyzer(), "C#"), ["csharp"]);
+    fn the_page_index_keys_a_sharp_after_a_letter_read_out() {
+        let page_key = |text| tokens(&page_joined_analyzer(), text);
+        assert_eq!(page_key("C#"), ["csharp"]);
+        assert_eq!(page_key("C Sharp"), ["csharp"]);
+        assert_eq!(page_key("F\u{266F} minor"), ["fsharpminor"]);
         // Only after a lone letter at a word's end.
-        assert_eq!(page_words("#metoo issue #5"), ["metoo", "issue", "5"]);
-        assert_eq!(page_words("abc# c#d"), ["abc", "cd"]);
-        // Site indexes are not rebuilt for it, so they keep dropping it.
+        assert_eq!(page_key("#metoo issue #5"), ["metooissue5"]);
+        assert_eq!(page_key("abc# c#d"), ["abccd"]);
+        // Words, and the sites' index, keep dropping it.
         assert_eq!(words("C# Corner"), ["c", "corner"]);
         assert_eq!(joined_token("C#"), ["c"]);
     }
