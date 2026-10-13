@@ -5,8 +5,8 @@ use plumb_core::article::{article_url, Article, SearchContent};
 
 use super::{
     Page, BOOKS_SET, DOCS_SET, ENGLISH_WIKIPEDIA, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET,
-    PAPERS_SET, PODCASTS_SET, REFERENCE2_SET, REFERENCE_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET,
-    SUBPAGES_SET, WIKIDATA_SET, WIKTIONARY_SET,
+    PAPERS_SET, PODCASTS_SET, RECORDS_SET, REFERENCE2_SET, REFERENCE_SET, STACKEXCHANGE_SET,
+    STACKOVERFLOW_SET, SUBPAGES_SET, WIKIDATA_SET, WIKTIONARY_SET,
 };
 
 impl Page {
@@ -368,10 +368,10 @@ impl Page {
         is_site_page_set(&self.set)
     }
 
-    /// The host of a docs, reference or subpages page's address, without
-    /// `www.`: `docs.python.org`, `healthline.com`.
+    /// The host of a docs, reference, subpages or record page's address,
+    /// without `www.`: `docs.python.org`, `healthline.com`.
     fn docs_host(&self) -> Option<&str> {
-        if self.set != DOCS_SET && !self.is_site_page() {
+        if self.set != DOCS_SET && self.set != RECORDS_SET && !self.is_site_page() {
             return None;
         }
         let host = self

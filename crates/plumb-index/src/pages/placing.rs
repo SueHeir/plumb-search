@@ -12,7 +12,7 @@ use super::docs::{docs_found_by_words, docs_named_as_code};
 use super::sites::{base_title, describes_an_organization, is_government, site_is_titled, squash};
 use super::{
     LearnedPlace, Page, PageHit, PlacedPage, ASKING_WORDS, DOCS_SET, FILMS_SET, GITHUB_SET,
-    PODCASTS_SET, REFERENCE2_SET, SUBPAGES_SET, WIKIDATA_SET,
+    PODCASTS_SET, RECORDS_SET, REFERENCE2_SET, SUBPAGES_SET, WIKIDATA_SET,
 };
 use crate::analysis;
 
@@ -235,7 +235,8 @@ pub(crate) fn named_page_site<'a>(
 /// A page the learned ranking listed on its own ([`PageHit::learned`])
 /// stays where it put it: before the same site, or last, except that a
 /// docs page found by its words never comes before the best site.
-pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -> Vec<PlacedPage> {
+pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
+    let (records, mut pages): (Vec<PageHit>, Vec<PageHit>) = pages.into_iter().partition(is_record);
     pages.retain(|hit| {
         crate::health::page_allowed(query, &hit.page) && subpage_asked(query, sites, hit)
     });
@@ -256,8 +257,19 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -
             None => {}
         }
     }
+    placed.extend(records.into_iter().map(|hit| PlacedPage {
+        hit,
+        under: None,
+        at: 0,
+    }));
     keep_page_rules(query, sites, &mut placed);
     placed
+}
+
+/// Whether `hit` is a record the query names by its identifier
+/// ([`RECORDS_SET`]).
+pub(crate) fn is_record(hit: &PageHit) -> bool {
+    hit.page.set == RECORDS_SET
 }
 
 /// Best sites of a query looked at for the site of a subpage found by its
@@ -467,8 +479,10 @@ fn on_site(page: &Page, domain: &str) -> bool {
 }
 
 /// The places no ranking overrides, applied after [`place_pages`] and
-/// after [`crate::learned::reorder`]: the docs page of an API the query
-/// names as code comes first ("Object.keys" wants MDN's page, see
+/// after [`crate::learned::reorder`]: a record the query names by its
+/// identifier comes first ("rfc 3339" wants RFC 3339 itself, not
+/// rfc-editor.org); then the docs page of an API the query
+/// names as code ("Object.keys" wants MDN's page, see
 /// [`docs_named_as_code`]); any other docs page found by its words, or
 /// another site's page while the query names the best site's owner, never
 /// comes before the best site (see [`kept_below`]); and, unless the
@@ -480,14 +494,14 @@ pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<Place
     let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0);
     let code = |p: &PlacedPage| p.under.is_none() && docs_named_as_code(&p.hit, query, sites);
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
-        if code(page) {
+        if is_record(&page.hit) || code(page) {
             page.at = 0;
         } else if kept_below(&page.hit, sites, names_best) {
             page.at = page.at.max(1).min(sites.len());
         }
     }
     // Pages at one place are listed in order, so it leads the questions too.
-    placed.sort_by_key(|p| !code(p));
+    placed.sort_by_key(|p| (!is_record(&p.hit), !code(p)));
     if asks_for_podcasts(query) {
         return;
     }

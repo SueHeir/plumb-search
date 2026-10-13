@@ -8,6 +8,7 @@ mod media;
 mod named_site;
 mod papers_and_entities;
 mod placing;
+mod records;
 mod subpages_and_packages;
 
 use anyhow::bail;
