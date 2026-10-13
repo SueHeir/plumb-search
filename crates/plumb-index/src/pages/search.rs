@@ -598,6 +598,20 @@ impl PageSearcher {
         };
         let mut found = self.search_once(&name, limit, scope)?;
         if asked {
+            // A work keeps its "the" for "The Hobbit", but "who painted the
+            // mona lisa" asks about Mona Lisa, not the song The Mona Lisa:
+            // what the name names without it counts too when it holds the
+            // fact asked.
+            let kinds = plumb_core::facts::fact_asked(query).map(|asked| asked.kinds);
+            if let (Some(bare), Some(kinds)) = (name.strip_prefix("the "), kinds) {
+                let holds =
+                    |hit: &PageHit| hit.page.facts.iter().any(|fact| kinds.contains(&fact.kind));
+                found.extend(
+                    self.search_once(bare, limit, scope)?
+                        .into_iter()
+                        .filter(holds),
+                );
+            }
             found.retain(|hit| hit.named);
         }
         match hint {
