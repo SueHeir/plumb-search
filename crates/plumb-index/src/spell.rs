@@ -647,7 +647,7 @@ pub(crate) fn near_terms(
 /// Whether `fixed` is close enough to `word`, one word of a corrected
 /// name: within [`max_edits`], or one edit for a word of two or three
 /// letters ("taco bel").
-fn within_edits(word: &str, fixed: &str) -> bool {
+pub(crate) fn within_edits(word: &str, fixed: &str) -> bool {
     let edits = match word.chars().count() {
         0 | 1 => 0,
         2 | 3 => 1,

@@ -15,6 +15,7 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 use super::building::schema;
 use super::page::is_item_id;
 use super::scoring::truncate_keeping_inner_pages;
+use super::sites::base_title;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
     KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET, POPULARITY_SCALE,
@@ -202,6 +203,19 @@ pub const KNOWN_SONG_MARGIN: u64 = 5;
 
 /// How many of the first sites [`PageSearcher::note_demand`] notes.
 pub const DEMAND_NOTED: usize = 3;
+
+/// Least popularity of an article whose name a query's first words are
+/// taken for a slip of ([`PageSearcher::fix_page_name`]): about 6,000
+/// reads in the days Wikipedia's counts cover. Stephen Hawking has seven
+/// times that; Stephen Hawkins, a name of its own, has 48.
+const WELL_READ_NAME: f32 = 0.55;
+
+/// Most of a query's first words read as one name
+/// ([`PageSearcher::fix_page_name`]).
+const MAX_NAME_WORDS: usize = 4;
+
+/// Most read pages looked at for an article with a name's key.
+const NAME_PAGES: usize = 5;
 
 impl PageSearcher {
     pub fn open(dir: &Path) -> Result<Self> {
@@ -419,7 +433,8 @@ impl PageSearcher {
         };
         let typed = analysis::tokens(&self.words, query);
         let mut fixed = typed.clone();
-        for word in &mut fixed {
+        let named = self.fix_page_name(&mut fixed, model)?;
+        for word in fixed.iter_mut().skip(named) {
             let chars = word.chars().count();
             let edits = crate::spell::max_edits(chars);
             if edits == 0
@@ -467,6 +482,88 @@ impl PageSearcher {
             site: None,
             applied: false,
         }))
+    }
+
+    /// Corrects the first words of `words`, two or more, when they are a
+    /// slip of a well-read article's name ([`WELL_READ_NAME`]): "jeff bezoz"
+    /// is Jeff Bezos, "leonardo da vinchi net worth" Leonardo da Vinci's. As
+    /// the sites' speller corrects a site's name: the joined words are within
+    /// [`crate::spell::max_edits`] of the name's, and each word changed is
+    /// within its own, keeps its first letter and has no digits ("iphone 15"
+    /// is not iPhone 16). Fewest edits first, then the likeliest slip by
+    /// `model`. How many words it corrected: none when they name a page as
+    /// typed.
+    fn fix_page_name(
+        &self,
+        words: &mut [String],
+        model: Option<&crate::spell_model::Model>,
+    ) -> Result<usize> {
+        let searcher = self.reader.searcher();
+        for covers in (2..=words.len().min(MAX_NAME_WORDS)).rev() {
+            let key = words[..covers].concat();
+            if searcher.doc_freq(&Term::from_field_text(self.fields.keys, &key))? > 0 {
+                return Ok(0);
+            }
+            let edits = crate::spell::max_edits(key.chars().count());
+            let mut near = crate::spell::near_terms(&searcher, self.fields.keys, &key, edits)?;
+            let cost = |name: &str| model.map_or(0.0, |model| model.ln_channel(&key, name));
+            near.sort_by(|a, b| a.1.cmp(&b.1).then(cost(&b.0).total_cmp(&cost(&a.0))));
+            for (name, _) in near {
+                if let Some(fixed) = self.well_read_name(&name, &words[..covers])? {
+                    words[..covers].clone_from_slice(&fixed);
+                    return Ok(covers);
+                }
+            }
+        }
+        Ok(0)
+    }
+
+    /// The words of the name keyed `key` of the most read article that has
+    /// it, when that article is read at least [`WELL_READ_NAME`] and each of
+    /// its words is `typed`'s or a slip of it ([`PageSearcher::fix_page_name`]).
+    fn well_read_name(&self, key: &str, typed: &[String]) -> Result<Option<Vec<String>>> {
+        let searcher = self.reader.searcher();
+        let named = TermQuery::new(
+            Term::from_field_text(self.fields.keys, key),
+            IndexRecordOption::Basic,
+        );
+        let top = TopDocs::with_limit(NAME_PAGES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        let slip = |word: &String, fix: &String| {
+            word == fix
+                || word.chars().chain(fix.chars()).all(char::is_alphabetic)
+                    && crate::spell::within_edits(word, fix)
+                    && crate::spell::plausible_word_fix(word, fix)
+        };
+        for (popularity, address) in searcher.search(self.language_query(&named).as_ref(), &top)? {
+            if (popularity.unwrap_or(0) as f32 / POPULARITY_SCALE) < WELL_READ_NAME {
+                break;
+            }
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if !page.is_article() {
+                continue;
+            }
+            let names = [page.title.as_str(), base_title(&page.title)]
+                .into_iter()
+                .chain(page.names.iter().map(String::as_str));
+            for name in names {
+                if analysis::tokens(&self.joined, name).pop().as_deref() != Some(key) {
+                    continue;
+                }
+                let fixed = analysis::tokens(&self.words, name);
+                if fixed.len() == typed.len() && typed.iter().zip(&fixed).all(|(w, f)| slip(w, f)) {
+                    return Ok(Some(fixed));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Named entity candidates before site blending or learned placement.
