@@ -52,7 +52,8 @@ impl Searcher {
 
     /// Of the sites with `word` in their title or description (at most
     /// [`SITES_READ`]), how many declare `language`, and how many declare
-    /// any.
+    /// any. The script a site's text is in, kept for one that declares
+    /// nothing (`Cyrl`), is not a declaration.
     fn declared(&self, word: &str, language: &str) -> (u32, u32) {
         let searcher = self.reader.searcher();
         let (mut chosen, mut declared, mut read) = (0, 0, 0);
@@ -61,6 +62,13 @@ impl Searcher {
                 continue;
             };
             let wanted = languages.dictionary().term_ord(language).ok().flatten();
+            // Language codes are lowercase, scripts capitalized.
+            let mut codes = Vec::new();
+            if let Ok(mut terms) = languages.dictionary().stream() {
+                while terms.advance() {
+                    codes.push(terms.key().first().is_some_and(u8::is_ascii_lowercase));
+                }
+            }
             for field in [self.fields.title, self.fields.description] {
                 let term = Term::from_field_text(field, word);
                 let Ok(Some(mut postings)) = segment
@@ -71,7 +79,8 @@ impl Searcher {
                 };
                 let mut doc = postings.doc();
                 while doc != TERMINATED && read < SITES_READ {
-                    if let Some(ord) = languages.term_ords(doc).next() {
+                    let ord = languages.term_ords(doc).next();
+                    if let Some(ord) = ord.filter(|&ord| codes.get(ord as usize) == Some(&true)) {
                         declared += 1;
                         chosen += u32::from(Some(ord) == wanted);
                     }
