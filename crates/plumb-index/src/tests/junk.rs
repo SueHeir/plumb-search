@@ -131,7 +131,7 @@ fn gambling_sites_are_left_out_of_searches_not_about_gambling() {
             obscure(120_000, 10),
         ),
         site(
-            "lazybar.example",
+            "lazybaraustralia.example",
             Some("Lazybar Casino 🎰 Play The Best Pokies in AU!"),
             None,
             &[],
@@ -181,16 +181,17 @@ fn gambling_sites_are_left_out_of_searches_not_about_gambling() {
     assert!(!ebay.contains("oldartgallery.example"), "{ebay}");
     let login = found("ebay login");
     assert!(!login.contains("ebaytoto.example"), "{login}");
-    assert!(found("ebaytoto").contains("ebaytoto.example"));
     let lazy = found("lazydocker");
     assert!(lazy.contains("lazydocker.example"), "{lazy}");
-    assert!(!lazy.contains("lazybar.example"), "{lazy}");
+    assert!(!lazy.contains("lazybaraustralia.example"), "{lazy}");
     let lazy = found("lazy");
     assert!(!lazy.contains("312bet29.com"), "{lazy}");
     assert!(lazy.contains("lakeside.casino"), "{lazy}");
     // Asked about gambling, or named, they are found.
-    assert!(found("lazy casino").contains("lazybar.example"));
-    assert!(found("lazybar").contains("lazybar.example"));
+    assert!(found("lazy casino").contains("lazybaraustralia.example"));
+    assert!(found("lazybar").contains("lazybaraustralia.example"));
+    assert!(found("ebaytoto").contains("ebaytoto.example"));
+    assert!(!found("ebay").contains("ebaytoto.example"));
     // A casino hotel is a hotel.
     assert!(found("las vegas hotel").contains("nugget.example"));
 }

@@ -19,16 +19,14 @@
 //!   curopayments.net took their place for "chase login", "coinbase login"
 //!   and "amex login", and three untitled strangers for "schwab login".
 //!   Nothing ties them to the site the searcher wants to sign in to.
-
 //! - Little-known online gambling sites, for a search that is not about
 //!   gambling. Most are spam on expired domains ("Situs Toto MATARAMTOTO"
 //!   on alleghenyartgalleries.com) whose links call them by a big site's
 //!   name, so they go even when that name is the query ("ebay"). Those
 //!   with no description to tell them by go by their names (312bet29.com).
+//!   One the query names stays: "lazybar" finds lazybaraustralia.com.
 
-use plumb_core::{
-    asks_to_sign_in, is_sign_in_page, names_label, normalize_text, spells_label,
-};
+use plumb_core::{asks_to_sign_in, is_sign_in_page, names_label, normalize_text, spells_label};
 
 use crate::names::is_reserved_name;
 use crate::{health, Hit, WELL_KNOWN_LINK_SCORE};
@@ -137,7 +135,7 @@ pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
         && (is_gambling([hit.title.as_deref(), hit.description.as_deref()])
             || (hit.description.is_none() && is_gambling_address(&hit.domain)))
         && !asks_about_gambling(query)
-        && !spells_label(query, &hit.domain)
+        && !named_by(query, hit)
     {
         return true;
     }
@@ -173,6 +171,17 @@ pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
             && (is_sign_in_page(&hit.url, title)
                 || (asks_to_sign_in(query) && says_nothing_meaning_found()))
             && !names_label(query, &hit.domain))
+}
+
+/// Whether `query` names `hit`'s site: spells a whole label of it
+/// ("mataram toto" and mataramtoto.com), or the start of one that its title
+/// says as words ("lazybar" and lazybaraustralia.com, "Lazybar Casino").
+/// "netflix login" does not name netflixtotoutama.com, titled "NETFLIXTOTO".
+fn named_by(query: &str, hit: &Hit) -> bool {
+    let query = format!(" {} ", normalize_text(query));
+    let says = |title: &str| format!(" {} ", normalize_text(title)).contains(&query);
+    spells_label(&query, &hit.domain)
+        || (names_label(&query, &hit.domain) && hit.title.as_deref().is_some_and(says))
 }
 
 /// Whether `texts` say they are an online gambling site's: "Situs Toto
