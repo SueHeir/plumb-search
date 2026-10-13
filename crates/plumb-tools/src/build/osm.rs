@@ -900,31 +900,46 @@ pub fn fill_in_towns(places: &mut [Place]) {
         }
     }
     // Towns none of whose places gave a country: their neighbours', in
-    // their region when one there has it. Towns that know their region go
-    // first, and a town lends only what it had before that pass, so a
-    // guess doesn't spread town by town across a border.
+    // their region when one there has it. They are filled in rounds, each
+    // from towns that knew theirs before it, towns that know their region
+    // first, so a town takes the side of the nearest town that knows before
+    // a guess can reach it from across a border; where none knows, the
+    // guess still goes on from town to town (northern Ontario).
     let reach = 4.0 * TOWN_REACH_KM;
-    for with_region in [true, false] {
-        let lent: Vec<(usize, usize)> = settlements
-            .iter()
-            .filter(|&&i| places[i].country.is_none() && places[i].region.is_some() == with_region)
-            .filter_map(|&i| {
-                let (lat, lon, region) = (places[i].lat, places[i].lon, &places[i].region);
-                let near = |ok: &dyn Fn(&Place) -> bool| grid.nearest(places, lat, lon, reach, ok);
-                near(&|t| {
-                    t.country.is_some()
-                        && t.region.is_some()
-                        && (region.is_none() || t.region == *region)
+    let mut unknown: Vec<usize> = settlements
+        .iter()
+        .copied()
+        .filter(|&i| places[i].country.is_none())
+        .collect();
+    loop {
+        let before = unknown.len();
+        for with_region in [true, false] {
+            let lent: Vec<(usize, usize)> = unknown
+                .iter()
+                .filter(|&&i| places[i].region.is_some() == with_region)
+                .filter_map(|&i| {
+                    let (lat, lon, region) = (places[i].lat, places[i].lon, &places[i].region);
+                    let near =
+                        |ok: &dyn Fn(&Place) -> bool| grid.nearest(places, lat, lon, reach, ok);
+                    near(&|t| {
+                        t.country.is_some()
+                            && t.region.is_some()
+                            && (region.is_none() || t.region == *region)
+                    })
+                    .or_else(|| near(&|t| t.country.is_some()))
+                    .map(|near| (i, near))
                 })
-                .or_else(|| near(&|t| t.country.is_some()))
-                .map(|near| (i, near))
-            })
-            .collect();
-        for (i, near) in lent {
-            places[i].country = places[near].country.clone();
-            if places[i].region.is_none() {
-                places[i].region = places[near].region.clone();
+                .collect();
+            for (i, near) in lent {
+                places[i].country = places[near].country.clone();
+                if places[i].region.is_none() {
+                    places[i].region = places[near].region.clone();
+                }
             }
+        }
+        unknown.retain(|&i| places[i].country.is_none());
+        if unknown.len() == before {
+            break;
         }
     }
     // The country most towns of each region are in.
@@ -1335,22 +1350,16 @@ mod tests {
             town("Massena", 45.00, -74.64, Some("NY"), Some("US")),
             town("Cornwall", 45.02, -74.69, Some("ON"), None),
             town("Alexandria", 45.31, -74.64, Some("ON"), Some("CA")),
+            // And a remote town that only a town between learns it from.
+            town("Nordegg", 52.47, -116.08, Some("AB"), None),
+            town("Rocky Mountain House", 52.37, -114.92, Some("AB"), None),
+            town("Red Deer", 52.27, -113.81, Some("AB"), Some("CA")),
         ];
         fill_in_towns(&mut places);
-        for i in [0, 2] {
-            assert_eq!(
-                places[i].region.as_deref(),
-                Some("ON"),
-                "{}",
-                places[i].name
-            );
-            assert_eq!(
-                places[i].country.as_deref(),
-                Some("CA"),
-                "{}",
-                places[i].name
-            );
-        }
+        let said = |i: usize| (places[i].region.as_deref(), places[i].country.as_deref());
+        assert_eq!(said(0), (Some("ON"), Some("CA")));
+        assert_eq!(said(2), (Some("ON"), Some("CA")));
+        assert_eq!(said(4), (Some("AB"), Some("CA")));
     }
 
     #[test]
