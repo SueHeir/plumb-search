@@ -361,6 +361,25 @@ fn best_rank<T: Ord>(current: Option<T>, new: Option<T>) -> Option<T> {
     }
 }
 
+/// The domains whose front page more than [`MAX_ITEMS_PER_HOMEPAGE`] items
+/// claim: [`Builder::add_official_sites`] gives each to the item that owns
+/// it ([`front_page_owner`]), or to none. A node refolding its seed reads
+/// their claims again, as their rule changed.
+pub fn crowded_front_pages(sites: &[OfficialSite]) -> HashSet<String> {
+    let mut claims: Vec<(&str, &str)> = sites
+        .iter()
+        .filter(|site| site.is_root_homepage())
+        .map(|site| (site.domain.as_str(), site.item.as_str()))
+        .collect();
+    claims.sort_unstable();
+    claims.dedup();
+    claims
+        .chunk_by(|a, b| a.0 == b.0)
+        .filter(|items| items.len() > MAX_ITEMS_PER_HOMEPAGE)
+        .map(|items| items[0].0.to_string())
+        .collect()
+}
+
 /// The item of `claims`, by more than [`MAX_ITEMS_PER_HOMEPAGE`] items,
 /// whose site the front page is: the best known of them (by sitelinks),
 /// when its names name the domain ([`OfficialSite::names_its_domain`]) or
