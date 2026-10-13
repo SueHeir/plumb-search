@@ -125,6 +125,46 @@ fn fact_questions_find_the_article_they_ask_about() {
 }
 
 #[test]
+fn an_event_is_named_whichever_end_its_year_is_on_and_asked_who_won() {
+    let (_dir, s) = searcher(&[
+        page("Tour de France", 200_000, &[]),
+        page("2025 Tour de France", 40_000, &[]),
+        page("2026 Tour de France", 30_000, &[]),
+        page("Eurovision Song Contest 2025", 60_000, &[]),
+        page("2025 World Series", 50_000, &[]),
+        page("World Series", 80_000, &[]),
+    ]);
+    let first = |q: &str| {
+        let hits = s.search(q, 5).unwrap();
+        hits.first().map(|h| (h.page.title.clone(), h.named))
+    };
+    for query in ["tour de france 2025", "2025 tour de france"] {
+        assert_eq!(
+            first(query),
+            Some(("2025 Tour de France".into(), true)),
+            "{query}"
+        );
+    }
+    assert_eq!(
+        first("2025 eurovision song contest"),
+        Some(("Eurovision Song Contest 2025".into(), true))
+    );
+    for query in ["who won the 2025 world series", "world series 2025 winner"] {
+        assert_eq!(
+            first(query),
+            Some(("2025 World Series".into(), true)),
+            "{query}"
+        );
+    }
+    assert_eq!(
+        year_moved("tour de france 2025").as_deref(),
+        Some("2025 tour de france")
+    );
+    assert_eq!(year_moved("1984"), None);
+    assert_eq!(year_moved("route 66"), None);
+}
+
+#[test]
 fn articles_whose_title_is_part_of_the_query_are_found() {
     let (_dir, s) = searcher(&[
         page("Titanic", 400_000, &["RMS Titanic"]),
