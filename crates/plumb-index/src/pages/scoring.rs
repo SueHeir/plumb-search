@@ -489,6 +489,11 @@ impl PageSearcher {
                 learned: None,
             });
         }
+        match words.as_slice() {
+            [word] => self.name_by_surname(word, &joined, &mut hits),
+            [title, name @ ..] => self.name_by_title(title, name, &joined, &mut hits),
+            [] => {}
+        }
         let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
@@ -869,6 +874,117 @@ impl PageSearcher {
         }
         (best, false)
     }
+
+    /// Names the person a query of one `word` (whose key is `joined`) is
+    /// the surname of when Wikipedia has no redirect from it: "thatcher"
+    /// is Margaret Thatcher and "kafka" Franz Kafka, not the film Kafka.
+    /// Only when they are read [`super::SURNAME_MARGIN`] times as much as
+    /// every other article with the word in its title ("darwin" is a city
+    /// too, "ford" two presidents), and no article is called the word
+    /// ("swift", "clinton") nor a company's site ("tesla", "hilton").
+    fn name_by_surname(&self, word: &str, joined: &str, hits: &mut [PageHit]) {
+        let called =
+            |name: &str| analysis::tokens(&self.joined, name).pop().as_deref() == Some(joined);
+        let articles = || {
+            hits.iter()
+                .enumerate()
+                .filter(|(_, hit)| hit.page.is_article())
+        };
+        let taken = articles().any(|(_, hit)| {
+            std::iter::once(&hit.page.title)
+                .chain(&hit.page.aliases)
+                .any(|name| called(name))
+                || super::sites::describes_an_organization(hit.page.description.as_deref())
+                    && hit
+                        .page
+                        .site
+                        .as_deref()
+                        .and_then(|site| site.split('.').next())
+                        .is_some_and(called)
+        });
+        let titled = |hit: &PageHit| analysis::tokens(&self.words, &hit.page.title);
+        let Some((best, views)) = articles()
+            .filter(|(_, hit)| {
+                !hit.named
+                    && hit.page.is_person()
+                    && titled(hit).last().map(String::as_str) == Some(word)
+            })
+            .max_by_key(|(_, hit)| hit.page.views)
+            .map(|(at, hit)| (at, hit.page.views))
+        else {
+            return;
+        };
+        if taken
+            || articles().any(|(at, hit)| {
+                at != best
+                    && hit.page.views * super::SURNAME_MARGIN > views
+                    && titled(hit).iter().any(|title_word| title_word == word)
+            })
+        {
+            return;
+        }
+        name_by_alias(&mut hits[best]);
+    }
+
+    /// Names the person a `title` and words of their `name` call when no
+    /// article is called the whole query (whose key is `joined`): "sir
+    /// isaac newton" is Isaac Newton, "president obama" Barack Obama,
+    /// "princess diana" Diana, Princess of Wales, not the song. Every word
+    /// of the name must be in the person's title or another name, and an
+    /// office ([`super::OFFICES`]) in their title or description. Only
+    /// when they are read [`super::SURNAME_MARGIN`] times as much as every
+    /// other article that fits: "president bush" is two presidents.
+    fn name_by_title(&self, title: &str, name: &[String], joined: &str, hits: &mut [PageHit]) {
+        let office = super::OFFICES.contains(&title);
+        if !office && !super::HONORIFICS.contains(&title) {
+            return;
+        }
+        let words = |text: &str| analysis::tokens(&self.words, text);
+        let fits = |page: &Page| {
+            let names: HashSet<String> = std::iter::once(&page.title)
+                .chain(&page.aliases)
+                .flat_map(|text| words(text))
+                .collect();
+            let said = || {
+                words(&page.title)
+                    .into_iter()
+                    .chain(words(page.description.as_deref().unwrap_or("")))
+                    .any(|word| word == title)
+            };
+            page.is_article() && name.iter().all(|word| names.contains(word)) && (!office || said())
+        };
+        let called =
+            |text: &str| analysis::tokens(&self.joined, text).pop().as_deref() == Some(joined);
+        if hits.iter().any(|hit| {
+            hit.page.is_article()
+                && std::iter::once(&hit.page.title)
+                    .chain(&hit.page.aliases)
+                    .any(|text| called(text))
+        }) {
+            return;
+        }
+        let Some((best, views)) = hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| !hit.named && hit.page.is_person() && fits(&hit.page))
+            .max_by_key(|(_, hit)| hit.page.views)
+            .map(|(at, hit)| (at, hit.page.views))
+        else {
+            return;
+        };
+        if hits.iter().enumerate().any(|(at, hit)| {
+            at != best && hit.page.views * super::SURNAME_MARGIN > views && fits(&hit.page)
+        }) {
+            return;
+        }
+        name_by_alias(&mut hits[best]);
+    }
+}
+
+/// Marks `hit` named by the query and scores it as if by an alias.
+fn name_by_alias(hit: &mut PageHit) {
+    hit.named = true;
+    hit.score = ALIAS_MATCH * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity);
 }
 
 /// Folds the films and shows in `hits` that English Wikipedia has an

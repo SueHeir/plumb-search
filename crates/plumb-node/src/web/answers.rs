@@ -865,6 +865,12 @@ pub fn resolve_entity<'a>(
             candidates = organizations;
         }
     }
+    if let Some(works) = works_made(&subject, &candidates, kinds) {
+        match works.as_slice() {
+            [work] => return EntityResolution::Resolved(&work.page),
+            _ => candidates = works,
+        }
+    }
     if candidates.is_empty() {
         return EntityResolution::Unresolved;
     }
@@ -958,6 +964,60 @@ fn main_sense<'a>(subject: &str, tied: &[&'a plumb_index::pages::PageHit]) -> En
     match (own.next(), own.next()) {
         (Some(hit), None) => EntityResolution::Resolved(&hit.page),
         _ => EntityResolution::Ambiguous(tied.iter().map(|hit| &hit.page).collect()),
+    }
+}
+
+/// What a question about a work's maker asks: the subject is the work.
+/// Only works have these, so a page without one is no answer to it, an
+/// exception to [`EntityResolution`]'s rule ([`works_made`]).
+const MAKERS: &[plumb_core::facts::FactKind] = {
+    use plumb_core::facts::FactKind::*;
+    &[Author, Director, Composer, Creator]
+};
+
+/// How many times as read as every other work the subject names the work
+/// a maker question means must be ("Titanic (1997 film)", not the 1953 one).
+const MOST_READ_WORK: u64 = 10;
+
+/// The works a question about a work's maker can be about, when it is one
+/// and `candidates` hold any: those `subject` (lowercased) names, by their
+/// title or another name, with or without a qualifier or "the", that have
+/// the maker it asks for first. Only a work has an author or a director,
+/// and compact records say what a page is only by such facts: "who wrote
+/// 1984" asks about the novel known as 1984, not the year, and "who
+/// directed titanic" about a film, not the ship. Of several, one read far
+/// more than each of the others is the one meant, so it is given alone.
+/// Only the first kind asked counts: "director of the fbi" asks for no TV
+/// series' creator.
+fn works_made<'a>(
+    subject: &str,
+    candidates: &[&'a plumb_index::pages::PageHit],
+    kinds: Option<&[plumb_core::facts::FactKind]>,
+) -> Option<Vec<&'a plumb_index::pages::PageHit>> {
+    let maker = kinds?.first().filter(|kind| MAKERS.contains(kind))?;
+    // fact_asked keeps a work's "the" for "The Hobbit", but "the mona
+    // lisa" is "Mona Lisa".
+    let named = |name: &str| {
+        let name =
+            plumb_core::collapse_whitespace(plumb_index::pages::base_title(name)).to_lowercase();
+        name == subject || subject.strip_prefix("the ") == Some(name.as_str())
+    };
+    let mut works: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|hit| {
+            let page = &hit.page;
+            (hit.named || named(&page.title) || page.aliases.iter().any(|alias| named(alias)))
+                && page.facts.iter().any(|fact| fact.kind == *maker)
+        })
+        .collect();
+    works.sort_by_key(|hit| std::cmp::Reverse(hit.page.views));
+    match works.as_slice() {
+        [] => None,
+        [most, next, ..] if next.page.views.saturating_mul(MOST_READ_WORK) >= most.page.views => {
+            Some(works)
+        }
+        [most, ..] => Some(vec![*most]),
     }
 }
 
@@ -1623,6 +1683,139 @@ mod tests {
         };
         assert_eq!(page.item.as_deref(), Some("Q910012"));
         assert_eq!(fact_answer_from_page(&asked, page, 0), None);
+    }
+
+    #[test]
+    fn makers_are_asked_of_the_work_the_name_means() {
+        use plumb_core::facts::{fact_asked, FactKind, FactKind::*};
+        let page = |title: &str, item: &str, views: u64, facts: &[(FactKind, &str)]| {
+            let mut hit = with_facts(article(title, "", None), facts);
+            hit.page.item = Some(item.into());
+            hit.page.views = views;
+            hit
+        };
+        let ask = |q: &str, candidates: &[PageHit]| {
+            let asked = fact_asked(q).unwrap();
+            match resolve_entity(&asked.subject, candidates, Some(&asked.kinds)) {
+                EntityResolution::Resolved(page) => fact_answer_from_page(&asked, page, 0),
+                _ => None,
+            }
+        };
+        // The year is called 1984; the novel is known as "1984 (novel)".
+        let mut novel = page(
+            "Nineteen Eighty-Four",
+            "Q208460",
+            30_159,
+            &[(Author, "George Orwell")],
+        );
+        novel.named = false;
+        novel.page.aliases = vec!["1984 (novel)".into()];
+        let advert = page(
+            "1984 (advertisement)",
+            "Q4566",
+            900,
+            &[(Director, "Ridley Scott")],
+        );
+        let nineteen = [page("1984", "Q2432", 2_014, &[]), advert, novel];
+        let answer = ask("who wrote 1984", &nineteen).unwrap();
+        assert_eq!(answer.question, "Author of Nineteen Eighty-Four");
+        assert_eq!(answer.answer, "George Orwell");
+        assert_eq!(
+            ask("who directed 1984", &nineteen).unwrap().answer,
+            "Ridley Scott"
+        );
+        // Of films called Titanic, the one read far more.
+        let titanic = [
+            page("Titanic", "Q25173", 39_360, &[(Owner, "White Star Line")]),
+            page(
+                "Titanic (1953 film)",
+                "Q1140317",
+                1_500,
+                &[(Director, "Jean Negulesco")],
+            ),
+            page(
+                "Titanic (1997 film)",
+                "Q44578",
+                30_683,
+                &[(Director, "James Cameron")],
+            ),
+        ];
+        let answer = ask("who directed titanic", &titanic).unwrap();
+        assert_eq!(
+            (answer.question.as_str(), answer.answer.as_str()),
+            ("Director of Titanic (1997 film)", "James Cameron")
+        );
+        assert_eq!(
+            ask("titanic owner", &titanic).unwrap().answer,
+            "White Star Line"
+        );
+        // Works read alike stay a question, and a work called the name
+        // keeps it ("The Lion King" over its remake).
+        let alien = [
+            page(
+                "Alien (film)",
+                "Q103569",
+                23_181,
+                &[(Director, "Ridley Scott")],
+            ),
+            page(
+                "Alien (franchise)",
+                "Q1813470",
+                21_144,
+                &[(Director, "James Cameron")],
+            ),
+        ];
+        assert_eq!(ask("who directed alien", &alien), None);
+        let lion = [
+            page(
+                "The Lion King (2019 film)",
+                "Q27964762",
+                20_000,
+                &[(Director, "Jon Favreau")],
+            ),
+            page(
+                "The Lion King",
+                "Q36479",
+                40_000,
+                &[(Director, "Roger Allers")],
+            ),
+        ];
+        assert_eq!(
+            ask("who directed the lion king", &lion).unwrap().answer,
+            "Roger Allers"
+        );
+        // A work's "the" need not be in its title.
+        let mona = [
+            page(
+                "Mona Lisa",
+                "Q12418",
+                34_216,
+                &[(Creator, "Leonardo da Vinci")],
+            ),
+            page(
+                "Mona Lisa (Prado)",
+                "Q2126369",
+                1_497,
+                &[(Owner, "Museo del Prado")],
+            ),
+        ]
+        .map(|mut hit| {
+            hit.named = false;
+            hit
+        });
+        let answer = ask("who painted the mona lisa", &mona).unwrap();
+        assert_eq!(answer.answer, "Leonardo da Vinci");
+        // "director of" asks a creator only of what the name means.
+        let fbi = [
+            page("Federal Bureau of Investigation", "Q8333", 60_000, &[]),
+            page(
+                "FBI (TV series)",
+                "Q57571045",
+                14_151,
+                &[(Creator, "Dick Wolf")],
+            ),
+        ];
+        assert_eq!(ask("director of fbi", &fbi), None);
     }
 
     #[test]

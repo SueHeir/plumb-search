@@ -149,6 +149,49 @@ fn declared_subpage_language_survives_retrieval_and_placement() {
 }
 
 #[test]
+fn tag_archives_are_listed_only_on_their_site() {
+    let hit = |url: &str, title: &str| PageHit {
+        page: Page::from_set(
+            SUBPAGES_SET,
+            Article {
+                title: title.into(),
+                description: Some("Explore Johnson & Johnson's lupus resources.".into()),
+                item: Some(url.into()),
+                views: 2_000,
+                ..Article::default()
+            },
+        )
+        .unwrap(),
+        score: 0.9,
+        named: true,
+        popularity: 0.9,
+        whole: false,
+        learned: None,
+    };
+    let lupus = hit("https://www.jnj.com/tag/lupus", "Lupus");
+    let sites =
+        |domains: &[&str]| -> Vec<crate::Hit> { domains.iter().map(|d| site(d, false)).collect() };
+    // Named by its title, it says nothing of lupus.
+    assert!(!subpage_asked("lupus", &sites(&["lupus.org"]), &lupus));
+    assert!(!subpage_asked("lupus", &[], &lupus));
+    // Unless the search is on its site.
+    assert!(subpage_asked(
+        "johnson and johnson lupus",
+        &sites(&["jnj.com"]),
+        &lupus
+    ));
+    // A page about the subject, or a tag in a page's name, is no archive.
+    for url in [
+        "https://www.who.int/health-topics/hypertension",
+        "https://www.jnj.com/lupus/tag",
+        "https://example.com/tag",
+        "https://example.com/products/name-tag",
+    ] {
+        assert!(subpage_asked("lupus", &[], &hit(url, "Lupus")), "{url}");
+    }
+}
+
+#[test]
 fn subpages_are_listed_only_when_asked_for() {
     let hit = |url: &str, title: &str, named: bool| PageHit {
         page: Page::from_set(
