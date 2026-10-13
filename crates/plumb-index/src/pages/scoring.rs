@@ -503,6 +503,11 @@ impl PageSearcher {
             [title, name @ ..] => self.name_by_title(title, name, &joined, &mut hits),
             [] => {}
         }
+        if let [the, rest @ ..] = words.as_slice() {
+            if the == "the" && !rest.is_empty() {
+                self.name_without_the(rest, &mut hits);
+            }
+        }
         let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
@@ -1119,6 +1124,38 @@ impl PageSearcher {
             return;
         }
         name_by_alias(&mut hits[best]);
+    }
+
+    /// Names the articles a query of "the" and a name calls without its
+    /// "the" (`rest`): "the pope" is Pope, not the book The Pope, and "the
+    /// titanic" the ship before the song. Only when they are read
+    /// [`super::WITHOUT_THE_MARGIN`] times as much as every article the
+    /// whole query names: "the police" and "the strokes" are the bands.
+    fn name_without_the(&self, rest: &[String], hits: &mut [PageHit]) {
+        let Some(joined) = analysis::tokens(&self.joined, &rest.join(" ")).pop() else {
+            return;
+        };
+        let called = |text: &str| {
+            analysis::tokens(&self.joined, text).pop().as_deref() == Some(joined.as_str())
+        };
+        let most_named = hits
+            .iter()
+            .filter(|hit| hit.named && hit.page.is_article())
+            .map(|hit| hit.page.views)
+            .max()
+            .unwrap_or(0);
+        for hit in hits.iter_mut().filter(|hit| {
+            !hit.named
+                && hit.page.is_article()
+                && hit.page.views >= most_named.saturating_mul(super::WITHOUT_THE_MARGIN)
+        }) {
+            if std::iter::once(base_title(&hit.page.title))
+                .chain(hit.page.aliases.iter().map(String::as_str))
+                .any(called)
+            {
+                name_by_alias(hit);
+            }
+        }
     }
 }
 

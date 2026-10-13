@@ -887,3 +887,32 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
     assert_eq!(named("president lincoln"), ["Abraham Lincoln"]);
     assert_eq!(named("general motors"), ["General Motors"]);
 }
+
+#[test]
+fn the_and_a_name_names_what_the_name_alone_does_when_far_more_read() {
+    let (_dir, s) = searcher(&[
+        page("Titanic (1997 film)", 150_000, &[]),
+        page("Titanic", 120_000, &["RMS Titanic"]),
+        page("Stroke", 30_000, &["Strokes"]),
+        page("Pope", 28_157, &["Supreme Pontiff"]),
+        page("The Strokes", 19_059, &[]),
+        page("The Police", 17_369, &[]),
+        page("Police", 15_000, &["Police officer"]),
+        page("Bible", 14_969, &["The Bible"]),
+        page("The Titanic (song)", 114, &[]),
+        page("The Pope (book)", 65, &["Du Pape", "On the Pope"]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("the pope"), ["Pope", "The Pope (book)"]);
+    assert_eq!(named("the titanic"), ["Titanic", "The Titanic (song)"]);
+    // Read too little more than what "the" and the name call.
+    assert_eq!(named("the police"), ["The Police"]);
+    assert_eq!(named("the strokes"), ["The Strokes"]);
+    assert_eq!(named("the bible"), ["Bible"]);
+}

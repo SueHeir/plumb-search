@@ -70,6 +70,11 @@ pub const OTHER_NAME_MATCH: f32 = 0.6;
 /// ([`PageSearcher::name_by_surname`]), or by a title and their name.
 const SURNAME_MARGIN: u64 = 3;
 
+/// How many times as much an article called a query without its leading
+/// "the" must be read as every article the whole query names to be named
+/// too ([`PageSearcher::name_without_the`]).
+const WITHOUT_THE_MARGIN: u64 = 10;
+
 /// Words before a person's name that are none of it: "sir isaac newton",
 /// "st francis of assisi" ([`PageSearcher::name_by_title`]).
 const HONORIFICS: &[&str] = &[
