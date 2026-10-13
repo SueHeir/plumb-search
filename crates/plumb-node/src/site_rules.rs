@@ -10,7 +10,7 @@ use plumb_core::SiteList;
 use plumb_format::sites::Rule;
 use plumb_format::{Note, PublicKey, SiteRules};
 
-use crate::sets::{check_set, read_items};
+use crate::sets::{check_held, read_items};
 
 /// The site lists built into `plumb-core` as rules: subsites, umbrella
 /// domains and the labels that are never sites under one. The suffix list
@@ -39,11 +39,11 @@ pub struct ReadRules {
     pub hash: String,
 }
 
-/// Reads the site rules set in `dir`, after checking it as a node does
-/// before taking a set ([`check_set`]): published by `trusted` or the key
-/// it handed over to in `notes`.
+/// Reads the site rules set in `dir`, after checking it as a node does a
+/// set it holds ([`check_held`]): published by `trusted` or the key it
+/// handed over to in `notes`.
 pub fn read_site_rules(dir: &Path, trusted: &PublicKey, notes: &[Note]) -> Result<ReadRules> {
-    check_set(dir, Some(trusted), notes)?;
+    check_held(dir, Some(trusted), notes)?;
     let (manifest, items) = read_items(dir)?;
     ensure!(
         manifest.is_site_rules(),
