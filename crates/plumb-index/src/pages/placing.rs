@@ -8,7 +8,7 @@ use plumb_core::{
 };
 use tantivy::tokenizer::TextAnalyzer;
 
-use super::docs::{docs_found_by_words, docs_kept_below};
+use super::docs::docs_found_by_words;
 use super::sites::{base_title, describes_an_organization, is_government, site_is_titled, squash};
 use super::{
     LearnedPlace, Page, PageHit, PlacedPage, ASKING_WORDS, DOCS_SET, FILMS_SET, GITHUB_SET,
@@ -364,16 +364,51 @@ fn in_other_language(url: &str) -> bool {
     first.len() <= 5 && OTHER_LANGUAGES.contains(&language)
 }
 
+/// Whether `hit` must come after the best of `sites`, whatever the
+/// learned ranking says. A docs page found by its words: "python package
+/// index" wants pypi.org first, and "bash parameter expansion" anything
+/// but expansion.com. And any page but an article when the best site is
+/// the official site of what the query names, by its own name or, when
+/// `names_best`, by an article the query names ([`named_page_site`]):
+/// "minecraft" wants minecraft.net before the Computer History Museum's
+/// page on Minecraft, "walmart" walmart.com before CNET's page of news on
+/// Walmart, and "red dead redemption 2" rockstargames.com, with the
+/// article under it, before IGN's guide to the game. Such a page's
+/// popularity is measured within its set, often a small one, so it reads
+/// as more read than the site's own article. Only a page of the best site
+/// itself may come before it, as docs.python.org's "python sorting
+/// techniques" before python.org.
+pub(crate) fn kept_below(hit: &PageHit, sites: &[crate::Hit], names_best: bool) -> bool {
+    let Some(best) = sites.first() else {
+        return false;
+    };
+    let official = names_best || best.named && best.official;
+    (docs_found_by_words(hit) || official && !hit.page.is_article())
+        && !on_site(&hit.page, &best.domain)
+}
+
+/// Whether `page` is on `domain` or one of its subdomains.
+fn on_site(page: &Page, domain: &str) -> bool {
+    host_of(&page.url).is_some_and(|host| {
+        host == domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|sub| sub.ends_with('.'))
+    })
+}
+
 /// The places no ranking overrides, applied after [`place_pages`] and
-/// after [`crate::learned::reorder`]: a docs page found by its words never
-/// comes before the best site unless that site is the docs' own (see
-/// [`docs_kept_below`]), and, unless the query asks for them,
-/// podcasts come after the best site and the other pages listed on their
-/// own ("better call saul" wants amc.com and the article first).
+/// after [`crate::learned::reorder`]: a docs page found by its words, or
+/// another site's page while the query names the best site's owner, never
+/// comes before the best site (see [`kept_below`]), and, unless the
+/// query asks for them, podcasts come after the best site and the other
+/// pages listed on their own ("better call saul" wants amc.com and the
+/// article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
     placed.retain(|page| crate::health::page_allowed(query, &page.hit.page));
+    let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0);
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
-        if docs_kept_below(&page.hit, sites) {
+        if kept_below(&page.hit, sites, names_best) {
             page.at = page.at.max(1).min(sites.len());
         }
     }

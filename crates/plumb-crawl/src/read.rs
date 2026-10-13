@@ -168,10 +168,13 @@ impl PageReader {
             return Err(ReadError::Status(status.as_u16()));
         }
         let final_url = response.url().clone();
-        let kind = response
+        let content_type = response
             .headers()
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let kind = content_type
+            .as_deref()
             .map(|value| {
                 value
                     .split(';')
@@ -197,7 +200,7 @@ impl PageReader {
             }
             body.extend_from_slice(&chunk);
         }
-        let body = String::from_utf8_lossy(&body);
+        let body = crate::charset::decode(&body, content_type.as_deref());
         let mut page = if html {
             page_text(&final_url, &body)
         } else {
