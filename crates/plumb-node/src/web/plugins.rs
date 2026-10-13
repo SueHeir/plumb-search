@@ -63,6 +63,26 @@ pub(super) fn button_token(
         .then(|| plugins.token().to_string())
 }
 
+/// [`refusal_of`] for a button pressed on a results page. Those pages'
+/// `no-referrer` policy makes browsers send `Origin: null` with their own
+/// forms, so a null origin counts as the page's own when the browser says
+/// the form came from the same origin; the host and peer are still checked.
+fn button_refusal(
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Option<&'static str> {
+    let same_origin = headers
+        .get("sec-fetch-site")
+        .is_some_and(|site| site == "same-origin");
+    if same_origin && headers.get(header::ORIGIN).is_some_and(|o| o == "null") {
+        let mut headers = headers.clone();
+        headers.remove(header::ORIGIN);
+        return refusal_of(peer, &headers, uri);
+    }
+    refusal_of(peer, headers, uri)
+}
+
 #[derive(Debug, Deserialize)]
 struct ActForm {
     plugin: String,
@@ -91,7 +111,7 @@ async fn act_form(
         format!("/search?{}", back.finish())
     };
     let plugins = &state.settings.plugins;
-    let refused = match refusal_of(peer(&extensions), &headers, &uri) {
+    let refused = match button_refusal(peer(&extensions), &headers, &uri) {
         Some(_) => Some("Buttons work only on the computer Plumb runs on, from its own pages."),
         None => (!plugins.accepts(&form.token)).then_some("This button is out of date."),
     };
@@ -197,6 +217,7 @@ async fn page(State(state): State<AppState>, Query(params): Query<PageParams>) -
         .plugins
         .page(&params.url, plumb_core::SafeSearch::Moderate, None)
         .await;
+    let found = state.without_denied(found);
     answer(StatusCode::OK, json!({ "plugins": found }))
 }
 
