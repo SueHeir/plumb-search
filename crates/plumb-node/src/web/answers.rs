@@ -342,6 +342,46 @@ pub fn profile_lookups(query: &str) -> Vec<String> {
     lookups
 }
 
+/// Whether a lookup of `query`'s profile ([`profile_lookups`]) goes on
+/// to the songs and albums of the music set ([`songs_profile`]) when the
+/// article it names, resolved as `resolution`, gives none. Lyrics always
+/// do: MusicBrainz knows a song's page on Genius more often than Wikidata,
+/// and lists the best-known recording of a title first ("creep" is
+/// Radiohead's, though TLC's has an article too). Other profiles only
+/// when no article is called so.
+pub fn searches_songs(query: &str, resolution: &EntityResolution) -> bool {
+    services_asked(query).is_some_and(|(services, _)| {
+        services.iter().any(|s| s.key == "genius-song")
+            || matches!(resolution, EntityResolution::Unresolved)
+    })
+}
+
+/// The profile `query` asks for of a song or album among `found`, what a
+/// search for a lookup found ([`searches_songs`]). When the lookup's
+/// article resolved as `resolution`, the song must have its title: a
+/// search for "pyramid song", Radiohead's "Pyramid Song", finds
+/// Wolfmother's "Pyramid" as a song too.
+pub fn songs_profile(
+    query: &str,
+    resolution: &EntityResolution,
+    found: Vec<PlacedPage>,
+) -> Option<ProfileAnswer> {
+    let title = |title: &str| plumb_core::normalize_text(plumb_index::pages::base_title(title));
+    let songs: Vec<PlacedPage> = found
+        .into_iter()
+        .filter(|placed| {
+            placed.hit.page.set == MUSIC_SET
+                && match resolution {
+                    EntityResolution::Resolved(page) => {
+                        title(&placed.hit.page.title) == title(&page.title)
+                    }
+                    _ => true,
+                }
+        })
+        .collect();
+    profile_answer(query, &songs)
+}
+
 /// The official profile `query` asks for ("mrbeast youtube", "valve
 /// steam", "bohemian rhapsody lyrics"), when the words before the service
 /// name a Wikipedia article or a song or album in `pages` (found for those
@@ -358,7 +398,7 @@ pub fn profile_answer(query: &str, pages: &[PlacedPage]) -> Option<ProfileAnswer
 }
 
 /// Renders a profile only after the caller has resolved its entity.
-pub(crate) fn profile_answer_from_page(query: &str, page: &Page) -> Option<ProfileAnswer> {
+pub fn profile_answer_from_page(query: &str, page: &Page) -> Option<ProfileAnswer> {
     let (services, _) = services_asked(query)?;
     let source = if page.set == MUSIC_SET {
         "MusicBrainz"
@@ -550,13 +590,13 @@ pub(crate) fn fact_pages(pages: &[PlacedPage]) -> impl Iterator<Item = &PlacedPa
 
 /// Resolving an entity does not inspect whether it has the requested
 /// fact. A missing fact must never select a namesake instead.
-pub(crate) enum EntityResolution<'a> {
+pub enum EntityResolution<'a> {
     Resolved(&'a Page),
     Ambiguous(Vec<&'a Page>),
     Unresolved,
 }
 
-pub(crate) fn resolve_entity<'a>(
+pub fn resolve_entity<'a>(
     subject: &str,
     candidates: &'a [plumb_index::pages::PageHit],
     kinds: Option<&[plumb_core::facts::FactKind]>,
@@ -1729,6 +1769,15 @@ mod tests {
         );
         assert_eq!(profile_lookups("mrbeast youtube"), ["mrbeast"]);
         assert!(profile_lookups("hey jude").is_empty());
+        // Lyrics are looked for among songs whatever the articles called
+        // so; other profiles only when there are none.
+        let ambiguous = EntityResolution::Ambiguous(Vec::new());
+        assert!(searches_songs("creep lyrics", &ambiguous));
+        assert!(searches_songs(
+            "hey jude spotify",
+            &EntityResolution::Unresolved
+        ));
+        assert!(!searches_songs("hey jude spotify", &ambiguous));
     }
 
     #[test]

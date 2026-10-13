@@ -575,3 +575,112 @@ fn facts_entity_profiles_keep_the_existing_music_fallback() {
         .unwrap()
         .starts_with("https://genius.com/search?"));
 }
+
+/// Finds `articles` for every name, and each of `songs` for its search.
+struct Songs {
+    articles: Vec<plumb_index::pages::PageHit>,
+    songs: Vec<(&'static str, PlacedPage)>,
+}
+
+impl SearchBackend for Songs {
+    fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+    fn num_docs(&self) -> u64 {
+        0
+    }
+    fn entities(
+        &self,
+        _: &str,
+        _: usize,
+        _: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        Ok(self.articles.clone())
+    }
+    fn search_full(&self, query: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
+        Ok(SearchResults {
+            pages: self
+                .songs
+                .iter()
+                .filter(|(asked, _)| *asked == query)
+                .map(|(_, song)| song.clone())
+                .collect(),
+            ..Default::default()
+        })
+    }
+}
+
+#[test]
+fn lyrics_come_from_the_song_asked_for() {
+    let article = |title: &str, item: &str, description: &str| plumb_index::pages::PageHit {
+        named: true,
+        ..shelved(Page::from_article(
+            "en",
+            plumb_core::article::Article {
+                title: title.into(),
+                description: Some(description.into()),
+                item: Some(item.into()),
+                ..Default::default()
+            },
+        ))
+    };
+    let song = |title: &str, by: &str, genius: &str| PlacedPage {
+        hit: plumb_index::pages::PageHit {
+            named: true,
+            ..shelved(
+                Page::from_music(plumb_core::article::Article {
+                    title: title.into(),
+                    description: Some(format!("Song by {by}, 1992")),
+                    aliases: vec![format!("{title} {by}")],
+                    item: Some("recording/70595637-9310-45f2-a266-58f8de4874a7".into()),
+                    profiles: vec![plumb_core::profiles::Profile {
+                        service: "genius-song".into(),
+                        id: genius.into(),
+                    }],
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+        },
+        under: None,
+        at: 0,
+    };
+    let lyrics = |backend: Songs, query: &str| {
+        Mcp::new(Arc::new(backend), None)
+            .search(query, None, &SearchOptions::default())
+            .unwrap()["profile"]
+            .clone()
+    };
+    // Two articles are called "Creep"; MusicBrainz lists Radiohead's
+    // first, with its page on Genius.
+    let creep = Songs {
+        articles: vec![
+            article(
+                "Creep (Radiohead song)",
+                "Q1140405",
+                "1992 single by Radiohead",
+            ),
+            article("Creep (TLC song)", "Q2304339", "1994 single by TLC"),
+        ],
+        songs: vec![(
+            "creep song",
+            song("Creep", "Radiohead", "Radiohead-creep-lyrics"),
+        )],
+    };
+    let profile = lyrics(creep, "creep lyrics");
+    assert_eq!(profile["url"], "https://genius.com/Radiohead-creep-lyrics");
+    // "Pyramid Song" is Radiohead's, never Wolfmother's "Pyramid", which a
+    // search for "pyramid song" finds as a song.
+    let pyramid = Songs {
+        articles: vec![article(
+            "Pyramid Song",
+            "Q1755624",
+            "2001 single by Radiohead",
+        )],
+        songs: vec![(
+            "pyramid song",
+            song("Pyramid", "Wolfmother", "Wolfmother-pyramid-lyrics"),
+        )],
+    };
+    assert!(lyrics(pyramid, "pyramid song lyrics").is_null());
+}
