@@ -271,6 +271,10 @@ const SUBPAGE_TITLE_SHARE: f32 = 0.75;
 /// The same share when the title holds every word of the query.
 const SUBPAGE_HELD_SHARE: f32 = 0.5;
 
+/// Most words of a reference page's title holding both words of a
+/// two-word query side by side, for it to be asked for.
+const REFERENCE_PAIR_TITLE_WORDS: usize = 5;
+
 /// Words a title shares with anything, left out of [`SUBPAGE_TITLE_SHARE`].
 const TITLE_STOP_WORDS: &[&str] = &[
     "a", "an", "and", "at", "by", "for", "from", "in", "my", "of", "on", "or", "the", "to", "with",
@@ -374,13 +378,16 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
             SUBPAGE_TITLE_SHARE
         };
         // A reference page's title with every word of a query of three
-        // words or more, or of two side by side, is asked for however long
-        // it is: "pain with ovarian cyst" for "Will an ovarian cyst cause
-        // back pain? What to know", "epley's maneuver" for "Epley Maneuver
-        // (Canalith Repositioning Procedure)". A subpage's long title with
-        // them is more often a big site's news or press release.
-        let whole =
-            reference && asked.len() >= 2 && shared == asked.len() && (asked.len() >= 3 || held);
+        // words or more is asked for however long it is: "pain with
+        // ovarian cyst" for "Will an ovarian cyst cause back pain? What to
+        // know". Two words side by side are enough in a short title,
+        // "epley's maneuver" for "Epley Maneuver (Canalith Repositioning
+        // Procedure)"; a longer one with a name is mostly news, "hulk
+        // hogan" for "Hulk Hogan's Daughter Brooke Welcomes Twins". A
+        // subpage's long title with them is more often a big site's news or
+        // press release.
+        let pair = asked.len() == 2 && held && title.len() <= REFERENCE_PAIR_TITLE_WORDS;
+        let whole = reference && shared == asked.len() && (asked.len() >= 3 || pair);
         whole || shared >= fewest && shared as f32 >= share * title.len() as f32
     };
     // Or of its title before a subtitle, "Declaration of Independence" in

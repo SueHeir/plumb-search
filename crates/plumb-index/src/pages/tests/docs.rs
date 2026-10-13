@@ -305,6 +305,7 @@ fn reference_pages_are_listed_only_when_asked_for() {
                 "epley's maneuver",
                 "Epley Maneuver (Canalith Repositioning Procedure)",
             ),
+            ("ribeye steak", "Charcoal-Grilled Ribeye Steak Recipe"),
         ] {
             assert!(allowed(set, query, title), "{set} {query}: {title}");
         }
@@ -339,6 +340,12 @@ fn reference_pages_are_listed_only_when_asked_for() {
             (
                 "lack of friends",
                 "Indoor Grilling: Leeks with Asian Vinaigrette Recipe",
+            ),
+            // News on what a two-word query names, listed under its site.
+            ("hulk hogan", "Hulk Hogan's Daughter Brooke Welcomes Twins"),
+            (
+                "taco bell",
+                "Taco Bell Has a New Version of the Menu Item That Sold Out in Days",
             ),
         ] {
             assert!(!allowed(set, query, title), "{set} {query}: {title}");
