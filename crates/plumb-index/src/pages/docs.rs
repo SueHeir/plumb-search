@@ -12,7 +12,7 @@ use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{TantivyDocument, Term};
 
 use super::placing::operators_allow;
-use super::scoring::{scoped_query, truncate_keeping_inner_pages};
+use super::scoring::{scoped_query, site_pages_after_named_article, truncate_keeping_inner_pages};
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, CANDIDATES, DOCS_SET, PARTIAL_MATCH,
     POPULARITY_SCALE, POPULARITY_SHARE, QUESTION_QUERY_WORDS, QUESTION_SHARE,
@@ -53,6 +53,7 @@ impl PageSearcher {
         hits.retain(|hit| {
             operators_allow(ops, &hit.page) && docs_exact_query_allows(&hit.page, words)
         });
+        site_pages_after_named_article(&mut hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
         Ok(hits)
