@@ -78,27 +78,8 @@ jobs:
           docker run --rm --entrypoint test plumb-search:ci \
             -s /usr/share/doc/plumb-search/THIRD-PARTY-NOTICES.html
 
-  # A v* tag must name the version in Cargo.toml, which the binary reports.
-  # Runs for every push so the builds can depend on it; only tags are checked.
-  version:
-    name: Check the tag's version
-    if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: github.ref_type == 'tag'
-      - name: Compare the tag with Cargo.toml
-        if: github.ref_type == 'tag'
-        run: |
-          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
-          if [[ ${GITHUB_REF_NAME#v} != "$version" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match version \"$version\" in Cargo.toml"
-            exit 1
-          fi
-
   build:
     name: Build ${{ matrix.platform }}
-    needs: version
     if: github.event_name == 'push'
     strategy:
       fail-fast: false
@@ -113,6 +94,21 @@ jobs:
       contents: read
       packages: write
     steps:
+      # A v* tag must name the version in Cargo.toml, which the binary
+      # reports. Checked here, not in a job of its own: when the account's
+      # runners are busy, every job waits its turn, so one more job before
+      # the builds delayed every image by that wait.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.ref_type == 'tag'
+      - name: Compare the tag with Cargo.toml
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [[ ${GITHUB_REF_NAME#v} != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version \"$version\" in Cargo.toml"
+            exit 1
+          fi
+
       - name: Prepare
         env:
           PLATFORM: ${{ matrix.platform }}
