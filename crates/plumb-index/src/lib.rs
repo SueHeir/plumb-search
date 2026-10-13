@@ -270,7 +270,9 @@ pub struct RankConfig {
     /// rid of aphids") names no site by its words: none of them matches a
     /// domain label or joined name on its own, and its first words are no
     /// leading name. Questions describe what they want; rid.it and get.gov
-    /// are not it.
+    /// are not it. Only a text most links to a site use still names it
+    /// inside a question ([`RankConfig::link_names`]), so it is kept where
+    /// it ranks: netflix.com in "how to cancel netflix".
     pub questions_name_nothing: bool,
     /// Add the official site of the article the query names when no site
     /// found is it ([`pages::add_named_site`]).

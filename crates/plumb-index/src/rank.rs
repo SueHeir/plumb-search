@@ -779,7 +779,8 @@ impl Searcher {
             .zip(any_meaning)
         {
             let convincing_alternative = ranked.iter().any(|row| row.relevance_tier > 0);
-            let (named_inside, alias_inside) = self.names_inside(&searcher, &query, query_text)?;
+            let (named_inside, alias_inside) =
+                self.names_inside(&searcher, &query, query_text, cfg)?;
             let mut partial = Vec::new();
             for r in &ranked {
                 if r.named || kinds.contains(&r.addr) || r.relevance_tier > 0 {
