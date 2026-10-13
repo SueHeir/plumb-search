@@ -51,6 +51,44 @@ const LIFT_LINK_MARGIN: f32 = 0.2;
 /// and codastory.com, having one word of it, are no answer. The page's
 /// own site stays. Returns how many were left out.
 pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -> usize {
+    drop_namesakes(sites, pages, |hit| hit.missing_words)
+}
+
+/// [`drop_namesakes_of_words`] for the sites that only one word of the
+/// name found, past its first: a site the query does not name by its
+/// first words, lacking some of its main words and less close to it in
+/// meaning than `floor` ([`crate::RankConfig::meaning_only_relevance`]).
+/// A word of an article's name is not a name of its own, though the
+/// ranking keeps a site that word names, as it keeps hilton.com for
+/// "back bay hilton": "airpods pro" names the earbuds, so
+/// nationalarchives.gov.uk, once the Public Record Office (PRO), is no
+/// answer, nor is carbon3d.com for "thinkpad x1 carbon" or mini.com for
+/// "ipad mini". A site the name starts with stays (apple.com, found by
+/// "mac", for "mac mini"), and so does one with no vector to judge it by.
+pub fn drop_far_namesakes(
+    sites: &mut Vec<crate::Hit>,
+    pages: &[PageHit],
+    floor: Option<f32>,
+) -> usize {
+    let Some(floor) = floor else {
+        return 0;
+    };
+    drop_namesakes(sites, pages, |hit| {
+        hit.missing_words
+            && hit.query_evidence.as_ref().is_some_and(|evidence| {
+                evidence.partial_name_words == 0
+                    && evidence.semantic_closeness.is_some_and(|c| c < floor)
+            })
+    })
+}
+
+/// Leaves out the `namesake` sites, but the page's own, when the whole
+/// query is the name of an article or Wikidata item.
+fn drop_namesakes(
+    sites: &mut Vec<crate::Hit>,
+    pages: &[PageHit],
+    namesake: impl Fn(&crate::Hit) -> bool,
+) -> usize {
     let Some(named) = pages
         .iter()
         .find(|hit| hit.named && hit.page.item.is_some())
@@ -59,7 +97,7 @@ pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -
     };
     let own = named.page.site.as_deref();
     let before = sites.len();
-    sites.retain(|hit| !hit.missing_words || Some(hit.domain.as_str()) == own);
+    sites.retain(|hit| !namesake(hit) || Some(hit.domain.as_str()) == own);
     before - sites.len()
 }
 

@@ -19,8 +19,8 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, Operators};
 use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, operators_allow, options_allow,
-    place_operator_pages, place_pages, PageHit, OPERATOR_PAGES,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
+    options_allow, place_operator_pages, place_pages, PageHit, OPERATOR_PAGES,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -1244,6 +1244,7 @@ pub(super) fn add_pages(
                     index.backend().site(domain)
                 });
             }
+            drop_far_namesakes(&mut results.hits, &found, inner.rank.meaning_only_relevance);
             if inner.rank.drop_namesakes {
                 drop_namesakes_of_words(&mut results.hits, &found);
             }
