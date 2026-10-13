@@ -209,11 +209,17 @@ pub fn features(query: &str, rows: &[RowSignals]) -> Vec<[f64; FEATURES.len()]> 
                 f[23] = flag(row.official);
                 f[24] = row.demand.map_or(-1.0, f64::from);
                 f[25] = flag(row.country.is_some());
-                f[26] = row.under.len() as f64;
-                f[27] = flag(row.under.iter().any(|p| p.named));
-                f[28] = row
-                    .under
-                    .iter()
+                // The site's own page a query names under it
+                // ([`crate::pages::PageSearcher::add_named_site_page`]) is
+                // not read: the model learned from sites with articles.
+                let under = || {
+                    row.under
+                        .iter()
+                        .filter(|p| !crate::pages::is_site_page_set(&p.set))
+                };
+                f[26] = under().count() as f64;
+                f[27] = flag(under().any(|p| p.named));
+                f[28] = under()
                     .map(|p| f64::from(p.popularity))
                     .fold(-1.0, f64::max);
                 let titled = row.title.as_deref().is_some_and(|t| !t.trim().is_empty());
