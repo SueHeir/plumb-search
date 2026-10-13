@@ -2,6 +2,7 @@
 //! search operators.
 
 use super::*;
+use crate::hits::is_unfilled;
 
 fn bank_corpus() -> Vec<SiteRecord> {
     let bank = |domain: &str, alias: &str, country: &str, rank: u32| {
@@ -455,6 +456,77 @@ fn borrowed_and_garbled_titles_are_not_shown() {
     let netease = first("netease");
     assert_eq!(netease.domain, "netease.com");
     assert_eq!(netease.title, None);
+}
+
+#[test]
+fn unfilled_template_descriptions_and_check_addresses_are_not_shown() {
+    let mut frengly = site(
+        "frengly.com",
+        Some("Free Online Translator - online translate www"),
+        Some("{{description}}"),
+        &[],
+        &[],
+        ranked(20_000, 40),
+    );
+    frengly.url = Some("https://frengly.com/".into());
+    let mut surbl = site(
+        "surbl.org",
+        Some("SURBL"),
+        Some("surbl desc"),
+        &[],
+        &[],
+        ranked(30_000, 30),
+    );
+    surbl.about = Some("anti-spam blocklist".into());
+    // Crawled into a check, whose address leads nowhere now.
+    let mut skyscanner = site(
+        "skyscanner.nl",
+        Some("Skyscanner"),
+        Some("Vergelijk goedkope vluchtprijzen"),
+        &[],
+        &[],
+        ranked(9_000, 200),
+    );
+    skyscanner.url =
+        Some("https://www.skyscanner.nl/sttc/px/captcha-v2/index.html?url=Lz8=&uuid=5103".into());
+    let mut records = corpus();
+    records.extend([frengly, surbl, skyscanner]);
+    let (_dir, searcher) = build(&records);
+    let first = |q: &str| searcher.search(q, 10).unwrap().into_iter().next().unwrap();
+    let frengly = first("frengly");
+    assert_eq!(frengly.domain, "frengly.com");
+    assert_eq!(frengly.description, None);
+    // What Wikidata says it is, in place of the placeholder.
+    let surbl = first("surbl");
+    assert_eq!(surbl.domain, "surbl.org");
+    assert_eq!(surbl.description.as_deref(), Some("anti-spam blocklist"));
+    assert_eq!(first("skyscanner").url, "https://skyscanner.nl/");
+    assert_eq!(first("frengly").url, "https://frengly.com/");
+}
+
+#[test]
+fn unfilled_descriptions_are_told_from_short_ones() {
+    for text in [
+        "{{description}}",
+        "{{ page.excerpt }}",
+        "${siteDescription}",
+        "null",
+        "YOUR DESCRIPTION HERE",
+        "Site description",
+        "surbl desc",
+    ] {
+        assert!(is_unfilled(text), "{text:?}");
+    }
+    for text in [
+        "Logic-less {{mustache}} templates.",
+        "Todo sobre el iPhone de Apple.",
+        "Sort results asc or desc",
+        "Description of the Dutch East India Company",
+        "Null hypothesis explained",
+        "Descriptive statistics",
+    ] {
+        assert!(!is_unfilled(text), "{text:?}");
+    }
 }
 
 #[test]
