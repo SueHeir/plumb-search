@@ -20,6 +20,7 @@ members = [
     "plugins/reddit",
     "plugins/steam",
     "plugins/youtube-music",
+    "plugins/zotero",
 ]
 # Plain `cargo build` and `cargo test` leave out the desktop app, which needs
 # GUI libraries (WebKitGTK on Linux); build it with `-p plumb-desktop`.
@@ -42,6 +43,7 @@ default-members = [
     "plugins/reddit",
     "plugins/steam",
     "plugins/youtube-music",
+    "plugins/zotero",
 ]
 
 [workspace.package]
