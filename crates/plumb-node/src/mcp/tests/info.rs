@@ -658,8 +658,7 @@ fn lyrics_come_from_the_song_asked_for() {
     let lyrics = |backend: Profiles, query: &str| {
         Mcp::new(Arc::new(backend), None)
             .search(query, None, &SearchOptions::default())
-            .unwrap()["profile"]
-            .clone()
+            .unwrap()
     };
     // Two articles are called "Creep"; MusicBrainz lists Radiohead's
     // first, with its page on Genius.
@@ -677,8 +676,20 @@ fn lyrics_come_from_the_song_asked_for() {
             song("Creep", "Radiohead", "Radiohead-creep-lyrics"),
         )],
     };
-    let profile = lyrics(creep, "creep lyrics");
-    assert_eq!(profile["url"], "https://genius.com/Radiohead-creep-lyrics");
+    let found = lyrics(creep, "creep lyrics");
+    let genius = "https://genius.com/Radiohead-creep-lyrics";
+    assert_eq!(found["profile"]["url"], genius);
+    // It is the first result, as on the results page, and a listing of
+    // the song rather than an official profile.
+    assert_eq!(
+        found["ordered_results"][0],
+        json!({"kind": "profile", "url": genius})
+    );
+    let text = super::text::render("search", &found);
+    assert!(
+        text.contains(&format!("Listing: Creep on Genius: {genius}")),
+        "{text}"
+    );
     // "Pyramid Song" is Radiohead's, never Wolfmother's "Pyramid", which a
     // search for "pyramid song" finds as a song.
     let pyramid = Profiles {
@@ -692,7 +703,7 @@ fn lyrics_come_from_the_song_asked_for() {
             song("Pyramid", "Wolfmother", "Wolfmother-pyramid-lyrics"),
         )],
     };
-    assert!(lyrics(pyramid, "pyramid song lyrics").is_null());
+    assert!(lyrics(pyramid, "pyramid song lyrics")["profile"].is_null());
 }
 
 #[test]
