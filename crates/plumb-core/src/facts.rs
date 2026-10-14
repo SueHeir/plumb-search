@@ -556,6 +556,12 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
     // "the" ("the art of war author"), dropped below unless a work's.
     let whole = q.as_str();
     let q = q.strip_prefix("the ").unwrap_or(&q);
+    // Facts are kept as they are now: "the current ceo of apple" asks what
+    // "the ceo of apple" does.
+    let q = ["current ", "present "]
+        .iter()
+        .find_map(|now| q.strip_prefix(now))
+        .unwrap_or(q);
     use FactKind::*;
     // Words before the subject.
     let before: &[(&str, &[FactKind], bool)] = &[
@@ -876,6 +882,19 @@ mod tests {
             ("what year did elvis die", Died, "elvis"),
             ("einstein date of death", Died, "einstein"),
             ("how tall was abraham lincoln", Height, "abraham lincoln"),
+            ("current ceo of apple", Ceo, "apple"),
+            ("who is the current ceo of microsoft", Ceo, "microsoft"),
+            ("current president of mexico", HeadOfState, "mexico"),
+            (
+                "who is the present prime minister of india",
+                HeadOfGovernment,
+                "india",
+            ),
+            (
+                "current owner of the washington post",
+                Owner,
+                "washington post",
+            ),
         ] {
             assert_eq!(asked(q), Some((kind, subject.into(), false)), "{q}");
         }
