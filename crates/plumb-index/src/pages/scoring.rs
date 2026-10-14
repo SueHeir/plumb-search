@@ -16,9 +16,9 @@ use super::page::is_item_id;
 use super::sites::{base_title, short_titles};
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
-    DESCRIBED_MISSING_FROM, DESCRIBED_QUERY_WORDS, DESCRIBED_WORD, DOCS_SET, FILMS_SET, GITHUB_SET,
-    LEAD_CANDIDATES, LEAD_MATCH, MUSIC_SET, OTHER_NAME_MATCH, PACKAGES_SET, PAPERS_SET,
-    PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
+    DESCRIBED_MISSING_FROM, DESCRIBED_QUERY_WORDS, DESCRIBED_WORD, DOCS_SET, DUPLICATE_WORD_SHARE,
+    FILMS_SET, GITHUB_SET, LEAD_CANDIDATES, LEAD_MATCH, MUSIC_SET, OTHER_NAME_MATCH, PACKAGES_SET,
+    PAPERS_SET, PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
     REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
     TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WANTED_SET, WELL_KNOWN_PACKAGE,
@@ -922,7 +922,9 @@ impl PageSearcher {
     /// word, or whose title has none of `sure`, matches not at all. The
     /// question's words are its title and
     /// tags, or the title of a duplicate of it and its tags, whichever
-    /// covers the query best ([`Page::asked_as`]).
+    /// covers the query best ([`Page::asked_as`]). A word only the
+    /// duplicate's title has counts [`DUPLICATE_WORD_SHARE`], unless the
+    /// query asks the duplicate as a whole.
     pub(crate) fn question_match(
         &self,
         page: &Page,
@@ -946,28 +948,43 @@ impl PageSearcher {
             }
         };
         let all: f32 = stems.iter().map(weight).sum();
+        let stemmed = |text: &str| -> HashSet<String> {
+            analysis::tokens(&self.stemmed, text).into_iter().collect()
+        };
+        let asked_as = page.asked_as();
+        let own = asked_as
+            .first()
+            .map(|(_, topic)| stemmed(topic))
+            .unwrap_or_default();
         let mut best = (0.0f32, false);
-        for (title, topic) in page.asked_as() {
+        for (title, topic) in &asked_as {
             if page.is_question() && self.only_asks(title) {
                 continue;
             }
-            let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
-                .into_iter()
-                .collect();
+            let words = stemmed(topic);
             if topic_word.is_some_and(|word| !words.contains(word)) {
                 continue;
             }
-            let share = stems
-                .iter()
-                .filter(|stem| words.contains(*stem))
-                .map(weight)
-                .sum::<f32>()
-                / all;
+            let covered = |duplicate_word: f32| {
+                stems
+                    .iter()
+                    .filter(|stem| words.contains(*stem))
+                    .map(|stem| {
+                        weight(stem)
+                            * if own.contains(stem) {
+                                1.0
+                            } else {
+                                duplicate_word
+                            }
+                    })
+                    .sum::<f32>()
+                    / all
+            };
+            let share = covered(1.0);
             if share < QUESTION_SHARE {
                 continue;
             }
-            let title: HashSet<String> =
-                analysis::tokens(&self.stemmed, title).into_iter().collect();
+            let title = stemmed(title);
             // Its tags alone do not make a question about the query: "What
             // is the tax status of assets recovered via bankruptcy
             // proceedings?", tagged capital-gains-tax and australia, does
@@ -982,6 +999,19 @@ impl PageSearcher {
                 && !title.is_empty()
                 && title.iter().filter(|word| stems.contains(word)).count() as f32
                     >= QUESTION_TITLE_SHARE * title.len() as f32;
+            // A duplicate's own words may be its asker's detail, not what
+            // the question answers: "python list sort" asks nothing of
+            // "Remove all whitespace in a string", though its duplicate "How
+            // to sort a list of string ignoring whitespace in python?" has
+            // every word.
+            let share = if asked {
+                share
+            } else {
+                covered(DUPLICATE_WORD_SHARE)
+            };
+            if share < QUESTION_SHARE {
+                continue;
+            }
             let found = (PARTIAL_MATCH * share, asked);
             if found.0 > best.0 || found.0 == best.0 && found.1 && !best.1 {
                 best = found;
