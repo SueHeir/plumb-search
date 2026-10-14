@@ -333,19 +333,23 @@ fn well_known_names_one_slip_away_are_meant() {
 #[test]
 fn a_likelier_slip_beats_a_well_known_name() {
     let mut records = typo_corpus();
-    records.push(site(
-        "wired.com",
-        Some("WIRED"),
-        None,
-        &["WIRED"],
-        &[],
-        popular(300, 30_000),
-    ));
+    for (domain, name) in [("wired.com", "WIRED"), ("trier.de", "Trier")] {
+        records.push(site(
+            domain,
+            Some(name),
+            None,
+            &[name],
+            &[],
+            popular(300, 30_000),
+        ));
+    }
     // The sites teach that "ei" is often typed "ie".
     for i in 0..30 {
         records.push(site(
             &format!("weird{i}.com"),
-            Some(&format!("Weird facts to receive, deceive and ceiling {i}")),
+            Some(&format!(
+                "Weird facts: their receive, deceive and ceiling {i}"
+            )),
             None,
             &[],
             &[],
@@ -367,6 +371,9 @@ fn a_likelier_slip_beats_a_well_known_name() {
     // "ei" typed "ie" is the likelier slip.
     let results = search_spelled(&searcher, "wierd");
     assert_ne!(suggestion(&results), suggested("wired"));
+    // Nor is "thier" Trier: a letter changed is a rarer slip.
+    let results = search_spelled(&searcher, "thier");
+    assert_ne!(suggestion(&results), suggested("trier"));
 }
 
 #[test]
