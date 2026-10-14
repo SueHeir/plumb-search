@@ -1220,18 +1220,7 @@ pub(super) fn add_pages(
     let wanted = wanted.map(|wanted| wanted.in_language(options.language.as_deref()));
     let ops = Operators::parse(query);
     if ops.any() {
-        if ops.words.is_empty() {
-            return;
-        }
-        // "asyncio site:docs.python.org" finds what "python asyncio" does
-        // there.
-        match searcher.search_naming_docs(&ops.words, &ops, false, OPERATOR_PAGES) {
-            Ok(mut found) => {
-                found.retain(|hit| options_allow(options, &hit.page));
-                results.pages = place_operator_pages(&ops, &results.hits, found);
-            }
-            Err(err) => warn!("searching pages: {err:#}"),
-        }
+        add_operator_pages(&searcher, options, &ops, results);
         return;
     }
     let applied = results
@@ -1299,28 +1288,14 @@ pub(super) fn add_pages(
                     results.site_search = None;
                 }
             }
-            if let Some(spelling) = results.spelling.take_if(|_| applied.is_none()) {
-                results.spelling = match searcher.check_spelling(query, spelling.clone()) {
-                    Ok(checked) => checked,
-                    Err(err) => {
-                        warn!("checking a spelling against pages: {err:#}");
-                        Some(spelling)
-                    }
-                };
-            }
-            // Words of things, not sites ("anubas", "budafest"): the
-            // pages' names know them.
-            if results.spelling.is_none() && !spelled_right {
-                if let Some(index) = inner.current() {
-                    let sites = index.backend().searcher();
-                    let site_known =
-                        |word: &str| sites.word_sites(word) >= plumb_index::KNOWN_WORD_SITES;
-                    match searcher.suggest_spelling(query, sites.spelling_model(), &site_known) {
-                        Ok(suggested) => results.spelling = suggested,
-                        Err(err) => warn!("suggesting a spelling from pages: {err:#}"),
-                    }
-                }
-            }
+            settle_spelling(
+                inner,
+                &searcher,
+                query,
+                applied.is_none(),
+                spelled_right,
+                results,
+            );
             results.pages = place_pages(query, &results.hits, found);
             if inner.rank.learned {
                 plumb_index::learned::reorder(
@@ -1361,6 +1336,58 @@ pub(super) fn add_pages(
             if let Err(err) = searcher.list_typed_page(query, options, &mut results.pages) {
                 warn!("listing the page at a typed address: {err:#}");
             }
+        }
+        Err(err) => warn!("searching pages: {err:#}"),
+    }
+}
+
+/// Checks a spelling the results carry against the pages, and suggests one
+/// from their names when the sites knew none.
+fn settle_spelling(
+    inner: &Inner,
+    searcher: &PageSearcher,
+    query: &str,
+    unapplied: bool,
+    spelled_right: bool,
+    results: &mut SearchResults,
+) {
+    if let Some(spelling) = results.spelling.take_if(|_| unapplied) {
+        results.spelling = match searcher.check_spelling(query, spelling.clone()) {
+            Ok(checked) => checked,
+            Err(err) => {
+                warn!("checking a spelling against pages: {err:#}");
+                Some(spelling)
+            }
+        };
+    }
+    // Words of things, not sites ("anubas", "budafest"): the
+    // pages' names know them.
+    if results.spelling.is_none() && !spelled_right {
+        if let Some(index) = inner.current() {
+            let sites = index.backend().searcher();
+            let site_known = |word: &str| sites.word_sites(word) >= plumb_index::KNOWN_WORD_SITES;
+            match searcher.suggest_spelling(query, sites.spelling_model(), &site_known) {
+                Ok(suggested) => results.spelling = suggested,
+                Err(err) => warn!("suggesting a spelling from pages: {err:#}"),
+            }
+        }
+    }
+}
+
+/// "asyncio site:docs.python.org" finds what "python asyncio" does there.
+fn add_operator_pages(
+    searcher: &PageSearcher,
+    options: &SearchOptions,
+    ops: &Operators,
+    results: &mut SearchResults,
+) {
+    if ops.words.is_empty() {
+        return;
+    }
+    match searcher.search_naming_docs(&ops.words, ops, false, OPERATOR_PAGES) {
+        Ok(mut found) => {
+            found.retain(|hit| options_allow(options, &hit.page));
+            results.pages = place_operator_pages(ops, &results.hits, found);
         }
         Err(err) => warn!("searching pages: {err:#}"),
     }

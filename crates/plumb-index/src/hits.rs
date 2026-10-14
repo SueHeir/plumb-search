@@ -338,6 +338,23 @@ pub fn suggested_site_second(hits: &mut Vec<Hit>, site: &str) {
     hits.insert(1, hit);
 }
 
+/// Whether the title names the brand anywhere in it: "StubHub UK", "Buy
+/// and sell tickets | StubHub".
+fn names_brand(hit: &Hit, label: &str) -> bool {
+    hit.title
+        .as_deref()
+        .is_none_or(|title| normalize_text(title).replace(' ', "").contains(label))
+}
+
+/// Whether a domain ending is a country's. Endings used as generic ones
+/// (.io, .me, .co) are not, but the same ending under a country's own
+/// (.com.co, Colombia's; .com.ai) still is.
+fn country(suffix: &str) -> bool {
+    suffix.rsplit('.').next().is_some_and(|tld| {
+        tld.len() == 2 && (suffix.contains('.') || !GENERIC_COUNTRY_ENDINGS.contains(&tld))
+    })
+}
+
 /// `hits` without the copies of a site listed with them:
 ///
 /// - One site per brand: airbnb.fr, airbnb.co.uk and airbnb.tech next to
@@ -379,21 +396,6 @@ pub(crate) fn without_copies(
     home: Option<&str>,
     asked: &[&str],
 ) -> Vec<Hit> {
-    // The title names the brand anywhere in it: "StubHub UK", "Buy and
-    // sell tickets | StubHub".
-    let names_brand = |hit: &Hit, label: &str| {
-        hit.title
-            .as_deref()
-            .is_none_or(|title| normalize_text(title).replace(' ', "").contains(label))
-    };
-    // Endings used as generic ones (.io, .me, .co) are not countries', but
-    // the same ending under a country's own (.com.co, Colombia's; .com.ai)
-    // still is.
-    let country = |suffix: &str| {
-        suffix.rsplit('.').next().is_some_and(|tld| {
-            tld.len() == 2 && (suffix.contains('.') || !GENERIC_COUNTRY_ENDINGS.contains(&tld))
-        })
-    };
     // The best known, not the best ranked: ranking comes again after this
     // (the learned order), and cbc.bb ranked above cbc.ca is no reason to
     // leave out cbc.ca.
