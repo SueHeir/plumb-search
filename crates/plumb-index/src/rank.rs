@@ -13,11 +13,11 @@ use tantivy::schema::Value;
 use tantivy::{DocAddress, DocSet, Order, TantivyDocument, Term};
 
 use crate::hits::{without_copies, without_near_copies};
-use crate::names::{is_reserved_name, navigation_subject, NameMatch, Named};
+use crate::names::{navigation_subject, NameMatch, Named};
 use crate::query::{matching_docs, ParsedQuery};
 use crate::{
-    analysis, health, pages, schema, CandidateEvidence, CandidatePool, Hit, Meaning, RankConfig,
-    SearchOptions, SearchResults, Searcher, WELL_KNOWN_LINK_SCORE,
+    analysis, health, junk, pages, schema, CandidateEvidence, CandidatePool, Hit, Meaning,
+    RankConfig, SearchOptions, SearchResults, Searcher, WELL_KNOWN_LINK_SCORE,
 };
 
 /// The most popular sites matching any query word that are ranked even if
@@ -979,12 +979,6 @@ impl Searcher {
             _ => None,
         };
 
-        // Left out unless the query names them: sites on names reserved
-        // for tests (uniteddolls.test), online pill shops named after a
-        // drug ("ibuprofen dosage" found celebrex365o24.com), and little
-        // known homepages that are only a company's sign-in page for
-        // someone else's product ("Outlook Web App" on bpl.net for
-        // "microsoft outlook"). live.com, titled "Outlook", is Microsoft's.
         let ranked = self.untitled_last(&searcher, ranked, query_text, limit)?;
         // A few more than asked for, so that copies left out below leave
         // the page full.
@@ -1006,20 +1000,8 @@ impl Searcher {
             let missing_words = missing.contains(&ranked.addr);
             let (mut hit, fingerprint) = self.hit(&searcher, ranked)?;
             hit.missing_words = missing_words;
-            let left_out = is_reserved_name(&hit.domain)
-                || health::source_quality(
-                    &hit.domain,
-                    hit.title.as_deref(),
-                    hit.description.as_deref(),
-                    Some(hit.link_score),
-                )
-                .is_some_and(|quality| quality.informational_penalty())
-                || (hit.link_score < WELL_KNOWN_LINK_SCORE
-                    && hit
-                        .title
-                        .as_deref()
-                        .is_some_and(|title| plumb_core::is_sign_in_portal(&hit.domain, title)));
-            if named || !left_out {
+            // Junk stays out unless the query names it.
+            if named || !junk::left_out(query_text, &hit) {
                 hits.push(hit);
                 fingerprints.push(fingerprint);
             }

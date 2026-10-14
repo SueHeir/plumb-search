@@ -74,6 +74,7 @@ pub mod health;
 mod hits;
 mod indexing;
 pub mod items;
+mod junk;
 mod language;
 pub mod learned;
 mod names;
