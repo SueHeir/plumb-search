@@ -702,6 +702,16 @@ fn plugins_with_ids_are_shown_only_results_about_what_they_know() {
     );
     let picked: Vec<u32> = knows.picks_shown(&results).iter().map(|r| r.id).collect();
     assert_eq!(picked, [1]);
+    // A site its pages lists is shown too, whatever the result is about.
+    let site = plugin(
+        Manifest {
+            ids: vec!["wikidata".into()],
+            pages: vec!["a.example".into()],
+            ..manifest(&[], &["a.example"])
+        },
+        &annotating("{}"),
+    );
+    assert_eq!(site.picks_shown(&results).len(), 2);
     let all = plugin(manifest(&[], &["a.example"]), &annotating("{}"));
     assert_eq!(all.picks_shown(&results).len(), 2);
     // Without keywords, ids, pages or always, a plugin must mark up
