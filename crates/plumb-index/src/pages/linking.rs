@@ -44,7 +44,8 @@ impl PageSearcher {
     ) -> Result<HashMap<DocAddress, Vec<String>>> {
         // A name joins its words, so "a lien" would be Alien and "a cast"
         // Acast: a part with a word like "a" at its edge names only a page
-        // spelled with it ("a star is born").
+        // spelled with it ("a star is born"), and is never linked, as "go
+        // to" would be The Mikado (one of its names is "Go to").
         let joins = |word: &String| crate::is_function_word(word) && word != "the";
         let mut named = Vec::new();
         for start in 0..words.len() {
@@ -66,18 +67,17 @@ impl PageSearcher {
                 if (names(self.fields.keys)? > 0 || names(self.fields.aliases)? > 0)
                     && (!edged || self.spelled(searcher, &key, span.len())?)
                 {
-                    named.push((start, end, key));
+                    named.push((start, end, key, edged));
                 }
             }
         }
         let heaviest = self.heaviest_word(searcher, described)?;
         let mut linked = HashMap::new();
-        for (start, end, key) in &named {
-            let (start, end) = (*start, *end);
+        for &(start, end, ref key, edged) in &named {
             let held = named
                 .iter()
-                .any(|&(s, e, _)| s <= start && end <= e && e - s > end - start);
-            if end - start == words.len() || held {
+                .any(|&(s, e, _, _)| s <= start && end <= e && e - s > end - start);
+            if end - start == words.len() || held || edged {
                 continue;
             }
             let span = &words[start..end];
