@@ -33,6 +33,13 @@ pub(crate) enum Hint {
     Repo,
     /// A paper of that title: "batch normalization paper".
     Paper,
+    /// A work of one of these kinds of that name, of which something is
+    /// asked: "titanic trailer", "let it be chords".
+    Work(&'static [&'static str]),
+    /// A film, show or game of that name when there is one, else
+    /// whatever is named so: "titanic movie" for the 1997 film, not the
+    /// ship, but "tom hanks movie" still for Tom Hanks.
+    Screen,
     /// A person of that name, of whom something is asked: "obama
     /// daughters", "picasso paintings".
     Person,
@@ -41,11 +48,41 @@ pub(crate) enum Hint {
     Regnal,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
-    /// Only pages the name names: what a fact question asks about. "madrid
-    /// spanish" (of "madrid spanish capital city") names nothing, and the
-    /// clubs it describes would push Madrid out.
+    /// Only pages the name names: what a fact question asks about, or the
+    /// list a search for one asks for ("list of popes" of "popes in
+    /// order"). "madrid spanish" (of "madrid spanish capital city") names
+    /// nothing, and the clubs it describes would push Madrid out.
     Named,
 }
+
+/// What a song is called in its title or description ([`Page::is_work_of`]).
+const SONG: &[&str] = &["song", "single"];
+
+/// What a film, show or game is called so.
+const SCREEN: &[&str] = &[
+    "film",
+    "movie",
+    "series",
+    "miniseries",
+    "sitcom",
+    "show",
+    "game",
+];
+
+/// Words before a name that ask who sang a song, where to see a film or
+/// show, or how long one is. Longer leads come first.
+const WORK_LEADS: &[(&str, &[&str])] = &[
+    ("who sings the song ", SONG),
+    ("who sang the song ", SONG),
+    ("who sings ", SONG),
+    ("who sang ", SONG),
+    ("where to watch ", SCREEN),
+    ("where can i watch ", SCREEN),
+    ("where to stream ", SCREEN),
+    ("where can i stream ", SCREEN),
+    ("how many seasons of ", SCREEN),
+    ("how many episodes of ", SCREEN),
+];
 
 /// Words before a name that ask about it. "What's" is read as "what is";
 /// "whats" is not, since "whats app" is a misspelled name.
@@ -97,14 +134,60 @@ const MEASURES: &[&str] = &[
     "tall", "old", "big", "long", "deep", "high", "far", "wide", "large", "heavy",
 ];
 
-/// What a question of how something works or how big it is asks about:
-/// "refrigerator" of "how does a refrigerator work", "eiffel tower" of
-/// "how tall is the eiffel tower". `None` for other questions ("how do i
-/// make pancakes", where "how do" starts any question) and for "it".
+/// Questions that name what they ask about between a lead and a tail:
+/// "refrigerator" of "how does a refrigerator work", "metabolism" of "how
+/// metabolism works", "meiosis" of "where does meiosis occur", "coffee" of
+/// "is coffee bad for you", "penicillin" of "who discovered penicillin",
+/// "liver" of "what does the liver do", "taylor swift" of "where is taylor
+/// swift from". The first pair a question has decides.
+const ASKED_BETWEEN: &[(&[&str], &[&str])] = &[
+    (&["how does ", "how do "], &[" work"]),
+    (&["how "], &[" works", " work"]),
+    (
+        &["where does ", "where do "],
+        &[" take place", " occur", " happen", " come from"],
+    ),
+    (&["where is ", "where are "], &[" from"]),
+    (
+        &["is ", "are "],
+        &[
+            " good for you",
+            " bad for you",
+            " healthy",
+            " safe",
+            " beneficial",
+            " harmful",
+            " dangerous",
+            " effective",
+        ],
+    ),
+    (&["does ", "do "], &[" really work", " work"]),
+    (&["what does ", "what do "], &[" do"]),
+    (&["who invented ", "who discovered "], &[""]),
+    (&["when was ", "when were "], &[" invented", " discovered"]),
+];
+
+/// Words that make what a question names a clause or a pronoun, not a
+/// name: "how do i make it work", "how many hours do nurses work".
+const NOT_NAMES: &[&str] = &[
+    "it", "this", "that", "they", "these", "those", "you", "i", "we", "he", "she", "to", "do",
+    "does", "did", "is", "are", "can", "should", "many", "much", "long", "often",
+];
+
+/// The most words a question's name has: more are a clause.
+const MAX_ASKED_WORDS: usize = 4;
+
+/// What a question of how something works, how big it is, where it
+/// happens or whether it is good for you asks about: "refrigerator" of
+/// "how does a refrigerator work", "eiffel tower" of "how tall is the
+/// eiffel tower". `None` for other questions ("how do i make pancakes",
+/// where "how do" starts any question), and when what it names is not a
+/// name ([`asked_name`]): "it", or a clause.
 fn asked_how(q: &str) -> Option<&str> {
-    let works = ["how does ", "how do "]
-        .iter()
-        .find_map(|lead| q.strip_prefix(lead)?.strip_suffix(" work"));
+    let between = ASKED_BETWEEN.iter().find_map(|(leads, tails)| {
+        let rest = leads.iter().find_map(|lead| q.strip_prefix(lead))?;
+        tails.iter().find_map(|tail| rest.strip_suffix(tail))
+    });
     let measured = || {
         let (measure, rest) = q.strip_prefix("how ")?.split_once(' ')?;
         let rest = ["is ", "are ", "was "]
@@ -112,12 +195,46 @@ fn asked_how(q: &str) -> Option<&str> {
             .find_map(|verb| rest.strip_prefix(verb))?;
         MEASURES.contains(&measure).then_some(rest)
     };
-    let about = works.or_else(measured)?;
-    let about = ["a ", "an ", "the "]
+    asked_name(between.or_else(measured)?)
+}
+
+/// `text` as the name a question asks about, without a leading "a", "an"
+/// or "the". `None` when it is empty, has more than [`MAX_ASKED_WORDS`]
+/// words or has one of [`NOT_NAMES`].
+fn asked_name(text: &str) -> Option<&str> {
+    let name = ["a ", "an ", "the "]
         .iter()
-        .find_map(|article| about.strip_prefix(article))
-        .unwrap_or(about);
-    (!matches!(about, "it" | "this" | "that" | "they" | "these" | "those")).then_some(about)
+        .find_map(|article| text.strip_prefix(article))
+        .unwrap_or(text);
+    let words = || name.split(' ');
+    (!name.is_empty()
+        && words().count() <= MAX_ASKED_WORDS
+        && !words().any(|word| NOT_NAMES.contains(&word)))
+    .then_some(name)
+}
+
+/// The two things a comparison sets side by side, each looked up as a
+/// name: "mitosis" and "meiosis" of "mitosis vs meiosis" or "difference
+/// between mitosis and meiosis". `None` for other queries, and when a
+/// side is not a name ([`asked_name`]).
+pub(crate) fn compared(query: &str) -> Option<[String; 2]> {
+    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?'))
+        .to_lowercase()
+        .replace('’', "'");
+    let (a, b) = [
+        "what is the difference between ",
+        "what's the difference between ",
+        "difference between ",
+    ]
+    .iter()
+    .find_map(|lead| q.strip_prefix(lead)?.split_once(" and "))
+    .or_else(|| {
+        [" vs. ", " vs ", " versus "]
+            .iter()
+            .find_map(|word| q.split_once(word))
+    })?;
+    let side = |text: &str| asked_name(text.trim()).map(str::to_string);
+    Some([side(a)?, side(b)?])
 }
 
 /// Words after a name that say what about it is wanted.
@@ -174,9 +291,33 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" albums", Hint::Person),
     (" paintings", Hint::Person),
     (" inventions", Hint::Person),
+    // What people ask of a song or a film, show or game, whose article is
+    // not called by these words. Longer tails first: "hey jude piano
+    // chords" is not about a song "hey jude piano".
+    (" song lyrics", Hint::Work(SONG)),
+    (" lyrics", Hint::Work(SONG)),
+    (" guitar chords", Hint::Work(SONG)),
+    (" piano chords", Hint::Work(SONG)),
+    (" ukulele chords", Hint::Work(SONG)),
+    (" chords", Hint::Work(SONG)),
+    (" guitar tabs", Hint::Work(SONG)),
+    (" guitar tab", Hint::Work(SONG)),
+    (" karaoke", Hint::Work(SONG)),
+    (" music video", Hint::Work(SONG)),
+    (" official trailer", Hint::Work(SCREEN)),
+    (" trailer", Hint::Work(SCREEN)),
+    (" box office", Hint::Work(SCREEN)),
+    (" reviews", Hint::Work(SCREEN)),
+    (" review", Hint::Work(SCREEN)),
+    (" release date", Hint::Work(SCREEN)),
+    (" ending explained", Hint::Work(SCREEN)),
+    (" ending", Hint::Work(SCREEN)),
+    (" finale", Hint::Work(SCREEN)),
+    (" characters", Hint::Work(SCREEN)),
+    (" actors", Hint::Work(SCREEN)),
     (" cast", Hint::Any),
     (" author", Hint::Any),
-    (" movie", Hint::Any),
+    (" movie", Hint::Screen),
     (" film", Hint::Any),
     (" meaning", Hint::Any),
     (" mean", Hint::Any),
@@ -187,6 +328,19 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
 ];
+
+/// The list article a search for a list asks for without saying "list
+/// of": "list of popes" of "popes in order", "list of us presidents" of
+/// "us presidents list". `None` for other searches.
+fn list_asked(query: &str) -> Option<String> {
+    let q = plumb_core::collapse_whitespace(query.trim()).to_lowercase();
+    let name = [" list in order", " in order", " list"]
+        .iter()
+        .find_map(|tail| q.strip_suffix(tail))?
+        .trim();
+    let name = name.strip_prefix("list of ").unwrap_or(name);
+    (!name.is_empty()).then(|| format!("list of {name}"))
+}
 
 /// The name in `query` without the words around it that only say what is
 /// wanted, and what kind of page they ask for: "lululemon" of "lululemon
@@ -205,6 +359,12 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     {
         name = rest;
         hint = Some(Hint::Any);
+    } else if let Some((rest, kinds)) = WORK_LEADS
+        .iter()
+        .find_map(|(lead, kinds)| Some((name.strip_prefix(lead)?, *kinds)))
+    {
+        name = rest;
+        hint = Some(Hint::Work(kinds));
     }
     if let Some((rest, tail_hint)) = HINT_TAILS
         .iter()
@@ -754,19 +914,46 @@ impl PageSearcher {
                 hits.sort_by(|a, b| b.score.total_cmp(&a.score));
             }
         }
+        let added = match compared(query) {
+            Some(sides) => self.add_compared(&mut hits, &sides, limit, scope)?,
+            None => self.add_hinted(&mut hits, query, limit, scope)?,
+        };
+        if added {
+            hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+            truncate_keeping_inner_pages(&mut hits, limit);
+        }
+        Ok(hits)
+    }
+
+    /// Adds to `hits` the pages named by what `query` asks about: "galileo"
+    /// of "who is galileo". `false` when it asks about nothing.
+    fn add_hinted(
+        &self,
+        hits: &mut Vec<PageHit>,
+        query: &str,
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<bool> {
         // "lululemon wikipedia", "batch normalization paper", "who is
         // galileo": the words that say what is wanted are not part of the
         // name, so the name is searched for too. So is what a fact question
         // asks about, or "when was isaac newton born" lists Newton's mother
         // and namesakes, whose descriptions hold its words, and not him;
-        // but not when the query is itself a name ("age of empires"). A
-        // monarch or pope typed with a number is searched in Roman numerals
-        // when no article is named as typed: "charles 3", "henry the 8th".
+        // but not when the query is itself a name ("age of empires"). So is
+        // the list a search for one asks for: "popes in order" finds Pope
+        // John numbering and not List of popes, which "list of popes"
+        // names. A monarch or pope typed with a number is searched in Roman
+        // numerals when no article is named as typed: "charles 3", "henry
+        // the 8th".
         let hinted = hinted_name(query)
             .or_else(|| {
-                plumb_core::facts::fact_asked(query)
-                    .filter(|_| !hits.iter().any(|hit| hit.named))
-                    .map(|asked| (asked.subject, Hint::Named))
+                list_asked(query)
+                    .or_else(|| {
+                        plumb_core::facts::fact_asked(query)
+                            .filter(|_| !hits.iter().any(|hit| hit.named))
+                            .map(|asked| asked.subject)
+                    })
+                    .map(|name| (name, Hint::Named))
             })
             .or_else(|| {
                 regnal_name(query)
@@ -782,14 +969,12 @@ impl PageSearcher {
         let moved = year_moved(&name).map(|name| (name, hint));
         let searches: Vec<(String, Hint)> = hinted.into_iter().chain(moved).collect();
         if searches.is_empty() {
-            return Ok(hits);
+            return Ok(false);
         }
         for (name, hint) in searches {
-            self.add_found(&mut hits, &name, hint, limit, scope)?;
+            self.add_found(hits, &name, hint, limit, scope)?;
         }
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        truncate_keeping_inner_pages(&mut hits, limit);
-        Ok(hits)
+        Ok(true)
     }
 
     /// Adds to `hits` the pages found for `name`, the kind `hint` asks for.
@@ -834,6 +1019,21 @@ impl PageSearcher {
                     }
                 }
             }
+            // Only a work of the kinds asked for, and not when a page is
+            // called the whole query: "power chords" is not about the song
+            // "Power".
+            Hint::Work(kinds) => {
+                let called = hits.iter().any(|hit| hit.named);
+                found.retain(|hit| !called && hit.named && hit.page.is_work_of(kinds));
+            }
+            // Only a film, show or game the name names, when it names
+            // one: "titanic movie" is not about the ship.
+            Hint::Screen => {
+                let screen = |hit: &PageHit| hit.named && hit.page.is_work_of(SCREEN);
+                if found.iter().any(screen) {
+                    found.retain(|hit| !hit.named || screen(hit));
+                }
+            }
             Hint::Any => {}
         }
         for hit in found {
@@ -849,6 +1049,31 @@ impl PageSearcher {
             }
         }
         Ok(())
+    }
+
+    /// Adds to `hits` the pages named by each of the things a comparison
+    /// sets side by side ([`compared`]): the articles on mitosis and
+    /// meiosis for "mitosis vs meiosis". `false` when one of `hits`
+    /// already compares them, as "Crocodiles vs. Alligators" does
+    /// "crocodile vs alligator".
+    fn add_compared(
+        &self,
+        hits: &mut Vec<PageHit>,
+        sides: &[String; 2],
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<bool> {
+        let compares = |hit: &PageHit| {
+            let title = hit.page.title.to_lowercase();
+            sides.iter().all(|side| title.contains(side.as_str()))
+        };
+        if hits.iter().any(compares) {
+            return Ok(false);
+        }
+        for side in sides {
+            self.add_found(hits, side, Hint::Named, limit, scope)?;
+        }
+        Ok(true)
     }
 
     pub(crate) fn scope_term(&self, text: &str) -> Box<dyn Query> {

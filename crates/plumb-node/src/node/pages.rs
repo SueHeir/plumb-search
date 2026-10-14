@@ -1330,6 +1330,15 @@ pub(super) fn add_pages(
                     &mut results.pages,
                 );
             }
+            // A county search that ends in its state lists that state's
+            // county before its namesakes elsewhere.
+            plumb_index::asked_state_first(query, &mut results.hits);
+            // And a search about a town lists the sites of its namesakes
+            // elsewhere last: "berlin wall memorial" is not Berlin, NH.
+            let town = |name: &str| {
+                super::places::locate(inner, name, None).filter(plumb_core::place::Place::is_town)
+            };
+            plumb_index::namesakes_last(query, &mut results.hits, &town);
             // The learned order knows nothing of spelling: the site a
             // suggestion names stays second.
             if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.clone()) {
