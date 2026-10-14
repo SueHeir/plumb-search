@@ -15,6 +15,7 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 use super::building::schema;
 use super::page::is_item_id;
 use super::placing::is_year;
+use super::records::records_named;
 use super::scoring::truncate_keeping_inner_pages;
 use super::sites::base_title;
 use super::{
@@ -968,13 +969,19 @@ impl PageSearcher {
         Ok(hits)
     }
 
-    /// The best `limit` pages for `query`, best first.
+    /// The best `limit` pages for `query`, best first, after the records
+    /// it names by their identifier ([`records_named`]).
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
         let paper = PaperQuery::parse(query)?;
-        if paper.constrained {
-            return self.search_papers(&paper, limit);
-        }
-        self.search_naming_docs(query, &Operators::default(), false, limit)
+        let mut hits = if paper.constrained {
+            self.search_papers(&paper, limit)?
+        } else {
+            self.search_naming_docs(query, &Operators::default(), false, limit)?
+        };
+        let mut records = records_named(query);
+        hits.retain(|hit| !records.iter().any(|record| record.page.url == hit.page.url));
+        records.append(&mut hits);
+        Ok(records)
     }
 
     pub(crate) fn search_general(
