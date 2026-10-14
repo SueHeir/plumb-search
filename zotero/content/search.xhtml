@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<?xml-stylesheet href="chrome://zotero/skin/zotero.css" type="text/css"?>
+<?xml-stylesheet href="chrome://zotero-platform/content/zotero.css" type="text/css"?>
+<?xml-stylesheet href="chrome://plumb-search/content/search.css" type="text/css"?>
+
+<window
+	xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+	xmlns:html="http://www.w3.org/1999/xhtml"
+	id="plumb-search-window"
+	windowtype="plumb-search:search"
+	data-l10n-id="plumb-search-window"
+	width="760"
+	height="620"
+	persist="screenX screenY width height">
+
+	<linkset>
+		<html:link rel="localization" href="plumb-search.ftl"/>
+	</linkset>
+
+	<script src="chrome://zotero/content/include.js"/>
+	<script src="plumb.js"/>
+	<script src="search.js"/>
+
+	<html:div id="search">
+		<html:div class="bar">
+			<html:input id="query" type="search" data-l10n-id="plumb-search-query"/>
+			<html:label><html:input id="papers" type="checkbox"/><html:span data-l10n-id="plumb-search-papers"/></html:label>
+			<html:button id="go" data-l10n-id="plumb-search-go"/>
+		</html:div>
+		<html:p id="status" role="status"/>
+		<html:ol id="results"/>
+		<html:div class="bar end">
+			<html:button id="more" data-l10n-id="plumb-search-more" hidden="hidden"/>
+			<html:span id="into"/>
+			<html:button id="save" data-l10n-id="plumb-search-save" data-l10n-args='{"count": 0}' disabled="disabled"/>
+		</html:div>
+	</html:div>
+</window>

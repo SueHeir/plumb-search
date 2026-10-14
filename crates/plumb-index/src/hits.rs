@@ -46,7 +46,12 @@ impl Searcher {
     /// address. Nothing a person sees then ties it to the search, and the
     /// vectors of sites with little text are near many queries the model
     /// barely knows ("pyenv" found five expired domains). emmys.com for
-    /// "emmy awards" shows its word in its address, so it stays.
+    /// "emmy awards" shows its word in its address, so it stays. So is a
+    /// site only meaning found whose title and description are in another
+    /// script than the query ([`plumb_core::written_apart`]), unless well
+    /// known or described by Wikidata: an English model reads little of
+    /// such text, and its vector sits near niche searches ("OEIS A000108
+    /// Catalan numbers" found a Chinese gambling site).
     pub(crate) fn untitled_last(
         &self,
         searcher: &tantivy::Searcher,
@@ -67,7 +72,13 @@ impl Searcher {
                 && site.link_score < WELL_KNOWN_LINK_SCORE
                 && !self.says_what_it_is(searcher, site.addr)?
                 && !self.has_aliases(searcher, site.addr)?;
-            if !(bare && !site.named && found_by_meaning_alone(&site, &words)) {
+            let alone = !site.named && found_by_meaning_alone(&site, &words);
+            let apart = alone
+                && !bare
+                && site.link_score < WELL_KNOWN_LINK_SCORE
+                && !self.is_official(searcher, site.addr)?
+                && self.written_apart(searcher, site.addr, query)?;
+            if !(alone && bare || apart) {
                 kept.push((site, bare));
             }
         }
@@ -86,6 +97,22 @@ impl Searcher {
         titled.extend(untitled);
         titled.extend(rest);
         Ok(titled)
+    }
+
+    /// Whether the site's title and description are in another script
+    /// than `query` ([`plumb_core::written_apart`]).
+    fn written_apart(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: tantivy::DocAddress,
+        query: &str,
+    ) -> Result<bool> {
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let text: Vec<&str> = [self.fields.title, self.fields.description]
+            .into_iter()
+            .filter_map(|field| doc.get_first(field).and_then(|value| value.as_str()))
+            .collect();
+        Ok(plumb_core::written_apart(&text.join(" "), query))
     }
 
     /// Reads the stored fields of a ranked document, with the

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "Plumb Search",
+  "version": "0.1.0",
+  "description": "Search Plumb, the open peer-to-peer search engine, from Zotero, and add papers, books, articles and sites with their details.",
+  "homepage_url": "https://github.com/SueHeir/plumb-search/tree/main/zotero",
+  "author": "Plumb Search contributors",
+  "icons": {
+    "48": "icon.svg",
+    "96": "icon.svg"
+  },
+  "applications": {
+    "zotero": {
+      "id": "plumb-search@plumbsearch.org",
+      "update_url": "https://raw.githubusercontent.com/SueHeir/plumb-search/main/zotero/updates.json",
+      "strict_min_version": "7.999",
+      "strict_max_version": "10.0.*"
+    }
+  }
+}

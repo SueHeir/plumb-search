@@ -551,6 +551,103 @@ fn partial_names_score_lower() {
     assert!(s.search("marie antoinette", 1).unwrap().is_empty());
     assert!(s.search("", 1).unwrap().is_empty());
 }
+#[test]
+fn a_name_inside_a_longer_search_finds_its_page() {
+    let article = |title: &str, description: &str, views: u64, aliases: &[&str]| {
+        let mut article = page(title, views, aliases);
+        article.description = Some(description.into());
+        article.item = Some("Q1".into());
+        article
+    };
+    let asyncio = Page::from_docs(Article {
+        title: "asyncio".into(),
+        description: Some(
+            "asyncio is a library to write concurrent code using the async/await syntax.".into(),
+        ),
+        item: Some("https://docs.python.org/3/library/asyncio.html".into()),
+        views: 5_000,
+        aliases: vec!["Python asyncio".into(), "asyncio Python".into()],
+        ..Article::default()
+    })
+    .unwrap();
+    let (_dir, s) = searcher(&[
+        asyncio,
+        article(
+            "Upper Peninsula of Michigan",
+            "northern of the two peninsulas of Michigan",
+            60_000,
+            &["Upper Peninsula"],
+        ),
+        article("Michigan", "state of the United States", 500_000, &[]),
+        article("Ninja", "covert agent in feudal Japan", 300_000, &[]),
+        article(
+            "Terry Stafford",
+            "American singer-songwriter (1941–1996)",
+            1_001,
+            &[],
+        ),
+        article("Stafford", "town in Staffordshire, England", 20_000, &[]),
+        article(
+            "Death",
+            "permanent cessation of vital functions",
+            200_000,
+            &[],
+        ),
+    ]);
+    let listed = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 10).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named || hit.score >= MIN_PARTIAL_SCORE)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    // A docs page by its product and title, an article by its title.
+    assert_eq!(listed("python asyncio tutorial"), ["asyncio"]);
+    assert_eq!(listed("terry stafford death"), ["Terry Stafford"]);
+    assert_eq!(
+        listed("upper peninsula michigan map")[0],
+        "Upper Peninsula of Michigan"
+    );
+    // An article named by one word of two is no closer for the other.
+    assert!(listed("ninja terms").len() <= 1);
+}
+
+#[test]
+fn a_qualifier_the_search_says_counts_as_part_of_the_name() {
+    let article = |title: &str, description: &str, views: u64, aliases: &[&str]| {
+        let mut article = page(title, views, aliases);
+        article.description = Some(description.into());
+        article.item = Some(format!("Q{views}"));
+        article
+    };
+    let (_dir, s) = searcher(&[
+        article(
+            "Mercury (element)",
+            "Chemical element with atomic number 80",
+            400_000,
+            &["Hg", "quicksilver"],
+        ),
+        article(
+            "Chemical element",
+            "Chemical substance not composed of simpler ones",
+            300_000,
+            &["element"],
+        ),
+        article(
+            "Mercury (planet)",
+            "smallest and closest planet to the Sun",
+            900_000,
+            &["Mercury"],
+        ),
+        article("Earth", "planet", 5_000_000, &[]),
+    ]);
+    let first = |q: &str| s.search(q, 5).unwrap()[0].page.title.clone();
+    // Its title and qualifier apart name the element more fully than the
+    // two words in a row name Chemical element.
+    assert_eq!(first("the chemical element mercury"), "Mercury (element)");
+    assert_eq!(first("chemical element mercury"), "Mercury (element)");
+    assert_eq!(first("mercury element"), "Mercury (element)");
+}
 
 #[test]
 fn words_of_things_are_corrected_from_page_names() {
@@ -645,6 +742,69 @@ fn spellings_keep_the_words_pages_know() {
     );
 }
 
+/// Wikipedia keeps the misspellings people type as redirects, so the
+/// pages know "mississipi" and "einstien" and name articles by them.
+#[test]
+fn misspelled_redirects_are_still_corrected() {
+    let pages = [
+        page("Mississippi", 9_000, &["Mississipi", "MS"]),
+        page("Mississippi River", 5_000, &["Mississipi River"]),
+        page(
+            "University of Mississippi",
+            2_000,
+            &["University of Mississipi"],
+        ),
+        page("Albert Einstein", 9_000, &["Einstein", "Einstien"]),
+        page("Hanukkah", 3_000, &["Hanukah", "Chanukah"]),
+        // A misspelling that is a title too, but of a little read page.
+        page("Cemetery", 9_000, &["Cemetary"]),
+        page("Cemetary (band)", 10, &[]),
+        page("Cemetary Gates", 20, &[]),
+        page("Cemetary Hill", 20, &[]),
+        page("Stain", 900, &[]),
+        page("Staining", 800, &[]),
+        page("Stain removal", 10, &[]),
+        page("Wood stain", 10, &[]),
+    ];
+    let (_dir, searcher) = searcher(&pages);
+    let spelling = |query: &str| crate::Spelling {
+        query: query.into(),
+        site: None,
+        applied: false,
+    };
+    let checked = |typed: &str, fixed: &str| {
+        searcher
+            .check_spelling(typed, spelling(fixed))
+            .unwrap()
+            .map(|spelling| spelling.query)
+    };
+    assert_eq!(
+        checked("mississipi", "mississippi").as_deref(),
+        Some("mississippi")
+    );
+    assert_eq!(
+        checked("mississipi river cruise", "mississippi river cruise").as_deref(),
+        Some("mississippi river cruise")
+    );
+    assert_eq!(checked("cemetary", "cemetery").as_deref(), Some("cemetery"));
+    // A word the best read page with it is titled with is put back.
+    assert_eq!(checked("stain wood", "spain wood"), None);
+    let spelled_right = |typed: &str, fixed: Option<&str>| {
+        let found = searcher.search(typed, 10).unwrap();
+        searcher.spelled_right(typed, &found, fixed.map(spelling).as_ref())
+    };
+    // Named by a redirect, but the suggestion names the article too.
+    assert!(!spelled_right("einstien", Some("einstein")));
+    assert!(!spelled_right("mississipi", Some("mississippi")));
+    assert!(!spelled_right("hanukah", Some("hanukkah")));
+    // Named by its title as typed: spelled right.
+    assert!(spelled_right("cemetary", Some("cemetery")));
+    assert!(spelled_right("stain", Some("spain")));
+    // Named by a redirect, and nothing else suggested.
+    assert!(spelled_right("einstien", None));
+    assert!(spelled_right("einstein", Some("einstien")));
+}
+
 #[test]
 fn untitled_sites_take_their_article_s_title() {
     let mut notion = page("Notion (productivity software)", 500, &[]);
@@ -709,40 +869,26 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
 
 #[test]
 fn a_famous_surname_alone_names_the_person() {
-    let person = |title: &str, views: u64| {
-        let mut person = page(title, views, &[]);
-        person.facts = vec![plumb_core::facts::Fact {
-            kind: plumb_core::facts::FactKind::Born,
-            value: "1925-10-13".into(),
-        }];
-        person
-    };
     let mut hilton = page("Hilton Worldwide", 3_448, &[]);
     hilton.description = Some("American hospitality company".into());
     hilton.site = Some("hilton.com".into());
     let (_dir, s) = searcher(&[
-        person("Margaret Thatcher", 43_807),
-        person("Denis Thatcher", 3_863),
+        person("Margaret Thatcher", 43_807, &[]),
+        person("Denis Thatcher", 3_863, &[]),
         page("Thatcher effect", 900, &[]),
-        person("Franz Kafka", 32_449),
+        person("Franz Kafka", 32_449, &[]),
         page("Kafka (film)", 1_200, &[]),
         page("Kafka on the Shore", 4_270, &[]),
         // Read too little more than another of the name.
-        person("Franklin D. Roosevelt", 69_007),
-        person("Theodore Roosevelt", 52_362),
+        person("Franklin D. Roosevelt", 69_007, &[]),
+        person("Theodore Roosevelt", 52_362, &[]),
         // An article is called the word, or a company's site is.
-        person("Bruno Mars", 90_557),
+        person("Bruno Mars", 90_557, &[]),
         page("Mars", 80_000, &[]),
-        person("Paris Hilton", 34_645),
+        person("Paris Hilton", 34_645, &[]),
         hilton,
     ]);
-    let named = |q: &str| -> Vec<String> {
-        let hits = s.search(q, 5).unwrap();
-        hits.into_iter()
-            .filter(|hit| hit.named)
-            .map(|hit| hit.page.title)
-            .collect()
-    };
+    let named = |q: &str| named_titles(&s, q);
     assert_eq!(named("thatcher"), ["Margaret Thatcher"]);
     assert_eq!(named("kafka"), ["Franz Kafka", "Kafka (film)"]);
     assert!(named("roosevelt").is_empty());
@@ -754,56 +900,52 @@ fn a_famous_surname_alone_names_the_person() {
 
 #[test]
 fn a_title_and_a_name_name_the_person_who_held_it() {
-    let person = |title: &str, views: u64, aliases: &[&str], description: &str| {
-        let mut person = page(title, views, aliases);
+    let described = |title: &str, views: u64, aliases: &[&str], description: &str| {
+        let mut person = person(title, views, aliases);
         person.description = Some(description.into());
-        person.facts = vec![plumb_core::facts::Fact {
-            kind: plumb_core::facts::FactKind::Born,
-            value: "1917-05-29".into(),
-        }];
         person
     };
     let (_dir, s) = searcher(&[
-        person(
+        described(
             "John F. Kennedy",
             75_228,
             &["JFK"],
             "President of the United States from 1961 to 1963",
         ),
-        person(
+        described(
             "Kennedy (commentator)",
             17_415,
             &[],
             "American television personality",
         ),
-        person(
+        described(
             "Robert F. Kennedy",
             31_922,
             &[],
             "American politician and lawyer (1925–1968)",
         ),
-        person(
+        described(
             "Diana, Princess of Wales",
             94_857,
             &["Lady Diana Spencer"],
             "Member of the British royal family (1961–1997)",
         ),
         page("Princess Diana (song)", 1_500, &[]),
-        person("Isaac Newton", 40_694, &[], "English polymath (1642–1727)"),
+        described("Isaac Newton", 40_694, &[], "English polymath (1642–1727)"),
         page("Newton (unit)", 4_568, &[]),
-        person(
+        described(
             "George W. Bush",
             69_493,
             &[],
             "President of the United States from 2001 to 2009",
         ),
-        person(
+        described(
             "George H. W. Bush",
             41_000,
             &[],
             "President of the United States from 1989 to 1993",
         ),
-        person(
+        described(
             "Abraham Lincoln",
             80_000,
             &["President Lincoln"],
@@ -811,13 +953,7 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
         ),
         page("General Motors", 30_000, &[]),
     ]);
-    let named = |q: &str| -> Vec<String> {
-        let hits = s.search(q, 5).unwrap();
-        hits.into_iter()
-            .filter(|hit| hit.named)
-            .map(|hit| hit.page.title)
-            .collect()
-    };
+    let named = |q: &str| named_titles(&s, q);
     assert_eq!(named("president kennedy"), ["John F. Kennedy"]);
     assert_eq!(named("princess diana")[0], "Diana, Princess of Wales");
     assert_eq!(named("sir isaac newton"), ["Isaac Newton"]);
