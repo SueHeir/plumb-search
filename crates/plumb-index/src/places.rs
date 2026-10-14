@@ -585,8 +585,9 @@ impl PlaceSearcher {
     /// The places `query` asks for, when it asks for places somewhere:
     /// around `home`, the searcher's town as they typed it, for "near me";
     /// with `country` ordering alternatives for an ambiguous name.
-    /// `None` when the query does not ask for places. Explicit unknown
-    /// locations return a coverage status instead of a guessed town.
+    /// `None` when the query does not ask for places. A town it doesn't
+    /// know gives a coverage status, not a guessed town, when what it
+    /// asks for is a kind of place.
     pub fn search(
         &self,
         query: &str,
@@ -663,20 +664,29 @@ impl PlaceSearcher {
         }
     }
 
-    /// `found`, unless it found nothing and what it looked for is neither
-    /// a kind of place nor the name of a place other than a town: "sort a
-    /// list in python" and "how many ounces in a cup" ask for no place,
-    /// while "pizza in gotham" does. Near me is always a place search, so
-    /// one that finds nothing still says so.
+    /// `found`, unless it found nothing and what it looked for is no kind
+    /// of place: "sort a list in python", "keel in english" and "calories
+    /// in a shot" ask for no place, while "pizza in gotham" does. A place's
+    /// name still asks when the town is one of several, so the choice is
+    /// offered ("starbucks in portland"), or when only a state or country
+    /// was named, so a town is asked for ("starbucks in texas"). Near me
+    /// always does, so one that finds nothing still says so.
     fn asks_for_places(&self, found: PlaceResults) -> Result<Option<PlaceResults>> {
         let kind = found.what.rsplit(' ').next().is_some_and(is_kind_word);
+        let wants_town = found.location.as_ref().is_some_and(|location| {
+            matches!(
+                location.status,
+                LocationStatus::AmbiguousLocation | LocationStatus::MissingLocation
+            )
+        });
         if found.hits.is_empty()
             && !found.near_me
             && !kind
-            && !self
-                .named(&found.what)?
-                .iter()
-                .any(|place| !place.is_town())
+            && !(wants_town
+                && self
+                    .named(&found.what)?
+                    .iter()
+                    .any(|place| !place.is_town()))
         {
             return Ok(None);
         }
@@ -1396,6 +1406,44 @@ impl PlaceSearcher {
             .context("a place without its record")?;
         parse_place(stored)
     }
+
+    /// The places within `km` of `lat`, `lon` that give a website, nearest
+    /// first, at most `limit`: a node's local sites. Taken from the most
+    /// notable `2 * limit` places there, which a website puts ahead of
+    /// most.
+    pub fn websites_near(
+        &self,
+        lat: f64,
+        lon: f64,
+        km: f64,
+        limit: usize,
+    ) -> Result<Vec<PlaceHit>> {
+        let cells: Vec<(Occur, Box<dyn Query>)> = cells_around(lat, lon, km)
+            .into_iter()
+            .map(|c| {
+                let term = Term::from_field_text(self.fields.cell, &c);
+                let query = TermQuery::new(term, IndexRecordOption::Basic);
+                (Occur::Should, Box::new(query) as Box<dyn Query>)
+            })
+            .collect();
+        let searcher = self.reader.searcher();
+        let found = searcher.search(
+            &BooleanQuery::new(cells),
+            &TopDocs::with_limit(limit.saturating_mul(2).max(1))
+                .order_by_fast_field::<u64>("rank", tantivy::Order::Desc),
+        )?;
+        let mut hits = Vec::new();
+        for (_, address) in found {
+            let place = self.stored(&searcher.doc(address)?)?;
+            let d = distance_km(lat, lon, place.lat, place.lon);
+            if place.website.is_some() && d <= km {
+                hits.push(PlaceHit { place, km: d });
+            }
+        }
+        hits.sort_by(|a, b| a.km.total_cmp(&b.km));
+        hits.truncate(limit);
+        Ok(hits)
+    }
 }
 
 /// What to look for when `what` finds nothing because of words that name
@@ -1973,6 +2021,13 @@ mod tests {
                 region: Some("CT".into()),
                 ..at("Portland", "place=town", 41.57, -72.64)
             },
+            // A village called English, and a pub called Keel far from it.
+            Place {
+                rank: place_rank("place=village", 600, false, false, 3),
+                region: Some("IN".into()),
+                ..at("English", "place=village", 38.33, -86.46)
+            },
+            at("Keel", "amenity=pub", 53.97, -10.08),
         ]);
         let (_dir, searcher) = index(fixtures);
         for query in [
@@ -1980,12 +2035,21 @@ mod tests {
             "sort a list in python",
             "workout app",
             "stock market",
+            "keel in english",
+            "blue pan in python",
+            "blue pan in gotham",
         ] {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_none(), "{query}: {found:?}");
         }
-        // A kind of place, or a place's name, is still looked for.
-        for query in ["pizza in python", "blue pan in python"] {
+        // A kind of place is still looked for, and so is a place's name in
+        // one of several towns or in a state with no town.
+        for query in [
+            "pizza in python",
+            "pizza in gotham",
+            "blue pan in portland",
+            "blue pan in texas",
+        ] {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_some(), "{query}");
         }
@@ -2668,5 +2732,25 @@ mod tests {
         let cells = cells_around(0.0, 179.99, 12.0);
         assert!(cells.iter().any(|c| c.ends_with(":-1800")));
         assert!(cells.contains(&cell(0.0, 179.99)));
+    }
+
+    #[test]
+    fn websites_near_lists_the_sites_of_nearby_places_nearest_first() {
+        let with_site = |name: &str, lat: f64, lon: f64, site: &str| Place {
+            website: Some(site.into()),
+            ..at(name, "amenity=cafe", lat, lon)
+        };
+        let (_dir, searcher) = index(vec![
+            with_site("Far Cafe", 39.99, -105.0, "https://far.example/"),
+            with_site("Near Cafe", 39.75, -105.0, "https://near.example/menu"),
+            with_site("Next Cafe", 39.80, -105.0, "https://next.example/"),
+            with_site("Boulder Cafe", 40.40, -105.0, "https://boulder.example/"),
+            at("Plain Cafe", "amenity=cafe", 39.74, -105.0),
+        ]);
+        let found = searcher.websites_near(39.74, -105.0, 30.0, 10).unwrap();
+        let names: Vec<&str> = found.iter().map(|hit| hit.place.name.as_str()).collect();
+        assert_eq!(names, ["Near Cafe", "Next Cafe", "Far Cafe"]);
+        let nearest = searcher.websites_near(39.74, -105.0, 30.0, 1).unwrap();
+        assert_eq!(nearest.len(), 1);
     }
 }

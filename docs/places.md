@@ -21,7 +21,7 @@ WHERE is a town (or village, suburb or neighbourhood) by its name or another nam
 
 Places are listed within a town's size of its centre (12 km for a city, 6 for a town, 10 around a national park, nature reserve, island, lake, mountain or beach, 3 for a village or around another named place). Places of the kind asked for come first, then those that only have the words in their name (for "sushi", sushi bars before an office called Sushi Tech). Within each, nearest first, with places that have a website, a brand or a Wikidata item a little ahead. When fewer than three are found, Plumb looks three times as far.
 
-A search that finds no place, and whose WHAT is neither a kind of place nor the name of a place other than a town, lists none (a "near me" search still says it found nothing): "sort a list in python" and "calories in a shot" ask for no place, while "pizza in gotham" says it knows no Gotham.
+A search that finds no place, and whose WHAT is no kind of place, lists none: "sort a list in python", "calories in a shot" and "keel in english" (a village in Indiana) ask for no place, while "pizza in gotham" says it knows no Gotham. A "near me" search still says it found nothing, and a place's name still offers the choice in a town of several names ("starbucks in portland") and asks for a town when only a state or country is named ("starbucks in texas").
 
 ## Near me
 
@@ -30,6 +30,10 @@ A search that finds no place, and whose WHAT is neither a kind of place nor the 
 ## The time in a town
 
 "time in boulder" or "what time is it in porto" is answered for any city or town in the places, not only the few hundred places the answer knows by name: by the clock its country keeps, or in the US, Canada and Australia its state's. A town in a state that keeps two (Texas, Ontario, New South Wales) gets none unless the answer knows it by name, and one in another country that keeps several (Russia, Brazil, Portugal) gets one only when it is much nearer one zone's main city than any city keeping another time: a town near a line between two clocks gets no answer rather than a wrong one.
+
+## Local sites
+
+A node also crawls the sites of the places near it: the websites of the places within 50 km of the towns on its About pages, nearest first, up to 5,000 sites. These are crawled whatever the network assigns the node that day, up to 100 a round, and again every 30 days like other sites. Trimming keeps them, and the denylist still applies. So each node fills in the cafés, shops and clinics of its own area, and its crawls reach the network like any others. Without a town on an About page, or crawling only, a node has no local sites.
 
 ## What is kept
 
