@@ -11,6 +11,12 @@
 //! redirects can point anywhere). Names sent through a proxy are not
 //! checked either, since the proxy looks them up, which is why the crawler
 //! connects directly unless `CrawlConfig::use_system_proxy` is set.
+//!
+//! A node's plugins fetch from the hosts their `plugin.json` names, which
+//! may be the owner's own machines (`nas`, `127.0.0.1:23119`). For them
+//! [`Resolver::for_named_hosts`] lets local names resolve anywhere, but a
+//! name on the web only to public addresses: whoever registered it could
+//! point it at the owner's router (DNS rebinding).
 
 use std::error::Error;
 use std::io;
@@ -63,21 +69,56 @@ const NON_GLOBAL_V6: &[(Ipv6Addr, u8)] = &[
 const RETRY_LOOKUP_AFTER: Duration = Duration::from_secs(1);
 
 /// Resolves host names with Tokio, at most `lookups` at a time (the rest
-/// wait). Unless `allow_private` is set it keeps only globally routable
-/// addresses ([`is_global`]), and when none is left the lookup fails with
-/// [`NonPublicHost`], so the request fails instead of connecting. A lookup
-/// that fails for the time being ([`is_temporary`]) is tried once more.
+/// wait). Unless `private` lets the name through it keeps only globally
+/// routable addresses ([`is_global`]), and when none is left the lookup
+/// fails with [`NonPublicHost`], so the request fails instead of
+/// connecting. A lookup that fails for the time being ([`is_temporary`]) is
+/// tried once more.
 #[derive(Debug, Clone)]
-pub(crate) struct Resolver {
-    allow_private: bool,
+pub struct Resolver {
+    private: Private,
     lookups: Arc<Semaphore>,
+}
+
+/// Which names a [`Resolver`] lets resolve to non-public addresses.
+#[derive(Debug, Clone, Copy)]
+enum Private {
+    Refused,
+    Allowed,
+    /// Only for local names ([`is_local_name`]).
+    LocalNames,
 }
 
 impl Resolver {
     pub(crate) fn new(allow_private: bool, lookups: usize) -> Resolver {
+        let private = if allow_private {
+            Private::Allowed
+        } else {
+            Private::Refused
+        };
+        Resolver::with(private, lookups)
+    }
+
+    /// For fetches from hosts someone named, such as a plugin's `hosts`: a
+    /// local name ([`is_local_name`]) resolves to whatever it does, any
+    /// other only to public addresses.
+    pub fn for_named_hosts() -> Resolver {
+        Resolver::with(Private::LocalNames, 4)
+    }
+
+    fn with(private: Private, lookups: usize) -> Resolver {
         Resolver {
-            allow_private,
+            private,
             lookups: Arc::new(Semaphore::new(lookups.max(1))),
+        }
+    }
+
+    /// Whether `host` may resolve to non-public addresses.
+    fn allows_private(&self, host: &str) -> bool {
+        match self.private {
+            Private::Refused => false,
+            Private::Allowed => true,
+            Private::LocalNames => is_local_name(host),
         }
     }
 }
@@ -94,9 +135,22 @@ impl Resolve for Resolver {
                 }
                 resolved => resolved,
             }?;
-            filter(host, resolved, resolver.allow_private)
+            let allow_private = resolver.allows_private(&host);
+            filter(host, resolved, allow_private)
         })
     }
+}
+
+/// Whether nobody outside the owner's network can own `host`: a name of
+/// one label (`nas`, `localhost`), one under `home.arpa` (RFC 8375), or
+/// one whose suffix the public suffix list does not know (`printer.lan`,
+/// `box.local`). Whoever registers a name on the web can point it at any
+/// address, a private one included.
+fn is_local_name(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    !host.contains('.')
+        || host.ends_with(".home.arpa")
+        || psl::suffix(host.as_bytes()).is_none_or(|suffix| !suffix.is_known())
 }
 
 impl Resolver {
@@ -351,6 +405,66 @@ mod tests {
         );
 
         let addrs: Vec<SocketAddr> = lookup("localhost".into(), true).await.unwrap().collect();
+        assert!(
+            addrs.iter().any(|addr| addr.ip().is_loopback()),
+            "{addrs:?}"
+        );
+    }
+
+    #[test]
+    fn named_hosts_reach_private_addresses_only_by_local_names() {
+        let resolver = Resolver::for_named_hosts();
+        let addrs = |list: &[&str]| -> Vec<SocketAddr> {
+            list.iter()
+                .map(|ip| SocketAddr::new(ip.parse().unwrap(), 0))
+                .collect()
+        };
+        let private = addrs(&["127.0.0.1", "192.168.1.2", "::1"]);
+        let resolve = |host: &str, resolved: Vec<SocketAddr>| {
+            filter(host.into(), resolved, resolver.allows_private(host))
+                .map(|found| found.map(|addr| addr.ip().to_string()).collect::<Vec<_>>())
+        };
+        // A name anyone can register, pointed at the owner's network.
+        for host in [
+            "api.example.org",
+            "rebind.example.com",
+            "someone.github.io",
+            "a.b.co.uk",
+            "localhost.com",
+            "example.org.",
+            "API.Example.ORG",
+        ] {
+            let err = resolve(host, private.clone()).unwrap_err().to_string();
+            assert!(err.contains("non-public addresses"), "{host}: {err}");
+        }
+        // Its public addresses still do.
+        let mixed = addrs(&["10.0.0.1", "93.184.215.14"]);
+        assert_eq!(
+            resolve("api.example.org", mixed).unwrap(),
+            ["93.184.215.14"]
+        );
+        // Names nobody outside can own resolve wherever they point.
+        for host in [
+            "nas",
+            "localhost",
+            "nas.",
+            "media.lan",
+            "box.local",
+            "router.home.arpa",
+            "printer.internal",
+        ] {
+            assert_eq!(resolve(host, private.clone()).unwrap().len(), 3, "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn named_hosts_resolve_local_names_to_loopback() {
+        let name: Name = "localhost".parse().unwrap();
+        let addrs: Vec<SocketAddr> = Resolver::for_named_hosts()
+            .resolve(name)
+            .await
+            .unwrap()
+            .collect();
         assert!(
             addrs.iter().any(|addr| addr.ip().is_loopback()),
             "{addrs:?}"

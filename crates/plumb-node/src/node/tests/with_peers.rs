@@ -321,6 +321,112 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn network_results_go_through_the_denylist() {
+    let dir = seeded_dir();
+    let publisher = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+    let deny = |target: &str| plumb_tools::set::DenyEntryArgs {
+        category: "copyright".into(),
+        target: Some(target.into()),
+        hash_of: None,
+        any_query: false,
+        places: Vec::new(),
+        id: None,
+    };
+    hold_denylist(
+        dir.path(),
+        &publisher,
+        &[
+            deny("site:lighthouse-wreckers.org"),
+            deny("url:https://lighthouse-keepers.org/wreck-maps"),
+            deny("url:https://www.facebook.com/marketplace/"),
+        ],
+    );
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![plumb_format::PublicKey::of(&publisher)];
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    let net_status = status.network.expect("the node joined the network");
+    let node_addr: plumb_net::Multiaddr = net_status.listening[0].parse().unwrap();
+    let node_addr = node_addr
+        .with_p2p(net_status.peer_id.parse().unwrap())
+        .unwrap();
+
+    // Another node holds a site this node's denylist takes off, one with
+    // a key page it takes off, and one whose key pages the index fills in
+    // (plumb_core::key_pages_or_known), one of them denied.
+    let site = |domain: &str, title: &str| {
+        let mut record = SiteRecord::new(domain);
+        record.url = Some(format!("https://{domain}/"));
+        record.title = Some(title.to_string());
+        record
+    };
+    let mut keepers = site("lighthouse-keepers.org", "Lighthouse Keepers Guild");
+    let page = |label: &str, path: &str| plumb_core::KeyPage {
+        label: label.into(),
+        url: format!("https://lighthouse-keepers.org/{path}"),
+    };
+    keepers.key_pages = vec![
+        page("Visiting hours", "hours"),
+        page("Wreck maps", "wreck-maps"),
+    ];
+    let wreckers = site("lighthouse-wreckers.org", "Lighthouse Wreckers");
+    let mut facebook = site("facebook.com", "Lighthouse Fans on Facebook");
+    facebook.url = Some("https://www.facebook.com/".into());
+    let peer_dir = tempfile::tempdir().unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    peer_config.bootstrap = vec![node_addr];
+    let records = [keepers, wreckers, facebook];
+    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &records).unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
+        .await
+        .unwrap();
+    wait_for(addr, "the peer to connect", |s| {
+        s.network.as_ref().is_some_and(|n| n.connected_peers >= 1)
+    })
+    .await;
+
+    let mut body = String::new();
+    for _ in 0..100 {
+        let (code, _, text) = get(addr, "/api/network/search?q=lighthouse").await;
+        assert_eq!(code, 200, "{text}");
+        body = text;
+        if body.contains("Lighthouse Keepers Guild") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
+    assert!(body.contains("/hours"), "{body}");
+    assert!(!body.contains("lighthouse-wreckers.org"), "{body}");
+    assert!(!body.contains("wreck-maps"), "{body}");
+    assert!(body.contains("facebook.com/help/"), "{body}");
+    assert!(!body.contains("marketplace"), "{body}");
+    for path in ["/network?q=lighthouse", "/search?q=lighthouse&net=1"] {
+        let (_, _, page) = get(addr, path).await;
+        assert!(page.contains("Lighthouse Keepers Guild"), "{path}: {page}");
+        assert!(!page.contains("lighthouse-wreckers.org"), "{path}: {page}");
+        assert!(!page.contains("wreck-maps"), "{path}: {page}");
+        assert!(!page.contains("facebook.com/marketplace"), "{path}: {page}");
+    }
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     use plumb_net::popularity::{report_epoch, MAX_POPULARITY_BONUS, REPORT_THRESHOLD};
 

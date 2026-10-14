@@ -321,6 +321,13 @@ pub trait StatusSource: Send + Sync {
         let _ = url;
         false
     }
+    /// False when the node's denylist takes off the site `record`
+    /// describes; else true, with the key pages and headlines it denies
+    /// taken off `record`. For the sites other nodes answer with.
+    fn allows_record(&self, record: &mut SiteRecord) -> bool {
+        let _ = record;
+        true
+    }
     /// Told what a person searched for here and what was found, so the
     /// node can go looking for the pages it wanted
     /// ([`crate::wanted_pages`]).
