@@ -128,7 +128,7 @@ async fn facts_resolve_japan_when_who_takes_the_displayed_result() {
 }
 
 #[tokio::test]
-async fn sums_and_operators_get_no_info_box() {
+async fn sums_and_operators_other_than_quotes_get_no_info_box() {
     // The results for "2*3" lead with its digits read without the sign.
     let number = answer_entity("23 (number)", "Q713498", "natural number");
     let backend = Arc::new(EntityAnswersBackend::new(vec![number], Vec::new()));
@@ -144,12 +144,14 @@ async fn sums_and_operators_get_no_info_box() {
     let (_, _, body) = send(app.clone(), "/api/search?q=23+-film&full=1").await;
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(json["info"].is_null(), "{body}");
-    // The number asked for alone gets its box.
-    let (_, _, body) = send(app.clone(), "/api/search?q=23&full=1").await;
-    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(json["info"]["title"], "23 (number)");
-    let (_, _, body) = send(app, "/search?q=23").await;
-    assert!(body.contains("class=\"ib\""), "{body}");
+    // The number asked for alone gets its box, in quotes too.
+    for query in ["23", "%2223%22"] {
+        let (_, _, body) = send(app.clone(), &format!("/api/search?q={query}&full=1")).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["info"]["title"], "23 (number)", "{query}");
+        let (_, _, body) = send(app.clone(), &format!("/search?q={query}")).await;
+        assert!(body.contains("class=\"ib\""), "{query}: {body}");
+    }
 }
 
 #[tokio::test]

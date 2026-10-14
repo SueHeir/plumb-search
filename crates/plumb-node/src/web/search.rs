@@ -848,7 +848,9 @@ pub(crate) fn search_about(
     if let Some(profile) = &extras.profile {
         return Some(crate::plugins::about_page(&profile.page));
     }
-    if plumb_core::Operators::parse(query).any() || answers::is_sum(extras.answer.as_ref()) {
+    if plumb_core::Operators::parse(query).any_but_phrases()
+        || answers::is_sum(extras.answer.as_ref())
+    {
         return None;
     }
     let placed = place_pages(
