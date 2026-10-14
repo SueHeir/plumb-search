@@ -719,12 +719,16 @@ fn untitled_sites_take_their_article_s_title() {
     // A domain of the initials: nba.com.
     let mut nba = page("National Basketball Association", 4_000, &[]);
     nba.site = Some("nba.com".into());
-    let (_dir, searcher) = searcher(&[notion, show, cbc, nba]);
+    // Some words in full, some by their initials.
+    let mut times = page("The New York Times", 6_000, &[]);
+    times.site = Some("nytimes.com".into());
+    let (_dir, searcher) = searcher(&[notion, show, cbc, nba, times]);
     let mut sites = vec![
         site("notion.so", true),
         site("other.com", false),
         site("cbc.ca", true),
         site("nba.com", true),
+        site("nytimes.com", true),
     ];
     sites[1].title = Some("Other".into());
     searcher.title_untitled(&mut sites).unwrap();
@@ -735,6 +739,7 @@ fn untitled_sites_take_their_article_s_title() {
         sites[3].title.as_deref(),
         Some("National Basketball Association")
     );
+    assert_eq!(sites[4].title.as_deref(), Some("The New York Times"));
 }
 
 #[test]
@@ -745,7 +750,11 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
     valve.site = Some("steampowered.com".into());
     let mut steam = page("Steam (service)", 4_000, &[]);
     steam.site = Some("steampowered.com".into());
-    let (_dir, searcher) = searcher(&[post, valve, steam]);
+    // Twitter's own article has x.com now; this one only names twitter.com
+    // as its website.
+    let mut snowflake = page("Snowflake ID", 2_000, &[]);
+    snowflake.site = Some("twitter.com".into());
+    let (_dir, searcher) = searcher(&[post, valve, steam, snowflake]);
     let titled = |domain: &str, title: &str, official: bool| crate::Hit {
         title: Some(title.into()),
         official,
@@ -760,11 +769,17 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
         titled("steampowered.com", "Welcome to Steam", true),
         // Not official: nothing says which name is its own.
         titled("nypost.com", "California Post", false),
+        titled("twitter.com", "X. It’s what’s happening / X", true),
     ];
     searcher.title_untitled(&mut sites).unwrap();
     assert_eq!(sites[0].title.as_deref(), Some("New York Post"));
     assert_eq!(sites[1].title.as_deref(), Some("Welcome to Steam"));
     assert_eq!(sites[2].title.as_deref(), Some("California Post"));
+    // No article its domain spells: it keeps its own title.
+    assert_eq!(
+        sites[3].title.as_deref(),
+        Some("X. It’s what’s happening / X")
+    );
 }
 
 #[test]

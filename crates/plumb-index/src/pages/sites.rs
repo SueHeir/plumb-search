@@ -36,13 +36,13 @@ impl PageSearcher {
     /// of, without its qualifier: "Notion" for notion.so, "Yelp" for
     /// yelp.com, whose homepages turn crawlers away. Only an article whose
     /// official website is the site's homepage ([`Page::website`]) and
-    /// whose title the domain spells ([`site_is_titled`]) or abbreviates
-    /// ([`site_is_initials`], nba.com) counts:
+    /// whose title the domain spells ([`site_spells`]) counts:
     /// "Schitt's Creek", whose website is a page on cbc.ca, is not what
-    /// cbc.ca is. An official site whose title may be borrowed
-    /// ([`may_be_borrowed`]) and names none of its articles takes the most
-    /// read one's title too: "New York Post" for nypost.com, not
-    /// "California Post".
+    /// cbc.ca is, nor is "Snowflake ID", whose website is twitter.com, what
+    /// twitter.com is. An official site whose title may be borrowed
+    /// ([`may_be_borrowed`]) and names none of its articles takes such an
+    /// article's title too: "New York Post" for nypost.com, not "California
+    /// Post".
     pub fn title_untitled(&self, sites: &mut [crate::Hit]) -> Result<()> {
         let searcher = self.reader.searcher();
         for site in sites.iter_mut() {
@@ -76,25 +76,22 @@ impl PageSearcher {
                     articles.push(page.title);
                 }
             }
-            let names = articles.iter().map(|title| base_title(title).trim());
+            let spelled = articles
+                .iter()
+                .find(|title| site_spells(&site.domain, title))
+                .map(|title| base_title(title).trim());
             let title = if untitled {
-                articles
-                    .iter()
-                    .find(|title| {
-                        site_is_titled(&site.domain, title) || site_is_initials(&site.domain, title)
-                    })
-                    .map(|title| base_title(title).trim())
+                spelled
             } else {
                 // A title that names what any article about the site is
                 // stays ("Welcome to Steam" for steampowered.com, whose
-                // articles are Valve's and Steam's); else the most read
-                // one names it.
+                // articles are Valve's and Steam's).
                 let shown = squash(site.title.as_deref().unwrap_or(""));
-                let named = names.clone().any(|name| {
-                    let name = squash(name);
+                let named = articles.iter().any(|title| {
+                    let name = squash(base_title(title));
                     name.len() < 3 || shown.contains(&name)
                 });
-                names.clone().next().filter(|_| !named)
+                spelled.filter(|_| !named)
             };
             if let Some(title) = title.filter(|title| !title.is_empty()) {
                 site.title = Some(title.to_string());
@@ -207,18 +204,35 @@ pub(crate) fn site_is_titled(domain: &str, title: &str) -> bool {
     false
 }
 
-/// Whether `domain`'s first label is the initials of the page's title,
-/// three or more of them, small words aside: nba.com for "National
-/// Basketball Association".
-fn site_is_initials(domain: &str, title: &str) -> bool {
+/// Whether `domain` spells the page's title ([`site_is_titled`]) or
+/// writes each of its words in full or by its first letter, small words
+/// aside, in three letters or more: nba.com for "National Basketball
+/// Association", nypost.com for "New York Post".
+fn site_spells(domain: &str, title: &str) -> bool {
     let label = squash(domain.split('.').next().unwrap_or(""));
-    let initials: String = base_title(title)
+    let words: Vec<String> = base_title(title)
         .split_whitespace()
         .map(squash)
-        .filter(|word| !word.is_empty() && !["of", "and", "the", "for"].contains(&word.as_str()))
-        .filter_map(|word| word.chars().next())
+        .filter(|word| !word.is_empty())
         .collect();
-    label.len() >= 3 && initials == label
+    site_is_titled(domain, title) || label.len() >= 3 && abbreviates(&label, &words)
+}
+
+/// Whether `label` is `words`, each in full or by its first letter, the
+/// small ones perhaps left out.
+fn abbreviates(label: &str, words: &[String]) -> bool {
+    let Some((word, rest)) = words.split_first() else {
+        return label.is_empty();
+    };
+    let initial = word
+        .chars()
+        .next()
+        .and_then(|first| label.strip_prefix(first));
+    (["of", "and", "the", "for"].contains(&word.as_str()) && abbreviates(label, rest))
+        || label
+            .strip_prefix(word.as_str())
+            .is_some_and(|left| abbreviates(left, rest))
+        || initial.is_some_and(|left| abbreviates(left, rest))
 }
 
 /// Whether `site`'s title may be another page's: an official site whose
