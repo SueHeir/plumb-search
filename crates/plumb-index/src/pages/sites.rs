@@ -25,16 +25,29 @@ pub fn base_title(title: &str) -> &str {
     }
 }
 
-/// The title of a work in a series without the series' name: "Tears of
-/// the Kingdom" of "The Legend of Zelda: Tears of the Kingdom", "The
-/// Phantom Menace" of "Star Wars: Episode I – The Phantom Menace". `None`
-/// when there is no such part, or it has fewer than two words that are
-/// not stop words ("Mission: Impossible", "Pokémon: The Movie"), too
-/// little to name the work alone.
-pub(crate) fn subtitle(title: &str) -> Option<&str> {
-    let (_, rest) = base_title(title).rsplit_once(": ")?;
-    let rest = rest.rsplit_once(" – ").map_or(rest, |(_, last)| last);
-    (crate::analysis::tokens(&crate::analysis::stemmed_analyzer(), rest).len() >= 2).then_some(rest)
+/// Shorter titles an article is searched for by: a work's title in a
+/// series without the series' name ("Tears of the Kingdom" of "The Legend
+/// of Zelda: Tears of the Kingdom", "The Phantom Menace" of "Star Wars:
+/// Episode I – The Phantom Menace"), and its title or that one without a
+/// leading "The" ("Dark Side of the Moon", "Phantom Menace"). Only those
+/// of two words or more that are not stop words: "Mission: Impossible",
+/// "Pokémon: The Movie" and "The Beatles" would say too little.
+pub(crate) fn short_titles(title: &str) -> Vec<&str> {
+    let base = base_title(title);
+    let subtitle = base
+        .rsplit_once(": ")
+        .map(|(_, rest)| rest.rsplit_once(" – ").map_or(rest, |(_, last)| last));
+    let words =
+        |text: &str| crate::analysis::tokens(&crate::analysis::stemmed_analyzer(), text).len();
+    [
+        subtitle,
+        base.strip_prefix("The "),
+        subtitle.and_then(|subtitle| subtitle.strip_prefix("The ")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|short| words(short) >= 2)
+    .collect()
 }
 
 impl PageSearcher {
