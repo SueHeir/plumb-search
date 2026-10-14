@@ -12,7 +12,7 @@ use tantivy::query::{EnableScoring, Query, Scorer};
 use tantivy::schema::Value;
 use tantivy::{DocAddress, DocSet, Order, TantivyDocument, Term};
 
-use crate::hits::{without_copies, without_near_copies};
+use crate::hits::{look_alikes, without_copies, without_near_copies};
 use crate::names::{navigation_subject, NameMatch, Named};
 use crate::query::{matching_docs, ParsedQuery};
 use crate::{
@@ -616,14 +616,16 @@ impl Searcher {
                 remainder.max(qualified_semantic.unwrap_or(0.0)) * subject_share
             };
             let relevance_tier = u8::from(cfg.whole_query_relevance && convincing);
-            // A site whose domain the whole query names stays whatever its
-            // language: "spiegel" finds spiegel.de with English chosen. So
-            // does a well-known site the query's first two words or more
-            // name: "real madrid tickets" keeps realmadrid.com, "deutsche
-            // bahn tickets" bahn.de. One word is too often a common one
-            // ("free games" is not free.fr's).
+            // A site the whole query names stays whatever its language, by
+            // its domain ("spiegel" finds spiegel.de with English chosen),
+            // an alias or what most links call it ("vietnam railways" finds
+            // vr.com.vn, written in Vietnamese). So does a well-known site
+            // the query's first two words or more name: "real madrid
+            // tickets" keeps realmadrid.com, "deutsche bahn tickets"
+            // bahn.de. One word is too often a common one ("free games" is
+            // not free.fr's).
             let known_name = name.typed
-                || name.label >= query.len
+                || name.words() >= query.len
                 || name.words() >= 2 && link_score >= WELL_KNOWN_LINK_SCORE;
             if let (Some(wanted), Some(site)) = (&language, column.language(addr.doc_id)) {
                 if !language_fits(wanted, &site) && !known_name {
@@ -938,37 +940,6 @@ impl Searcher {
             }
         }
 
-        // Copies of the site the query names on other top-level domains
-        // (gmail.ru, gmail.hu for "gmail"; paypal.biz for "paypal"): never
-        // crawled, nothing says what they are, little linked. They are
-        // left out: a bare facebook.co under facebook.com only looks like
-        // a trap. Typed, they are still found. Country sites of the brand
-        // are kept where they rank: they are well known (amazon.de) or
-        // crawled (toyota.jp).
-        if let Some(top) = ranked
-            .first()
-            .filter(|top| top.named && top.link_score >= WELL_KNOWN_LINK_SCORE)
-        {
-            let top_label = columns[top.addr.segment_ord as usize]
-                .domain(top.addr.doc_id)
-                .and_then(|domain| domain.split('.').next().map(str::to_owned));
-            if let Some(top_label) = top_label {
-                let mut copies = HashSet::new();
-                for r in ranked.iter().skip(1) {
-                    if r.link_score >= WELL_KNOWN_LINK_SCORE {
-                        continue;
-                    }
-                    let same_label = columns[r.addr.segment_ord as usize]
-                        .domain(r.addr.doc_id)
-                        .is_some_and(|domain| domain.split('.').next() == Some(&top_label));
-                    if same_label && !self.says_what_it_is(&searcher, r.addr)? {
-                        copies.insert(r.addr);
-                    }
-                }
-                ranked.retain(|r| !copies.contains(&r.addr));
-            }
-        }
-
         // The first result, when the query's first words name it, with
         // words left over to search it for. A site named lower down is not
         // what the query is about: capital.edu for "capital one my
@@ -1014,13 +985,19 @@ impl Searcher {
             let missing_words = missing.contains(&ranked.addr);
             let (mut hit, fingerprint) = self.hit(&searcher, ranked)?;
             hit.missing_words = missing_words;
-            // Junk stays out unless the query names it.
-            if named || !junk::left_out(query_text, &hit) {
+            if !junk::left_out(query_text, &hit, named) {
                 hits.push(hit);
                 fingerprints.push(fingerprint);
             }
         }
         let typed = registrable_domain(query_text.trim());
+        let look_alike = look_alikes(&hits, query_text, typed.as_deref());
+        let (hits, fingerprints): (Vec<Hit>, Vec<Option<u64>>) = hits
+            .into_iter()
+            .zip(fingerprints)
+            .zip(look_alike)
+            .filter_map(|(kept, look_alike)| (!look_alike).then_some(kept))
+            .unzip();
         let hits = without_near_copies(hits, &fingerprints, typed.as_deref(), home.as_deref());
         // The countries the query names, by a word or two: "south korea".
         let asked: Vec<&str> = (0..query.words.len())

@@ -341,6 +341,119 @@ fn the_model_reads_a_site_as_it_did_without_its_own_page() {
 }
 
 #[test]
+fn a_typed_address_lists_the_page_held_at_it_first() {
+    let question = Page::from_question(Article {
+        title: "Why is processing a sorted array faster than processing an unsorted array?".into(),
+        item: Some("11227809".into()),
+        views: 2_000_000,
+        ..Article::default()
+    });
+    let repo = Page::from_repo(Article {
+        title: "torvalds/linux".into(),
+        views: 180_000,
+        ..Article::default()
+    });
+    let (_dir, s) = searcher(&[
+        page("Albert Einstein", 90_000, &[]),
+        page("Albert Einstein College of Medicine", 5_000, &[]),
+        page("Python (programming language)", 80_000, &["Python"]),
+        page("Café", 3_000, &[]),
+        page("9", 2_000, &[]),
+        question,
+        repo,
+        package("pypi", "requests", 1_000),
+        inner("https://www.census.gov/quickfacts/", "QuickFacts", 500),
+        inner("https://www.irs.gov/forms?id=1040", "Form 1040", 400),
+    ]);
+    let options = crate::SearchOptions::default();
+    let listed = |query: &str, placed: &mut Vec<PlacedPage>| -> Option<(String, usize, bool)> {
+        s.list_typed_page(query, &options, placed).unwrap();
+        placed
+            .first()
+            .filter(|p| p.under.is_none())
+            .map(|p| (p.hit.page.title.clone(), p.at, p.hit.named))
+    };
+    for (query, title) in [
+        ("https://en.wikipedia.org/wiki/Albert_Einstein", "Albert Einstein"),
+        // A share link's query, a phone's address, and a path whatever
+        // its case.
+        (
+            "https://en.wikipedia.org/wiki/Albert_Einstein?wprov=sfla1",
+            "Albert Einstein",
+        ),
+        (
+            "en.m.wikipedia.org/wiki/Python_(programming_language)",
+            "Python (programming language)",
+        ),
+        ("https://en.wikipedia.org/wiki/Caf%C3%A9", "Café"),
+        ("en.wikipedia.org/wiki/Café", "Café"),
+        // Under the repository, the question and the package.
+        ("github.com/Torvalds/Linux/blob/master/README", "torvalds/linux"),
+        (
+            "https://stackoverflow.com/questions/11227809/why-is-processing-a-sorted-array-faster-than-processing-an-unsorted-array",
+            "Why is processing a sorted array faster than processing an unsorted array?",
+        ),
+        ("https://pypi.org/project/requests/", "requests"),
+        ("www.census.gov/quickfacts", "QuickFacts"),
+        ("irs.gov/forms?id=1040", "Form 1040"),
+    ] {
+        assert_eq!(
+            listed(query, &mut Vec::new()),
+            Some((title.to_string(), 0, true)),
+            "{query}"
+        );
+    }
+    // Listed already, at another spelling of its address, it moves first
+    // rather than twice.
+    let mut listed_einstein = found("Albert Einstein", None, false, 0.5);
+    listed_einstein.page.url = "http://en.wikipedia.org/wiki/Albert_Einstein/".into();
+    let mut placed = vec![
+        PlacedPage {
+            hit: found("Wikipedia", Some("wikipedia.org"), true, 0.9),
+            under: Some("wikipedia.org".into()),
+            at: 0,
+        },
+        PlacedPage {
+            hit: listed_einstein,
+            under: None,
+            at: 2,
+        },
+    ];
+    listed("https://en.wikipedia.org/wiki/Albert_Einstein", &mut placed);
+    let titles: Vec<&str> = placed.iter().map(|p| p.hit.page.title.as_str()).collect();
+    assert_eq!(titles, ["Albert Einstein", "Wikipedia"]);
+    // No path, no page held there (nor one whose address merely starts
+    // the same), or not an address.
+    for query in [
+        "en.wikipedia.org",
+        "https://en.wikipedia.org/wiki/Nikola_Tesla",
+        "en.wikipedia.org/wiki/Albert",
+        "albert einstein",
+        "github.com/torvalds",
+        // On a wiki a title with a "/" is not below its first part.
+        "en.wikipedia.org/wiki/9/11",
+        // Another page's query.
+        "irs.gov/forms?id=1099",
+    ] {
+        assert_eq!(listed(query, &mut Vec::new()), None, "{query}");
+    }
+    // The address names the page in whatever language the searcher reads.
+    let german = crate::SearchOptions {
+        language: Some("de".into()),
+        ..crate::SearchOptions::default()
+    };
+    let mut placed = Vec::new();
+    s.in_language(Some("de"))
+        .list_typed_page(
+            "https://en.wikipedia.org/wiki/Albert_Einstein",
+            &german,
+            &mut placed,
+        )
+        .unwrap();
+    assert_eq!(placed[0].hit.page.title, "Albert Einstein");
+}
+
+#[test]
 fn another_sites_page_comes_after_the_site_and_its_page_named() {
     let (_dir, searcher) = searcher(&[inner(
         "https://www.who.int/news-room/fact-sheets",
@@ -352,8 +465,9 @@ fn another_sites_page_comes_after_the_site_and_its_page_named() {
         page: Page::from_set(
             REFERENCE_SET,
             Article {
-                title: "Sepsis Survivors: Fact sheet and graphics for people who are recovering"
-                    .into(),
+                // Short enough for the reference-set gate to keep it for
+                // both searches below.
+                title: "Sepsis Survivors: Fact Sheet".into(),
                 item: Some(
                     "https://www.cdc.gov/sepsis/communication-resources/survivor.html".into(),
                 ),

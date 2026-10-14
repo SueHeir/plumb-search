@@ -39,6 +39,35 @@ fn plurals_name_the_article_titled_in_the_singular() {
 }
 
 #[test]
+fn a_title_with_a_possessive_is_named_without_it() {
+    let (_dir, s) = searcher(&[
+        page("Ohm's law", 7_111, &[]),
+        page("Ohm's acoustic law", 81, &[]),
+        page("Halley's Comet", 13_861, &[]),
+        page("Maslow's hierarchy of needs", 19_592, &[]),
+        page("McDonald's", 50_000, &[]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        s.search(q, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("ohm law"), ["Ohm's law"]);
+    assert_eq!(named("halley comet"), ["Halley's Comet"]);
+    assert_eq!(
+        named("maslow hierarchy of needs"),
+        ["Maslow's hierarchy of needs"]
+    );
+    assert_eq!(named("ohm's law"), ["Ohm's law"]);
+    // A name is not a title that ends in it: "mcdonald" is a surname too.
+    assert!(named("mcdonald").is_empty());
+    assert!(named("ohm").is_empty());
+}
+
+#[test]
 fn whole_titles_win_then_popularity() {
     let (_dir, s) = searcher(&[
         page("Marie Curie", 80_000, &["Madame Curie"]),
@@ -410,6 +439,68 @@ fn questions_are_found_in_their_duplicates_words() {
         ["How do I undo the most recent local commits in Git?"]
     );
     assert!(hits[0].whole);
+}
+
+#[test]
+fn a_title_and_a_name_name_the_living_holder_over_past_ones() {
+    use plumb_core::facts::{Fact, FactKind};
+    let holder = |title: &str, views: u64, description: &str, died: Option<&str>| {
+        let mut holder = page(title, views, &[]);
+        holder.description = Some(description.into());
+        holder.facts = std::iter::once((FactKind::Born, "1600"))
+            .chain(died.map(|year| (FactKind::Died, year)))
+            .map(|(kind, value)| Fact {
+                kind,
+                value: value.into(),
+            })
+            .collect();
+        holder
+    };
+    let (_dir, s) = searcher(&[
+        holder(
+            "Charles III",
+            110_755,
+            "King of the United Kingdom since 2022",
+            None,
+        ),
+        holder(
+            "Charles I of England",
+            36_925,
+            "King of England, Scotland and Ireland from 1625 to 1649",
+            Some("1649"),
+        ),
+        holder(
+            "Charles II of England",
+            34_747,
+            "King of England, Scotland, and Ireland from 1660 to 1685",
+            Some("1685"),
+        ),
+        page("King Charles (musician)", 124, &[]),
+        holder(
+            "Elizabeth II",
+            124_534,
+            "Queen of the United Kingdom from 1952 to 2022",
+            Some("2022"),
+        ),
+        holder(
+            "Elizabeth I",
+            66_242,
+            "Queen of England and Ireland from 1558 to 1603",
+            Some("1603"),
+        ),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("king charles")[0], "Charles III");
+    // Two queens of the name, neither living.
+    assert!(!named("queen elizabeth")
+        .iter()
+        .any(|title| title.starts_with("Elizabeth")));
 }
 
 #[test]
@@ -962,6 +1053,138 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
     assert!(named("president bush").is_empty());
     assert_eq!(named("president lincoln"), ["Abraham Lincoln"]);
     assert_eq!(named("general motors"), ["General Motors"]);
+}
+
+#[test]
+fn a_name_with_capitals_inside_that_names_no_page_lists_questions_about_it() {
+    let question = |title: &str, tags: &str, views| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some(tags.into()),
+            item: Some(title.len().to_string()),
+            views,
+            ..Article::default()
+        })
+    };
+    let pages = vec![
+        question(
+            "Kubernetes pod stuck in CrashLoopBackOff",
+            "kubernetes",
+            90_000,
+        ),
+        question(
+            "What does CrashLoopBackOff mean for a pod?",
+            "kubernetes, pod",
+            40_000,
+        ),
+        question(
+            "Pod restarts with exit code 137",
+            "kubernetes, crashloopbackoff",
+            200_000,
+        ),
+        question(
+            "UnicodeDecodeError: 'utf-8' codec can't decode byte",
+            "python, unicode",
+            300_000,
+        ),
+        question(
+            "Connect ECONNREFUSED 127.0.0.1:3000 in Node",
+            "node.js",
+            80_000,
+        ),
+        question("How do I embed a YouTube video?", "html, youtube", 500_000),
+        page("YouTube", 9_000_000, &[]),
+        page("Kubernetes", 2_000_000, &[]),
+    ];
+    let (_dir, searcher) = searcher(&pages);
+    let sites = [site("crashlytics.com", false), site("other.com", false)];
+    for (query, title) in [
+        (
+            "CrashLoopBackOff",
+            "Kubernetes pod stuck in CrashLoopBackOff",
+        ),
+        (
+            "UnicodeDecodeError",
+            "UnicodeDecodeError: 'utf-8' codec can't decode byte",
+        ),
+        (
+            "ECONNREFUSED",
+            "Connect ECONNREFUSED 127.0.0.1:3000 in Node",
+        ),
+    ] {
+        let placed = place_pages(query, &sites, searcher.search(query, 10).unwrap());
+        let listed: Vec<&str> = placed.iter().map(|p| p.hit.page.title.as_str()).collect();
+        assert_eq!(listed.first(), Some(&title), "{query}: {listed:?}");
+        // A question with it only among its tags is not about it.
+        assert!(
+            !listed.contains(&"Pod restarts with exit code 137"),
+            "{query}"
+        );
+    }
+    // A name an article has, and a word in lower case, are as before.
+    for query in ["YouTube", "crashloopbackoff"] {
+        let placed = place_pages(query, &sites, searcher.search(query, 10).unwrap());
+        assert!(
+            placed.iter().all(|p| !p.hit.page.is_question()),
+            "{query}: {placed:?}"
+        );
+    }
+}
+
+#[test]
+fn a_question_of_only_asking_words_and_code_names_nothing() {
+    let question = |title: &str, alias: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some("command-line".into()),
+            item: Some(item.into()),
+            views: 300_000,
+            aliases: vec![alias.into()],
+            ..Article::default()
+        })
+    };
+    let pages = [
+        question(
+            "Why did the command \":(){ : : & };:\" make my system lag?",
+            "What does :(){ : :& };: do?",
+            "1",
+        ),
+        question(
+            "Why do we use \"./\" (dot slash) to execute a file?",
+            "What does ./ mean?",
+            "2",
+        ),
+        question("What is a monad?", "Monads explained", "3"),
+        question("What does ~$ stand for?", "Tilde before the prompt", "4"),
+    ];
+    // Pages that make the query's other words known, not typos.
+    let known = [
+        "Liver",
+        "Liver disease",
+        "Liver transplantation",
+        "Kidney",
+        "Kidney stone",
+        "Kidney failure",
+        "NASA",
+        "NASA TV",
+        "NASA Astronaut Corps",
+    ]
+    .map(|title| page(title, 1_000, &[]));
+    let (_dir, s) = searcher(&[&pages[..], &known[..]].concat());
+    let questions = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.is_question())
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert!(questions("what does the liver do").is_empty());
+    assert!(questions("what does a kidney do").is_empty());
+    assert!(questions("what does yeet mean").is_empty());
+    assert!(questions("what does nasa stand for").is_empty());
+    // A question that asks about something is still found.
+    assert_eq!(questions("what is a monad"), ["What is a monad?"]);
 }
 
 #[test]
