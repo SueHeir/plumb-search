@@ -500,6 +500,94 @@ fn a_word_or_two_of_a_longer_search_is_no_answer() {
 }
 
 #[test]
+fn a_little_known_site_a_search_starts_with_the_name_of_is_kept() {
+    let records = vec![
+        site(
+            "wimbledon.com",
+            Some("The Championships, Wimbledon - Official Website"),
+            Some("The home of the tennis championships, with news, scores and draws."),
+            &[],
+            &[],
+            ranked(60_000, 1_500),
+        ),
+        site(
+            "afcwimbledon.co.uk",
+            Some("AFC Wimbledon"),
+            Some("association football club in London, England"),
+            &["AFC Wimbledon", "Wimbledon"],
+            &[],
+            popular(40_000, 2_000),
+        ),
+        site(
+            "tennisfinals.com",
+            Some("Tennis finals"),
+            Some("Results of every tennis final."),
+            &[],
+            &[],
+            ranked(500_000, 10),
+        ),
+        site(
+            "wimbledonpaint.com",
+            Some("Wimbledon Paint"),
+            Some("Paint shop in south London."),
+            &[],
+            &[],
+            obscure(900_000, 3),
+        ),
+        site(
+            "wimbledon.org",
+            Some("Club news"),
+            Some("News of a lawn tennis club."),
+            &[],
+            &[],
+            obscure(800_000, 3),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let options = SearchOptions::default();
+    let meaning = near_and_far(
+        &[("tennisfinals.com", 0.7)],
+        &[
+            ("wimbledon.com", 0.42),
+            ("wimbledon.org", 0.42),
+            ("afcwimbledon.co.uk", 0.3),
+            ("wimbledonpaint.com", 0.2),
+        ],
+    );
+    let found = |query: &str| {
+        let hits = searcher
+            .search_meaning(query, 10, &RankConfig::default(), &options, Some(&meaning))
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+
+    // The tournament's site doesn't say "final" or "champions", and isn't
+    // well known enough to be kept for its name alone, but it calls itself
+    // Wimbledon and is near the query in meaning.
+    for query in ["wimbledon final", "wimbledon champions"] {
+        let found = found(query);
+        assert!(
+            found.contains(&"wimbledon.com".to_string()),
+            "{query}: {found:?}"
+        );
+        // A shop that calls itself Wimbledon and is far from the query, and
+        // a site that has the word only for its domain, are still left out.
+        assert!(
+            !found.contains(&"wimbledonpaint.com".to_string()),
+            "{query}: {found:?}"
+        );
+        assert!(
+            !found.contains(&"wimbledon.org".to_string()),
+            "{query}: {found:?}"
+        );
+    }
+}
+
+#[test]
 fn a_name_some_little_site_has_does_not_keep_namesakes_of_its_words() {
     let records = vec![
         site(
@@ -565,6 +653,62 @@ fn a_name_some_little_site_has_does_not_keep_namesakes_of_its_words() {
 }
 
 #[test]
+fn a_domain_that_only_spells_the_query_leaves_it_to_meaning() {
+    let found = |namesake: SiteRecord| {
+        let records = vec![
+            namesake,
+            site(
+                "gmail.com",
+                Some("Gmail"),
+                Some("Mail from Google."),
+                &["Gmail"],
+                &[],
+                popular(5, 90_000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let meaning = near_and_far(&[("gmail.com", 1.0)], &[("email-provider.eu", 0.1)]);
+        let hits = searcher
+            .search_meaning(
+                "email provider",
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let bare = site(
+        "email-provider.eu",
+        None,
+        None,
+        &[],
+        &[],
+        obscure(900_000, 2),
+    );
+    // Never linked to, the domain is a namesake of the words: the query
+    // still describes what it wants, and meaning finds it.
+    let described = found(bare.clone());
+    assert!(
+        described.contains(&"gmail.com".to_string()),
+        "{described:?}"
+    );
+    assert!(
+        described.contains(&"email-provider.eu".to_string()),
+        "{described:?}"
+    );
+    // The official site of something called that is what it names.
+    let mut official = bare;
+    official.about = Some("company".to_string());
+    assert_eq!(found(official), ["email-provider.eu"]);
+}
+
+#[test]
 fn an_official_site_is_named_inside_by_its_wikidata_name_only() {
     let bank = Signals {
         official_site: true,
@@ -610,6 +754,79 @@ fn an_official_site_is_named_inside_by_its_wikidata_name_only() {
     );
     let routing = found("routing number valley national bank");
     assert!(routing.contains(&"valley.com".to_string()), "{routing:?}");
+}
+
+#[test]
+fn a_question_names_a_site_by_what_links_call_it() {
+    // Official, though not well known.
+    let mut wikihow = site(
+        "wikihow.com",
+        Some("wikiHow"),
+        None,
+        &["wikiHow"],
+        &[("wikiHow", 900)],
+        obscure(300_000, 40),
+    );
+    wikihow.about = Some("how-to website".to_string());
+    let records = vec![
+        wikihow,
+        site(
+            "netflix.com",
+            Some("Netflix"),
+            None,
+            &["Netflix"],
+            &[("Netflix", 5_000)],
+            popular(30, 200_000),
+        ),
+        site("rid.it", Some("RID"), None, &[], &[], popular(5_000, 900)),
+        site(
+            "tie.org",
+            Some("TiE Global"),
+            None,
+            &["TiE"],
+            &[("TiE", 2_000)],
+            popular(9_000, 5_000),
+        ),
+        site(
+            "helpguides.net",
+            Some("Help guides"),
+            Some("How to cancel a subscription, tie a tie or get rid of aphids."),
+            &[],
+            &[],
+            ranked(300_000, 10),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let options = SearchOptions::default();
+    let meaning = near_and_far(
+        &[("helpguides.net", 1.0)],
+        &[
+            ("netflix.com", 0.2),
+            ("wikihow.com", 0.2),
+            ("rid.it", 0.2),
+            ("tie.org", 0.0),
+        ],
+    );
+    let found = |query: &str| {
+        let hits = searcher
+            .search_meaning(query, 10, &RankConfig::default(), &options, Some(&meaning))
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let netflix = found("how to cancel netflix");
+    assert!(netflix.contains(&"netflix.com".to_string()), "{netflix:?}");
+    let tie = found("how to tie a tie wikihow");
+    assert!(tie.contains(&"wikihow.com".to_string()), "{tie:?}");
+    // A name nowhere near the question in meaning is a namesake of its
+    // word, as in any other search.
+    assert!(!tie.contains(&"tie.org".to_string()), "{tie:?}");
+    // Only its domain calls rid.it "rid": the question names nothing.
+    let aphids = found("how to get rid of aphids");
+    assert!(!aphids.contains(&"rid.it".to_string()), "{aphids:?}");
 }
 
 #[test]
@@ -946,6 +1163,75 @@ fn a_number_alone_matches_nothing_in_a_query_of_other_words() {
     assert!(found("2026").contains(&"lottery.example".to_string()));
     // A site the query starts by naming keeps its place.
     assert_eq!(found("163 mail")[0], "163.com");
+}
+
+#[test]
+fn sites_in_another_script_only_meaning_finds_are_left_out() {
+    let mut records = vec![
+        site(
+            "oeis.example",
+            Some("The On-Line Encyclopedia of Integer Sequences"),
+            Some("Catalan numbers and other integer sequences"),
+            &[],
+            &[],
+            obscure(60_000, 200),
+        ),
+        // Titled in another script, near niche searches in meaning only,
+        // and better linked than the encyclopedia.
+        site(
+            "gambling.example",
+            Some("和记娱乐 和记娱乐官网"),
+            None,
+            &[],
+            &[],
+            obscure(20_000, 400),
+        ),
+        site(
+            "anime.example",
+            Some("ANIMG - 二次エロ画像"),
+            None,
+            &[],
+            &[],
+            obscure(20_000, 400),
+        ),
+        // Described by Wikidata, so a person can tell what it is.
+        site(
+            "tabelog.example",
+            Some("食べログ グルメ・レストラン予約サイト"),
+            None,
+            &[],
+            &[],
+            obscure(20_000, 400),
+        ),
+    ];
+    records[1].language = Some("en".into());
+    records[3].about = Some("Japanese restaurant review website".into());
+    let (_dir, searcher) = build(&records);
+    let meaning = FixedMeaning(vec![
+        ("gambling.example", 0.9),
+        ("anime.example", 0.9),
+        ("tabelog.example", 0.8),
+        ("oeis.example", 0.7),
+    ]);
+    let found = |query: &str| -> Vec<String> {
+        let results = searcher
+            .search_meaning(
+                query,
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap();
+        results.hits.into_iter().map(|hit| hit.domain).collect()
+    };
+    assert_eq!(
+        found("oeis catalan numbers"),
+        ["oeis.example", "tabelog.example"]
+    );
+    // Searched in its own script, or by name, such a site is found.
+    assert_eq!(found("和记娱乐")[0], "gambling.example");
+    assert!(found("animg").contains(&"anime.example".to_string()));
 }
 
 #[test]
