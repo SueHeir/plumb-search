@@ -189,6 +189,10 @@ impl SearchBackend for FrozenBackend {
         SearchBackend::site(&self.sites, domain)
     }
 
+    fn common_word(&self, word: &str) -> bool {
+        self.sites.common_word(word)
+    }
+
     fn places(
         &self,
         query: &str,
@@ -710,6 +714,57 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
             assert_eq!(error["id"], 7);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_health_search_lists_the_site_it_names_first() {
+        // As on a node, "mucinex" is in few sites' titles, so mucinex.com
+        // goes back above the authorities after the learned order. It was
+        // fourth while this server called every word common.
+        let (dir, _) = fixture();
+        let index = dir.path().join("health");
+        let site = |domain: &str, title: &str| SiteRecord {
+            domain: domain.into(),
+            title: Some(title.into()),
+            description: Some(format!("{title} health information")),
+            ..SiteRecord::default()
+        };
+        plumb_index::build_index(
+            &index,
+            &[
+                site("mucinex.com", "Mucinex"),
+                site("medlineplus.gov", "MedlinePlus"),
+                site("mayoclinic.org", "Mayo Clinic"),
+                site("clevelandclinic.org", "Cleveland Clinic"),
+            ],
+        )
+        .unwrap();
+        let rank = RankConfig::default();
+        let backend = Arc::new(FrozenBackend {
+            sites: IndexBackend::new(Searcher::open(&index).unwrap(), rank),
+            pages: PageSearcher::open(&dir.path().join("pages")).unwrap(),
+            rank,
+        });
+        let app = router(
+            backend,
+            WebSettings::from(HomeCountry::Off),
+            json!({"schema": 1}),
+        );
+        for query in [
+            "can i take zyrtec with mucinex",
+            "mucinex zyrtec safe together",
+        ] {
+            let uri = format!("/api/search?q={}&full=1", query.replace(' ', "+"));
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["hits"][0]["domain"], "mucinex.com", "{query}: {body}");
         }
     }
 
