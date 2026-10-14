@@ -12,7 +12,7 @@ use tantivy::{TantivyDocument, Term};
 
 use super::docs::docs_asked;
 use super::page::is_item_id;
-use super::sites::{base_title, subtitle, title_qualifier};
+use super::sites::{base_title, subtitle};
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
     DESCRIBED_MISSING_FROM, DESCRIBED_QUERY_WORDS, DESCRIBED_WORD, DOCS_SET, FILMS_SET, GITHUB_SET,
@@ -614,7 +614,7 @@ impl PageSearcher {
         if stems.is_empty() {
             return 0.0;
         }
-        let qualifier = title_qualifier(&page.title).filter(|_| page.is_article());
+        let qualifier = super::sites::title_qualifier(&page.title).filter(|_| page.is_article());
         let named: HashSet<String> = self
             .question_words(&format!(
                 "{} {}",
@@ -1189,7 +1189,7 @@ impl Inside {
     fn span(&self, page: &Page, joined: &tantivy::tokenizer::TextAnalyzer) -> Option<&[String]> {
         let key = |name: &str| analysis::tokens(joined, name).pop();
         let names: Vec<&str> = if page.is_article() {
-            let qualified = title_qualifier(&page.title)
+            let qualified = super::sites::title_qualifier(&page.title)
                 .and_then(key)
                 .is_some_and(|qualifier| self.keys.contains_key(&qualifier));
             std::iter::once(page.title.as_str())
