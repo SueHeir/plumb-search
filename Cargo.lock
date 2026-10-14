@@ -6180,6 +6180,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "plumb-plugin-zotero"
+version = "0.3.0"
+dependencies = [
+ "plumb-plugin",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "plumb-private"
 version = "0.3.0"
 dependencies = [

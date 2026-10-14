@@ -60,6 +60,12 @@ fn the_page_a_search_names_with_its_site_goes_under_it() {
             700,
         ),
         inner("https://www.who.int/health-topics/malaria", "Malaria", 300),
+        inner("https://www.who.int/news-room/fact-sheets", "Fact sheets", 900),
+        inner(
+            "https://www.who.int/news-room/fact-sheets/detail/malaria",
+            "Malaria",
+            200,
+        ),
         // Better read, but in another language.
         inner("https://www.who.int/es/health-topics/malaria", "Malaria", 3_000),
         inner(
@@ -74,6 +80,12 @@ fn the_page_a_search_names_with_its_site_goes_under_it() {
             500,
         ),
         inner("https://www.nps.gov/yose/", "Yosemite National Park", 800),
+        inner("https://www.nhs.uk/conditions/burns-and-scalds/", "Burns and scalds", 600),
+        inner(
+            "https://www.nist.gov/pml/special-publication-811",
+            "Special Publication 811",
+            400,
+        ),
     ]);
     // Found by words its text shares with the search.
     let story = PageHit {
@@ -116,6 +128,68 @@ fn the_page_a_search_names_with_its_site_goes_under_it() {
     assert_eq!(
         placed(&searcher, "who malaria", &who, &[]),
         [(Some("who.int".to_string()), "Malaria".to_string())]
+    );
+    // The search may say more than the page's whole title, and the rest
+    // be in its path: the fact sheet on malaria, not the list of them.
+    let mut found = searcher.search("who malaria fact sheet", 10).unwrap();
+    searcher
+        .add_named_site_page("who malaria fact sheet", &who, &mut found)
+        .unwrap();
+    assert_eq!(
+        found[0].page.url,
+        "https://www.who.int/news-room/fact-sheets/detail/malaria"
+    );
+    assert_eq!(
+        placed(&searcher, "who malaria fact sheet", &who, &[]),
+        [(Some("who.int".to_string()), "Malaria".to_string())]
+    );
+    // Not when the search found a page of the site that says more of it.
+    let vaccines = PageHit {
+        page: inner(
+            "https://www.who.int/news-room/questions-and-answers/item/malaria-vaccines",
+            "Questions and answers on RTS,S and R21 malaria vaccines",
+            100,
+        ),
+        score: 0.5,
+        named: false,
+        popularity: 0.1,
+        whole: false,
+        learned: None,
+    };
+    assert_eq!(
+        placed(&searcher, "who malaria vaccine", &who, &[vaccines]),
+        [(
+            None,
+            "Questions and answers on RTS,S and R21 malaria vaccines".to_string()
+        )]
+    );
+    // A site on a public suffix is named whole or by its first label, at
+    // either end.
+    let nhs = [titled_site("www.nhs.uk", "NHS website for England - NHS")];
+    let burns = [(
+        Some("www.nhs.uk".to_string()),
+        "Burns and scalds".to_string(),
+    )];
+    assert_eq!(
+        placed(&searcher, "nhs burns and scalds treatment", &nhs, &[]),
+        burns
+    );
+    assert_eq!(placed(&searcher, "burns and scalds nhs", &nhs, &[]), burns);
+    assert_eq!(
+        placed(&searcher, "nhs.uk burns and scalds", &nhs, &[]),
+        burns
+    );
+    // A word of the search may be the initials of words of the title.
+    let nist = [titled_site(
+        "nist.gov",
+        "National Institute of Standards and Technology",
+    )];
+    assert_eq!(
+        placed(&searcher, "nist sp 811", &nist, &[]),
+        [(
+            Some("nist.gov".to_string()),
+            "Special Publication 811".to_string()
+        )]
     );
     // The site's name may end the search, and the title go on after a
     // break.
@@ -174,6 +248,11 @@ fn only_a_page_the_rest_of_the_search_names_is_taken() {
             300,
         ),
         inner(
+            "https://www.who.int/about",
+            "About WHO: World Health Organization (WHO)",
+            300,
+        ),
+        inner(
             "https://www.census.gov/library/stories/clock.html",
             "How the population clock is built, and what it says about births",
             300,
@@ -200,10 +279,18 @@ fn only_a_page_the_rest_of_the_search_names_is_taken() {
     // A question that starts with the site's name asks nothing of it.
     let who = [titled_site("who.int", "World Health Organization (WHO)")];
     assert!(taken("who is the president", &who).is_empty());
+    // Nor does a title that is mostly the site's name.
+    assert!(taken("who won the world cup", &who).is_empty());
     // Words the site has no page titled with, or only as a small part of
     // a title.
     assert!(taken("census births", &census).is_empty());
     assert!(taken("census unemployment", &census).is_empty());
+    // A whole title that is less than a third of what the search asks.
+    assert!(taken(
+        "census population clock births deaths migration 2020 by state",
+        &census
+    )
+    .is_empty());
     // A site the whole query names, or one below the best few.
     let named = [site("census.gov", true)];
     assert!(taken("census population clock", &named).is_empty());
@@ -250,5 +337,172 @@ fn the_model_reads_a_site_as_it_did_without_its_own_page() {
     assert_eq!(
         crate::learned::features("census population clock", &[row(&[&clock, &article])]),
         crate::learned::features("census population clock", &[row(&[&article])])
+    );
+}
+
+#[test]
+fn a_typed_address_lists_the_page_held_at_it_first() {
+    let question = Page::from_question(Article {
+        title: "Why is processing a sorted array faster than processing an unsorted array?".into(),
+        item: Some("11227809".into()),
+        views: 2_000_000,
+        ..Article::default()
+    });
+    let repo = Page::from_repo(Article {
+        title: "torvalds/linux".into(),
+        views: 180_000,
+        ..Article::default()
+    });
+    let (_dir, s) = searcher(&[
+        page("Albert Einstein", 90_000, &[]),
+        page("Albert Einstein College of Medicine", 5_000, &[]),
+        page("Python (programming language)", 80_000, &["Python"]),
+        page("Café", 3_000, &[]),
+        page("9", 2_000, &[]),
+        question,
+        repo,
+        package("pypi", "requests", 1_000),
+        inner("https://www.census.gov/quickfacts/", "QuickFacts", 500),
+        inner("https://www.irs.gov/forms?id=1040", "Form 1040", 400),
+    ]);
+    let options = crate::SearchOptions::default();
+    let listed = |query: &str, placed: &mut Vec<PlacedPage>| -> Option<(String, usize, bool)> {
+        s.list_typed_page(query, &options, placed).unwrap();
+        placed
+            .first()
+            .filter(|p| p.under.is_none())
+            .map(|p| (p.hit.page.title.clone(), p.at, p.hit.named))
+    };
+    for (query, title) in [
+        ("https://en.wikipedia.org/wiki/Albert_Einstein", "Albert Einstein"),
+        // A share link's query, a phone's address, and a path whatever
+        // its case.
+        (
+            "https://en.wikipedia.org/wiki/Albert_Einstein?wprov=sfla1",
+            "Albert Einstein",
+        ),
+        (
+            "en.m.wikipedia.org/wiki/Python_(programming_language)",
+            "Python (programming language)",
+        ),
+        ("https://en.wikipedia.org/wiki/Caf%C3%A9", "Café"),
+        ("en.wikipedia.org/wiki/Café", "Café"),
+        // Under the repository, the question and the package.
+        ("github.com/Torvalds/Linux/blob/master/README", "torvalds/linux"),
+        (
+            "https://stackoverflow.com/questions/11227809/why-is-processing-a-sorted-array-faster-than-processing-an-unsorted-array",
+            "Why is processing a sorted array faster than processing an unsorted array?",
+        ),
+        ("https://pypi.org/project/requests/", "requests"),
+        ("www.census.gov/quickfacts", "QuickFacts"),
+        ("irs.gov/forms?id=1040", "Form 1040"),
+    ] {
+        assert_eq!(
+            listed(query, &mut Vec::new()),
+            Some((title.to_string(), 0, true)),
+            "{query}"
+        );
+    }
+    // Listed already, at another spelling of its address, it moves first
+    // rather than twice.
+    let mut listed_einstein = found("Albert Einstein", None, false, 0.5);
+    listed_einstein.page.url = "http://en.wikipedia.org/wiki/Albert_Einstein/".into();
+    let mut placed = vec![
+        PlacedPage {
+            hit: found("Wikipedia", Some("wikipedia.org"), true, 0.9),
+            under: Some("wikipedia.org".into()),
+            at: 0,
+        },
+        PlacedPage {
+            hit: listed_einstein,
+            under: None,
+            at: 2,
+        },
+    ];
+    listed("https://en.wikipedia.org/wiki/Albert_Einstein", &mut placed);
+    let titles: Vec<&str> = placed.iter().map(|p| p.hit.page.title.as_str()).collect();
+    assert_eq!(titles, ["Albert Einstein", "Wikipedia"]);
+    // No path, no page held there (nor one whose address merely starts
+    // the same), or not an address.
+    for query in [
+        "en.wikipedia.org",
+        "https://en.wikipedia.org/wiki/Nikola_Tesla",
+        "en.wikipedia.org/wiki/Albert",
+        "albert einstein",
+        "github.com/torvalds",
+        // On a wiki a title with a "/" is not below its first part.
+        "en.wikipedia.org/wiki/9/11",
+        // Another page's query.
+        "irs.gov/forms?id=1099",
+    ] {
+        assert_eq!(listed(query, &mut Vec::new()), None, "{query}");
+    }
+    // The address names the page in whatever language the searcher reads.
+    let german = crate::SearchOptions {
+        language: Some("de".into()),
+        ..crate::SearchOptions::default()
+    };
+    let mut placed = Vec::new();
+    s.in_language(Some("de"))
+        .list_typed_page(
+            "https://en.wikipedia.org/wiki/Albert_Einstein",
+            &german,
+            &mut placed,
+        )
+        .unwrap();
+    assert_eq!(placed[0].hit.page.title, "Albert Einstein");
+}
+
+#[test]
+fn another_sites_page_comes_after_the_site_and_its_page_named() {
+    let (_dir, searcher) = searcher(&[inner(
+        "https://www.who.int/news-room/fact-sheets",
+        "Fact sheets",
+        900,
+    )]);
+    // Listed first by the learned ranking, which reads it as well read.
+    let sepsis = PageHit {
+        page: Page::from_set(
+            REFERENCE_SET,
+            Article {
+                title: "Sepsis Survivors: Fact sheet and graphics for people who are recovering"
+                    .into(),
+                item: Some(
+                    "https://www.cdc.gov/sepsis/communication-resources/survivor.html".into(),
+                ),
+                views: 5_000,
+                ..Article::default()
+            },
+        )
+        .unwrap(),
+        score: 0.9,
+        named: false,
+        popularity: 0.9,
+        whole: false,
+        learned: Some(LearnedPlace::Before("who.int".into())),
+    };
+    let who = [titled_site("who.int", "World Health Organization (WHO)")];
+    let place = |query: &str| {
+        let mut found = vec![sepsis.clone()];
+        searcher
+            .add_named_site_page(query, &who, &mut found)
+            .unwrap();
+        place_pages(query, &who, found)
+            .into_iter()
+            .map(|p| (p.hit.page.title, p.under, p.at))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        place("who fact sheets"),
+        [
+            ("Fact sheets".to_string(), Some("who.int".to_string()), 0),
+            (sepsis.page.title.clone(), None, 1)
+        ]
+    );
+    // Without a page of the site named, the learned ranking keeps its
+    // place.
+    assert_eq!(
+        place("who sepsis survivors"),
+        [(sepsis.page.title.clone(), None, 0)]
     );
 }

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::format::format_number;
 use crate::units::{amount, sides};
-use crate::{simplify, Answer, Kind};
+use crate::{simplify, unasked, Answer, Kind};
 
 /// Where the day's rates are: a small XML file (about 2 KB).
 pub const ECB_RATES_URL: &str = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml";
@@ -184,7 +184,7 @@ fn money(text: &str) -> Option<(f64, &'static str)> {
 /// Whether `query` names a currency on each side of a conversion.
 pub(crate) fn looks_like(query: &str) -> bool {
     let text = simplify(query);
-    sides(&text)
+    sides(unasked(&text))
         .into_iter()
         .any(|(from, to)| money(from).is_some() && currency(to).is_some())
 }
@@ -221,7 +221,7 @@ fn named_as(number: String, code: &str) -> Option<String> {
 
 pub(crate) fn answer(query: &str, rates: &Rates) -> Option<Answer> {
     let text = simplify(query);
-    let text = text.strip_prefix("convert ").unwrap_or(&text);
+    let text = unasked(&text);
     sides(text).into_iter().find_map(|(from, to)| {
         let (value, from) = money(from)?;
         let to = currency(to)?;
@@ -285,6 +285,13 @@ pub(crate) mod tests {
             answer("1000 yen to dollars", &rates()).unwrap().answer,
             "6.75 US dollars"
         );
+        // Asked as a question.
+        assert_eq!(
+            answer("how to convert 100 usd to eur", &rates()),
+            answer("100 usd to eur", &rates())
+        );
+        assert!(looks_like("how do i convert 100 usd to eur"));
+        assert!(looks_like("convert 100 usd to eur"));
         assert_eq!(answer("100 usd to cad", &rates()), None, "no rate");
         assert_eq!(answer("10 pounds to kg", &rates()), None);
     }

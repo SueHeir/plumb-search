@@ -22,6 +22,15 @@ use crate::cli::{MeaningArgs, QueryInstruction};
 /// Sites nearest a query in meaning: closeness is spread over them, and
 /// the search ranks the nearest of them and the most popular.
 const NEAREST: usize = 1_000;
+/// How far the nearest site's cosine must stand above the last of the
+/// [`NEAREST`] for closeness to reach 1; below that, closeness shrinks in
+/// proportion. The raw cosine can't tell what is near: on hpc's 1,000
+/// review searches, a right site found by meaning and an unrelated one
+/// leading the results ("trifling glyph of magicka": an Italian theme
+/// park) both scored about 0.7. How far the nearest stood out did: by 0.12
+/// (median) where an unrelated site led, 0.15 where meaning found the
+/// right one.
+const LEAST_SPREAD: f32 = 0.15;
 /// Vectors made between saves of the vectors file, so a stopped run keeps
 /// most of its work.
 pub const SAVE_EVERY: usize = 10_000;
@@ -172,7 +181,9 @@ impl SharedMeaning {
 /// last of them 0, and sites farther away 0 too. A thousand, not fewer:
 /// with hundreds of thousands of sites, a big one the query describes is
 /// often a few hundred places down, behind small sites that repeat the
-/// query's words, and must still count as close.
+/// query's words, and must still count as close. When the nearest stands
+/// out little from the last of them, nothing is really near, and closeness
+/// stays below 1 ([`LEAST_SPREAD`]).
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
     nearest: Vec<String>,
@@ -187,6 +198,19 @@ struct Spread {
     vector: Vec<i8>,
     best: f32,
     floor: f32,
+}
+
+impl Spread {
+    /// `cosine` spread from the last of the nearest (0) to the nearest
+    /// (1), over at least [`LEAST_SPREAD`].
+    fn stretch(&self, cosine: f32) -> f32 {
+        if self.best > self.floor {
+            (cosine - self.floor) / (self.best - self.floor).max(LEAST_SPREAD)
+        } else {
+            cosine
+        }
+        .clamp(0.0, 1.0)
+    }
 }
 
 impl<'a> QueryMeaning<'a> {
@@ -229,12 +253,7 @@ impl<'a> QueryMeaning<'a> {
     }
 
     fn spread(&self, spread: &Spread, domain: &str) -> Option<f32> {
-        let cosine = self.vectors.closeness(&spread.vector, domain)?;
-        if spread.best > spread.floor {
-            Some(((cosine - spread.floor) / (spread.best - spread.floor)).clamp(0.0, 1.0))
-        } else {
-            Some(cosine.clamp(0.0, 1.0))
-        }
+        Some(spread.stretch(self.vectors.closeness(&spread.vector, domain)?))
     }
 }
 
@@ -326,20 +345,15 @@ pub fn embed_records(
 pub(crate) type ToEmbed = (f32, String, plumb_embed::TextHash, String);
 
 /// The first half of [`embed_records`]: drops the vectors of sites not in
-/// `records` and returns the sites to embed, best first. The records are
-/// freed by the time it returns.
+/// `records`, or with no text there, and returns the sites to embed, best
+/// first. The records are freed by the time it returns.
 pub(crate) fn sites_to_embed(
     vectors: &RwLock<Vectors>,
     records: RecordSet,
     words: usize,
 ) -> Vec<ToEmbed> {
-    let write = || vectors.write_locked();
-    {
-        let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
-        write().retain(|domain| domains.contains(domain));
-    }
-
     let total = records.len();
+    let mut domains: HashSet<u64> = HashSet::new();
     let mut todo = Vec::new();
     {
         let vectors = vectors.read_locked();
@@ -348,29 +362,35 @@ pub(crate) fn sites_to_embed(
             if text.is_empty() {
                 continue;
             }
+            domains.insert(domain_hash(&record.domain));
             let hash = text_hash(&text);
             if vectors.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
                 let score = record.link_score();
                 todo.push((score, record.domain, hash, text));
             }
         }
-        // The most popular sites first: a long run (all of them, after
-        // their text changed) gets to the sites most searched for early.
-        todo.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        todo.shrink_to_fit();
-        info!(
-            "{} of {total} sites need a vector ({} have one)",
-            todo.len(),
-            vectors.len()
-        );
     }
+    vectors
+        .write_locked()
+        .retain(|domain| domains.contains(&domain_hash(domain)));
+    // The most popular sites first: a long run (all of them, after
+    // their text changed) gets to the sites most searched for early.
+    todo.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    todo.shrink_to_fit();
+    info!(
+        "{} of {total} sites need a vector ({} have one)",
+        todo.len(),
+        vectors.read_locked().len()
+    );
     todo
 }
 
 /// [`sites_to_embed`] for a node, reading the records file at `path` a
 /// record at a time (its journal folded in first, see [`crate::outline`])
 /// rather than holding every record: drops the vectors of sites not in the
-/// file and returns the best `max` sites to embed, best first, and whether
+/// file, or with no text there (a homepage now read as a placeholder,
+/// [`plumb_core::is_stand_in_homepage`]), and returns the best `max` sites to
+/// embed, best first, and whether
 /// more wait for a vector. The text of each site to embed is held until it
 /// is embedded, so a node takes them `max` at a time.
 pub(crate) fn sites_to_embed_from_file(
@@ -393,11 +413,11 @@ pub(crate) fn sites_to_embed_from_file(
         let held = vectors.read_locked();
         crate::outline::for_each_record(path, |record| {
             total += 1;
-            domains.insert(domain_hash(&record.domain));
             let text = site_text_words(&record, words);
             if text.is_empty() {
                 return;
             }
+            domains.insert(domain_hash(&record.domain));
             let hash = text_hash(&text);
             if held.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
                 todo.push((record.link_score(), record.domain, hash, text));
@@ -672,5 +692,53 @@ mod tests {
         let vectors = vectors.into_inner().unwrap();
         assert_eq!(vectors.len(), 1);
         assert!(vectors.get("zzz.example").is_some());
+    }
+
+    #[test]
+    fn closeness_reaches_one_only_when_the_nearest_stands_out() {
+        let spread = |best, floor| Spread {
+            vector: Vec::new(),
+            best,
+            floor,
+        };
+        // hpc's "trifling glyph of magicka": the nearest stands out by 0.09,
+        // and an Italian theme park at 0.659 no longer counts as close.
+        let nothing_near = spread(0.702, 0.611);
+        assert!((nothing_near.stretch(0.659) - 0.32).abs() < 0.01);
+        assert!((nothing_near.stretch(0.702) - 0.61).abs() < 0.01);
+        // "paris saint-germain": psg.fr stands out by 0.16 and stays at 1.
+        let near = spread(0.794, 0.634);
+        assert_eq!(near.stretch(0.794), 1.0);
+        assert!((near.stretch(0.714) - 0.5).abs() < 0.01);
+        assert_eq!(near.stretch(0.6), 0.0);
+    }
+
+    #[test]
+    fn a_site_left_with_no_text_loses_its_vector() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model");
+        plumb_embed::write_test_model(&model).unwrap();
+        let embedder = Embedder::load(&model).unwrap();
+        let vectors = RwLock::new(Vectors::new(embedder.id(), embedder.dim()));
+        let embed = |text: &str| {
+            let mut parked = record("parked.example", text);
+            parked.body_text = Some(text.into());
+            let records = [parked].into_iter().collect();
+            embed_records(
+                &embedder,
+                &vectors,
+                records,
+                1,
+                &|| false,
+                &mut |_| Ok(()),
+                &mut |_, _| {},
+            )
+            .unwrap();
+        };
+        embed("Parked Things");
+        assert!(vectors.read_locked().get("parked.example").is_some());
+        // Crawled again, its homepage only says hello: a placeholder.
+        embed("Hello!");
+        assert!(vectors.read_locked().get("parked.example").is_none());
     }
 }
