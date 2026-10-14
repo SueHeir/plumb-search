@@ -1327,6 +1327,27 @@ fn a_sharp_after_a_letter_names_what_is_named_so() {
 }
 
 #[test]
+fn a_sharp_in_part_of_a_query_names_what_is_named_so() {
+    let book = Page::from_book(Article {
+        title: "C# in Depth".into(),
+        description: Some("Book by Jon Skeet".into()),
+        item: Some("OL17055567W".into()),
+        views: 5_000,
+        ..Article::default()
+    });
+    let (_dir, s) = searcher(&[
+        book,
+        page("C (programming language)", 600_000, &[]),
+        page("Jon Skeet", 2_000, &[]),
+    ]);
+    // Its title then its author, the title keyed with the sign read out.
+    for query in ["c# in depth jon skeet", "c# in depth skeet"] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(hits[0].page.title, "C# in Depth", "{query}: {hits:?}");
+    }
+}
+
+#[test]
 fn a_name_with_capitals_inside_that_names_no_page_lists_questions_about_it() {
     let question = |title: &str, tags: &str, views| {
         Page::from_question(Article {

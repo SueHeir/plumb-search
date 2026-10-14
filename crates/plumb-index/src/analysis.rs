@@ -72,23 +72,43 @@ pub(crate) fn register_pages(manager: &TokenizerManager) {
 /// `C# 12` -> `C sharp 12`. [`normalize_text`] drops the sign, and "c#"
 /// would name C.
 fn read_sharps(text: &str) -> Cow<'_, str> {
-    let sharp = |c: &char| matches!(c, '#' | '\u{266F}');
-    if !text.chars().any(|c| sharp(&c)) {
+    if !text.contains(['#', '\u{266F}']) {
         return Cow::Borrowed(text);
     }
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len() + 8);
     for (i, c) in chars.iter().enumerate() {
-        let lone_letter =
-            i > 0 && chars[i - 1].is_alphabetic() && (i < 2 || !chars[i - 2].is_alphanumeric());
-        let ends = chars.get(i + 1).is_none_or(|next| !next.is_alphanumeric());
-        if sharp(c) && lone_letter && ends {
+        if sharp_at(&chars, i) {
             out.push_str(" sharp");
         } else {
             out.push(*c);
         }
     }
     Cow::Owned(out)
+}
+
+/// The letters `text` writes a sharp after ([`read_sharps`]), in lower
+/// case: `["c"]` for "C# in Depth". The query's words drop the sign, so a
+/// part of a query keyed from them gets it back
+/// ([`crate::pages::PageSearcher::span_key`]).
+pub(crate) fn sharp_letters(text: &str) -> Vec<String> {
+    if !text.contains(['#', '\u{266F}']) {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    (1..chars.len())
+        .filter(|&i| sharp_at(&chars, i))
+        .map(|i| chars[i - 1].to_lowercase().collect())
+        .collect()
+}
+
+/// Whether `chars[i]` is a sharp sign after a lone letter at a word's end.
+fn sharp_at(chars: &[char], i: usize) -> bool {
+    matches!(chars[i], '#' | '\u{266F}')
+        && i > 0
+        && chars[i - 1].is_alphabetic()
+        && (i < 2 || !chars[i - 2].is_alphanumeric())
+        && chars.get(i + 1).is_none_or(|next| !next.is_alphanumeric())
 }
 
 /// Whether `c` belongs to a script written without spaces between words:
@@ -404,6 +424,7 @@ mod tests {
         // Only after a lone letter at a word's end.
         assert_eq!(page_key("#metoo issue #5"), ["metooissue5"]);
         assert_eq!(page_key("abc# c#d"), ["abccd"]);
+        assert_eq!(sharp_letters("C# in Depth, F\u{266F} abc# #5"), ["c", "f"]);
         // Words, and the sites' index, keep dropping it.
         assert_eq!(words("C# Corner"), ["c", "corner"]);
         assert_eq!(joined_token("C#"), ["c"]);

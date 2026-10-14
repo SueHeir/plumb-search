@@ -97,6 +97,7 @@ impl PageSearcher {
         scope: Option<&dyn Query>,
     ) -> Result<Vec<PageHit>> {
         let words = analysis::tokens(&self.words, query);
+        let sharped = analysis::sharp_letters(query);
         let Some(joined) = self.query_key(query)? else {
             return Ok(Vec::new());
         };
@@ -218,7 +219,7 @@ impl PageSearcher {
         // for so: "1989 by taylor swift".
         let mut film_title_first = HashSet::new();
         for end in 1..words.len() {
-            let Some(key) = analysis::tokens(&self.joined, &words[..end].join(" ")).pop() else {
+            let Some(key) = self.span_key(&words[..end], &sharped)? else {
                 continue;
             };
             let named = TermQuery::new(
@@ -441,7 +442,7 @@ impl PageSearcher {
             .filter(|stem| !unknown.contains(stem))
             .cloned()
             .collect();
-        let inside = self.named_inside(&searcher, &words, scope, &mut addresses)?;
+        let inside = self.named_inside(&searcher, &words, &sharped, scope, &mut addresses)?;
         let mut hits = Vec::new();
         let mut described_repos = super::repos::DescribedRepos::default();
         for address in addresses {
@@ -604,11 +605,13 @@ impl PageSearcher {
     /// ("frp reverse proxy", [`PageSearcher::repo_described`]) and docs
     /// pages by their product and title ("python asyncio tutorial"). They lack the query's other words, so nothing
     /// else finds them. A part is any run of the query's `words` but the
-    /// whole query, as long as it is not only function or asking words.
+    /// whole query, as long as it is not only function or asking words,
+    /// keyed with the sharps it was typed with (`sharped`).
     fn named_inside(
         &self,
         searcher: &tantivy::Searcher,
         words: &[String],
+        sharped: &[String],
         scope: Option<&dyn Query>,
         addresses: &mut Vec<tantivy::DocAddress>,
     ) -> Result<Inside> {
@@ -633,7 +636,7 @@ impl PageSearcher {
                 {
                     continue;
                 }
-                let Some(key) = analysis::tokens(&self.joined, &span.join(" ")).pop() else {
+                let Some(key) = self.span_key(span, sharped)? else {
                     continue;
                 };
                 let mut lanes: Vec<Box<dyn Query>> = vec![Box::new(TermQuery::new(
@@ -1501,7 +1504,7 @@ const REPO_NAME_PAGES: u64 = 100_000;
 /// The parts of a query that may name a page ([`PageSearcher::named_inside`]).
 #[derive(Default)]
 struct Inside {
-    /// Each part's key ([`analysis::joined_analyzer`]) and words, the
+    /// Each part's key ([`PageSearcher::span_key`]) and words, the
     /// longest part of a key.
     keys: HashMap<String, Vec<String>>,
     /// Pages found only by a part, left out unless it names them.

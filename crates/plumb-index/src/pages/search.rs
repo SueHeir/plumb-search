@@ -925,6 +925,28 @@ impl PageSearcher {
         })
     }
 
+    /// The key the run `span` of a query's words names pages by, as
+    /// [`PageSearcher::query_key`] reads it: a letter the query wrote a
+    /// sharp after (`sharped`, [`analysis::sharp_letters`]) gets it back,
+    /// since the words drop it. "c# in depth" of "c# in depth jon skeet" is
+    /// the book.
+    pub(crate) fn span_key(&self, span: &[String], sharped: &[String]) -> Result<Option<String>> {
+        let typed: Vec<String> = span
+            .iter()
+            .map(|word| {
+                if sharped.contains(word) {
+                    format!("{word}#")
+                } else {
+                    word.clone()
+                }
+            })
+            .collect();
+        if typed == span {
+            return Ok(analysis::tokens(&self.joined, &span.join(" ")).pop());
+        }
+        self.query_key(&typed.join(" "))
+    }
+
     /// Whether `word` is a misspelling of `fix` that Wikipedia keeps as a
     /// redirect: the most read article with the word among its names is
     /// titled with `fix` and not with the word. "mississipi" is in the
