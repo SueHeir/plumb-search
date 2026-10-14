@@ -166,12 +166,14 @@ pub(crate) fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
             plumb_index::pages::REFERENCE_SET | plumb_index::pages::SUBPAGES_SET => {
                 "the site's weight over the page's depth"
             }
+            plumb_index::pages::WANTED_SET => "a thousand over the page's depth",
             plumb_index::pages::PAPERS_SET => hit
                 .page
                 .paper
                 .as_ref()
                 .map_or("popularity (count type unknown)", |p| p.count_label()),
             plumb_index::pages::PACKAGES_SET => "use (share of the registry's most, in billionths)",
+            plumb_index::pages::RECORDS_SET => "(none: built from the identifier searched for)",
             _ => "views",
         },
         hit.score
