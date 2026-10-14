@@ -74,6 +74,8 @@ fn node_config(args: RunArgs) -> NodeConfig {
     if let Some(feeds) = args.news_feeds {
         config.news_feeds = feeds;
     }
+    // On for the desktop profile already.
+    config.wanted_pages |= args.wanted_pages;
     if args.cc_release.is_some() {
         config.cc_release = args.cc_release;
     }

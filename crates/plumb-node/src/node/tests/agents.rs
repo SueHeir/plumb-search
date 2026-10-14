@@ -40,7 +40,7 @@ async fn mcp_call(
 }
 
 /// Writes `articles` as the node's whole file of the page set `set`.
-fn write_set_file(dir: &Path, set: &str, articles: &[plumb_core::Article]) {
+pub(super) fn write_set_file(dir: &Path, set: &str, articles: &[plumb_core::Article]) {
     let set = crate::pages::SetInfo::find(set).unwrap();
     let file = set.file(dir);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
