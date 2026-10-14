@@ -41,6 +41,10 @@ pub(crate) enum Hint {
     /// spanish" (of "madrid spanish capital city") names nothing, and the
     /// clubs it describes would push Madrid out.
     Named,
+    /// The thing's own article, when the name names one, and not its
+    /// namesakes: "how to get rid of heartburn" is not after Heartburn
+    /// (film).
+    Own,
 }
 
 /// Words before a name that ask about it. "What's" is read as "what is";
@@ -124,6 +128,19 @@ const ASKED_BETWEEN: &[(&[&str], &[&str])] = &[
     (&["what does ", "what do "], &[" do"]),
     (&["who invented ", "who discovered "], &[""]),
     (&["when was ", "when were "], &[" invented", " discovered"]),
+];
+
+/// Words before a problem that ask how to be rid of it, which its article
+/// says: "how to get rid of hiccups", "how to treat a sunburn".
+const REMEDY_LEADS: &[&str] = &[
+    "how to get rid of ",
+    "how do i get rid of ",
+    "how do you get rid of ",
+    "how to stop ",
+    "how to treat ",
+    "how to cure ",
+    "how to prevent ",
+    "how to relieve ",
 ];
 
 /// Words that make what a question names a clause or a pronoun, not a
@@ -281,6 +298,13 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     {
         name = rest;
         hint = Some(Hint::Any);
+    } else if let Some(rest) = REMEDY_LEADS
+        .iter()
+        .find_map(|lead| name.strip_prefix(lead))
+        .and_then(asked_name)
+    {
+        name = rest;
+        hint = Some(Hint::Own);
     }
     if let Some((rest, tail_hint)) = HINT_TAILS
         .iter()
@@ -847,7 +871,7 @@ impl PageSearcher {
             // qualifier asks about what its singular names: "what are
             // clouds" is about Cloud, not "Clouds (2020 film)", and "what
             // are solar panels" about Solar panel.
-            Hint::Any => {
+            Hint::Any | Hint::Own => {
                 let qualified =
                     |hit: &PageHit| super::base_title(&hit.page.title) != hit.page.title;
                 let last = name.rsplit(' ').next().unwrap_or_default();
@@ -862,6 +886,10 @@ impl PageSearcher {
                             }),
                         );
                     }
+                }
+                let own = |hit: &PageHit| hit.named && hit.page.is_article() && !qualified(hit);
+                if hint == Hint::Own && found.iter().any(own) {
+                    found.retain(own);
                 }
             }
         }
