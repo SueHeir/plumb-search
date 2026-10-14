@@ -17,10 +17,10 @@ use super::sites::{base_title, short_titles};
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
     DESCRIBED_MISSING_FROM, DESCRIBED_QUERY_WORDS, DESCRIBED_WORD, DOCS_SET, DUPLICATE_WORD_SHARE,
-    ENTITY_MATCH, FILMS_SET, GITHUB_SET, LEAD_CANDIDATES, LEAD_MATCH, MUSIC_SET, OTHER_NAME_MATCH,
-    PACKAGES_SET, PAPERS_SET, PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE,
-    POPULARITY_SHARE, QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
-    REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
+    ENTITY_MATCH, FILMS_SET, GITHUB_SET, LEAD_CANDIDATES, LEAD_MATCH, MIN_PARTIAL_SCORE, MUSIC_SET,
+    OTHER_NAME_MATCH, PACKAGES_SET, PAPERS_SET, PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET,
+    POPULARITY_SCALE, POPULARITY_SHARE, QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE,
+    REFERENCE2_SET, REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
     TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WANTED_SET, WELL_KNOWN_PACKAGE,
 };
 use crate::analysis;
@@ -512,12 +512,12 @@ impl PageSearcher {
             // full, or meant by it: "queen tour" is not about Queen (album).
             let link = linked.get(&address).map(Vec::as_slice);
             let named_part = inside.span(&page, &self.joined);
-            let span = named_part.or(link);
-            let left_out = span.is_none()
+            let left_out_unlinked = named_part.is_none()
                 && (by_title_first.contains(&address) && !asked_by_title
                     || film_title_first.contains(&address)
                         && !(asked_as_film || asked_by_title && page.is_article())
                     || inside.only.contains(&address) && !asked_by_title);
+            let left_out = left_out_unlinked && link.is_none();
             let repo_described =
                 self.repo_described(&page, popularity, &words, &mut described_repos);
             if left_out && repo_described.is_none() {
@@ -525,7 +525,6 @@ impl PageSearcher {
             }
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
             let mut whole = false;
-            let mut meant = false;
             if asked_by_title {
                 let least = if title_end {
                     PARTIAL_MATCH
@@ -538,20 +537,22 @@ impl PageSearcher {
                 name = name.max(question);
                 whole = asked;
             }
+            let mut unlinked = name;
             if !named && !whole {
                 name = name.max(self.described_match(&page, &described));
                 if let Some(&lead) = lead_scores.get(&address).filter(|_| page.is_article()) {
                     name = name
                         .max(LEAD_MATCH * (0.5 + 0.5 * lead / best_lead.max(f32::MIN_POSITIVE)));
                 }
-                if let Some(span) = span {
+                if let Some(span) = named_part {
                     name = name.max(self.inside_match(&page, span, &described));
-                    // Listed for what a part means, not names: after
-                    // three sites, whatever the learned ranking says.
-                    if link.is_some() {
-                        meant = named_part.is_none() || name < ENTITY_MATCH;
-                        name = name.max(ENTITY_MATCH);
+                }
+                unlinked = name;
+                if let Some(span) = link {
+                    if named_part.is_none() {
+                        name = name.max(self.inside_match(&page, span, &described));
                     }
+                    name = name.max(ENTITY_MATCH);
                 }
             }
             if name <= 0.0 && repo_described.is_none() {
@@ -560,12 +561,21 @@ impl PageSearcher {
             if let Some(key) = repo_described.filter(|_| !named) {
                 described_repos.keep(hits.len(), key, left_out || name <= 0.0);
             }
-            let mut score = name * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity);
+            let mut weight = 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity;
             if !page.may_lead() {
-                score *= SHELF_WEIGHT;
+                weight *= SHELF_WEIGHT;
             } else if page.set == GITHUB_SET {
-                score *= REPO_WEIGHT;
+                weight *= REPO_WEIGHT;
             }
+            // Listed only for what a part of the query means, not names:
+            // after three sites, whatever the learned ranking says. A page
+            // listed without the link keeps its place: "tylenol formula"
+            // still leads with Tylenol.
+            let meant = link.is_some()
+                && !named
+                && !whole
+                && (left_out_unlinked || unlinked * weight < MIN_PARTIAL_SCORE);
+            let score = name * weight;
             hits.push(PageHit {
                 page,
                 score,

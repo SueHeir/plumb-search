@@ -28,6 +28,7 @@ fn a_part_of_the_query_links_to_the_article_it_usually_means() {
             &["Trephining"],
         ),
         article("Wood", "Tissue found in trees", 50_000, &[]),
+        article("Tylenol", "Painkiller brand and its formula", 300_000, &[]),
         article(
             "Lien",
             "Right to keep property until a debt is paid",
@@ -64,6 +65,9 @@ fn a_part_of_the_query_links_to_the_article_it_usually_means() {
     // ranking says.
     assert!(s.search("hamstring insertion point", 5).unwrap()[0].meant);
     assert!(!s.search("hamstring", 5).unwrap()[0].meant);
+    // Listed without the link, so it keeps its place.
+    let tylenol = s.search("tylenol formula", 5).unwrap();
+    assert!(tylenol[0].page.title == "Tylenol" && !tylenol[0].meant);
     // The last word, after a word like "for".
     assert_eq!(first("uses for wood").as_deref(), Some("Wood"));
     // Not "a lien", which joins to Alien, so would hold "lien".
