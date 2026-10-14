@@ -433,6 +433,25 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("how big is texas", "texas"),
         ("where is machu picchu", "machu picchu"),
         ("how many people live in tokyo", "tokyo"),
+        ("how metabolism works", "metabolism"),
+        ("how the stock market works", "stock market"),
+        ("how vaccines work", "vaccines"),
+        ("where does photosynthesis take place", "photosynthesis"),
+        ("where does meiosis occur", "meiosis"),
+        ("where do babies come from", "babies"),
+        ("where is taylor swift from", "taylor swift"),
+        ("where are the beatles from", "beatles"),
+        ("is coffee bad for you", "coffee"),
+        ("is intermittent fasting healthy", "intermittent fasting"),
+        ("are eggs good for you", "eggs"),
+        ("does creatine work", "creatine"),
+        ("do charcoal masks really work", "charcoal masks"),
+        ("what does the liver do", "liver"),
+        ("what does a pharmacist do", "pharmacist"),
+        ("what do bees do", "bees"),
+        ("who invented the telephone", "telephone"),
+        ("who discovered penicillin", "penicillin"),
+        ("when was the printing press invented", "printing press"),
     ] {
         assert_eq!(
             hinted_name(query),
@@ -445,6 +464,24 @@ fn articles_are_found_by_what_they_say_of_themselves() {
     assert_eq!(hinted_name("how long is it"), None);
     assert_eq!(hinted_name("how long does it take to boil an egg"), None);
     assert_eq!(hinted_name("how do i make pancakes"), None);
+    // A pronoun or a clause between the words is not a name.
+    for query in [
+        "how it works",
+        "does it work",
+        "is it safe",
+        "is this website safe",
+        "do you work",
+        "how do i make it work",
+        "how to make money work",
+        "how many hours do nurses work",
+        "is the new bridge over the river safe",
+        "who invented it",
+        "when was it invented",
+        "what do you do",
+        "what do i do",
+    ] {
+        assert_eq!(hinted_name(query), None, "{query:?}");
+    }
 }
 
 #[test]
@@ -630,6 +667,62 @@ fn what_is_asked_about_a_person_finds_their_article() {
         hinted_name("Lebron James kids"),
         Some(("lebron james".into(), Hint::Person))
     );
+}
+
+#[test]
+fn comparisons_find_the_articles_on_both_sides() {
+    for (query, a, b) in [
+        ("mitosis vs meiosis", "mitosis", "meiosis"),
+        ("Virus vs. bacteria?", "virus", "bacteria"),
+        (
+            "physical therapy versus occupational therapy",
+            "physical therapy",
+            "occupational therapy",
+        ),
+        (
+            "what is the difference between a crocodile and an alligator",
+            "crocodile",
+            "alligator",
+        ),
+        (
+            "difference between weather and climate",
+            "weather",
+            "climate",
+        ),
+    ] {
+        assert_eq!(compared(query), Some([a.into(), b.into()]), "{query:?}");
+    }
+    for query in [
+        "mitosis",
+        "vs code",
+        "batman v superman",
+        "how to choose a roth ira vs a traditional ira",
+        "difference between",
+    ] {
+        assert_eq!(compared(query), None, "{query:?}");
+    }
+    let (_dir, s) = searcher(&[
+        page("Mitosis", 300_000, &[]),
+        page("Meiosis", 250_000, &[]),
+        page("Mitosis (blockchain)", 1_000, &[]),
+        page("Cell cycle", 200_000, &[]),
+    ]);
+    let hits = s.search("mitosis vs meiosis", 5).unwrap();
+    let named: Vec<_> = hits
+        .iter()
+        .filter(|hit| hit.named)
+        .map(|hit| hit.page.title.as_str())
+        .collect();
+    assert_eq!(named[..2], ["Mitosis", "Meiosis"], "{hits:?}");
+    // A page that compares them already is what is asked for.
+    let (_dir, s) = searcher(&[
+        page("Crocodile", 300_000, &[]),
+        page("Alligator", 250_000, &[]),
+        page("Crocodiles vs. Alligators", 50_000, &[]),
+    ]);
+    let hits = s.search("crocodile vs alligator", 5).unwrap();
+    assert_eq!(hits[0].page.title, "Crocodiles vs. Alligators", "{hits:?}");
+    assert!(hits.iter().all(|hit| !hit.named), "{hits:?}");
 }
 
 #[test]
