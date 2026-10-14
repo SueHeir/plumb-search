@@ -77,27 +77,55 @@ trained on these searches (`crates/plumb-index/src/learned.rs`, the model
 in `learned_model.json` next to it). It reads the signals the hand-made
 ranking already has for each result: its place, score, text match, link
 score, whether the query names it, the pages under a site, a page's set
-and how read it is. It is trained on the **tune half only**, so the
-held-out half still says how well it does on searches it never saw.
+and how read it is, how a site matched the query (its query evidence),
+and how many of the query's main words its title, address, description
+and the titles of the pages under it hold. It learns from two kinds of
+label: the answer each search here expects, and an LLM's grade, 0 to 3,
+of each of the first ten results of other searches. It is trained on the
+**tune half only**, so the held-out half still says how well it does on
+searches it never saw.
+
+The graded searches (October 2026) are AI agents' searches and searches
+an LLM wrote like the ones the 1,000-search review found Plumb failing (a
+name's other meaning, a word that is also a site's name, a missing
+official site, a homepage instead of the page asked for, questions, word
+meanings, typos) or answering well. Everyday searches from ORCAS, which is
+licensed for non-commercial research only, and the review's own searches
+are graded too but only judged, never trained on. DeepSeek graded them
+with a strict rater's prompt; the scripts, the searches and the grades
+are in the project's files, in `learned-ranking-v2/`. Training on a
+quarter, a half or all of the 11,000 training searches gave the same
+NDCG@10 on the review's searches (0.921, 0.922, 0.923), so more searches
+of these kinds would not help.
 
 To train it again after the searches or the ranking change:
 
     plumb-tools eval --index DIR --queries eval/ai_queries.tsv ... \
-      --pages ... --limit 20 --features-out features.jsonl
+      --pages ... --limit 30 --features-out features.jsonl
     plumb-tools eval --index DIR --queries eval/typo_queries.tsv \
-      --follow-suggestions --limit 20 --features-out features-typo.jsonl
-    plumb-tools train-rank --features features.jsonl --features features-typo.jsonl \
+      --follow-suggestions --limit 30 --features-out features-typo.jsonl
+    python3 prep.py rows grade-in.jsonl features-graded.jsonl
+    python3 grade.py grade-in.jsonl grades.jsonl
+    python3 prep.py merge train.jsonl features*.jsonl --grades grades.jsonl
+    plumb-tools train-rank --features train.jsonl --trees 400 --leaves 15 \
       --out crates/plumb-index/src/learned_model.json
+
+In a training file a row's grade is `"grade"`, and a search marked
+`"half": "test"` is only judged, whatever `--half` says.
 
 Searches are embedded after the model's search instruction by default
 (`--query-instruction split`), so train on features written that way;
-the model in `learned_model.json` was (October 2026, main 58b70f7).
+the model in `learned_model.json` was (October 2026, at 6466fb9, on the
+October 10 index with eight page sets).
 
 `--features-out` writes the hand-made order (the model is never trained
-on its own output), and `train-rank` prints top-1, top-3 and MRR of both
-halves before and after. `--folds 5` also trains on four fifths of the
-training half and judges the fifth left out, in turn, so options can be
-chosen without looking at the held-out half.
+on its own output), and `train-rank` prints top-1, top-3 and MRR of the
+expected answers and NDCG@10 of the grades (an expected answer counts as
+grade 3), for each half before and after. `--orders-out` writes the
+order it gives each search, to look at what it moved. `--folds 5` also
+trains on four fifths of the training half and judges the fifth left
+out, in turn, so options can be chosen without looking at the held-out
+half.
 
 `--objective` picks the loss (`lambda-rank`, the default; `lambda-loss`,
 LambdaLoss's NDCG-Loss2++; or `softmax`) and `--learner net` trains a
