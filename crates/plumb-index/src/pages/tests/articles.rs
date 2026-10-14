@@ -550,6 +550,12 @@ fn words_are_only_looked_up() {
         word("free", "(adjective) Unconstrained.", 900),
         word("Free", "(noun) A surname.", 5),
         word("AWOL", "(adjective) Absent without leave.", 50),
+        word(
+            "aka",
+            "(noun) The New Zealand vine Metrosideros fulgens.",
+            1,
+        ),
+        word("AKA", "(preposition) Initialism of also known as.", 12),
     ]);
     // Never a result.
     assert_eq!(titles(&s.search("free", 5).unwrap()), ["Free (album)"]);
@@ -560,6 +566,9 @@ fn words_are_only_looked_up() {
     );
     assert_eq!(free.url, "https://en.wiktionary.org/wiki/free");
     assert_eq!(s.definition("awol").unwrap().unwrap().title, "AWOL");
+    // Lower case says nothing of capitals: the best-known form.
+    assert_eq!(s.definition("aka").unwrap().unwrap().title, "AKA");
+    assert_eq!(s.definition("Free").unwrap().unwrap().title, "Free");
     assert_eq!(s.definition("freedom").unwrap(), None);
 }
 
