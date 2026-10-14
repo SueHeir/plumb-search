@@ -13,11 +13,11 @@ use tantivy::schema::Value;
 use tantivy::{DocAddress, DocSet, Order, TantivyDocument, Term};
 
 use crate::hits::{without_copies, without_near_copies};
-use crate::names::{is_reserved_name, navigation_subject, NameMatch, Named};
+use crate::names::{navigation_subject, NameMatch, Named};
 use crate::query::{matching_docs, ParsedQuery};
 use crate::{
-    analysis, health, pages, schema, CandidateEvidence, CandidatePool, Hit, Meaning, RankConfig,
-    SearchOptions, SearchResults, Searcher, WELL_KNOWN_LINK_SCORE,
+    analysis, health, junk, pages, schema, CandidateEvidence, CandidatePool, Hit, Meaning,
+    RankConfig, SearchOptions, SearchResults, Searcher, WELL_KNOWN_LINK_SCORE,
 };
 
 /// The most popular sites matching any query word that are ranked even if
@@ -37,6 +37,11 @@ const NEAREST_POPULAR: usize = 50;
 /// Results looked at past the ones asked for, to fill the places of the
 /// copies [`without_copies`] leaves out.
 const COPY_LOOKAHEAD: usize = 10;
+
+/// The least closeness in meaning that keeps a little-known site the query
+/// starts with the name of, when it lacks a word of the rest
+/// ([`RankConfig::partial_closeness`]).
+const LEADING_NAME_CLOSENESS: f32 = 0.35;
 
 impl Searcher {
     /// The ranked results of `query_text` as typed, and how the query names
@@ -779,7 +784,8 @@ impl Searcher {
             .zip(any_meaning)
         {
             let convincing_alternative = ranked.iter().any(|row| row.relevance_tier > 0);
-            let (named_inside, alias_inside) = self.names_inside(&searcher, &query, query_text)?;
+            let (named_inside, alias_inside) =
+                self.names_inside(&searcher, &query, query_text, cfg)?;
             let mut partial = Vec::new();
             for r in &ranked {
                 if r.named || kinds.contains(&r.addr) || r.relevance_tier > 0 {
@@ -816,6 +822,25 @@ impl Searcher {
                         .domain(r.addr.doc_id)
                         .and_then(|domain| any.closeness(&domain)),
                 };
+                // A little-known site the query starts with a name of, one
+                // it calls itself by and near the query in meaning, if not
+                // as near as the floor: wimbledon.com for "wimbledon
+                // final", which its homepage doesn't say. A site that has
+                // the word only for its domain still needs the floor.
+                if let Some(name) = names.get(&r.addr).filter(|name| name.words() > 0) {
+                    if named_inside.contains(&r.addr)
+                        && closeness.is_some_and(|c| c >= LEADING_NAME_CLOSENESS)
+                        && (name.alias > 0
+                            || self.titled_by_first_words(
+                                &searcher,
+                                r.addr,
+                                query_text,
+                                name.words(),
+                            )?)
+                    {
+                        continue;
+                    }
+                }
                 // Indexed semantic support at the existing descriptive
                 // floor is enough to retain a noncollision paraphrase,
                 // even when sparse text shares some generic query words.
@@ -844,6 +869,18 @@ impl Searcher {
             let missing = query.missing_main_words(&searcher, &self.fields, &partial)?;
             ranked.retain(|r| !missing.contains(&r.addr));
         }
+
+        // A number shared with a query of other words is no match, however
+        // near in meaning: the year of "glastonbury 2026" says which one,
+        // not what (a rugby championship's or a lottery's "2026"). A site
+        // the query starts by naming keeps its place (163.com).
+        let unnamed: Vec<DocAddress> = ranked
+            .iter()
+            .filter(|r| !r.named && names.get(&r.addr).is_none_or(|name| name.words() == 0))
+            .map(|r| r.addr)
+            .collect();
+        let numbers_only = query.only_numbers(&searcher, &self.fields, &unnamed)?;
+        ranked.retain(|r| !numbers_only.contains(&r.addr));
 
         // Far below a site the query names: filler.
         if let (Some(share), Some(top)) = (cfg.named_share, ranked.first()) {
@@ -942,12 +979,6 @@ impl Searcher {
             _ => None,
         };
 
-        // Left out unless the query names them: sites on names reserved
-        // for tests (uniteddolls.test), online pill shops named after a
-        // drug ("ibuprofen dosage" found celebrex365o24.com), and little
-        // known homepages that are only a company's sign-in page for
-        // someone else's product ("Outlook Web App" on bpl.net for
-        // "microsoft outlook"). live.com, titled "Outlook", is Microsoft's.
         let ranked = self.untitled_last(&searcher, ranked, query_text, limit)?;
         // A few more than asked for, so that copies left out below leave
         // the page full.
@@ -969,27 +1000,21 @@ impl Searcher {
             let missing_words = missing.contains(&ranked.addr);
             let (mut hit, fingerprint) = self.hit(&searcher, ranked)?;
             hit.missing_words = missing_words;
-            let left_out = is_reserved_name(&hit.domain)
-                || health::source_quality(
-                    &hit.domain,
-                    hit.title.as_deref(),
-                    hit.description.as_deref(),
-                    Some(hit.link_score),
-                )
-                .is_some_and(|quality| quality.informational_penalty())
-                || (hit.link_score < WELL_KNOWN_LINK_SCORE
-                    && hit
-                        .title
-                        .as_deref()
-                        .is_some_and(|title| plumb_core::is_sign_in_portal(&hit.domain, title)));
-            if named || !left_out {
+            // Junk stays out unless the query names it.
+            if named || !junk::left_out(query_text, &hit) {
                 hits.push(hit);
                 fingerprints.push(fingerprint);
             }
         }
         let typed = registrable_domain(query_text.trim());
         let hits = without_near_copies(hits, &fingerprints, typed.as_deref(), home.as_deref());
-        let mut hits = without_copies(hits, typed.as_deref(), home.as_deref());
+        // The countries the query names, by a word or two: "south korea".
+        let asked: Vec<&str> = (0..query.words.len())
+            .flat_map(|at| [1, 2].map(|n| query.words.get(at..at + n).map(|words| words.join(" "))))
+            .flatten()
+            .filter_map(|name| plumb_core::country_of_any_name(&name))
+            .collect();
+        let mut hits = without_copies(hits, typed.as_deref(), home.as_deref(), &asked);
         hits.truncate(limit);
         let results = SearchResults {
             hits,
