@@ -192,54 +192,85 @@ fn tag_archives_are_listed_only_on_their_site() {
 }
 
 #[test]
-fn another_sites_page_titled_what_has_a_site_waits_for_that_site() {
-    let subpage = |url: &str| PageHit {
+fn section_pages_are_listed_only_on_their_site() {
+    let hit = |url: &str, title: &str| PageHit {
         page: Page::from_set(
             SUBPAGES_SET,
             Article {
-                title: "Boston Marathon".into(),
+                title: title.into(),
                 item: Some(url.into()),
-                views: 5_000,
+                views: 6_000,
                 ..Article::default()
             },
         )
         .unwrap(),
-        score: 0.9,
+        score: 0.98,
         named: true,
-        popularity: 0.9,
+        popularity: 0.98,
         whole: false,
         learned: None,
     };
-    let mut race = found("Boston Marathon", Some("baa.org"), true, 0.8);
-    race.page.item = Some("Q826288".into());
-    let staff = subpage("https://www.lanl.gov/media/our-people/boston-marathon");
-    let own = subpage("https://www.baa.org/races/boston-marathon");
     let sites =
         |domains: &[&str]| -> Vec<crate::Hit> { domains.iter().map(|d| site(d, false)).collect() };
-    let listed = |sites: &[crate::Hit], pages: Vec<PageHit>| -> Vec<String> {
-        place_pages("boston marathon", sites, pages)
-            .into_iter()
-            .map(|p| p.hit.page.url)
-            .collect()
-    };
-    let results = sites(&["baa.org", "boston.com", "boston.gov"]);
-    let pages = vec![race.clone(), staff.clone(), own.clone()];
-    let urls = listed(&results, pages);
-    // The race's own page and its article stay; the lab's story goes.
-    assert!(!urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
-    assert!(urls.iter().any(|url| url.contains("baa.org")), "{urls:?}");
-    assert!(urls.iter().any(|url| url.contains("wikipedia")), "{urls:?}");
-    // On one of the best sites, or without the race's site listed or
-    // its article named, it stays.
-    let urls = listed(
-        &sites(&["lanl.gov", "baa.org"]),
-        vec![race.clone(), staff.clone()],
-    );
-    assert!(urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
-    let urls = listed(&sites(&["boston.com"]), vec![race, staff.clone()]);
-    assert!(urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
-    let urls = listed(&results, vec![staff]);
-    assert!(urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
+    let news_sites = sites(&["news.google.com", "nytimes.com", "cnn.com"]);
+    for (url, title, query, own) in [
+        ("https://www.cam.ac.uk/news", "News", "news", "cam.ac.uk"),
+        (
+            "https://hai.stanford.edu/events",
+            "Upcoming Events",
+            "upcoming events",
+            "stanford.edu",
+        ),
+        (
+            "https://corporate.target.com/press/releases",
+            "Press Releases | Target Corporate",
+            "press releases",
+            "target.com",
+        ),
+        (
+            "https://www.stanford.edu/contact",
+            "Contact Us",
+            "contact us",
+            "stanford.edu",
+        ),
+        (
+            "https://openai.com/careers/",
+            "Careers",
+            "careers",
+            "openai.com",
+        ),
+        (
+            "https://www.billboard.com/c/business/business-news/",
+            "Business News",
+            "business news",
+            "billboard.com",
+        ),
+    ] {
+        let page = hit(url, title);
+        // Named by its title, it says nothing of what was searched for.
+        assert!(!subpage_asked(query, &news_sites, &page), "{url}");
+        assert!(!subpage_asked(query, &[], &page), "{url}");
+        // Unless the search is on its site.
+        assert!(subpage_asked(query, &sites(&[own]), &page), "{url}");
+    }
+    // A page about something is no section page.
+    for (url, title) in [
+        ("https://computerhistory.org/minecraft", "Minecraft"),
+        (
+            "https://www.cam.ac.uk/news/fusion",
+            "News from the fusion lab",
+        ),
+        ("https://press.example.edu/", "University Press"),
+        ("https://example.org/maya/calendar", "Mayan Calendar"),
+        ("https://example.org/guides/social-media", "Social Media"),
+        (
+            "https://example.org/events/winter-olympics",
+            "Events of the Winter Olympics",
+        ),
+    ] {
+        let query = plumb_core::normalize_text(title);
+        assert!(subpage_asked(&query, &[], &hit(url, title)), "{url}");
+    }
 }
 
 #[test]
@@ -489,4 +520,117 @@ fn packages_are_found_only_when_asked_for() {
     );
     let hit = searcher.search("serde crate", 10).unwrap().remove(0);
     assert!(hit.named && hit.page.set_name() == "crates.io");
+}
+
+#[test]
+fn a_well_known_package_searched_by_its_name_alone_leads() {
+    let (_dir, searcher) = searcher(&[
+        page("JSON", 5_000_000, &[]),
+        package("crates", "serde", 1_000_000_000),
+        package("crates", "serde_json", 900_000_000),
+        package("npm", "react-dom", 800_000_000),
+        package("npm", "@types/node", 800_000_000),
+        package("npm", "is-thirteen", 2_000),
+        page("Media type", 50_000, &["Content-Type"]),
+        package("npm", "content-type", 900_000_000),
+        Page::from_repo(plumb_core::article::Article {
+            title: "left-pad/left-pad".into(),
+            aliases: vec!["left-pad".into()],
+            views: 1_000,
+            ..Default::default()
+        }),
+        package("npm", "left-pad", 500_000_000),
+    ]);
+    let found = |query: &str| -> Vec<PageHit> {
+        searcher
+            .search(query, 10)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.package.is_some())
+            .collect()
+    };
+    for (query, url) in [
+        ("serde_json", "https://crates.io/crates/serde_json"),
+        ("react-dom", "https://www.npmjs.com/package/react-dom"),
+        ("@types/node", "https://www.npmjs.com/package/@types/node"),
+    ] {
+        let hits = found(query);
+        assert_eq!(hits.len(), 1, "{query}: {hits:?}");
+        assert!(
+            hits[0].page.url == url && hits[0].named && hits[0].whole,
+            "{query}"
+        );
+        // Asked for as a whole, it comes before a site sharing a word.
+        let sites = [site("json.org", false), site("serde.rs", false)];
+        let placed = place_pages(query, &sites, searcher.search(query, 10).unwrap());
+        let package = placed.iter().find(|p| p.hit.page.url == url).unwrap();
+        assert_eq!(package.at, 0, "{query}");
+    }
+    // A name that may be a word still asks for nothing, a little-used
+    // package is no answer to its bare name, and nor is a package called
+    // what something else is: the header and the repository come first.
+    for query in ["serde", "is-thirteen", "content-type", "left-pad"] {
+        assert!(found(query).is_empty(), "{query}");
+    }
+    let hits = searcher.search("content-type", 10).unwrap();
+    assert!(hits[0].page.title == "Media type" && hits[0].named);
+    // With a registry's word, the package is named but not the whole search.
+    for query in ["serde_json crate", "content-type npm"] {
+        let hits = found(query);
+        assert!(
+            hits.len() == 1 && hits[0].named && !hits[0].whole,
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn another_sites_page_titled_what_has_a_site_waits_for_that_site() {
+    let subpage = |url: &str| PageHit {
+        page: Page::from_set(
+            SUBPAGES_SET,
+            Article {
+                title: "Boston Marathon".into(),
+                item: Some(url.into()),
+                views: 5_000,
+                ..Article::default()
+            },
+        )
+        .unwrap(),
+        score: 0.9,
+        named: true,
+        popularity: 0.9,
+        whole: false,
+        learned: None,
+    };
+    let mut race = found("Boston Marathon", Some("baa.org"), true, 0.8);
+    race.page.item = Some("Q826288".into());
+    let staff = subpage("https://www.lanl.gov/media/our-people/boston-marathon");
+    let own = subpage("https://www.baa.org/races/boston-marathon");
+    let sites =
+        |domains: &[&str]| -> Vec<crate::Hit> { domains.iter().map(|d| site(d, false)).collect() };
+    let listed = |sites: &[crate::Hit], pages: Vec<PageHit>| -> Vec<String> {
+        place_pages("boston marathon", sites, pages)
+            .into_iter()
+            .map(|p| p.hit.page.url)
+            .collect()
+    };
+    let results = sites(&["baa.org", "boston.com", "boston.gov"]);
+    let pages = vec![race.clone(), staff.clone(), own.clone()];
+    let urls = listed(&results, pages);
+    // The race's own page and its article stay; the lab's story goes.
+    assert!(!urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
+    assert!(urls.iter().any(|url| url.contains("baa.org")), "{urls:?}");
+    assert!(urls.iter().any(|url| url.contains("wikipedia")), "{urls:?}");
+    // On one of the best sites, or without the race's site listed or
+    // its article named, it stays.
+    let urls = listed(
+        &sites(&["lanl.gov", "baa.org"]),
+        vec![race.clone(), staff.clone()],
+    );
+    assert!(urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
+    let urls = listed(&sites(&["boston.com"]), vec![race, staff.clone()]);
+    assert!(urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
+    let urls = listed(&results, vec![staff]);
+    assert!(urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
 }
