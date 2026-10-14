@@ -412,6 +412,36 @@ fn articles_are_found_by_what_they_say_of_themselves() {
 }
 
 #[test]
+fn a_bands_members_name_the_band() {
+    let (_dir, s) = searcher(&[
+        page("BTS", 900_000, &[]),
+        page("BTS: Bon Voyage", 40_000, &[]),
+        page("ABBA", 500_000, &[]),
+        page("Mansour Abbas", 60_000, &[]),
+        page("Member of parliament", 80_000, &[]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title.clone())
+            .collect()
+    };
+    for q in [
+        "bts members",
+        "who are the members of bts",
+        "BTS band members",
+    ] {
+        assert_eq!(named(q), ["BTS"], "{q}");
+    }
+    assert_eq!(named("abba members"), ["ABBA"]);
+    assert_eq!(
+        hinted_name("members of the rolling stones"),
+        Some(("rolling stones".into(), Hint::Any))
+    );
+}
+
+#[test]
 fn articles_are_found_by_their_other_names() {
     let mut sternum = page("Sternum", 300_000, &["Breastbone"]);
     sternum.names = vec!["Manubrium".into(), "Manubrium sterni".into()];

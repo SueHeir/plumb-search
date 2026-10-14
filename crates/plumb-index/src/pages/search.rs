@@ -48,6 +48,10 @@ pub(crate) enum Hint {
 const HINT_LEADS: &[&str] = &[
     "who is ",
     "who was ",
+    // "who are the members of bts" asks about BTS.
+    "who are the members of ",
+    "members of the ",
+    "members of ",
     "who are ",
     "who were ",
     "tell me about ",
@@ -171,6 +175,8 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" paintings", Hint::Person),
     (" inventions", Hint::Person),
     (" cast", Hint::Any),
+    (" band members", Hint::Any),
+    (" members", Hint::Any),
     (" author", Hint::Any),
     (" movie", Hint::Any),
     (" film", Hint::Any),
