@@ -210,6 +210,10 @@ pub struct NodeConfig {
     /// Threads that embed sites for search by meaning; `None` for half the
     /// CPUs this node may use.
     pub embed_threads: Option<usize>,
+    /// A reader's folder (`plumb_embed::Reader`): the learned ranking then
+    /// reads each of the first results with it
+    /// (`plumb_index::learned::Model::reading`).
+    pub reader: Option<PathBuf>,
     /// On first start in the network, set up from the sites of a node this
     /// one trusts rather than from the seed downloads (Tranco, Common
     /// Crawl, Wikidata, Wikipedia), which are then a fallback for when no
@@ -356,6 +360,7 @@ impl NodeConfig {
             search_by_meaning: false,
             meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
+            reader: None,
             seed_from_network: true,
             set_updates: crate::pages::SetUpdates::All,
             sources: SeedSources::default(),
@@ -1169,6 +1174,8 @@ struct Opened {
     /// Sites in the records file, counted only when crawling only
     /// ([`Inner::round_sites`]).
     sites: u64,
+    /// The reader in [`NodeConfig::reader`], loaded.
+    reader: Option<plumb_embed::Reader>,
 }
 
 /// Creates and locks the data directory, clears leftovers, reads the saved
@@ -1250,6 +1257,17 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
     } else {
         0
     };
+    let reader = (config.reader.as_deref())
+        .map(|dir| {
+            let reader = plumb_embed::Reader::load(dir)
+                .with_context(|| format!("loading the reader in {}", dir.display()))?;
+            info!(
+                "ranking the first results with the reader in {}",
+                dir.display()
+            );
+            Ok::<_, anyhow::Error>(reader)
+        })
+        .transpose()?;
     Ok(Opened {
         paths,
         lock,
@@ -1258,6 +1276,7 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
         index,
         leftover,
         sites,
+        reader,
     })
 }
 
@@ -1366,6 +1385,9 @@ struct Inner {
     disk: Mutex<Option<(std::time::Instant, u64)>>,
     /// The model and vectors of search by meaning, once loaded.
     meaning: SharedMeaning,
+    /// The reader the learned ranking reads the first results with, if any
+    /// ([`NodeConfig::reader`]).
+    reader: Option<plumb_embed::Reader>,
     /// What search by meaning is doing in the background.
     meaning_work: Mutex<Option<MeaningWork>>,
     /// Asks whoever runs the node (the desktop app) to restart it.
@@ -1608,6 +1630,7 @@ impl Inner {
             settings: Mutex::new(opened.settings),
             disk: Mutex::new(None),
             meaning: SharedMeaning::default(),
+            reader: opened.reader,
             meaning_work: Mutex::new(None),
             restart: RestartSignal::default(),
             journal,

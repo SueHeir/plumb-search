@@ -564,12 +564,7 @@ fn observe(
         .map(|p| p.hit.page.url.clone())
         .collect::<Vec<_>>();
     if cfg.learned && typed.is_none() && !ops.any() {
-        plumb_index::learned::reorder(
-            plumb_index::learned::Model::builtin(),
-            words,
-            &mut found.hits,
-            &mut placed,
-        );
+        super::learned_order(setup.reader.as_ref(), words, &mut found.hits, &mut placed);
     }
     let learned = rows(&found.hits, &placed);
     let now = args.eval_time.expect("report requires fixed time");
@@ -869,7 +864,7 @@ pub(super) fn run(args: &EvalArgs) -> Result<()> {
         BufWriter::new(File::create(path).with_context(|| format!("writing {}", path.display()))?);
     let manifest = json!({
         "type":"manifest","schema":1,"build":plumb_node::build_info::current(),"target":"in-process-offline","transport":"core",
-        "eval_time":args.eval_time,"rank":cfg,"learned_model_sha256":format!("{:x}",Sha256::digest(include_bytes!("../../../plumb-index/src/learned_model.json"))),
+        "eval_time":args.eval_time,"rank":cfg,"learned_model_sha256":format!("{:x}",Sha256::digest(match setup.reader { Some(_) => &include_bytes!("../../../plumb-index/src/learned_model_reader.json")[..], None => &include_bytes!("../../../plumb-index/src/learned_model.json")[..] })),"reader":args.reader,
         "model":setup.meaning.as_ref().map(|m| format!("{:?}",m.embedder().id())),
         "vectors":args.meaning.vectors.as_ref().map(|p| fingerprint(p)).transpose()?,
         "query_instruction":format!("{:?}",args.meaning.query_instruction),

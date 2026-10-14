@@ -142,6 +142,41 @@ sweep line `hand	{"learned": false}`. `--rerank-model DIR` (with
 `--features-out`) also scores the first 20 results with a cross-encoder
 model, for trying a second pass.
 
+### The reader
+
+A node started with `--reader DIR` also reads each of the first ten
+results with a small cross-encoder, the reader (`plumb_embed::Reader`, a
+folder with `config.json`, `tokenizer.json` and `model.safetensors`),
+which scores how well the row's text (`learned::reader_text`: its title,
+address, description and the titles of three pages under it) answers the
+search. The learned ranking then uses `learned_model_reader.json`, trained
+with that score as one more signal. Without a reader, or when reading
+fails, it uses `learned_model.json`. `plumb-tools eval --reader DIR` does
+the same in an eval.
+
+The reader is MiniLM-L6 (`nreimers/MiniLM-L6-H384-uncased`) trained on
+the tune half's grades (`grade / 3`, an expected answer as 3). So that the
+trees learn from scores like the ones a node sees, each training row is
+scored by a reader trained on the other half of the tune searches, split
+by a hash of the search:
+
+    python3 reader_pairs.py train.jsonl pairs.jsonl
+    THREADS=4 python3 reader_train.py train pairs.jsonl minilm-f0 \
+      --base nreimers/MiniLM-L6-H384-uncased --fold 0 --epochs 1 --lr 5e-5
+    # the same for --fold 1, and --fold all for the reader nodes use
+    python3 reader_train.py score pairs.jsonl scores.jsonl --models minilm-f0 minilm-f1
+    python3 reader_merge.py train.jsonl scores.jsonl train-reader.jsonl
+    plumb-tools train-rank --features train-reader.jsonl --trees 400 --leaves 15 \
+      --out crates/plumb-index/src/learned_model_reader.json
+
+The scripts are in `learned-ranking-v2/scripts/` in the project's files.
+With it (October 2026) NDCG@10 went from 0.927 to 0.938 on the review's
+searches, 0.862 to 0.881 on everyday ones and 0.905 to 0.921 on popular
+ones, mostly on how-to searches and questions; top-1 of expected answers
+stayed level. The reader learned from the same grader it is judged by, so
+check it with the batch evals too. It adds about 0.3 s to each search on
+two cores.
+
 ## Trying another embedding model
 
 `--model DIR` can name an embedding server instead of the pinned model:

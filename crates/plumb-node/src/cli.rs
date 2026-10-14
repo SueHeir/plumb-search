@@ -348,6 +348,12 @@ pub struct RunArgs {
     /// faster with more.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
     pub embed_threads: Option<u16>,
+    /// Read each search's first results with the reader in DIR (its
+    /// config.json, tokenizer.json and model.safetensors) and rank them
+    /// with the learned model trained on its scores. Plumb's 6-layer reader
+    /// adds about 0.3 s to each search on two cores.
+    #[arg(long, value_name = "DIR")]
+    pub reader: Option<PathBuf>,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
     /// internet only through one. Without it, homepages are fetched directly

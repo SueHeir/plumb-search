@@ -30,7 +30,6 @@ use crate::cli::{EvalArgs, Half};
 use plumb_node::meaning::MeaningIndex;
 
 pub mod contracts;
-mod rerank;
 
 /// One query of a queries file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +232,28 @@ struct Setup {
     /// Holds the page index while it is searched, when it is not kept in
     /// `--pages-cache`.
     _pages_dir: Option<tempfile::TempDir>,
+    /// The reader in `--reader`, loaded.
+    reader: Option<plumb_embed::Reader>,
+}
+
+/// Puts the first results in the learned ranking's order, as a node with
+/// `reader` does.
+fn learned_order(
+    reader: Option<&plumb_embed::Reader>,
+    query: &str,
+    hits: &mut Vec<Hit>,
+    placed: &mut Vec<PlacedPage>,
+) {
+    let Some(reader) = reader else {
+        return plumb_index::learned::reorder(
+            plumb_index::learned::Model::builtin(),
+            query,
+            hits,
+            placed,
+        );
+    };
+    let read = |query: &str, texts: &[String]| reader.score_all(query, texts).ok();
+    plumb_index::learned::reorder_reading(&read, query, hits, placed);
 }
 
 pub fn run(args: EvalArgs) -> Result<()> {
@@ -275,7 +296,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
             .rerank_model
             .iter()
             .map(|dir| {
-                rerank::Reranker::load(dir)
+                plumb_embed::Reader::load(dir)
                     .with_context(|| format!("loading the reranker in {}", dir.display()))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -339,12 +360,19 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
     } else {
         HashSet::new()
     };
+    let reader = (args.reader.as_deref())
+        .map(|dir| {
+            plumb_embed::Reader::load(dir)
+                .with_context(|| format!("loading the reader in {}", dir.display()))
+        })
+        .transpose()?;
     Ok(Setup {
         searcher,
         meaning,
         pages,
         page_urls,
         _pages_dir: pages_dir,
+        reader,
     })
 }
 
@@ -839,12 +867,7 @@ fn evaluate(
                 // --features-out writes the hand-made order the learned
                 // ranking is trained to improve.
                 if cfg.learned && features.is_none() {
-                    plumb_index::learned::reorder(
-                        plumb_index::learned::Model::builtin(),
-                        &searched,
-                        &mut lifted,
-                        &mut placed,
-                    );
+                    learned_order(setup.reader.as_ref(), &searched, &mut lifted, &mut placed);
                 }
                 if let Some(spelling) = &results.spelling {
                     pages.list_suggested_page(spelling, &options, &mut placed)?;
@@ -1385,7 +1408,7 @@ fn row_text(row: &serde_json::Value) -> String {
 /// Scores the first [`RERANKED_ROWS`] rows of a query written by
 /// [`feature_rows`] with each reranker: `ce` holds one score per model,
 /// and the query's `ce_ms` how long each model took over all its rows.
-fn rerank_rows(rerankers: &[rerank::Reranker], query: &mut serde_json::Value) -> Result<()> {
+fn rerank_rows(rerankers: &[plumb_embed::Reader], query: &mut serde_json::Value) -> Result<()> {
     if rerankers.is_empty() {
         return Ok(());
     }
@@ -1399,8 +1422,9 @@ fn rerank_rows(rerankers: &[rerank::Reranker], query: &mut serde_json::Value) ->
     }
     for reranker in rerankers {
         let start = std::time::Instant::now();
-        for row in rows.iter_mut().take(RERANKED_ROWS) {
-            let score = reranker.score(&searched, &row_text(row))?;
+        let texts: Vec<String> = rows.iter().take(RERANKED_ROWS).map(row_text).collect();
+        let read = reranker.score_all(&searched, &texts)?;
+        for (row, score) in rows.iter_mut().zip(read) {
             if let Some(scores) = row["ce"].as_array_mut() {
                 scores.push(score.into());
             }

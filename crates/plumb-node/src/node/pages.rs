@@ -1323,12 +1323,7 @@ pub(super) fn add_pages(
             }
             results.pages = place_pages(query, &results.hits, found);
             if inner.rank.learned {
-                plumb_index::learned::reorder(
-                    plumb_index::learned::Model::builtin(),
-                    query,
-                    &mut results.hits,
-                    &mut results.pages,
-                );
+                reorder(inner, query, results);
             }
             // A county search that ends in its state lists that state's
             // county before its namesakes elsewhere.
@@ -1364,6 +1359,28 @@ pub(super) fn add_pages(
         }
         Err(err) => warn!("searching pages: {err:#}"),
     }
+}
+
+/// Puts the first results in the learned ranking's order, reading them
+/// with the node's reader when it has one.
+fn reorder(inner: &Inner, query: &str, results: &mut SearchResults) {
+    let (hits, pages) = (&mut results.hits, &mut results.pages);
+    let Some(reader) = &inner.reader else {
+        return plumb_index::learned::reorder(
+            plumb_index::learned::Model::builtin(),
+            query,
+            hits,
+            pages,
+        );
+    };
+    let read = |query: &str, texts: &[String]| match reader.score_all(query, texts) {
+        Ok(scores) => Some(scores),
+        Err(err) => {
+            warn!("reading the first results: {err:#}");
+            None
+        }
+    };
+    plumb_index::learned::reorder_reading(&read, query, hits, pages);
 }
 
 /// Puts first in `found` the page of a site `query` names

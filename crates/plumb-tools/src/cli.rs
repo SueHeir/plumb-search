@@ -561,6 +561,10 @@ pub struct EvalArgs {
     /// more than once.
     #[arg(long, value_name = "DIR", requires = "features_out")]
     pub rerank_model: Vec<PathBuf>,
+    /// Rank as a node run with `--reader DIR` does: the learned model that
+    /// reads this reader's score of each of the first results.
+    #[arg(long, value_name = "DIR")]
+    pub reader: Option<PathBuf>,
     /// Results fetched per query; an expected site further down counts as not found.
     #[arg(long, value_name = "N", default_value_t = 10, value_parser = parse_positive)]
     pub limit: usize,

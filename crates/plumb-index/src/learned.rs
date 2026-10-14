@@ -446,6 +446,16 @@ impl Model {
         })
     }
 
+    /// The model a node that runs a reader ranks with: [`Model::builtin`]'s
+    /// signals and the reader's score ([`RowSignals::reader`]).
+    pub fn reading() -> &'static Model {
+        static MODEL: OnceLock<Model> = OnceLock::new();
+        MODEL.get_or_init(|| {
+            Model::from_json(include_str!("learned_model_reader.json"))
+                .expect("the built-in reading model reads")
+        })
+    }
+
     /// The score of a row with features `x`; higher comes first.
     pub fn score(&self, x: &[f64]) -> f64 {
         let trees: f64 = self.trees.iter().map(|tree| tree.value(x)).sum();
@@ -568,20 +578,97 @@ fn after_leading(
 /// A record the query names by its identifier is not read, as the model
 /// never saw one, and stays first ([`crate::pages::keep_page_rules`]).
 pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec<PlacedPage>) {
+    reorder_with(model, None, query, hits, placed);
+}
+
+/// Scores how well each of a search's texts fits it, as a reader does
+/// (`plumb_embed::Reader`): one score a text, or `None` when it could not.
+pub type Read<'a> = &'a dyn Fn(&str, &[String]) -> Option<Vec<f32>>;
+
+/// [`reorder`] with [`Model::reading`], given `read`'s score of the text
+/// ([`reader_text`]) of each of the first rows; with [`Model::builtin`]
+/// when `read` gives none.
+pub fn reorder_reading(read: Read, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec<PlacedPage>) {
+    reorder_with(Model::builtin(), Some(read), query, hits, placed);
+}
+
+fn reorder_with(
+    model: &Model,
+    read: Option<Read>,
+    query: &str,
+    hits: &mut Vec<Hit>,
+    placed: &mut Vec<PlacedPage>,
+) {
     let (records, rest): (Vec<PlacedPage>, Vec<PlacedPage>) = std::mem::take(placed)
         .into_iter()
         .partition(|page| crate::pages::is_record(&page.hit));
     *placed = rest;
-    reorder_rows(model, query, hits, placed);
+    reorder_rows(model, read, query, hits, placed);
     placed.splice(0..0, records);
 }
 
-fn reorder_rows(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec<PlacedPage>) {
+/// What the reader reads of `row`, as `plumb-tools` trains it (eval's
+/// `reader_pairs.py`): its title and address, its description, and the
+/// titles of the first pages under a site.
+pub fn reader_text(row: &RowSignals) -> String {
+    let cut = |text: &str, most: usize| {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        match text.chars().count() <= most {
+            true => text,
+            false => text.chars().take(most - 1).chain(['…']).collect(),
+        }
+    };
+    let title = cut(row.title.as_deref().unwrap_or(""), 120);
+    let address = match row.is_page() {
+        true => row.key.split('/').nth(2).unwrap_or(&row.key),
+        false => &row.key,
+    };
+    let mut text = match title.is_empty() {
+        true => row.key.clone(),
+        false => format!("{title} ({address})"),
+    };
+    let description = cut(row.description.as_deref().unwrap_or(""), 240);
+    if !description.is_empty() {
+        text = format!("{text}. {description}");
+    }
+    let under: Vec<String> = (row.under.iter().take(3))
+        .filter(|page| !page.title.is_empty())
+        .map(|page| cut(&page.title, 60))
+        .collect();
+    if !under.is_empty() {
+        text = format!("{text} | {}", under.join("; "));
+    }
+    text
+}
+
+/// Puts `read`'s score of each of the first [`LEARNED_ROWS`] of `rows` in
+/// them; whether it gave one for each.
+fn read_rows(read: Read, query: &str, rows: &mut [RowSignals]) -> bool {
+    let top = rows.len().min(LEARNED_ROWS);
+    let texts: Vec<String> = rows[..top].iter().map(reader_text).collect();
+    match read(query, &texts) {
+        Some(scores) if scores.len() == top => {
+            for (row, score) in rows.iter_mut().zip(scores) {
+                row.reader = Some(score);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn reorder_rows(
+    model: &Model,
+    read: Option<Read>,
+    query: &str,
+    hits: &mut Vec<Hit>,
+    placed: &mut Vec<PlacedPage>,
+) {
     let rows = listed(hits, placed);
     if rows.len() < 2 {
         return;
     }
-    let signals: Vec<RowSignals> = rows
+    let mut signals: Vec<RowSignals> = rows
         .iter()
         .map(|row| match *row {
             Listed::Site(i) => {
@@ -595,6 +682,10 @@ fn reorder_rows(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Ve
             Listed::Page(i) => RowSignals::page(&placed[i].hit),
         })
         .collect();
+    let model = match read {
+        Some(read) if read_rows(read, query, &mut signals) => Model::reading(),
+        _ => model,
+    };
     let mut order = model.order(query, &signals);
     // The model may reorder within a relevance tier, but an unsupported
     // domain word cannot regain top placement because it is popular.
@@ -717,6 +808,78 @@ mod tests {
     use super::*;
     use crate::pages::{place_pages, Page, PlacedPage};
     use plumb_core::article::Article;
+
+    #[test]
+    fn the_reader_reads_rows_as_it_was_trained() {
+        let page_titled = |title: &str| PageSignals {
+            title: title.into(),
+            ..PageSignals::default()
+        };
+        let site = RowSignals {
+            kind: "site".into(),
+            key: "burnshield.com".into(),
+            title: Some("  Burnshield   Emergency Burn Care - Cool The Burn ".into()),
+            description: Some(format!("Burnshield hydrogel {}", "x".repeat(300))),
+            under: vec![
+                page_titled("First aid"),
+                page_titled(""),
+                page_titled(&format!("Products {}", "y".repeat(80))),
+                page_titled("Fourth"),
+            ],
+            ..RowSignals::default()
+        };
+        // As eval's reader_pairs.py wrote it for training.
+        assert_eq!(
+            reader_text(&site),
+            format!(
+                "Burnshield Emergency Burn Care - Cool The Burn (burnshield.com). \
+                 Burnshield hydrogel {}… | First aid; Products {}…",
+                "x".repeat(219),
+                "y".repeat(50)
+            )
+        );
+        let page = RowSignals {
+            kind: "page".into(),
+            key: "https://en.wikipedia.org/wiki/Burn".into(),
+            title: Some("Burn".into()),
+            ..RowSignals::default()
+        };
+        assert_eq!(reader_text(&page), "Burn (en.wikipedia.org)");
+        let bare = RowSignals {
+            kind: "site".into(),
+            key: "oldnavy.com".into(),
+            ..RowSignals::default()
+        };
+        assert_eq!(reader_text(&bare), "oldnavy.com");
+    }
+
+    #[test]
+    fn without_the_readers_scores_the_order_is_the_built_in_models() {
+        let order = |read: Option<Read>| {
+            let mut hits = vec![
+                site("example.org", 0.9, false),
+                site("burnshield.com", 0.5, false),
+                site("other.com", 0.4, false),
+            ];
+            let mut placed = Vec::new();
+            match read {
+                Some(read) => reorder_reading(read, "burn care", &mut hits, &mut placed),
+                None => reorder(Model::builtin(), "burn care", &mut hits, &mut placed),
+            }
+            hits.into_iter().map(|hit| hit.domain).collect::<Vec<_>>()
+        };
+        let failed = |_: &str, _: &[String]| None;
+        let short = |_: &str, _: &[String]| Some(vec![1.0]);
+        assert_eq!(order(Some(&failed)), order(None));
+        assert_eq!(order(Some(&short)), order(None));
+        let mut rows = vec![RowSignals::default(); 12];
+        let each = |_: &str, texts: &[String]| Some(vec![0.5; texts.len()]);
+        assert!(read_rows(&each, "burn care", &mut rows));
+        assert_eq!(
+            rows.iter().filter(|row| row.reader == Some(0.5)).count(),
+            LEARNED_ROWS
+        );
+    }
 
     fn site(domain: &str, score: f32, named: bool) -> Hit {
         Hit {
