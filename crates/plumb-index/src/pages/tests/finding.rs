@@ -783,6 +783,48 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
 }
 
 #[test]
+fn a_web_address_names_the_article_about_its_site() {
+    let mut bank = page("X.com (bank)", 3_000, &[]);
+    bank.site = Some("x.com".into());
+    let mut social = page("X (social network)", 90_000, &["Twitter"]);
+    social.site = Some("x.com".into());
+    let mut snowflake = page("Snowflake ID", 2_000, &[]);
+    snowflake.site = Some("twitter.com".into());
+    let mut website = page("nytimes.com", 2_000, &[]);
+    website.site = Some("nytimes.com".into());
+    let mut paper = page("The New York Times", 50_000, &[]);
+    paper.site = Some("nytimes.com".into());
+    let (_dir, searcher) = searcher(&[bank, social, snowflake, website, paper]);
+    let first = |query: &str| {
+        searcher
+            .search(query, 10)
+            .unwrap()
+            .into_iter()
+            .next()
+            .map(|hit| (hit.page.title, hit.named))
+    };
+    let social = Some(("X (social network)".to_string(), true));
+    assert_eq!(first("x.com"), social);
+    assert_eq!(first("WWW.X.COM"), social);
+    let found = searcher.search("x.com", 10).unwrap();
+    let placed = place_pages("x.com", &[site("x.com", true)], found);
+    assert_eq!(placed[0].under.as_deref(), Some("x.com"));
+    assert_eq!(placed[0].hit.page.title, "X (social network)");
+    // The article called by the address alone is what it names.
+    assert_eq!(
+        first("nytimes.com"),
+        Some(("nytimes.com".to_string(), true))
+    );
+    // Its domain spells no article's name, nor is an inner site's address
+    // X's.
+    assert_ne!(
+        first("twitter.com").map(|(title, _)| title),
+        Some("Snowflake ID".into())
+    );
+    assert_ne!(first("mail.x.com"), social);
+}
+
+#[test]
 fn a_famous_surname_alone_names_the_person() {
     let person = |title: &str, views: u64| {
         let mut person = page(title, views, &[]);

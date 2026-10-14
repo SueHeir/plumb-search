@@ -650,7 +650,10 @@ impl PageSearcher {
         if paper.constrained {
             return self.search_papers(&paper, limit);
         }
-        self.search_naming_docs(query, &Operators::default(), false, limit)
+        let mut hits = self.search_naming_docs(query, &Operators::default(), false, limit)?;
+        self.name_typed_site(query, &mut hits)?;
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     pub(crate) fn search_general(

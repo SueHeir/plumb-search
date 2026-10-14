@@ -7,7 +7,7 @@ use tantivy::query::TermQuery;
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{TantivyDocument, Term};
 
-use super::{Page, PageSearcher, TITLE_CANDIDATES};
+use super::{Page, PageHit, PageSearcher, ALIAS_MATCH, POPULARITY_SCALE, TITLE_CANDIDATES};
 
 /// `title` without a trailing qualifier in brackets: `Python (programming
 /// language)` -> `Python`.
@@ -53,29 +53,11 @@ impl PageSearcher {
             if !untitled && !may_be_borrowed(site) {
                 continue;
             }
-            let query = TermQuery::new(
-                Term::from_field_text(self.fields.site, &site.domain),
-                IndexRecordOption::Basic,
-            );
-            let best = searcher.search(
-                &query,
-                &TopDocs::with_limit(TITLE_CANDIDATES)
-                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
-            )?;
-            let mut articles = Vec::new();
-            for (_, address) in best {
-                let document: TantivyDocument = searcher.doc(address)?;
-                let Some(stored) = document
-                    .get_first(self.fields.page)
-                    .and_then(|v| v.as_str())
-                else {
-                    continue;
-                };
-                let page: Page = serde_json::from_str(stored)?;
-                if page.is_article() && page.website.is_none() {
-                    articles.push(page.title);
-                }
-            }
+            let articles: Vec<String> = self
+                .site_articles(&searcher, &site.domain)?
+                .into_iter()
+                .map(|(page, _)| page.title)
+                .collect();
             let spelled = articles
                 .iter()
                 .find(|title| site_spells(&site.domain, title))
@@ -97,6 +79,82 @@ impl PageSearcher {
                 site.title = Some(title.to_string());
             }
         }
+        Ok(())
+    }
+
+    /// The most read Wikipedia articles, with their
+    /// [`PageHit::popularity`], whose item's official website is
+    /// `domain`'s front page ([`Page::website`]), most read first.
+    fn site_articles(
+        &self,
+        searcher: &tantivy::Searcher,
+        domain: &str,
+    ) -> Result<Vec<(Page, f32)>> {
+        let query = TermQuery::new(
+            Term::from_field_text(self.fields.site, domain),
+            IndexRecordOption::Basic,
+        );
+        let best = searcher.search(
+            &query,
+            &TopDocs::with_limit(TITLE_CANDIDATES)
+                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+        )?;
+        let mut articles = Vec::new();
+        for (popularity, address) in best {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if page.is_article() && page.website.is_none() {
+                let popularity = popularity.unwrap_or(0) as f32 / POPULARITY_SCALE;
+                articles.push((page, popularity));
+            }
+        }
+        Ok(articles)
+    }
+
+    /// Puts first among `hits`, named, the article about the site that
+    /// `query`, a web address, is the front page of: the most read one
+    /// whose name the domain spells ([`site_spells`]). "x.com" is X, the
+    /// social network, not "X.com (bank)", whose name was the address. An
+    /// article Wikipedia calls by the address alone stays first
+    /// ("nytimes.com", the newspaper's website), and an address with more
+    /// than "www." before the domain is an inner site's ("mail.google.com"
+    /// is not Google).
+    pub(crate) fn name_typed_site(&self, query: &str, hits: &mut Vec<PageHit>) -> Result<()> {
+        let Some(domain) = crate::names::typed_domain(query) else {
+            return Ok(());
+        };
+        let typed = query.trim().to_lowercase();
+        let called = |hit: &PageHit| hit.named && hit.page.title.to_lowercase() == domain;
+        if typed.strip_prefix("www.").unwrap_or(&typed) != domain || hits.iter().any(called) {
+            return Ok(());
+        }
+        let searcher = self.reader.searcher();
+        let Some((page, popularity)) = self
+            .site_articles(&searcher, &domain)?
+            .into_iter()
+            .find(|(page, _)| site_spells(&domain, &page.title))
+        else {
+            return Ok(());
+        };
+        let score = hits.iter().map(|hit| hit.score).fold(ALIAS_MATCH, f32::max);
+        hits.retain(|hit| hit.page != page);
+        hits.insert(
+            0,
+            PageHit {
+                page,
+                score,
+                named: true,
+                popularity,
+                whole: false,
+                learned: None,
+            },
+        );
         Ok(())
     }
 }
