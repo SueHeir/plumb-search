@@ -715,6 +715,33 @@ fn what_is_asked_about_a_person_finds_their_article() {
     assert_eq!(named("obama daughters"), ["Barack Obama"]);
     assert_eq!(named("picasso paintings"), ["Pablo Picasso"]);
     assert_eq!(named("steve jobs cause of death"), ["Steve Jobs"]);
+    // With a possessive, or as a question.
+    assert_eq!(named("obama's daughters"), ["Barack Obama"]);
+    assert_eq!(named("who are obama's parents"), ["Barack Obama"]);
+    assert_eq!(named("picasso's paintings"), ["Pablo Picasso"]);
+    assert_eq!(named("how did steve jobs die"), ["Steve Jobs"]);
+    assert_eq!(named("what did steve jobs die of"), ["Steve Jobs"]);
+    assert_eq!(named("how many kids does obama have"), ["Barack Obama"]);
+    // As "who is picasso" would, the crater too, below him.
+    assert_eq!(
+        named("what is picasso known for"),
+        ["Pablo Picasso", "Picasso (crater)"]
+    );
+    assert_eq!(named("why was steve jobs famous"), ["Steve Jobs"]);
+    assert_eq!(named("what is picasso's real name"), ["Pablo Picasso"]);
+    assert_eq!(named("where is steve jobs buried"), ["Steve Jobs"]);
+    assert_eq!(
+        hinted_name("einstein's biography"),
+        Some(("einstein".into(), Hint::Any))
+    );
+    assert_eq!(
+        hinted_name("what is mcdonald's"),
+        Some(("mcdonald's".into(), Hint::Any))
+    );
+    assert_eq!(
+        hinted_name("mcdonald's wikipedia"),
+        Some(("mcdonald's".into(), Hint::Article))
+    );
     // Only a person, and not when a page is called the whole query.
     assert_eq!(named("black death"), ["Black Death"]);
     assert!(named("christmas songs").is_empty());
@@ -778,6 +805,34 @@ fn comparisons_find_the_articles_on_both_sides() {
     let hits = s.search("crocodile vs alligator", 5).unwrap();
     assert_eq!(hits[0].page.title, "Crocodiles vs. Alligators", "{hits:?}");
     assert!(hits.iter().all(|hit| !hit.named), "{hits:?}");
+}
+
+#[test]
+fn a_plural_that_names_only_namesakes_asks_about_its_singular() {
+    let (_dir, s) = searcher(&[
+        page("Cloud", 300_000, &[]),
+        page("Clouds (2020 film)", 5_000, &[]),
+        page("Clouds (Joni Mitchell album)", 8_000, &[]),
+        page("Solar panel", 100_000, &[]),
+        page("Python (programming language)", 400_000, &[]),
+        page("Python (genus)", 20_000, &[]),
+        page("Pythonidae", 30_000, &["Pythons"]),
+    ]);
+    let named = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("what are clouds")[0], "Cloud");
+    assert_eq!(named("what are solar panels"), ["Solar panel"]);
+    // A singular asks about what it names, qualified or not.
+    let python = named("what is python");
+    assert!(!python.contains(&"Pythonidae".to_string()), "{python:?}");
+    let pythons = named("what is a ball python");
+    assert!(!pythons.contains(&"Pythonidae".to_string()), "{pythons:?}");
 }
 
 #[test]
