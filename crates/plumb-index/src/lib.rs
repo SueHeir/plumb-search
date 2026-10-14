@@ -74,6 +74,7 @@ pub mod health;
 mod hits;
 mod indexing;
 pub mod items;
+mod junk;
 mod language;
 pub mod learned;
 mod names;
@@ -473,8 +474,9 @@ pub struct SearchOptions {
     /// What safe search leaves out; see [`plumb_core::safe`].
     pub safe: SafeSearch,
     /// Leave out sites whose homepage is in another language than this
-    /// one (a language code, `en`). Sites that do not say stay, and so do
-    /// sites the whole query names.
+    /// one (a language code, `en`), as it declares or as its script or
+    /// common words tell ([`plumb_core::site_language`]). Sites none of
+    /// these tells stay, and so do sites the whole query names.
     pub language: Option<String>,
     /// How the results page shows recent headlines; the index ignores it.
     pub recent: plumb_core::RecentNews,

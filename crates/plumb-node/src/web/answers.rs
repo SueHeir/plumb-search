@@ -468,20 +468,6 @@ const HOLDER_FACTS: &[plumb_core::facts::FactKind] = &[
     plumb_core::facts::FactKind::Headquarters,
 ];
 
-/// Where a description stops saying what its page is and goes on to who
-/// made it or what it is part of.
-const DESCRIPTION_HEAD_ENDS: &[&str] = &[
-    " by ",
-    " directed ",
-    " created ",
-    " starring ",
-    " based ",
-    " of ",
-    " from ",
-    " (",
-    ",",
-];
-
 /// The kinds of work [`KIND_LISTINGS`] has for the listing among
 /// `services`, if one is.
 fn listed_kinds(services: &[&plumb_core::profiles::Service]) -> Option<&'static [&'static str]> {
@@ -552,26 +538,7 @@ pub fn profile_candidates(
     }
     let films = kinds.contains(&"film");
     let of_kind = |hit: &plumb_index::pages::PageHit| {
-        let qualifier = hit
-            .page
-            .title
-            .strip_suffix(')')
-            .and_then(|title| title.rsplit_once(" ("));
-        let description = hit.page.description.as_deref().unwrap_or("").to_lowercase();
-        let head_end = DESCRIPTION_HEAD_ENDS
-            .iter()
-            .filter_map(|end| description.find(end))
-            .min()
-            .unwrap_or(description.len());
-        films && hit.page.set == FILMS_SET
-            || qualifier.is_some_and(|(_, what)| {
-                what.split_whitespace()
-                    .any(|word| kinds.contains(&word.to_lowercase().as_str()))
-            })
-            || description[..head_end]
-                .split_whitespace()
-                .last()
-                .is_some_and(|word| kinds.contains(&word))
+        films && hit.page.set == FILMS_SET || hit.page.is_work_of(kinds)
     };
     if candidates.iter().any(of_kind) {
         candidates.retain(of_kind);
@@ -917,6 +884,10 @@ pub fn resolve_entity<'a>(
     // CEO/headquarters requests supply an organization type, independently
     // of imported property availability. Founding properties do not:
     // settlements and other entities can have a founder or inception too.
+    // A page is an organization when its description says so or when it
+    // has a CEO or headquarters, which nothing else has: "American
+    // multinational technology conglomerate" (Amazon) and "coffeehouse
+    // chain" (Starbucks) say no word of the list.
     let company = kinds.is_some_and(|kinds| {
         kinds
             .iter()
@@ -929,7 +900,11 @@ pub fn resolve_entity<'a>(
             .filter(|hit| {
                 let description = key(hit.page.description.as_deref().unwrap_or(""));
                 let words: Vec<_> = description.split(|c: char| !c.is_alphabetic()).collect();
-                description.contains("record label")
+                hit.page
+                    .facts
+                    .iter()
+                    .any(|fact| matches!(fact.kind, FactKind::Ceo | FactKind::Headquarters))
+                    || description.contains("record label")
                     || [
                         "company",
                         "corporation",
@@ -1390,12 +1365,16 @@ pub(crate) fn fact_text(
                     } else {
                         2
                     };
+                    // A person's height in whole feet says little: 1.7 m
+                    // is 5 ft 7 in, not 6 ft.
+                    let imperial = if amount < 3.0 {
+                        let inches = (amount / 0.0254).round() as u64;
+                        format!("{} ft {} in", inches / 12, inches % 12)
+                    } else {
+                        format!("{} ft", group_digits(amount * 3.280_84, 0))
+                    };
                     (
-                        format!(
-                            "{} m ({} ft)",
-                            group_digits(amount, digits),
-                            group_digits(amount * 3.280_84, 0)
-                        ),
+                        format!("{} m ({imperial})", group_digits(amount, digits)),
                         None,
                     )
                 }
@@ -1758,6 +1737,77 @@ mod tests {
     }
 
     #[test]
+    fn a_company_with_a_ceo_is_an_organization_whatever_it_is_called() {
+        use plumb_core::facts::{fact_asked, FactKind, FactKind::*};
+        let page =
+            |title: &str, item: &str, named: bool, about: &str, facts: &[(FactKind, &str)]| {
+                let mut hit = with_facts(article(title, about, None), facts);
+                hit.page.item = Some(item.into());
+                hit.named = named;
+                hit
+            };
+        let ask = |q: &str, candidates: &[PageHit]| {
+            let asked = fact_asked(q).unwrap();
+            match resolve_entity(&asked.subject, candidates, Some(&asked.kinds)) {
+                EntityResolution::Resolved(page) => {
+                    fact_answer_from_page(&asked, page, 0).map(|answer| answer.answer)
+                }
+                _ => None,
+            }
+        };
+        // Another company the name finds must not leave the one it names out.
+        let amazon = [
+            page(
+                "Amazon (company)",
+                "Q3884",
+                true,
+                "American multinational technology conglomerate",
+                &[(Ceo, "Andy Jassy"), (Headquarters, "Seattle")],
+            ),
+            page(
+                "Amazon Web Services",
+                "Q456157",
+                false,
+                "American cloud computing company",
+                &[(Ceo, "Matt Garman")],
+            ),
+            page(
+                "Amazons",
+                "Q131183",
+                true,
+                "Women warriors in Greek mythology",
+                &[],
+            ),
+        ];
+        assert_eq!(ask("ceo of amazon", &amazon).as_deref(), Some("Andy Jassy"));
+        assert_eq!(
+            ask("amazon headquarters", &amazon).as_deref(),
+            Some("Seattle")
+        );
+        let starbucks = [
+            page(
+                "Starbucks",
+                "Q37158",
+                true,
+                "American multinational coffeehouse chain",
+                &[(Ceo, "Brian Niccol")],
+            ),
+            page("Starbucks (song)", "Q910013", true, "2002 single by A", &[]),
+            page(
+                "Seattle's Best Coffee",
+                "Q910014",
+                false,
+                "American coffee company",
+                &[(Ceo, "Someone")],
+            ),
+        ];
+        assert_eq!(
+            ask("who is the ceo of starbucks", &starbucks).as_deref(),
+            Some("Brian Niccol")
+        );
+    }
+
+    #[test]
     fn founding_questions_resolve_unique_and_qualified_settlements_and_organizations() {
         use plumb_core::facts::{fact_asked, FactKind::Founded};
         let mut city = with_facts(article("Ravelin", "city", None), &[(Founded, "1801")]);
@@ -2078,6 +2128,11 @@ mod tests {
         );
         let age = ask("how old is albert einstein", &einstein).unwrap();
         assert_eq!(age.answer, "Died at 76");
+        // Whether someone lives is answered by how old they are or were.
+        let alive = ask("is albert einstein still alive", &einstein).unwrap();
+        assert_eq!(alive.answer, "Died at 76");
+        let died = ask("how old was albert einstein when he died", &einstein).unwrap();
+        assert_eq!(died.answer, "Died at 76");
         // 2026-10-06 is when the test's "now" is.
         let musk = [placed(
             with_facts(
@@ -2089,6 +2144,10 @@ mod tests {
         )];
         assert_eq!(
             ask("how old is elon musk", &musk).unwrap().answer,
+            "55 years old"
+        );
+        assert_eq!(
+            ask("is elon musk dead", &musk).unwrap().answer,
             "55 years old"
         );
 
@@ -2131,6 +2190,11 @@ mod tests {
         );
         assert_eq!(text(FactKind::Radius, "6371000"), "6,371 km (3,959 mi)");
         assert_eq!(text(FactKind::Radius, "250"), "250 m (820 ft)");
+        // People's heights in feet and inches.
+        assert_eq!(text(FactKind::Height, "1.7"), "1.7 m (5 ft 7 in)");
+        assert_eq!(text(FactKind::Height, "2.06"), "2.06 m (6 ft 9 in)");
+        assert_eq!(text(FactKind::Height, "1.47"), "1.47 m (4 ft 10 in)");
+        assert_eq!(text(FactKind::Height, "46"), "46 m (151 ft)");
     }
 
     #[test]
