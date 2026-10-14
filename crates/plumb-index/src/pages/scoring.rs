@@ -1238,7 +1238,8 @@ impl PageSearcher {
     /// of the name must be in the person's title or another name, and an
     /// office ([`super::OFFICES`]) in their title or description. Only
     /// when they are read [`super::SURNAME_MARGIN`] times as much as every
-    /// other article that fits: "president bush" is two presidents.
+    /// other article that fits and, when they live, every other living one:
+    /// "queen elizabeth" is two queens.
     fn name_by_title(&self, title: &str, name: &[String], joined: &str, hits: &mut [PageHit]) {
         let office = super::OFFICES.contains(&title);
         if !office && !super::HONORIFICS.contains(&title) {
@@ -1277,8 +1278,20 @@ impl PageSearcher {
         else {
             return;
         };
+        // Past holders are called by their numbers, so a living one is
+        // called by the title and the bare name: "king charles" is
+        // Charles III though Charles I is read a third as much.
+        let died = |page: &Page| {
+            page.facts
+                .iter()
+                .any(|fact| fact.kind == plumb_core::facts::FactKind::Died)
+        };
+        let living = !died(&hits[best].page);
         if hits.iter().enumerate().any(|(at, hit)| {
-            at != best && hit.page.views * super::SURNAME_MARGIN > views && fits(&hit.page)
+            at != best
+                && hit.page.views * super::SURNAME_MARGIN > views
+                && fits(&hit.page)
+                && !(living && died(&hit.page))
         }) {
             return;
         }
