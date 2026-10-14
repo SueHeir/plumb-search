@@ -502,3 +502,43 @@ fn podcasts_are_found_by_their_name_and_podcast() {
         .iter()
         .any(|hit| hit.whole));
 }
+
+#[test]
+fn a_podcast_asked_for_by_its_title_or_host_leads_one_ending_so() {
+    let podcast = |item: &str, title: &str, host: &str, views: u64| {
+        Page::from_podcast(Article {
+            title: title.into(),
+            description: Some(format!("Podcast by {host} · comedy")),
+            item: Some(item.into()),
+            views,
+            aliases: vec![format!("{host} podcast")],
+            ..Article::default()
+        })
+    };
+    let (_dir, s) = searcher(&[
+        podcast("1", "The Joe Rogan Experience", "Joe Rogan", 404_999),
+        podcast(
+            "2",
+            "At Least its Not Joe Rogan",
+            "atleastitsnotjoerogan",
+            405_008,
+        ),
+        podcast("3", "The Daily", "The New York Times", 401_999),
+        podcast("4", "On the Daily", "Blue Wire", 402_160),
+    ]);
+    for (query, title, ending) in [
+        (
+            "joe rogan podcast",
+            "The Joe Rogan Experience",
+            "At Least its Not Joe Rogan",
+        ),
+        ("the daily podcast", "The Daily", "On the Daily"),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert!(
+            hits[0].whole && hits[0].page.title == title,
+            "{query}: {hits:?}"
+        );
+        assert!(hits.iter().any(|hit| hit.whole && hit.page.title == ending));
+    }
+}

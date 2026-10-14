@@ -477,7 +477,15 @@ impl PageSearcher {
                 continue;
             }
             let asked_as_film = self.film_match(&page, &words);
-            let asked_by_title = asked_as_film || self.book_match(&page, &words);
+            let asked_in_full = asked_as_film || self.book_match(&page, &words);
+            // A podcast asked for by the end of its title alone ("hardcore
+            // history podcast") ranks below one asked for by its whole
+            // title or its host: "the daily podcast" is The Daily before
+            // "On the Daily", "joe rogan podcast" The Joe Rogan Experience
+            // before "At Least its Not Joe Rogan".
+            let title_end =
+                !asked_in_full && page.set == PODCASTS_SET && self.podcast_named(&page, &words);
+            let asked_by_title = asked_in_full || title_end;
             // Songs and albums share their titles with too much ("Dead
             // Sea", "Notion", "Lord of the Flies"): one is only listed
             // when asked for by its artist or as a song or album.
@@ -500,7 +508,12 @@ impl PageSearcher {
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
             let mut whole = false;
             if asked_by_title {
-                (name, named, whole) = (name.max(ALIAS_MATCH), true, true);
+                let least = if title_end {
+                    PARTIAL_MATCH
+                } else {
+                    ALIAS_MATCH
+                };
+                (name, named, whole) = (name.max(least), true, true);
             } else if !named && (page.set != DOCS_SET || docs_asked(&page, query)) {
                 let (question, asked) = self.question_match(&page, &stems, &sure, topic_word);
                 name = name.max(question);
@@ -921,11 +934,13 @@ impl PageSearcher {
     /// or album's title followed by words of its author's name or by what
     /// it is ("book", "novel", "podcast", "paper"), or both: "dune frank
     /// herbert", "the great gatsby book", "nevermind nirvana album",
-    /// "hardcore history podcast", "random forests breiman". A paper's
-    /// year and venue may follow too, and a paper's whole title of
+    /// "the daily podcast", "random forests breiman". A paper's year and
+    /// venue may follow too, and a paper's whole title of
     /// [`PAPER_TITLE_WORDS`] words or more asks for it alone. A Wikipedia
     /// article on a work ([`made_by`]) is asked for so too, by its title
-    /// or another name: "1984 george orwell" for Nineteen Eighty-Four.
+    /// or another name: "1984 george orwell" for Nineteen Eighty-Four. A
+    /// podcast is asked for by its host and "podcast" too: "joe rogan
+    /// podcast".
     pub(crate) fn book_match(&self, page: &Page, words: &[String]) -> bool {
         let description = page.description.as_deref().unwrap_or("");
         let byline = |byline: &str| description.strip_prefix(byline).unwrap_or("");
@@ -1027,7 +1042,10 @@ impl PageSearcher {
                     || leader
                         .as_ref()
                         .is_none_or(|leader| maker.iter().any(|word| leader.contains(word))))
-        }) || (page.set == PODCASTS_SET && self.podcast_named(page, words))
+        }) || page.set == PODCASTS_SET
+            && words.split_last().is_some_and(|(kind, host)| {
+                kinds.contains(&kind.as_str()) && !host.is_empty() && host == artist
+            })
     }
 
     /// Whether `words` are the end of a podcast's title, two words or more,
