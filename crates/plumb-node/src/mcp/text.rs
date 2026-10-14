@@ -267,9 +267,17 @@ fn search(out: &mut String, answer: &Value) {
         out.push('\n');
     }
     if let Some(p) = answer.get("profile").filter(|p| p.is_object()) {
+        let flag = |name: &str| p.get(name).and_then(Value::as_bool) == Some(true);
         let _ = writeln!(
             out,
-            "Official profile: {} on {}: {}",
+            "{}: {} on {}: {}",
+            if flag("search") {
+                "Search"
+            } else if flag("official") {
+                "Official profile"
+            } else {
+                "Listing"
+            },
             text(p, "of").unwrap_or(""),
             text(p, "service").unwrap_or(""),
             text(p, "url").unwrap_or("")

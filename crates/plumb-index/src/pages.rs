@@ -53,6 +53,7 @@ pub use self::placing::{
 pub(crate) use self::placing::{
     asked_as_question, is_record, kept_below, named_page_site, names_best_site_page,
 };
+pub use self::scoring::made_by;
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
 pub use self::sites::base_title;
 
@@ -72,6 +73,11 @@ pub const OTHER_NAME_MATCH: f32 = 0.6;
 /// their surname in its title to be named by it alone
 /// ([`PageSearcher::name_by_surname`]), or by a title and their name.
 const SURNAME_MARGIN: u64 = 3;
+
+/// How many times as much an article called a query without its leading
+/// "the" must be read as every article the whole query names to be named
+/// too ([`PageSearcher::name_without_the`]).
+const WITHOUT_THE_MARGIN: u64 = 10;
 
 /// Words before a person's name that are none of it: "sir isaac newton",
 /// "st francis of assisi" ([`PageSearcher::name_by_title`]).
@@ -167,7 +173,7 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 const LEAD_CANDIDATES: usize = 20;
 
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v8-docs-address-symbols-subtitles";
+pub const PAGE_INDEX_VERSION: &str = "v9-docs-address-symbols-short-titles";
 
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.

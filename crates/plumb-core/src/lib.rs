@@ -20,6 +20,7 @@ pub mod films;
 pub mod key_pages;
 pub mod keys;
 mod kinds;
+mod language_words;
 pub mod locks;
 pub mod news;
 #[cfg(feature = "oblivious")]
@@ -31,6 +32,7 @@ pub mod papers;
 pub mod place;
 pub mod profiles;
 pub mod safe;
+mod sign_in;
 pub mod simhash;
 mod site_search;
 pub mod stack_exchange;
@@ -50,6 +52,7 @@ pub use kinds::{is_generic_kind, kind_key, other_number, singular, MAX_KINDS};
 pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
+pub use sign_in::{asks_to_sign_in, is_sign_in_page, names_label};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
 pub use subsites::{
     parent_domain, subdomain_sites, use_site_list, SiteList, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
@@ -1077,8 +1080,8 @@ pub fn is_homepage_path(path: &str) -> bool {
 }
 
 /// `en`, `us`, `en-us`, `pt_br`, `zh-hans`: two letters, optionally a `-` or
-/// `_` and two to four more.
-fn is_locale_segment(segment: &str) -> bool {
+/// `_` and two to four more. Lowercase only.
+pub fn is_locale_segment(segment: &str) -> bool {
     let (lang, region) = match segment.split_once(['-', '_']) {
         Some((lang, region)) => (lang, Some(region)),
         None => (segment, None),
@@ -1392,6 +1395,9 @@ pub fn text_script(text: &str) -> Option<&'static str> {
 /// only keeps the candidate, it does not establish its language. Unlisted
 /// languages and scripts fail open rather than excluding uncertain text.
 pub fn language_fits(wanted: &str, site: &str) -> bool {
+    if let Some(guessed) = site.strip_prefix(GUESSED) {
+        return wanted == guessed || !language_words::tells(wanted);
+    }
     if site.starts_with(|c: char| c.is_ascii_uppercase()) {
         if !matches!(
             site,
@@ -1439,14 +1445,47 @@ pub fn written_outside(language: &str, query: &str) -> bool {
     })
 }
 
+/// Marks a language [`site_language`] tells from a site's common words
+/// rather than its declaration ("~de"). [`language_fits`] takes it as that
+/// language, for the languages the words can tell; the shares of declared
+/// languages a search's words are judged by leave it out, since their
+/// limits were set on declarations alone.
+pub const GUESSED: char = '~';
+
+/// Whether at least half of `text`'s letters, and [`MIN_SCRIPT_LETTERS`]
+/// or more, are in scripts `query` has no letter of: a title in Chinese or
+/// Thai for a search typed in Latin letters, mixed with Latin words or not
+/// ("ANIMG - 二次エロ画像"). A reader of the query is unlikely to read it.
+/// Kana and kanji count as one, since Japanese mixes them.
+pub fn written_apart(text: &str, query: &str) -> bool {
+    let scripts = |text: &str| {
+        text.chars()
+            .filter_map(char_script)
+            .map(|(script, _)| if script == "Kana" { "Hani" } else { script })
+            .collect::<Vec<_>>()
+    };
+    let typed = scripts(query);
+    let (mut apart, mut letters) = (0, 0);
+    for script in scripts(text) {
+        letters += 1;
+        apart += usize::from(!typed.contains(&script));
+    }
+    letters >= MIN_SCRIPT_LETTERS && apart * 2 >= letters
+}
+
 /// Keep valid declared language metadata authoritative. Only missing or
-/// invalid declarations fall back to dominant title/description script.
-/// Short excerpts and multilingual names do not reliably contradict an
-/// explicit declaration; this intentionally leaves mistagged pages alone.
+/// invalid declarations fall back to dominant title/description script,
+/// and then, for Latin letters, to the language their common words say
+/// clearly ([`language_words::language_by_words`]), marked [`GUESSED`]:
+/// seven sites in eight declare none, and a French or German one was
+/// otherwise taken for English. Short excerpts and multilingual names do
+/// not reliably contradict an explicit declaration; this intentionally
+/// leaves mistagged pages alone.
 pub fn site_language(declared: Option<&str>, text: &str) -> Option<String> {
     declared
         .and_then(language_code)
         .or_else(|| text_script(text).map(str::to_string))
+        .or_else(|| language_words::language_by_words(text).map(|code| format!("{GUESSED}{code}")))
 }
 
 /// Collapses every whitespace run to one space and trims the ends.
@@ -1604,6 +1643,14 @@ mod tests {
             Some("de")
         );
         assert_eq!(site_language(None, "Bank Deutschland"), None);
+        // Undeclared Latin text falls back to what its common words say.
+        let german = "Willkommen bei uns: wir bieten Reisen und Urlaub für alle";
+        assert_eq!(site_language(None, german).as_deref(), Some("~de"));
+        assert_eq!(site_language(Some("en"), german).as_deref(), Some("en"));
+        assert!(language_fits("de", "~de"));
+        assert!(!language_fits("en", "~de"));
+        // A Danish site may be taken for German: unlisted languages keep it.
+        assert!(language_fits("da", "~de"));
     }
 
     #[test]
@@ -1683,6 +1730,28 @@ mod tests {
         // Kana is Japanese, not Chinese; Han alone fits either.
         assert!(written_outside("zh", "東京タワー"));
         assert!(!written_outside("zh", "天气预报"));
+    }
+
+    #[test]
+    fn text_in_scripts_the_query_has_none_of() {
+        for (text, query) in [
+            ("和记娱乐 和记娱乐官网", "catalan numbers"),
+            ("ANIMG - 二次エロ画像", "oeis a051023"),
+            ("Vast MM | เครื่องจักร/ เครื่องมือช่าง", "rydberg constant"),
+            ("Информационный портал района", "zara"),
+        ] {
+            assert!(written_apart(text, query), "{text}");
+        }
+        for (text, query) in [
+            ("Tokyo Hotel 東京", "tokyo hotel"),
+            ("Café de Flore", "cafe"),
+            ("和记", "catalan numbers"),
+            ("東京新聞のニュースサイト", "東京 ニュース"),
+            ("東京拉麺店の公式サイト", "ラーメン"),
+            ("", "news"),
+        ] {
+            assert!(!written_apart(text, query), "{text}");
+        }
     }
 
     #[test]
