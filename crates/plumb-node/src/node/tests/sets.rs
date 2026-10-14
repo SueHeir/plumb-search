@@ -350,6 +350,8 @@ async fn a_node_takes_signed_sets_from_any_node_but_only_from_trusted_publishers
         title: None,
         license: "MPL-2.0".into(),
         hosts: None,
+        host_ranks: None,
+        top_hosts: 0,
         level: 3,
     })
     .unwrap();
