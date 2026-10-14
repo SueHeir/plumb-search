@@ -72,16 +72,45 @@ fn main_articles_beat_their_namesakes() {
         site("b.com", false),
         site("c.com", false),
     ];
+    let mut namesake = found("Eiffel Tower (Six Flags)", None, true, 0.6);
     let placed = place_pages(
         "eiffel tower",
         &sites,
         vec![
             found("Eiffel Tower", Some("toureiffel.paris"), true, 0.9),
-            found("Eiffel Tower (Six Flags)", None, true, 0.6),
+            namesake.clone(),
         ],
     );
     assert_eq!(placed[0].under.as_deref(), Some("toureiffel.paris"));
     assert_eq!(placed[1].at, PARTIAL_AFTER);
+    // Whatever the learned ranking says: "taylor swift" listed the album
+    // "Taylor Swift" second.
+    namesake.learned = Some(LearnedPlace::Before("a.com".into()));
+    let placed = place_pages(
+        "eiffel tower",
+        &sites,
+        vec![
+            found("Eiffel Tower", Some("toureiffel.paris"), true, 0.9),
+            namesake,
+        ],
+    );
+    assert_eq!(placed[1].at, PARTIAL_AFTER);
+    // Of two namesakes on their own, the better one stays.
+    let mut placed = vec![
+        PlacedPage {
+            at: 0,
+            under: None,
+            hit: found("The Bear (1984 film)", None, true, 0.6),
+        },
+        PlacedPage {
+            at: 1,
+            under: None,
+            hit: found("The Bear (1988 film)", None, true, 0.7),
+        },
+    ];
+    keep_page_rules("the bear", &sites, &mut placed);
+    let at: Vec<usize> = placed.iter().map(|p| p.at).collect();
+    assert_eq!(at, [PARTIAL_AFTER, 1]);
 }
 
 #[test]
@@ -255,6 +284,56 @@ fn sites_only_a_later_word_of_a_named_article_finds_are_left_out() {
             "pro.example"
         ]
     );
+}
+
+#[test]
+fn sites_only_a_first_name_finds_are_left_out_for_people() {
+    // Each lacks a word of "ted kaczynski" and is named by "ted".
+    let evidence = |domain: &str, closeness: f32| {
+        let mut hit = known_site(domain, false, 0.7);
+        hit.missing_words = true;
+        hit.query_evidence = Some(crate::CandidateEvidence {
+            domain: domain.into(),
+            lexical_score: 30.0,
+            semantic_closeness: Some(closeness),
+            query_coverage: 0.5,
+            substantive_coverage: 0.5,
+            remaining_coverage: 0.0,
+            named_subject_words: 0,
+            named_subject_domain: None,
+            named_subject_reason: None,
+            subject_coverage: None,
+            subject_remaining_coverage: None,
+            full_name: false,
+            typed_domain: false,
+            partial_name_words: 1,
+            relevance_tier: 0,
+            source_quality: None,
+        });
+        hit
+    };
+    let sites = vec![
+        evidence("ted.com", 0.0),
+        evidence("tedfans.example", 0.6),
+        evidence("own.example", 0.1),
+    ];
+    let mut article = found("Ted Kaczynski", Some("own.example"), true, 0.9);
+    article.page.item = Some("Q222134".into());
+    let floor = crate::RankConfig::default().meaning_only_relevance;
+    // Not a person: the site the name starts with stays.
+    assert_eq!(
+        drop_far_namesakes(&mut sites.clone(), &[article.clone()], floor),
+        0
+    );
+    article.page.facts = vec![plumb_core::facts::Fact {
+        kind: plumb_core::facts::FactKind::Born,
+        value: "1942-05-22".into(),
+    }];
+    let mut left = sites.clone();
+    assert_eq!(drop_far_namesakes(&mut left, &[article], floor), 1);
+    let order: Vec<&str> = left.iter().map(|s| s.domain.as_str()).collect();
+    // One near in meaning and the person's own site stay.
+    assert_eq!(order, ["tedfans.example", "own.example"]);
 }
 
 #[test]
