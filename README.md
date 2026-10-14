@@ -8,7 +8,7 @@ A free, open-source web search engine that anyone can run. Plumb answers from it
 
 **[Search at plumbsearch.org](https://plumbsearch.org)** · [Run your own node](docs/running-a-node.md) · [Documentation](docs/README.md) · [How search is doing](docs/search-quality.md)
 
-![Plumb Search results for "nasa": the official site with its key pages, the latest headlines and an info box](docs/images/results.png)
+![Plumb Search results for "nasa": the official site with its key pages, the latest headlines and an info box](docs/images/results-nasa.png)
 
 ## Use it
 
