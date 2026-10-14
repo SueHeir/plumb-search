@@ -94,9 +94,61 @@ const NEAR_ME: &[&[&str]] = &[
     &["close", "to", "me"],
     &["near", "my", "location"],
     &["in", "my", "area"],
+    &["in", "the", "area"],
+    &["near", "here"],
+    &["around", "here"],
 ];
 /// Words that say where, in "pizza in denver".
 const WHERE_WORDS: &[&[&str]] = &[&["in"], &["near"], &["around"], &["close", "to"], &["at"]];
+/// What may follow "in" or "at" without naming a place: "tallest building
+/// in the world", "coffee in the morning", "pizza at home".
+const NOWHERE: &[&str] = &[
+    "world",
+    "whole world",
+    "universe",
+    "morning",
+    "afternoon",
+    "evening",
+    "night",
+    "weekend",
+    "summer",
+    "winter",
+    "home",
+];
+/// Units a measure is asked in, which name no place either: "tom cruise
+/// height in cm", "area of texas in square miles", "price of gold in
+/// euros". Not "stone" or "acre", which are towns too.
+const UNITS: &[&str] = &[
+    "cm",
+    "m",
+    "km",
+    "meters",
+    "metres",
+    "kilometers",
+    "inches",
+    "feet",
+    "ft",
+    "miles",
+    "square feet",
+    "square meters",
+    "square miles",
+    "square kilometers",
+    "km2",
+    "acres",
+    "hectares",
+    "kg",
+    "pounds",
+    "lbs",
+    "grams",
+    "ounces",
+    "liters",
+    "gallons",
+    "celsius",
+    "fahrenheit",
+    "mph",
+    "dollars",
+    "euros",
+];
 /// Kinds of town a query may name without "in" or "near": "denver
 /// pizza", "barber brooklyn".
 const GUESSED_TOWNS: &[&str] = &["place=city", "place=borough"];
@@ -114,6 +166,7 @@ const HOURS: &[&[&str]] = &[
     &["open", "late"],
     &["open", "today"],
     &["open", "24", "hours"],
+    &["open", "at", "night"],
     &["24", "hours"],
     &["24", "7"],
 ];
@@ -259,9 +312,13 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
                 if place.first().is_some_and(|w| w == "the") && place.len() > 1 {
                     place = &place[1..];
                 }
+                let place = place.join(" ");
+                if NOWHERE.contains(&place.as_str()) || UNITS.contains(&place.as_str()) {
+                    return Vec::new();
+                }
                 return vec![PlaceQuery {
                     what,
-                    near: Near::Named(place.join(" ")),
+                    near: Near::Named(place),
                     said_where: true,
                 }];
             }
@@ -1737,6 +1794,17 @@ mod tests {
             Some(("pharmacy".into(), Near::Me))
         );
         assert_eq!(query("pizza tonight"), Some(("pizza".into(), Near::Me)));
+        assert_eq!(
+            query("restaurants open at night"),
+            Some(("restaurants".into(), Near::Me))
+        );
+        for here in [
+            "coffee near here",
+            "coffee around here",
+            "coffee in the area",
+        ] {
+            assert_eq!(query(here), Some(("coffee".into(), Near::Me)), "{here}");
+        }
         // Not for words that are no kind of place.
         assert_eq!(query("chrome open now"), None);
         assert_eq!(query("news today"), None);
@@ -1761,6 +1829,21 @@ mod tests {
             "best time to visit seattle",
             "capital of washington",
             "capital of singapore",
+            // Nowhere, after "in" or "at".
+            "tallest building in the world",
+            "best pizza in the world",
+            "largest library in the whole world",
+            "coffee in the morning",
+            "museums in winter",
+            "pizza at home",
+            // Units.
+            "tom cruise height in cm",
+            "lebron james height in feet",
+            "how tall is tom cruise in feet",
+            "mount everest height in feet",
+            "area of texas in square miles",
+            "size of russia in km2",
+            "eiffel tower height in meters",
         ] {
             assert_eq!(query(plain), None, "{plain}");
         }
