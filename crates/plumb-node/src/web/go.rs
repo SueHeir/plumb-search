@@ -4,7 +4,6 @@
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use plumb_index::{Hit, SearchOptions};
 use serde::Deserialize;
 use tracing::error;
 
@@ -90,13 +89,24 @@ pub(crate) async fn go(
     } else {
         let options = search.options(&state.settings, &headers);
         match run_search(&state, &query, MAX_LIMIT, &options).await {
-            Ok(results) => match results.hits.iter().find(|hit| hit.domain == params.d) {
-                Some(hit) => Some(hit.clone()),
-                // Or one of the local sites the page puts first.
-                None => {
-                    place_site(&state, &headers, &query, &options, &results.hits, &params.d).await
+            Ok(mut results) => {
+                // The sites as the page lists them, the places' own first:
+                // a place's page on a site the results also list stands
+                // for that site's domain.
+                let about = match history::Visitor::of(&state, &headers, None) {
+                    Some(visitor) => visitor.about,
+                    None => history::browser_about(&headers),
+                };
+                let found = not_a_name(
+                    run_places(&state, &query, about.town(), options.country.as_deref()).await,
+                    &results.hits,
+                );
+                if let Some(found) = found {
+                    let local = place_sites(&state, &found, &options).await;
+                    places::local_first(&found, &mut results.hits, local, MAX_LIMIT);
                 }
-            },
+                results.hits.into_iter().find(|hit| hit.domain == params.d)
+            }
             Err(_) => {
                 error!("result redirect search failed");
                 None
@@ -121,31 +131,6 @@ pub(crate) async fn go(
         }
     }
     redirect(&href)
-}
-
-/// The local site `domain` of the places the results page shows for
-/// `query` above `hits`, if it is one.
-async fn place_site(
-    state: &AppState,
-    headers: &HeaderMap,
-    query: &str,
-    options: &SearchOptions,
-    hits: &[Hit],
-    domain: &str,
-) -> Option<Hit> {
-    let about = match history::Visitor::of(state, headers, None) {
-        Some(visitor) => visitor.about,
-        None => history::browser_about(headers),
-    };
-    let town = about.town();
-    let found = not_a_name(
-        run_places(state, query, town, options.country.as_deref()).await,
-        hits,
-    )?;
-    place_sites(state, &found, options)
-        .await
-        .into_iter()
-        .find(|hit| hit.domain == domain)
 }
 
 /// `/go?q=&b=&u=`: notes that a link of `block` was opened for the query,

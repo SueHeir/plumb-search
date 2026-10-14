@@ -42,6 +42,7 @@ impl PageSearcher {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let words = &*plumb_core::docs::docs_query(words);
         let scope = self.page_scope(ops, docs);
         let mut hits = self.search_general(words, limit, scope.as_deref())?;
         for hit in self.search_docs(words, ops, docs, limit)? {
@@ -118,13 +119,7 @@ impl PageSearcher {
         for site in &requested {
             let alias = naming_docs(site, &docs_topic(site, query));
             if let Some(key) = analysis::tokens(&self.joined, &alias).pop() {
-                identities.push((
-                    Occur::Should,
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(self.fields.keys, &key),
-                        IndexRecordOption::Basic,
-                    )) as Box<dyn Query>,
-                ));
+                identities.push((Occur::Should, self.key_term(&key)));
             }
         }
         for site in requested
@@ -138,7 +133,10 @@ impl PageSearcher {
                 ));
             }
         }
-        if clauses.is_empty() && identities.is_empty() {
+        // Pages named by a part of the topic have a window of their own,
+        // so the pages named by all of it keep theirs.
+        let named_parts = self.part_identities(&requested, query);
+        if clauses.is_empty() && identities.is_empty() && named_parts.is_empty() {
             return Ok(Vec::new());
         }
         let mut filter = vec![(Occur::Must, self.page_scope(ops, true).expect("docs scope"))];
@@ -163,7 +161,7 @@ impl PageSearcher {
         let top = TopDocs::with_limit(CANDIDATES)
             .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
         let mut addresses = Vec::new();
-        for lane in [identities, clauses]
+        for lane in [identities, named_parts, clauses]
             .into_iter()
             .filter(|lane| !lane.is_empty())
         {
@@ -177,6 +175,7 @@ impl PageSearcher {
             }
         }
         let mut hits = Vec::new();
+        let mut parts = Vec::new();
         for address in addresses {
             let document: TantivyDocument = searcher.doc(address)?;
             let Some(stored) = document
@@ -213,6 +212,9 @@ impl PageSearcher {
                 // Short identifiers remain supporting pages in ordinary
                 // navigation; a product/host/typed request names them.
                 (ALIAS_MATCH, allowed, allowed)
+            } else if allowed && site.is_some_and(|site| self.named_by_part(site, &page, &topic)) {
+                parts.push(hits.len());
+                (ALIAS_MATCH, true, false)
             } else {
                 if !allowed {
                     continue;
@@ -274,10 +276,115 @@ impl PageSearcher {
                 learned: None,
             });
         }
+        self.unname_covered_parts(&mut hits, &parts, query);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(limit);
         Ok(hits)
     }
+
+    fn key_term(&self, key: &str) -> Box<dyn Query> {
+        Box::new(TermQuery::new(
+            Term::from_field_text(self.fields.keys, key),
+            IndexRecordOption::Basic,
+        ))
+    }
+
+    /// What finds the pages of the `requested` sites that a part of the
+    /// topic of `query` names, by its name or as a symbol.
+    fn part_identities(
+        &self,
+        requested: &[&plumb_core::docs::DocsSite],
+        query: &str,
+    ) -> Vec<(Occur, Box<dyn Query>)> {
+        let mut identities = Vec::new();
+        for site in requested {
+            for (part, _) in docs_parts(&docs_topic(site, query)) {
+                if let Some(key) = analysis::tokens(&self.joined, &naming_docs(site, &part)).pop() {
+                    identities.push((Occur::Should, self.key_term(&key)));
+                }
+                if let Some(symbol) = canonical_docs_symbol(&part) {
+                    identities.push((Occur::Should, self.scope_term(&format!("symbol:{symbol}"))));
+                }
+            }
+        }
+        identities
+    }
+
+    /// Whether a part of `topic` names the docs page `page` of `site`, and
+    /// the rest of `topic` is on the page or written as code: "python
+    /// logging basicConfig" asks for logging's page, and "git rebase
+    /// interactive" for git-rebase's, whose INTERACTIVE MODE section it
+    /// is. "python random forest" is not about random's page.
+    fn named_by_part(&self, site: &plumb_core::docs::DocsSite, page: &Page, topic: &str) -> bool {
+        let key = |alias: &str| analysis::tokens(&self.joined, alias).pop();
+        let keys: HashSet<_> = page.aliases.iter().filter_map(|alias| key(alias)).collect();
+        // A whole name only: "load" is a short name of json.load and
+        // pickle.load alike.
+        let names = docs_whole_names(page);
+        let Some((_, rest)) = docs_parts(topic).into_iter().find(|(part, _)| {
+            key(&naming_docs(site, part)).is_some_and(|k| keys.contains(&k))
+                || canonical_docs_symbol(part).is_some_and(|name| names.contains(&name))
+        }) else {
+            return false;
+        };
+        // A version ("3.12") is not code.
+        let code = |word: &str| written_as_code(word) && word.chars().any(char::is_alphabetic);
+        if topic.split_whitespace().any(code) {
+            return true;
+        }
+        let stems = self.question_words(&rest);
+        let on_page: HashSet<_> = page
+            .topic()
+            .map(|text| self.question_words(&text).into_iter().collect())
+            .unwrap_or_default();
+        !stems.is_empty() && stems.iter().all(|stem| on_page.contains(stem))
+    }
+
+    /// Leaves the pages of `hits` at `parts`, named by a part of the
+    /// topic, unnamed when another's title has every word of the topic:
+    /// "javascript array flat" asks for Array.prototype.flat(), not Array.
+    fn unname_covered_parts(&self, hits: &mut [PageHit], parts: &[usize], query: &str) {
+        for &at in parts {
+            let Some(site) = plumb_core::docs::site_of_url(&hits[at].page.url) else {
+                continue;
+            };
+            let topic = self.question_words(&docs_topic(site, query));
+            let covered = hits.iter().enumerate().any(|(i, hit)| {
+                let title: HashSet<_> = self.question_words(&hit.page.title).into_iter().collect();
+                i != at && topic.iter().all(|stem| title.contains(stem))
+            });
+            if covered {
+                let hit = &mut hits[at];
+                hit.named = false;
+                hit.score *= PARTIAL_MATCH / ALIAS_MATCH;
+            }
+        }
+    }
+}
+
+/// Most words of a part of a docs search's topic that may name a page.
+const PART_WORDS: usize = 3;
+
+/// Most words of a topic whose parts may name a page: longer searches
+/// are questions, which the page's words answer.
+const PARTED_WORDS: usize = 6;
+
+/// The parts of `topic` that may name a docs page, the longest first, each
+/// with the rest of `topic`: "logging basicConfig" has "logging" (rest
+/// "basicConfig") and "basicConfig" (rest "logging").
+fn docs_parts(topic: &str) -> Vec<(String, String)> {
+    let words: Vec<&str> = topic.split_whitespace().collect();
+    if words.len() > PARTED_WORDS {
+        return Vec::new();
+    }
+    (1..words.len().min(PART_WORDS + 1))
+        .rev()
+        .flat_map(|len| (0..=words.len() - len).map(move |start| (start, len)))
+        .map(|(start, len)| {
+            let rest = [&words[..start], &words[start + len..]].concat();
+            (words[start..start + len].join(" "), rest.join(" "))
+        })
+        .collect()
 }
 
 /// Whether the docs page `hit` is just what `query` names in code's own
@@ -291,25 +398,10 @@ pub(crate) fn docs_named_as_code(hit: &PageHit, query: &str, sites: &[crate::Hit
     let Some(symbol) = canonical_docs_symbol(query) else {
         return false;
     };
-    let head = hit
-        .page
-        .title
-        .split(" — ")
-        .next()
-        .unwrap_or(&hit.page.title);
-    let rich = hit.page.search.as_ref().and_then(SearchContent::bounded);
-    let holds = std::iter::once(head)
-        .chain(rich.iter().flat_map(|search| {
-            search
-                .symbols
-                .iter()
-                .map(|symbol| symbol.identifier.as_str())
-        }))
-        .any(|name| canonical_docs_symbol(name).as_ref() == Some(&symbol));
     let name = squash(query);
     hit.page.set == DOCS_SET
         && written_as_code(query)
-        && holds
+        && docs_whole_names(&hit.page).contains(&symbol)
         && strong_docs_symbol(&hit.page, query)
         && !sites.first().is_some_and(|best| {
             squash(&best.domain) == name
@@ -318,15 +410,16 @@ pub(crate) fn docs_named_as_code(hit: &PageHit, query: &str, sites: &[crate::Hit
 }
 
 /// Whether `query` is one name written as code: with call parentheses,
-/// `::`, a `.` or `_` inside it ("read_csv"), or a capital after a small
-/// first letter ("useState"). "malloc" and "vector" may be words.
+/// `::`, a `.`, `_` or `-` inside it ("read_csv", "z-index"), or a capital
+/// after a small first letter ("useState"). "malloc" and "vector" may be
+/// words.
 fn written_as_code(query: &str) -> bool {
     let chars: Vec<char> = query.chars().collect();
     !query.contains(char::is_whitespace)
         && (query.ends_with("()")
             || query.contains("::")
             || chars.windows(3).any(|w| {
-                w[0].is_alphanumeric() && matches!(w[1], '.' | '_') && w[2].is_alphanumeric()
+                w[0].is_alphanumeric() && matches!(w[1], '.' | '_' | '-') && w[2].is_alphanumeric()
             })
             || chars.first().is_some_and(|c| c.is_lowercase())
                 && chars
@@ -374,21 +467,33 @@ fn docs_without_intent(query: &str) -> String {
         .join(" ")
 }
 
+/// Words that ask for docs, but only beside what the docs are about:
+/// "python asyncio tutorial" asks for the asyncio page, and "python
+/// tutorial" for the tutorial.
+const DOCS_KIND_WORDS: &[&str] = &["tutorial", "tutorials", "guide", "example", "examples"];
+
 fn docs_topic(site: &plumb_core::docs::DocsSite, query: &str) -> String {
-    query
-        .split_whitespace()
-        .filter(|word| {
-            let word = word.to_lowercase();
-            let word = word.trim_matches(|c: char| !c.is_alphanumeric() && !"._:+#".contains(c));
-            word != site.key
-                && word != site.product.to_lowercase()
-                && !site.asked_by.contains(&word)
-                && !DOCS_INTENT_WORDS.contains(&word)
-                && !ASKING_WORDS.contains(&word)
-                && !plumb_core::is_function_word(word)
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut kinds = Vec::new();
+    let mut topic = Vec::new();
+    for word in query.split_whitespace() {
+        let lower = word.to_lowercase();
+        let lower = lower.trim_matches(|c: char| !c.is_alphanumeric() && !"._:+#".contains(c));
+        if lower == site.key
+            || lower == site.product.to_lowercase()
+            || site.asked_by.contains(&lower)
+            || DOCS_INTENT_WORDS.contains(&lower)
+            || ASKING_WORDS.contains(&lower)
+            || plumb_core::is_function_word(lower)
+        {
+            continue;
+        }
+        if DOCS_KIND_WORDS.contains(&lower) {
+            kinds.push(word);
+        } else {
+            topic.push(word);
+        }
+    }
+    if topic.is_empty() { kinds } else { topic }.join(" ")
 }
 
 /// Substantive docs terms for selecting source excerpts from a result.
@@ -428,20 +533,68 @@ fn docs_host_requested(site: &plumb_core::docs::DocsSite, ops: &Operators) -> bo
         })
 }
 
+/// `text` as a docs symbol: lower case, without call parentheses or a
+/// manual page's section ("ls(1)" documents ls), and only letters,
+/// digits, `_`, `.`, `:` and inner hyphens ("border-radius",
+/// "Content-Type").
 fn canonical_docs_symbol(text: &str) -> Option<String> {
     let text = text.trim().trim_end_matches("()");
+    let text = match text.strip_suffix(')').and_then(|t| t.rsplit_once('(')) {
+        Some((name, section))
+            if !section.is_empty() && section.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            name
+        }
+        _ => text,
+    };
     (!text.is_empty()
         && text.len() < 256
         && text.chars().any(char::is_alphabetic)
+        && !text.starts_with('-')
+        && !text.ends_with('-')
         && text
             .chars()
-            .all(|c| c.is_alphanumeric() || "_.:".contains(c)))
+            .all(|c| c.is_alphanumeric() || "_.:-".contains(c)))
     .then(|| text.to_lowercase())
 }
 
-fn docs_title_symbols(title: &str) -> Vec<String> {
-    let head = title.split(" — ").next().unwrap_or(title);
-    docs_identifier_symbols(head)
+/// The whole names the docs page `page` documents: its title before
+/// " — ", the name its title and address share, and its rich symbols.
+fn docs_whole_names(page: &Page) -> Vec<String> {
+    let head = page.title.split(" — ").next().unwrap_or(&page.title);
+    let rich = page.search.as_ref().and_then(SearchContent::bounded);
+    std::iter::once(head)
+        .chain(rich.iter().flat_map(|search| {
+            search
+                .symbols
+                .iter()
+                .map(|symbol| symbol.identifier.as_str())
+        }))
+        .filter_map(canonical_docs_symbol)
+        .chain(docs_address_symbol(page))
+        .collect()
+}
+
+/// The name a docs page's title writes as code and its address ends
+/// with: MDN's "Document: querySelectorAll() method" at
+/// …/Document/querySelectorAll, "border-radius CSS property" at
+/// …/Properties/border-radius. Call parentheses alone don't make a name
+/// code here, so "Window: open() method" doesn't name "open", nor
+/// "Built-in Functions" at functions.html "functions".
+fn docs_address_symbol(page: &Page) -> Option<String> {
+    let leaf = docs_address_leaf(&page.url)?;
+    let head = page.title.split(" — ").next().unwrap_or(&page.title);
+    head.split_whitespace()
+        .map(|word| word.trim_end_matches([':', ',']))
+        .filter(|word| written_as_code(word.trim_end_matches("()")))
+        .find_map(|word| canonical_docs_symbol(word).filter(|symbol| *symbol == leaf))
+}
+
+/// The last part of a docs page's address as a symbol: "querySelectorAll"
+/// for …/Document/querySelectorAll, "tomllib" for …/library/tomllib.html.
+fn docs_address_leaf(url: &str) -> Option<String> {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    canonical_docs_symbol(path.rsplit('/').next()?.trim_end_matches(".html"))
 }
 
 fn docs_identifier_symbols(identifier: &str) -> Vec<String> {
@@ -467,12 +620,10 @@ pub fn docs_symbol_matches(query: &str, identifier: &str) -> bool {
 }
 
 pub(crate) fn docs_symbols(page: &Page) -> Vec<String> {
-    let mut symbols = docs_title_symbols(&page.title);
-    if let Some(search) = page.search.as_ref().and_then(SearchContent::bounded) {
-        for symbol in search.symbols {
-            symbols.extend(docs_identifier_symbols(&symbol.identifier));
-        }
-    }
+    let mut symbols: Vec<String> = docs_whole_names(page)
+        .iter()
+        .flat_map(|name| docs_identifier_symbols(name))
+        .collect();
     symbols.sort();
     symbols.dedup();
     symbols
@@ -503,16 +654,7 @@ fn strong_docs_symbol(page: &Page, query: &str) -> bool {
         || head.chars().skip(1).any(char::is_uppercase)
         || (page.title.contains(" — ")
             && symbol.len() >= 5
-            && page
-                .url
-                .split(['?', '#'])
-                .next()
-                .unwrap_or("")
-                .rsplit('/')
-                .next()
-                .and_then(|leaf| canonical_docs_symbol(leaf.trim_end_matches(".html")))
-                .as_ref()
-                == Some(&symbol))
+            && docs_address_leaf(&page.url).as_ref() == Some(&symbol))
 }
 
 pub(crate) fn docs_overview(page: &Page, site: &plumb_core::docs::DocsSite) -> bool {

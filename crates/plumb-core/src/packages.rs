@@ -502,6 +502,9 @@ fn is_date(date: &str) -> bool {
 /// and the registries it names (none for any). `None` when it does not
 /// ask for a package: no registry or package word ("serde crate", "lodash
 /// version"), or nothing left once those and filler words are taken out.
+/// A lone name spelled as no word is ("serde_json", "react-dom",
+/// "@types/node") asks for a well-known package of any registry, unless
+/// something else is called so ([`PackageQuery::alone`]).
 pub fn package_query(query: &str) -> Option<PackageQuery> {
     let mut registries: Vec<&'static Registry> = Vec::new();
     let mut asked = false;
@@ -526,9 +529,18 @@ pub fn package_query(query: &str) -> Option<PackageQuery> {
         } else if PACKAGE_WORDS.contains(&lower) {
             asked = true;
             surely |= lower.starts_with("package");
-        } else if !FILLER_WORDS.contains(&lower) {
+        } else if !FILLER_WORDS.contains(&lower) && !word.starts_with('-') {
+            // An option ("--save-dev", "-g") names no package.
             rest.push(word);
         }
+    }
+    if !asked && rest.len() == 1 && spelled_as_package(rest[0]) {
+        return Some(PackageQuery {
+            name: rest[0].to_string(),
+            registries: Vec::new(),
+            surely: false,
+            alone: true,
+        });
     }
     if !asked || rest.is_empty() {
         return None;
@@ -537,7 +549,20 @@ pub fn package_query(query: &str) -> Option<PackageQuery> {
         name: rest.join(" "),
         registries,
         surely,
+        alone: false,
     })
+}
+
+/// Whether `word` is spelled as a package's name and no word is: scoped
+/// ("@types/node"), or with `_` or `-` between letters or digits
+/// ("serde_json", "react-dom"). "boto3" may be a hash or a codec's name,
+/// as "md5" and "utf8" are, and "crates.io" or "socket.io" a site's.
+fn spelled_as_package(word: &str) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    (word.starts_with('@') && word.contains('/'))
+        || chars
+            .windows(3)
+            .any(|w| w[0].is_alphanumeric() && matches!(w[1], '_' | '-') && w[2].is_alphanumeric())
 }
 
 /// See [`package_query`].
@@ -552,6 +577,9 @@ pub struct PackageQuery {
     /// the name will do,
     /// not only a well-known one.
     pub surely: bool,
+    /// The query is the name alone ("serde_json"): a page called so that
+    /// is no package is what it asks for, "content-type" the header's.
+    pub alone: bool,
 }
 
 impl PackageQuery {
@@ -651,7 +679,30 @@ mod tests {
             "@tanstack/react-query"
         );
         assert_eq!(package_query("gin go framework docs").unwrap().name, "gin");
-        for query in ["react", "react docs", "python", "latest version", "crate"] {
+        assert_eq!(
+            package_query("pip install --upgrade requests")
+                .unwrap()
+                .name,
+            "requests"
+        );
+        for query in [
+            "react",
+            "react docs",
+            "python",
+            "latest version",
+            "crate",
+            "npm install --save-dev",
+        ] {
+            assert_eq!(package_query(query), None, "{query}");
+        }
+        // A lone name no word is spelled like asks for a well-known one.
+        for name in ["serde_json", "react-dom", "@types/node"] {
+            let q = package_query(name).unwrap();
+            assert_eq!(q.name, name);
+            assert!(q.registries.is_empty() && !q.surely && q.alone, "{name}");
+        }
+        assert!(!package_query("serde_json crate").unwrap().alone);
+        for query in ["boto3", "md5", "lodash", "-v", "serde json", "crates.io"] {
             assert_eq!(package_query(query), None, "{query}");
         }
     }

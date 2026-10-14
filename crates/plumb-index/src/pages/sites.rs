@@ -9,6 +9,13 @@ use tantivy::{TantivyDocument, Term};
 
 use super::{Page, PageSearcher, TITLE_CANDIDATES};
 
+/// The trailing qualifier in brackets that [`base_title`] leaves out:
+/// `element` of `Mercury (element)`.
+pub(crate) fn title_qualifier(title: &str) -> Option<&str> {
+    let base = base_title(title);
+    (base.len() < title.len()).then(|| &title[base.len() + 2..title.len() - 1])
+}
+
 /// `title` without a trailing qualifier in brackets: `Python (programming
 /// language)` -> `Python`.
 pub fn base_title(title: &str) -> &str {
@@ -16,6 +23,40 @@ pub fn base_title(title: &str) -> &str {
         Some(i) if title.ends_with(')') && i > 0 => &title[..i],
         _ => title,
     }
+}
+
+/// Shorter titles an article is searched for by: a work's title in a
+/// series without the series' name ("Tears of the Kingdom" of "The Legend
+/// of Zelda: Tears of the Kingdom", "The Phantom Menace" of "Star Wars:
+/// Episode I – The Phantom Menace"), and its title or that one without a
+/// leading "The" ("Dark Side of the Moon", "Phantom Menace"). Only those
+/// of two words or more that are not stop words: "Mission: Impossible",
+/// "Pokémon: The Movie" and "The Beatles" would say too little.
+pub(crate) fn short_titles(title: &str) -> Vec<&str> {
+    let base = base_title(title);
+    let subtitle = base
+        .rsplit_once(": ")
+        .map(|(_, rest)| rest.rsplit_once(" – ").map_or(rest, |(_, last)| last));
+    let words =
+        |text: &str| crate::analysis::tokens(&crate::analysis::stemmed_analyzer(), text).len();
+    [
+        subtitle,
+        base.strip_prefix("The "),
+        subtitle.and_then(|subtitle| subtitle.strip_prefix("The ")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|short| words(short) >= 2)
+    .collect()
+}
+
+/// A title as people type it without the "'s" of a name before another
+/// word: "Ohm law" for "Ohm's law", "Halley Comet" for "Halley's Comet".
+/// `None` when it has no such word. A title that ends in one keeps it:
+/// "mcdonald" is a surname as much as McDonald's.
+pub(crate) fn without_possessive(title: &str) -> Option<String> {
+    let bare = title.replace("'s ", " ").replace("’s ", " ");
+    (bare != title).then_some(bare)
 }
 
 impl PageSearcher {
@@ -141,16 +182,69 @@ const ORGANIZATION_WORDS: &[&str] = &[
     "website",
 ];
 
+/// Words of a short description saying a page is about an event, a
+/// competition, a team or league that plays in one, or a venue: what has
+/// a schedule, results or tickets.
+const EVENT_WORDS: &[&str] = &[
+    "arena",
+    "award",
+    "bowl",
+    "carnival",
+    "ceremony",
+    "championship",
+    "club",
+    "competition",
+    "conference",
+    "contest",
+    "convention",
+    "cup",
+    "election",
+    "event",
+    "expo",
+    "fair",
+    "festival",
+    "franchise",
+    "gala",
+    "league",
+    "marathon",
+    "pageant",
+    "parade",
+    "playoff",
+    "promotion",
+    "race",
+    "rally",
+    "referendum",
+    "regatta",
+    "season",
+    "stadium",
+    "team",
+    "tour",
+    "tournament",
+];
+
 /// Whether Wikipedia's short description of a page says it is about an
 /// organization, product or service ("American auto insurance company",
 /// "Open-source software framework"), see [`ORGANIZATION_WORDS`].
 pub(crate) fn describes_an_organization(description: Option<&str>) -> bool {
+    describes_as(description, ORGANIZATION_WORDS)
+}
+
+/// Whether Wikipedia's short description of a page says it is about an
+/// event, competition, team or venue ("European association football
+/// tournament", "National Basketball Association team"), see
+/// [`EVENT_WORDS`].
+pub(crate) fn describes_an_event(description: Option<&str>) -> bool {
+    describes_as(description, EVENT_WORDS)
+}
+
+/// Whether `description` has one of `words`, or its plural.
+fn describes_as(description: Option<&str>, words: &[&str]) -> bool {
     description.is_some_and(|text| {
         text.split(|c: char| !c.is_alphanumeric())
             .map(str::to_lowercase)
             .any(|word| {
                 let one = word.strip_suffix('s').unwrap_or(&word);
-                ORGANIZATION_WORDS.contains(&word.as_str()) || ORGANIZATION_WORDS.contains(&one)
+                words.contains(&word.as_str()) || words.contains(&one)
             })
     })
 }
@@ -221,4 +315,53 @@ fn may_be_borrowed(site: &crate::Hit) -> bool {
             .title
             .as_deref()
             .is_some_and(|title| !squash(title).contains(&label))
+}
+
+/// What happens to a person that Wikipedia titles "Assassination of
+/// Abraham Lincoln", "Wedding of Prince Harry and Meghan Markle".
+const EVENTS: &[&str] = &[
+    "abdication",
+    "arrest",
+    "assassination",
+    "burial",
+    "coronation",
+    "death",
+    "disappearance",
+    "execution",
+    "funeral",
+    "impeachment",
+    "inauguration",
+    "kidnapping",
+    "killing",
+    "murder",
+    "presidency",
+    "resignation",
+    "shooting",
+    "trial",
+    "wedding",
+];
+
+/// Whether `query` is a name and then what happened to them, which
+/// `title` is the article on: "lincoln assassination" for
+/// "Assassination of Abraham Lincoln", "george floyd murder" for "Murder
+/// of George Floyd". Every word of the name has to be in the title.
+pub(crate) fn event_of(title: &str, query: &str) -> bool {
+    let words = |text: &str| -> Vec<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let Some((event, whom)) = base_title(title).split_once(" of ") else {
+        return false;
+    };
+    let query = words(query);
+    let Some((asked, name)) = query.split_last() else {
+        return false;
+    };
+    let whom = words(whom);
+    !name.is_empty()
+        && EVENTS.contains(&asked.as_str())
+        && words(event) == [asked.clone()]
+        && name.iter().all(|word| whom.contains(word))
 }
