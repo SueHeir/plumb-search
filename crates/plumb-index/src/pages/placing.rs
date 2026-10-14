@@ -789,6 +789,9 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
                 continue;
             }
         }
+        if obscure_namesake(&hit, &placed) {
+            continue;
+        }
         // An item without an article is only told apart from its
         // namesakes by its website.
         if hit.page.set == WIKIDATA_SET {
@@ -865,6 +868,31 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         });
     }
     placed
+}
+
+/// How many times as read as a namesake an article that has the name to
+/// itself is when the namesake is not listed ([`obscure_namesake`]).
+const OBSCURE_NAMESAKE: u64 = 50;
+
+/// Whether `hit` is an article the query names only by its title before a
+/// qualifier, read less than a fiftieth as much as an article of its set
+/// already placed that has the name to itself: "Prince William (1788
+/// ship)" and "Prince William (TV series)" for "prince william", "Lady Gaga
+/// (song)" for "lady gaga". Named so, it scored nearly as high as the
+/// article, popularity being only half a page's score, and took a place
+/// among the first results. "Cleopatra (1963 film)" and "Julius Caesar
+/// (play)" are read enough to stay.
+fn obscure_namesake(hit: &PageHit, placed: &[PlacedPage]) -> bool {
+    let unqualified = |page: &Page| base_title(&page.title) == page.title;
+    hit.named
+        && hit.page.is_article()
+        && !unqualified(&hit.page)
+        && placed.iter().any(|p| {
+            p.hit.named
+                && p.hit.page.set == hit.page.set
+                && unqualified(&p.hit.page)
+                && hit.page.views.saturating_mul(OBSCURE_NAMESAKE) < p.hit.page.views
+        })
 }
 
 /// Words a search asked as a question starts with.

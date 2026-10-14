@@ -3,6 +3,25 @@
 use super::*;
 
 #[test]
+fn a_field_after_the_name_keeps_that_sense() {
+    let mut film = page("Cell (film)", 90_000, &[]);
+    film.description = Some("2016 film by Tod Williams".into());
+    let mut biology = page("Cell (biology)", 80_000, &[]);
+    biology.description = Some("Basic unit of all life".into());
+    let (_dir, s) = searcher(&[film, biology, page("Cell biology", 40_000, &[])]);
+    let named = |query: &str| -> Vec<String> {
+        let hits = s.search(query, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("what is a cell in biology"), ["Cell (biology)"]);
+    // With no page on the field's sense, the name's pages are all kept.
+    assert_eq!(named("what is a cell in poetry").len(), 2);
+}
+
+#[test]
 fn words_that_say_what_is_wanted_keep_the_name() {
     let (_dir, s) = searcher(&[
         page("Lululemon", 50_000, &[]),

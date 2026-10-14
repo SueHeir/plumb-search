@@ -114,6 +114,41 @@ fn main_articles_beat_their_namesakes() {
 }
 
 #[test]
+fn namesakes_read_far_less_than_the_article_are_not_listed() {
+    let read = |title: &str, site: Option<&str>, score: f32, views: u64| {
+        let mut hit = found(title, site, true, score);
+        hit.page.views = views;
+        hit
+    };
+    let sites = [
+        site("royal.uk", false),
+        site("pwcgov.org", false),
+        site("prince.com", false),
+    ];
+    let placed = place_pages(
+        "prince william",
+        &sites,
+        vec![
+            read("William, Prince of Wales", Some("royal.uk"), 0.76, 400_000),
+            read("Prince William (TV series)", None, 0.54, 20),
+            read("Prince William (1788 ship)", None, 0.52, 5),
+        ],
+    );
+    let titles: Vec<&str> = placed.iter().map(|p| p.hit.page.title.as_str()).collect();
+    assert_eq!(titles, ["William, Prince of Wales"]);
+    // One read at least a fiftieth as much is listed.
+    let placed = place_pages(
+        "cleopatra",
+        &[site("cleorecs.com", false)],
+        vec![
+            read("Cleopatra", None, 0.85, 66_000),
+            read("Cleopatra (1963 film)", None, 0.70, 7_000),
+        ],
+    );
+    assert_eq!(placed.len(), 2);
+}
+
+#[test]
 fn pages_about_a_listed_site_go_under_it() {
     let sites = [site("python.org", true), site("pythonanywhere.com", false)];
     let placed = place_pages(
@@ -625,4 +660,58 @@ fn sites_called_after_pages() {
         "Navy Federal Credit Union"
     ));
     assert!(!site_is_titled("navyfed.org", "Navy Federal Credit Union"));
+}
+
+#[test]
+fn a_suggested_spelling_lists_the_page_it_names_second() {
+    let (_dir, s) = searcher(&[
+        page("Isaac Newton", 50_000, &[]),
+        page("Newton (unit)", 9_000, &[]),
+    ]);
+    let spelling = |query: &str, applied: bool| crate::Spelling {
+        query: query.into(),
+        site: None,
+        applied,
+    };
+    let options = crate::SearchOptions::default();
+    let placed = |title: &str, at: usize| PlacedPage {
+        hit: found(title, None, true, 0.9),
+        under: None,
+        at,
+    };
+    let listed = |placed: &[PlacedPage]| -> Vec<(String, usize)> {
+        placed
+            .iter()
+            .map(|p| (p.hit.page.title.clone(), p.at))
+            .collect()
+    };
+    // Second: after the first site and a page listed first, before the
+    // pages listed with the second site.
+    let mut pages = vec![placed("Newton, Massachusetts", 0), placed("Fig Newton", 1)];
+    s.list_suggested_page(&spelling("isaac newton", false), &options, &mut pages)
+        .unwrap();
+    assert_eq!(
+        listed(&pages),
+        [
+            ("Newton, Massachusetts".to_string(), 0),
+            ("Isaac Newton".to_string(), 1),
+            ("Fig Newton".to_string(), 1),
+        ]
+    );
+    // Named by the spelling, not the query: no info box.
+    assert!(!pages[1].hit.named);
+    // Listed already, it stays where it is.
+    s.list_suggested_page(&spelling("isaac newton", false), &options, &mut pages)
+        .unwrap();
+    assert_eq!(pages.len(), 3);
+    // Nothing when the results are for the spelling, or it names no page.
+    for spelling in [
+        spelling("isaac newton", true),
+        spelling("newton apple", false),
+    ] {
+        let mut pages = Vec::new();
+        s.list_suggested_page(&spelling, &options, &mut pages)
+            .unwrap();
+        assert!(pages.is_empty(), "{}", spelling.query);
+    }
 }

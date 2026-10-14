@@ -647,7 +647,7 @@ pub(crate) async fn extras(
     // What something is ("what is a manatee"): the first sentence of the
     // article it names, or what the word means ("define anadromous").
     let answer = match (answer, answers::definition_asked(query)) {
-        (None, Some(name)) => {
+        (None, Some((name, field))) => {
             let backend = Arc::clone(&state.backend);
             let word = {
                 let name = name.clone();
@@ -663,7 +663,7 @@ pub(crate) async fn extras(
                 run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
                     .await
                     .ok()
-                    .and_then(|found| answers::definition_answer(&found.pages))
+                    .and_then(|found| answers::definition_answer(&found.pages, field))
                     .or(word)
             }
         }
