@@ -1277,13 +1277,13 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
             "President of the United States",
         ),
         page("General Motors", 30_000, &[]),
-        person(
+        described(
             "Bernie Sanders",
             60_000,
             &[],
             "American politician and activist (born 1941)",
         ),
-        person("Colonel Sanders", 20_000, &[], "American businessman"),
+        described("Colonel Sanders", 20_000, &[], "American businessman"),
     ]);
     let named = |q: &str| named_titles(&s, q);
     assert_eq!(named("president kennedy"), ["John F. Kennedy"]);
