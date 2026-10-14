@@ -11,9 +11,11 @@ pub(super) struct Intent {
 }
 
 impl Intent {
+    /// The entity `name` names, with a country at its end taken as where
+    /// it is wanted: "SAT México" is SAT in Mexico.
     pub fn of(name: &str) -> Self {
-        let mut entity = bare_name(name).unwrap_or_else(|| name.trim().to_lowercase());
-        let parts: Vec<_> = entity.split_whitespace().collect();
+        let whole = Self::whole(name);
+        let parts: Vec<_> = whole.entity.split_whitespace().collect();
         let jurisdiction = (1..parts.len()).find_map(|at| {
             // A country's name can be part of a brand: Bank of America.
             if matches!(parts[at - 1], "of" | "de" | "del" | "di") {
@@ -27,11 +29,23 @@ impl Intent {
             }?;
             Some((parts[..at].join(" "), suffix, country))
         });
-        let country_name = jurisdiction.as_ref().map(|(_, suffix, _)| suffix.clone());
-        let country = jurisdiction.map(|(prefix, _, country)| {
-            entity = prefix;
-            country
-        });
+        match jurisdiction {
+            Some((entity, country_name, country)) => Self {
+                country: Some(country),
+                country_name: Some(country_name),
+                ..Self::named(entity)
+            },
+            None => whole,
+        }
+    }
+
+    /// The entity all of `name` names, a country at its end included: New
+    /// Mexico, not "new" in Mexico.
+    pub fn whole(name: &str) -> Self {
+        Self::named(bare_name(name).unwrap_or_else(|| name.trim().to_lowercase()))
+    }
+
+    fn named(entity: String) -> Self {
         Self {
             // Categories and resources distinguish the requested entity.
             // Keep every substantive word after documented docs/login intent
@@ -42,9 +56,26 @@ impl Intent {
                 .map(str::to_string)
                 .collect(),
             entity,
-            country,
-            country_name,
+            country: None,
+            country_name: None,
         }
+    }
+
+    /// Whether Wikidata knows something by exactly this name: an article
+    /// named by it, or an official site titled it.
+    pub fn is_known_name(&self, results: &SearchResults) -> bool {
+        let entity = plumb_core::normalize_text(&self.entity);
+        results.pages.iter().any(|placed| {
+            placed.hit.named
+                && super::official_site::is_article(&placed.hit.page)
+                && plumb_core::normalize_text(&placed.hit.page.title) == entity
+        }) || results.hits.iter().any(|hit| {
+            hit.official
+                && hit
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| plumb_core::normalize_text(title) == entity)
+        })
     }
 
     pub fn matches_site(&self, hit: &Hit) -> bool {
@@ -67,10 +98,13 @@ impl Intent {
             .iter()
             .any(|word| title.split_whitespace().any(|shown| shown == word))
             || self.expands_acronym(&title);
+        // A person's page on a bigger site keeps no site (plumb-index's
+        // drop_borrowed_site), so their country shows in their website.
+        let site = super::official_site::website_domain(page).unwrap_or_default();
         title_names
             && self.matches(page.website.as_deref().unwrap_or(""), &page.title)
-            && self.matches_country(page.site.as_deref().unwrap_or(""), None)
-            && self.shows_jurisdiction(page.site.as_deref().unwrap_or(""), &page.title, None)
+            && self.matches_country(&site, None)
+            && self.shows_jurisdiction(&site, &page.title, None)
     }
 
     /// A name match is retrieval evidence, not ownership. A bare domain

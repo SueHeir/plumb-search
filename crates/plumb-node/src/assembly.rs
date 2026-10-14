@@ -178,6 +178,7 @@ pub(crate) fn route_sources(
     results: &mut plumb_index::SearchResults,
     limit: usize,
     site: impl Fn(&str) -> Option<Hit>,
+    common: impl Fn(&str) -> bool,
 ) {
     if plumb_core::Operators::parse(query).any() {
         return;
@@ -185,7 +186,7 @@ pub(crate) fn route_sources(
     let Some(route) = crate::sources::route(query, answer, country) else {
         // The source a health search names, first whatever the learned
         // order did.
-        plumb_index::health::sources_lead(query, &mut results.hits, &mut results.pages);
+        plumb_index::health::sources_lead(query, &mut results.hits, &mut results.pages, &common);
         return;
     };
     let keep = results.hits.len().max(limit);
@@ -257,9 +258,18 @@ pub(crate) fn linked_sites(
     site: impl Fn(&str) -> Option<Hit>,
     search: impl Fn(&str) -> Vec<Hit>,
 ) -> Vec<Hit> {
+    // A place that links a page within a bigger site (its Facebook page,
+    // its Tripadvisor listing) is listed with that page, not the site's
+    // homepage.
     let mut sites: Vec<Hit> = local_sites(found)
         .into_iter()
-        .map(|hit| site(&hit.domain).unwrap_or(hit))
+        .map(|hit| {
+            if front_page(&hit) {
+                site(&hit.domain).unwrap_or(hit)
+            } else {
+                hit
+            }
+        })
         .collect();
     for place in places_without_sites(found) {
         if let Some(mut hit) = site_named_for(&place, search(&place.name)) {
@@ -273,6 +283,16 @@ pub(crate) fn linked_sites(
         }
     }
     sites
+}
+
+/// Whether `hit` links the front page of its site, not a page in it.
+fn front_page(hit: &Hit) -> bool {
+    url::Url::parse(&hit.url).is_ok_and(|url| {
+        url.host_str()
+            .is_some_and(|host| host.strip_prefix("www.").unwrap_or(host) == hit.domain)
+            && url.path() == "/"
+            && url.query().is_none()
+    })
 }
 
 /// The places of `found` that give no website, at most
