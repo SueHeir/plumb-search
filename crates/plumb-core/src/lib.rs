@@ -52,7 +52,7 @@ pub use kinds::{is_generic_kind, kind_key, other_number, singular, MAX_KINDS};
 pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
-pub use sign_in::{asks_to_sign_in, is_sign_in_page, names_label};
+pub use sign_in::{asks_to_sign_in, is_sign_in_page, names_label, spells_label};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
 pub use subsites::{
     parent_domain, subdomain_sites, use_site_list, SiteList, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
@@ -209,8 +209,9 @@ pub struct SiteRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gone_at: Option<u64>,
     /// Where the homepage sent the crawler instead, when it redirects to
-    /// another site (`pncbank.com` -> `pnc.com`), as of the last crawl. Such
-    /// a site is the other one under another name.
+    /// another site (`pncbank.com` -> `pnc.com`), as of the last crawl. Sent
+    /// to the other's front page, the site is the other one under another
+    /// name ([`Redirect::folds_into`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect: Option<Redirect>,
     /// The site's icon as a small PNG, base64, only while a crawl travels
@@ -234,6 +235,12 @@ pub struct Redirect {
     pub to: String,
     /// Unix seconds of the crawl that saw it.
     pub at: u64,
+    /// It went to a page of `to` other than its front page: a sign-in
+    /// (`docs.google.com` to Google's), a bot check, or a page about the
+    /// site (`destinythegame.com` to Bungie's page on Destiny). Older
+    /// crawlers never set it, so their redirects fold as before.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inner: bool,
 }
 
 /// Inbound link text and the sites that link with it.
@@ -1920,6 +1927,7 @@ mod tests {
             redirect: Some(Redirect {
                 to: "pnc.com".into(),
                 at,
+                inner: false,
             }),
             ..SiteRecord::new("pncbank.com")
         };

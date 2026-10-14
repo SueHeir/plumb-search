@@ -1016,8 +1016,7 @@ impl Searcher {
             let missing_words = missing.contains(&ranked.addr);
             let (mut hit, fingerprint) = self.hit(&searcher, ranked)?;
             hit.missing_words = missing_words;
-            // Junk stays out unless the query names it.
-            if named || !junk::left_out(query_text, &hit) {
+            if !junk::left_out(query_text, &hit, named) {
                 hits.push(hit);
                 fingerprints.push(fingerprint);
             }

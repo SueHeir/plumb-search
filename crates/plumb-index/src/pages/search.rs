@@ -15,6 +15,7 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 use super::building::schema;
 use super::page::is_item_id;
 use super::placing::is_year;
+use super::records::records_named;
 use super::scoring::truncate_keeping_inner_pages;
 use super::sites::base_title;
 use super::{
@@ -458,7 +459,45 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
         name = rest;
         hint = Some(tail_hint);
     }
+    // "how did steve jobs die", "what is einstein known for": what an
+    // article tells, asked as a question.
+    let asked_of = [
+        ("how did ", " die", Hint::Person),
+        ("what did ", " die of", Hint::Person),
+        ("what did ", " die from", Hint::Person),
+        ("how many kids does ", " have", Hint::Person),
+        ("how many kids did ", " have", Hint::Person),
+        ("how many children does ", " have", Hint::Person),
+        ("how many children did ", " have", Hint::Person),
+        ("where was ", " buried", Hint::Person),
+        ("", " buried", Hint::Person),
+        ("what did ", " invent", Hint::Person),
+        ("what did ", " discover", Hint::Person),
+        ("why is ", " famous", Hint::Any),
+        ("why was ", " famous", Hint::Any),
+        ("", " known for", Hint::Any),
+        ("", " famous for", Hint::Any),
+        ("", " real name", Hint::Person),
+        ("", " full name", Hint::Person),
+        ("", " birth name", Hint::Person),
+        ("", " iq", Hint::Person),
+    ];
+    if let Some((rest, asked)) = asked_of.iter().find_map(|(lead, tail, asked)| {
+        Some((name.strip_prefix(lead)?.strip_suffix(tail)?, *asked))
+    }) {
+        name = rest;
+        hint = Some(asked);
+    }
     let name = name.trim();
+    // "obama's daughters" and "einstein's biography" ask about Obama and
+    // Einstein, whom "obama's" does not name. A name only asked about
+    // keeps it: "what is mcdonald's".
+    let name = match hint {
+        Some(Hint::Person | Hint::Any) if !q.ends_with(name) => {
+            name.strip_suffix("'s").unwrap_or(name)
+        }
+        _ => name,
+    };
     let hint = hint?;
     (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
 }
@@ -968,13 +1007,19 @@ impl PageSearcher {
         Ok(hits)
     }
 
-    /// The best `limit` pages for `query`, best first.
+    /// The best `limit` pages for `query`, best first, after the records
+    /// it names by their identifier ([`records_named`]).
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
         let paper = PaperQuery::parse(query)?;
-        if paper.constrained {
-            return self.search_papers(&paper, limit);
-        }
-        self.search_naming_docs(query, &Operators::default(), false, limit)
+        let mut hits = if paper.constrained {
+            self.search_papers(&paper, limit)?
+        } else {
+            self.search_naming_docs(query, &Operators::default(), false, limit)?
+        };
+        let mut records = records_named(query);
+        hits.retain(|hit| !records.iter().any(|record| record.page.url == hit.page.url));
+        records.append(&mut hits);
+        Ok(records)
     }
 
     pub(crate) fn search_general(

@@ -465,8 +465,9 @@ fn another_sites_page_comes_after_the_site_and_its_page_named() {
         page: Page::from_set(
             REFERENCE_SET,
             Article {
-                title: "Sepsis Survivors: Fact sheet and graphics for people who are recovering"
-                    .into(),
+                // Short enough for the reference-set gate to keep it for
+                // both searches below.
+                title: "Sepsis Survivors: Fact Sheet".into(),
                 item: Some(
                     "https://www.cdc.gov/sepsis/communication-resources/survivor.html".into(),
                 ),

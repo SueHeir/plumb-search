@@ -421,7 +421,18 @@ fn after_supported(rows: Vec<usize>, bare: impl Fn(usize) -> bool) -> Vec<usize>
 /// network) sorts by score and keeps this order. Each page listed on its
 /// own notes where it went ([`PageHit::learned`]), which
 /// [`crate::pages::place_pages`] keeps when the results are placed again.
+/// A record the query names by its identifier is not read, as the model
+/// never saw one, and stays first ([`crate::pages::keep_page_rules`]).
 pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec<PlacedPage>) {
+    let (records, rest): (Vec<PlacedPage>, Vec<PlacedPage>) = std::mem::take(placed)
+        .into_iter()
+        .partition(|page| crate::pages::is_record(&page.hit));
+    *placed = rest;
+    reorder_rows(model, query, hits, placed);
+    placed.splice(0..0, records);
+}
+
+fn reorder_rows(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec<PlacedPage>) {
     let rows = listed(hits, placed);
     if rows.len() < 2 {
         return;
