@@ -331,6 +331,45 @@ fn well_known_names_one_slip_away_are_meant() {
 }
 
 #[test]
+fn a_likelier_slip_beats_a_well_known_name() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "wired.com",
+        Some("WIRED"),
+        None,
+        &["WIRED"],
+        &[],
+        popular(300, 30_000),
+    ));
+    // The sites teach that "ei" is often typed "ie".
+    for i in 0..30 {
+        records.push(site(
+            &format!("weird{i}.com"),
+            Some(&format!("Weird facts to receive, deceive and ceiling {i}")),
+            None,
+            &[],
+            &[],
+            obscure(5_000_000 + i, 10),
+        ));
+    }
+    for (i, slip) in ["recieve", "decieve", "cieling"].into_iter().enumerate() {
+        records.push(site(
+            &format!("{slip}.net"),
+            Some(&format!("How to {slip}")),
+            None,
+            &[],
+            &[],
+            obscure(6_000_000 + i as u64, 10),
+        ));
+    }
+    let (_dir, searcher) = build(&records);
+    // "wired" is one swap from "wierd" too, and wired.com well known, but
+    // "ei" typed "ie" is the likelier slip.
+    let results = search_spelled(&searcher, "wierd");
+    assert_ne!(suggestion(&results), suggested("wired"));
+}
+
+#[test]
 fn exact_names_are_not_corrected() {
     let (_dir, searcher) = build(&typo_corpus());
     for query in [
