@@ -442,6 +442,43 @@ fn questions_are_found_in_their_duplicates_words() {
 }
 
 #[test]
+fn words_only_a_duplicates_title_has_count_half() {
+    let whitespace = Page::from_question(Article {
+        title: "Remove all whitespace in a string".into(),
+        description: Some("python, string, trim, removing-whitespace".into()),
+        item: Some("8270092".into()),
+        views: 2_800_000,
+        aliases: vec![
+            "Why doesn't .strip() remove whitespaces?".into(),
+            "How to sort a list of string ignoring whitespace in python?".into(),
+        ],
+        ..Article::default()
+    });
+    let (_dir, s) = searcher(&[whitespace]);
+    // Only the duplicate sorts a list: the question is not about that, and
+    // is not listed.
+    let found = s.search("python list sort", 5).unwrap();
+    assert!(place_pages("python list sort", &[], found).is_empty());
+    // With the question's own words, a duplicate's title still finds it,
+    // and a duplicate asked as a whole is still the question asked.
+    for query in [
+        "python strip whitespace",
+        "sort list of strings ignoring whitespace python",
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(
+            titles(&hits),
+            ["Remove all whitespace in a string"],
+            "{query}"
+        );
+    }
+    let hits = s
+        .search("sort list of strings ignoring whitespace python", 5)
+        .unwrap();
+    assert!(hits[0].whole);
+}
+
+#[test]
 fn a_title_and_a_name_name_the_living_holder_over_past_ones() {
     use plumb_core::facts::{Fact, FactKind};
     let holder = |title: &str, views: u64, description: &str, died: Option<&str>| {
@@ -574,6 +611,64 @@ fn sites_called_like_organizations_stay_first() {
         }],
     );
     assert_eq!(placed[0].at, 0);
+}
+
+#[test]
+fn a_name_and_what_the_person_is_name_them() {
+    let person = |title: &str, views: u64, aliases: &[&str], description: &str| {
+        let mut page = page(title, views, aliases);
+        page.description = Some(description.into());
+        page.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1956-07-09".into(),
+        }];
+        page
+    };
+    let (_dir, s) = searcher(&[
+        person(
+            "Tom Hanks",
+            300_000,
+            &[],
+            "American actor and filmmaker (born 1956)",
+        ),
+        person(
+            "Chet Hanks",
+            20_000,
+            &[],
+            "American actor and musician (born 1990)",
+        ),
+        person(
+            "Wolfgang Amadeus Mozart",
+            400_000,
+            &[],
+            "Composer and musician (1756–1791)",
+        ),
+        person("Leopold Mozart", 60_000, &[], "German composer (1719–1787)"),
+        person(
+            "Chris Smith (footballer, born 1981)",
+            2_000,
+            &[],
+            "English footballer",
+        ),
+        person(
+            "Chris Smith (footballer, born 1977)",
+            1_500,
+            &[],
+            "Welsh footballer",
+        ),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("tom hanks actor"), ["Tom Hanks"]);
+    assert_eq!(named("mozart composer"), ["Wolfgang Amadeus Mozart"]);
+    // Not what the description does not say, nor one of several who fit.
+    assert!(named("tom hanks singer").is_empty());
+    assert!(named("chris smith footballer").is_empty());
 }
 
 #[test]
@@ -1324,6 +1419,67 @@ fn a_question_of_only_asking_words_and_code_names_nothing() {
     assert!(questions("what does nasa stand for").is_empty());
     // A question that asks about something is still found.
     assert_eq!(questions("what is a monad"), ["What is a monad?"]);
+}
+
+#[test]
+fn a_question_found_by_its_tags_alone_is_not_about_the_query() {
+    let question = |title: &str, tags: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some(tags.into()),
+            item: Some(item.into()),
+            views: 100_000,
+            ..Article::default()
+        })
+    };
+    let pages = [
+        question(
+            "What is the tax status of assets recovered via bankruptcy proceedings?",
+            "united-states, taxes, capital-gains-tax, australia",
+            "1",
+        ),
+        question(
+            "How long does cooked pasta last in the fridge?",
+            "pasta, storage-lifetime, refrigerator",
+            "2",
+        ),
+        question(
+            "Pandas Merging 101",
+            "python, pandas, merge, dataframe",
+            "3",
+        ),
+        question(
+            "What is the capital gains tax rate in Australia?",
+            "taxes, capital-gains-tax, australia",
+            "4",
+        ),
+    ];
+    // Pages that make the query's other words known, not typos.
+    let known = [
+        "Capital city",
+        "Capital punishment",
+        "Australia",
+        "Refrigerator",
+        "Pandas (software)",
+        "Merge",
+    ]
+    .map(|title| page(title, 1_000, &[]));
+    let (_dir, s) = searcher(&[&pages[..], &known[..]].concat());
+    let questions = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.is_question())
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(
+        questions("what is the capital of australia"),
+        ["What is the capital gains tax rate in Australia?"]
+    );
+    assert!(questions("how does a refrigerator work").is_empty());
+    // Tags still count toward a title that has some of the query.
+    assert_eq!(questions("pandas merge dataframes"), ["Pandas Merging 101"]);
 }
 
 #[test]

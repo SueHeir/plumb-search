@@ -280,9 +280,6 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         let what = what.join(" ");
         (!what.is_empty() && what != "to").then_some(what)
     };
-    let ends_with = |suffix: &[&str]| {
-        words.len() > suffix.len() && words[words.len() - suffix.len()..] == *suffix
-    };
     let near_me = |what: Option<String>| -> Vec<PlaceQuery> {
         what.map(|what| PlaceQuery {
             what,
@@ -292,10 +289,8 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         .into_iter()
         .collect()
     };
-    for suffix in NEAR_ME {
-        if ends_with(suffix) {
-            return near_me(what_of(&words[..words.len() - suffix.len()]));
-        }
+    if let Some((at, _)) = near_me_at(&words) {
+        return near_me(what_of(&words[..at]));
     }
     if words.first().is_some_and(|w| w == "nearby") && words.len() > 1 {
         return near_me(what_of(&words[1..]));
@@ -393,19 +388,44 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
     readings
 }
 
-/// `query` without the "near me" that ends it ("safeway near me" ->
-/// "safeway"), for searching sites: "me" names no site (domain.me,
+/// Where `words` say "near me" or the like, and in how many words: at
+/// their end ("safeway near me"), or after the first word with more after
+/// it ("dentist near me that takes medicaid", "car wash near me open
+/// sunday"), which say no more of where. "nearby" only at the end: "hotels
+/// nearby disney world" is near Disney World.
+fn near_me_at(words: &[String]) -> Option<(usize, usize)> {
+    let said = |at: usize, near: &[&str]| {
+        words
+            .get(at..at + near.len())
+            .is_some_and(|words| words == near)
+    };
+    NEAR_ME
+        .iter()
+        .find(|near| words.len() > near.len() && said(words.len() - near.len(), near))
+        .map(|near| (words.len() - near.len(), near.len()))
+        .or_else(|| {
+            (1..words.len()).find_map(|at| {
+                NEAR_ME
+                    .iter()
+                    .find(|near| near.iter().any(|w| *w == "me" || *w == "my") && said(at, near))
+                    .map(|near| (at, near.len()))
+            })
+        })
+}
+
+/// `query` without the "near me" in it ("safeway near me" -> "safeway",
+/// "dentist near me that takes medicaid" -> "dentist that takes
+/// medicaid"), for searching sites: "me" names no site (domain.me,
 /// maine.gov). `None` when it has none.
 pub fn without_near_me(query: &str) -> Option<String> {
-    let words: Vec<String> = normalize_text(query)
+    let mut words: Vec<String> = normalize_text(query)
         .split(' ')
         .filter(|w| !w.is_empty())
         .map(str::to_string)
         .collect();
-    NEAR_ME.iter().find_map(|suffix| {
-        (words.len() > suffix.len() && words[words.len() - suffix.len()..] == **suffix)
-            .then(|| words[..words.len() - suffix.len()].join(" "))
-    })
+    let (at, length) = near_me_at(&words)?;
+    words.drain(at..at + length);
+    Some(words.join(" "))
 }
 
 /// A place found, and how far it is from where the search looked.
@@ -1749,6 +1769,19 @@ mod tests {
             Some(("coffee".into(), Near::Me))
         );
         assert_eq!(query("Coffee nearby"), Some(("coffee".into(), Near::Me)));
+        // Words after "near me" say no more of where.
+        for (asked, what) in [
+            ("dentist near me that takes medicaid", "dentist"),
+            ("restaurants near me with outdoor seating", "restaurants"),
+            ("urgent care near me open saturday", "urgent care"),
+            ("car wash in my area open sunday", "car wash"),
+        ] {
+            assert_eq!(query(asked), Some((what.into(), Near::Me)), "{asked}");
+        }
+        assert!(!matches!(
+            query("hotels nearby disney world"),
+            Some((_, Near::Me))
+        ));
         assert_eq!(
             query("hotels near the eiffel tower"),
             Some(("hotels".into(), Near::Named("eiffel tower".into())))
@@ -2108,6 +2141,11 @@ mod tests {
             Some("safeway")
         );
         assert_eq!(without_near_me("safeway"), None);
+        assert_eq!(
+            without_near_me("dentist near me that takes medicaid").as_deref(),
+            Some("dentist that takes medicaid")
+        );
+        assert_eq!(without_near_me("hotels nearby disney world"), None);
         // No town of that name, or nothing of that kind there.
         let missing = searcher
             .search("pizza in gotham", None, None, 5)
