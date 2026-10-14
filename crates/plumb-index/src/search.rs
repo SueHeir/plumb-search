@@ -582,7 +582,7 @@ impl Searcher {
         if num_docs == 0 {
             return Ok(Some(WordsOrder::default()));
         }
-        query.add_arabic_spellings(&searcher, &self.fields)?;
+        query.add_marked_spellings(&searcher, &self.fields)?;
         let text_query = query.text_query(&searcher, &self.fields)?;
         let found = searcher.search(
             &text_query,

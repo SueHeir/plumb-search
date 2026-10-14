@@ -84,7 +84,7 @@ impl Searcher {
             return Ok(Default::default());
         }
 
-        query.add_arabic_spellings(&searcher, &self.fields)?;
+        query.add_marked_spellings(&searcher, &self.fields)?;
         let text_query = query.text_query(&searcher, &self.fields)?;
         let num_candidates = cfg.candidates.max(limit).min(num_docs);
         let mut candidates = searcher.search(
