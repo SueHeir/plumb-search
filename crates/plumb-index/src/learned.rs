@@ -230,8 +230,10 @@ fn singular(word: &str) -> &str {
     }
 }
 
-/// The share of `words` that `texts` have between them.
-fn coverage(words: &[String], texts: &[&str]) -> f64 {
+/// The share of `words` that `texts` have between them, or that `joined`
+/// holds run together, as oldnavy.com holds "old navy" (words of three
+/// letters or more).
+fn coverage(words: &[String], texts: &[&str], joined: &str) -> f64 {
     if words.is_empty() {
         return 0.0;
     }
@@ -244,7 +246,10 @@ fn coverage(words: &[String], texts: &[&str]) -> f64 {
                 .collect::<Vec<_>>()
         })
         .collect();
-    let found = words.iter().filter(|w| have.contains(singular(w))).count();
+    let found = words
+        .iter()
+        .filter(|w| have.contains(singular(w)) || (w.len() >= 3 && joined.contains(w.as_str())))
+        .count();
     found as f64 / words.len() as f64
 }
 
@@ -322,7 +327,7 @@ pub fn features(query: &str, rows: &[RowSignals]) -> Vec<[f64; FEATURES.len()]> 
                 f[29] = flag(titled);
                 f[30] = f64::from(row.placing_text_score.unwrap_or(row.text_score));
                 f[33] = under()
-                    .map(|p| coverage(&words, &[&p.title]))
+                    .map(|p| coverage(&words, &[&p.title], ""))
                     .fold(0.0, f64::max);
                 let evidence = row.query_evidence.as_ref();
                 f[34] = evidence.map_or(-1.0, |e| f64::from(e.query_coverage));
@@ -343,8 +348,12 @@ pub fn features(query: &str, rows: &[RowSignals]) -> Vec<[f64; FEATURES.len()]> 
             let description = row.description.as_deref().unwrap_or("");
             // A site's address names it as much as its title does.
             let address = if row.is_page() { "" } else { row.key.as_str() };
-            f[31] = coverage(&words, &[title, address]);
-            f[32] = coverage(&words, &[title, address, description]);
+            let joined: String = plumb_core::domain_label(address)
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect();
+            f[31] = coverage(&words, &[title, address], &joined);
+            f[32] = coverage(&words, &[title, address, description], &joined);
             f[40] = flag(ascii_query && mostly_foreign(&format!("{title} {description}")));
             f[45] = row.reader.map_or(-20.0, f64::from);
             f
