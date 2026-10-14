@@ -1326,6 +1326,7 @@ fn feature_rows(
             "placing_text_score": hit.placing_text_score,
             "link_score": hit.link_score,
             "closeness": closeness(&hit.domain),
+            "query_evidence": hit.query_evidence,
             "country": hit.country,
             "named": hit.named,
             "official": hit.official,

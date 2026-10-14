@@ -1,6 +1,6 @@
 //! How `train-rank` trains a [`Model`]: trees grown as in LambdaMART, or
-//! a small neural network ([`net`]), on the labelled rows of the test
-//! searches.
+//! a small neural network ([`net`]), on the labelled or graded rows of
+//! the test searches.
 
 use plumb_index::learned::{features, Model, Node, RowSignals, FEATURES, LEARNED_ROWS};
 use serde::Deserialize;
@@ -80,13 +80,32 @@ impl Default for TrainOptions {
 }
 
 /// Discount of the row at 0-based `place` in NDCG.
-fn discount(place: usize) -> f64 {
+pub fn discount(place: usize) -> f64 {
     1.0 / ((place + 2) as f64).log2()
 }
 
+/// What `row` is worth to its search, as NDCG's gain `2^grade - 1`: its
+/// LLM grade, an expected answer counting as the best grade, 3.
+pub fn gain(row: &RowSignals) -> f64 {
+    let grade = row.grade.unwrap_or(0).min(3).max(3 * row.label.min(1));
+    f64::from((1u8 << grade) - 1)
+}
+
+/// The DCG of `gains` in their best order.
+pub fn ideal_dcg(gains: &[f64]) -> f64 {
+    let mut sorted = gains.to_vec();
+    sorted.sort_by(|a, b| b.total_cmp(a));
+    sorted
+        .iter()
+        .enumerate()
+        .map(|(i, g)| g * discount(i))
+        .sum()
+}
+
 /// The training rows of `queries`: every query's first
-/// [`LEARNED_ROWS`] rows end to end, their labels, and where each query's
-/// rows start and end. Queries with no labelled row there are left out.
+/// [`LEARNED_ROWS`] rows end to end, their [`gain`]s, and where each
+/// query's rows start and end. Queries whose rows there are all worth
+/// the same are left out.
 type Rows = (Vec<[f64; FEATURES.len()]>, Vec<f64>, Vec<(usize, usize)>);
 
 fn training_rows(queries: &[TrainingQuery]) -> Rows {
@@ -95,12 +114,12 @@ fn training_rows(queries: &[TrainingQuery]) -> Rows {
     let mut groups: Vec<(usize, usize)> = Vec::new();
     for q in queries {
         let rows = &q.rows[..q.rows.len().min(LEARNED_ROWS)];
-        if !rows.iter().any(|r| r.label > 0) || rows.len() < 2 {
+        if rows.iter().all(|r| gain(r) == gain(&rows[0])) {
             continue;
         }
         let start = x.len();
         x.extend(features(&q.searched, rows));
-        labels.extend(rows.iter().map(|r| f64::from(r.label.min(1))));
+        labels.extend(rows.iter().map(gain));
         groups.push((start, x.len()));
     }
     (x, labels, groups)
@@ -165,8 +184,7 @@ fn lambda_loss(scores: &[f64], labels: &[f64], groups: &[(usize, usize)]) -> (Ve
     let mut hess = vec![0.0; scores.len()];
     for &(start, end) in groups {
         let place = places(scores, start, end);
-        let relevant = labels[start..end].iter().filter(|&&l| l > 0.0).count();
-        let best: f64 = (0..relevant).map(discount).sum();
+        let best = ideal_dcg(&labels[start..end]);
         if best <= 0.0 {
             continue;
         }
@@ -234,8 +252,7 @@ fn lambdas(scores: &[f64], labels: &[f64], groups: &[(usize, usize)]) -> (Vec<f6
     let mut hess = vec![0.0; scores.len()];
     for &(start, end) in groups {
         let place = places(scores, start, end);
-        let relevant = labels[start..end].iter().filter(|&&l| l > 0.0).count();
-        let best: f64 = (0..relevant).map(discount).sum();
+        let best = ideal_dcg(&labels[start..end]);
         if best <= 0.0 {
             continue;
         }

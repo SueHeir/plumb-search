@@ -8,7 +8,8 @@
 //! pages under a site), and scores every row. The rows are then listed by
 //! that score. It is gradient-boosted trees trained with LambdaMART
 //! (`plumb-tools train-rank`), which learns from which row each test
-//! search expects first; no search logs, only the labelled test searches.
+//! search expects first and from an LLM's grades of every row of other
+//! searches; no search logs.
 
 use std::sync::OnceLock;
 
@@ -37,11 +38,15 @@ const SETS: [&str; 8] = [
     "podcasts",
 ];
 
+/// Page sets told apart since, whose values follow the others.
+const LATER_SETS: [&str; 3] = ["reference", "subpages", "docs"];
+
 /// The signals of one page, as the model reads them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PageSignals {
     pub set: String,
+    pub title: String,
     pub score: f32,
     pub named: bool,
     pub popularity: f32,
@@ -52,6 +57,7 @@ impl PageSignals {
     fn of(hit: &PageHit) -> Self {
         PageSignals {
             set: hit.page.set.clone(),
+            title: hit.page.title.clone(),
             score: hit.score,
             named: hit.named,
             popularity: hit.popularity,
@@ -68,6 +74,8 @@ impl PageSignals {
 pub struct RowSignals {
     /// `site` or `page`.
     pub kind: String,
+    /// A site's domain or a page's address.
+    pub key: String,
     /// A page's set; empty for a site.
     pub set: String,
     pub score: f32,
@@ -83,17 +91,20 @@ pub struct RowSignals {
     /// A site's country, `None` for global sites.
     pub country: Option<String>,
     pub title: Option<String>,
+    pub description: Option<String>,
     /// A page's popularity.
     pub popularity: f32,
     /// A page the query asks for in full.
     pub whole: bool,
     /// Pages shown under a site.
     pub under: Vec<PageSignals>,
-    /// Diagnostic evidence only. This does not add model input features
-    /// or change the compatible built-in model contract.
+    /// How a site matches the query, as the hand-made ranking found.
     pub query_evidence: Option<crate::CandidateEvidence>,
     /// In training data: 1 when the row holds an expected answer.
     pub label: u8,
+    /// In training data: how well the row meets the search, 0 to 3, as
+    /// an LLM graded it.
+    pub grade: Option<u8>,
 }
 
 impl RowSignals {
@@ -101,6 +112,7 @@ impl RowSignals {
     pub fn site(hit: &Hit, under: &[&PageHit]) -> Self {
         RowSignals {
             kind: "site".into(),
+            key: hit.domain.clone(),
             score: hit.score,
             text_score: hit.text_score,
             placing_text_score: hit.placing_text_score,
@@ -110,6 +122,7 @@ impl RowSignals {
             demand: hit.demand,
             country: hit.country.clone(),
             title: hit.title.clone(),
+            description: hit.description.clone(),
             query_evidence: hit.query_evidence.clone(),
             under: under.iter().map(|p| PageSignals::of(p)).collect(),
             ..RowSignals::default()
@@ -120,11 +133,14 @@ impl RowSignals {
     pub fn page(hit: &PageHit) -> Self {
         RowSignals {
             kind: "page".into(),
+            key: hit.page.url.clone(),
             set: hit.page.set.clone(),
             score: hit.score,
             named: hit.named,
             popularity: hit.popularity,
             whole: hit.whole,
+            title: Some(hit.page.title.clone()),
+            description: hit.page.description.clone(),
             ..RowSignals::default()
         }
     }
@@ -135,7 +151,7 @@ impl RowSignals {
 }
 
 /// The names of the values [`features`] gives each row, in order.
-pub const FEATURES: [&str; 31] = [
+pub const FEATURES: [&str; 45] = [
     "pos_inv",
     "pos",
     "nwords",
@@ -167,18 +183,91 @@ pub const FEATURES: [&str; 31] = [
     "s_under_pop",
     "s_has_title",
     "s_text_plain",
+    "cover_title",
+    "cover_text",
+    "cover_under",
+    "e_cover",
+    "e_subst",
+    "e_close",
+    "e_full_name",
+    "e_typed",
+    "e_tier",
+    "foreign",
+    "same_label_above",
+    "set_reference",
+    "set_subpages",
+    "set_docs",
 ];
+
+/// The query's words that say what it is about, as
+/// [`plumb_core::normalize_text`] writes them: all but function and
+/// filler words, or all of them when that leaves none.
+fn main_words(query: &str) -> Vec<String> {
+    let all: Vec<String> = plumb_core::normalize_text(query)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let mut main: Vec<String> = all
+        .iter()
+        .filter(|w| !plumb_core::is_function_word(w) && !crate::FILLER_WORDS.contains(&w.as_str()))
+        .cloned()
+        .collect();
+    if main.is_empty() {
+        main = all;
+    }
+    main.dedup();
+    main
+}
+
+/// A word with a plural `s` taken off, so "cicadas" matches "cicada".
+fn singular(word: &str) -> &str {
+    match word.strip_suffix('s') {
+        Some(stem) if stem.chars().count() >= 3 => stem,
+        _ => word,
+    }
+}
+
+/// The share of `words` that `texts` have between them.
+fn coverage(words: &[String], texts: &[&str]) -> f64 {
+    if words.is_empty() {
+        return 0.0;
+    }
+    let have: std::collections::HashSet<String> = texts
+        .iter()
+        .flat_map(|t| {
+            plumb_core::normalize_text(t)
+                .split_whitespace()
+                .map(|w| singular(w).to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let found = words.iter().filter(|w| have.contains(singular(w))).count();
+    found as f64 / words.len() as f64
+}
+
+/// Whether most letters of `text` are outside ASCII.
+fn mostly_foreign(text: &str) -> bool {
+    let (mut letters, mut foreign) = (0, 0);
+    for ch in text.chars().filter(|c| c.is_alphabetic()) {
+        letters += 1;
+        foreign += usize::from(!ch.is_ascii());
+    }
+    letters > 0 && foreign * 2 > letters
+}
 
 /// What the model reads of each of `rows`, listed in this order for
 /// `query`: one value per name of [`FEATURES`]. Values a row does not
 /// have (a page's text match) are 0.
 pub fn features(query: &str, rows: &[RowSignals]) -> Vec<[f64; FEATURES.len()]> {
-    let words = query.split_whitespace().count() as f64;
+    let nwords = query.split_whitespace().count() as f64;
     let question = f64::from(u8::from(crate::pages::asked_as_question(query)));
     let sites = || rows.iter().filter(|r| !r.is_page());
     let best_score = sites().map(|r| f64::from(r.score)).fold(0.0, f64::max);
     let best_link = sites().map(|r| f64::from(r.link_score)).fold(0.0, f64::max);
     let flag = |b: bool| f64::from(u8::from(b));
+    let words = main_words(query);
+    let ascii_query = query.is_ascii();
+    let label = |row: &RowSignals| plumb_core::domain_label(&row.key);
     rows.iter()
         .enumerate()
         .map(|(i, row)| {
@@ -186,12 +275,16 @@ pub fn features(query: &str, rows: &[RowSignals]) -> Vec<[f64; FEATURES.len()]> 
             let pos = (i + 1) as f64;
             f[0] = 1.0 / pos;
             f[1] = pos;
-            f[2] = words;
+            f[2] = nwords;
             f[3] = question;
             f[4] = flag(row.is_page());
             if row.is_page() {
                 if let Some(set) = SETS.iter().position(|s| row.set.starts_with(s)) {
                     f[5 + set] = 1.0;
+                }
+                // Sets the first models were not trained with.
+                if let Some(set) = LATER_SETS.iter().position(|s| row.set.starts_with(s)) {
+                    f[42 + set] = 1.0;
                 }
                 f[13] = f64::from(row.score);
                 f[14] = flag(row.named);
@@ -225,7 +318,31 @@ pub fn features(query: &str, rows: &[RowSignals]) -> Vec<[f64; FEATURES.len()]> 
                 let titled = row.title.as_deref().is_some_and(|t| !t.trim().is_empty());
                 f[29] = flag(titled);
                 f[30] = f64::from(row.placing_text_score.unwrap_or(row.text_score));
+                f[33] = under()
+                    .map(|p| coverage(&words, &[&p.title]))
+                    .fold(0.0, f64::max);
+                let evidence = row.query_evidence.as_ref();
+                f[34] = evidence.map_or(-1.0, |e| f64::from(e.query_coverage));
+                f[35] = evidence.map_or(-1.0, |e| f64::from(e.substantive_coverage));
+                f[36] = evidence
+                    .and_then(|e| e.semantic_closeness)
+                    .map_or(-1.0, f64::from);
+                f[37] = flag(evidence.is_some_and(|e| e.full_name));
+                f[38] = flag(evidence.is_some_and(|e| e.typed_domain));
+                f[39] = evidence.map_or(-1.0, |e| f64::from(e.relevance_tier));
+                f[41] = flag(
+                    rows[..i]
+                        .iter()
+                        .any(|above| !above.is_page() && label(above) == label(row)),
+                );
             }
+            let title = row.title.as_deref().unwrap_or("");
+            let description = row.description.as_deref().unwrap_or("");
+            // A site's address names it as much as its title does.
+            let address = if row.is_page() { "" } else { row.key.as_str() };
+            f[31] = coverage(&words, &[title, address]);
+            f[32] = coverage(&words, &[title, address, description]);
+            f[40] = flag(ascii_query && mostly_foreign(&format!("{title} {description}")));
             f
         })
         .collect()
@@ -290,10 +407,17 @@ impl Model {
         }
     }
 
-    /// The model in `json` (as `plumb-tools train-rank` writes it).
+    /// The model in `json` (as `plumb-tools train-rank` writes it). A
+    /// model made before features were added reads the ones it knew.
     pub fn from_json(json: &str) -> Result<Self> {
         let model: Model = serde_json::from_str(json).context("reading a ranking model")?;
-        if model.features != FEATURES {
+        if model.features.len() > FEATURES.len()
+            || model
+                .features
+                .iter()
+                .zip(FEATURES)
+                .any(|(made, now)| made != now)
+        {
             bail!("the ranking model was made for other features");
         }
         Ok(model)
