@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 
 use plumb_core::facts::FactKind;
+use plumb_core::key_pages::PageIntent;
 use plumb_core::{
     adult_level, host_of, normalize_text, registrable_domain, AdultLevel, Operators, SafeSearch,
 };
@@ -13,7 +14,7 @@ use super::docs::{docs_found_by_words, docs_named_as_code};
 use super::sites::{base_title, describes_an_organization, is_government, site_is_titled, squash};
 use super::{
     LearnedPlace, Page, PageHit, PlacedPage, ASKING_WORDS, DOCS_SET, FILMS_SET, GITHUB_SET,
-    PODCASTS_SET, SUBPAGES_SET, WIKIDATA_SET,
+    PODCASTS_SET, RECORDS_SET, SUBPAGES_SET, WIKIDATA_SET,
 };
 use crate::analysis;
 
@@ -244,7 +245,8 @@ pub(crate) fn named_page_site<'a>(
 /// A page the learned ranking listed on its own ([`PageHit::learned`])
 /// stays where it put it: before the same site, or last, except that a
 /// docs page found by its words never comes before the best site.
-pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -> Vec<PlacedPage> {
+pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
+    let (records, mut pages): (Vec<PageHit>, Vec<PageHit>) = pages.into_iter().partition(is_record);
     pages.retain(|hit| {
         crate::health::page_allowed(query, &hit.page) && subpage_asked(query, sites, hit)
     });
@@ -265,8 +267,19 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -
             None => {}
         }
     }
+    placed.extend(records.into_iter().map(|hit| PlacedPage {
+        hit,
+        under: None,
+        at: 0,
+    }));
     keep_page_rules(query, sites, &mut placed);
     placed
+}
+
+/// Whether `hit` is a record the query names by its identifier
+/// ([`RECORDS_SET`]).
+pub(crate) fn is_record(hit: &PageHit) -> bool {
+    hit.page.set == RECORDS_SET
 }
 
 /// Best sites of a query looked at for the site of a subpage found by its
@@ -300,8 +313,9 @@ const TITLE_STOP_WORDS: &[&str] = &[
 /// all sorts of searches: "seven summits" is not a leadership summit at
 /// jnj.com, nor "mount everest" a film review at ign.com, nor "work
 /// australia" Live Science's story on how a second El Niño works. A tag
-/// archive is listed only on one of the best sites, named or not. Pages of
-/// other sets always may.
+/// archive, or a page titled just what kind of page it is
+/// ([`is_section_page`]), is listed only on one of the best sites, named
+/// or not. Pages of other sets always may.
 pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
     if !hit.page.is_site_page() {
         return true;
@@ -317,7 +331,9 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
     // A site's list of its posts with one tag is titled just the tag, and
     // says nothing of it: jnj.com's "Lupus" ("Explore Johnson & Johnson's
     // lupus resources") was named by "lupus" and led it, above the article.
-    if is_tag_archive(&hit.page.url) {
+    // So is a site's news or contact page titled just that: cam.ac.uk's
+    // "News" was named by "news" and led it, above every news site.
+    if is_tag_archive(&hit.page.url) || is_section_page(&hit.page.title) {
         return on_best_site();
     }
     if hit.named {
@@ -418,6 +434,42 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
         })
 }
 
+/// Titles of a site's news and events pages, normalized. With the titles
+/// of its key pages ([`PageIntent::of_title`]: "Contact Us", "Careers"),
+/// they say what kind of page it is, not what it is about.
+const SECTION_TITLES: &[&str] = &[
+    "news and events",
+    "calendar",
+    "events calendar",
+    "press",
+    "press room",
+    "media",
+    "media center",
+    "media centre",
+    "whats on",
+];
+
+/// Last words of such titles, alone or after one other word: "News",
+/// "Latest News", "Business News", "Upcoming Events", "Press Releases".
+const SECTION_ENDS: &[&str] = &["news", "events", "releases", "announcements", "updates"];
+
+/// Whether `title`, before any site name after a bar or a dash, only says
+/// what kind of page it is: "News", "Upcoming Events", "Press Releases |
+/// Target Corporate", "Contact Us".
+fn is_section_page(title: &str) -> bool {
+    let head = [" | ", " - ", " – ", " — "]
+        .iter()
+        .filter_map(|mark| title.split_once(mark).map(|(head, _)| head))
+        .min_by_key(|head| head.len())
+        .unwrap_or(title);
+    let words = normalize_text(head);
+    let words: Vec<&str> = words.split_whitespace().collect();
+    let ends_so = words.len() <= 2 && words.last().is_some_and(|w| SECTION_ENDS.contains(w));
+    ends_so
+        || SECTION_TITLES.contains(&words.join(" ").as_str())
+        || PageIntent::of_title(head).is_some()
+}
+
 /// Whether `url` is a site's list of its posts with one tag:
 /// `https://www.jnj.com/tag/lupus`.
 fn is_tag_archive(url: &str) -> bool {
@@ -514,8 +566,10 @@ fn on_site(page: &Page, domain: &str) -> bool {
 }
 
 /// The places no ranking overrides, applied after [`place_pages`] and
-/// after [`crate::learned::reorder`]: the docs page of an API the query
-/// names as code comes first ("Object.keys" wants MDN's page, see
+/// after [`crate::learned::reorder`]: a record the query names by its
+/// identifier comes first ("rfc 3339" wants RFC 3339 itself, not
+/// rfc-editor.org); then the docs page of an API the query
+/// names as code ("Object.keys" wants MDN's page, see
 /// [`docs_named_as_code`]); any other docs page found by its words, or
 /// another site's page while the query names the best site's owner, never
 /// comes before the best site (see [`kept_below`]); a namesake of a better
@@ -535,7 +589,7 @@ pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<Place
         if page.under.is_some() {
             continue;
         }
-        if code(page) {
+        if is_record(&page.hit) || code(page) {
             page.at = 0;
         } else if namesake {
             page.at = page.at.max(PARTIAL_AFTER).min(sites.len());
@@ -544,7 +598,7 @@ pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<Place
         }
     }
     // Pages at one place are listed in order, so it leads the questions too.
-    placed.sort_by_key(|p| !code(p));
+    placed.sort_by_key(|p| (!is_record(&p.hit), !code(p)));
     if asks_for_podcasts(query) {
         return;
     }

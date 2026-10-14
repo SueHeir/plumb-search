@@ -15,6 +15,7 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 use super::building::schema;
 use super::page::is_item_id;
 use super::placing::is_year;
+use super::records::records_named;
 use super::scoring::truncate_keeping_inner_pages;
 use super::sites::base_title;
 use super::{
@@ -48,6 +49,10 @@ pub(crate) enum Hint {
     Regnal,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
+    /// The thing, of which one part is asked about: "ibuprofen side
+    /// effects", "volcano facts". A search for papers keeps those words
+    /// ("loss function").
+    Aspect,
     /// Only pages the name names: what a fact question asks about, or the
     /// list a search for one asks for ("list of popes" of "popes in
     /// order"). "madrid spanish" (of "madrid spanish capital city") names
@@ -115,6 +120,15 @@ const HINT_LEADS: &[&str] = &[
     "define ",
     "definition of ",
     "meaning of ",
+    "symptoms of ",
+    "side effects of ",
+    "benefits of ",
+    "health benefits of ",
+    "causes of ",
+    "treatment for ",
+    "treatment of ",
+    "uses of ",
+    "examples of ",
     "info about ",
     "information about ",
     "facts about ",
@@ -327,7 +341,78 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" stands for", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
+    // The article on a drug, an illness or a thing of science says what
+    // these ask, and none of the words: "melatonin dosage", "shingles
+    // symptoms", "photosynthesis equation".
+    (" side effects", Hint::Aspect),
+    (" symptoms", Hint::Aspect),
+    (" dosage", Hint::Aspect),
+    (" dose", Hint::Aspect),
+    (" health benefits", Hint::Aspect),
+    (" benefits", Hint::Aspect),
+    (" treatment", Hint::Aspect),
+    (" causes", Hint::Aspect),
+    (" facts", Hint::Aspect),
+    (" uses", Hint::Aspect),
+    (" diagram", Hint::Aspect),
 ];
+
+/// What a search asks of a thing of science, which the thing's article
+/// says, before its name with "of" or after it: "melting point of iron",
+/// "iron melting point". Longer first: "glucose chemical formula" is not
+/// about a "glucose chemical". Those a fact question asks ("atomic number
+/// of gold", "area of france", "radius of mars") are left to
+/// [`plumb_core::facts::fact_asked`].
+const PROPERTIES: &[&str] = &[
+    "melting point",
+    "boiling point",
+    "freezing point",
+    "chemical formula",
+    "formula",
+    "equation",
+    "structure",
+    "function",
+    "molar mass",
+    "atomic mass",
+    "atomic weight",
+    "density",
+    "half life",
+    "half-life",
+];
+
+/// Properties asked only before the name: "temperature of the sun",
+/// "volume of a sphere", but "oven temperature" is about an oven's
+/// setting and "sound volume" about a knob.
+const PROPERTIES_OF: &[&str] = &[
+    "mass",
+    "diameter",
+    "temperature",
+    "ph",
+    "volume",
+    "surface area",
+    "perimeter",
+    "circumference",
+];
+
+/// The thing `q` asks a property of ([`PROPERTIES`]): "iron" of "melting
+/// point of iron" and of "iron melting point", "sun" of "mass of the sun".
+fn property_of(q: &str) -> Option<&str> {
+    let before = PROPERTIES
+        .iter()
+        .chain(PROPERTIES_OF)
+        .find_map(|property| q.strip_prefix(property)?.strip_prefix(" of "));
+    let thing = before.or_else(|| {
+        PROPERTIES
+            .iter()
+            .find_map(|property| q.strip_suffix(property)?.strip_suffix(' '))
+    })?;
+    Some(
+        ["the ", "a ", "an "]
+            .iter()
+            .find_map(|article| thing.strip_prefix(article))
+            .unwrap_or(thing),
+    )
+}
 
 /// The list article a search for a list asks for without saying "list
 /// of": "list of popes" of "popes in order", "list of us presidents" of
@@ -369,11 +454,50 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     if let Some((rest, tail_hint)) = HINT_TAILS
         .iter()
         .find_map(|(tail, h)| Some((name.strip_suffix(tail)?, *h)))
+        .or_else(|| Some((property_of(name)?, Hint::Aspect)))
     {
         name = rest;
         hint = Some(tail_hint);
     }
+    // "how did steve jobs die", "what is einstein known for": what an
+    // article tells, asked as a question.
+    let asked_of = [
+        ("how did ", " die", Hint::Person),
+        ("what did ", " die of", Hint::Person),
+        ("what did ", " die from", Hint::Person),
+        ("how many kids does ", " have", Hint::Person),
+        ("how many kids did ", " have", Hint::Person),
+        ("how many children does ", " have", Hint::Person),
+        ("how many children did ", " have", Hint::Person),
+        ("where was ", " buried", Hint::Person),
+        ("", " buried", Hint::Person),
+        ("what did ", " invent", Hint::Person),
+        ("what did ", " discover", Hint::Person),
+        ("why is ", " famous", Hint::Any),
+        ("why was ", " famous", Hint::Any),
+        ("", " known for", Hint::Any),
+        ("", " famous for", Hint::Any),
+        ("", " real name", Hint::Person),
+        ("", " full name", Hint::Person),
+        ("", " birth name", Hint::Person),
+        ("", " iq", Hint::Person),
+    ];
+    if let Some((rest, asked)) = asked_of.iter().find_map(|(lead, tail, asked)| {
+        Some((name.strip_prefix(lead)?.strip_suffix(tail)?, *asked))
+    }) {
+        name = rest;
+        hint = Some(asked);
+    }
     let name = name.trim();
+    // "obama's daughters" and "einstein's biography" ask about Obama and
+    // Einstein, whom "obama's" does not name. A name only asked about
+    // keeps it: "what is mcdonald's".
+    let name = match hint {
+        Some(Hint::Person | Hint::Any) if !q.ends_with(name) => {
+            name.strip_suffix("'s").unwrap_or(name)
+        }
+        _ => name,
+    };
     let hint = hint?;
     (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
 }
@@ -883,13 +1007,19 @@ impl PageSearcher {
         Ok(hits)
     }
 
-    /// The best `limit` pages for `query`, best first.
+    /// The best `limit` pages for `query`, best first, after the records
+    /// it names by their identifier ([`records_named`]).
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
         let paper = PaperQuery::parse(query)?;
-        if paper.constrained {
-            return self.search_papers(&paper, limit);
-        }
-        self.search_naming_docs(query, &Operators::default(), false, limit)
+        let mut hits = if paper.constrained {
+            self.search_papers(&paper, limit)?
+        } else {
+            self.search_naming_docs(query, &Operators::default(), false, limit)?
+        };
+        let mut records = records_named(query);
+        hits.retain(|hit| !records.iter().any(|record| record.page.url == hit.page.url));
+        records.append(&mut hits);
+        Ok(records)
     }
 
     pub(crate) fn search_general(
@@ -944,8 +1074,12 @@ impl PageSearcher {
         // John numbering and not List of popes, which "list of popes"
         // names. A monarch or pope typed with a number is searched in Roman
         // numerals when no article is named as typed: "charles 3", "henry
-        // the 8th".
+        // the 8th". A hinted name is not searched when a page is called
+        // the whole query: "plaster cast", "ice age" and "horror film" are
+        // not about plaster, ice or horror.
+        let called = hits.iter().any(|hit| hit.named && !hit.whole);
         let hinted = hinted_name(query)
+            .filter(|_| !called)
             .or_else(|| {
                 list_asked(query)
                     .or_else(|| {
@@ -1019,6 +1153,9 @@ impl PageSearcher {
                     }
                 }
             }
+            // Only the thing's article: "python examples" asks for code,
+            // not the repositories called Python.
+            Hint::Aspect => found.retain(|hit| hit.named && hit.page.is_article()),
             // Only a work of the kinds asked for, and not when a page is
             // called the whole query: "power chords" is not about the song
             // "Power".

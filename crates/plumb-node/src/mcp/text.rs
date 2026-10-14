@@ -113,6 +113,7 @@ fn set_label(set: &str) -> &str {
         "github" => "GitHub",
         "books" => "Book",
         "papers" => "Paper",
+        "records" => "Record",
         other => other,
     }
 }

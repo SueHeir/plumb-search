@@ -144,6 +144,9 @@ pub fn route(query: &str, answer: Option<Kind>, country: Option<&str>) -> Option
     if let Some(route) = tools(&text) {
         return Some(route);
     }
+    if let Some(route) = government(&text, country) {
+        return Some(route);
+    }
     near_me(&text)
 }
 
@@ -519,6 +522,179 @@ fn near_me(text: &str) -> Option<Route> {
     }
 }
 
+/// A government service's page for one country: the country's code, the
+/// site's domain as the index keys it, the page's address and its title.
+type OfficialPage = (&'static str, &'static str, &'static str, &'static str);
+
+/// Government services that paid middlemen also sell under names that
+/// look official ("U.S. Passport Online Application", "US Birth
+/// Certificates and Vital Records"), which rank well for the service's
+/// words: what the service is called, and its official page by country
+/// ([`OfficialPage`]).
+const GOVERNMENT: &[(&[&str], &[OfficialPage])] = &[
+    (
+        &["passport", "passports"],
+        &[
+            (
+                "US",
+                "travel.state.gov",
+                "https://travel.state.gov/content/travel/en/passports.html",
+                "U.S. Passports | Travel.State.Gov",
+            ),
+            (
+                "GB",
+                "www.gov.uk",
+                "https://www.gov.uk/apply-renew-passport",
+                "Apply for or renew a British passport - GOV.UK",
+            ),
+        ],
+    ),
+    (
+        &[
+            "birth certificate",
+            "birth certificates",
+            "death certificate",
+            "marriage certificate",
+            "vital records",
+        ],
+        &[
+            (
+                "US",
+                "cdc.gov",
+                "https://www.cdc.gov/nchs/w2w/index.htm",
+                "Where to Write for Vital Records | CDC",
+            ),
+            (
+                "GB",
+                "www.gov.uk",
+                "https://www.gov.uk/order-copy-birth-death-marriage-certificate",
+                "Order a copy of a birth, death or marriage certificate - GOV.UK",
+            ),
+        ],
+    ),
+    (
+        &["real id"],
+        &[(
+            "US",
+            "usa.gov",
+            "https://www.usa.gov/real-id",
+            "REAL ID | USAGov",
+        )],
+    ),
+    (
+        &["social security card", "social security cards"],
+        &[(
+            "US",
+            "ssa.gov",
+            "https://www.ssa.gov/number-card",
+            "Social Security number and card | SSA",
+        )],
+    ),
+];
+
+/// Words around a service's name that ask how to get or use it.
+const GOVERNMENT_ASKING: &[&str] = &[
+    "how",
+    "where",
+    "what",
+    "when",
+    "get",
+    "getting",
+    "apply",
+    "applying",
+    "application",
+    "renew",
+    "renewing",
+    "renewal",
+    "replace",
+    "replacement",
+    "lost",
+    "stolen",
+    "order",
+    "request",
+    "copy",
+    "certified",
+    "expedite",
+    "expedited",
+    "status",
+    "check",
+    "cost",
+    "fee",
+    "fees",
+    "need",
+    "required",
+    "requirements",
+    "documents",
+    "long",
+    "much",
+    "take",
+    "new",
+    "first",
+    "online",
+    "form",
+    "forms",
+];
+
+/// Words that may go with those, saying nothing themselves: "my" alone
+/// does not ask for a passport ("my passport" is a hard drive).
+const GOVERNMENT_FILLER: &[&str] = &[
+    "can", "do", "does", "is", "i", "you", "it", "to", "a", "an", "the", "my", "for", "of", "s",
+];
+
+/// Words that say whose service is meant, and the country's code.
+const GOVERNMENT_COUNTRIES: &[(&str, &str)] = &[
+    ("us", "US"),
+    ("usa", "US"),
+    ("u", "US"),
+    ("american", "US"),
+    ("uk", "GB"),
+    ("british", "GB"),
+    ("britain", "GB"),
+];
+
+/// The official page of the government service `text` (normalized) asks
+/// how to get: "how to renew passport", "lost passport", "how to get a
+/// birth certificate", "real id requirements". Only the service's name
+/// with words that ask for it or say whose it is, and one of those: "us
+/// passport" or "passport renewal", not "passport photo", "laravel
+/// passport" or "my passport". The country said, else the searcher's
+/// (the United States when not given).
+fn government(text: &str, country: Option<&str>) -> Option<Route> {
+    let words: Vec<&str> = text.split(' ').collect();
+    GOVERNMENT.iter().find_map(|(names, pages)| {
+        let rest = names.iter().find_map(|name| {
+            let name: Vec<&str> = name.split(' ').collect();
+            let at = words.windows(name.len()).position(|run| run == name)?;
+            Some([&words[..at], &words[at + name.len()..]].concat())
+        })?;
+        let said = rest.iter().find_map(|word| {
+            GOVERNMENT_COUNTRIES
+                .iter()
+                .find(|(country_word, _)| country_word == word)
+                .map(|(_, code)| *code)
+        });
+        let asks = rest.iter().any(|word| GOVERNMENT_ASKING.contains(word));
+        let known = |word: &&str| {
+            GOVERNMENT_ASKING.contains(word)
+                || GOVERNMENT_FILLER.contains(word)
+                || GOVERNMENT_COUNTRIES.iter().any(|(name, _)| name == word)
+        };
+        if !rest.iter().all(known) || !(asks || said.is_some()) {
+            return None;
+        }
+        let country = said.or(country).unwrap_or("US");
+        let &(_, domain, url, title) = pages
+            .iter()
+            .find(|(code, ..)| code.eq_ignore_ascii_case(country))?;
+        Some(Route {
+            sources: vec![Source {
+                domain,
+                page: Some((url.to_string(), title.to_string())),
+            }],
+        })
+    })
+}
+
 /// Lists `route`'s sources first among `hits`, below a first site the
 /// query names in full, each as the index has it (`site` looks one up) or
 /// moved up from further down. Sources the index lacks are left out. The
@@ -666,6 +842,74 @@ mod tests {
             define.sources[2].page.as_ref().unwrap().0,
             "https://en.wiktionary.org/wiki/prioritize"
         );
+    }
+
+    #[test]
+    fn routes_government_services_to_their_official_page() {
+        let page = |query: &str, country: Option<&str>| {
+            route(query, None, country)
+                .and_then(|route| route.sources[0].page.clone())
+                .map(|(url, _)| url)
+        };
+        let passports = "https://travel.state.gov/content/travel/en/passports.html";
+        for query in [
+            "how to renew passport",
+            "how to get a passport",
+            "passport renewal",
+            "lost passport",
+            "how long does it take to get a passport",
+            "us passport",
+            "u.s. passport application",
+        ] {
+            assert_eq!(page(query, None).as_deref(), Some(passports), "{query}");
+        }
+        assert_eq!(
+            page("how to renew my passport", Some("GB")).as_deref(),
+            Some("https://www.gov.uk/apply-renew-passport")
+        );
+        // Whose passport is said: a British one from the United States.
+        assert_eq!(
+            page("uk passport renewal", Some("US")).as_deref(),
+            Some("https://www.gov.uk/apply-renew-passport")
+        );
+        assert_eq!(
+            page("how to get a birth certificate", None).as_deref(),
+            Some("https://www.cdc.gov/nchs/w2w/index.htm")
+        );
+        assert_eq!(
+            page("order a copy of my birth certificate", Some("GB")).as_deref(),
+            Some("https://www.gov.uk/order-copy-birth-death-marriage-certificate")
+        );
+        assert_eq!(
+            page("real id requirements", None).as_deref(),
+            Some("https://www.usa.gov/real-id")
+        );
+        for query in [
+            "how to get a social security card",
+            "replace social security card",
+            "lost social security card",
+        ] {
+            assert_eq!(
+                page(query, None).as_deref(),
+                Some("https://www.ssa.gov/number-card"),
+                "{query}"
+            );
+        }
+        // No page for that country, or words that ask for something else.
+        assert_eq!(page("how to renew passport", Some("FR")), None);
+        for query in [
+            "passport",
+            "my passport",
+            "passport photo",
+            "laravel passport get token",
+            "passport index",
+            "passport office near me",
+            "obama birth certificate",
+            "birth certificate translation",
+            "social security card template",
+        ] {
+            assert_eq!(page(query, None), None, "{query}");
+        }
     }
 
     #[test]

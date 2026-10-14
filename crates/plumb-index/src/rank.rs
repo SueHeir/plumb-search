@@ -616,14 +616,16 @@ impl Searcher {
                 remainder.max(qualified_semantic.unwrap_or(0.0)) * subject_share
             };
             let relevance_tier = u8::from(cfg.whole_query_relevance && convincing);
-            // A site whose domain the whole query names stays whatever its
-            // language: "spiegel" finds spiegel.de with English chosen. So
-            // does a well-known site the query's first two words or more
-            // name: "real madrid tickets" keeps realmadrid.com, "deutsche
-            // bahn tickets" bahn.de. One word is too often a common one
-            // ("free games" is not free.fr's).
+            // A site the whole query names stays whatever its language, by
+            // its domain ("spiegel" finds spiegel.de with English chosen),
+            // an alias or what most links call it ("vietnam railways" finds
+            // vr.com.vn, written in Vietnamese). So does a well-known site
+            // the query's first two words or more name: "real madrid
+            // tickets" keeps realmadrid.com, "deutsche bahn tickets"
+            // bahn.de. One word is too often a common one ("free games" is
+            // not free.fr's).
             let known_name = name.typed
-                || name.label >= query.len
+                || name.words() >= query.len
                 || name.words() >= 2 && link_score >= WELL_KNOWN_LINK_SCORE;
             if let (Some(wanted), Some(site)) = (&language, column.language(addr.doc_id)) {
                 if !language_fits(wanted, &site) && !known_name {
@@ -988,6 +990,10 @@ impl Searcher {
             }
             _ => None,
         };
+        let site_search = match site_search {
+            Some(link) => Some(link),
+            None => self.site_search_at_end(&searcher, query_text, cfg)?,
+        };
 
         let ranked = self.untitled_last(&searcher, ranked, query_text, limit)?;
         // A few more than asked for, so that copies left out below leave
@@ -1010,8 +1016,7 @@ impl Searcher {
             let missing_words = missing.contains(&ranked.addr);
             let (mut hit, fingerprint) = self.hit(&searcher, ranked)?;
             hit.missing_words = missing_words;
-            // Junk stays out unless the query names it.
-            if named || !junk::left_out(query_text, &hit) {
+            if !junk::left_out(query_text, &hit, named) {
                 hits.push(hit);
                 fingerprints.push(fingerprint);
             }
@@ -1045,7 +1050,10 @@ pub(crate) fn best_link_score(searcher: &tantivy::Searcher, docs: &HashSet<DocAd
 }
 
 /// The link score of each of `docs` that has one.
-fn link_scores(searcher: &tantivy::Searcher, docs: &HashSet<DocAddress>) -> Vec<(f32, DocAddress)> {
+pub(crate) fn link_scores(
+    searcher: &tantivy::Searcher,
+    docs: &HashSet<DocAddress>,
+) -> Vec<(f32, DocAddress)> {
     let mut columns: HashMap<u32, Option<tantivy::columnar::Column<f64>>> = HashMap::new();
     let mut scores = Vec::with_capacity(docs.len());
     for &addr in docs {
