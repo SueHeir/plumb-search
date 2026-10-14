@@ -3,6 +3,30 @@
 use super::*;
 
 #[test]
+fn a_judged_name_finds_what_it_judges() {
+    let (_dir, s) = searcher(&[
+        page("Blood pressure", 90_000, &[]),
+        page("Normal distribution", 80_000, &[]),
+        page("Distribution (economics)", 20_000, &[]),
+        page("BMI (company)", 5_000, &["BMI"]),
+    ]);
+    let named = |query: &str| -> Vec<String> {
+        let hits = s.search(query, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("what is a normal blood pressure"), ["Blood pressure"]);
+    // A page called the whole name keeps its namesakes away.
+    assert_eq!(
+        named("what is a normal distribution"),
+        ["Normal distribution"]
+    );
+    assert!(named("what is a healthy bmi").is_empty());
+}
+
+#[test]
 fn words_that_say_what_is_wanted_keep_the_name() {
     let (_dir, s) = searcher(&[
         page("Lululemon", 50_000, &[]),
