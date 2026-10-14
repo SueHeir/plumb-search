@@ -9,6 +9,13 @@ use tantivy::{TantivyDocument, Term};
 
 use super::{Page, PageSearcher, TITLE_CANDIDATES};
 
+/// The trailing qualifier in brackets that [`base_title`] leaves out:
+/// `element` of `Mercury (element)`.
+pub(crate) fn title_qualifier(title: &str) -> Option<&str> {
+    let base = base_title(title);
+    (base.len() < title.len()).then(|| &title[base.len() + 2..title.len() - 1])
+}
+
 /// `title` without a trailing qualifier in brackets: `Python (programming
 /// language)` -> `Python`.
 pub fn base_title(title: &str) -> &str {

@@ -1,6 +1,7 @@
 //! Sums: `12 * (3 + 4)`, `2^10`, `sqrt(2)`, `15% of 80`, `50 - 20%`, `5!`, and
 //! the same in words: "2 to the power of 10", "square root of 2", "15
-//! percent of 80", "20% off 50", "10 factorial", "log base 2 of 8".
+//! percent of 80", "20% off 50", "10 factorial", "log base 2 of 8". "3/8 as a
+//! decimal" and "5/8 as a percent" ask for a sum's value.
 //!
 //! A query is a sum only when all of it reads as one, with at least one
 //! operation in it, so "2024" and "f1" stay searches. Two numbers joined by
@@ -432,6 +433,29 @@ fn in_symbols(text: &str) -> String {
     text.trim().to_string()
 }
 
+/// Endings that ask for a sum's value as a decimal, so that "3/8 as a
+/// decimal" is a sum though "3/8" alone may be a date.
+const AS_DECIMAL: &[&str] = &[" as a decimal", " as decimal", " in decimal", " to decimal"];
+
+/// Endings that ask for it as a percentage: "5/8 as a percent".
+const AS_PERCENT: &[&str] = &[
+    " as a percent",
+    " as a percentage",
+    " as percent",
+    " to percent",
+];
+
+/// `text` without the first of `endings` it ends with, ignoring case.
+fn without_ending<'a>(text: &'a str, endings: &[&str]) -> Option<&'a str> {
+    endings.iter().find_map(|ending| {
+        let at = text.len().checked_sub(ending.len())?;
+        // Matched on the text itself: lowercasing can change byte lengths.
+        text.get(at..)
+            .filter(|end| end.eq_ignore_ascii_case(ending))
+            .map(|_| &text[..at])
+    })
+}
+
 /// Whether `text` is two whole numbers joined by `/` or `-` with nothing
 /// around them: "9/11", "24/7", "1-800".
 fn is_name_like(text: &str) -> bool {
@@ -447,6 +471,7 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
     for prefix in [
         "calculate ",
         "calc ",
+        "convert ",
         "what is ",
         "what's ",
         "whats ",
@@ -461,13 +486,16 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
             text = text[prefix.len()..].trim();
         }
     }
-    let text = in_symbols(text.trim_end_matches(['=', '?']));
+    let text = text.trim_end_matches(['=', '?']);
+    let percent = without_ending(text, AS_PERCENT);
+    let asked = percent.or_else(|| without_ending(text, AS_DECIMAL));
+    let text = in_symbols(asked.unwrap_or(text));
     // "20% off 50" is 50 less 20% of it.
     let text = match text.split_once("% off ") {
         Some((cut, price)) => format!("{price} - {cut}%"),
         None => text,
     };
-    if is_name_like(&text) {
+    if asked.is_none() && is_name_like(&text) {
         return None;
     }
     let mut parser = Parser {
@@ -479,15 +507,18 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
         return None;
     }
     let (value, shown) = parser.expr()?;
-    if parser.at != parser.tokens.len() || parser.operations == 0 {
+    if parser.at != parser.tokens.len() {
         return None;
     }
-    // "pi" and "e" alone are searches.
-    if parser.tokens.len() == 1 {
+    // "pi" and "e" alone are searches, "pi as a decimal" is not.
+    if asked.is_none() && (parser.operations == 0 || parser.tokens.len() == 1) {
         return None;
     }
     // Round away float noise: 0.1 + 0.2 is 0.3.
-    let answer = format_number(value, 12)?;
+    let answer = match percent {
+        Some(_) => format!("{}%", format_number(value * 100.0, 12)?),
+        None => format_number(value, 12)?,
+    };
     Some(Answer {
         kind: Kind::Calculation,
         question: format!("{shown} ="),
@@ -553,6 +584,13 @@ mod tests {
             ("natural log of 1", "0"),
             ("ln of e", "1"),
             ("sqrt of 16", "4"),
+            ("3/8 as a decimal", "0.375"),
+            ("what is 5/8 as a decimal?", "0.625"),
+            ("convert 3/4 to decimal", "0.75"),
+            ("5/8 as a percent", "62.5%"),
+            ("2/5 as a percentage", "40%"),
+            ("0.375 as a percent", "37.5%"),
+            ("pi as a decimal", "3.14159265359"),
         ] {
             assert_eq!(calc(query).as_deref(), Some(sum), "{query:?}");
         }
@@ -571,6 +609,9 @@ mod tests {
             "natural log",
             "natural logarithm",
             "round of 16",
+            "3/8",
+            "as a decimal",
+            "inflation as a percent",
         ] {
             assert_eq!(answer(query), None, "{query:?}");
         }
