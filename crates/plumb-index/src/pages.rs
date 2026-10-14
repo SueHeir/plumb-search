@@ -97,6 +97,10 @@ const OFFICES: &[&str] = &[
     "admiral",
 ];
 
+/// Offices a person's description may say only as "politician": "senator
+/// bernie sanders" is Bernie Sanders, "American politician and activist".
+const ELECTED: &[&str] = &["senator", "governor", "mayor"];
+
 /// How much popularity counts, against how well the query names the page.
 pub const POPULARITY_SHARE: f32 = 0.5;
 
