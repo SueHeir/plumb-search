@@ -14,7 +14,7 @@ The desktop app runs a Plumb Search node inside it and opens a window on its sea
 
 ## Install
 
-The installers for every release are on the [Releases page](https://github.com/SueHeir/plumb-search/releases/latest):
+The installers for every release are on the [Releases page](https://github.com/SueHeir/plumb-search/releases):
 
 | System | Files |
 | --- | --- |
