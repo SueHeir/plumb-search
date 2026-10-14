@@ -11,7 +11,7 @@ When a query only might say where ("denver brewery", with no "in" or "near") and
 ## How a query is read
 
 - `WHAT in WHERE`, `WHAT near WHERE`, `WHAT around WHERE`, `WHAT close to WHERE`.
-- `WHAT near me`, `WHAT nearby`, `nearby WHAT`, and `WHAT open now` (or "open late", "24 hours"). A WHAT followed only by "now", "today" or "tonight" is near me when all its words are kinds of place: "pizza tonight", not "stock market today".
+- `WHAT near me`, `WHAT nearby`, `nearby WHAT`, `WHAT near here`, `WHAT in the area`, and `WHAT open now` (or "open late", "open at night", "24 hours"). A WHAT followed only by "now", "today" or "tonight" is near me when all its words are kinds of place: "pizza tonight", not "stock market today".
 - `WHERE WHAT` or `WHAT WHERE` when WHAT is a kind of place ("denver pizza", "sushi fort collins").
 - `NAME WHERE` when WHERE is a city and a place in or near it, other than a town, is called NAME ("starbucks denver", "pizza hut denver"), and no site is named by the whole query. These list the places but leave the results in their order, since NAME may also be a word for something else ("subway new york").
 
@@ -21,7 +21,7 @@ WHERE is a town (or village, suburb or neighbourhood) by its name or another nam
 
 Places are listed within a town's size of its centre (12 km for a city, 6 for a town, 10 around a national park, nature reserve, island, lake, mountain or beach, 3 for a village or around another named place). Places of the kind asked for come first, then those that only have the words in their name (for "sushi", sushi bars before an office called Sushi Tech). Within each, nearest first, with places that have a website, a brand or a Wikidata item a little ahead. When fewer than three are found, Plumb looks three times as far.
 
-A search that finds no place, and whose WHAT is no kind of place, lists none: "sort a list in python", "calories in a shot" and "keel in english" (a village in Indiana) ask for no place, while "pizza in gotham" says it knows no Gotham. A "near me" search still says it found nothing, and a place's name still offers the choice in a town of several names ("starbucks in portland") and asks for a town when only a state or country is named ("starbucks in texas").
+A search that finds no place, and whose WHAT is no kind of place, lists none: "sort a list in python", "calories in a shot" and "keel in english" (a village in Indiana) ask for no place, while "pizza in gotham" says it knows no Gotham. Nor does a WHERE that is no place at all: "tallest building in the world", "coffee in the morning", "pizza at home", or a unit: "tom cruise height in cm", "area of texas in square miles". A "near me" search still says it found nothing, and a place's name still offers the choice in a town of several names ("starbucks in portland") and asks for a town when only a state or country is named ("starbucks in texas").
 
 ## Near me
 

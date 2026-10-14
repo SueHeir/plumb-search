@@ -330,7 +330,7 @@ impl Mcp {
         });
         let info = match &profile {
             Some(profile) => answers::info_from_page(&profile.page, &results.hits),
-            None if operators.any() => None,
+            None if operators.any_but_phrases() || answers::is_sum(answer.as_ref()) => None,
             None => answers::info_box(&results.hits, &placed),
         };
         let recent = (!sites_only)
