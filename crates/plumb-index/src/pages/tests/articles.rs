@@ -804,6 +804,44 @@ fn what_is_asked_about_a_person_finds_their_article() {
 }
 
 #[test]
+fn a_slip_in_a_well_read_name_is_corrected() {
+    let (_dir, s) = searcher(&[
+        page("Jeff Bezos", 400_000, &[]),
+        page("Leonardo da Vinci", 90_000, &[]),
+        page("Stephen Hawking", 45_000, &[]),
+        page("Stephen Hawkins", 48, &[]),
+        page("IPhone 16", 60_000, &[]),
+        page("Bill Gates", 300_000, &[]),
+        page("Serena Williams", 70_000, &[]),
+        page("Jean Meeus", 80, &[]),
+        page("Bezos family", 200, &[]),
+    ]);
+    let suggest = |query: &str| {
+        s.suggest_spelling(query, None, &|_| false)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    assert_eq!(suggest("jeff bezoz").as_deref(), Some("jeff bezos"));
+    assert_eq!(
+        suggest("serena wiliams").as_deref(),
+        Some("serena williams")
+    );
+    // The first words, with the rest after them.
+    assert_eq!(
+        suggest("leonardo da vinchi net worth").as_deref(),
+        Some("leonardo da vinci net worth")
+    );
+    // A name as typed is no slip, however much more another is read.
+    assert_eq!(suggest("stephen hawkins"), None);
+    assert_eq!(suggest("jeff bezos"), None);
+    // Nor are other numbers, other numbers of a word, or a little-read
+    // article's name.
+    assert_eq!(suggest("iphone 15"), None);
+    assert_eq!(suggest("bill gate"), None);
+    assert_eq!(suggest("jean meeuz"), None);
+}
+
+#[test]
 fn comparisons_find_the_articles_on_both_sides() {
     for (query, a, b) in [
         ("mitosis vs meiosis", "mitosis", "meiosis"),
