@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use plumb_core::paper_query::PaperQuery;
 use plumb_core::{registrable_domain, Operators};
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
@@ -20,8 +20,8 @@ use super::scoring::truncate_keeping_inner_pages;
 use super::sites::base_title;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
-    GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET,
-    POPULARITY_SCALE, POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
+    GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAGE_SLIP_WEIGHT,
+    PAPERS_SET, POPULARITY_SCALE, POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
 };
 use crate::analysis;
 
@@ -881,8 +881,15 @@ impl PageSearcher {
     /// [`MIN_PAGE_FIX_PAGES`], or with the spelling model, the likeliest by
     /// the noisy channel ([`crate::spell_model`]). With the model, a word
     /// is kept unless the slip is likelier than the word, a word no page
-    /// has counting as if one did ("perft" is not "perf"). `None` when no
-    /// word changes.
+    /// has counting as if one did ("perft" is not "perf"), or the slip is
+    /// one the model learned and is likelier than the word with how much
+    /// commoner the near word is weighed by [`PAGE_SLIP_WEIGHT`]; that
+    /// holds for a word the pages know too ("recieve", "definately").
+    /// A word typed in capitals, with letters English does not use, or in
+    /// a web address is kept, and so is a word that names something
+    /// ([`PageSearcher::names_something`]), however few pages have it:
+    /// "magicka" is not "magick", nor "baidu baike" "baidu bake".
+    /// `None` when no word changes.
     pub fn suggest_spelling(
         &self,
         query: &str,
@@ -899,15 +906,35 @@ impl PageSearcher {
             Ok(searcher.doc_freq(&Term::from_field_text(self.fields.words, word))?)
         };
         let typed = analysis::tokens(&self.words, query);
+        // Names, abbreviations and addresses: "ETIAS" is not "elias", "OLED"
+        // not "old", nor "ratp.info" "rate info". Nor is a word typed with
+        // letters English does not use a slip of one without them: "Edlén"
+        // is not "ellen", nor the mojibake "mÃ©xico" "ma xiao".
+        let mut kept: HashSet<String> = HashSet::new();
+        for part in query.split_whitespace() {
+            let whole = part.contains('.') && registrable_domain(part).is_some()
+                || part.chars().any(|c| c.is_alphabetic() && !c.is_ascii());
+            for piece in part.split(|c: char| !c.is_alphanumeric()) {
+                let capitals = piece.chars().filter(|c| c.is_alphabetic()).count() > 1
+                    && !piece.chars().any(char::is_lowercase);
+                if whole || capitals {
+                    kept.extend(analysis::tokens(&self.words, piece));
+                }
+            }
+        }
         let mut fixed = typed.clone();
         for word in &mut fixed {
             let chars = word.chars().count();
             let edits = crate::spell::max_edits(chars);
             if edits == 0
                 || !word.chars().all(char::is_alphabetic)
-                || self.knows_word(word)?
                 || site_known(word)
+                || kept.contains(word.as_str())
             {
+                continue;
+            }
+            let known = self.knows_word(word)?;
+            if known && model.is_none() {
                 continue;
             }
             let typed_docs = docs(word)?;
@@ -930,17 +957,25 @@ impl PageSearcher {
                     None => -7.0 * f64::from(distance),
                 };
                 let likelihood = cost + (term_docs as f64).ln();
-                // As likely as the word typed, a word no page has counting
-                // as if one did: "perft" is not "perf".
-                if model.is_some() && likelihood < (typed_docs.max(1) as f64).ln() {
-                    continue;
+                if let Some(model) = model {
+                    let commoner = (term_docs as f64 / typed_docs.max(1) as f64).ln();
+                    // As likely as the word typed, a word no page has
+                    // counting as if one did: "perft" is not "perf".
+                    let rare = !known && cost + commoner >= 0.0;
+                    let slip =
+                        model.learned(word, &term) && cost + PAGE_SLIP_WEIGHT * commoner >= 0.0;
+                    if !rare && !slip {
+                        continue;
+                    }
                 }
                 if best.as_ref().is_none_or(|(b, _)| likelihood > *b) {
                     best = Some((likelihood, term));
                 }
             }
             if let Some((_, term)) = best {
-                *word = term;
+                if !self.names_something(word, &typed)? {
+                    *word = term;
+                }
             }
         }
         Ok((fixed != typed).then(|| crate::Spelling {
@@ -948,6 +983,66 @@ impl PageSearcher {
             site: None,
             applied: false,
         }))
+    }
+
+    /// Whether `word`, typed among `words`, is the name of something rather
+    /// than a slip, however near a commoner word it is: Wiktionary has it as
+    /// a word ("saute", "renter") or has its singular ("cloths": the set
+    /// leaves out forms of other words), a page is named by it ("Everlong",
+    /// "htop", "Scald" for Burn), or a page's name has it with another word
+    /// typed ("Jean Meeus", "Baidu Baike"). A near spelling of an article's
+    /// title is not its name but the redirect Wikipedia keeps for a
+    /// misspelling ("Arguement" for Argument).
+    fn names_something(&self, word: &str, words: &[String]) -> Result<bool> {
+        let searcher = self.reader.searcher();
+        let term = |field, text: &str| -> Box<dyn Query> {
+            Box::new(TermQuery::new(
+                Term::from_field_text(field, text),
+                IndexRecordOption::Basic,
+            ))
+        };
+        let found = |clauses: Vec<Box<dyn Query>>| -> Result<bool> {
+            let query = BooleanQuery::new(clauses.into_iter().map(|q| (Occur::Must, q)).collect());
+            Ok(searcher.search(&query, &Count)? > 0)
+        };
+        let plural = word.strip_suffix('s').filter(|one| !one.ends_with('s'));
+        for word in std::iter::once(word).chain(plural) {
+            if searcher.doc_freq(&Term::from_field_text(self.fields.word, word))? > 0 {
+                return Ok(true);
+            }
+        }
+        let top = TopDocs::with_limit(TITLE_CANDIDATES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        for (_, address) in searcher.search(term(self.fields.keys, word).as_ref(), &top)? {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            let title = analysis::tokens(&self.joined, base_title(&page.title))
+                .pop()
+                .unwrap_or_default();
+            // An article is also keyed by the names that lead to it, some
+            // of them misspellings of its title.
+            if title == word || page.is_article() && !crate::spell::within_edits(word, &title) {
+                return Ok(true);
+            }
+        }
+        for other in words {
+            if other != word
+                && !plumb_core::is_function_word(other)
+                && found(vec![
+                    term(self.fields.words, word),
+                    term(self.fields.words, other),
+                ])?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Named entity candidates before site blending or learned placement.

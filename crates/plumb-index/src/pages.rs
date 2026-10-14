@@ -128,7 +128,8 @@ const UNSURE_WORD_SHARE: f32 = 0.5;
 
 /// Least number of pages whose names have a word for the word to be
 /// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
-/// sites say them.
+/// sites say them. Unless it is a slip the sites show people make, of a
+/// word in far more pages ([`PAGE_SLIP_WEIGHT`]): "recieve" is in 68.
 pub const KNOWN_WORD_PAGES: u64 = 3;
 
 /// A word the pages hardly know is corrected to a near word found in this
@@ -138,6 +139,14 @@ pub const PAGE_FIX_RATIO: u64 = 20;
 /// ...and in at least this many: a slip of a rare word is no likelier than
 /// a rare word typed as meant ("kiwipete" is not "kimipet").
 pub const MIN_PAGE_FIX_PAGES: u64 = 20;
+
+/// The power how much commoner a word is in pages' names is weighed by,
+/// against a slip the spelling model learned ([`PageSearcher::suggest_spelling`]).
+/// Pages are named after things, so everyday words are rarer in their
+/// names than in what people type: "definitely" is in 228, "receive" in
+/// 3,668, and at a power of 1 neither "definately" nor "recieve" would be
+/// taken for a slip of them.
+pub const PAGE_SLIP_WEIGHT: f64 = 2.0;
 
 /// Most read articles about a site looked at for one about the site itself
 /// ([`PageSearcher::title_untitled`]).
