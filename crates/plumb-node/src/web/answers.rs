@@ -215,6 +215,29 @@ pub struct ProfileAnswer {
     pub page: Page,
 }
 
+impl ProfileAnswer {
+    /// What kind of link it is: only an account of its own is an
+    /// official profile, not a song's page on Genius.
+    pub(crate) fn kind(&self) -> &'static str {
+        if self.search {
+            "Search"
+        } else if self.official {
+            "Official profile"
+        } else {
+            "Listing"
+        }
+    }
+
+    /// Where it comes from, said under it: "Listing, from MusicBrainz".
+    pub(crate) fn note(&self) -> String {
+        if self.search {
+            format!("Searched for on {}", self.service)
+        } else {
+            format!("{}, from {}", self.kind(), self.source)
+        }
+    }
+}
+
 /// What a results page shows besides the results.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Extras {
@@ -677,33 +700,15 @@ pub(crate) fn render_profile(out: &mut String, profile: &ProfileAnswer, icon: Op
         "<section class=\"pf\" aria-label=\"{kind}\"><a class=\"r\" href=\"{}\" \
          rel=\"noreferrer\"><span class=\"site\">{}<span class=\"sn\"><span class=\"dn\">{}</span>\
          <span class=\"u\">{}</span></span></span><span class=\"t\">{} on {}</span></a>\
-         <p class=\"m\">{note}</p></section>",
+         <p class=\"m\">{}</p></section>",
         escape_html(&profile.url),
         super::site_badge(&domain, icon),
         escape_html(profile.service),
         escape_html(&shown),
         escape_html(&truncate_chars(&profile.of, 120)),
         escape_html(profile.service),
-        kind = if profile.search {
-            "Search"
-        } else if profile.official {
-            "Official profile"
-        } else {
-            "Listing"
-        },
-        note = if profile.search {
-            format!("Searched for on {}", escape_html(profile.service))
-        } else {
-            format!(
-                "{}, from {}",
-                if profile.official {
-                    "Official profile"
-                } else {
-                    "Listing"
-                },
-                profile.source
-            )
-        },
+        escape_html(&profile.note()),
+        kind = profile.kind(),
     );
 }
 
