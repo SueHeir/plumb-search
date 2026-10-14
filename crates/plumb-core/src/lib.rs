@@ -5,6 +5,7 @@
 //! the text other sites use when they link to it, a few aliases, and some
 //! popularity signals. Every other crate passes [`SiteRecord`]s around.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -1500,6 +1501,36 @@ pub fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// What windows-1252 has at bytes 0x80 to 0x9F, where Latin-1 has control
+/// characters. The five it leaves undefined keep Latin-1's.
+const WINDOWS_1252_HIGH: &str = "€\u{81}‚ƒ„…†‡ˆ‰Š‹Œ\u{8d}Ž\u{8f}\u{90}‘’“”•–—˜™š›œ\u{9d}žŸ";
+
+/// `text` as the UTF-8 it was before something read it as windows-1252 or
+/// Latin-1, as text copied from a page decoded in the wrong charset comes:
+/// "MÃ¼nchen" is "München", "donâ€™t" is "don’t". Text with a character
+/// those charsets lack, or whose bytes are not UTF-8, was not garbled so
+/// and comes back as it is ("café", "東京").
+pub fn unmangled(text: &str) -> Cow<'_, str> {
+    let mut text = Cow::Borrowed(text);
+    // Text garbled twice ("ÃƒÂ¼") is read back twice; each pass shortens it.
+    while !text.is_ascii() {
+        let bytes: Option<Vec<u8>> = text
+            .chars()
+            .map(|c| {
+                u8::try_from(c).ok().or_else(|| {
+                    let at = WINDOWS_1252_HIGH.chars().position(|high| high == c)?;
+                    u8::try_from(0x80 + at).ok()
+                })
+            })
+            .collect();
+        match bytes.map(String::from_utf8) {
+            Some(Ok(read)) => text = Cow::Owned(read),
+            _ => break,
+        }
+    }
+    text
+}
+
 /// An address as results pages show it: without `http://` or `https://`,
 /// without the slash of a bare homepage, and cut to 100 characters.
 pub fn display_url(href: &str) -> String {
@@ -1600,6 +1631,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn garbled_text_reads_as_the_utf8_it_was() {
+        for (garbled, text) in [
+            ("MÃ¼nchen", "München"),
+            ("usembassy mÃ©xico", "usembassy méxico"),
+            ("crÃ¨me brÃ»lÃ©e recipe", "crème brûlée recipe"),
+            ("donâ€™t panic", "don’t panic"),
+            // Read as Latin-1, 0x81 stays a control character.
+            ("Ð¼Ð¾Ñ\u{81}ÐºÐ²Ð°", "москва"),
+            ("ÃƒÂ¼ber", "über"),
+        ] {
+            assert_eq!(unmangled(garbled), text);
+        }
+        for text in ["café", "München", "東京", "Ã la carte", "plain", ""] {
+            assert!(matches!(unmangled(text), Cow::Borrowed(same) if same == text));
+        }
+    }
 
     #[test]
     fn titles_tell_their_writing_system() {
