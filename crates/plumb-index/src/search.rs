@@ -92,6 +92,13 @@ impl Searcher {
             .sum()
     }
 
+    /// Whether many sites' titles have `word` ([`KNOWN_WORD_SITES`] or
+    /// more): "first" and "health" do, a name such as "medscape" does not.
+    pub fn is_common_word(&self, word: &str) -> bool {
+        self.names_by_common_word(&self.reader.searcher(), word, 1)
+            .unwrap_or(true)
+    }
+
     /// Number of documents (sites) in the index.
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()
@@ -103,9 +110,9 @@ impl Searcher {
         self.reader.searcher().doc_freq(&term).is_ok_and(|n| n > 0)
     }
 
-    /// The language `domain`'s homepage says it is in
-    /// ([`plumb_core::SiteRecord::language`]), when the index holds the site
-    /// and knows it.
+    /// The language of `domain`'s homepage as the index keeps it
+    /// ([`plumb_core::site_language`]), when the index holds the site and
+    /// knows it.
     pub fn language(&self, domain: &str) -> Option<String> {
         let searcher = self.reader.searcher();
         let term = Term::from_field_text(self.fields.domain, domain);
@@ -220,6 +227,7 @@ impl Searcher {
                     &mut results.hits,
                     limit,
                     &|domain| self.site(domain).ok().flatten(),
+                    &|word| self.is_common_word(word),
                 );
             }
             return Ok(results);
