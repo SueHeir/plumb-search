@@ -102,6 +102,10 @@ const WORK_LEADS: &[(&str, &[&str])] = &[
 const HINT_LEADS: &[&str] = &[
     "who is ",
     "who was ",
+    // "who are the members of bts" asks about BTS.
+    "who are the members of ",
+    "members of the ",
+    "members of ",
     "who are ",
     "who were ",
     "tell me about ",
@@ -410,6 +414,8 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" predictions", Hint::Event),
     (" start time", Hint::Event),
     (" cast", Hint::Any),
+    (" band members", Hint::Any),
+    (" members", Hint::Any),
     (" author", Hint::Any),
     (" movie", Hint::Screen),
     (" film", Hint::Any),
