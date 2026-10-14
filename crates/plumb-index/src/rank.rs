@@ -1026,7 +1026,13 @@ impl Searcher {
         }
         let typed = registrable_domain(query_text.trim());
         let hits = without_near_copies(hits, &fingerprints, typed.as_deref(), home.as_deref());
-        let mut hits = without_copies(hits, typed.as_deref(), home.as_deref());
+        // The countries the query names, by a word or two: "south korea".
+        let asked: Vec<&str> = (0..query.words.len())
+            .flat_map(|at| [1, 2].map(|n| query.words.get(at..at + n).map(|words| words.join(" "))))
+            .flatten()
+            .filter_map(|name| plumb_core::country_of_any_name(&name))
+            .collect();
+        let mut hits = without_copies(hits, typed.as_deref(), home.as_deref(), &asked);
         hits.truncate(limit);
         let results = SearchResults {
             hits,
