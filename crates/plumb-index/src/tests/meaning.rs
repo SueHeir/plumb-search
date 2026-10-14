@@ -927,3 +927,79 @@ fn bare_sites_only_meaning_finds_are_left_out() {
     // Named, a bare site is still found.
     assert_eq!(found("makewebeasy")[0], "makewebeasy.co");
 }
+
+#[test]
+fn a_number_alone_matches_nothing_in_a_query_of_other_words() {
+    let records = vec![
+        site(
+            "glastonburyfestivals.co.uk",
+            Some("Glastonbury Festival"),
+            Some("Line-up, tickets and news of the festival."),
+            &[],
+            &[],
+            ranked(40_000, 900),
+        ),
+        site(
+            "nationschampionshiprugby.com",
+            Some("Nations Championship"),
+            Some("The rugby Nations Championship: 2026 fixtures and results."),
+            &[],
+            &[],
+            ranked(20_000, 2_000),
+        ),
+        site(
+            "lottery.example",
+            Some("Lottery"),
+            Some("Lottery 2026 draws and results."),
+            &[],
+            &[],
+            ranked(30_000, 800),
+        ),
+        site(
+            "163.com",
+            Some("NetEase"),
+            None,
+            &[],
+            &[],
+            popular(100, 50_000),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let meaning = near_and_far(
+        &[
+            ("glastonburyfestivals.co.uk", 1.0),
+            ("nationschampionshiprugby.com", 0.45),
+            ("lottery.example", 0.4),
+        ],
+        &[],
+    );
+    let found = |query: &str| {
+        let hits = searcher
+            .search_meaning(
+                query,
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    // The year says which festival, not what: sites with only "2026" go,
+    // however near in meaning.
+    assert_eq!(found("glastonbury 2026"), ["glastonburyfestivals.co.uk"]);
+    // With another word they have, they stay.
+    let rugby = found("rugby 2026");
+    assert!(
+        rugby.contains(&"nationschampionshiprugby.com".to_string()),
+        "{rugby:?}"
+    );
+    // A number alone is the whole query.
+    assert!(found("2026").contains(&"lottery.example".to_string()));
+    // A site the query starts by naming keeps its place.
+    assert_eq!(found("163 mail")[0], "163.com");
+}
