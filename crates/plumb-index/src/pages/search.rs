@@ -48,6 +48,10 @@ pub(crate) enum Hint {
     Regnal,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
+    /// The thing, of which one part is asked about: "ibuprofen side
+    /// effects", "volcano facts". A search for papers keeps those words
+    /// ("loss function").
+    Aspect,
     /// Only pages the name names: what a fact question asks about, or the
     /// list a search for one asks for ("list of popes" of "popes in
     /// order"). "madrid spanish" (of "madrid spanish capital city") names
@@ -115,6 +119,15 @@ const HINT_LEADS: &[&str] = &[
     "define ",
     "definition of ",
     "meaning of ",
+    "symptoms of ",
+    "side effects of ",
+    "benefits of ",
+    "health benefits of ",
+    "causes of ",
+    "treatment for ",
+    "treatment of ",
+    "uses of ",
+    "examples of ",
     "info about ",
     "information about ",
     "facts about ",
@@ -327,7 +340,78 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" stands for", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
+    // The article on a drug, an illness or a thing of science says what
+    // these ask, and none of the words: "melatonin dosage", "shingles
+    // symptoms", "photosynthesis equation".
+    (" side effects", Hint::Aspect),
+    (" symptoms", Hint::Aspect),
+    (" dosage", Hint::Aspect),
+    (" dose", Hint::Aspect),
+    (" health benefits", Hint::Aspect),
+    (" benefits", Hint::Aspect),
+    (" treatment", Hint::Aspect),
+    (" causes", Hint::Aspect),
+    (" facts", Hint::Aspect),
+    (" uses", Hint::Aspect),
+    (" diagram", Hint::Aspect),
 ];
+
+/// What a search asks of a thing of science, which the thing's article
+/// says, before its name with "of" or after it: "melting point of iron",
+/// "iron melting point". Longer first: "glucose chemical formula" is not
+/// about a "glucose chemical". Those a fact question asks ("atomic number
+/// of gold", "area of france", "radius of mars") are left to
+/// [`plumb_core::facts::fact_asked`].
+const PROPERTIES: &[&str] = &[
+    "melting point",
+    "boiling point",
+    "freezing point",
+    "chemical formula",
+    "formula",
+    "equation",
+    "structure",
+    "function",
+    "molar mass",
+    "atomic mass",
+    "atomic weight",
+    "density",
+    "half life",
+    "half-life",
+];
+
+/// Properties asked only before the name: "temperature of the sun",
+/// "volume of a sphere", but "oven temperature" is about an oven's
+/// setting and "sound volume" about a knob.
+const PROPERTIES_OF: &[&str] = &[
+    "mass",
+    "diameter",
+    "temperature",
+    "ph",
+    "volume",
+    "surface area",
+    "perimeter",
+    "circumference",
+];
+
+/// The thing `q` asks a property of ([`PROPERTIES`]): "iron" of "melting
+/// point of iron" and of "iron melting point", "sun" of "mass of the sun".
+fn property_of(q: &str) -> Option<&str> {
+    let before = PROPERTIES
+        .iter()
+        .chain(PROPERTIES_OF)
+        .find_map(|property| q.strip_prefix(property)?.strip_prefix(" of "));
+    let thing = before.or_else(|| {
+        PROPERTIES
+            .iter()
+            .find_map(|property| q.strip_suffix(property)?.strip_suffix(' '))
+    })?;
+    Some(
+        ["the ", "a ", "an "]
+            .iter()
+            .find_map(|article| thing.strip_prefix(article))
+            .unwrap_or(thing),
+    )
+}
 
 /// The list article a search for a list asks for without saying "list
 /// of": "list of popes" of "popes in order", "list of us presidents" of
@@ -369,6 +453,7 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     if let Some((rest, tail_hint)) = HINT_TAILS
         .iter()
         .find_map(|(tail, h)| Some((name.strip_suffix(tail)?, *h)))
+        .or_else(|| Some((property_of(name)?, Hint::Aspect)))
     {
         name = rest;
         hint = Some(tail_hint);
@@ -944,8 +1029,12 @@ impl PageSearcher {
         // John numbering and not List of popes, which "list of popes"
         // names. A monarch or pope typed with a number is searched in Roman
         // numerals when no article is named as typed: "charles 3", "henry
-        // the 8th".
+        // the 8th". A hinted name is not searched when a page is called
+        // the whole query: "plaster cast", "ice age" and "horror film" are
+        // not about plaster, ice or horror.
+        let called = hits.iter().any(|hit| hit.named && !hit.whole);
         let hinted = hinted_name(query)
+            .filter(|_| !called)
             .or_else(|| {
                 list_asked(query)
                     .or_else(|| {
@@ -1019,6 +1108,9 @@ impl PageSearcher {
                     }
                 }
             }
+            // Only the thing's article: "python examples" asks for code,
+            // not the repositories called Python.
+            Hint::Aspect => found.retain(|hit| hit.named && hit.page.is_article()),
             // Only a work of the kinds asked for, and not when a page is
             // called the whole query: "power chords" is not about the song
             // "Power".
