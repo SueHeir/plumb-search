@@ -1,8 +1,8 @@
 //! Sign-in pages, gambling spam and app installers of sites a search
-//! does not name are left out.
+//! does not name are left out, and so are domains only held.
 
 use super::*;
-use crate::junk::{is_gambling, is_gambling_address, offers_apk};
+use crate::junk::{is_gambling, is_gambling_address, is_holding_page, offers_apk};
 
 /// A site found only by meaning, whose homepage is at `url`.
 fn at(domain: &str, url: &str, title: Option<&str>) -> SiteRecord {
@@ -247,6 +247,80 @@ fn gambling_sites_are_told_by_their_words() {
     ] {
         assert!(!is_gambling_address(domain), "{domain}");
     }
+}
+
+#[test]
+fn held_domains_are_left_out_unless_typed() {
+    let records = [
+        site(
+            "goldenglobes.com",
+            Some("Golden Globes"),
+            Some("The Golden Globe Awards for film and television."),
+            &["Golden Globes"],
+            &[("golden globes", 300)],
+            popular(3_000, 2_000),
+        ),
+        // The old address, kept by a brand-protection registrar and still
+        // linked as the awards' site.
+        site(
+            "goldenglobes.org",
+            Some("Registered & Protected by MarkMonitor"),
+            None,
+            &[],
+            &[("golden globes", 200)],
+            obscure(20_000, 400),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let found =
+        |query: &str| domains(&searcher.search_with(query, 10, &keep_all()).unwrap()).join(" ");
+    assert_eq!(found("golden globes"), "goldenglobes.com");
+    assert!(found("goldenglobes.org").contains("goldenglobes.org"));
+}
+
+#[test]
+fn held_domains_are_told_by_their_notices() {
+    for (domain, title, description) in [
+        ("goldenglobes.org", "Registered & Protected by MarkMonitor", None),
+        ("mozy.com", "Domain Registered at Safenames", None),
+        ("fusion-id.com", "fusion-id.com — Domain registered with JOKER.COM", None),
+        ("managedomain.nl", "Domain registered - managedomain.nl", None),
+        ("u.ie", "This domain is reserved", None),
+        ("labubu.st", "Domain Parked", None),
+        (
+            "corporationcreation.com",
+            "CorporationCreation.com is for sale - Premium Domain",
+            None,
+        ),
+        (
+            "kuro5hin.org",
+            "kuro5hin.org",
+            Some("This domain name has been registered with Gandi.net. It is currently parked by the owner."),
+        ),
+    ] {
+        assert!(is_holding_page(domain, Some(title), description), "{title}");
+    }
+    for (domain, title) in [
+        ("networksolutions.com", "Network Solutions"),
+        ("nicnames.com", "Domain Registrar | NicNames.com"),
+        (
+            "registerdomain.co.za",
+            "Best Domain Registration in South Africa ☑️ Register Domains",
+        ),
+        (
+            "markmonitor.com",
+            "MarkMonitor | Brand Protection and Domain Management",
+        ),
+        ("boats.example", "Classic Boat is for sale"),
+    ] {
+        assert!(!is_holding_page(domain, Some(title), None), "{title}");
+    }
+    let whois = "Look up who owns a domain and when this domain has been registered.";
+    assert!(!is_holding_page(
+        "whois.example",
+        Some("WHOIS lookup"),
+        Some(whois)
+    ));
 }
 
 #[test]

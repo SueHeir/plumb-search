@@ -178,9 +178,12 @@ impl OfficialSite {
 
 /// The site of a Wikidata item, from its official website claims: the
 /// registrable domain of its first claim and, when no claim is a front
-/// page of a domain ([`OfficialSite::is_root_homepage`]), the first
-/// address on that domain, such as `https://music.youtube.com/` for
-/// YouTube Music: a part of youtube.com rather than a site of its own.
+/// page of a domain ([`OfficialSite::is_root_homepage`]), the address on
+/// that domain with the fewest folders, such as `https://music.youtube.com/`
+/// for YouTube Music: a part of youtube.com rather than a site of its own.
+/// Fewest folders, because an item often lists its page in other languages
+/// too, and the order of claims is no guide: the Yankees' `mlb.com/yankees`
+/// rather than `mlb.com/es/yankees`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemSite {
     pub domain: String,
@@ -198,11 +201,18 @@ impl ItemSite {
             front_page: false,
         });
         site.front_page |= front_page;
-        if !front_page && site.inner.is_none() && claim.domain == site.domain {
-            let url = claim.url.trim();
-            if url.starts_with("https://") || url.starts_with("http://") {
-                site.inner = Some(url.to_string());
-            }
+        let url = claim.url.trim();
+        let folders = |url: &str| url_path(url).split('/').filter(|s| !s.is_empty()).count();
+        let shallower = site
+            .inner
+            .as_deref()
+            .is_none_or(|inner| folders(url) < folders(inner));
+        if !front_page
+            && shallower
+            && claim.domain == site.domain
+            && (url.starts_with("https://") || url.starts_with("http://"))
+        {
+            site.inner = Some(url.to_string());
         }
     }
 
@@ -371,6 +381,16 @@ mod tests {
         assert_eq!(sites["Q3"].domain, "karjakin.ru");
         assert!(sites["Q3"].front_page());
         assert_eq!(sites["Q4"].domain, "perplexity.ai");
+        // Its page in other languages too: the one with the fewest folders.
+        let yankees = &mut HashMap::new();
+        for url in [
+            "https://www.mlb.com/es/yankees",
+            "https://www.mlb.com/yankees",
+            "https://www.mlb.com/yankees/tickets",
+        ] {
+            ItemSite::add(yankees, &site("Q6", "New York Yankees", url));
+        }
+        assert_eq!(yankees["Q6"].website(), Some("https://www.mlb.com/yankees"));
 
         let mut named = site(
             "Q5",

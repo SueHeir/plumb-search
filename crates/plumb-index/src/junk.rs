@@ -25,6 +25,12 @@
 //!   name, so they go even when that name is the query ("ebay"). Those
 //!   with no description to tell them by go by their names (312bet29.com).
 //!   One the query names stays: "lazybar" finds lazybaraustralia.com.
+//! - Domains only held, whose homepage says so ([`is_holding_page`]):
+//!   kept by a brand-protection registrar ("Registered & Protected by
+//!   MarkMonitor" on goldenglobes.org, the Golden Globes' old address,
+//!   and paypallogin.com), reserved, parked or for sale. However well
+//!   linked or official they were, there is nothing there; only typing
+//!   the address finds one.
 //! - Little-known sites handing out Android apps' installers (APKs),
 //!   most of them changed to unlock what the app charges for
 //!   ("Kinemaster MOD APK Download", "GB WhatsApp APK Download"), for a
@@ -32,10 +38,46 @@
 //!   how malware reaches phones, and an app's own site or store is well
 //!   known or official, or is named by the search ("snaptube").
 
-use plumb_core::{asks_to_sign_in, is_sign_in_page, names_label, normalize_text, spells_label};
+use plumb_core::{
+    asks_to_sign_in, is_sign_in_page, names_label, normalize_text, registrable_domain, spells_label,
+};
 
 use crate::names::is_reserved_name;
+use crate::schema::title_parts;
 use crate::{health, Hit, WELL_KNOWN_LINK_SCORE};
+
+/// Title parts, after [`normalize_text`], of a homepage that only says
+/// its domain is held: kept by a brand-protection registrar, reserved,
+/// parked or for sale.
+const HOLDING_TITLES: &[&str] = &[
+    "registered protected by markmonitor",
+    "domain is registered",
+    "this domain has been registered",
+    "this domain is registered",
+    "the domain name is registered",
+    "this domain name has been registered",
+    "this domain is reserved",
+    "reserved domain",
+    "reserved from registration",
+    "domain not available",
+    "domain parked",
+    "parked domain",
+    "domain for sale",
+    "this domain is for sale",
+];
+
+/// Beginnings of such title parts: "Domain Registered at Safenames",
+/// "Domain registered with JOKER.COM", "Domain Reserved".
+const HOLDING_STARTS: &[&str] = &["domain registered", "domain reserved"];
+
+/// Beginnings, after [`normalize_text`], of a held domain's description:
+/// "This domain name has been registered with Gandi.net. It is currently
+/// parked by the owner." A WHOIS site saying when a domain "has been
+/// registered" says it further on.
+const HOLDING_OPENINGS: &[&str] = &[
+    "this domain name has been registered",
+    "this domain has been registered",
+];
 
 /// Words, after [`normalize_text`], that only online gambling sites use.
 const GAMBLING_WORDS: &[&str] = &[
@@ -142,6 +184,14 @@ const APK_QUERY_WORDS: &[&str] = &[
 /// Whether `hit` stays out of the results of `query`, which `named` says
 /// names it in full.
 pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
+    if is_holding_page(
+        &hit.domain,
+        hit.title.as_deref(),
+        hit.description.as_deref(),
+    ) && registrable_domain(query.trim()).as_deref() != Some(hit.domain.as_str())
+    {
+        return true;
+    }
     let little_known = hit.link_score < WELL_KNOWN_LINK_SCORE && !hit.official;
     let texts = [hit.title.as_deref(), hit.description.as_deref()];
     let gambling = || {
@@ -274,6 +324,35 @@ pub(crate) fn is_gambling_address(domain: &str) -> bool {
         || label.contains("togel")
         || GAMBLING_NUMBERED.iter().any(|word| numbered(word))
         || bet
+}
+
+/// Whether the homepage of `domain`, titled `title` and described as
+/// `description`, only says the domain is held: "Registered & Protected
+/// by MarkMonitor", "Domain Registered at Safenames" (mozy.com), "This
+/// domain is reserved", "Domain Parked", or "CorporationCreation.com is
+/// for sale". A registrar's own homepage says more ("Domain Registration
+/// in 3 minutes").
+pub(crate) fn is_holding_page(
+    domain: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+) -> bool {
+    let name = normalize_text(domain);
+    let holding = |part: &str| {
+        let part = normalize_text(part);
+        HOLDING_TITLES.contains(&part.as_str())
+            || HOLDING_STARTS
+                .iter()
+                .any(|start| part == *start || part.starts_with(&format!("{start} ")))
+            || part.strip_suffix(" is for sale") == Some(name.as_str())
+    };
+    title.is_some_and(|title| title_parts(title).into_iter().any(holding))
+        || description.is_some_and(|text| {
+            let text = normalize_text(text);
+            HOLDING_OPENINGS
+                .iter()
+                .any(|opening| text.starts_with(opening))
+        })
 }
 
 /// Whether `query` asks about gambling: "nfl free vegas picks", "las
