@@ -613,8 +613,8 @@ pub(crate) fn plausible_word_fix(word: &str, term: &str) -> bool {
     plausible_fix(word, term) && word.chars().next() == term.chars().next()
 }
 
-/// The terms of `field` within `edits` edits of `key`, `key` itself and
-/// [`analysis::folded`] words left out, each with its edit distance.
+/// The terms of `field` within `edits` edits of `key`, `key` itself left
+/// out, each with its edit distance.
 pub(crate) fn near_terms(
     searcher: &tantivy::Searcher,
     field: Field,
@@ -630,7 +630,7 @@ pub(crate) fn near_terms(
             let Ok(term) = std::str::from_utf8(terms.key()) else {
                 continue;
             };
-            if term == key || term.starts_with(analysis::FOLDED) {
+            if term == key {
                 continue;
             }
             if let Distance::Exact(distance) = dfa.eval(term) {
