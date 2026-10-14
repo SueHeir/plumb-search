@@ -306,7 +306,7 @@ fn rank_words(
         );
         let site_language = site_language(site.language.as_deref(), &written);
         if let (Some(wanted), Some(site)) = (&language, &site_language) {
-            if !language_fits(wanted, site) && !name.typed && name.label < query.len {
+            if !language_fits(wanted, site) && !name.typed && name.words() < query.len {
                 continue;
             }
         }

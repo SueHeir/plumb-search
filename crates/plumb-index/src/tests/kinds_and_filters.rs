@@ -920,7 +920,7 @@ fn brand_names_find_the_official_site() {
 }
 
 #[test]
-fn a_well_known_site_the_query_starts_by_naming_keeps_its_language() {
+fn sites_the_query_names_keep_their_language() {
     let foreign = |domain: &str, title: &str, alias: &[&str], language: &str, signals| {
         let mut record = site(domain, Some(title), None, alias, &[], signals);
         record.language = Some(language.into());
@@ -952,6 +952,15 @@ fn a_well_known_site_the_query_starts_by_naming_keeps_its_language() {
             obscure(5_000_000, 20),
         ),
     ]);
+    // Known to few and written in Vietnamese, but named in full.
+    records.push(site(
+        "vr.example",
+        Some("Tổng Công Ty Đường Sắt Việt Nam"),
+        None,
+        &["Vietnam Railways"],
+        &[],
+        obscure(3_000_000, 30),
+    ));
     let (_dir, searcher) = build(&records);
     let english = SearchOptions {
         language: Some("en".into()),
@@ -961,6 +970,7 @@ fn a_well_known_site_the_query_starts_by_naming_keeps_its_language() {
         ("real madrid tickets", "realmadrid.example", true),
         ("free games", "free.example", false),
         ("real estate agents", "realestate.example", false),
+        ("vietnam railways", "vr.example", true),
     ] {
         let found =
             |options: &SearchOptions| search_in(&searcher, query, options).contains(&domain.into());
