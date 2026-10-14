@@ -66,6 +66,61 @@ fn words_that_say_what_is_wanted_keep_the_name() {
 }
 
 #[test]
+fn a_search_for_one_part_of_a_thing_finds_the_thing() {
+    let (_dir, s) = searcher(&[
+        page("Ibuprofen", 200_000, &[]),
+        page("Shingles", 150_000, &["Herpes zoster"]),
+        page("Volcano", 120_000, &[]),
+        page("Iron", 110_000, &[]),
+        page("Sun", 180_000, &[]),
+        page("Glucose", 90_000, &[]),
+        page("Sphere", 80_000, &[]),
+        page("Side Effects (2013 film)", 300_000, &["Side Effects"]),
+        page("Plaster", 90_000, &[]),
+        page("Plaster cast", 20_000, &[]),
+        dated_paper("A loss function for metric learning", None, Some(2022), 10),
+        dated_paper("Loss aversion in markets", None, Some(2022), 10),
+    ]);
+    let first = |q: &str| {
+        let hits = s.search(q, 5).unwrap();
+        hits.first().map(|h| (h.page.title.clone(), h.named))
+    };
+    for (query, title) in [
+        ("ibuprofen side effects", "Ibuprofen"),
+        ("side effects of ibuprofen", "Ibuprofen"),
+        ("shingles symptoms", "Shingles"),
+        ("volcano facts", "Volcano"),
+        ("melting point of iron", "Iron"),
+        ("iron melting point", "Iron"),
+        ("what is the melting point of iron", "Iron"),
+        ("mass of the sun", "Sun"),
+        ("glucose chemical formula", "Glucose"),
+        ("volume of a sphere", "Sphere"),
+    ] {
+        assert_eq!(first(query), Some((title.into(), true)), "{query}");
+    }
+    // A page called the whole query is what it asks for: "plaster cast"
+    // is not about plaster.
+    assert_eq!(first("plaster cast"), Some(("Plaster cast".into(), true)));
+    let hits = s.search("plaster cast", 5).unwrap();
+    assert!(
+        hits.iter().all(|h| h.page.title != "Plaster" || !h.named),
+        "{hits:?}"
+    );
+    // An everyday thing's temperature is a setting, not its article's.
+    assert_eq!(hinted_name("oven temperature"), None);
+    // Papers keep those words.
+    assert_eq!(
+        hinted_name("loss function"),
+        Some(("loss".into(), Hint::Aspect))
+    );
+    let papers = s
+        .search_papers(&PaperQuery::parse("loss function after:2020").unwrap(), 5)
+        .unwrap();
+    assert_eq!(titles(&papers), ["A loss function for metric learning"]);
+}
+
+#[test]
 fn repository_words_find_the_repository() {
     let mut tokio = Page::from_repo(Article {
         title: "tokio-rs/tokio".into(),
@@ -660,6 +715,33 @@ fn what_is_asked_about_a_person_finds_their_article() {
     assert_eq!(named("obama daughters"), ["Barack Obama"]);
     assert_eq!(named("picasso paintings"), ["Pablo Picasso"]);
     assert_eq!(named("steve jobs cause of death"), ["Steve Jobs"]);
+    // With a possessive, or as a question.
+    assert_eq!(named("obama's daughters"), ["Barack Obama"]);
+    assert_eq!(named("who are obama's parents"), ["Barack Obama"]);
+    assert_eq!(named("picasso's paintings"), ["Pablo Picasso"]);
+    assert_eq!(named("how did steve jobs die"), ["Steve Jobs"]);
+    assert_eq!(named("what did steve jobs die of"), ["Steve Jobs"]);
+    assert_eq!(named("how many kids does obama have"), ["Barack Obama"]);
+    // As "who is picasso" would, the crater too, below him.
+    assert_eq!(
+        named("what is picasso known for"),
+        ["Pablo Picasso", "Picasso (crater)"]
+    );
+    assert_eq!(named("why was steve jobs famous"), ["Steve Jobs"]);
+    assert_eq!(named("what is picasso's real name"), ["Pablo Picasso"]);
+    assert_eq!(named("where is steve jobs buried"), ["Steve Jobs"]);
+    assert_eq!(
+        hinted_name("einstein's biography"),
+        Some(("einstein".into(), Hint::Any))
+    );
+    assert_eq!(
+        hinted_name("what is mcdonald's"),
+        Some(("mcdonald's".into(), Hint::Any))
+    );
+    assert_eq!(
+        hinted_name("mcdonald's wikipedia"),
+        Some(("mcdonald's".into(), Hint::Article))
+    );
     // Only a person, and not when a page is called the whole query.
     assert_eq!(named("black death"), ["Black Death"]);
     assert!(named("christmas songs").is_empty());
@@ -761,6 +843,34 @@ fn one_side_of_a_thing_finds_its_article_unless_one_is_called_so() {
             .all(|hit| !hit.named || hit.page.title != "French Revolution"),
         "{hits:?}"
     );
+}
+
+#[test]
+fn a_plural_that_names_only_namesakes_asks_about_its_singular() {
+    let (_dir, s) = searcher(&[
+        page("Cloud", 300_000, &[]),
+        page("Clouds (2020 film)", 5_000, &[]),
+        page("Clouds (Joni Mitchell album)", 8_000, &[]),
+        page("Solar panel", 100_000, &[]),
+        page("Python (programming language)", 400_000, &[]),
+        page("Python (genus)", 20_000, &[]),
+        page("Pythonidae", 30_000, &["Pythons"]),
+    ]);
+    let named = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("what are clouds")[0], "Cloud");
+    assert_eq!(named("what are solar panels"), ["Solar panel"]);
+    // A singular asks about what it names, qualified or not.
+    let python = named("what is python");
+    assert!(!python.contains(&"Pythonidae".to_string()), "{python:?}");
+    let pythons = named("what is a ball python");
+    assert!(!pythons.contains(&"Pythonidae".to_string()), "{pythons:?}");
 }
 
 #[test]

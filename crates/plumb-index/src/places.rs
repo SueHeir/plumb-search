@@ -94,9 +94,61 @@ const NEAR_ME: &[&[&str]] = &[
     &["close", "to", "me"],
     &["near", "my", "location"],
     &["in", "my", "area"],
+    &["in", "the", "area"],
+    &["near", "here"],
+    &["around", "here"],
 ];
 /// Words that say where, in "pizza in denver".
 const WHERE_WORDS: &[&[&str]] = &[&["in"], &["near"], &["around"], &["close", "to"], &["at"]];
+/// What may follow "in" or "at" without naming a place: "tallest building
+/// in the world", "coffee in the morning", "pizza at home".
+const NOWHERE: &[&str] = &[
+    "world",
+    "whole world",
+    "universe",
+    "morning",
+    "afternoon",
+    "evening",
+    "night",
+    "weekend",
+    "summer",
+    "winter",
+    "home",
+];
+/// Units a measure is asked in, which name no place either: "tom cruise
+/// height in cm", "area of texas in square miles", "price of gold in
+/// euros". Not "stone" or "acre", which are towns too.
+const UNITS: &[&str] = &[
+    "cm",
+    "m",
+    "km",
+    "meters",
+    "metres",
+    "kilometers",
+    "inches",
+    "feet",
+    "ft",
+    "miles",
+    "square feet",
+    "square meters",
+    "square miles",
+    "square kilometers",
+    "km2",
+    "acres",
+    "hectares",
+    "kg",
+    "pounds",
+    "lbs",
+    "grams",
+    "ounces",
+    "liters",
+    "gallons",
+    "celsius",
+    "fahrenheit",
+    "mph",
+    "dollars",
+    "euros",
+];
 /// Kinds of town a query may name without "in" or "near": "denver
 /// pizza", "barber brooklyn".
 const GUESSED_TOWNS: &[&str] = &["place=city", "place=borough"];
@@ -114,6 +166,7 @@ const HOURS: &[&[&str]] = &[
     &["open", "late"],
     &["open", "today"],
     &["open", "24", "hours"],
+    &["open", "at", "night"],
     &["24", "hours"],
     &["24", "7"],
 ];
@@ -198,6 +251,17 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         said_when = true;
         said_hours |= HOURS.contains(when);
     }
+    // Nor in the middle, "pharmacy open now denver", for the hours: a
+    // word alone may be part of a name ("now tv").
+    while let Some((at, length)) = HOURS.iter().find_map(|hours| {
+        (1..words.len().saturating_sub(hours.len()))
+            .find(|&at| words[at..at + hours.len()] == **hours)
+            .map(|at| (at, hours.len()))
+    }) {
+        words.drain(at..at + length);
+        said_when = true;
+        said_hours = true;
+    }
     if words
         .iter()
         .map(String::as_str)
@@ -248,9 +312,13 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
                 if place.first().is_some_and(|w| w == "the") && place.len() > 1 {
                     place = &place[1..];
                 }
+                let place = place.join(" ");
+                if NOWHERE.contains(&place.as_str()) || UNITS.contains(&place.as_str()) {
+                    return Vec::new();
+                }
                 return vec![PlaceQuery {
                     what,
-                    near: Near::Named(place.join(" ")),
+                    near: Near::Named(place),
                     said_where: true,
                 }];
             }
@@ -260,11 +328,17 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
     // other.
     // A country after the kind still qualifies the city: "Rome museums
     // Italy", rather than treating "Italy" as a town and "Rome" as part
-    // of the business name. Only country names, not ambiguous state codes.
+    // of the business name. So does a state's or province's name,
+    // "springfield city hall illinois", which alone names no town. Not
+    // their codes, which are words too ("in", "or").
     for count in (1..=3.min(words.len().saturating_sub(2))).rev() {
         let at = words.len() - count;
         let country = words[at..].join(" ");
-        if country_of_any_name(&country).is_some() {
+        let region = US_STATES
+            .iter()
+            .chain(CANADIAN_PROVINCES)
+            .any(|(_, name)| normalize_text(name) == country);
+        if region || country_of_any_name(&country).is_some() {
             let qualified: Vec<PlaceQuery> = place_query_readings(&words[..at].join(" "))
                 .into_iter()
                 .filter_map(|mut asked| match &mut asked.near {
@@ -1057,7 +1131,9 @@ impl PlaceSearcher {
                             || (country == "CA" && region.is_none() && of.is_none_or(|of| of == "CA"))
                     })
             };
-            let mut matching: Vec<Place> = self.named(&name)?.into_iter().filter(fits).collect();
+            let named = self.named(&name)?;
+            let mut matching: Vec<Place> =
+                named.iter().filter(|place| fits(place)).cloned().collect();
             // German without its accents ([`Self::named_within`]) also when
             // what the name as typed finds is no town that fits: "muenster
             // germany" is not Muenster, Texas.
@@ -1067,6 +1143,16 @@ impl PlaceSearcher {
                 if found.iter().any(town_like) {
                     matching = found;
                 }
+            }
+            // A town the index knows no country of (Australia's, whose
+            // addresses seldom give it) may be in the country named when
+            // no town of the name is known to be: "hotels in perth
+            // australia".
+            if matching.is_empty() && country_of_any_name(&qualifier).is_some() {
+                matching = named
+                    .into_iter()
+                    .filter(|place| place.is_town() && place.country.is_none())
+                    .collect();
             }
             // "union station denver", "soho london": a place by the town
             // the qualifier names, not in a region of that name. A town is
@@ -1692,6 +1778,15 @@ mod tests {
             query("plumber boston open now"),
             Some(("plumber".into(), Near::Named("boston".into())))
         );
+        // Or before the town.
+        assert_eq!(
+            query("pharmacy open now denver"),
+            Some(("pharmacy".into(), Near::Named("denver".into())))
+        );
+        assert_eq!(
+            query("gym open 24 hours in boston"),
+            Some(("gym".into(), Near::Named("boston".into())))
+        );
         // A kind of place at a time, with no town, is near the searcher.
         assert_eq!(query("coffee open now"), Some(("coffee".into(), Near::Me)));
         assert_eq!(
@@ -1699,6 +1794,17 @@ mod tests {
             Some(("pharmacy".into(), Near::Me))
         );
         assert_eq!(query("pizza tonight"), Some(("pizza".into(), Near::Me)));
+        assert_eq!(
+            query("restaurants open at night"),
+            Some(("restaurants".into(), Near::Me))
+        );
+        for here in [
+            "coffee near here",
+            "coffee around here",
+            "coffee in the area",
+        ] {
+            assert_eq!(query(here), Some(("coffee".into(), Near::Me)), "{here}");
+        }
         // Not for words that are no kind of place.
         assert_eq!(query("chrome open now"), None);
         assert_eq!(query("news today"), None);
@@ -1723,6 +1829,21 @@ mod tests {
             "best time to visit seattle",
             "capital of washington",
             "capital of singapore",
+            // Nowhere, after "in" or "at".
+            "tallest building in the world",
+            "best pizza in the world",
+            "largest library in the whole world",
+            "coffee in the morning",
+            "museums in winter",
+            "pizza at home",
+            // Units.
+            "tom cruise height in cm",
+            "lebron james height in feet",
+            "how tall is tom cruise in feet",
+            "mount everest height in feet",
+            "area of texas in square miles",
+            "size of russia in km2",
+            "eiffel tower height in meters",
         ] {
             assert_eq!(query(plain), None, "{plain}");
         }
@@ -2466,6 +2587,84 @@ mod tests {
         }
         let country = searcher.resolve("iceland", None, None).unwrap();
         assert_eq!(country.status, LocationStatus::MissingLocation);
+    }
+
+    #[test]
+    fn a_state_at_the_end_qualifies_a_town() {
+        let mut fixtures = places();
+        fixtures.extend([
+            city("Springfield", 170_000, "MO", "US", 37.21, -93.29),
+            city("Springfield", 155_000, "MA", "US", 42.10, -72.59),
+            city("Springfield", 114_000, "IL", "US", 39.80, -89.65),
+            at("Springfield City Hall", "amenity=townhall", 42.101, -72.591),
+            at("Springfield City Hall", "amenity=townhall", 39.801, -89.651),
+            city("Columbus", 900_000, "OH", "US", 39.96, -83.00),
+            city("Columbus", 200_000, "GA", "US", 32.46, -84.99),
+            at(
+                "Columbus Police Department",
+                "amenity=police",
+                32.461,
+                -84.991,
+            ),
+            at(
+                "Columbus Police Department",
+                "amenity=police",
+                39.961,
+                -83.001,
+            ),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        // Not a town in Illinois, which the state alone would ask for.
+        let hall = searcher
+            .search("springfield city hall illinois", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hall.center.unwrap().region.as_deref(), Some("IL"));
+        assert_eq!(hall.hits[0].place.lat, 39.801);
+        let police = searcher
+            .search("columbus police department ohio", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(police.center.unwrap().region.as_deref(), Some("OH"));
+        assert_eq!(police.hits[0].place.lat, 39.961);
+        let pizza = searcher
+            .search("denver pizza colorado", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pizza.hits[0].place.name, "Blue Pan");
+        // A state alone still names no town.
+        let state = searcher
+            .search("city hall illinois", None, Some("US"), 5)
+            .unwrap();
+        assert!(state.is_none_or(|found| found.center.is_none()));
+    }
+
+    #[test]
+    fn a_town_of_no_known_country_is_found_by_its_country() {
+        let mut fixtures = places();
+        // As the index has them: Perth with no country, as Australia's
+        // addresses seldom give one.
+        fixtures.extend([
+            Place {
+                country: None,
+                ..city("Perth", 2_000_000, "WA", "", -31.95, 115.86)
+            },
+            at("Hotel Perth", "tourism=hotel", -31.951, 115.861),
+            city("Perth", 47_000, "Scotland", "GB", 56.40, -3.43),
+            at("Perth Hotel", "tourism=hotel", 56.401, -3.431),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let center = |query: &str| {
+            let found = searcher.search(query, None, None, 5).unwrap().unwrap();
+            let center = found.center.unwrap();
+            (center.region, center.country)
+        };
+        let australia = center("hotels in perth australia");
+        assert_eq!(australia, (Some("WA".into()), None));
+        // A town known to be in the country named comes first.
+        assert_eq!(center("hotels in perth scotland").1.as_deref(), Some("GB"));
+        assert_eq!(center("hotels in perth uk").1.as_deref(), Some("GB"));
+        assert_eq!(center("hotels in perth"), australia);
     }
 
     #[test]

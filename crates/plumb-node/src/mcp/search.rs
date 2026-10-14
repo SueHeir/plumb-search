@@ -320,13 +320,17 @@ impl Mcp {
             if !answers::searches_songs(query, &resolution) {
                 return None;
             }
-            self.lookup(name, PROFILE_SEARCH_LIMIT, options)
-                .ok()
-                .and_then(|found| answers::songs_profile(query, &resolution, found.pages))
+            answers::song_lookups(name, &resolution)
+                .iter()
+                .find_map(|lookup| {
+                    self.lookup(lookup, PROFILE_SEARCH_LIMIT, options)
+                        .ok()
+                        .and_then(|found| answers::songs_profile(query, &resolution, found.pages))
+                })
         });
         let info = match &profile {
             Some(profile) => answers::info_from_page(&profile.page, &results.hits),
-            None if operators.any() => None,
+            None if operators.any_but_phrases() || answers::is_sum(answer.as_ref()) => None,
             None => answers::info_box(&results.hits, &placed),
         };
         let recent = (!sites_only)

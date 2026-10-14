@@ -831,15 +831,15 @@ fn docs_pages_named_then_more_words_and_crowded_by_questions_are_listed() {
         ));
     }
     let (_dir, searcher) = searcher(&pages);
-    // Named by its product and title, then a word of its description:
-    // not a book's title and its author.
+    // Named by its product and title, with a word of its description
+    // after them, not as a book is by its title and author.
     let hits = searcher.search("react usestate hook", 10).unwrap();
     assert_eq!(hits.len(), 10);
     // The questions outnumber it, and are more read, but it stays.
     let docs: Vec<&PageHit> = hits.iter().filter(|h| h.page.set == DOCS_SET).collect();
     assert_eq!(docs.len(), 1);
     assert_eq!(docs[0].page.title, "useState");
-    assert!(!docs[0].named);
+    assert!(docs[0].named && !docs[0].whole);
     // Listed after the best site, besides the questions that took
     // the places for pages.
     let sites = [site("react.dev", true), site("other.com", false)];
@@ -1043,4 +1043,208 @@ fn manual_pages_are_named_without_their_section() {
     }
     // A bare name may be anything.
     assert!(searcher.search("ls", 10).unwrap().is_empty());
+}
+
+#[test]
+fn docs_pages_named_by_part_of_a_search_keep_the_rest_as_detail() {
+    let with_sections = |mut page: Page, sections: &[&str]| {
+        page.sections = sections.iter().map(|s| s.to_string()).collect();
+        page
+    };
+    // Titles, other names and sections as the docs pages have them.
+    let logging = with_sections(
+        docs_page(
+            "https://docs.python.org/3/library/logging.html",
+            "logging — Logging facility for Python",
+            &["Python logging", "logging Python"],
+            "Source code: Lib/logging/__init__.py This module defines functions and classes which implement a flexible event logging system.",
+        ),
+        &["Logger Objects", "Logging Levels", "Handler Objects", "Module-Level Functions"],
+    );
+    let pathlib = with_sections(
+        docs_page(
+            "https://docs.python.org/3/library/pathlib.html",
+            "pathlib — Object-oriented filesystem paths",
+            &["Python pathlib", "pathlib Python"],
+            "Source code: Lib/pathlib/ This module offers classes representing filesystem paths.",
+        ),
+        &[
+            "Basic use",
+            "Pure paths",
+            "Concrete paths",
+            "Pattern language",
+            "Comparison to the glob module",
+        ],
+    );
+    let random = with_sections(
+        docs_page(
+            "https://docs.python.org/3/library/random.html",
+            "random — Generate pseudo-random numbers",
+            &["Python random", "random Python"],
+            "Source code: Lib/random.py This module implements pseudo-random number generators for various distributions.",
+        ),
+        &["Bookkeeping functions", "Functions for integers", "Functions for sequences", "Examples"],
+    );
+    let rebase = with_sections(
+        docs_page(
+            "https://git-scm.com/docs/git-rebase",
+            "git-rebase",
+            &["git rebase", "Git git-rebase", "git-rebase Git"],
+            "",
+        ),
+        &[
+            "NAME",
+            "SYNOPSIS",
+            "DESCRIPTION",
+            "OPTIONS",
+            "MERGE STRATEGIES",
+            "INTERACTIVE MODE",
+            "SPLITTING COMMITS",
+        ],
+    );
+    let effect = with_sections(
+        docs_page(
+            "https://react.dev/reference/react/useEffect",
+            "useEffect",
+            &["React useEffect", "useEffect React"],
+            "useEffect is a React Hook that lets you synchronize a component with an external system.",
+        ),
+        &["Reference", "Usage", "Troubleshooting"],
+    );
+    let array = with_sections(
+        docs_page(
+            "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array",
+            "Array — JavaScript",
+            &["MDN Array", "Array MDN", "JavaScript Array", "Array JavaScript"],
+            "The Array object enables storing a collection of multiple items under a single variable name, and flat() makes it flat.",
+        ),
+        &["Description", "Constructor", "Static methods", "Instance methods", "Examples"],
+    );
+    let flat = docs_page(
+        "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/flat",
+        "Array.prototype.flat() — JavaScript",
+        &["MDN Array.prototype.flat()", "Array.prototype.flat() MDN", "JavaScript Array.prototype.flat()", "Array.prototype.flat() JavaScript"],
+        "The flat() method of Array instances creates a new array with all sub-array elements concatenated into it.",
+    );
+    let (_dir, searcher) = searcher(&[logging, pathlib, random, rebase, effect, array, flat]);
+    let first_docs = |query: &str| {
+        searcher
+            .search(query, 10)
+            .unwrap()
+            .into_iter()
+            .find(|hit| hit.page.set == DOCS_SET)
+            .map(|hit| (hit.page.title, hit.named))
+    };
+    for (query, title) in [
+        // The rest is written as code: a function of the module.
+        (
+            "python logging basicConfig",
+            "logging — Logging facility for Python",
+        ),
+        (
+            "logging basicConfig python",
+            "logging — Logging facility for Python",
+        ),
+        ("react useEffect cleanup", "useEffect"),
+        // The rest is on the page.
+        (
+            "python pathlib glob",
+            "pathlib — Object-oriented filesystem paths",
+        ),
+        ("git rebase interactive", "git-rebase"),
+        ("git interactive rebase", "git-rebase"),
+    ] {
+        assert_eq!(
+            first_docs(query),
+            Some((title.to_string(), true)),
+            "{query}"
+        );
+        let hits = searcher.search(query, 10).unwrap();
+        let placed = place_pages(query, &[site("other.com", false)], hits);
+        assert!(
+            placed
+                .iter()
+                .any(|p| p.hit.page.title == title && p.at <= 1),
+            "{query}: {placed:?}"
+        );
+    }
+    // A page the whole search names is still named so.
+    assert_eq!(
+        first_docs("python logging"),
+        Some(("logging — Logging facility for Python".to_string(), true))
+    );
+    // Nothing says random's page is about forests, nor is a version code,
+    // so the page "python random" names is only found (#604), not named.
+    for query in ["python random forest", "python 3.12 random forest"] {
+        assert!(
+            searcher
+                .search(query, 10)
+                .unwrap()
+                .iter()
+                .all(|hit| !hit.named || !hit.page.title.starts_with("random")),
+            "{query}"
+        );
+    }
+    // A page whose title has every word comes before the one a part names.
+    let hits = searcher.search("javascript array flat", 10).unwrap();
+    assert_eq!(hits[0].page.title, "Array.prototype.flat() — JavaScript");
+    assert!(hits
+        .iter()
+        .all(|hit| !hit.named || !hit.page.title.starts_with("Array —")));
+}
+
+#[test]
+fn docs_pages_asked_for_as_a_tutorial_or_examples_are_named() {
+    let asyncio = docs_page(
+        "https://docs.python.org/3/library/asyncio.html",
+        "asyncio — Asynchronous I/O",
+        &["Python asyncio", "asyncio Python"],
+        "asyncio is a library to write concurrent code using the async/await syntax.",
+    );
+    let tutorial = docs_page(
+        "https://docs.python.org/3/tutorial/index.html",
+        "The Python Tutorial",
+        &["Python The Python Tutorial"],
+        "Python is an easy to learn, powerful programming language.",
+    );
+    let (_dir, searcher) = searcher(&[asyncio, tutorial]);
+    for query in [
+        "python asyncio tutorial",
+        "asyncio python examples",
+        "python asyncio guide",
+    ] {
+        let hits = searcher.search(query, 10).unwrap();
+        assert_eq!(hits[0].page.title, "asyncio — Asynchronous I/O", "{query}");
+        assert!(hits[0].named, "{query}: {hits:?}");
+    }
+    // The word alone is still the topic: the tutorial, not asyncio.
+    let hits = searcher.search("python tutorial", 10).unwrap();
+    assert!(
+        hits.iter()
+            .all(|hit| hit.page.title != "asyncio — Asynchronous I/O"),
+        "{hits:?}"
+    );
+    // A page titled so keeps its place first: the argparse tutorial.
+    let argparse = docs_page(
+        "https://docs.python.org/3/library/argparse.html",
+        "argparse — Parser for command-line options, arguments and subcommands",
+        &["Python argparse", "argparse Python"],
+        "The argparse module makes it easy to write user-friendly command-line interfaces.",
+    );
+    let howto = docs_page(
+        "https://docs.python.org/3/howto/argparse.html",
+        "Argparse Tutorial",
+        &["Python Argparse Tutorial", "Argparse Tutorial Python"],
+        "This tutorial is intended to be a gentle introduction to argparse.",
+    );
+    let (_dir2, searcher) = super::searcher(&[argparse, howto]);
+    let hits = searcher.search("python argparse tutorial", 10).unwrap();
+    assert_eq!(hits[0].page.title, "Argparse Tutorial", "{hits:?}");
+    let sites = [site("python.org", true), site("other.com", false)];
+    let placed = place_pages("python argparse tutorial", &sites, hits);
+    let first = placed.iter().find(|p| p.under.is_none());
+    assert_eq!(
+        first.map(|p| p.hit.page.title.as_str()),
+        Some("Argparse Tutorial")
+    );
 }

@@ -17,13 +17,13 @@ use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{DocAddress, Index, ReloadPolicy, TantivyDocument, Term};
 
 use crate::hits::{docs_site_first, hit_texts, suggested_site_second};
-use crate::names::without_intent_words;
-use crate::query::{matching_docs, words_after, ParsedQuery};
-use crate::rank::{best_link_score, bm25_of, domain_of};
+use crate::names::{named_by_links, without_intent_words};
+use crate::query::{matching_docs, words_after, ParsedQuery, COMPARISON_WORDS};
+use crate::rank::{best_link_score, bm25_of, domain_of, link_scores};
 use crate::schema::Fields;
 use crate::{
     analysis, health, pages, schema, spell, spell_model, CandidatePool, Hit, Meaning, RankConfig,
-    SearchOptions, SearchResults, Searcher, SiteSearch, Spelling, WordsOrder,
+    SearchOptions, SearchResults, Searcher, SiteSearch, Spelling, WordsOrder, FILLER_WORDS,
     WELL_KNOWN_LINK_SCORE,
 };
 
@@ -42,6 +42,10 @@ pub const TYPO_POPULARITY_MARGIN: f32 = 0.3;
 /// name even when a far better-known one is a typo away. Typo-squatters
 /// such as twiter.com score below it (0.25 to 0.37 on real data).
 pub const KEEPS_ITS_NAME_LINK_SCORE: f32 = 0.4;
+
+/// Most words of a site's name at the end of a query
+/// ([`Searcher::site_search_at_end`]): "new york times".
+const MAX_END_NAME_WORDS: usize = 3;
 
 impl Searcher {
     /// Opens the index in `dir`. Fails when there is none, or when it was
@@ -110,9 +114,9 @@ impl Searcher {
         self.reader.searcher().doc_freq(&term).is_ok_and(|n| n > 0)
     }
 
-    /// The language `domain`'s homepage says it is in
-    /// ([`plumb_core::SiteRecord::language`]), when the index holds the site
-    /// and knows it.
+    /// The language of `domain`'s homepage as the index keeps it
+    /// ([`plumb_core::site_language`]), when the index holds the site and
+    /// knows it.
     pub fn language(&self, domain: &str) -> Option<String> {
         let searcher = self.reader.searcher();
         let term = Term::from_field_text(self.fields.domain, domain);
@@ -633,6 +637,73 @@ impl Searcher {
             return Ok(None);
         }
         self.site_search_link(searcher, addr, terms)
+    }
+
+    /// A link into the search of a well-known site the query's last words
+    /// name, for the words before them: reddit.com for "how to fix a leaky
+    /// faucet reddit", target.com for "coffee maker target". Only a big
+    /// site whose search Plumb knows, and only after two main words or
+    /// more, so the site is where to look and not what is asked about
+    /// ("how to cancel netflix"). Words that run into the name as one
+    /// phrase name nothing: "the cricket and the ant", "nike vs adidas".
+    pub(crate) fn site_search_at_end(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &str,
+        cfg: &RankConfig,
+    ) -> Result<Option<SiteSearch>> {
+        let typed: Vec<&str> = query.split_whitespace().collect();
+        let tokens = |words: &[&str]| -> Vec<String> {
+            words
+                .iter()
+                .flat_map(|word| analysis::tokens(&self.words, word))
+                .collect()
+        };
+        let longest = MAX_END_NAME_WORDS.min(typed.len().saturating_sub(1));
+        for words in (1..=longest).rev() {
+            let (before, name) = typed.split_at(typed.len() - words);
+            let last = before.last().map(|word| normalize_text(word));
+            if last.is_none_or(|word| {
+                is_function_word(&word) || COMPARISON_WORDS.contains(&word.as_str())
+            }) {
+                continue;
+            }
+            let main = tokens(before)
+                .iter()
+                .map(String::as_str)
+                .filter(|token| !is_function_word(token) && !FILLER_WORDS.contains(token))
+                .count();
+            let key = tokens(name).concat();
+            if main < 2 || key.is_empty() {
+                continue;
+            }
+            let mut named = matching_docs(
+                searcher,
+                vec![
+                    Term::from_field_text(self.fields.label_key, &key),
+                    Term::from_field_text(self.fields.alias_key, &key),
+                ],
+            )?;
+            if let Some(field) = self.fields.link_name_key.filter(|_| cfg.link_names) {
+                named.extend(named_by_links(
+                    searcher,
+                    &Term::from_field_text(field, &key),
+                )?);
+            }
+            for (link_score, addr) in link_scores(searcher, &named) {
+                let Some(domain) = domain_of(searcher, addr) else {
+                    continue;
+                };
+                let terms = before.join(" ");
+                let link = search_template_for(&domain)
+                    .filter(|_| link_score >= WELL_KNOWN_LINK_SCORE)
+                    .and_then(|template| search_link(template, &domain, &terms));
+                if let Some(url) = link {
+                    return Ok(Some(SiteSearch { domain, terms, url }));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// A link into the search of the site at `addr` for `terms`.

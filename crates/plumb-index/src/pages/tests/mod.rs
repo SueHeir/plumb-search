@@ -8,6 +8,7 @@ mod media;
 mod named_site;
 mod papers_and_entities;
 mod placing;
+mod records;
 mod repos;
 mod subpages_and_packages;
 
