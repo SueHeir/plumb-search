@@ -5,7 +5,16 @@
 use crate::{simplify, Answer, Kind};
 
 /// Words that alone ask for crisis help.
-const CRISIS_WORDS: &[&str] = &["suicide", "suicidal", "selfharm", "self-harm", "988"];
+const CRISIS_WORDS: &[&str] = &["suicide", "suicidal", "selfharm", "self-harm"];
+
+/// The US and Canadian crisis line, which asks for the line alone or with
+/// these words ("call 988", "988 lifeline"). With others it is a car, an
+/// amount or a year: "porsche 988", "988 km to miles".
+const LINE_NUMBER: &str = "988";
+const LINE_WORDS: &[&str] = &[
+    "call", "text", "dial", "chat", "phone", "number", "line", "lifeline", "hotline", "helpline",
+    "help", "crisis", "mental", "health", "what", "is", "the",
+];
 
 /// Phrases that ask for crisis help wherever they appear.
 const CRISIS_PHRASES: &[&str] = &[
@@ -33,9 +42,15 @@ const CRISIS_PHRASES: &[&str] = &[
 pub(crate) fn answer(query: &str) -> Option<Answer> {
     let query = simplify(query);
     let padded = format!(" {query} ");
-    let asks = query
+    let words: Vec<&str> = query
         .split(|c: char| c.is_whitespace() || c == ',')
-        .any(|word| CRISIS_WORDS.contains(&word))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let asks = words.iter().any(|word| CRISIS_WORDS.contains(word))
+        || (words.contains(&LINE_NUMBER)
+            && words
+                .iter()
+                .all(|word| *word == LINE_NUMBER || LINE_WORDS.contains(word)))
         || CRISIS_PHRASES
             .iter()
             .any(|phrase| padded.contains(&format!(" {phrase} ")));
@@ -67,11 +82,22 @@ mod tests {
             "I want to die",
             "how to stop self harm",
             "Suicidal thoughts?",
+            "988",
+            "call 988",
+            "988 lifeline",
+            "what is the 988 number",
         ] {
             let found = answer(query).unwrap_or_else(|| panic!("{query}"));
             assert!(found.answer.contains("988"), "{query}");
         }
-        for query in ["depression", "die hard", "help desk"] {
+        for query in [
+            "depression",
+            "die hard",
+            "help desk",
+            "porsche 988",
+            "988 area code",
+            "988 km to miles",
+        ] {
             assert_eq!(answer(query), None, "{query}");
         }
         // A title with the word still gets the lines: better shown once

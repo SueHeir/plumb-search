@@ -118,7 +118,15 @@ const PLACE_KEYS: &[&str] = &[
     "aeroway",
     "railway",
     "boundary",
+    "natural",
 ];
+/// Values of `natural` that are sights people search around ("hotels
+/// near lake tahoe", "near mount fuji") when Wikidata knows them. Those
+/// no English article names plainly are dropped once the articles are
+/// read: most mountains and lakes have none.
+const NATURAL_SIGHTS: &[&str] = &["water", "peak", "volcano", "beach"];
+/// Values of `water` that make a lake, not a river or a canal.
+const LAKE_WATERS: &[&str] = &["lake", "reservoir", "lagoon"];
 /// Values of `place` that are towns or parts of them.
 const TOWN_VALUES: &[&str] = &[
     "city",
@@ -227,6 +235,12 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
                 "aeroway" => value == "aerodrome",
                 "railway" => value == "station",
                 "boundary" => value == "national_park",
+                "natural" => {
+                    NATURAL_SIGHTS.contains(&value)
+                        && get("wikidata").is_some()
+                        && get("water").is_none_or(|water| LAKE_WATERS.contains(&water))
+                        && get("waterway").is_none()
+                }
                 _ => value != "no" && value != "vacant",
             };
             if !kept || value.contains(';') {
@@ -264,14 +278,22 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
             place_tags.push(format!("sport={}", sport.to_lowercase()));
         }
     }
+    // An embassy's or consulate's address can give the country it serves,
+    // not the one it is in: El Salvador's consulate in Camuy, Puerto Rico
+    // says SV, and was the only country the towns around it were given.
+    let diplomatic = matches!(kind.as_str(), "office=diplomatic" | "amenity=embassy");
     let country = get("addr:country")
         .or_else(|| get("is_in:country_code"))
-        .and_then(normalize_country);
+        .and_then(normalize_country)
+        .filter(|_| !diplomatic);
     // Canada's addresses give the province as addr:province, and so do
     // Italy's (MI, PE), whose would be taken for states and provinces.
+    // Where they give none, the postal code says it: shops by Glen Walter,
+    // Ontario give K6H and no province.
     let province = get("addr:province")
         .map(normalize_region)
         .filter(|region| CANADIAN_PROVINCES.iter().any(|(code, _)| code == region))
+        .or_else(|| postal_province(get("addr:postcode")?).map(str::to_string))
         .filter(|_| country.as_deref().is_none_or(|country| country == "CA"));
     let website = ["website", "contact:website", "url", "brand:website"]
         .iter()
@@ -327,6 +349,44 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
         website,
         osm,
         aliases,
+    })
+}
+
+/// The province of a Canadian postal code ("K6H 2R4"), by the first
+/// letter Canada Post gives each. Other countries' codes are no A9A 9A9.
+fn postal_province(code: &str) -> Option<&'static str> {
+    let code: Vec<char> = code
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    let canadian = code.len() == 6
+        && code.iter().enumerate().all(|(i, c)| {
+            if i % 2 == 0 {
+                c.is_ascii_uppercase()
+            } else {
+                c.is_ascii_digit()
+            }
+        });
+    if !canadian {
+        return None;
+    }
+    Some(match code[0] {
+        'A' => "NL",
+        'B' => "NS",
+        'C' => "PE",
+        'E' => "NB",
+        'G' | 'H' | 'J' => "QC",
+        'K' | 'L' | 'M' | 'N' | 'P' => "ON",
+        'R' => "MB",
+        'S' => "SK",
+        'T' => "AB",
+        'V' => "BC",
+        // X0A to X0C are Nunavut's, the rest the Northwest Territories'.
+        'X' if code[1] == '0' && matches!(code[2], 'A' | 'B' | 'C') => "NU",
+        'X' => "NT",
+        'Y' => "YT",
+        _ => return None,
     })
 }
 
@@ -546,8 +606,10 @@ pub fn read_places(paths: &[PathBuf], articles: Option<&Path>) -> Result<Vec<Pla
     let (states, mut found): (Vec<_>, Vec<_>) = found
         .into_iter()
         .partition(|(place, _)| place.kind == STATE_KIND);
-    if let Some(articles) = articles {
-        add_article_names(&mut found, articles)?;
+    match articles {
+        Some(articles) => add_article_names(&mut found, articles)?,
+        // Then no article names a lake or mountain.
+        None => found.retain(|(place, _)| !place.kind.starts_with("natural=")),
     }
     let mut located: Vec<Place> = found.into_iter().map(|(place, _)| place).collect();
     let states: Vec<Place> = states.into_iter().map(|(state, _)| state).collect();
@@ -697,20 +759,24 @@ fn titled_region(title: &str, lon: f64) -> Option<(String, &'static str)> {
 /// English Wikipedia article on its Wikidata item, from the articles file
 /// `path`: "Big Ben" for the Elizabeth Tower, "Philly" for Philadelphia.
 /// The best known place of an item that is no town, and that the title
-/// names plainly, is a landmark ([`landmark_rank`]). A place with its
-/// town's item (a town hall) takes nothing from it.
-fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<()> {
+/// names plainly, is a landmark ([`landmark_rank`]); a lake or mountain
+/// that is not one is dropped. A place with its town's item (a town hall)
+/// takes nothing from it.
+fn add_article_names(found: &mut Vec<(Place, Option<u64>)>, path: &Path) -> Result<()> {
     let mut places_of: HashMap<u64, ItemPlaces> = HashMap::new();
+    // The parts of a lake or a beach are one place, not a brand's many,
+    // and a park or museum of the item stays its landmark.
+    let natural = |place: &Place| place.kind.starts_with("natural=");
     for (i, (place, item)) in found.iter().enumerate() {
         let Some(item) = item else { continue };
         let of = places_of.entry(*item).or_default();
-        of.places += 1;
+        of.places += u32::from(!natural(place));
         of.town |= place.is_town();
-        if !place.is_town()
-            && of
-                .landmark
-                .is_none_or(|best| found[best].0.rank < place.rank)
-        {
+        let better = |best: usize| {
+            let best = &found[best].0;
+            (!natural(best), best.rank) < (!natural(place), place.rank)
+        };
+        if !place.is_town() && of.landmark.is_none_or(better) {
             of.landmark = Some(i);
         }
     }
@@ -782,6 +848,7 @@ fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<
             .filter(|(_, item)| item.is_some_and(|item| articles.contains_key(&item)))
             .count()
     );
+    found.retain(|(place, _)| !place.kind.starts_with("natural=") || place.is_landmark());
     Ok(())
 }
 
@@ -880,6 +947,7 @@ fn winner(votes: &HashMap<String, u32>) -> Option<String> {
 /// nearest of `states` with that code, and takes from towns that know
 /// their country a region no state of it has: Rainy River, Ontario, voted
 /// Minnesota's by shops across the river, has no region rather than MN.
+/// A territory's towns are in its own country (Puerto Rico's in PR).
 fn countries_from_states(places: &mut [Place], settlements: &[usize], states: &[Place]) {
     // A state's region is its whole code; it is looked up by the part
     // after the country's: "WA" for AU-WA and US-WA.
@@ -911,14 +979,20 @@ fn countries_from_states(places: &mut [Place], settlements: &[usize], states: &[
                     .and_then(|(_, state)| state.country.clone());
             }
             // A territory's state is its own country's and its parent's:
-            // US-PR is Puerto Rico's and the US's.
+            // US-PR is Puerto Rico's and the US's, and its towns are in
+            // Puerto Rico, though some of their shops say US.
             Some(country) => {
                 let ours = |state: &&Place| {
                     state.country.as_ref() == Some(country)
                         || split(state).is_some_and(|(parent, _)| parent == country)
                 };
-                if !states.iter().any(ours) {
-                    places[i].region = None;
+                match states.iter().copied().find(ours) {
+                    None => places[i].region = None,
+                    Some(state) => {
+                        if split(state).is_some_and(|(parent, _)| parent == country) {
+                            places[i].country = state.country.clone();
+                        }
+                    }
                 }
             }
         }
@@ -1255,6 +1329,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shop.region.as_deref(), Some("ON"));
+        // Or their postal codes do; a British one says nothing.
+        let postal = |code: &str| {
+            let shop = [
+                ("name", "Esso"),
+                ("amenity", "fuel"),
+                ("addr:postcode", code),
+            ];
+            place_of(&tags(&shop), "n9".into(), true).unwrap().region
+        };
+        assert_eq!(postal("K6H 2R4").as_deref(), Some("ON"));
+        assert_eq!(postal("x0a0h0").as_deref(), Some("NU"));
+        assert_eq!(postal("W1A 0AX"), None);
+        assert_eq!(postal("80202"), None);
         // Italy's provinces are no states.
         let bar = place_of(
             &tags(&[
@@ -1289,6 +1376,40 @@ mod tests {
         );
         let rock = &[("name", "Seal Rock"), ("place", "island")];
         assert!(place_of(&tags(rock), "w4".into(), false).is_none());
+        // And a lake or a mountain Wikidata knows, not a river.
+        let lake = &[
+            ("name", "Lake Tahoe"),
+            ("natural", "water"),
+            ("water", "lake"),
+            ("wikidata", "Q107374"),
+        ];
+        assert_eq!(
+            place_of(&tags(lake), "r5".into(), false).unwrap().kind,
+            "natural=water"
+        );
+        let peak = &[("name", "Mount Hood"), ("natural", "peak")];
+        assert!(place_of(&tags(peak), "n6".into(), true).is_none());
+        let peak = &[peak[0], peak[1], ("wikidata", "Q217577")];
+        assert!(place_of(&tags(peak), "n6".into(), true).is_some());
+        let river = &[
+            ("name", "Thames"),
+            ("natural", "water"),
+            ("water", "river"),
+            ("wikidata", "Q19686"),
+        ];
+        assert!(place_of(&tags(river), "r7".into(), false).is_none());
+        let bank = &[river[0], river[1], ("waterway", "riverbank"), river[3]];
+        assert!(place_of(&tags(bank), "r7".into(), false).is_none());
+        // A consulate's address says whose it is, not where.
+        let consulate = &[
+            ("name", "Consulado de El Salvador"),
+            ("office", "diplomatic"),
+            ("addr:state", "PR"),
+            ("addr:country", "SV"),
+        ];
+        let consulate = place_of(&tags(consulate), "n8".into(), true).unwrap();
+        assert_eq!(consulate.country, None);
+        assert_eq!(consulate.region.as_deref(), Some("PR"));
     }
 
     #[test]
@@ -1340,13 +1461,35 @@ mod tests {
                 },
                 Some(1003),
             ),
+            // A lake an article names, and a mountain none does.
+            (at("Lake Tahoe", "natural=water", "r13"), Some(107374)),
+            (at("Mount Nobody", "natural=peak", "n14"), Some(99)),
+            // A park stays its item's landmark, and a beach of four parts
+            // is no brand.
+            (
+                at("Emerald Bay State Park", "leisure=park", "w15"),
+                Some(555),
+            ),
+            (
+                Place {
+                    rank: place_rank("natural=water", 0, true, true, 9),
+                    ..at("Emerald Bay", "natural=water", "r16")
+                },
+                Some(555),
+            ),
         ];
+        found.extend((17..21).map(|n| {
+            (
+                at("Bondi Beach", "natural=beach", &format!("w{n}")),
+                Some(666),
+            )
+        }));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wikipedia-en.tsv");
         std::fs::write(
             &path,
             format!(
-                "{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}{}",
                 plumb_core::article::ARTICLES_HEADER,
                 "a line with no columns\n",
                 "90000\tBig Ben\tclock tower\tQ41225\t\tElizabeth Tower|BigBen|10.57232|Clock Tower (Westminster)|Big Ben, London\n",
@@ -1355,6 +1498,9 @@ mod tests {
                 "70000\tStarbucks\tcoffeehouse chain\tQ37158\t\t\n",
                 "2293\tNiagara Falls, Ontario\tcity\tQ274120\t\tNiagara Falls, ON|Crowland Township\n",
                 "900\tGori, Georgia\ttown\tQ1003\t\t\n",
+                "60000\tLake Tahoe\tlake\tQ107374\t\tTahoe\n",
+                "40000\tEmerald Bay State Park\tpark\tQ555\t\t\n",
+                "50000\tBondi Beach\tbeach\tQ666\t\t\n",
             ),
         )
         .unwrap();
@@ -1383,6 +1529,13 @@ mod tests {
         assert_eq!(falls.country.as_deref(), Some("CA"));
         assert_eq!(falls.aliases, ["Crowland Township"]);
         assert_eq!(found[11].0.region, None);
+        // The lake is a landmark; the mountain no article names is gone.
+        assert!(found[12].0.is_landmark());
+        assert_eq!(found[13].0.name, "Emerald Bay State Park");
+        assert!(found[13].0.is_landmark());
+        assert_eq!(found[14].0.name, "Bondi Beach");
+        assert!(found[14].0.is_landmark());
+        assert_eq!(found.len(), 15);
     }
 
     #[test]
@@ -1542,7 +1695,8 @@ mod tests {
         // Canada has no MN, so Rainy River keeps no region.
         assert_eq!(said(5), (None, Some("CA")));
         assert_eq!(said(8), (Some("PR"), Some("PR")));
-        // A town whose addresses put Puerto Rico in the US keeps its state.
+        // A town whose addresses put Puerto Rico in the US keeps its state,
+        // and is in Puerto Rico.
         let mut places = vec![
             at("Arecibo", "place=town", 18.47, -66.72),
             Place {
@@ -1552,7 +1706,7 @@ mod tests {
         ];
         fill_in_towns(&mut places, &states);
         assert_eq!(places[0].region.as_deref(), Some("PR"));
-        assert_eq!(places[0].country.as_deref(), Some("US"));
+        assert_eq!(places[0].country.as_deref(), Some("PR"));
         // Without the states, no country is made up.
         let mut places = vec![
             at("Perth", "place=city", -31.95, 115.86),
