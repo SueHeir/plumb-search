@@ -1057,7 +1057,9 @@ impl PlaceSearcher {
                             || (country == "CA" && region.is_none() && of.is_none_or(|of| of == "CA"))
                     })
             };
-            let mut matching: Vec<Place> = self.named(&name)?.into_iter().filter(fits).collect();
+            let named = self.named(&name)?;
+            let mut matching: Vec<Place> =
+                named.iter().filter(|place| fits(place)).cloned().collect();
             // German without its accents ([`Self::named_within`]) also when
             // what the name as typed finds is no town that fits: "muenster
             // germany" is not Muenster, Texas.
@@ -1067,6 +1069,16 @@ impl PlaceSearcher {
                 if found.iter().any(town_like) {
                     matching = found;
                 }
+            }
+            // A town the index knows no country of (Australia's, whose
+            // addresses seldom give it) may be in the country named when
+            // no town of the name is known to be: "hotels in perth
+            // australia".
+            if matching.is_empty() && country_of_any_name(&qualifier).is_some() {
+                matching = named
+                    .into_iter()
+                    .filter(|place| place.is_town() && place.country.is_none())
+                    .collect();
             }
             // "union station denver", "soho london": a place by the town
             // the qualifier names, not in a region of that name. A town is
@@ -2466,6 +2478,34 @@ mod tests {
         }
         let country = searcher.resolve("iceland", None, None).unwrap();
         assert_eq!(country.status, LocationStatus::MissingLocation);
+    }
+
+    #[test]
+    fn a_town_of_no_known_country_is_found_by_its_country() {
+        let mut fixtures = places();
+        // As the index has them: Perth with no country, as Australia's
+        // addresses seldom give one.
+        fixtures.extend([
+            Place {
+                country: None,
+                ..city("Perth", 2_000_000, "WA", "", -31.95, 115.86)
+            },
+            at("Hotel Perth", "tourism=hotel", -31.951, 115.861),
+            city("Perth", 47_000, "Scotland", "GB", 56.40, -3.43),
+            at("Perth Hotel", "tourism=hotel", 56.401, -3.431),
+        ]);
+        let (_dir, searcher) = index(fixtures);
+        let center = |query: &str| {
+            let found = searcher.search(query, None, None, 5).unwrap().unwrap();
+            let center = found.center.unwrap();
+            (center.region, center.country)
+        };
+        let australia = center("hotels in perth australia");
+        assert_eq!(australia, (Some("WA".into()), None));
+        // A town known to be in the country named comes first.
+        assert_eq!(center("hotels in perth scotland").1.as_deref(), Some("GB"));
+        assert_eq!(center("hotels in perth uk").1.as_deref(), Some("GB"));
+        assert_eq!(center("hotels in perth"), australia);
     }
 
     #[test]

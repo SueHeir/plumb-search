@@ -578,6 +578,7 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("size of ", &[Area], false),
         ("how big is ", &[Area, Radius], false),
         ("how old is ", &[Born], true),
+        ("how old was ", &[Born], true),
         ("age of ", &[Born], true),
         ("birthday of ", &[Born], false),
         ("founder of ", &[Founder], false),
@@ -643,6 +644,8 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         (" date of death", &[Died], false),
         (" death date", &[Died], false),
         (" age", &[Born], true),
+        (" age at death", &[Born], true),
+        (" born", &[Born], false),
         (" founder", &[Founder], false),
         (" founders", &[Founder], false),
         (" ceo", &[Ceo], false),
@@ -673,30 +676,46 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         (" radius", &[Radius], false),
     ];
     // Words around it.
-    let around: &[(&str, &str, &[FactKind])] = &[
-        ("when was ", " born", &[Born]),
-        ("when is ", " birthday", &[Born]),
-        ("where was ", " born", &[Birthplace]),
-        ("when did ", " die", &[Died]),
-        ("when was ", " founded", &[Founded]),
-        ("when was ", " established", &[Founded]),
-        ("when was ", " built", &[Founded]),
-        ("when was ", " formed", &[Founded]),
-        ("where is ", " headquartered", &[Headquarters]),
-        ("where is ", " based", &[Headquarters]),
-        ("what currency does ", " use", &[Currency]),
-        ("how long does ", " take to orbit the sun", &[OrbitalPeriod]),
+    let around: &[(&str, &str, &[FactKind], bool)] = &[
+        ("when was ", " born", &[Born], false),
+        ("when is ", " birthday", &[Born], false),
+        ("where was ", " born", &[Birthplace], false),
+        ("when did ", " die", &[Died], false),
+        // "is elvis still alive": how old they are, or were when they died.
+        ("is ", " still alive", &[Born], true),
+        ("is ", " still living", &[Born], true),
+        ("is ", " alive", &[Born], true),
+        ("is ", " dead", &[Born], true),
+        // "how old was elvis when he died": the age they died at.
+        ("how old was ", " when he died", &[Born], true),
+        ("how old was ", " when she died", &[Born], true),
+        ("how old was ", " when they died", &[Born], true),
+        ("age of ", " at death", &[Born], true),
+        ("when was ", " founded", &[Founded], false),
+        ("when was ", " established", &[Founded], false),
+        ("when was ", " built", &[Founded], false),
+        ("when was ", " formed", &[Founded], false),
+        ("where is ", " headquartered", &[Headquarters], false),
+        ("where is ", " based", &[Headquarters], false),
+        ("what currency does ", " use", &[Currency], false),
+        (
+            "how long does ",
+            " take to orbit the sun",
+            &[OrbitalPeriod],
+            false,
+        ),
         (
             "how long does it take ",
             " to orbit the sun",
             &[OrbitalPeriod],
+            false,
         ),
     ];
     let found = around
         .iter()
-        .find_map(|(lead, tail, kinds)| {
+        .find_map(|(lead, tail, kinds, age)| {
             let subject = q.strip_prefix(lead)?.strip_suffix(tail)?;
-            Some((subject, kinds.to_vec(), false))
+            Some((subject, kinds.to_vec(), *age))
         })
         .or_else(|| {
             before
@@ -845,6 +864,7 @@ mod tests {
         use FactKind::*;
         for (q, kind, subject) in [
             ("what is the capital of nepal", Capital, "nepal"),
+            ("taylor swift born", Born, "taylor swift"),
             ("brazil capital", Capital, "brazil"),
             ("nepal's capital", Capital, "nepal"),
             ("what is australia's capital", Capital, "australia"),
@@ -935,6 +955,18 @@ mod tests {
             asked("how old is elon musk"),
             Some((Born, "elon musk".into(), true))
         );
+        for (q, subject) in [
+            ("is morgan freeman still alive", "morgan freeman"),
+            ("is betty white dead?", "betty white"),
+            ("is ozzy osbourne alive", "ozzy osbourne"),
+            ("how old was elvis when he died", "elvis"),
+            ("how old was princess diana when she died", "princess diana"),
+            ("how old was einstein", "einstein"),
+            ("age of kobe bryant at death", "kobe bryant"),
+            ("marilyn monroe age at death", "marilyn monroe"),
+        ] {
+            assert_eq!(asked(q), Some((Born, subject.into(), true)), "{q}");
+        }
         assert_eq!(
             asked("who is the ceo of nvidia"),
             Some((Ceo, "nvidia".into(), false))

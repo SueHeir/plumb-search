@@ -93,6 +93,23 @@ impl Searcher {
         )
     }
 
+    /// Whether people know the site by its name: it is well linked, the
+    /// official site of a Wikidata item, or has other names. A domain that
+    /// only spells some words (vacationrentals.com for "vacation rentals")
+    /// is not.
+    pub(crate) fn known_by_name(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+    ) -> Result<bool> {
+        Ok(
+            crate::rank::best_link_score(searcher, &HashSet::from([addr]))
+                >= crate::WELL_KNOWN_LINK_SCORE
+                || self.is_official(searcher, addr)?
+                || self.has_aliases(searcher, addr)?,
+        )
+    }
+
     /// Whether the site has other names (from Wikidata or a redirect),
     /// which stand in for a missing title.
     pub(crate) fn has_aliases(

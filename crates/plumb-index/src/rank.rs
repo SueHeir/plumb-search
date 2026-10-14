@@ -135,7 +135,20 @@ impl Searcher {
             names.retain(|_, name| name.words() > 0 || name.typed);
         }
         // Meaning helps with queries that describe a site, not with names.
-        let named_in_full = !kinds.is_empty() || names.values().any(|n| n.words() >= query.len);
+        // Words count as a name when some site is known by them: a domain
+        // that only spells them (email-provider.eu, globalwarming.org) is a
+        // namesake of the words, and leaves the query described.
+        let mut named_in_full = !kinds.is_empty();
+        for (&addr, name) in &names {
+            if named_in_full {
+                break;
+            }
+            named_in_full = name.words() >= query.len
+                && (query.len < 2
+                    || name.typed
+                    || name.linked >= query.len
+                    || self.known_by_name(&searcher, addr)?);
+        }
         // Still asked, for a query named in full, whether a site that has
         // only some of its words is anything like it (debian.org and
         // systemofadown.com for "solar system").
@@ -900,10 +913,7 @@ impl Searcher {
         if cfg.named_needs_all_words && query.words.len() >= 2 {
             let mut known_name = false;
             for &addr in &full_names {
-                if link_score_of(addr) >= WELL_KNOWN_LINK_SCORE
-                    || self.is_official(&searcher, addr)?
-                    || self.has_aliases(&searcher, addr)?
-                {
+                if self.known_by_name(&searcher, addr)? {
                     known_name = true;
                     break;
                 }

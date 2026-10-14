@@ -468,20 +468,6 @@ const HOLDER_FACTS: &[plumb_core::facts::FactKind] = &[
     plumb_core::facts::FactKind::Headquarters,
 ];
 
-/// Where a description stops saying what its page is and goes on to who
-/// made it or what it is part of.
-const DESCRIPTION_HEAD_ENDS: &[&str] = &[
-    " by ",
-    " directed ",
-    " created ",
-    " starring ",
-    " based ",
-    " of ",
-    " from ",
-    " (",
-    ",",
-];
-
 /// The kinds of work [`KIND_LISTINGS`] has for the listing among
 /// `services`, if one is.
 fn listed_kinds(services: &[&plumb_core::profiles::Service]) -> Option<&'static [&'static str]> {
@@ -552,26 +538,7 @@ pub fn profile_candidates(
     }
     let films = kinds.contains(&"film");
     let of_kind = |hit: &plumb_index::pages::PageHit| {
-        let qualifier = hit
-            .page
-            .title
-            .strip_suffix(')')
-            .and_then(|title| title.rsplit_once(" ("));
-        let description = hit.page.description.as_deref().unwrap_or("").to_lowercase();
-        let head_end = DESCRIPTION_HEAD_ENDS
-            .iter()
-            .filter_map(|end| description.find(end))
-            .min()
-            .unwrap_or(description.len());
-        films && hit.page.set == FILMS_SET
-            || qualifier.is_some_and(|(_, what)| {
-                what.split_whitespace()
-                    .any(|word| kinds.contains(&word.to_lowercase().as_str()))
-            })
-            || description[..head_end]
-                .split_whitespace()
-                .last()
-                .is_some_and(|word| kinds.contains(&word))
+        films && hit.page.set == FILMS_SET || hit.page.is_work_of(kinds)
     };
     if candidates.iter().any(of_kind) {
         candidates.retain(of_kind);
@@ -1398,12 +1365,16 @@ pub(crate) fn fact_text(
                     } else {
                         2
                     };
+                    // A person's height in whole feet says little: 1.7 m
+                    // is 5 ft 7 in, not 6 ft.
+                    let imperial = if amount < 3.0 {
+                        let inches = (amount / 0.0254).round() as u64;
+                        format!("{} ft {} in", inches / 12, inches % 12)
+                    } else {
+                        format!("{} ft", group_digits(amount * 3.280_84, 0))
+                    };
                     (
-                        format!(
-                            "{} m ({} ft)",
-                            group_digits(amount, digits),
-                            group_digits(amount * 3.280_84, 0)
-                        ),
+                        format!("{} m ({imperial})", group_digits(amount, digits)),
                         None,
                     )
                 }
@@ -2157,6 +2128,11 @@ mod tests {
         );
         let age = ask("how old is albert einstein", &einstein).unwrap();
         assert_eq!(age.answer, "Died at 76");
+        // Whether someone lives is answered by how old they are or were.
+        let alive = ask("is albert einstein still alive", &einstein).unwrap();
+        assert_eq!(alive.answer, "Died at 76");
+        let died = ask("how old was albert einstein when he died", &einstein).unwrap();
+        assert_eq!(died.answer, "Died at 76");
         // 2026-10-06 is when the test's "now" is.
         let musk = [placed(
             with_facts(
@@ -2168,6 +2144,10 @@ mod tests {
         )];
         assert_eq!(
             ask("how old is elon musk", &musk).unwrap().answer,
+            "55 years old"
+        );
+        assert_eq!(
+            ask("is elon musk dead", &musk).unwrap().answer,
             "55 years old"
         );
 
@@ -2210,6 +2190,11 @@ mod tests {
         );
         assert_eq!(text(FactKind::Radius, "6371000"), "6,371 km (3,959 mi)");
         assert_eq!(text(FactKind::Radius, "250"), "250 m (820 ft)");
+        // People's heights in feet and inches.
+        assert_eq!(text(FactKind::Height, "1.7"), "1.7 m (5 ft 7 in)");
+        assert_eq!(text(FactKind::Height, "2.06"), "2.06 m (6 ft 9 in)");
+        assert_eq!(text(FactKind::Height, "1.47"), "1.47 m (4 ft 10 in)");
+        assert_eq!(text(FactKind::Height, "46"), "46 m (151 ft)");
     }
 
     #[test]
