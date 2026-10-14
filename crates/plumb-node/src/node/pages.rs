@@ -30,8 +30,8 @@ use tracing::{debug, info, warn};
 
 use super::{Inner, NodeSettings};
 use crate::pages::{
-    index_dir, notes_path, open_or_build_with, remove_other_indexes_with_budget, stand_in,
-    thousands, wanted_counts, HeldPageSet, SetFileCutter, SetFileNotes, SetInfo, Wanted,
+    index_dir, notes_path, open_built, open_or_build_with, remove_other_indexes_with_budget,
+    stand_in, thousands, wanted_counts, HeldPageSet, SetFileCutter, SetFileNotes, SetInfo, Wanted,
 };
 
 /// How often the job looks for changed settings or set files.
@@ -199,15 +199,19 @@ pub(super) fn run(inner: Arc<Inner>) {
                 );
                 *inner.pages.write_locked() = Some((older, Arc::new(searcher)));
             }
-            let found = {
-                let _big = inner.one_big_job();
-                open_or_build_with(
-                    &inner.paths.data,
-                    &wanted,
-                    inner.storage.clone(),
-                    denylist.as_ref().map(|(list, _)| list.as_ref()),
-                    &mut || inner.check_stop(),
-                )
+            // An index already built is only opened: that needs no turn.
+            let found = match open_built(&inner.paths.data, &wanted) {
+                Some(found) => Ok(Some(found)),
+                None => {
+                    let _big = inner.one_big_job();
+                    open_or_build_with(
+                        &inner.paths.data,
+                        &wanted,
+                        inner.storage.clone(),
+                        denylist.as_ref().map(|(list, _)| list.as_ref()),
+                        &mut || inner.check_stop(),
+                    )
+                }
             };
             match found {
                 Ok(found) => {
@@ -1279,12 +1283,7 @@ pub(super) fn add_pages(
             if let Err(err) = searcher.note_demand(&mut results.hits) {
                 warn!("reading what sites' articles are read: {err:#}");
             }
-            // A query that names a package or a page, or asks a question
-            // in full, is spelled right: "serde crate" is not "serde
-            // create", and "git undo last commit" is not "git und".
-            let spelled_right = found
-                .iter()
-                .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+            let spelled_right = searcher.spelled_right(query, &found, results.spelling.as_ref());
             if spelled_right && applied.is_none() {
                 results.spelling = None;
             }
@@ -1606,5 +1605,62 @@ mod tests {
         assert!(file.exists());
         // No sets folder yet: nothing to do.
         remove_stale_parts(&dir.path().join("none"), None);
+    }
+
+    /// While the node joins the network, the page index it already has is
+    /// searched at once, and a new one is built only after the join.
+    #[test]
+    fn the_built_index_is_searched_while_the_node_joins() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let file = SetInfo::find("wikipedia-en").unwrap().file(data);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let write = |title: &str, time: u64| {
+            let mut text = plumb_core::article::ARTICLES_HEADER.as_bytes().to_vec();
+            let article = plumb_core::Article {
+                title: title.into(),
+                views: 10,
+                ..Default::default()
+            };
+            plumb_core::article::write_article(&mut text, &article).unwrap();
+            std::fs::write(&file, text).unwrap();
+            super::super::newer::set_time(&file, time).unwrap();
+        };
+        write("Built Before", 1_700_000_000);
+        let mut config = crate::node::NodeConfig::desktop(data.to_path_buf());
+        config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
+        let wanted = Wanted::taking(data, &config.settings.page_sets, 0, &[]);
+        let (built, _) = crate::pages::open_or_build_with_budget(data, &wanted, None)
+            .unwrap()
+            .unwrap();
+        let rank = crate::rank_config(config.alpha);
+        let opened = super::super::open_data_dir(&config, rank).unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let inner = Arc::new(Inner::new(config, rank, opened, stopped, None));
+        inner.joining.store(true, Ordering::Release);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let job = {
+            let inner = inner.clone();
+            let handle = runtime.handle().clone();
+            std::thread::spawn(move || {
+                let _entered = handle.enter();
+                run(inner)
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while inner.page_key().as_deref() != Some(built.as_str()) {
+            assert!(Instant::now() < deadline, "the built index was not opened");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        write("Built After", 1_700_000_001);
+        std::thread::sleep(LOOK_EVERY * 5);
+        assert_eq!(inner.page_key().as_deref(), Some(built.as_str()));
+        inner.joining.store(false, Ordering::Release);
+        while inner.page_key().as_deref() == Some(built.as_str()) {
+            assert!(Instant::now() < deadline, "no build after the join");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stop.send(true).unwrap();
+        job.join().unwrap();
     }
 }

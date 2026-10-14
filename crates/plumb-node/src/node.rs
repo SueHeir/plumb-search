@@ -1030,16 +1030,22 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
             None => http.await,
         }
     });
+    // Joining can take twenty minutes on a small server. Meanwhile searches
+    // get the page index already built and search by meaning; what those
+    // jobs build waits for the join (see Inner::one_big_job).
+    inner.joining.store(true, Ordering::Release);
+    let mut jobs = start_jobs(&inner, true);
     if let Err(err) = network::start(&inner).await {
         // The node still searches and crawls on its own.
         warn!("{err:#}");
     }
+    inner.joining.store(false, Ordering::Release);
     let worker = tokio::spawn(plumb_ingest::storage::with_budget(
         inner.storage.clone(),
         worker::run(inner.clone()),
     ));
     tokio::spawn(release_memory_now_and_then(inner.clone()));
-    let jobs = start_jobs(&inner);
+    jobs.extend(start_jobs(&inner, false));
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -1055,34 +1061,42 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
 }
 
 /// Starts the background jobs besides the worker, each with what it is
-/// called; a node that only crawls runs fewer.
-fn start_jobs(inner: &Arc<Inner>) -> Vec<(JoinHandle<()>, &'static str)> {
+/// called: while the node joins the network (`joining`), the ones searches
+/// need meanwhile, and after it the rest. A node that only crawls runs
+/// fewer.
+fn start_jobs(inner: &Arc<Inner>, joining: bool) -> Vec<(JoinHandle<()>, &'static str)> {
     let mut jobs = Vec::new();
     let mut job = |what: &'static str, start: fn(Arc<Inner>) -> JoinHandle<()>| {
         jobs.push((supervise(inner, what, start), what));
     };
-    if inner.config.search_by_meaning {
-        job("search by meaning", |inner| {
-            tokio::task::spawn_blocking(move || embedding::run(inner))
-        });
-    }
-    if inner.config.crawl_only {
-        // Only searching needs these.
-        info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
+    // Only searching needs the page sets, feeds and adult blocklist.
+    let searching = !inner.config.crawl_only;
+    if joining {
+        if inner.config.search_by_meaning {
+            job("search by meaning", |inner| {
+                tokio::task::spawn_blocking(move || embedding::run(inner))
+            });
+        }
+        if searching {
+            job("page sets", |inner| {
+                tokio::task::spawn_blocking(move || pages::run(inner))
+            });
+        }
     } else {
-        job("page sets", |inner| {
-            tokio::task::spawn_blocking(move || pages::run(inner))
+        if searching {
+            job("checking feeds", |inner| tokio::spawn(news::run(inner)));
+            job("the adult blocklist", |inner| {
+                tokio::spawn(adult::run(inner))
+            });
+        } else {
+            info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
+        }
+        // Off or crawling only, it still forgets old searches on time.
+        job("following links for searches", |inner| {
+            tokio::spawn(wanted_pages::run(inner))
         });
-        job("checking feeds", |inner| tokio::spawn(news::run(inner)));
-        job("the adult blocklist", |inner| {
-            tokio::spawn(adult::run(inner))
-        });
+        job("signed sets", |inner| tokio::spawn(signed_sets::run(inner)));
     }
-    // Off or crawling only, it still forgets old searches on time.
-    job("following links for searches", |inner| {
-        tokio::spawn(wanted_pages::run(inner))
-    });
-    job("signed sets", |inner| tokio::spawn(signed_sets::run(inner)));
     jobs
 }
 
@@ -1332,6 +1346,10 @@ struct Inner {
     /// Held by each job that takes up to a GB or so of memory while it runs
     /// ([`Inner::one_big_job`]).
     big_job: Mutex<()>,
+    /// True while the node joins the network ([`network::start`]), which
+    /// replays the crawl agreement: the most memory a start takes, so no
+    /// big job runs beside it ([`Inner::joined`]).
+    joining: AtomicBool,
     /// The page sets whose file is being downloaded or cut, so the two
     /// never write the same file at once.
     set_files_busy: Mutex<std::collections::HashSet<&'static str>>,
@@ -1582,6 +1600,7 @@ impl Inner {
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
             big_job: Mutex::new(()),
+            joining: AtomicBool::new(false),
             set_files_busy: Mutex::default(),
             held_page_sets: Arc::default(),
             buckets_rebuilt: AtomicBool::new(false),
@@ -2015,9 +2034,18 @@ impl Inner {
     /// until this one does: the page and place index builds, keeping the
     /// vectors taken from a node and a round of embedding. Each fits a
     /// small node on its own, but not all at once, as at a first start.
+    /// None starts while the node joins the network ([`Inner::joined`]).
     /// Taken before [`Inner::hold_records`], never after.
     fn one_big_job(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.joined();
         self.big_job.locked()
+    }
+
+    /// Waits while the node joins the network, or until it stops.
+    fn joined(&self) {
+        while self.joining.load(Ordering::Acquire) && !self.stopping() {
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     /// `Err(Stopped)` once the node is shutting down.

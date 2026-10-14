@@ -19,7 +19,7 @@ use super::hit::{block_go_link, render_page};
 use super::home::{bad_search_query, home_or_setup, request_origin, setup_response};
 use super::html::{
     escape_html, html_response, http_url, page, results_form, safe_href, search_link,
-    security_headers,
+    security_headers, settings_link,
 };
 use super::network::network_search;
 use super::params::{error_settings, flag, NetSetting, SearchParams, Settings};
@@ -436,6 +436,14 @@ pub(crate) async fn search_page(
                         href.to_owned()
                     }
                 };
+                let search = |query: &str| {
+                    let options = SearchOptions {
+                        exact: false,
+                        ..settings.options.clone()
+                    };
+                    let net = settings.network == NetSetting::On;
+                    settings_link("/search", query, &settings, &options, net)
+                };
                 let base_map = state.backend.base_map();
                 let mut html = places::render_places(
                     found,
@@ -446,6 +454,7 @@ pub(crate) async fn search_page(
                     settings.options.country.as_deref(),
                     &icons,
                     &link,
+                    &search,
                 );
                 if let (Some(edit), Some(context), Some(visitor)) = (
                     settings.history.as_ref().and_then(|h| h.edit.as_ref()),

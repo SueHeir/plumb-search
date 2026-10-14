@@ -13,8 +13,8 @@ use tracing::warn;
 use super::Inner;
 use crate::pages::thousands;
 use crate::places::{
-    open_or_build_with_budget, remove_indexes_except_with_budget, remove_other_indexes_with_budget,
-    wanted,
+    open_built, open_or_build_with_budget, remove_indexes_except_with_budget,
+    remove_other_indexes_with_budget, wanted,
 };
 
 /// Wait after a failed build before trying the same places again.
@@ -67,9 +67,14 @@ pub(super) fn refresh(
     }
     let found = match &wanted {
         None => None,
+        // An index already built is only opened: that needs no turn.
         Some(wanted) => {
-            let _big = inner.one_big_job();
-            match open_or_build_with_budget(&inner.paths.data, wanted, inner.storage.clone()) {
+            let built = open_built(&inner.paths.data, wanted).map(Ok);
+            let found = built.unwrap_or_else(|| {
+                let _big = inner.one_big_job();
+                open_or_build_with_budget(&inner.paths.data, wanted, inner.storage.clone())
+            });
+            match found {
                 Ok(found) => Some(found),
                 Err(err) => {
                     warn!("places: {err:#}");
@@ -139,6 +144,41 @@ pub(super) fn known_homes(inner: &Inner) -> Option<Vec<(f64, f64)>> {
     homes.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
     homes.dedup();
     Some(homes)
+}
+
+/// Most local sites a node crawls ([`local_sites`]).
+pub(super) const LOCAL_SITES: usize = 5_000;
+/// How far from the towns on a node's About pages its local sites are.
+const LOCAL_KM: f64 = 50.0;
+
+/// The node's local sites: the sites of the places within [`LOCAL_KM`]
+/// of the towns on its About pages that give a website, nearest first,
+/// at most [`LOCAL_SITES`], none the denylist denies. None without a town
+/// or a place index (crawling only): Plumb never works out where its
+/// people are. A node crawls these whatever the network assigns it, so
+/// each fills in the sites of its own area.
+pub(super) fn local_sites(inner: &Inner) -> Vec<String> {
+    let homes = homes(inner);
+    let searcher = inner.places.read_locked().as_ref().map(|(_, s)| s.clone());
+    let (Some(searcher), false) = (searcher, homes.is_empty()) else {
+        return Vec::new();
+    };
+    let mut hits = Vec::new();
+    for (lat, lon) in homes {
+        match searcher.websites_near(lat, lon, LOCAL_KM, LOCAL_SITES) {
+            Ok(found) => hits.extend(found),
+            Err(err) => warn!("local sites: {err:#}"),
+        }
+    }
+    hits.sort_by(|a, b| a.km.total_cmp(&b.km));
+    let mut seen = std::collections::HashSet::new();
+    hits.into_iter()
+        .filter_map(|hit| crate::web::http_url(hit.place.website.as_deref()?))
+        .filter(|url| !inner.denies(url))
+        .filter_map(|url| plumb_core::registrable_domain(&url))
+        .filter(|domain| seen.insert(domain.clone()))
+        .take(LOCAL_SITES)
+        .collect()
 }
 
 /// The town (or else other place) `text` names.
@@ -333,6 +373,71 @@ mod tests {
         assert!(failed.is_none());
         assert_eq!(budget.status().used_bytes, used - removed);
         assert_eq!(budget.status().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn local_sites_are_the_sites_of_places_near_the_about_towns() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let inner = open_node(data, settings("places=all"));
+        assert!(local_sites(&inner).is_empty(), "no place index");
+        let place = |name: &str, kind: &str, lat: f64, website: Option<&str>| Place {
+            rank: plumb_core::place::place_rank(kind, 1_000_000, false, website.is_some(), 3),
+            name: name.into(),
+            kind: kind.into(),
+            lat,
+            lon: -105.0,
+            website: website.map(Into::into),
+            osm: format!("n{lat}"),
+            ..Place::default()
+        };
+        let index = data.join("test-places");
+        plumb_index::places::build_place_index(
+            &index,
+            [
+                place("Denver", "place=city", 39.74, None),
+                place(
+                    "Chain Cafe",
+                    "amenity=cafe",
+                    39.76,
+                    Some("https://chaincafe.com/"),
+                ),
+                place(
+                    "Near Cafe",
+                    "amenity=cafe",
+                    39.75,
+                    Some("https://www.nearcafe.com/m"),
+                ),
+                place(
+                    "Near Bar",
+                    "amenity=bar",
+                    39.78,
+                    Some("https://nearcafe.com/bar"),
+                ),
+                place(
+                    "Ftp Cafe",
+                    "amenity=cafe",
+                    39.77,
+                    Some("ftp://ftpcafe.com/"),
+                ),
+                place(
+                    "Far Cafe",
+                    "amenity=cafe",
+                    41.0,
+                    Some("https://farcafe.com/"),
+                ),
+            ],
+        )
+        .unwrap();
+        let searcher = Arc::new(PlaceSearcher::open(&index).unwrap());
+        *inner.places.write().unwrap() = Some(("test".into(), searcher));
+        assert!(local_sites(&inner).is_empty(), "no town given");
+        let about = crate::about::About::default().with_town("Denver");
+        let profile = crate::history::new_profile().unwrap();
+        crate::about::AboutStore::new(data.join("history"))
+            .save(&profile, &about)
+            .unwrap();
+        assert_eq!(local_sites(&inner), ["nearcafe.com", "chaincafe.com"]);
     }
 
     #[test]
