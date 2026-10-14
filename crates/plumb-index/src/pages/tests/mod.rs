@@ -8,6 +8,7 @@ mod media;
 mod named_site;
 mod papers_and_entities;
 mod placing;
+mod records;
 mod repos;
 mod subpages_and_packages;
 
@@ -18,7 +19,9 @@ use plumb_core::{Operators, SafeSearch};
 
 use super::docs::naming_docs;
 use super::placing::subpage_asked;
-use super::search::{hinted_name, last_word_in_other_number, Hint};
+use super::search::{
+    aspect_asked, compared, hinted_name, last_word_in_other_number, regnal_name, year_moved, Hint,
+};
 use super::sites::{base_title, describes_an_organization, site_is_titled};
 use super::*;
 
@@ -34,12 +37,31 @@ fn page(title: &str, views: u64, aliases: &[&str]) -> Page {
     )
 }
 
+/// An article on a person ([`Page::is_person`]: it has a birth date).
+fn person(title: &str, views: u64, aliases: &[&str]) -> Page {
+    let mut person = page(title, views, aliases);
+    person.facts = vec![plumb_core::facts::Fact {
+        kind: plumb_core::facts::FactKind::Born,
+        value: "1900-01-01".into(),
+    }];
+    person
+}
+
 fn searcher(pages: &[Page]) -> (tempfile::TempDir, PageSearcher) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pages");
     build_page_index(&path, pages.to_vec()).unwrap();
     let searcher = PageSearcher::open(&path).unwrap();
     (dir, searcher)
+}
+
+/// The titles of the pages `query` names, best first.
+fn named_titles(searcher: &PageSearcher, query: &str) -> Vec<String> {
+    let hits = searcher.search(query, 5).unwrap();
+    hits.into_iter()
+        .filter(|hit| hit.named)
+        .map(|hit| hit.page.title)
+        .collect()
 }
 
 fn dated_paper(title: &str, date: Option<&str>, year: Option<i32>, count: u64) -> Page {
