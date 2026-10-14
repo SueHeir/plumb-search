@@ -35,6 +35,7 @@ mod named_site;
 mod page;
 mod papers;
 mod placing;
+mod repos;
 mod scoring;
 mod search;
 mod sites;
@@ -63,6 +64,38 @@ pub const PARTIAL_MATCH: f32 = 0.6;
 /// it ("manubrium" for Sternum). Not its name, so never above a page the
 /// query names, but enough to be listed.
 pub const OTHER_NAME_MATCH: f32 = 0.6;
+
+/// How many times as much a person must be read as any other article with
+/// their surname in its title to be named by it alone
+/// ([`PageSearcher::name_by_surname`]), or by a title and their name.
+const SURNAME_MARGIN: u64 = 3;
+
+/// Words before a person's name that are none of it: "sir isaac newton",
+/// "st francis of assisi" ([`PageSearcher::name_by_title`]).
+const HONORIFICS: &[&str] = &[
+    "sir", "dame", "dr", "mr", "mrs", "ms", "saint", "st", "lord", "lady", "tsar", "czar",
+];
+
+/// Titles before a person's name that their article's title or
+/// description says they held: "president kennedy" is John F. Kennedy,
+/// "President of the United States", and not Kennedy the commentator.
+const OFFICES: &[&str] = &[
+    "president",
+    "senator",
+    "governor",
+    "mayor",
+    "chancellor",
+    "chairman",
+    "pope",
+    "emperor",
+    "empress",
+    "king",
+    "queen",
+    "prince",
+    "princess",
+    "general",
+    "admiral",
+];
 
 /// How much popularity counts, against how well the query names the page.
 pub const POPULARITY_SHARE: f32 = 0.5;
@@ -111,12 +144,14 @@ pub const DESCRIBED_QUERY_WORDS: usize = 2;
 pub const DESCRIBED_MISSING_FROM: usize = 3;
 
 /// How much a query word an article only says counts, against one of its
-/// title.
+/// title. It has to say the word itself, in the singular or the plural,
+/// not only its stem: "scheduled monument" does not say "schedule".
 pub const DESCRIBED_WORD: f32 = 0.5;
 
 /// Most `name` of a Wikipedia article whose lead ([`Page::lead`]), with
-/// its names and description, has every word of a query (stemmed, without
-/// the asking words) of at least [`DESCRIBED_QUERY_WORDS`]: the article
+/// its names and description, says every word of a query (without the
+/// asking words, as [`DESCRIBED_WORD`] says) of at least
+/// [`DESCRIBED_QUERY_WORDS`]: the article
 /// whose lead matches them best gets it, others less by how much worse
 /// theirs does. "triassic jurassic cretaceous" finds Mesozoic.
 pub const LEAD_MATCH: f32 = 0.55;
@@ -129,7 +164,7 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 const LEAD_CANDIDATES: usize = 20;
 
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v6-paper-dates-rich-symbol-docs-scope";
+pub const PAGE_INDEX_VERSION: &str = "v8-docs-address-symbols-subtitles";
 
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
