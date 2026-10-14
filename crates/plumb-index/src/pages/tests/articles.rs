@@ -715,6 +715,33 @@ fn what_is_asked_about_a_person_finds_their_article() {
     assert_eq!(named("obama daughters"), ["Barack Obama"]);
     assert_eq!(named("picasso paintings"), ["Pablo Picasso"]);
     assert_eq!(named("steve jobs cause of death"), ["Steve Jobs"]);
+    // With a possessive, or as a question.
+    assert_eq!(named("obama's daughters"), ["Barack Obama"]);
+    assert_eq!(named("who are obama's parents"), ["Barack Obama"]);
+    assert_eq!(named("picasso's paintings"), ["Pablo Picasso"]);
+    assert_eq!(named("how did steve jobs die"), ["Steve Jobs"]);
+    assert_eq!(named("what did steve jobs die of"), ["Steve Jobs"]);
+    assert_eq!(named("how many kids does obama have"), ["Barack Obama"]);
+    // As "who is picasso" would, the crater too, below him.
+    assert_eq!(
+        named("what is picasso known for"),
+        ["Pablo Picasso", "Picasso (crater)"]
+    );
+    assert_eq!(named("why was steve jobs famous"), ["Steve Jobs"]);
+    assert_eq!(named("what is picasso's real name"), ["Pablo Picasso"]);
+    assert_eq!(named("where is steve jobs buried"), ["Steve Jobs"]);
+    assert_eq!(
+        hinted_name("einstein's biography"),
+        Some(("einstein".into(), Hint::Any))
+    );
+    assert_eq!(
+        hinted_name("what is mcdonald's"),
+        Some(("mcdonald's".into(), Hint::Any))
+    );
+    assert_eq!(
+        hinted_name("mcdonald's wikipedia"),
+        Some(("mcdonald's".into(), Hint::Article))
+    );
     // Only a person, and not when a page is called the whole query.
     assert_eq!(named("black death"), ["Black Death"]);
     assert!(named("christmas songs").is_empty());
