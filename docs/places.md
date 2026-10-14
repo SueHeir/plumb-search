@@ -47,7 +47,7 @@ flowchart TD
 | `WHAT near me`, `nearby`, `in my area`, `near here` | "coffee near me", "nearby pharmacy" |
 | A kind of place with `open now`, `open late`, `24 hours`, `tonight`, or after `nearest` | "pharmacy open late", "nearest gas station", "pizza tonight" |
 | `WHERE WHAT` or `WHAT WHERE`, when WHAT is a kind of place and WHERE a city or borough | "denver pizza", "sushi fort collins" |
-| A place's name with its town | "starbucks denver", "sheraton charlotte" |
+| A place's name with its town | "starbucks denver", "hyatt austin" |
 
 - Words like "best", "cheap" and "nearest" are left out of WHAT. WHAT must be in a place's name or among the words for its kind: a café is found by "cafe", "coffee" and "coffee shop".
 - Words after "near me" say no more of where: "dentist near me that takes medicaid" is a dentist near me.

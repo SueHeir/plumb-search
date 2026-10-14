@@ -125,7 +125,7 @@ where the prior is the site's `link_score`, the text score is BM25 normalized ov
 
 ### Pages and the learned order
 
-The page index is searched next to the sites: a page is found by name only, and scored by how well the query names it and how much it is read. `place_pages` decides for each page whether it goes under a site it is about, before a site, or after the sites. The caller runs these steps (plumb-node in `node/pages.rs`, plumb-tools in `eval.rs`). Keep the two in step, or the evals measure something the node does not serve.
+The page index is searched next to the sites: a page is found by name (some kinds also by the words of their title, tags, description or lead; see [Page sets](../../docs/pages.md#how-pages-are-searched-and-shown)), and scored by how well the query names it and how much it is read. `place_pages` decides for each page whether it goes under a site it is about, before a site, or after the sites. The caller runs these steps (plumb-node in `node/pages.rs`, plumb-tools in `eval.rs`). Keep the two in step, or the evals measure something the node does not serve.
 
 `learned::reorder` then reorders the first 10 rows (`LEARNED_ROWS`) with the built-in model. The model is gradient-boosted trees trained with LambdaMART by `plumb-tools train-rank`; [learned/net.rs](src/learned/net.rs) is a small neural ranker the same command can train instead.
 

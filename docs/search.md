@@ -185,7 +185,7 @@ The results stay those of the query as typed unless nothing else works:
 | A typed domain is a slip of a site 0.3 more popular | that site first if no site has the typed address, else second |
 | The correction finds nothing | results as typed, no suggestion |
 
-On a node with page sets, the pages' names check the suggestion again: a query the pages know as typed drops it, results for a correction are searched as typed again when the pages know the typed words, and words of things rather than sites ("budafest") get a suggestion from the page titles.
+On a node with page sets, the pages' names check the suggestion again: a query the pages know as typed drops it, results for a correction are searched as typed again when the pages know the typed words, and words of things rather than sites ("photosynthsis") get a suggestion from the page titles.
 
 ## Pages and the node's own steps
 
@@ -195,7 +195,7 @@ The node backend, `search_with_rank` in [node.rs](../crates/plumb-node/src/node.
 2. **Blocklists.** With safe search on, sites on the adult blocklist are dropped; sites on the node's denylist are dropped for everyone. The node ranks 10 more sites for each list in use (`adult::MARGIN`, `denylist::MARGIN`) so the page stays full.
 3. **Pages.** `add_pages` in [node/pages.rs](../crates/plumb-node/src/node/pages.rs) searches the page sets (Wikipedia articles, Stack Overflow questions, packages, papers and more; see [Page sets](pages.md)) and places pages among the sites. It runs only on a node with a page index.
 
-Pages are found by name only and scored by how well the query names them and how much they are read ([pages.rs](../crates/plumb-index/src/pages.rs)):
+Pages are found by name: their title, aliases and the other titles that lead to them. Questions, papers, docs, reference and subpages pages are also found by most of the words of their title, tags and description (`QUESTION_SHARE`), and Wikipedia articles by the words of their description and lead (`LEAD_MATCH`). Pages are scored by how well the query names them and how much they are read ([pages.rs](../crates/plumb-index/src/pages.rs)):
 
 ```text
 page score = name * (1 - 0.5 + 0.5 * popularity)
@@ -246,7 +246,7 @@ Once the backend returns sites and placed pages, the web layer adds what a searc
 | Profile | [web/answers.rs](../crates/plumb-node/src/web/answers.rs) | an official profile asked for ("mrbeast youtube"), or a song's lyrics page |
 | Plugins | [plugins.rs](../crates/plumb-node/src/plugins.rs) | the node's plugins run with the query and what it is about, and may note or hide results; see [Plugins](plugins.md) |
 | Network results | [web/network.rs](../crates/plumb-node/src/web/network.rs) | with `net=1`: the query's buckets from other nodes, ranked in a temporary index with this node's ranking |
-| Tool sources | `route_sources` in [assembly.rs](../crates/plumb-node/src/assembly.rs), [sources.rs](../crates/plumb-node/src/sources.rs) | for "weather", "20 usd to eur", "define prioritize": sites that do the job go first; otherwise a health source the query names leads |
+| Tool sources | `route_sources` in [assembly.rs](../crates/plumb-node/src/assembly.rs), [sources.rs](../crates/plumb-node/src/sources.rs) | for "weather", "20 usd to eur", "define ephemeral": sites that do the job go first; otherwise a health source the query names leads |
 | Places | `places` and `local_first` in [assembly.rs](../crates/plumb-node/src/assembly.rs) | for queries that say where: up to 8 places (`MAX_PLACES`), and their own sites first among the results; see [Places](places.md) |
 | Info box | `info_box` in [web/answers.rs](../crates/plumb-node/src/web/answers.rs) | the article the query is clearly about, or the article of the official site it names |
 | Recent | `recent` in [assembly.rs](../crates/plumb-node/src/assembly.rs) | headlines from the news feeds, at most 5; see [News](news.md) |

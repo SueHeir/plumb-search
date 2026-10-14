@@ -221,7 +221,7 @@ A site result (`/api/search`) has `domain`, `url`, `title`, `description`, `scor
 
 With `full=1`, the object holds `hits` (the sites), `pages` (page rows), `assembled` (the page's order: `rows` of `{"kind": "site", "site", "pages"}` or `{"kind": "page", "page"}`, with `places`, `recent`, `answer` and `profile`), and, when there are any, `answer`, `profile`, `info`, `places`, `recent`, `spelling`, `site_search` and the node's plugin results. The [Zotero plugin](../zotero/) reads `assembled.rows`, `pages` and `hits`.
 
-The SearXNG format (`results`, `answers`, `corrections`, `infoboxes`, `number_of_results`, plus `recent` and `places`) and Open WebUI's are described in [local-llms.md](local-llms.md).
+The SearXNG format (`results`, `answers`, `suggestions`, `infoboxes`, `number_of_results`, plus `recent` and `places`) and Open WebUI's are described in [local-llms.md](local-llms.md).
 
 The API applies the node's defaults and the parameters given, not a browser's history or About you.
 

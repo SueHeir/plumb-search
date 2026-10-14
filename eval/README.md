@@ -213,7 +213,7 @@ A case needs a relevant answer, an expected answer text, a verdict or `abstain`.
 
 | File | Cases |
 | --- | --- |
-| [contracts/audit.jsonl](contracts/audit.jsonl) | 17 `candidate` cases from [the search improvement plan](../docs/reviews/search-improvement-plan.md): 8 searches, the rest for the identity tools |
+| [contracts/audit.jsonl](contracts/audit.jsonl) | 17 `candidate` cases from an earlier search improvement plan: 8 searches, the rest for the identity tools |
 | [contracts/family_heldout.jsonl](contracts/family_heldout.jsonl) | 200 `candidate` cases in 40 families, separate from the audit's, each with negatives |
 | [contracts/offline.jsonl](contracts/offline.jsonl) | 3 `manual` cases for the synthetic [fixtures](../fixtures/README.md) |
 

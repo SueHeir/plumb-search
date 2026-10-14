@@ -88,7 +88,7 @@ Three more `plumb-tools` commands add entries to the `wikipedia-en` file, on its
 | --- | --- | --- |
 | `fetch-profiles` | Official profiles from Wikidata (YouTube, X, Instagram, GitHub, Steam, the app stores and more) and listings (IMDb, Genius, Spotify albums and more); official websites that are inner pages or subdomains of a bigger site; and the `wikidata` set, written beside the file | Info box links; "mrbeast youtube" or "bohemian rhapsody lyrics" show that profile first; "youtube music" shows `music.youtube.com` under youtube.com |
 | `fetch-facts` | 25 kinds of Wikidata fact: capital, population, birth and death dates, founders, CEO, height, area and more, best-ranked statements only | "capital of australia" is answered above the results, "From Wikidata" |
-| `fetch-leads` | The lead (whole sentences of the first paragraph, up to 300 characters) of the 2,000,000 most read articles, and up to 10 other names that lead to each | "what is a manatee" is answered "From Wikipedia"; "manubrium" finds Sternum |
+| `fetch-leads` | The lead (whole sentences of the first paragraph, up to 300 characters) of the 2,000,000 most read articles, and up to 10 other names that lead to each | "what is a manatee" is answered "From Wikipedia"; "lou gehrig's disease" finds ALS |
 
 Facts are answered only when the search names an article that has the fact; the node never guesses one.
 
@@ -256,7 +256,7 @@ Some sets wait to be asked for, since their titles are often common words:
 | `reference`, `subpages2` | When the search names its whole title, has most of its title's words, or the page is on one of the search's best sites ("met museum hours") |
 | `docs` | By its product and title ("python asyncio", "javascript array.prototype.sort()"), or a name written as code ("useState", "std::vector") |
 | `wikidata` | Only under its own website's result |
-| `wiktionary` | Never among the results: a search that asks what a word means ("define anadromous") is answered above them, "From Wiktionary" |
+| `wiktionary` | Never among the results: a search that asks what a word means ("define ephemeral") is answered above them, "From Wiktionary" |
 
 Everything a node shows goes through the denylist, and searchers can ask for more or less of each kind of page, or none, under "Kinds of results" on the About page (`/about`).
 

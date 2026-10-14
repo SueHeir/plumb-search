@@ -26,7 +26,7 @@ CONTRIBUTING.md lists the extra checks for the WebAssembly crates and the deskto
 **Locks.**
 - Take std locks with `plumb_core::locks::{Locked, RwLocked}` (`.locked()`, `.read_locked()`, `.write_locked()`), never `.lock().unwrap()`.
 - Never hold a std lock across `.await`.
-- Don't hold a lock that async code or the network loop needs while doing file I/O, an fsync or a fold. Async code waiting on such a lock blocks a tokio worker, and the droplet has two.
+- Don't hold a lock that async code or the network loop needs while doing file I/O, an fsync or a fold. Async code waiting on such a lock blocks a tokio worker, and plumbsearch.org's server has two.
 
 **Blocking work.**
 - Disk I/O, parsing whole files and heavy CPU go in `spawn_blocking` (`blocking()` in the node's worker), never on async threads.

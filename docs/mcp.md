@@ -182,7 +182,7 @@ A lead carries the page, why it helped (at most 300 characters), when it was rep
 Lead shared by 1 other Plumb node, 1 trusted (2 days ago; unchecked, read it first): https://tokio.rs/blog/2025-07-tokio-1-47 (the release notes list every change)
 ```
 
-Each lead says which nodes reported it, how this node stands to each (`trusted`, `friend_of_friend` or `other`), and when, with `verified: false`: a lead is someone's report, not a crawl other crawlers checked, so an agent should read the page before relying on it. Only leads from nodes the node's search scope asks are listed ([Agreement between crawlers](network.md#agreement-between-crawlers)), never the node's own, and none whose page is a look-alike. Leads are listed only to apps on the node's own computer. How leads travel and how many a node keeps: [Shared findings](network.md#shared-findings).
+Each lead says which nodes reported it, how this node stands to each (`trusted`, `friend_of_friend` or `other`), and when, with `verified: false`: a lead is someone's report, not a crawl other crawlers checked, so an agent should read the page before relying on it. Only leads from nodes the node's search scope asks are listed ([Who a search asks](network.md#who-a-search-asks)), never the node's own, and none whose page is a look-alike. Leads are listed only to apps on the node's own computer. How leads travel and how many a node keeps: [Shared findings](network.md#shared-findings).
 
 ## Limits
 
