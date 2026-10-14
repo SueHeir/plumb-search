@@ -1353,6 +1353,44 @@ impl PlaceSearcher {
             .context("a place without its record")?;
         parse_place(stored)
     }
+
+    /// The places within `km` of `lat`, `lon` that give a website, nearest
+    /// first, at most `limit`: a node's local sites. Taken from the most
+    /// notable `2 * limit` places there, which a website puts ahead of
+    /// most.
+    pub fn websites_near(
+        &self,
+        lat: f64,
+        lon: f64,
+        km: f64,
+        limit: usize,
+    ) -> Result<Vec<PlaceHit>> {
+        let cells: Vec<(Occur, Box<dyn Query>)> = cells_around(lat, lon, km)
+            .into_iter()
+            .map(|c| {
+                let term = Term::from_field_text(self.fields.cell, &c);
+                let query = TermQuery::new(term, IndexRecordOption::Basic);
+                (Occur::Should, Box::new(query) as Box<dyn Query>)
+            })
+            .collect();
+        let searcher = self.reader.searcher();
+        let found = searcher.search(
+            &BooleanQuery::new(cells),
+            &TopDocs::with_limit(limit.saturating_mul(2).max(1))
+                .order_by_fast_field::<u64>("rank", tantivy::Order::Desc),
+        )?;
+        let mut hits = Vec::new();
+        for (_, address) in found {
+            let place = self.stored(&searcher.doc(address)?)?;
+            let d = distance_km(lat, lon, place.lat, place.lon);
+            if place.website.is_some() && d <= km {
+                hits.push(PlaceHit { place, km: d });
+            }
+        }
+        hits.sort_by(|a, b| a.km.total_cmp(&b.km));
+        hits.truncate(limit);
+        Ok(hits)
+    }
 }
 
 /// What to look for when `what` finds nothing because of words that name
@@ -2516,5 +2554,25 @@ mod tests {
         let cells = cells_around(0.0, 179.99, 12.0);
         assert!(cells.iter().any(|c| c.ends_with(":-1800")));
         assert!(cells.contains(&cell(0.0, 179.99)));
+    }
+
+    #[test]
+    fn websites_near_lists_the_sites_of_nearby_places_nearest_first() {
+        let with_site = |name: &str, lat: f64, lon: f64, site: &str| Place {
+            website: Some(site.into()),
+            ..at(name, "amenity=cafe", lat, lon)
+        };
+        let (_dir, searcher) = index(vec![
+            with_site("Far Cafe", 39.99, -105.0, "https://far.example/"),
+            with_site("Near Cafe", 39.75, -105.0, "https://near.example/menu"),
+            with_site("Next Cafe", 39.80, -105.0, "https://next.example/"),
+            with_site("Boulder Cafe", 40.40, -105.0, "https://boulder.example/"),
+            at("Plain Cafe", "amenity=cafe", 39.74, -105.0),
+        ]);
+        let found = searcher.websites_near(39.74, -105.0, 30.0, 10).unwrap();
+        let names: Vec<&str> = found.iter().map(|hit| hit.place.name.as_str()).collect();
+        assert_eq!(names, ["Near Cafe", "Next Cafe", "Far Cafe"]);
+        let nearest = searcher.websites_near(39.74, -105.0, 30.0, 1).unwrap();
+        assert_eq!(nearest.len(), 1);
     }
 }
