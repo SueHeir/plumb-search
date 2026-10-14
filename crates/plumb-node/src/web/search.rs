@@ -213,6 +213,9 @@ pub(crate) async fn search_page(
         _ => None,
     };
     let local = run_search_ranked(&state, &query, limit, &settings.options, rank).await;
+    if let (Ok(results), Some(node)) = (&local, &state.node) {
+        node.searched(&query, results);
+    }
     // "Near me", "weather" and "what time is it" go by the town the
     // searcher gave.
     let town = match &visitor {
@@ -612,10 +615,15 @@ pub(crate) async fn extras(
             continue;
         }
         // MusicBrainz songs have no Wikidata ID.
-        profile = run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
-            .await
-            .ok()
-            .and_then(|found| answers::songs_profile(query, &resolution, found.pages));
+        for lookup in answers::song_lookups(&name, &resolution) {
+            profile = run_search(state, &lookup, PROFILE_SEARCH_LIMIT, options)
+                .await
+                .ok()
+                .and_then(|found| answers::songs_profile(query, &resolution, found.pages));
+            if profile.is_some() {
+                break;
+            }
+        }
         if profile.is_some() {
             break;
         }
@@ -680,9 +688,15 @@ pub(crate) fn route_sources(
     results: &mut SearchResults,
     limit: usize,
 ) {
-    crate::assembly::route_sources(query, answer, country, results, limit, |domain| {
-        state.backend.site(domain)
-    });
+    crate::assembly::route_sources(
+        query,
+        answer,
+        country,
+        results,
+        limit,
+        |domain| state.backend.site(domain),
+        |word| state.backend.common_word(word),
+    );
 }
 
 /// Results asked for when looking up whose profile a query asks for.
@@ -848,7 +862,9 @@ pub(crate) fn search_about(
     if let Some(profile) = &extras.profile {
         return Some(crate::plugins::about_page(&profile.page));
     }
-    if plumb_core::Operators::parse(query).any() {
+    if plumb_core::Operators::parse(query).any_but_phrases()
+        || answers::is_sum(extras.answer.as_ref())
+    {
         return None;
     }
     let placed = place_pages(
@@ -873,9 +889,11 @@ pub(crate) async fn plugin_about(
     options: &SearchOptions,
 ) -> Option<plumb_plugin::About> {
     let about = search_about(query, results, extras);
-    if about
-        .as_ref()
-        .is_some_and(|about| same_title(&about.title, query))
+    // A sum is about nothing, not a song its digits name either.
+    if answers::is_sum(extras.answer.as_ref())
+        || about
+            .as_ref()
+            .is_some_and(|about| same_title(&about.title, query))
     {
         return about;
     }

@@ -199,24 +199,40 @@ impl Model {
     /// `ln P(typed | meant)`: the cost of the edits that turn `meant` into
     /// `typed`, by the learned rules. 0 when they are the same.
     pub fn ln_channel(&self, typed: &str, meant: &str) -> f64 {
-        edit_rules(meant, typed)
-            .iter()
-            .map(|forms| {
+        self.edits(typed, meant)
+            .map(|(p, first)| {
+                let p = p.max(self.unseen);
                 // Typos rarely start a word.
-                let first = forms
-                    .iter()
-                    .any(|(r, t)| r.starts_with('^') || t.starts_with('^'));
-                let p = forms
-                    .iter()
-                    .filter_map(|rule| {
-                        self.rules
-                            .get(&(rule.0.as_str().into(), rule.1.as_str().into()))
-                    })
-                    .fold(self.unseen, |best, &p| best.max(p));
                 let p = if first { p * FIRST_LETTER_SHARE } else { p };
                 f64::from(p).ln()
             })
             .sum()
+    }
+
+    /// Whether each edit that turns `meant` into `typed` is a slip the
+    /// learned rules make likelier than an edit they never saw: "recieve"
+    /// for "receive" is, "pkce" for "pace" is not.
+    pub fn learned(&self, typed: &str, meant: &str) -> bool {
+        self.edits(typed, meant).all(|(p, _)| p > self.unseen)
+    }
+
+    /// For each edit that turns `meant` into `typed`, the probability of
+    /// its likeliest learned rule (0 when none covers it), and whether it
+    /// changes the first letter.
+    fn edits(&self, typed: &str, meant: &str) -> impl Iterator<Item = (f32, bool)> + '_ {
+        edit_rules(meant, typed).into_iter().map(|forms| {
+            let first = forms
+                .iter()
+                .any(|(r, t)| r.starts_with('^') || t.starts_with('^'));
+            let p = forms
+                .iter()
+                .filter_map(|rule| {
+                    self.rules
+                        .get(&(rule.0.as_str().into(), rule.1.as_str().into()))
+                })
+                .fold(0.0, |best: f32, &p| best.max(p));
+            (p, first)
+        })
     }
 
     /// The learned rules, most likely first, as (meant, typed, probability).
@@ -834,6 +850,22 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
 }
 
 #[cfg(test)]
+impl Model {
+    /// A model of nothing but these slips, as (meant, typed, probability),
+    /// and `unseen` for any other edit.
+    pub(crate) fn with_rules(rules: &[(&str, &str, f32)], unseen: f32) -> Model {
+        Model {
+            rules: rules
+                .iter()
+                .map(|&(meant, typed, p)| ((meant.into(), typed.into()), p))
+                .collect(),
+            unseen,
+            ..Model::default()
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -918,6 +950,8 @@ mod tests {
         assert!(m.ln_channel("amtrack", "amtrak") > m.ln_channel("amtrek", "amtrak"));
         // Two edits cost both.
         assert!(m.ln_channel("amtrac", "amtrak") > m.ln_channel("amtrc", "amtrak"));
+        assert!(m.learned("amtrack", "amtrak"));
+        assert!(!m.learned("amtrek", "amtrak"));
     }
 
     #[test]
