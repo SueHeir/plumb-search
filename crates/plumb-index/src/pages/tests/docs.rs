@@ -1078,11 +1078,26 @@ fn numbered_documents_go_packages_and_error_codes_are_named() {
             "A variable was borrowed as mutable more than once.",
         ),
     ]);
-    for (query, url) in [
+    // PEPs and RFCs are records too (records.rs), whose links lead; the
+    // RFC's docs page, at its info address, comes next.
+    let rfc_record = "https://www.rfc-editor.org/rfc/rfc9110.html";
+    for (query, record) in [
         ("PEP 8", pep),
         ("pep8", pep),
-        ("RFC 9110", rfc),
-        ("rfc9110", rfc),
+        ("RFC 9110", rfc_record),
+        ("rfc9110", rfc_record),
+    ] {
+        let hits = searcher.search(query, 10).unwrap();
+        assert_eq!(
+            hits.first().map(|hit| hit.page.url.as_str()),
+            Some(record),
+            "{query}"
+        );
+        if record == rfc_record {
+            assert!(hits.iter().any(|hit| hit.page.url == rfc && hit.named));
+        }
+    }
+    for (query, url) in [
         ("golang slog", slog),
         ("rust E0499", borrow),
         (
