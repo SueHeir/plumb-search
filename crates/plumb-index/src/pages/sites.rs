@@ -7,7 +7,7 @@ use tantivy::query::TermQuery;
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{TantivyDocument, Term};
 
-use super::{Page, PageSearcher, TITLE_CANDIDATES};
+use super::{Page, PageHit, PageSearcher, ALIAS_MATCH, POPULARITY_SCALE, TITLE_CANDIDATES};
 
 /// The trailing qualifier in brackets that [`base_title`] leaves out:
 /// `element` of `Mercury (element)`.
@@ -65,13 +65,13 @@ impl PageSearcher {
     /// of, without its qualifier: "Notion" for notion.so, "Yelp" for
     /// yelp.com, whose homepages turn crawlers away. Only an article whose
     /// official website is the site's homepage ([`Page::website`]) and
-    /// whose title the domain spells ([`site_is_titled`]) or abbreviates
-    /// ([`site_is_initials`], nba.com) counts:
+    /// whose title the domain spells ([`site_spells`]) counts:
     /// "Schitt's Creek", whose website is a page on cbc.ca, is not what
-    /// cbc.ca is. An official site whose title may be borrowed
-    /// ([`may_be_borrowed`]) and names none of its articles takes the most
-    /// read one's title too: "New York Post" for nypost.com, not
-    /// "California Post".
+    /// cbc.ca is, nor is "Snowflake ID", whose website is twitter.com, what
+    /// twitter.com is. An official site whose title may be borrowed
+    /// ([`may_be_borrowed`]) and names none of its articles takes such an
+    /// article's title too: "New York Post" for nypost.com, not "California
+    /// Post".
     pub fn title_untitled(&self, sites: &mut [crate::Hit]) -> Result<()> {
         let searcher = self.reader.searcher();
         for site in sites.iter_mut() {
@@ -82,53 +82,108 @@ impl PageSearcher {
             if !untitled && !may_be_borrowed(site) {
                 continue;
             }
-            let query = TermQuery::new(
-                Term::from_field_text(self.fields.site, &site.domain),
-                IndexRecordOption::Basic,
-            );
-            let best = searcher.search(
-                &query,
-                &TopDocs::with_limit(TITLE_CANDIDATES)
-                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
-            )?;
-            let mut articles = Vec::new();
-            for (_, address) in best {
-                let document: TantivyDocument = searcher.doc(address)?;
-                let Some(stored) = document
-                    .get_first(self.fields.page)
-                    .and_then(|v| v.as_str())
-                else {
-                    continue;
-                };
-                let page: Page = serde_json::from_str(stored)?;
-                if page.is_article() && page.website.is_none() {
-                    articles.push(page.title);
-                }
-            }
-            let names = articles.iter().map(|title| base_title(title).trim());
+            let articles: Vec<String> = self
+                .site_articles(&searcher, &site.domain)?
+                .into_iter()
+                .map(|(page, _)| page.title)
+                .collect();
+            let spelled = articles
+                .iter()
+                .find(|title| site_spells(&site.domain, title))
+                .map(|title| base_title(title).trim());
             let title = if untitled {
-                articles
-                    .iter()
-                    .find(|title| {
-                        site_is_titled(&site.domain, title) || site_is_initials(&site.domain, title)
-                    })
-                    .map(|title| base_title(title).trim())
+                spelled
             } else {
                 // A title that names what any article about the site is
                 // stays ("Welcome to Steam" for steampowered.com, whose
-                // articles are Valve's and Steam's); else the most read
-                // one names it.
+                // articles are Valve's and Steam's).
                 let shown = squash(site.title.as_deref().unwrap_or(""));
-                let named = names.clone().any(|name| {
-                    let name = squash(name);
+                let named = articles.iter().any(|title| {
+                    let name = squash(base_title(title));
                     name.len() < 3 || shown.contains(&name)
                 });
-                names.clone().next().filter(|_| !named)
+                spelled.filter(|_| !named)
             };
             if let Some(title) = title.filter(|title| !title.is_empty()) {
                 site.title = Some(title.to_string());
             }
         }
+        Ok(())
+    }
+
+    /// The most read Wikipedia articles, with their
+    /// [`PageHit::popularity`], whose item's official website is
+    /// `domain`'s front page ([`Page::website`]), most read first.
+    fn site_articles(
+        &self,
+        searcher: &tantivy::Searcher,
+        domain: &str,
+    ) -> Result<Vec<(Page, f32)>> {
+        let query = TermQuery::new(
+            Term::from_field_text(self.fields.site, domain),
+            IndexRecordOption::Basic,
+        );
+        let best = searcher.search(
+            &query,
+            &TopDocs::with_limit(TITLE_CANDIDATES)
+                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+        )?;
+        let mut articles = Vec::new();
+        for (popularity, address) in best {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if page.is_article() && page.website.is_none() {
+                let popularity = popularity.unwrap_or(0) as f32 / POPULARITY_SCALE;
+                articles.push((page, popularity));
+            }
+        }
+        Ok(articles)
+    }
+
+    /// Puts first among `hits`, named, the article about the site that
+    /// `query`, a web address, is the front page of: the most read one
+    /// whose name the domain spells ([`site_spells`]). "x.com" is X, the
+    /// social network, not "X.com (bank)", whose name was the address. An
+    /// article Wikipedia calls by the address alone stays first
+    /// ("nytimes.com", the newspaper's website), and an address with more
+    /// than "www." before the domain is an inner site's ("mail.google.com"
+    /// is not Google).
+    pub(crate) fn name_typed_site(&self, query: &str, hits: &mut Vec<PageHit>) -> Result<()> {
+        let Some(domain) = crate::names::typed_domain(query) else {
+            return Ok(());
+        };
+        let typed = query.trim().to_lowercase();
+        let called = |hit: &PageHit| hit.named && hit.page.title.to_lowercase() == domain;
+        if typed.strip_prefix("www.").unwrap_or(&typed) != domain || hits.iter().any(called) {
+            return Ok(());
+        }
+        let searcher = self.reader.searcher();
+        let Some((page, popularity)) = self
+            .site_articles(&searcher, &domain)?
+            .into_iter()
+            .find(|(page, _)| site_spells(&domain, &page.title))
+        else {
+            return Ok(());
+        };
+        let score = hits.iter().map(|hit| hit.score).fold(ALIAS_MATCH, f32::max);
+        hits.retain(|hit| hit.page != page);
+        hits.insert(
+            0,
+            PageHit {
+                page,
+                score,
+                named: true,
+                popularity,
+                whole: false,
+                learned: None,
+            },
+        );
         Ok(())
     }
 }
@@ -289,18 +344,35 @@ pub(crate) fn site_is_titled(domain: &str, title: &str) -> bool {
     false
 }
 
-/// Whether `domain`'s first label is the initials of the page's title,
-/// three or more of them, small words aside: nba.com for "National
-/// Basketball Association".
-fn site_is_initials(domain: &str, title: &str) -> bool {
+/// Whether `domain` spells the page's title ([`site_is_titled`]) or
+/// writes each of its words in full or by its first letter, small words
+/// aside, in three letters or more: nba.com for "National Basketball
+/// Association", nypost.com for "New York Post".
+fn site_spells(domain: &str, title: &str) -> bool {
     let label = squash(domain.split('.').next().unwrap_or(""));
-    let initials: String = base_title(title)
+    let words: Vec<String> = base_title(title)
         .split_whitespace()
         .map(squash)
-        .filter(|word| !word.is_empty() && !["of", "and", "the", "for"].contains(&word.as_str()))
-        .filter_map(|word| word.chars().next())
+        .filter(|word| !word.is_empty())
         .collect();
-    label.len() >= 3 && initials == label
+    site_is_titled(domain, title) || label.len() >= 3 && abbreviates(&label, &words)
+}
+
+/// Whether `label` is `words`, each in full or by its first letter, the
+/// small ones perhaps left out.
+fn abbreviates(label: &str, words: &[String]) -> bool {
+    let Some((word, rest)) = words.split_first() else {
+        return label.is_empty();
+    };
+    let initial = word
+        .chars()
+        .next()
+        .and_then(|first| label.strip_prefix(first));
+    (["of", "and", "the", "for"].contains(&word.as_str()) && abbreviates(label, rest))
+        || label
+            .strip_prefix(word.as_str())
+            .is_some_and(|left| abbreviates(left, rest))
+        || initial.is_some_and(|left| abbreviates(left, rest))
 }
 
 /// Whether `site`'s title may be another page's: an official site whose
