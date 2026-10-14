@@ -174,9 +174,9 @@ pub fn redirect_name(domain: &str) -> String {
 /// For each of `sites`, by position, the site it is folded into: the one
 /// its homepage redirects to, when that is another of `sites` and does not
 /// redirect itself (one step only). `domain` gives a site's canonical
-/// domain and `redirect_to` the canonical domain its homepage redirects to
-/// (an empty one when it redirects to no valid domain: no target, but it
-/// still redirects).
+/// domain and `redirect_to` the canonical domain of the site it is under
+/// another name ([`plumb_core::Redirect::folds_into`]; an empty one when
+/// it redirects to no valid domain: no target, but it still redirects).
 /// A site folded into another is left out of the index, and its
 /// [`redirect_name`] names the other.
 pub fn redirect_targets<T>(
@@ -274,17 +274,15 @@ fn merge_by_domain<R: Borrow<SiteRecord>>(records: &[R]) -> (Vec<Site<'_>>, Inde
 }
 
 /// Leaves out the sites whose homepage redirects to another site in
-/// `sites` (`pncbank.com` -> `pnc.com`): they are that site under another
-/// name. Their domain labels become names of the site they redirect to,
-/// returned by its position in the sites kept, so "pnc bank" names pnc.com.
+/// `sites` that they are under another name (`pncbank.com` -> `pnc.com`;
+/// see [`plumb_core::Redirect::folds_into`]). Their domain labels become
+/// names of the site they redirect to, returned by its position in the
+/// sites kept, so "pnc bank" names pnc.com.
 fn fold_redirects(sites: Vec<Site<'_>>) -> (Vec<Site<'_>>, HashMap<usize, Vec<String>>) {
     let targets = redirect_targets(
         &sites,
         |site| site.domain.as_str(),
-        |site| {
-            let to = &site.redirect.as_ref()?.to;
-            Some(canonical_domain(to).unwrap_or_default())
-        },
+        |site| site.redirect.as_ref()?.folds_into(&site.domain),
     );
     let mut kept_at = vec![None; sites.len()];
     let mut kept = 0;

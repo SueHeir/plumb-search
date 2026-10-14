@@ -131,6 +131,9 @@ impl Mcp {
         sites_only: bool,
     ) -> Result<Value> {
         let mut results = self.lookup(query, limit.unwrap_or(DEFAULT_SEARCH_LIMIT), options)?;
+        if let Some(node) = &self.node {
+            node.searched(query, &results);
+        }
         if sites_only {
             results.pages.clear();
         }
@@ -202,35 +205,33 @@ impl Mcp {
             &mut results,
             limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
             |domain| self.backend.site(domain),
+            |word| self.backend.common_word(word),
         );
         // Placed as the results page places them, which the info box needs.
-        let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
-        let operators = plumb_core::Operators::parse(query);
-        let mut placed = if operators.any() {
-            place_operator_pages(&operators, &results.hits, found_pages)
-        } else {
-            place_pages(query, &results.hits, found_pages)
-        };
+        // A package the search doesn't ask for outright is placed apart, so
+        // it never takes the place of a page listed beside the sites:
+        // "left-pad javascript" keeps its repository and article. It still
+        // goes where it would go on its own, ahead of the pages placed
+        // there, since after every site the limit cuts it: "requests
+        // python" lists PyPI's page.
         let promote_package = crate::assembly::promote_package(query);
-        if !promote_package {
-            let mut supplementary = Vec::new();
-            placed.retain(|page| {
-                if page.hit.page.package.is_some() {
-                    supplementary.push(page.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            let after = results
-                .hits
-                .len()
-                .max(placed.iter().map(|p| p.at + 1).max().unwrap_or(0));
-            for mut page in supplementary {
-                page.at = after;
-                page.under = None;
-                placed.push(page);
+        let (supplementary, found_pages): (Vec<_>, Vec<_>) = results
+            .pages
+            .iter()
+            .map(|p| p.hit.clone())
+            .partition(|hit| !promote_package && hit.page.package.is_some());
+        let operators = plumb_core::Operators::parse(query);
+        let place = |pages| {
+            if operators.any() {
+                place_operator_pages(&operators, &results.hits, pages)
+            } else {
+                place_pages(query, &results.hits, pages)
             }
+        };
+        let mut placed = place(found_pages);
+        for page in place(supplementary) {
+            let at = placed.iter().position(|p| p.at >= page.at);
+            placed.insert(at.unwrap_or(placed.len()), page);
         }
         if let Some(page) = &guessed {
             placed.retain(|p| p.hit.page.url != page.url);
@@ -322,13 +323,17 @@ impl Mcp {
             if !answers::searches_songs(query, &resolution) {
                 return None;
             }
-            self.lookup(name, PROFILE_SEARCH_LIMIT, options)
-                .ok()
-                .and_then(|found| answers::songs_profile(query, &resolution, found.pages))
+            answers::song_lookups(name, &resolution)
+                .iter()
+                .find_map(|lookup| {
+                    self.lookup(lookup, PROFILE_SEARCH_LIMIT, options)
+                        .ok()
+                        .and_then(|found| answers::songs_profile(query, &resolution, found.pages))
+                })
         });
         let info = match &profile {
             Some(profile) => answers::info_from_page(&profile.page, &results.hits),
-            None if operators.any() => None,
+            None if operators.any_but_phrases() || answers::is_sum(answer.as_ref()) => None,
             None => answers::info_box(&results.hits, &placed),
         };
         let recent = (!sites_only)
@@ -422,23 +427,27 @@ impl Mcp {
                 )),
             }
         }
-        let ordered_results: Vec<_> = assembled
-            .rows
-            .iter()
-            .map(|row| match row {
-                crate::assembly::Row::Site { site, .. } => json!({"kind": "site", "url": site.url}),
-                crate::assembly::Row::Page { page } => {
-                    let url = pages
-                        .iter()
-                        .find(|entry| {
-                            entry["page_url"].as_str().or_else(|| entry["url"].as_str())
-                                == Some(page.hit.page.url.as_str())
-                        })
-                        .and_then(|entry| entry["url"].as_str())
-                        .unwrap_or(&page.hit.page.url);
-                    json!({"kind": "page", "url": url})
-                }
-            })
+        // The profile asked for comes first, as the results page shows it:
+        // "superstition lyrics" is for the song's page on Genius.
+        let profile_url = profile.as_ref().map(|profile| profile.url.as_str());
+        let rows = assembled.rows.iter().map(|row| match row {
+            crate::assembly::Row::Site { site, .. } => json!({"kind": "site", "url": site.url}),
+            crate::assembly::Row::Page { page } => {
+                let url = pages
+                    .iter()
+                    .find(|entry| {
+                        entry["page_url"].as_str().or_else(|| entry["url"].as_str())
+                            == Some(page.hit.page.url.as_str())
+                    })
+                    .and_then(|entry| entry["url"].as_str())
+                    .unwrap_or(&page.hit.page.url);
+                json!({"kind": "page", "url": url})
+            }
+        });
+        let ordered_results: Vec<_> = profile_url
+            .map(|url| json!({"kind": "profile", "url": url}))
+            .into_iter()
+            .chain(rows.filter(|row| row["url"].as_str() != profile_url))
             .collect();
         let mut answer_json = json!({
             "query": query,

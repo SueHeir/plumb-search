@@ -17,10 +17,11 @@ use std::time::{Duration, Instant};
 use std::io::Write;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, Operators};
+use plumb_core::{adult_level, now_unix, registrable_domain, Operators, SafeSearch};
 use plumb_index::pages::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
-    options_allow, place_operator_pages, place_pages, PageHit, OPERATOR_PAGES,
+    options_allow, place_operator_pages, place_pages, site_pages_after_named_article, PageHit,
+    PageSearcher, OPERATOR_PAGES, WANTED_SET,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -29,8 +30,8 @@ use tracing::{debug, info, warn};
 
 use super::{Inner, NodeSettings};
 use crate::pages::{
-    index_dir, notes_path, open_or_build_with, remove_other_indexes_with_budget, stand_in,
-    thousands, wanted_counts, HeldPageSet, SetFileCutter, SetFileNotes, SetInfo, Wanted,
+    index_dir, notes_path, open_built, open_or_build_with, remove_other_indexes_with_budget,
+    stand_in, thousands, wanted_counts, HeldPageSet, SetFileCutter, SetFileNotes, SetInfo, Wanted,
 };
 
 /// How often the job looks for changed settings or set files.
@@ -198,15 +199,19 @@ pub(super) fn run(inner: Arc<Inner>) {
                 );
                 *inner.pages.write_locked() = Some((older, Arc::new(searcher)));
             }
-            let found = {
-                let _big = inner.one_big_job();
-                open_or_build_with(
-                    &inner.paths.data,
-                    &wanted,
-                    inner.storage.clone(),
-                    denylist.as_ref().map(|(list, _)| list.as_ref()),
-                    &mut || inner.check_stop(),
-                )
+            // An index already built is only opened: that needs no turn.
+            let found = match open_built(&inner.paths.data, &wanted) {
+                Some(found) => Ok(Some(found)),
+                None => {
+                    let _big = inner.one_big_job();
+                    open_or_build_with(
+                        &inner.paths.data,
+                        &wanted,
+                        inner.storage.clone(),
+                        denylist.as_ref().map(|(list, _)| list.as_ref()),
+                        &mut || inner.check_stop(),
+                    )
+                }
             };
             match found {
                 Ok(found) => {
@@ -1207,8 +1212,12 @@ pub(super) fn add_pages(
     let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return;
     };
+    let wanted = (inner.config.wanted_pages)
+        .then(|| inner.wanted_pages.searcher())
+        .flatten();
     let options = &for_query(inner, options, query);
     let searcher = searcher.in_language(options.language.as_deref());
+    let wanted = wanted.map(|wanted| wanted.in_language(options.language.as_deref()));
     let ops = Operators::parse(query);
     if ops.any() {
         if ops.words.is_empty() {
@@ -1238,6 +1247,9 @@ pub(super) fn add_pages(
             {
                 warn!("searching pages in the other number: {err:#}");
             }
+            if let Some(wanted) = &wanted {
+                add_wanted(wanted, query, &mut found);
+            }
             found.retain(|hit| options_allow(options, &hit.page));
             if let Some(index) = inner.current().filter(|_| inner.rank.add_named_site) {
                 add_named_site(&mut results.hits, &found, |domain| {
@@ -1249,19 +1261,29 @@ pub(super) fn add_pages(
                 drop_namesakes_of_words(&mut results.hits, &found);
             }
             lift_named_sites(&mut results.hits, &found);
-            if let Err(err) = searcher.add_named_site_page(query, &results.hits, &mut found) {
-                warn!("searching the pages of a site the query names: {err:#}");
-            }
-            found.retain(|hit| options_allow(options, &hit.page));
+            add_named_site_page(&searcher, wanted.as_ref(), query, &results.hits, &mut found);
+            // Pages found for this node's searches come from anywhere on
+            // the web, not from sites picked by hand: they are checked as
+            // sites are, and against the adult blocklist as it is now.
+            let list = inner
+                .adult_list()
+                .filter(|_| options.safe != SafeSearch::Off);
+            let adult = |hit: &PageHit| {
+                if hit.page.set != WANTED_SET {
+                    return false;
+                }
+                let domain = registrable_domain(&hit.page.url).unwrap_or_default();
+                let texts = [hit.page.title.as_str()]
+                    .into_iter()
+                    .chain(hit.page.description.as_deref());
+                options.safe.hides(adult_level(&domain, texts))
+                    || list.as_ref().is_some_and(|list| list.contains(&domain))
+            };
+            found.retain(|hit| options_allow(options, &hit.page) && !adult(hit));
             if let Err(err) = searcher.note_demand(&mut results.hits) {
                 warn!("reading what sites' articles are read: {err:#}");
             }
-            // A query that names a package or a page, or asks a question
-            // in full, is spelled right: "serde crate" is not "serde
-            // create", and "git undo last commit" is not "git und".
-            let spelled_right = found
-                .iter()
-                .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+            let spelled_right = searcher.spelled_right(query, &found, results.spelling.as_ref());
             if spelled_right && applied.is_none() {
                 results.spelling = None;
             }
@@ -1308,6 +1330,15 @@ pub(super) fn add_pages(
                     &mut results.pages,
                 );
             }
+            // A county search that ends in its state lists that state's
+            // county before its namesakes elsewhere.
+            plumb_index::asked_state_first(query, &mut results.hits);
+            // And a search about a town lists the sites of its namesakes
+            // elsewhere last: "berlin wall memorial" is not Berlin, NH.
+            let town = |name: &str| {
+                super::places::locate(inner, name, None).filter(plumb_core::place::Place::is_town)
+            };
+            plumb_index::namesakes_last(query, &mut results.hits, &town);
             // The learned order knows nothing of spelling: the site a
             // suggestion names stays second.
             if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.clone()) {
@@ -1318,8 +1349,61 @@ pub(super) fn add_pages(
             if let Err(err) = searcher.title_untitled(&mut results.hits) {
                 warn!("titling sites from their articles: {err:#}");
             }
+            // A pasted address is the page at it, whatever the ranking
+            // says.
+            if let Err(err) = searcher.list_typed_page(query, options, &mut results.pages) {
+                warn!("listing the page at a typed address: {err:#}");
+            }
         }
         Err(err) => warn!("searching pages: {err:#}"),
+    }
+}
+
+/// Puts first in `found` the page of a site `query` names
+/// ([`PageSearcher::add_named_site_page`]): the page sets' when they have
+/// one, else one found for this node's searches.
+fn add_named_site_page(
+    searcher: &PageSearcher,
+    wanted: Option<&PageSearcher>,
+    query: &str,
+    sites: &[plumb_index::Hit],
+    found: &mut Vec<PageHit>,
+) {
+    let first = found.first().map(|hit| hit.page.url.clone());
+    if let Err(err) = searcher.add_named_site_page(query, sites, found) {
+        warn!("searching the pages of a site the query names: {err:#}");
+    }
+    let added = found.first().map(|hit| &hit.page.url) != first.as_ref();
+    if let Some(wanted) = wanted.filter(|_| !added) {
+        if let Err(err) = wanted.add_named_site_page(query, sites, found) {
+            warn!("searching the wanted pages of a site the query names: {err:#}");
+        }
+    }
+}
+
+/// Most pages found for this node's searches ([`crate::wanted_pages`])
+/// that one search takes in.
+const WANTED_PER_SEARCH: usize = 3;
+
+/// Adds to `found` the pages found for this node's searches that `query`
+/// finds, best first among the page sets' by score: both are scored the
+/// same way, each set's popularity against its own most viewed page, and
+/// none goes above the article the query names.
+fn add_wanted(wanted: &PageSearcher, query: &str, found: &mut Vec<PageHit>) {
+    match wanted.search(query, WANTED_PER_SEARCH) {
+        Ok(more) => {
+            let before = found.len();
+            for hit in more {
+                if !found.iter().any(|known| known.page.url == hit.page.url) {
+                    found.push(hit);
+                }
+            }
+            if found.len() > before {
+                site_pages_after_named_article(found);
+                found.sort_by(|a, b| b.score.total_cmp(&a.score));
+            }
+        }
+        Err(err) => warn!("searching the wanted pages: {err:#}"),
     }
 }
 
@@ -1535,5 +1619,62 @@ mod tests {
         assert!(file.exists());
         // No sets folder yet: nothing to do.
         remove_stale_parts(&dir.path().join("none"), None);
+    }
+
+    /// While the node joins the network, the page index it already has is
+    /// searched at once, and a new one is built only after the join.
+    #[test]
+    fn the_built_index_is_searched_while_the_node_joins() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let file = SetInfo::find("wikipedia-en").unwrap().file(data);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let write = |title: &str, time: u64| {
+            let mut text = plumb_core::article::ARTICLES_HEADER.as_bytes().to_vec();
+            let article = plumb_core::Article {
+                title: title.into(),
+                views: 10,
+                ..Default::default()
+            };
+            plumb_core::article::write_article(&mut text, &article).unwrap();
+            std::fs::write(&file, text).unwrap();
+            super::super::newer::set_time(&file, time).unwrap();
+        };
+        write("Built Before", 1_700_000_000);
+        let mut config = crate::node::NodeConfig::desktop(data.to_path_buf());
+        config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=all").unwrap();
+        let wanted = Wanted::taking(data, &config.settings.page_sets, 0, &[]);
+        let (built, _) = crate::pages::open_or_build_with_budget(data, &wanted, None)
+            .unwrap()
+            .unwrap();
+        let rank = crate::rank_config(config.alpha);
+        let opened = super::super::open_data_dir(&config, rank).unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let inner = Arc::new(Inner::new(config, rank, opened, stopped, None));
+        inner.joining.store(true, Ordering::Release);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let job = {
+            let inner = inner.clone();
+            let handle = runtime.handle().clone();
+            std::thread::spawn(move || {
+                let _entered = handle.enter();
+                run(inner)
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while inner.page_key().as_deref() != Some(built.as_str()) {
+            assert!(Instant::now() < deadline, "the built index was not opened");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        write("Built After", 1_700_000_001);
+        std::thread::sleep(LOOK_EVERY * 5);
+        assert_eq!(inner.page_key().as_deref(), Some(built.as_str()));
+        inner.joining.store(false, Ordering::Release);
+        while inner.page_key().as_deref() == Some(built.as_str()) {
+            assert!(Instant::now() < deadline, "no build after the join");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stop.send(true).unwrap();
+        job.join().unwrap();
     }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use futures::stream::{self, FuturesUnordered, StreamExt};
-use plumb_core::{is_bot_check_page, now_unix, registrable_domain};
+use plumb_core::{is_stand_in_homepage, now_unix, registrable_domain};
 use reqwest::header::{
     ACCEPT, CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION,
 };
@@ -407,7 +407,7 @@ pub fn build_client(cfg: &CrawlConfig) -> reqwest::Result<Client> {
 /// The client's settings. It follows no redirects: [`Visit`] follows them
 /// itself, checking robots.txt before each hop.
 fn client_builder(cfg: &CrawlConfig) -> ClientBuilder {
-    let builder = Client::builder()
+    let mut builder = Client::builder()
         .user_agent(cfg.user_agent.as_str())
         .timeout(cfg.timeout)
         .gzip(true)
@@ -416,6 +416,9 @@ fn client_builder(cfg: &CrawlConfig) -> ClientBuilder {
             cfg.allow_private_addresses,
             cfg.dns_lookups,
         ));
+    for (name, addr) in &cfg.resolve {
+        builder = builder.resolve(name, *addr);
+    }
     // reqwest uses the system proxy unless told not to; behind a proxy the
     // resolver above would see only the proxy's name, not the targets'.
     if cfg.use_system_proxy {
@@ -471,6 +474,12 @@ async fn crawl_outcome(client: &Client, cfg: &CrawlConfig, target: &CrawlTarget)
                 } else {
                     also_tried.push(url.to_string());
                 }
+            }
+            // A crawl batch holds its pages a while; only following links
+            // needs their links to their own site.
+            CrawlOutcome::Fetched(mut page) => {
+                page.meta.own_links = Vec::new();
+                return CrawlOutcome::Fetched(page);
             }
             outcome => return outcome,
         }
@@ -892,7 +901,7 @@ impl<'a> Visit<'a> {
         .await;
         match parsed {
             Ok(meta)
-                if is_bot_check_page(
+                if is_stand_in_homepage(
                     domain,
                     meta.title.as_deref(),
                     meta.description.as_deref(),

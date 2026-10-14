@@ -392,22 +392,22 @@ fn unsupported(hit: &Hit, placed: &[PlacedPage]) -> bool {
             .any(|p| p.hit.named && p.under.as_deref() == Some(hit.domain.as_str()))
 }
 
-/// The site rows `sites`, in the model's order, with each one `waits`
-/// says moved down until every site `leads` says that was above it in the
-/// hand-made order (a lower row) is listed. The others keep their order.
+/// The site rows or page rows `rows`, in the model's order, with each one
+/// `waits` says moved down until every row `leads` says that was above it in
+/// the hand-made order (a lower row) is listed. The others keep their order.
 fn after_leading(
-    sites: Vec<usize>,
+    rows: Vec<usize>,
     waits: impl Fn(usize) -> bool,
     leads: impl Fn(usize) -> bool,
 ) -> Vec<usize> {
-    let leading: Vec<usize> = sites
+    let leading: Vec<usize> = rows
         .iter()
         .copied()
         .filter(|&row| leads(row) && !waits(row))
         .collect();
-    let mut listed = Vec::with_capacity(sites.len());
+    let mut listed = Vec::with_capacity(rows.len());
     let mut waiting = Vec::new();
-    for row in sites {
+    for row in rows {
         waiting.push(row);
         while let Some(at) = waiting
             .iter()
@@ -428,7 +428,18 @@ fn after_leading(
 /// network) sorts by score and keeps this order. Each page listed on its
 /// own notes where it went ([`PageHit::learned`]), which
 /// [`crate::pages::place_pages`] keeps when the results are placed again.
+/// A record the query names by its identifier is not read, as the model
+/// never saw one, and stays first ([`crate::pages::keep_page_rules`]).
 pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec<PlacedPage>) {
+    let (records, rest): (Vec<PlacedPage>, Vec<PlacedPage>) = std::mem::take(placed)
+        .into_iter()
+        .partition(|page| crate::pages::is_record(&page.hit));
+    *placed = rest;
+    reorder_rows(model, query, hits, placed);
+    placed.splice(0..0, records);
+}
+
+fn reorder_rows(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec<PlacedPage>) {
     let rows = listed(hits, placed);
     if rows.len() < 2 {
         return;
@@ -453,7 +464,7 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
     // A named page's corroborated official-site identity is also query
     // evidence. Account for it without rewriting the original site-query
     // diagnostics or adding learned input features.
-    // Pages keep their model positions; only the site slots change.
+    // Sites and pages keep their model slots; only who fills them changes.
     let page_site = crate::pages::named_page_site(hits, placed.iter().map(|page| &page.hit));
     let mut sites: Vec<_> = order
         .iter()
@@ -491,10 +502,29 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
     let partial = |row: usize| site(row).is_some_and(|hit| hit.missing_words);
     let named = |row: usize| site(row).is_some_and(|hit| hit.named);
     let mut sites = after_leading(sites, partial, named).into_iter();
-    for row in &mut order {
-        if matches!(rows[*row], Listed::Site(_)) {
-            *row = sites.next().expect("site slot");
+    // Nor can popularity alone lift a site's inner page the query does not
+    // name past a page listed above it: such a page's popularity is its
+    // site's weight, which the model reads as the page being much read. "wolfram code" put MathWorld's
+    // "Barker Code" before the article Wolfram code, "cellular automaton"
+    // its "Additive Cellular Automaton" before Cellular automaton.
+    let inner = |row: usize| match rows[row] {
+        Listed::Page(i) => {
+            let hit = &placed[i].hit;
+            hit.page.is_site_page() && !hit.named && !hit.whole
         }
+        Listed::Site(_) => false,
+    };
+    let pages = order
+        .iter()
+        .copied()
+        .filter(|&row| matches!(rows[row], Listed::Page(_)))
+        .collect();
+    let mut pages = after_leading(pages, inner, |row| !inner(row)).into_iter();
+    for row in &mut order {
+        *row = match rows[*row] {
+            Listed::Site(_) => sites.next().expect("site slot"),
+            Listed::Page(_) => pages.next().expect("page slot"),
+        };
     }
     let mut new_hits: Vec<Hit> = Vec::with_capacity(hits.len());
     let mut alone: Vec<PlacedPage> = Vec::new();
@@ -509,11 +539,13 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
         }
     }
     // A docs page found by its words, or another site's page while the
-    // query names the best site's owner, never comes before the best site
-    // but its own, whatever the model says: "python package index" wants
-    // pypi.org first, "minecraft" minecraft.net.
-    let names_best =
-        crate::pages::named_page_site(&new_hits, placed.iter().map(|p| &p.hit)) == Some(0);
+    // query names the best site's owner, or the best site with one of its
+    // pages, never comes before the best site but its own, whatever the
+    // model says: "python package index" wants pypi.org first, "minecraft"
+    // minecraft.net.
+    let names_best = crate::pages::named_page_site(&new_hits, placed.iter().map(|p| &p.hit))
+        == Some(0)
+        || crate::pages::names_best_site_page(&new_hits, placed);
     for page in alone
         .iter_mut()
         .filter(|p| p.at == 0 && crate::pages::kept_below(&p.hit, &new_hits, names_best))
@@ -801,6 +833,88 @@ mod tests {
     }
 
     #[test]
+    fn popularity_alone_lifts_no_inner_page_past_a_page_above_it() {
+        // Lists much-read pages first, then much-linked sites, as the
+        // built-in model did with MathWorld's "Barker Code" for "wolfram
+        // code", whose popularity is MathWorld's weight.
+        let feature = |name| FEATURES.iter().position(|f| *f == name).unwrap();
+        let leaf = |value| Box::new(Node::Leaf { value });
+        let linked = Node::Split {
+            feature: feature("s_link"),
+            threshold: 0.4,
+            left: leaf(0.0),
+            right: leaf(1.0),
+        };
+        let tree = Node::Split {
+            feature: feature("p_pop"),
+            threshold: 0.5,
+            left: Box::new(linked),
+            right: leaf(2.0),
+        };
+        let model = Model::new(vec![tree], None);
+        let mut code = article("Wolfram code", true);
+        (code.score, code.popularity) = (0.65, 0.3);
+        code.page.item = Some("Q8030198".into());
+        let inner = |title: &str, named: bool, whole: bool| PageHit {
+            page: Page::from_set(
+                crate::pages::SUBPAGES_SET,
+                Article {
+                    title: title.into(),
+                    item: Some("https://mathworld.wolfram.com/BarkerCode.html".into()),
+                    views: 4_000,
+                    ..Article::default()
+                },
+            )
+            .unwrap(),
+            score: 0.59,
+            named,
+            popularity: 0.968,
+            whole,
+            learned: None,
+        };
+        let order_of = |pages: Vec<PageHit>| {
+            let mut hits = vec![
+                site("wolfram.com", 0.76, false),
+                site("wolframalpha.com", 0.67, false),
+            ];
+            let mut placed: Vec<PlacedPage> = pages
+                .into_iter()
+                .map(|hit| PlacedPage {
+                    at: 0,
+                    under: None,
+                    hit,
+                })
+                .collect();
+            reorder(&model, "wolfram code", &mut hits, &mut placed);
+            listed(&hits, &placed)
+                .into_iter()
+                .map(|row| match row {
+                    Listed::Site(i) => hits[i].domain.clone(),
+                    Listed::Page(i) => placed[i].hit.page.title.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let barker = "Barker Code -- from Wolfram MathWorld";
+        // The article listed above it takes its place.
+        assert_eq!(
+            order_of(vec![code.clone(), inner(barker, false, false)]),
+            ["Wolfram code", "wolfram.com", "wolframalpha.com", barker]
+        );
+        // Already above the article, named by the query or asked for
+        // whole, it is left to the model.
+        for (pages, first) in [
+            (vec![inner(barker, false, false), code.clone()], barker),
+            (
+                vec![code.clone(), inner("Wolfram Code", true, false)],
+                "Wolfram Code",
+            ),
+            (vec![code.clone(), inner(barker, false, true)], barker),
+        ] {
+            assert_eq!(order_of(pages)[0], first);
+        }
+    }
+
+    #[test]
     fn a_model_for_other_features_is_refused() {
         assert!(Model::from_json(r#"{"features":["pos"],"trees":[]}"#).is_err());
     }
@@ -909,7 +1023,7 @@ mod tests {
         // A museum's page on Minecraft, or a news site's, comes after
         // minecraft.net.
         assert!(!led(named(crate::pages::SUBPAGES_SET, museum), true));
-        let news = "https://www.cnet.com/tags/minecraft/";
+        let news = "https://www.cnet.com/tech/gaming/minecraft/";
         assert!(!led(named(crate::pages::REFERENCE_SET, news), true));
         // The official site's own page, one named while the best site is
         // not an official one, and the article are left to the model.
