@@ -32,6 +32,7 @@ pub mod papers;
 pub mod place;
 pub mod profiles;
 pub mod safe;
+mod sign_in;
 pub mod simhash;
 mod site_search;
 pub mod stack_exchange;
@@ -39,16 +40,19 @@ pub mod storage;
 pub mod subsites;
 
 pub use article::{article_url, Article};
-pub use bot_check::{echoes_the_request, is_bot_check_page, is_sign_in_portal};
+pub use bot_check::{
+    echoes_the_request, is_bot_check_page, is_sign_in_portal, is_stand_in_homepage,
+};
 pub use country::{
     country_of_any_name, country_of_name, normalize_country, site_country, tld_country,
     COUNTRY_CHOICES,
 };
 pub use key_pages::{KeyPage, PageIntent, MAX_KEY_PAGES};
-pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
+pub use kinds::{is_generic_kind, kind_key, other_number, singular, MAX_KINDS};
 pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
+pub use sign_in::{asks_to_sign_in, is_sign_in_page, names_label};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
 pub use subsites::{
     parent_domain, subdomain_sites, use_site_list, SiteList, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
@@ -1076,8 +1080,8 @@ pub fn is_homepage_path(path: &str) -> bool {
 }
 
 /// `en`, `us`, `en-us`, `pt_br`, `zh-hans`: two letters, optionally a `-` or
-/// `_` and two to four more.
-fn is_locale_segment(segment: &str) -> bool {
+/// `_` and two to four more. Lowercase only.
+pub fn is_locale_segment(segment: &str) -> bool {
     let (lang, region) = match segment.split_once(['-', '_']) {
         Some((lang, region)) => (lang, Some(region)),
         None => (segment, None),
@@ -1448,6 +1452,27 @@ pub fn written_outside(language: &str, query: &str) -> bool {
 /// limits were set on declarations alone.
 pub const GUESSED: char = '~';
 
+/// Whether at least half of `text`'s letters, and [`MIN_SCRIPT_LETTERS`]
+/// or more, are in scripts `query` has no letter of: a title in Chinese or
+/// Thai for a search typed in Latin letters, mixed with Latin words or not
+/// ("ANIMG - 二次エロ画像"). A reader of the query is unlikely to read it.
+/// Kana and kanji count as one, since Japanese mixes them.
+pub fn written_apart(text: &str, query: &str) -> bool {
+    let scripts = |text: &str| {
+        text.chars()
+            .filter_map(char_script)
+            .map(|(script, _)| if script == "Kana" { "Hani" } else { script })
+            .collect::<Vec<_>>()
+    };
+    let typed = scripts(query);
+    let (mut apart, mut letters) = (0, 0);
+    for script in scripts(text) {
+        letters += 1;
+        apart += usize::from(!typed.contains(&script));
+    }
+    letters >= MIN_SCRIPT_LETTERS && apart * 2 >= letters
+}
+
 /// Keep valid declared language metadata authoritative. Only missing or
 /// invalid declarations fall back to dominant title/description script,
 /// and then, for Latin letters, to the language their common words say
@@ -1705,6 +1730,28 @@ mod tests {
         // Kana is Japanese, not Chinese; Han alone fits either.
         assert!(written_outside("zh", "東京タワー"));
         assert!(!written_outside("zh", "天气预报"));
+    }
+
+    #[test]
+    fn text_in_scripts_the_query_has_none_of() {
+        for (text, query) in [
+            ("和记娱乐 和记娱乐官网", "catalan numbers"),
+            ("ANIMG - 二次エロ画像", "oeis a051023"),
+            ("Vast MM | เครื่องจักร/ เครื่องมือช่าง", "rydberg constant"),
+            ("Информационный портал района", "zara"),
+        ] {
+            assert!(written_apart(text, query), "{text}");
+        }
+        for (text, query) in [
+            ("Tokyo Hotel 東京", "tokyo hotel"),
+            ("Café de Flore", "cafe"),
+            ("和记", "catalan numbers"),
+            ("東京新聞のニュースサイト", "東京 ニュース"),
+            ("東京拉麺店の公式サイト", "ラーメン"),
+            ("", "news"),
+        ] {
+            assert!(!written_apart(text, query), "{text}");
+        }
     }
 
     #[test]

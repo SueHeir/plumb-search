@@ -93,6 +93,23 @@ impl Searcher {
         )
     }
 
+    /// Whether people know the site by its name: it is well linked, the
+    /// official site of a Wikidata item, or has other names. A domain that
+    /// only spells some words (vacationrentals.com for "vacation rentals")
+    /// is not.
+    pub(crate) fn known_by_name(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+    ) -> Result<bool> {
+        Ok(
+            crate::rank::best_link_score(searcher, &HashSet::from([addr]))
+                >= crate::WELL_KNOWN_LINK_SCORE
+                || self.is_official(searcher, addr)?
+                || self.has_aliases(searcher, addr)?,
+        )
+    }
+
     /// Whether the site has other names (from Wikidata or a redirect),
     /// which stand in for a missing title.
     pub(crate) fn has_aliases(
@@ -183,19 +200,27 @@ impl Searcher {
     /// phrase ("cricket" in "the cricket and the ant", "guess" in "guess
     /// the states game"). A run of one function, filler or comparison word
     /// names nothing. The second set has only the sites named by an alias.
+    ///
+    /// A question names a site only by a text most links to it use
+    /// ([`RankConfig::link_names`]): netflix.com in "how to cancel netflix"
+    /// or reddit.com in "how to fix a leaky faucet reddit", but not rid.it
+    /// in "how to get rid of aphids", which only its domain calls "rid".
     pub(crate) fn names_inside(
         &self,
         searcher: &tantivy::Searcher,
         query: &ParsedQuery,
         query_text: &str,
+        cfg: &RankConfig,
     ) -> Result<(HashSet<DocAddress>, HashSet<DocAddress>)> {
-        if query.asked {
+        let link_names = self.fields.link_name_key.filter(|_| cfg.link_names);
+        if query.asked && link_names.is_none() {
             return Ok((HashSet::new(), HashSet::new()));
         }
         let tokens = analysis::tokens(&self.words, query_text);
         let tokens = &tokens[..tokens.len().min(MAX_QUERY_WORDS)];
         let mut labels = Vec::new();
         let mut aliases = Vec::new();
+        let mut linked = HashSet::new();
         for start in 0..tokens.len() {
             let mut key = String::new();
             for end in start..tokens.len() {
@@ -214,14 +239,46 @@ impl Searcher {
                 if goes_on {
                     continue;
                 }
+                if let Some(field) = link_names.filter(|_| query.asked) {
+                    let term = Term::from_field_text(field, &key);
+                    linked.extend(named_by_links(searcher, &term)?);
+                    continue;
+                }
                 labels.push(Term::from_field_text(self.fields.label_key, &key));
                 aliases.push(Term::from_field_text(self.fields.alias_key, &key));
             }
         }
-        let by_alias = matching_docs(searcher, aliases)?;
+        let mut by_alias = matching_docs(searcher, aliases)?;
+        by_alias.extend(linked);
         let mut named = matching_docs(searcher, labels)?;
         named.extend(by_alias.iter().copied());
         Ok((named, by_alias))
+    }
+
+    /// Whether the document's title has the first `words` words of
+    /// `query`: wimbledon.com, "The Championships, Wimbledon", calls itself
+    /// what "wimbledon final" starts with, and a site that has the word
+    /// only for its domain doesn't.
+    pub(crate) fn titled_by_first_words(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+        query: &str,
+        words: usize,
+    ) -> Result<bool> {
+        let first: Vec<String> = analysis::tokens(&self.words, query)
+            .into_iter()
+            .take(words)
+            .collect();
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let titled = doc
+            .get_all(self.fields.title)
+            .filter_map(|value| value.as_str())
+            .any(|title| {
+                let title = analysis::tokens(&self.words, title);
+                first.iter().all(|word| title.contains(word))
+            });
+        Ok(titled)
     }
 
     /// Whether the document's title, description or Wikidata description

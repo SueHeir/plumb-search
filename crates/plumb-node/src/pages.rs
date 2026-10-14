@@ -1060,10 +1060,10 @@ pub fn open_or_build_with(
     let Some(key) = wanted.key() else {
         return Ok(None);
     };
-    let dir = index_dir(data_dir, &key);
-    if let Ok(searcher) = PageSearcher::open(&dir) {
-        return Ok(Some((key, searcher)));
+    if let Some(found) = open_built(data_dir, wanted) {
+        return Ok(Some(found));
     }
+    let dir = index_dir(data_dir, &key);
     let started = std::time::Instant::now();
     let denied = std::cell::Cell::new(0usize);
     let allowed = |page: &Page| {
@@ -1119,6 +1119,13 @@ pub fn open_or_build_with(
         );
     }
     Ok(Some((key, PageSearcher::open(&dir)?)))
+}
+
+/// The page index of `wanted`, when it is already built.
+pub fn open_built(data_dir: &Path, wanted: &Wanted) -> Option<(String, PageSearcher)> {
+    let key = wanted.key()?;
+    let searcher = PageSearcher::open(&index_dir(data_dir, &key)).ok()?;
+    Some((key, searcher))
 }
 
 /// The newest page index other than `key`'s that this version can search,
