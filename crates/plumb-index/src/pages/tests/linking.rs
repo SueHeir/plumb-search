@@ -28,6 +28,13 @@ fn a_part_of_the_query_links_to_the_article_it_usually_means() {
             &["Trephining"],
         ),
         article("Wood", "Tissue found in trees", 50_000, &[]),
+        article(
+            "Lien",
+            "Right to keep property until a debt is paid",
+            30_000,
+            &[],
+        ),
+        article("Alien (film)", "1979 film by Ridley Scott", 200_000, &[]),
         singer,
         article(
             "Jordan Smith (footballer)",
@@ -55,6 +62,9 @@ fn a_part_of_the_query_links_to_the_article_it_usually_means() {
     );
     // The last word, after a word like "for".
     assert_eq!(first("uses for wood").as_deref(), Some("Wood"));
+    // Not "a lien", which joins to Alien, so would hold "lien".
+    let lien = s.search("how to remove a lien", 5).unwrap();
+    assert!(lien[0].page.title == "Lien" && lien[0].score >= MIN_PARTIAL_SCORE);
     // An alias, or a title with a qualifier, when the article says more
     // of the query.
     assert_eq!(first("trephining skull").as_deref(), Some("Trepanning"));
