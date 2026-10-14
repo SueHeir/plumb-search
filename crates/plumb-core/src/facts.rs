@@ -556,6 +556,12 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
     // "the" ("the art of war author"), dropped below unless a work's.
     let whole = q.as_str();
     let q = q.strip_prefix("the ").unwrap_or(&q);
+    // Facts are kept as they are now: "the current ceo of apple" asks what
+    // "the ceo of apple" does.
+    let q = ["current ", "present "]
+        .iter()
+        .find_map(|now| q.strip_prefix(now))
+        .unwrap_or(q);
     use FactKind::*;
     // Words before the subject.
     let before: &[(&str, &[FactKind], bool)] = &[
@@ -605,6 +611,15 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("president of ", &[HeadOfState], false),
         ("prime minister of ", &[HeadOfGovernment], false),
         ("leader of ", &[HeadOfGovernment, HeadOfState], false),
+        // A state's or city's head of government is its governor or mayor,
+        // and a kingdom's head of state its monarch.
+        ("governor of ", &[HeadOfGovernment], false),
+        ("mayor of ", &[HeadOfGovernment], false),
+        ("chancellor of ", &[HeadOfGovernment], false),
+        ("premier of ", &[HeadOfGovernment], false),
+        ("king of ", &[HeadOfState], false),
+        ("queen of ", &[HeadOfState], false),
+        ("monarch of ", &[HeadOfState], false),
         ("coordinates of ", &[Coordinates], false),
         ("gps coordinates of ", &[Coordinates], false),
         ("latitude and longitude of ", &[Coordinates], false),
@@ -647,6 +662,8 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         (" president", &[HeadOfState], false),
         (" prime minister", &[HeadOfGovernment], false),
         (" leader", &[HeadOfGovernment, HeadOfState], false),
+        (" governor", &[HeadOfGovernment], false),
+        (" mayor", &[HeadOfGovernment], false),
         (" gps coordinates", &[Coordinates], false),
         (" coordinates", &[Coordinates], false),
         (" latitude and longitude", &[Coordinates], false),
@@ -853,6 +870,12 @@ mod tests {
             ("germany president", HeadOfState, "germany"),
             ("who is the president of france", HeadOfState, "france"),
             ("prime minister of canada", HeadOfGovernment, "canada"),
+            ("governor of texas", HeadOfGovernment, "texas"),
+            ("texas governor", HeadOfGovernment, "texas"),
+            ("who is the mayor of chicago", HeadOfGovernment, "chicago"),
+            ("london mayor", HeadOfGovernment, "london"),
+            ("chancellor of germany", HeadOfGovernment, "germany"),
+            ("who is the king of spain", HeadOfState, "spain"),
             ("coordinates of yellowstone", Coordinates, "yellowstone"),
             ("eiffel tower gps coordinates", Coordinates, "eiffel tower"),
             ("what is the atomic number of gold", AtomicNumber, "gold"),
@@ -876,6 +899,19 @@ mod tests {
             ("what year did elvis die", Died, "elvis"),
             ("einstein date of death", Died, "einstein"),
             ("how tall was abraham lincoln", Height, "abraham lincoln"),
+            ("current ceo of apple", Ceo, "apple"),
+            ("who is the current ceo of microsoft", Ceo, "microsoft"),
+            ("current president of mexico", HeadOfState, "mexico"),
+            (
+                "who is the present prime minister of india",
+                HeadOfGovernment,
+                "india",
+            ),
+            (
+                "current owner of the washington post",
+                Owner,
+                "washington post",
+            ),
         ] {
             assert_eq!(asked(q), Some((kind, subject.into(), false)), "{q}");
         }

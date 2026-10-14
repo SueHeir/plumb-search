@@ -466,21 +466,33 @@ fn docs_without_intent(query: &str) -> String {
         .join(" ")
 }
 
+/// Words that ask for docs, but only beside what the docs are about:
+/// "python asyncio tutorial" asks for the asyncio page, and "python
+/// tutorial" for the tutorial.
+const DOCS_KIND_WORDS: &[&str] = &["tutorial", "tutorials", "guide", "example", "examples"];
+
 fn docs_topic(site: &plumb_core::docs::DocsSite, query: &str) -> String {
-    query
-        .split_whitespace()
-        .filter(|word| {
-            let word = word.to_lowercase();
-            let word = word.trim_matches(|c: char| !c.is_alphanumeric() && !"._:+#".contains(c));
-            word != site.key
-                && word != site.product.to_lowercase()
-                && !site.asked_by.contains(&word)
-                && !DOCS_INTENT_WORDS.contains(&word)
-                && !ASKING_WORDS.contains(&word)
-                && !plumb_core::is_function_word(word)
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut kinds = Vec::new();
+    let mut topic = Vec::new();
+    for word in query.split_whitespace() {
+        let lower = word.to_lowercase();
+        let lower = lower.trim_matches(|c: char| !c.is_alphanumeric() && !"._:+#".contains(c));
+        if lower == site.key
+            || lower == site.product.to_lowercase()
+            || site.asked_by.contains(&lower)
+            || DOCS_INTENT_WORDS.contains(&lower)
+            || ASKING_WORDS.contains(&lower)
+            || plumb_core::is_function_word(lower)
+        {
+            continue;
+        }
+        if DOCS_KIND_WORDS.contains(&lower) {
+            kinds.push(word);
+        } else {
+            topic.push(word);
+        }
+    }
+    if topic.is_empty() { kinds } else { topic }.join(" ")
 }
 
 /// Substantive docs terms for selecting source excerpts from a result.
