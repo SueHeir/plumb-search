@@ -587,6 +587,9 @@ impl PageSearcher {
                 self.name_without_the(rest, &mut hits);
             }
         }
+        if let [name @ .., what] = words.as_slice() {
+            self.name_by_description(name, what, &mut hits);
+        }
         let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
@@ -1338,6 +1341,53 @@ impl PageSearcher {
                 && hit.page.views * super::SURNAME_MARGIN > views
                 && fits(&hit.page)
                 && !(living && died(&hit.page))
+        }) {
+            return;
+        }
+        name_by_alias(&mut hits[best]);
+    }
+
+    /// Names the person the query calls by their `name` and then says
+    /// `what` they are, as their description does, when nothing is named:
+    /// "tom hanks actor" is Tom Hanks, "American actor and filmmaker", and
+    /// "mozart composer" Wolfgang Amadeus Mozart. The name is their title
+    /// without its qualifier, another name or, alone, the title's last
+    /// word. Only when they are read
+    /// [`super::SURNAME_MARGIN`] times as much as every other person who
+    /// fits: "chris smith footballer" is several.
+    fn name_by_description(&self, name: &[String], what: &str, hits: &mut [PageHit]) {
+        if name.is_empty() || hits.iter().any(|hit| hit.named) {
+            return;
+        }
+        let key = |text: &str| analysis::tokens(&self.joined, text).pop();
+        let Some(called) = key(&name.join(" ")) else {
+            return;
+        };
+        let surname = |page: &Page| match name {
+            [word] => analysis::tokens(&self.words, base_title(&page.title)).last() == Some(word),
+            _ => false,
+        };
+        let fits = |page: &Page| {
+            page.is_person()
+                && (std::iter::once(base_title(&page.title))
+                    .chain(page.aliases.iter().map(String::as_str))
+                    .any(|text| key(text).as_ref() == Some(&called))
+                    || surname(page))
+                && analysis::tokens(&self.words, page.description.as_deref().unwrap_or(""))
+                    .iter()
+                    .any(|word| word == what)
+        };
+        let Some((best, views)) = hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| fits(&hit.page))
+            .max_by_key(|(_, hit)| hit.page.views)
+            .map(|(at, hit)| (at, hit.page.views))
+        else {
+            return;
+        };
+        if hits.iter().enumerate().any(|(at, hit)| {
+            at != best && hit.page.views * super::SURNAME_MARGIN > views && fits(&hit.page)
         }) {
             return;
         }
