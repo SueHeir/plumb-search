@@ -35,6 +35,7 @@ mod named_site;
 mod page;
 mod papers;
 mod placing;
+mod records;
 mod repos;
 mod scoring;
 mod search;
@@ -50,7 +51,7 @@ pub use self::placing::{
     WEAK_SITE_MATCH,
 };
 pub(crate) use self::placing::{
-    asked_as_question, kept_below, named_page_site, names_best_site_page,
+    asked_as_question, is_record, kept_below, named_page_site, names_best_site_page,
 };
 pub use self::scoring::{made_by, site_pages_after_named_article};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
@@ -348,6 +349,11 @@ pub const PAPERS_SET: &str = "papers";
 /// Wikipedia article (Linus Tech Tips the channel), each only ever listed
 /// under its own website.
 pub const WIKIDATA_SET: &str = "wikidata";
+
+/// Records a search names by their identifier ("rfc 3339", "pep 8"),
+/// built from the identifier rather than read from a file (see
+/// `pages/records.rs`) and always listed first ([`keep_page_rules`]).
+pub const RECORDS_SET: &str = "records";
 
 /// The set of English words and what they mean, from Wiktionary
 /// ([`plumb_core::article`] files made by `plumb-tools fetch-pages --set

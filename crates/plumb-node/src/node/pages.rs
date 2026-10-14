@@ -1349,6 +1349,11 @@ pub(super) fn add_pages(
             if let Err(err) = searcher.title_untitled(&mut results.hits) {
                 warn!("titling sites from their articles: {err:#}");
             }
+            // A pasted address is the page at it, whatever the ranking
+            // says.
+            if let Err(err) = searcher.list_typed_page(query, options, &mut results.pages) {
+                warn!("listing the page at a typed address: {err:#}");
+            }
         }
         Err(err) => warn!("searching pages: {err:#}"),
     }

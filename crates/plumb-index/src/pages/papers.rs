@@ -32,7 +32,7 @@ impl PageSearcher {
         // "gene family" is a topic, not a person's, and "transformer
         // review" a kind of paper, not a film's.
         let words = hinted_name(&ops.words)
-            .filter(|(_, hint)| !matches!(hint, Hint::Person | Hint::Work(_)))
+            .filter(|(_, hint)| !matches!(hint, Hint::Aspect | Hint::Person | Hint::Work(_)))
             .map_or_else(|| ops.words.clone(), |(name, _)| name);
         let mut clauses: Vec<(Occur, Box<dyn Query>)> =
             vec![(Occur::Must, self.scope_term("set:papers"))];
