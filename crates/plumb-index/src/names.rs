@@ -4,12 +4,13 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
-use plumb_core::{is_function_word, kind_key, normalize_text, registrable_domain};
+use plumb_core::{domain_label, is_function_word, kind_key, normalize_text, registrable_domain};
 use tantivy::postings::Postings;
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{DocAddress, DocSet, TantivyDocument, Term, TERMINATED};
 
 use crate::query::{matching_docs, ParsedQuery, COMPARISON_WORDS};
+use crate::rank::{domain_of, link_scores};
 use crate::{
     analysis, spell, RankConfig, Searcher, FILLER_WORDS, LINK_NAME_SHARE, MAX_QUERY_WORDS,
 };
@@ -93,6 +94,23 @@ impl Searcher {
         )
     }
 
+    /// Whether people know the site by its name: it is well linked, the
+    /// official site of a Wikidata item, or has other names. A domain that
+    /// only spells some words (vacationrentals.com for "vacation rentals")
+    /// is not.
+    pub(crate) fn known_by_name(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+    ) -> Result<bool> {
+        Ok(
+            crate::rank::best_link_score(searcher, &HashSet::from([addr]))
+                >= crate::WELL_KNOWN_LINK_SCORE
+                || self.is_official(searcher, addr)?
+                || self.has_aliases(searcher, addr)?,
+        )
+    }
+
     /// Whether the site has other names (from Wikidata or a redirect),
     /// which stand in for a missing title.
     pub(crate) fn has_aliases(
@@ -110,6 +128,83 @@ impl Searcher {
                 None => false,
             },
         )
+    }
+
+    /// Leaves out of `names` the sites the query's first words name only by
+    /// a name they don't call themselves by ([`Searcher::calls_itself`]),
+    /// when an official site better known than they are has it as its
+    /// domain label. Such a site borrowed the name: holden.com.au's homepage
+    /// gives "Facebook" as its og:site_name, and sites built with Laravel
+    /// keep its default name "Laravel", so "facebook" named holden.com.au in
+    /// full next to facebook.com, and "spotify premium price" named okta.com
+    /// by its first word. A site that calls itself by the name keeps it:
+    /// deltafaucet.com, "Delta Faucet", for "delta", and x.com, "formerly
+    /// Twitter", for "twitter".
+    pub(crate) fn drop_borrowed_names(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &ParsedQuery,
+        names: &mut HashMap<DocAddress, NameMatch>,
+    ) -> Result<()> {
+        for (key, words) in &query.leading {
+            let named: HashSet<DocAddress> = names
+                .iter()
+                .filter(|(_, name)| name.words() == *words && !name.typed)
+                .map(|(&addr, _)| addr)
+                .collect();
+            let scores = link_scores(searcher, &named);
+            let own_label = |addr| {
+                domain_of(searcher, addr).is_some_and(|domain| domain_label(&domain) == *key)
+            };
+            let mut owner = 0.0;
+            for &(score, addr) in &scores {
+                if score > owner && own_label(addr) && self.is_official(searcher, addr)? {
+                    owner = score;
+                }
+            }
+            for (score, addr) in scores {
+                if score < owner && !own_label(addr) && !self.calls_itself(searcher, addr, key)? {
+                    names.remove(&addr);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether words that, joined, are `key` are in the site's title or,
+    /// for an official site, in its description, where Wikipedia's words
+    /// for it go: x.com is "formerly known as Twitter", meta.com "formerly
+    /// Facebook, Inc.". Another site's description can name the brand in
+    /// passing ("Follow us on Instagram").
+    fn calls_itself(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+        key: &str,
+    ) -> Result<bool> {
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let has = |field| {
+            doc.get_all(field)
+                .filter_map(|value| value.as_str())
+                .any(|text| {
+                    let words = analysis::tokens(&self.words, text);
+                    (0..words.len()).any(|start| {
+                        let mut run = String::new();
+                        for word in &words[start..] {
+                            run.push_str(word);
+                            if run.len() >= key.len() {
+                                return run == key;
+                            }
+                        }
+                        false
+                    })
+                })
+        };
+        if has(self.fields.title) {
+            return Ok(true);
+        }
+        let described = has(self.fields.description);
+        Ok(described && self.is_official(searcher, addr)?)
     }
 
     /// Whether the first `words` words of `query` are one word that many
@@ -183,19 +278,27 @@ impl Searcher {
     /// phrase ("cricket" in "the cricket and the ant", "guess" in "guess
     /// the states game"). A run of one function, filler or comparison word
     /// names nothing. The second set has only the sites named by an alias.
+    ///
+    /// A question names a site only by a text most links to it use
+    /// ([`RankConfig::link_names`]): netflix.com in "how to cancel netflix"
+    /// or reddit.com in "how to fix a leaky faucet reddit", but not rid.it
+    /// in "how to get rid of aphids", which only its domain calls "rid".
     pub(crate) fn names_inside(
         &self,
         searcher: &tantivy::Searcher,
         query: &ParsedQuery,
         query_text: &str,
+        cfg: &RankConfig,
     ) -> Result<(HashSet<DocAddress>, HashSet<DocAddress>)> {
-        if query.asked {
+        let link_names = self.fields.link_name_key.filter(|_| cfg.link_names);
+        if query.asked && link_names.is_none() {
             return Ok((HashSet::new(), HashSet::new()));
         }
         let tokens = analysis::tokens(&self.words, query_text);
         let tokens = &tokens[..tokens.len().min(MAX_QUERY_WORDS)];
         let mut labels = Vec::new();
         let mut aliases = Vec::new();
+        let mut linked = HashSet::new();
         for start in 0..tokens.len() {
             let mut key = String::new();
             for end in start..tokens.len() {
@@ -214,14 +317,46 @@ impl Searcher {
                 if goes_on {
                     continue;
                 }
+                if let Some(field) = link_names.filter(|_| query.asked) {
+                    let term = Term::from_field_text(field, &key);
+                    linked.extend(named_by_links(searcher, &term)?);
+                    continue;
+                }
                 labels.push(Term::from_field_text(self.fields.label_key, &key));
                 aliases.push(Term::from_field_text(self.fields.alias_key, &key));
             }
         }
-        let by_alias = matching_docs(searcher, aliases)?;
+        let mut by_alias = matching_docs(searcher, aliases)?;
+        by_alias.extend(linked);
         let mut named = matching_docs(searcher, labels)?;
         named.extend(by_alias.iter().copied());
         Ok((named, by_alias))
+    }
+
+    /// Whether the document's title has the first `words` words of
+    /// `query`: wimbledon.com, "The Championships, Wimbledon", calls itself
+    /// what "wimbledon final" starts with, and a site that has the word
+    /// only for its domain doesn't.
+    pub(crate) fn titled_by_first_words(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+        query: &str,
+        words: usize,
+    ) -> Result<bool> {
+        let first: Vec<String> = analysis::tokens(&self.words, query)
+            .into_iter()
+            .take(words)
+            .collect();
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let titled = doc
+            .get_all(self.fields.title)
+            .filter_map(|value| value.as_str())
+            .any(|title| {
+                let title = analysis::tokens(&self.words, title);
+                first.iter().all(|word| title.contains(word))
+            });
+        Ok(titled)
     }
 
     /// Whether the document's title, description or Wikidata description
@@ -338,7 +473,10 @@ impl NameMatch {
 /// to, in a `link_name_key` field: one that holds more than
 /// [`LINK_NAME_SHARE`] of the term's occurrences, each standing for a
 /// linking site ([`schema`](crate::schema)).
-fn named_by_links(searcher: &tantivy::Searcher, term: &Term) -> Result<Option<DocAddress>> {
+pub(crate) fn named_by_links(
+    searcher: &tantivy::Searcher,
+    term: &Term,
+) -> Result<Option<DocAddress>> {
     if searcher.doc_freq(term)? > u64::from(MAX_LINK_NAME_DOCS) {
         return Ok(None);
     }

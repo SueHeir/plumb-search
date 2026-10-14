@@ -216,16 +216,150 @@ fn copies_of_the_named_site_on_other_domains_are_left_out() {
     let hits = searcher.search_with("gmail", 10, &keep_all()).unwrap();
     let order = domains(&hits);
     assert_eq!(order[0], "gmail.com", "{order:?}");
-    let at = |d: &str| order.iter().position(|o| *o == d).unwrap();
-    // Copies with nothing to say are left out; a crawled one keeps its
-    // place.
+    // Copies with nothing to say are left out, and so is a crawled one
+    // for another country, but for a searcher there or a search for it.
     assert!(!order.contains(&"gmail.ru"), "{order:?}");
     assert!(!order.contains(&"gmail.hu"), "{order:?}");
-    assert!(at("gmail.jp") > 0, "{order:?}");
+    assert!(!order.contains(&"gmail.jp"), "{order:?}");
     assert!(order.contains(&"gmailtips.net"), "{order:?}");
+    let options = SearchOptions {
+        country: Some("JP".into()),
+        ..SearchOptions::default()
+    };
+    let in_japan = searcher
+        .search_full("gmail", 10, &keep_all(), &options)
+        .unwrap()
+        .hits;
+    let japan = searcher
+        .search_with("gmail japan", 10, &keep_all())
+        .unwrap();
+    for hits in [in_japan, japan] {
+        assert!(domains(&hits).contains(&"gmail.jp"), "{:?}", domains(&hits));
+    }
     // Typed, the copy is what was asked for.
     let hits = searcher.search("gmail.ru", 10).unwrap();
     assert_eq!(hits[0].domain, "gmail.ru", "{:?}", domains(&hits));
+}
+
+#[test]
+fn hyphenated_look_alikes_of_the_named_site_are_left_out() {
+    let mut official = site(
+        "you-tube.org",
+        Some("You Tube Trust"),
+        None,
+        &[],
+        &[],
+        obscure(250_000, 4),
+    );
+    official.about = Some("charity".into());
+    let records = [
+        site(
+            "youtube.com",
+            Some("YouTube"),
+            Some("Enjoy the videos and music you love."),
+            &["YouTube"],
+            &[("youtube", 900)],
+            popular(2, 9_000),
+        ),
+        // Titled to pass for the real one.
+        site(
+            "yout-ube.com",
+            Some("Watch YouTube Videos with No Ads on Auto-Repeat"),
+            None,
+            &[],
+            &[("youtube", 2)],
+            obscure(90_000, 30),
+        ),
+        site("you-tube.ru", None, None, &[], &[], obscure(300_000, 1)),
+        site(
+            "youtube-tools.net",
+            Some("YouTube tools"),
+            Some("Download thumbnails and tags of YouTube videos."),
+            &[],
+            &[],
+            obscure(200_000, 2),
+        ),
+        official,
+    ];
+    let (_dir, searcher) = build(&records);
+    let order = domains(&searcher.search_with("youtube", 10, &keep_all()).unwrap()).join(" ");
+    assert!(order.starts_with("youtube.com"), "{order}");
+    assert!(!order.contains("yout-ube.com"), "{order}");
+    assert!(!order.contains("you-tube.ru"), "{order}");
+    // The name and more is not the name split up.
+    assert!(order.contains("youtube-tools.net"), "{order}");
+    assert!(order.contains("you-tube.org"), "{order}");
+    // Typed, the look-alike is what was asked for.
+    assert_eq!(top(&searcher, "yout-ube.com"), "yout-ube.com");
+}
+
+#[test]
+fn copies_go_when_the_named_site_is_not_first() {
+    let records = [
+        // Better known, and the query is in its description, but not its
+        // name: it ranks above the site the query names.
+        site(
+            "google.com",
+            Some("Google"),
+            Some("Search, Gmail, Maps and more."),
+            &["Google"],
+            &[("google", 5_000)],
+            popular(1, 90_000),
+        ),
+        site(
+            "gmail.com",
+            None,
+            None,
+            &[],
+            &[("gmail", 900)],
+            popular(40, 3_000),
+        ),
+        site("gmail.cm", None, None, &[], &[], obscure(300_000, 1)),
+    ];
+    let (_dir, searcher) = build(&records);
+    let order = domains(&searcher.search_with("gmail", 10, &keep_all()).unwrap()).join(" ");
+    assert!(order.contains("gmail.com"), "{order}");
+    assert!(!order.contains("gmail.cm"), "{order}");
+}
+
+#[test]
+fn the_query_spelled_as_a_domain_goes_next_to_the_site_it_names() {
+    let records = [
+        site(
+            "facebook.com",
+            Some("Facebook"),
+            Some("Log in to Facebook to connect with friends."),
+            &["Facebook"],
+            &[("facebook", 900)],
+            popular(3, 9_000),
+        ),
+        site(
+            "facebook-login.com",
+            None,
+            None,
+            &[],
+            &[],
+            obscure(150_000, 5),
+        ),
+        site(
+            "facebooklogin.com",
+            Some("Facebook Login"),
+            None,
+            &[],
+            &[],
+            obscure(160_000, 4),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let order = domains(
+        &searcher
+            .search_with("facebook login", 10, &keep_all())
+            .unwrap(),
+    )
+    .join(" ");
+    assert_eq!(order, "facebook.com");
+    // Typed, it is found.
+    assert_eq!(top(&searcher, "facebook-login.com"), "facebook-login.com");
 }
 
 #[test]
@@ -316,6 +450,45 @@ fn near_copies_of_a_better_known_site_are_left_out() {
 }
 
 #[test]
+fn a_spam_network_with_one_text_is_listed_once() {
+    let text = "Beginner's guide to coding in Python. Learn variables, loops, \
+        functions and lists step by step, with small exercises after every lesson \
+        and answers at the end, so you can practise at your own pace and build \
+        your first programs in a weekend.";
+    let page = |domain: &str, title: &str, body: &str| {
+        let mut record = site(domain, Some(title), None, &[], &[], obscure(50_000, 20));
+        record.body_text = Some(body.to_string());
+        record
+    };
+    let pizza = "Joe's Pizza: New York style pizza by the slice, baked in a coal oven \
+        since 1975. Order online for pickup or delivery, see our menu and opening hours.";
+    let records = [
+        page(
+            "modusygunaciro.example",
+            "Beginner's Guide to Coding in Python | Crest Center",
+            text,
+        ),
+        page(
+            "nyhizyjybawozi.example",
+            "Beginner's Guide to Coding in Python | Harbor Workshop",
+            text,
+        ),
+        // Namesakes on one template: each title is its own name.
+        page("joespizzanyc.example", "Joe's Pizza NYC", pizza),
+        page(
+            "joespizzala.example",
+            "Joe's Pizza LA",
+            &pizza.replace("New York", "LA"),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let hits = searcher.search("coding in python", 10).unwrap();
+    assert_eq!(domains(&hits).len(), 1, "{hits:#?}");
+    let hits = searcher.search("joe's pizza", 10).unwrap();
+    assert_eq!(domains(&hits).len(), 2, "{hits:#?}");
+}
+
+#[test]
 fn copies_and_copycats_are_left_out() {
     let hit = |domain: &str, title: Option<&str>, link_score: f32, official: bool| Hit {
         domain: domain.into(),
@@ -335,7 +508,7 @@ fn copies_and_copycats_are_left_out() {
         query_evidence: None,
     };
     let kept = |hits: Vec<Hit>, typed: Option<&str>| -> Vec<String> {
-        without_copies(hits, typed, None)
+        without_copies(hits, typed, None, &[])
             .into_iter()
             .map(|h| h.domain)
             .collect()
@@ -433,26 +606,15 @@ fn copies_and_copycats_are_left_out() {
             0.4,
         ),
     ];
-    let cases = cases.into_iter().chain([
-        (
-            "abc.com",
-            Some("ABC Network - ABC.com"),
-            0.67,
-            true,
-            "abc.net.au",
-            None,
-            0.6,
-        ),
-        (
-            "weather.gov",
-            Some("National Weather Service"),
-            0.67,
-            true,
-            "weather.com",
-            None,
-            0.55,
-        ),
-    ]);
+    let cases = cases.into_iter().chain([(
+        "weather.gov",
+        Some("National Weather Service"),
+        0.67,
+        true,
+        "weather.com",
+        None,
+        0.55,
+    )]);
     for (a, a_title, a_link, a_official, b, b_title, b_link) in cases {
         let both = vec![
             hit(a, a_title, a_link, a_official),
@@ -460,6 +622,94 @@ fn copies_and_copycats_are_left_out() {
         ];
         assert_eq!(kept(both, None), [a, b]);
     }
+    // A brand's site for another country goes under its better-known site
+    // on a generic ending, official or not, in whatever language; but for
+    // a searcher there or a search naming the country, and an official
+    // one only under an official one.
+    let mcdonalds = vec![
+        hit("mcdonalds.com", Some("McDonald's"), 0.64, true),
+        hit(
+            "mcdonalds.co.jp",
+            Some("マクドナルド公式サイト"),
+            0.56,
+            true,
+        ),
+        hit("mcdonalds.co.kr", Some("맥도날드"), 0.21, false),
+        hit("mcdonalds.ca", Some("McDonald's Canada"), 0.43, true),
+        hit("mcdonaldsfans.com", Some("McDonald's fans"), 0.1, false),
+    ];
+    let kept_for = |home: Option<&str>, asked: &[&str]| -> Vec<String> {
+        without_copies(mcdonalds.clone(), None, home, asked)
+            .into_iter()
+            .map(|h| h.domain)
+            .collect()
+    };
+    assert_eq!(kept_for(None, &[]), ["mcdonalds.com", "mcdonaldsfans.com"]);
+    assert_eq!(
+        kept_for(Some("US"), &[]),
+        ["mcdonalds.com", "mcdonaldsfans.com"]
+    );
+    assert!(kept_for(Some("JP"), &[]).contains(&"mcdonalds.co.jp".to_string()));
+    assert!(kept_for(None, &["KR"]).contains(&"mcdonalds.co.kr".to_string()));
+    // Nor is a site titled with the brand a copy on the ending of a
+    // country the search names, though a copycat there still is.
+    let amazon = vec![
+        hit("amazon.com", Some("Amazon.com"), 0.9, true),
+        hit("amazon.co.uk", Some("Amazon.co.uk"), 0.55, false),
+        hit("amazon.de", None, 0.4, false),
+        hit("amaz0n.co.uk", Some("Amazon.com"), 0.0, false),
+    ];
+    let kept_for = |asked: &[&str]| -> Vec<String> {
+        without_copies(amazon.clone(), None, None, asked)
+            .into_iter()
+            .map(|h| h.domain)
+            .collect()
+    };
+    assert_eq!(kept_for(&[]), ["amazon.com"]);
+    assert_eq!(kept_for(&["GB"]), ["amazon.com", "amazon.co.uk"]);
+    assert_eq!(kept_for(&["DE"]), ["amazon.com", "amazon.de"]);
+    let abc = vec![
+        hit("abc.com", Some("ABC Network - ABC.com"), 0.67, true),
+        hit("abc.net.au", None, 0.6, false),
+    ];
+    assert_eq!(kept(abc.clone(), None), ["abc.com"]);
+    let in_australia = without_copies(abc, None, Some("AU"), &[]);
+    assert_eq!(domains(&in_australia), ["abc.com", "abc.net.au"]);
+    let paris = vec![
+        hit("paris.com", Some("Paris travel guide"), 0.6, false),
+        hit("paris.fr", Some("Paris.fr"), 0.5, true),
+    ];
+    assert_eq!(kept(paris, None), ["paris.com", "paris.fr"]);
+    // Not named by the query, a country's site stays (stjohns.ca for "time
+    // in st john's newfoundland", next to stjohns.edu), unless one of the
+    // brand's official sites titled and described alike: Google Search's
+    // country addresses are one site, whose best known stays.
+    let mut city = hit("stjohns.ca", Some("City of St. John's"), 0.5, true);
+    city.named = false;
+    let stjohns = vec![
+        hit("stjohns.edu", Some("St. John's University"), 0.6, true),
+        city,
+    ];
+    assert_eq!(kept(stjohns, None), ["stjohns.edu", "stjohns.ca"]);
+    let copy = |domain: &str, link_score: f32| Hit {
+        named: false,
+        description: Some("search engine by Google LLC".into()),
+        ..hit(domain, Some("Google Search"), link_score, true)
+    };
+    let google = vec![
+        Hit {
+            named: false,
+            ..hit("google.com", Some("Google"), 1.0, true)
+        },
+        copy("google.fr", 0.73),
+        copy("google.co.uk", 0.75),
+        copy("google.it", 0.67),
+        hit("amazon.de", Some("Amazon.de"), 0.72, true),
+    ];
+    assert_eq!(
+        kept(google, None),
+        ["google.com", "google.co.uk", "amazon.de"]
+    );
     // A site nobody links to with a listed site's title.
     let coin = vec![
         hit(
@@ -494,12 +744,79 @@ fn copies_and_copycats_are_left_out() {
         ),
     ];
     assert_eq!(kept(coin, None), ["coinbase.com"]);
-    // Sites sharing a title that names neither stay.
-    let homes = vec![
-        hit("acme.com", Some("Home"), 0.6, false),
-        hit("widgets.com", Some("Home"), 0.3, false),
+    // Namesakes sharing a title that is each one's own name stay.
+    let pizza = vec![
+        hit("joespizzanyc.com", Some("Joe's Pizza"), 0.3, false),
+        hit("joes-pizza.com", Some("Joe's Pizza"), 0.3, false),
+        hit("joespizza.ie", Some("Joe's Pizza"), 0.1, false),
     ];
-    assert_eq!(kept(homes, None), ["acme.com", "widgets.com"]);
+    assert_eq!(
+        kept(pizza, None),
+        ["joespizzanyc.com", "joes-pizza.com", "joespizza.ie"]
+    );
+    // A spam network under one title that names none of its sites, as
+    // well linked as each other: the first stays.
+    let network = vec![
+        hit("python.org", Some("Welcome to Python.org"), 0.9, true),
+        hit("bountystory.site", Some("INFORMATION40"), 0.29, false),
+        hit("bountystory.fun", Some("INFORMATION40"), 0.29, false),
+        hit("wordlistfinder.com", Some("Word List Finder"), 0.3, false),
+        hit("bountystory.online", Some("INFORMATION40"), 0.29, false),
+    ];
+    assert_eq!(
+        kept(network, None),
+        ["python.org", "bountystory.site", "wordlistfinder.com"]
+    );
+    // A whole title of a site with a short name, copied on a site it is
+    // no name of: mos-scripts.com titled as CNN's homepage.
+    let cnn = vec![
+        hit(
+            "cnn.com",
+            Some("Breaking News, Latest News and Videos | CNN"),
+            0.9,
+            true,
+        ),
+        hit(
+            "mos-scripts.com",
+            Some("Breaking News, Latest News and Videos | CNN"),
+            0.23,
+            false,
+        ),
+    ];
+    assert_eq!(kept(cnn, None), ["cnn.com"]);
+    // Little-known sites sharing a title stay when each says something
+    // else of itself, or the title has no words, or names the site.
+    let described = |domain: &str, title: &str, description: &str| Hit {
+        description: Some(description.into()),
+        ..hit(domain, Some(title), 0.2, false)
+    };
+    let dentists = vec![
+        described(
+            "smithdental.com",
+            "Family Dentistry",
+            "Dr. Smith in Austin.",
+        ),
+        described(
+            "austinsmiles.com",
+            "Family Dentistry",
+            "Gentle care in Round Rock.",
+        ),
+        hit("stars.example", Some("★★★"), 0.2, false),
+        hit("moons.example", Some("☾☾"), 0.2, false),
+        hit("xn--mnchen-3ya.de", Some("München"), 0.2, false),
+        hit("muenchen.example", Some("München"), 0.3, false),
+    ];
+    assert_eq!(
+        kept(dentists, None),
+        [
+            "smithdental.com",
+            "austinsmiles.com",
+            "stars.example",
+            "moons.example",
+            "xn--mnchen-3ya.de",
+            "muenchen.example"
+        ]
+    );
     // The best known of unofficial namesakes stays, wherever it ranks.
     let cbc = vec![
         hit("cbc.bb", Some("CBC Barbados"), 0.3, false),
@@ -801,4 +1118,31 @@ fn scores_blend_text_and_popularity() {
         cfg.alpha * hit.link_score
             + trust * ((1.0 - cfg.alpha) * hit.text_score + label_bonus(hit, 2.0 / 3.0))
     });
+}
+
+#[test]
+fn a_brand_site_for_the_country_searched_for_is_listed() {
+    let shop = |domain: &str, title: &str, rank: u32| {
+        site(
+            domain,
+            Some(title),
+            Some("Free shipping on millions of items."),
+            &[],
+            &[],
+            popular(rank, 1_000),
+        )
+    };
+    let mut amazon = shop("amazon.com", "Amazon.com", 5);
+    amazon.about = Some("American online retailer".into());
+    let records = [
+        amazon,
+        shop("amazon.co.uk", "Amazon.co.uk", 200),
+        shop("amazon.de", "Amazon.de", 220),
+    ];
+    let (_dir, searcher) = build(&records);
+    assert_eq!(top(&searcher, "amazon uk"), "amazon.co.uk");
+    let hits = searcher.search("amazon germany", 10).unwrap();
+    assert_eq!(domains(&hits), ["amazon.com", "amazon.de"]);
+    let hits = searcher.search("amazon", 10).unwrap();
+    assert_eq!(domains(&hits), ["amazon.com"]);
 }

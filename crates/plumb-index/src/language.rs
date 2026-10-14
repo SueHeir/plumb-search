@@ -53,7 +53,8 @@ impl Searcher {
     /// Of the sites with `word` in their title or description (at most
     /// [`SITES_READ`]), how many declare `language`, and how many declare
     /// any. The script a site's text is in, kept for one that declares
-    /// nothing (`Cyrl`), is not a declaration.
+    /// nothing (`Cyrl`), is not a declaration, nor is the language its
+    /// common words tell (`~de`).
     fn declared(&self, word: &str, language: &str) -> (u32, u32) {
         let searcher = self.reader.searcher();
         let (mut chosen, mut declared, mut read) = (0, 0, 0);
@@ -62,7 +63,8 @@ impl Searcher {
                 continue;
             };
             let wanted = languages.dictionary().term_ord(language).ok().flatten();
-            // Language codes are lowercase, scripts capitalized.
+            // Declared language codes are lowercase, scripts capitalized
+            // and guessed codes marked.
             let mut codes = Vec::new();
             if let Ok(mut terms) = languages.dictionary().stream() {
                 while terms.advance() {
