@@ -72,16 +72,45 @@ fn main_articles_beat_their_namesakes() {
         site("b.com", false),
         site("c.com", false),
     ];
+    let mut namesake = found("Eiffel Tower (Six Flags)", None, true, 0.6);
     let placed = place_pages(
         "eiffel tower",
         &sites,
         vec![
             found("Eiffel Tower", Some("toureiffel.paris"), true, 0.9),
-            found("Eiffel Tower (Six Flags)", None, true, 0.6),
+            namesake.clone(),
         ],
     );
     assert_eq!(placed[0].under.as_deref(), Some("toureiffel.paris"));
     assert_eq!(placed[1].at, PARTIAL_AFTER);
+    // Whatever the learned ranking says: "taylor swift" listed the album
+    // "Taylor Swift" second.
+    namesake.learned = Some(LearnedPlace::Before("a.com".into()));
+    let placed = place_pages(
+        "eiffel tower",
+        &sites,
+        vec![
+            found("Eiffel Tower", Some("toureiffel.paris"), true, 0.9),
+            namesake,
+        ],
+    );
+    assert_eq!(placed[1].at, PARTIAL_AFTER);
+    // Of two namesakes on their own, the better one stays.
+    let mut placed = vec![
+        PlacedPage {
+            at: 0,
+            under: None,
+            hit: found("The Bear (1984 film)", None, true, 0.6),
+        },
+        PlacedPage {
+            at: 1,
+            under: None,
+            hit: found("The Bear (1988 film)", None, true, 0.7),
+        },
+    ];
+    keep_page_rules("the bear", &sites, &mut placed);
+    let at: Vec<usize> = placed.iter().map(|p| p.at).collect();
+    assert_eq!(at, [PARTIAL_AFTER, 1]);
 }
 
 #[test]

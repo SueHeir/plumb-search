@@ -518,18 +518,27 @@ fn on_site(page: &Page, domain: &str) -> bool {
 /// names as code comes first ("Object.keys" wants MDN's page, see
 /// [`docs_named_as_code`]); any other docs page found by its words, or
 /// another site's page while the query names the best site's owner, never
-/// comes before the best site (see [`kept_below`]); and, unless the
-/// query asks for them, podcasts come after the best site and the other
-/// pages listed on their own ("better call saul" wants amc.com and the
-/// article first).
+/// comes before the best site (see [`kept_below`]); a namesake of a better
+/// page comes after [`PARTIAL_AFTER`] sites, as [`place_pages_by_rules`]
+/// put it ("taylor swift" wants the singer's article under
+/// taylorswift.com, then sites, then the album "Taylor Swift"); and,
+/// unless the query asks for them, podcasts come after the best site and
+/// the other pages listed on their own ("better call saul" wants amc.com
+/// and the article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
     placed.retain(|page| crate::health::page_allowed(query, &page.hit.page));
     let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0)
         || names_best_site_page(sites, placed);
     let code = |p: &PlacedPage| p.under.is_none() && docs_named_as_code(&p.hit, query, sites);
-    for page in placed.iter_mut().filter(|p| p.under.is_none()) {
+    let namesakes = namesakes(placed);
+    for (page, namesake) in placed.iter_mut().zip(namesakes) {
+        if page.under.is_some() {
+            continue;
+        }
         if code(page) {
             page.at = 0;
+        } else if namesake {
+            page.at = page.at.max(PARTIAL_AFTER).min(sites.len());
         } else if kept_below(&page.hit, sites, names_best) {
             page.at = page.at.max(1).min(sites.len());
         }
@@ -553,6 +562,31 @@ pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<Place
         rest.push(page);
     }
     *placed = rest;
+}
+
+/// Which of `placed` are named like a better page of their set the query
+/// also names, as [`place_pages_by_rules`] found them in order of score:
+/// "The Bear (1988 film)" beside "The Bear (TV series)", under
+/// fxnetworks.com.
+fn namesakes(placed: &[PlacedPage]) -> Vec<bool> {
+    let keys: Vec<_> = placed
+        .iter()
+        .map(|p| {
+            p.hit
+                .named
+                .then(|| (&p.hit.page.set, page_key(base_title(&p.hit.page.title))))
+        })
+        .collect();
+    let before = |one: usize, other: usize| {
+        let (one_score, other_score) = (placed[one].hit.score, placed[other].hit.score);
+        one_score > other_score || one_score == other_score && one < other
+    };
+    (0..placed.len())
+        .map(|i| {
+            keys[i].is_some()
+                && (0..placed.len()).any(|j| j != i && keys[j] == keys[i] && before(j, i))
+        })
+        .collect()
 }
 
 /// Whether `query` asks for podcasts or episodes.
