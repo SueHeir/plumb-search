@@ -215,6 +215,29 @@ pub struct ProfileAnswer {
     pub page: Page,
 }
 
+impl ProfileAnswer {
+    /// What kind of link it is: only an account of its own is an
+    /// official profile, not a song's page on Genius.
+    pub(crate) fn kind(&self) -> &'static str {
+        if self.search {
+            "Search"
+        } else if self.official {
+            "Official profile"
+        } else {
+            "Listing"
+        }
+    }
+
+    /// Where it comes from, said under it: "Listing, from MusicBrainz".
+    pub(crate) fn note(&self) -> String {
+        if self.search {
+            format!("Searched for on {}", self.service)
+        } else {
+            format!("{}, from {}", self.kind(), self.source)
+        }
+    }
+}
+
 /// What a results page shows besides the results.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Extras {
@@ -474,6 +497,9 @@ fn kind_named<'a>(name: &'a str, kinds: &[&str]) -> Option<&'a str> {
 /// god's. Looked up with its kind ("top gun movie"), only a work called
 /// so, since a search names every film of the title then, and the film
 /// called Top Gun is looked up by its name alone ([`profile_lookups`]).
+/// Of the works of that kind the name names, one read far more than each
+/// of the others is the one meant: "titanic cast" is the 1997 film's, not
+/// the 1953 one's or the 1996 miniseries'.
 /// For an account ([`ACCOUNTS`]), only a person, group or organization
 /// when some are: "drake instagram" is the rapper's, not the name list's,
 /// and "pink instagram" the singer's, not the colour's.
@@ -516,6 +542,17 @@ pub fn profile_candidates(
     };
     if candidates.iter().any(of_kind) {
         candidates.retain(of_kind);
+        let mut views: Vec<u64> = candidates
+            .iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.views)
+            .collect();
+        views.sort_unstable_by(|a, b| b.cmp(a));
+        if let [most, next, ..] = views[..] {
+            if next.saturating_mul(MOST_READ_WORK) < most {
+                candidates.retain(|hit| hit.named && hit.page.views == most);
+            }
+        }
     }
     candidates
 }
@@ -536,11 +573,71 @@ pub fn searches_songs(query: &str, resolution: &EntityResolution) -> bool {
     })
 }
 
+/// The searches for the songs a lookup `name` may be ([`songs_profile`]),
+/// once the article it names resolved as `resolution`: first a song's
+/// title and maker, when the article is on a song ("africa toto" for
+/// "1982 single by Toto"), as other songs of its title can fill a search
+/// of the name ("africa song"), then the name.
+pub fn song_lookups(name: &str, resolution: &EntityResolution) -> Vec<String> {
+    let mut lookups = Vec::new();
+    if let EntityResolution::Resolved(page) = resolution {
+        if let Some(by) = song_by(page) {
+            let title = plumb_index::pages::base_title(&page.title);
+            lookups.push(format!("{title} {by}"));
+        }
+    }
+    lookups.push(name.to_string());
+    lookups
+}
+
+/// Who made the song `page` is on, as its description says, the main
+/// artist alone: "Toto" of Wikipedia's "1982 single by Toto" and of
+/// MusicBrainz's "Song by Toto, 1982", "Beyoncé" of "Song by Beyoncé
+/// feat. JAY-Z". `None` for anything but a song.
+fn song_by(page: &Page) -> Option<&str> {
+    let description = page.description.as_deref()?;
+    let by = if page.set == MUSIC_SET {
+        description.strip_prefix("Song by ")?
+    } else {
+        let (by, asked) = plumb_index::pages::made_by(description)?;
+        if !asked.contains(&"song") {
+            return None;
+        }
+        by
+    };
+    let by = by
+        .rsplit_once(", ")
+        .filter(|(_, year)| year.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(by, |(name, _)| name);
+    let by = [" feat. ", " ft. ", " featuring "]
+        .iter()
+        .find_map(|joiner| by.split_once(joiner))
+        .map_or(by, |(main, _)| main);
+    Some(by.trim())
+}
+
+/// Whether two songs' makers ([`song_by`]) are the same, or one is the
+/// other with more said, whatever "the" and "and" they are said with:
+/// "the Beatles" and "The Beatles", "Bruce Springsteen" and "Bruce
+/// Springsteen and the E Street Band".
+fn same_maker(one: &str, other: &str) -> bool {
+    let words = |name: &str| -> Vec<String> {
+        plumb_core::normalize_text(name)
+            .split(' ')
+            .filter(|word| !matches!(*word, "the" | "and"))
+            .map(str::to_string)
+            .collect()
+    };
+    let (one, other) = (words(one), words(other));
+    !one.is_empty() && !other.is_empty() && (one.starts_with(&other) || other.starts_with(&one))
+}
+
 /// The profile `query` asks for of a song or album among `found`, what a
 /// search for a lookup found ([`searches_songs`]). When the lookup's
-/// article resolved as `resolution`, the song must have its title: a
-/// search for "pyramid song", Radiohead's "Pyramid Song", finds
-/// Wolfmother's "Pyramid" as a song too.
+/// article resolved as `resolution`, the song must have its title, and
+/// its maker when the article says who that is: a search for "pyramid
+/// song", Radiohead's "Pyramid Song", finds Wolfmother's "Pyramid" as a
+/// song too, and one for Adele's "Hello" finds Oasis's.
 pub fn songs_profile(
     query: &str,
     resolution: &EntityResolution,
@@ -550,10 +647,14 @@ pub fn songs_profile(
     let songs: Vec<PlacedPage> = found
         .into_iter()
         .filter(|placed| {
-            placed.hit.page.set == MUSIC_SET
+            let song = &placed.hit.page;
+            song.set == MUSIC_SET
                 && match resolution {
                     EntityResolution::Resolved(page) => {
-                        title(&placed.hit.page.title) == title(&page.title)
+                        title(&song.title) == title(&page.title)
+                            && song_by(page).is_none_or(|by| {
+                                song_by(song).is_some_and(|other| same_maker(by, other))
+                            })
                     }
                     _ => true,
                 }
@@ -630,33 +731,15 @@ pub(crate) fn render_profile(out: &mut String, profile: &ProfileAnswer, icon: Op
         "<section class=\"pf\" aria-label=\"{kind}\"><a class=\"r\" href=\"{}\" \
          rel=\"noreferrer\"><span class=\"site\">{}<span class=\"sn\"><span class=\"dn\">{}</span>\
          <span class=\"u\">{}</span></span></span><span class=\"t\">{} on {}</span></a>\
-         <p class=\"m\">{note}</p></section>",
+         <p class=\"m\">{}</p></section>",
         escape_html(&profile.url),
         super::site_badge(&domain, icon),
         escape_html(profile.service),
         escape_html(&shown),
         escape_html(&truncate_chars(&profile.of, 120)),
         escape_html(profile.service),
-        kind = if profile.search {
-            "Search"
-        } else if profile.official {
-            "Official profile"
-        } else {
-            "Listing"
-        },
-        note = if profile.search {
-            format!("Searched for on {}", escape_html(profile.service))
-        } else {
-            format!(
-                "{}, from {}",
-                if profile.official {
-                    "Official profile"
-                } else {
-                    "Listing"
-                },
-                profile.source
-            )
-        },
+        escape_html(&profile.note()),
+        kind = profile.kind(),
     );
 }
 
@@ -854,7 +937,7 @@ pub fn resolve_entity<'a>(
             .iter()
             .copied()
             .filter(|hit| {
-                key(&hit.page.title) == subject
+                plumb_index::same_words(&hit.page.title, &subject)
                     || legal_name(&hit.page.title) == subject
                     || hit.named
                     || hit.whole
@@ -867,7 +950,7 @@ pub fn resolve_entity<'a>(
     let exact: Vec<_> = candidates
         .iter()
         .copied()
-        .filter(|hit| key(&hit.page.title) == subject)
+        .filter(|hit| plumb_index::same_words(&hit.page.title, &subject))
         .collect();
     if exact.len() == 1 {
         return EntityResolution::Resolved(&exact[0].page);
@@ -943,7 +1026,8 @@ const MAKERS: &[plumb_core::facts::FactKind] = {
 };
 
 /// How many times as read as every other work the subject names the work
-/// a maker question means must be ("Titanic (1997 film)", not the 1953 one).
+/// a maker question or a listing means must be ("Titanic (1997 film)", not
+/// the 1953 one).
 const MOST_READ_WORK: u64 = 10;
 
 /// The works a question about a work's maker can be about, when it is one
@@ -1561,6 +1645,36 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn a_name_typed_without_its_accents_is_the_title() {
+        let entity = |title: &str, item: &str| {
+            let mut hit = article(title, "", None);
+            hit.page.item = Some(item.into());
+            hit
+        };
+        // Both named by "beyonce": the singer's title is the name asked
+        // for, whatever its accent.
+        let candidates = [
+            entity("Beyoncé (album)", "Q15079464"),
+            entity("Beyoncé", "Q36153"),
+        ];
+        let EntityResolution::Resolved(page) = resolve_entity("beyonce", &candidates, None) else {
+            panic!("beyonce is Beyoncé");
+        };
+        assert_eq!(page.title, "Beyoncé");
+        let candidates = [
+            entity("Mötley Crüe", "Q151215"),
+            entity("Mötley Crüe (album)", "Q1546186"),
+        ];
+        assert!(matches!(
+            resolve_entity("motley crue", &candidates, None),
+            EntityResolution::Resolved(page) if page.title == "Mötley Crüe"
+        ));
+        // Other words are another name.
+        assert!(!plumb_index::same_words("Beyoncé", "beyonce knowles"));
+        assert!(plumb_index::same_words("AC/DC", "ac dc"));
     }
 
     #[test]
@@ -2332,6 +2446,32 @@ mod tests {
         );
         let titles: Vec<_> = kept.iter().map(|hit| hit.page.title.as_str()).collect();
         assert_eq!(titles, ["Top Gun"]);
+        // Of films of one name, one read far more than each other.
+        let film = |title: &str, description: &str, views: u64| {
+            let mut hit = article(title, description, None);
+            hit.page.views = views;
+            hit
+        };
+        let titanic = |remake_views: u64| {
+            vec![
+                film(
+                    "Titanic",
+                    "British passenger liner that sank in 1912",
+                    90_000,
+                ),
+                film("Titanic (1997 film)", "Film by James Cameron", 100_000),
+                film("Titanic (1953 film)", "1953 film by Jean Negulesco", 2_000),
+                film("Titanic (1996 miniseries)", "Miniseries", remake_views),
+            ]
+        };
+        let kept = profile_candidates("titanic cast", "titanic", titanic(5_000));
+        let titles: Vec<_> = kept.iter().map(|hit| hit.page.title.as_str()).collect();
+        assert_eq!(titles, ["Titanic (1997 film)"]);
+        // Not when another is read nearly as much.
+        assert_eq!(
+            profile_candidates("titanic cast", "titanic", titanic(20_000)).len(),
+            3
+        );
         // No song has a film's listing.
         assert!(!searches_songs(
             "top gun movie cast",
@@ -2473,5 +2613,28 @@ mod tests {
             },
         );
         assert!(html.contains("&lt;i&gt;") && html.contains("&amp;"));
+    }
+
+    #[test]
+    fn song_makers_are_read_from_descriptions() {
+        let by = |set: &str, description: &str| {
+            let mut page = article("Song", description, None).page;
+            page.set = set.to_string();
+            song_by(&page).map(str::to_string)
+        };
+        assert_eq!(by("wikipedia-en", "1982 single by Toto").unwrap(), "Toto");
+        assert_eq!(by(MUSIC_SET, "Song by Toto, 1982").unwrap(), "Toto");
+        assert_eq!(
+            by(MUSIC_SET, "Song by Beyoncé feat. JAY-Z").unwrap(),
+            "Beyoncé"
+        );
+        assert!(by("wikipedia-en", "1997 studio album by Radiohead").is_none());
+        assert!(by(MUSIC_SET, "Album by Radiohead, 1997").is_none());
+        assert!(same_maker("the Beatles", "The Beatles"));
+        assert!(same_maker(
+            "Bruce Springsteen",
+            "Bruce Springsteen and the E Street Band"
+        ));
+        assert!(!same_maker("Adele", "Oasis"));
     }
 }
