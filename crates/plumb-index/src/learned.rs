@@ -706,6 +706,12 @@ mod tests {
         let hits = vec![official("yahoo.com", 0.9, false)];
         let placed = place_pages("yahoo mail", &hits, vec![named]);
         assert_eq!(placed[0].under.as_deref(), Some("yahoo.com"));
+        // A paper's website is where a free copy is: it goes under no site.
+        let mut paper = article("Webmail use in large firms", false);
+        paper.page.website = Some("https://mail.yahoo.com/papers/webmail.pdf".into());
+        let hits = vec![official("mail.yahoo.com", 1.0, true)];
+        let placed = place_pages("yahoo mail", &hits, vec![paper]);
+        assert!(placed.iter().all(|p| p.under.is_none()));
     }
 
     #[test]

@@ -213,13 +213,15 @@ pub(crate) fn named_page_site<'a>(
 /// The site among `sites` that `page` is about: its item's own website
 /// when that is a site of its own there (mail.yahoo.com for the article
 /// Yahoo Mail, whose [`Page::site`] is yahoo.com, when both are listed),
-/// else its site.
+/// else its site. A page with no site has none: a paper's website is where
+/// a free copy of it is (PMC, arXiv), which it is not about.
 fn page_site(page: &Page, sites: &[crate::Hit]) -> Option<String> {
+    let site = page.site.clone()?;
     page.website
         .as_deref()
         .and_then(registrable_domain)
         .filter(|own| sites.iter().any(|site| site.domain == *own))
-        .or_else(|| page.site.clone())
+        .or(Some(site))
 }
 
 /// Where `pages` (best first) go among the site results `sites`:
