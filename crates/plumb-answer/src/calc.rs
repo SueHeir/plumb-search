@@ -1,11 +1,13 @@
-//! Sums: `12 * (3 + 4)`, `2^10`, `sqrt(2)`, `15% of 80`, `5!`, and the same
-//! in words: "2 to the power of 10", "square root of 2", "15 percent of 80",
-//! "10 factorial", "log base 2 of 8".
+//! Sums: `12 * (3 + 4)`, `2^10`, `sqrt(2)`, `15% of 80`, `50 - 20%`, `5!`, and
+//! the same in words: "2 to the power of 10", "square root of 2", "15
+//! percent of 80", "20% off 50", "10 factorial", "log base 2 of 8". "3/8 as a
+//! decimal" and "5/8 as a percent" ask for a sum's value.
 //!
 //! A query is a sum only when all of it reads as one, with at least one
-//! operation in it, so "2024" and "f1" stay searches. Two numbers joined by
-//! `/` or `-` with no spaces ("9/11", "24/7", "1-800") are left alone too:
-//! they are more often names and dates than sums.
+//! operation in it, so "2024" and "f1" stay searches. Numbers joined by `/`
+//! or `-` with no spaces ("9/11", "24/7", "1-800", "1-800-273-8255",
+//! "2024-10-13") are left alone too: they are more often names, phone
+//! numbers and dates than sums.
 
 use crate::format::format_number;
 use crate::{Answer, Kind};
@@ -242,12 +244,19 @@ impl Parser {
     }
 
     /// expr := term (('+' | '-') term)*
+    ///
+    /// A percent alone after `+` or `-` is of the amount before it, as
+    /// calculators read it: "50 - 20%" is 40, not 49.8.
     fn expr(&mut self) -> Option<Value> {
         let (mut value, mut text) = self.term()?;
         while let Some(op @ (Token::Plus | Token::Minus)) = self.peek() {
             self.at += 1;
             self.operations += 1;
-            let (right, right_text) = self.term()?;
+            let start = self.at;
+            let (mut right, right_text) = self.term()?;
+            if matches!(self.tokens[start..self.at], [Token::Num(_), Token::Percent]) {
+                right *= value;
+            }
             if op == Token::Plus {
                 value += right;
                 text = format!("{text} + {right_text}");
@@ -425,14 +434,37 @@ fn in_symbols(text: &str) -> String {
     text.trim().to_string()
 }
 
-/// Whether `text` is two whole numbers joined by `/` or `-` with nothing
-/// around them: "9/11", "24/7", "1-800".
+/// Endings that ask for a sum's value as a decimal, so that "3/8 as a
+/// decimal" is a sum though "3/8" alone may be a date.
+const AS_DECIMAL: &[&str] = &[" as a decimal", " as decimal", " in decimal", " to decimal"];
+
+/// Endings that ask for it as a percentage: "5/8 as a percent".
+const AS_PERCENT: &[&str] = &[
+    " as a percent",
+    " as a percentage",
+    " as percent",
+    " to percent",
+];
+
+/// `text` without the first of `endings` it ends with, ignoring case.
+fn without_ending<'a>(text: &'a str, endings: &[&str]) -> Option<&'a str> {
+    endings.iter().find_map(|ending| {
+        let at = text.len().checked_sub(ending.len())?;
+        // Matched on the text itself: lowercasing can change byte lengths.
+        text.get(at..)
+            .filter(|end| end.eq_ignore_ascii_case(ending))
+            .map(|_| &text[..at])
+    })
+}
+
+/// Whether `text` is whole numbers joined by `/` or by `-` with nothing
+/// around them: "9/11", "24/7", "1-800", a phone number ("1-800-273-8255"),
+/// a date ("2024-10-13", "10/13/2024") or an ISBN ("978-0-13-468599-1").
 fn is_name_like(text: &str) -> bool {
-    let Some((left, right)) = text.split_once(['/', '-']) else {
-        return false;
-    };
     let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-    digits(left) && digits(right)
+    ['/', '-']
+        .into_iter()
+        .any(|joint| text.contains(joint) && text.split(joint).all(digits))
 }
 
 pub(crate) fn answer(query: &str) -> Option<Answer> {
@@ -440,6 +472,7 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
     for prefix in [
         "calculate ",
         "calc ",
+        "convert ",
         "what is ",
         "what's ",
         "whats ",
@@ -454,8 +487,16 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
             text = text[prefix.len()..].trim();
         }
     }
-    let text = in_symbols(text.trim_end_matches(['=', '?']));
-    if is_name_like(&text) {
+    let text = text.trim_end_matches(['=', '?']);
+    let percent = without_ending(text, AS_PERCENT);
+    let asked = percent.or_else(|| without_ending(text, AS_DECIMAL));
+    let text = in_symbols(asked.unwrap_or(text));
+    // "20% off 50" is 50 less 20% of it.
+    let text = match text.split_once("% off ") {
+        Some((cut, price)) => format!("{price} - {cut}%"),
+        None => text,
+    };
+    if asked.is_none() && is_name_like(&text) {
         return None;
     }
     let mut parser = Parser {
@@ -467,15 +508,18 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
         return None;
     }
     let (value, shown) = parser.expr()?;
-    if parser.at != parser.tokens.len() || parser.operations == 0 {
+    if parser.at != parser.tokens.len() {
         return None;
     }
-    // "pi" and "e" alone are searches.
-    if parser.tokens.len() == 1 {
+    // "pi" and "e" alone are searches, "pi as a decimal" is not.
+    if asked.is_none() && (parser.operations == 0 || parser.tokens.len() == 1) {
         return None;
     }
     // Round away float noise: 0.1 + 0.2 is 0.3.
-    let answer = format_number(value, 12)?;
+    let answer = match percent {
+        Some(_) => format!("{}%", format_number(value * 100.0, 12)?),
+        None => format_number(value, 12)?,
+    };
     Some(Answer {
         kind: Kind::Calculation,
         question: format!("{shown} ="),
@@ -541,6 +585,13 @@ mod tests {
             ("natural log of 1", "0"),
             ("ln of e", "1"),
             ("sqrt of 16", "4"),
+            ("3/8 as a decimal", "0.375"),
+            ("what is 5/8 as a decimal?", "0.625"),
+            ("convert 3/4 to decimal", "0.75"),
+            ("5/8 as a percent", "62.5%"),
+            ("2/5 as a percentage", "40%"),
+            ("0.375 as a percent", "37.5%"),
+            ("pi as a decimal", "3.14159265359"),
         ] {
             assert_eq!(calc(query).as_deref(), Some(sum), "{query:?}");
         }
@@ -559,7 +610,33 @@ mod tests {
             "natural log",
             "natural logarithm",
             "round of 16",
+            "3/8",
+            "as a decimal",
+            "inflation as a percent",
         ] {
+            assert_eq!(answer(query), None, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn a_percent_added_or_taken_away_is_of_the_amount() {
+        for (query, sum) in [
+            ("50 - 20%", "40"),
+            ("100 + 10%", "110"),
+            ("80-25%", "60"),
+            ("60 + 15%", "69"),
+            ("10 + 40 + 20%", "60"),
+            ("20% off 50", "40"),
+            ("what is 15 percent off 80", "68"),
+            // Elsewhere a percent is a hundredth.
+            ("200 * 15%", "30"),
+            ("50 - 20% of 30", "44"),
+            ("-20% + 1", "0.8"),
+        ] {
+            assert_eq!(calc(query).as_deref(), Some(sum), "{query:?}");
+        }
+        assert_eq!(answer("20% off 50").unwrap().question, "50 − 20% =");
+        for query in ["20% off", "20% off sale", "off 50"] {
             assert_eq!(answer(query), None, "{query:?}");
         }
     }
@@ -607,5 +684,21 @@ mod tests {
         ] {
             assert_eq!(answer(query), None, "{query:?}");
         }
+        // Phone numbers, dates and an ISBN.
+        for query in [
+            "1-800-273-8255",
+            "800-275-8777",
+            "2024-10-13",
+            "10/13/2024",
+            "978-0-13-468599-1",
+            "3-2-1",
+        ] {
+            assert_eq!(answer(query), None, "{query:?}");
+        }
+        // Spaced, or with other signs, they are sums.
+        assert_eq!(calc("10 - 3 - 2").unwrap(), "5");
+        assert_eq!(calc("8 / 4 / 2").unwrap(), "1");
+        assert_eq!(calc("10-3*2").unwrap(), "4");
+        assert_eq!(calc("1-2/4").unwrap(), "0.5");
     }
 }
