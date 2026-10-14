@@ -654,6 +654,18 @@ fn articles_are_found_by_what_they_say_of_themselves() {
             "{query:?}"
         );
     }
+    for (query, name) in [
+        ("how to get rid of hiccups", "hiccups"),
+        ("how do i get rid of fruit flies", "fruit flies"),
+        ("how to treat a sunburn", "sunburn"),
+        ("how to stop snoring", "snoring"),
+    ] {
+        assert_eq!(
+            hinted_name(query),
+            Some((name.into(), Hint::Own)),
+            "{query:?}"
+        );
+    }
     assert_eq!(hinted_name("whats app"), None);
     assert_eq!(hinted_name("how does it work"), None);
     assert_eq!(hinted_name("how long is it"), None);
@@ -674,9 +686,39 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         "when was it invented",
         "what do you do",
         "what do i do",
+        "how to get rid of it",
+        "how to stop you from doing it",
     ] {
         assert_eq!(hinted_name(query), None, "{query:?}");
     }
+}
+
+#[test]
+fn a_problem_asked_how_to_be_rid_of_names_its_own_article() {
+    let (_dir, s) = searcher(&[
+        page("Heartburn", 30_000, &[]),
+        page("Heartburn (film)", 20_000, &[]),
+        page("Hiccup", 40_000, &[]),
+        page("Mole (animal)", 50_000, &[]),
+        page("Mole (skin)", 30_000, &[]),
+    ]);
+    let named = |query: &str| -> Vec<String> {
+        let hits = s.search(query, 5).unwrap();
+        let mut titles: Vec<String> = hits
+            .into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect();
+        titles.sort();
+        titles
+    };
+    assert_eq!(named("how to get rid of heartburn"), ["Heartburn"]);
+    assert_eq!(named("how to stop hiccups"), ["Hiccup"]);
+    // With no article called the name alone, its namesakes all stay.
+    assert_eq!(
+        named("how to get rid of a mole"),
+        ["Mole (animal)", "Mole (skin)"]
+    );
 }
 
 #[test]
