@@ -1039,33 +1039,38 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
             None => http.await,
         }
     });
-    if let Err(err) = network::start(&inner).await {
-        // The node still searches and crawls on its own.
-        warn!("{err:#}");
-    }
-    let worker = tokio::spawn(plumb_ingest::storage::with_budget(
-        inner.storage.clone(),
-        worker::run(inner.clone()),
-    ));
-    tokio::spawn(release_memory_now_and_then(inner.clone()));
+    // Joining can take twenty minutes on a small server. Meanwhile searches
+    // get the page index already built and search by meaning; what those
+    // jobs build waits for the join (see Inner::one_big_job).
+    inner.joining.store(true, Ordering::Release);
     let embedding = inner.config.search_by_meaning.then(|| {
         supervise(&inner, "search by meaning", |inner| {
             tokio::task::spawn_blocking(move || embedding::run(inner))
         })
     });
-    let (pages, news, adult) = if inner.config.crawl_only {
-        // Only searching needs these.
+    // Only searching needs the page sets, feeds and adult blocklist.
+    let pages = if inner.config.crawl_only {
+        tokio::spawn(async {})
+    } else {
+        supervise(&inner, "page sets", |inner| {
+            tokio::task::spawn_blocking(move || pages::run(inner))
+        })
+    };
+    if let Err(err) = network::start(&inner).await {
+        // The node still searches and crawls on its own.
+        warn!("{err:#}");
+    }
+    inner.joining.store(false, Ordering::Release);
+    let worker = tokio::spawn(plumb_ingest::storage::with_budget(
+        inner.storage.clone(),
+        worker::run(inner.clone()),
+    ));
+    tokio::spawn(release_memory_now_and_then(inner.clone()));
+    let (news, adult) = if inner.config.crawl_only {
         info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
-        (
-            tokio::spawn(async {}),
-            tokio::spawn(async {}),
-            tokio::spawn(async {}),
-        )
+        (tokio::spawn(async {}), tokio::spawn(async {}))
     } else {
         (
-            supervise(&inner, "page sets", |inner| {
-                tokio::task::spawn_blocking(move || pages::run(inner))
-            }),
             supervise(&inner, "checking feeds", |inner| {
                 tokio::spawn(news::run(inner))
             }),
@@ -1341,6 +1346,10 @@ struct Inner {
     /// Held by each job that takes up to a GB or so of memory while it runs
     /// ([`Inner::one_big_job`]).
     big_job: Mutex<()>,
+    /// True while the node joins the network ([`network::start`]), which
+    /// replays the crawl agreement: the most memory a start takes, so no
+    /// big job runs beside it ([`Inner::joined`]).
+    joining: AtomicBool,
     /// The page sets whose file is being downloaded or cut, so the two
     /// never write the same file at once.
     set_files_busy: Mutex<std::collections::HashSet<&'static str>>,
@@ -1587,6 +1596,7 @@ impl Inner {
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
             big_job: Mutex::new(()),
+            joining: AtomicBool::new(false),
             set_files_busy: Mutex::default(),
             held_page_sets: Arc::default(),
             buckets_rebuilt: AtomicBool::new(false),
@@ -2019,9 +2029,18 @@ impl Inner {
     /// until this one does: the page and place index builds, keeping the
     /// vectors taken from a node and a round of embedding. Each fits a
     /// small node on its own, but not all at once, as at a first start.
+    /// None starts while the node joins the network ([`Inner::joined`]).
     /// Taken before [`Inner::hold_records`], never after.
     fn one_big_job(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.joined();
         self.big_job.locked()
+    }
+
+    /// Waits while the node joins the network, or until it stops.
+    fn joined(&self) {
+        while self.joining.load(Ordering::Acquire) && !self.stopping() {
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     /// `Err(Stopped)` once the node is shutting down.
@@ -2187,6 +2206,11 @@ impl SearchBackend for Inner {
 
     fn site(&self, domain: &str) -> Option<Hit> {
         self.unless_denied_site(self.current()?.backend().site(domain))
+    }
+
+    fn common_word(&self, word: &str) -> bool {
+        self.current()
+            .is_none_or(|index| index.backend().common_word(word))
     }
 
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {

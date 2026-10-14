@@ -73,10 +73,13 @@ fn named_subject_evidence_guards_task_only_semantic_providers() {
             .unwrap()
             .hits;
         assert_eq!(hits[0].domain, "aster.example", "{query}: {hits:?}");
-        let provider = hits
-            .iter()
-            .find(|hit| hit.domain == "nimbus.example")
-            .unwrap();
+        let provider = hits.iter().find(|hit| hit.domain == "nimbus.example");
+        if query == "aster 7" {
+            // Sharing only a number with the query, it is not listed.
+            assert!(provider.is_none(), "{hits:?}");
+            continue;
+        }
+        let provider = provider.unwrap();
         assert_eq!(provider.text_score, 0.0);
         assert_eq!(provider.score, 0.0);
     }
