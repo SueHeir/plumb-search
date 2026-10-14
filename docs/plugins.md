@@ -215,10 +215,11 @@ node:
   folders.
 
 Read `plugin.json` before installing: `hosts` lists everywhere the plugin can
-send your users' searches. A host is allowed on every port, so a plugin that
-lists `localhost`, `127.0.0.1` or a machine on your network can reach every
-service on it. On start the node lists each plugin it loaded and
-its hosts in its log and the panel's activity list. A plugin that cannot load
+send your users' searches. A host is allowed only on ports 80 and 443 unless
+it names a port, as the Zotero plugin's `127.0.0.1:23119` does, and a plugin
+that lists `localhost`, `127.0.0.1` or a machine on your network can reach
+the services on those ports. On start the node lists each plugin it loaded
+and its hosts in its log and the panel's activity list. A plugin that cannot load
 is left out with a warning. To remove a plugin, delete its folder and restart.
 
 Try a plugin before installing it:
@@ -248,6 +249,7 @@ into its folder as `plugin.wasm`.
 | `reddit` | `reddit` searches: Reddit threads. | Your own Reddit app keys (see its README). |
 | `github` | `gh http client` or `tokio github`: repositories with stars, language and last push. A search that says GitHub, repository, source code or open source, or one about something whose GitHub account the node knows ("python asyncio tutorial"), shows "Show results from GitHub"; one that only names that thing ("rust", "linus torvalds") lists the account's most starred repositories. With a token: "Starred" badges, star counts on GitHub results among the node's own, and Star and Unstar buttons. | Nothing to search (GitHub allows 10 searches a minute without a token, and a search past that shows none of its results); a [fine-grained token](https://github.com/settings/personal-access-tokens) with read and write access to Starring for the rest. |
 | `steam` | `steam portal` or `my games portal`: games in your library with hours played. Results about a game get "Owned, 25 h" or "On your wishlist". | A [Steam Web API key](https://steamcommunity.com/dev/apikey) and your SteamID64. If your library comes back empty, set your Steam profile's game details to public. |
+| `zotero` | Every search: up to five items from your Zotero library whose titles, authors or year hold all its words. `zotero gene drive` or `my papers gene drive`: notes and PDF text too. See its README. | Zotero 7 or later open on the node's computer, with **Allow other applications on this computer to communicate with Zotero** ticked in its Advanced settings. |
 
 ## Write a plugin
 
