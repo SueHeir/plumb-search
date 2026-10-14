@@ -31,6 +31,8 @@ Search at https://plumbsearch.org. It keeps no access log, and its results pages
 
 To make it your browser's search engine, open a Plumb page and add it from the address bar (in Firefox, right-click the address bar and choose **Add "Plumb Search"**), or add `https://plumbsearch.org/search?q=%s` by hand.
 
+To search it from Zotero and add the papers, books and pages you find to your library, install the [Zotero plugin](zotero/README.md).
+
 ## What it does
 
 - **Official sites first.** Names outrank text, and look-alike sites stuffed with a brand's keywords are kept below the real one.
@@ -256,6 +258,8 @@ score = α · link_score + trust · ((1 − α) · text_score + name_bonus)
 
 `α` defaults to 0.35 and can be changed with `--alpha`.
 
+A search for a county that ends in its state ("franklin county sheriff ohio") lists the sites that say they are in another state, by name, postal code or domain, after the rest: two dozen states have a Franklin County.
+
 Besides its names, title, description and headings, a site is also found by up to 30 search terms that each crawl picks from the whole homepage text with [YAKE](https://github.com/LIAAD/yake), a statistical keyword extractor (no model, a few milliseconds a page). They count for less than names. `plumb-tools fetch-text` and `plumb-tools terms` measure other choices on saved pages without crawling again.
 
 ### Trying ranking changes on real searches
@@ -303,7 +307,7 @@ A node does this on its own with `plumb run --search-by-meaning` (the desktop ap
 | `crates/plumb-desktop` | The desktop app: a [Tauri](https://v2.tauri.app) window around a node running inside it. A plain `cargo build` leaves it out; see [docs/desktop.md](docs/desktop.md) |
 | `crates/plumb-e2e` | End-to-end tests that run the Docker image, kill containers mid-work and restart them |
 
-`fixtures/` holds the synthetic test data and `eval/brand_queries.tsv` the brand-name test list for real data.
+`zotero/` holds the Zotero plugin. `fixtures/` holds the synthetic test data and `eval/brand_queries.tsv` the brand-name test list for real data.
 
 ## Data sources
 
