@@ -296,12 +296,12 @@ pub(super) fn read_page_tool() -> Value {
     })
 }
 
-/// A required, non-empty text argument, cut to [`MAX_QUERY_CHARS`].
+/// A required, non-empty text argument, read as a search is ([`query_text`]).
 pub(super) fn text_arg(args: &Map<String, Value>, name: &str) -> Result<String, (i64, String)> {
     let text = args
         .get(name)
         .and_then(Value::as_str)
-        .map(|text| truncate_chars(&plumb_core::collapse_whitespace(text), MAX_QUERY_CHARS))
+        .map(query_text)
         .unwrap_or_default();
     if text.is_empty() {
         return Err((INVALID_PARAMS, format!("{name} is required")));
@@ -451,7 +451,7 @@ pub(super) fn more_subjects_arg(args: &Map<String, Value>) -> Result<Vec<String>
     let names: Vec<String> = names
         .iter()
         .filter_map(Value::as_str)
-        .map(|name| truncate_chars(&plumb_core::collapse_whitespace(name), MAX_QUERY_CHARS))
+        .map(query_text)
         .filter(|name| !name.is_empty())
         .collect();
     if names.len() >= MAX_FACT_SUBJECTS {

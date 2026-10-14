@@ -1,0 +1,41 @@
+[
+  {
+    "key": "JESU5QJL",
+    "version": 2,
+    "library": {
+      "type": "user",
+      "id": 0,
+      "name": "My Library",
+      "links": {
+        "self": {
+          "href": "http://localhost:23119/api/users/0",
+          "type": "application/json"
+        }
+      }
+    },
+    "links": {
+      "self": {
+        "href": "http://localhost:23119/api/users/0/items/JESU5QJL",
+        "type": "application/json"
+      },
+      "up": {
+        "href": "http://localhost:23119/api/users/0/items/TLUNZV7I",
+        "type": "application/json"
+      }
+    },
+    "meta": {
+      "numChildren": 0
+    },
+    "data": {
+      "key": "JESU5QJL",
+      "version": 2,
+      "itemType": "note",
+      "parentItem": "TLUNZV7I",
+      "note": "<p>Read again: attention heads</p>",
+      "tags": [],
+      "relations": {},
+      "dateAdded": "2026-10-13T21:20:59Z",
+      "dateModified": "2026-10-13T21:20:59Z"
+    }
+  }
+]

@@ -138,6 +138,22 @@ fn official_site_takes_the_site_wikidata_gives_the_named_article() {
     assert_eq!(answer["url"], "https://mathworld.wolfram.com/");
     assert_eq!(answer["confidence"], "high");
 
+    // A senator's website is a page of senate.gov, which is not theirs, so
+    // their article has no site; the website is still their official one.
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("senate.gov", "U.S. Senate", 0.6, false)],
+            vec![article(
+                "Bernie Sanders",
+                None,
+                Some("https://www.sanders.senate.gov/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "Bernie Sanders");
+    assert_eq!(answer["domain"], "sanders.senate.gov", "{answer}");
+    assert_eq!(answer["url"], "https://www.sanders.senate.gov/");
+
     // A well-known site of exactly the name keeps it: "zoom" is zoom.us,
     // whatever film is called Zoom.
     let mcp = scripted(|_| {

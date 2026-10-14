@@ -2,12 +2,12 @@
 
 use anyhow::Result;
 use axum::http::{header, HeaderMap};
-use plumb_core::{collapse_whitespace, language_code, truncate_chars, RecentNews, SafeSearch};
+use plumb_core::{language_code, RecentNews, SafeSearch};
 use plumb_index::SearchOptions;
 use serde::Deserialize;
 
 use super::html::LANGUAGE_CHOICES;
-use super::{history, AppState, DEFAULT_LIMIT, MAX_LIMIT, MAX_QUERY_CHARS};
+use super::{history, query_text, AppState, DEFAULT_LIMIT, MAX_LIMIT};
 use crate::about::About;
 use crate::country::HomeCountry;
 use crate::websearch::WebSettings;
@@ -195,9 +195,9 @@ impl SearchParams {
         }
     }
 
-    /// The query with whitespace collapsed, cut to [`MAX_QUERY_CHARS`].
+    /// The query, as [`query_text`] reads it.
     pub(crate) fn query(&self) -> String {
-        truncate_chars(&collapse_whitespace(&self.q), MAX_QUERY_CHARS)
+        query_text(&self.q)
     }
 
     pub(crate) fn limit(&self) -> usize {

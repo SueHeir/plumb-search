@@ -125,6 +125,7 @@ mod shared_vectors;
 pub(crate) mod signed_sets;
 pub(crate) mod store;
 mod trim;
+mod wanted_pages;
 mod worker;
 
 #[cfg(test)]
@@ -318,6 +319,11 @@ pub struct NodeConfig {
     /// week of headlines is kept. 0 checks none; headlines trusted nodes
     /// share are still kept and shown.
     pub news_feeds: usize,
+    /// Go looking for the inner pages this node's own searches want, and
+    /// show the ones found (see [`crate::wanted_pages`]). The searches'
+    /// words are kept 30 days, so it is on for the desktop app, as
+    /// [`NodeConfig::search_history`] is, and off for servers.
+    pub wanted_pages: bool,
 }
 
 impl NodeConfig {
@@ -374,6 +380,7 @@ impl NodeConfig {
             search_history: false,
             focus_topics: Vec::new(),
             news_feeds: 3_000,
+            wanted_pages: false,
         }
     }
 
@@ -392,6 +399,7 @@ impl NodeConfig {
             settings: NodeSettings::desktop(),
             manage_other_nodes: true,
             search_history: true,
+            wanted_pages: true,
             search_by_meaning: true,
             news_feeds: 300,
             ..NodeConfig::server(data_dir)
@@ -417,6 +425,7 @@ impl NodeConfig {
         self.search_by_meaning = false;
         self.private_search = false;
         self.news_feeds = 0;
+        self.wanted_pages = false;
         if let Some(net) = &mut self.network {
             // Nothing is searched here, and other nodes' crawls are not
             // taken in, so neither is followed in memory.
@@ -808,11 +817,9 @@ pub struct NodeHandle {
     stop: watch::Sender<bool>,
     server: JoinHandle<std::io::Result<()>>,
     worker: JoinHandle<()>,
-    embedding: Option<JoinHandle<()>>,
-    pages: JoinHandle<()>,
-    news: JoinHandle<()>,
-    adult: JoinHandle<()>,
-    signed_sets: JoinHandle<()>,
+    /// Background jobs besides the worker, each with what its failure is
+    /// called; a node that only crawls runs fewer.
+    jobs: Vec<(JoinHandle<()>, &'static str)>,
 }
 
 impl NodeHandle {
@@ -862,11 +869,7 @@ impl NodeHandle {
             stop,
             mut server,
             worker,
-            embedding,
-            pages,
-            news,
-            adult,
-            signed_sets,
+            jobs,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -886,22 +889,10 @@ impl NodeHandle {
             }
         };
         let worked = worker.await.context("the background work failed");
-        if let Some(embedding) = embedding {
-            if let Err(err) = embedding.await {
-                warn!("search by meaning failed: {err}");
+        for (job, what) in jobs {
+            if let Err(err) = job.await {
+                warn!("{what} failed: {err}");
             }
-        }
-        if let Err(err) = pages.await {
-            warn!("page sets failed: {err}");
-        }
-        if let Err(err) = news.await {
-            warn!("checking feeds failed: {err}");
-        }
-        if let Err(err) = adult.await {
-            warn!("the adult blocklist failed: {err}");
-        }
-        if let Err(err) = signed_sets.await {
-            warn!("signed sets failed: {err}");
         }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
@@ -1039,44 +1030,22 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
             None => http.await,
         }
     });
+    // Joining can take twenty minutes on a small server. Meanwhile searches
+    // get the page index already built and search by meaning; what those
+    // jobs build waits for the join (see Inner::one_big_job).
+    inner.joining.store(true, Ordering::Release);
+    let mut jobs = start_jobs(&inner, true);
     if let Err(err) = network::start(&inner).await {
         // The node still searches and crawls on its own.
         warn!("{err:#}");
     }
+    inner.joining.store(false, Ordering::Release);
     let worker = tokio::spawn(plumb_ingest::storage::with_budget(
         inner.storage.clone(),
         worker::run(inner.clone()),
     ));
     tokio::spawn(release_memory_now_and_then(inner.clone()));
-    let embedding = inner.config.search_by_meaning.then(|| {
-        supervise(&inner, "search by meaning", |inner| {
-            tokio::task::spawn_blocking(move || embedding::run(inner))
-        })
-    });
-    let (pages, news, adult) = if inner.config.crawl_only {
-        // Only searching needs these.
-        info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
-        (
-            tokio::spawn(async {}),
-            tokio::spawn(async {}),
-            tokio::spawn(async {}),
-        )
-    } else {
-        (
-            supervise(&inner, "page sets", |inner| {
-                tokio::task::spawn_blocking(move || pages::run(inner))
-            }),
-            supervise(&inner, "checking feeds", |inner| {
-                tokio::spawn(news::run(inner))
-            }),
-            supervise(&inner, "the adult blocklist", |inner| {
-                tokio::spawn(adult::run(inner))
-            }),
-        )
-    };
-    let signed_sets = supervise(&inner, "signed sets", |inner| {
-        tokio::spawn(signed_sets::run(inner))
-    });
+    jobs.extend(start_jobs(&inner, false));
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -1087,12 +1056,48 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         stop,
         server,
         worker,
-        embedding,
-        pages,
-        news,
-        adult,
-        signed_sets,
+        jobs,
     })
+}
+
+/// Starts the background jobs besides the worker, each with what it is
+/// called: while the node joins the network (`joining`), the ones searches
+/// need meanwhile, and after it the rest. A node that only crawls runs
+/// fewer.
+fn start_jobs(inner: &Arc<Inner>, joining: bool) -> Vec<(JoinHandle<()>, &'static str)> {
+    let mut jobs = Vec::new();
+    let mut job = |what: &'static str, start: fn(Arc<Inner>) -> JoinHandle<()>| {
+        jobs.push((supervise(inner, what, start), what));
+    };
+    // Only searching needs the page sets, feeds and adult blocklist.
+    let searching = !inner.config.crawl_only;
+    if joining {
+        if inner.config.search_by_meaning {
+            job("search by meaning", |inner| {
+                tokio::task::spawn_blocking(move || embedding::run(inner))
+            });
+        }
+        if searching {
+            job("page sets", |inner| {
+                tokio::task::spawn_blocking(move || pages::run(inner))
+            });
+        }
+    } else {
+        if searching {
+            job("checking feeds", |inner| tokio::spawn(news::run(inner)));
+            job("the adult blocklist", |inner| {
+                tokio::spawn(adult::run(inner))
+            });
+        } else {
+            info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
+        }
+        // Off or crawling only, it still forgets old searches on time.
+        job("following links for searches", |inner| {
+            tokio::spawn(wanted_pages::run(inner))
+        });
+        job("signed sets", |inner| tokio::spawn(signed_sets::run(inner)));
+    }
+    jobs
 }
 
 /// How often a running node hands the memory its threads freed back to the
@@ -1341,6 +1346,10 @@ struct Inner {
     /// Held by each job that takes up to a GB or so of memory while it runs
     /// ([`Inner::one_big_job`]).
     big_job: Mutex<()>,
+    /// True while the node joins the network ([`network::start`]), which
+    /// replays the crawl agreement: the most memory a start takes, so no
+    /// big job runs beside it ([`Inner::joined`]).
+    joining: AtomicBool,
     /// The page sets whose file is being downloaded or cut, so the two
     /// never write the same file at once.
     set_files_busy: Mutex<std::collections::HashSet<&'static str>>,
@@ -1374,6 +1383,8 @@ struct Inner {
     map: crate::map::MapFile,
     /// Recent headlines and the feeds watched for them.
     news: crate::news::NewsStore,
+    /// The inner pages this node's searches wanted, and the ones found.
+    wanted_pages: crate::wanted_pages::WantedPages,
     /// The adult blocklist, once loaded.
     adult: RwLock<Option<Arc<adult::AdultList>>>,
     /// The project's denylist, once the node holds one, with its stamp
@@ -1553,6 +1564,8 @@ impl Inner {
             .with_held_set(map_data, config.set_publishers.clone());
         let fill_state = fill::FillState::load(&opened.paths.net);
         let news = crate::news::NewsStore::open(&opened.paths.news).with_budget(storage.clone());
+        let wanted_pages = crate::wanted_pages::WantedPages::open(&opened.paths.wanted)
+            .with_budget(storage.clone());
         Inner {
             config,
             paths: opened.paths,
@@ -1587,6 +1600,7 @@ impl Inner {
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
             big_job: Mutex::new(()),
+            joining: AtomicBool::new(false),
             set_files_busy: Mutex::default(),
             held_page_sets: Arc::default(),
             buckets_rebuilt: AtomicBool::new(false),
@@ -1602,6 +1616,7 @@ impl Inner {
             places: RwLock::new(None),
             map,
             news,
+            wanted_pages,
             adult: RwLock::new(None),
             denylist: RwLock::new(None),
         }
@@ -2019,9 +2034,18 @@ impl Inner {
     /// until this one does: the page and place index builds, keeping the
     /// vectors taken from a node and a round of embedding. Each fits a
     /// small node on its own, but not all at once, as at a first start.
+    /// None starts while the node joins the network ([`Inner::joined`]).
     /// Taken before [`Inner::hold_records`], never after.
     fn one_big_job(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.joined();
         self.big_job.locked()
+    }
+
+    /// Waits while the node joins the network, or until it stops.
+    fn joined(&self) {
+        while self.joining.load(Ordering::Acquire) && !self.stopping() {
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     /// `Err(Stopped)` once the node is shutting down.
@@ -2189,6 +2213,11 @@ impl SearchBackend for Inner {
         self.unless_denied_site(self.current()?.backend().site(domain))
     }
 
+    fn common_word(&self, word: &str) -> bool {
+        self.current()
+            .is_none_or(|index| index.backend().common_word(word))
+    }
+
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         self.map.get()
     }
@@ -2336,6 +2365,14 @@ impl StatusSource for Inner {
 
     fn denies(&self, url: &str) -> bool {
         Inner::denies(self, url)
+    }
+
+    fn searched(&self, query: &str, results: &SearchResults) {
+        // Pages found are shown next to the page sets' only.
+        if self.config.wanted_pages && self.pages.read_locked().is_some() {
+            self.wanted_pages
+                .note(query, results, now_unix(), |url| self.may_want(url));
+        }
     }
 
     fn network(&self) -> Option<Arc<plumb_net::NetHandle>> {
