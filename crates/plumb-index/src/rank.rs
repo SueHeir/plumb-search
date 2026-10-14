@@ -38,6 +38,11 @@ const NEAREST_POPULAR: usize = 50;
 /// copies [`without_copies`] leaves out.
 const COPY_LOOKAHEAD: usize = 10;
 
+/// The least closeness in meaning that keeps a little-known site the query
+/// starts with the name of, when it lacks a word of the rest
+/// ([`RankConfig::partial_closeness`]).
+const LEADING_NAME_CLOSENESS: f32 = 0.35;
+
 impl Searcher {
     /// The ranked results of `query_text` as typed, and how the query names
     /// sites.
@@ -816,6 +821,25 @@ impl Searcher {
                         .domain(r.addr.doc_id)
                         .and_then(|domain| any.closeness(&domain)),
                 };
+                // A little-known site the query starts with a name of, one
+                // it calls itself by and near the query in meaning, if not
+                // as near as the floor: wimbledon.com for "wimbledon
+                // final", which its homepage doesn't say. A site that has
+                // the word only for its domain still needs the floor.
+                if let Some(name) = names.get(&r.addr).filter(|name| name.words() > 0) {
+                    if named_inside.contains(&r.addr)
+                        && closeness.is_some_and(|c| c >= LEADING_NAME_CLOSENESS)
+                        && (name.alias > 0
+                            || self.titled_by_first_words(
+                                &searcher,
+                                r.addr,
+                                query_text,
+                                name.words(),
+                            )?)
+                    {
+                        continue;
+                    }
+                }
                 // Indexed semantic support at the existing descriptive
                 // floor is enough to retain a noncollision paraphrase,
                 // even when sparse text shares some generic query words.

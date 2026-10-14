@@ -647,12 +647,22 @@ impl PageSearcher {
     /// the share of them its name has, a word only what it says of itself
     /// has counting [`DESCRIBED_WORD`]. Nothing when that is half or less:
     /// such a name leaves most of the query unsaid. "terry stafford death"
-    /// is the singer, but "london hotels" is not the article London.
+    /// is the singer, but "london hotels" is not the article London. An
+    /// article's qualifier is part of its name, so "the chemical element
+    /// mercury" is closer to Mercury (element) than to Chemical element.
     fn inside_match(&self, page: &Page, span: &[String], described: &[Described]) -> f32 {
         if described.is_empty() {
             return 0.0;
         }
-        let named: HashSet<String> = self.question_words(&span.join(" ")).into_iter().collect();
+        let qualifier = super::sites::title_qualifier(&page.title).filter(|_| page.is_article());
+        let named: HashSet<String> = self
+            .question_words(&format!(
+                "{} {}",
+                span.join(" "),
+                qualifier.unwrap_or_default()
+            ))
+            .into_iter()
+            .collect();
         let mut said = page.about().or_else(|| page.topic()).unwrap_or_else(|| {
             std::iter::once(&page.title)
                 .chain(&page.aliases)
@@ -1249,18 +1259,27 @@ impl Inside {
     /// title alone names nothing ("Glossary"). Repositories are told apart
     /// by what they say of themselves ([`PageSearcher::repo_described`]),
     /// and pages of other sets share their titles with too much to be
-    /// named so.
+    /// named so. An article's title without its qualifier names it when
+    /// another part says the qualifier: "the chemical element mercury"
+    /// names Mercury (element), but "queen tour" not Queen (album).
     fn span(&self, page: &Page, joined: &tantivy::tokenizer::TextAnalyzer) -> Option<&[String]> {
-        let names: Vec<&String> = if page.is_article() {
-            std::iter::once(&page.title).chain(&page.aliases).collect()
+        let key = |name: &str| analysis::tokens(joined, name).pop();
+        let names: Vec<&str> = if page.is_article() {
+            let qualified = super::sites::title_qualifier(&page.title)
+                .and_then(key)
+                .is_some_and(|qualifier| self.keys.contains_key(&qualifier));
+            std::iter::once(page.title.as_str())
+                .chain(qualified.then(|| base_title(&page.title)))
+                .chain(page.aliases.iter().map(String::as_str))
+                .collect()
         } else if page.set == DOCS_SET {
-            page.aliases.iter().collect()
+            page.aliases.iter().map(String::as_str).collect()
         } else {
             return None;
         };
         names
             .into_iter()
-            .filter_map(|name| self.keys.get(&analysis::tokens(joined, name).pop()?))
+            .filter_map(|name| self.keys.get(&key(name)?))
             .max_by_key(|span| span.len())
             .map(Vec::as_slice)
     }

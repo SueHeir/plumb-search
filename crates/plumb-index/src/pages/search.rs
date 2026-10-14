@@ -41,9 +41,10 @@ pub(crate) enum Hint {
     Regnal,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
-    /// Only pages the name names: what a fact question asks about. "madrid
-    /// spanish" (of "madrid spanish capital city") names nothing, and the
-    /// clubs it describes would push Madrid out.
+    /// Only pages the name names: what a fact question asks about, or the
+    /// list a search for one asks for ("list of popes" of "popes in
+    /// order"). "madrid spanish" (of "madrid spanish capital city") names
+    /// nothing, and the clubs it describes would push Madrid out.
     Named,
 }
 
@@ -187,6 +188,19 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
 ];
+
+/// The list article a search for a list asks for without saying "list
+/// of": "list of popes" of "popes in order", "list of us presidents" of
+/// "us presidents list". `None` for other searches.
+fn list_asked(query: &str) -> Option<String> {
+    let q = plumb_core::collapse_whitespace(query.trim()).to_lowercase();
+    let name = [" list in order", " in order", " list"]
+        .iter()
+        .find_map(|tail| q.strip_suffix(tail))?
+        .trim();
+    let name = name.strip_prefix("list of ").unwrap_or(name);
+    (!name.is_empty()).then(|| format!("list of {name}"))
+}
 
 /// The name in `query` without the words around it that only say what is
 /// wanted, and what kind of page they ask for: "lululemon" of "lululemon
@@ -759,14 +773,21 @@ impl PageSearcher {
         // name, so the name is searched for too. So is what a fact question
         // asks about, or "when was isaac newton born" lists Newton's mother
         // and namesakes, whose descriptions hold its words, and not him;
-        // but not when the query is itself a name ("age of empires"). A
-        // monarch or pope typed with a number is searched in Roman numerals
-        // when no article is named as typed: "charles 3", "henry the 8th".
+        // but not when the query is itself a name ("age of empires"). So is
+        // the list a search for one asks for: "popes in order" finds Pope
+        // John numbering and not List of popes, which "list of popes"
+        // names. A monarch or pope typed with a number is searched in Roman
+        // numerals when no article is named as typed: "charles 3", "henry
+        // the 8th".
         let hinted = hinted_name(query)
             .or_else(|| {
-                plumb_core::facts::fact_asked(query)
-                    .filter(|_| !hits.iter().any(|hit| hit.named))
-                    .map(|asked| (asked.subject, Hint::Named))
+                list_asked(query)
+                    .or_else(|| {
+                        plumb_core::facts::fact_asked(query)
+                            .filter(|_| !hits.iter().any(|hit| hit.named))
+                            .map(|asked| asked.subject)
+                    })
+                    .map(|name| (name, Hint::Named))
             })
             .or_else(|| {
                 regnal_name(query)

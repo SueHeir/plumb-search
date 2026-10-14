@@ -500,6 +500,94 @@ fn a_word_or_two_of_a_longer_search_is_no_answer() {
 }
 
 #[test]
+fn a_little_known_site_a_search_starts_with_the_name_of_is_kept() {
+    let records = vec![
+        site(
+            "wimbledon.com",
+            Some("The Championships, Wimbledon - Official Website"),
+            Some("The home of the tennis championships, with news, scores and draws."),
+            &[],
+            &[],
+            ranked(60_000, 1_500),
+        ),
+        site(
+            "afcwimbledon.co.uk",
+            Some("AFC Wimbledon"),
+            Some("association football club in London, England"),
+            &["AFC Wimbledon", "Wimbledon"],
+            &[],
+            popular(40_000, 2_000),
+        ),
+        site(
+            "tennisfinals.com",
+            Some("Tennis finals"),
+            Some("Results of every tennis final."),
+            &[],
+            &[],
+            ranked(500_000, 10),
+        ),
+        site(
+            "wimbledonpaint.com",
+            Some("Wimbledon Paint"),
+            Some("Paint shop in south London."),
+            &[],
+            &[],
+            obscure(900_000, 3),
+        ),
+        site(
+            "wimbledon.org",
+            Some("Club news"),
+            Some("News of a lawn tennis club."),
+            &[],
+            &[],
+            obscure(800_000, 3),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let options = SearchOptions::default();
+    let meaning = near_and_far(
+        &[("tennisfinals.com", 0.7)],
+        &[
+            ("wimbledon.com", 0.42),
+            ("wimbledon.org", 0.42),
+            ("afcwimbledon.co.uk", 0.3),
+            ("wimbledonpaint.com", 0.2),
+        ],
+    );
+    let found = |query: &str| {
+        let hits = searcher
+            .search_meaning(query, 10, &RankConfig::default(), &options, Some(&meaning))
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+
+    // The tournament's site doesn't say "final" or "champions", and isn't
+    // well known enough to be kept for its name alone, but it calls itself
+    // Wimbledon and is near the query in meaning.
+    for query in ["wimbledon final", "wimbledon champions"] {
+        let found = found(query);
+        assert!(
+            found.contains(&"wimbledon.com".to_string()),
+            "{query}: {found:?}"
+        );
+        // A shop that calls itself Wimbledon and is far from the query, and
+        // a site that has the word only for its domain, are still left out.
+        assert!(
+            !found.contains(&"wimbledonpaint.com".to_string()),
+            "{query}: {found:?}"
+        );
+        assert!(
+            !found.contains(&"wimbledon.org".to_string()),
+            "{query}: {found:?}"
+        );
+    }
+}
+
+#[test]
 fn a_name_some_little_site_has_does_not_keep_namesakes_of_its_words() {
     let records = vec![
         site(

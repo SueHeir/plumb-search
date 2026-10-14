@@ -115,6 +115,42 @@ fn repository_words_find_the_repository() {
 }
 
 #[test]
+fn a_search_for_a_list_finds_the_list_article() {
+    let (_dir, s) = searcher(&[
+        page("List of popes", 90_000, &[]),
+        page("Pope John numbering", 5_000, &[]),
+        page("Order of St. Sylvester", 2_000, &[]),
+        page(
+            "List of presidents of the United States",
+            300_000,
+            &["List of US presidents"],
+        ),
+        page("Linked list", 80_000, &[]),
+    ]);
+    for (query, list) in [
+        ("popes in order", "List of popes"),
+        ("list of popes in order", "List of popes"),
+        (
+            "us presidents list",
+            "List of presidents of the United States",
+        ),
+        (
+            "US presidents list in order",
+            "List of presidents of the United States",
+        ),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(hits[0].page.title, list, "{query}");
+        assert!(hits[0].named, "{query}");
+    }
+    // Nothing is called "list of linked".
+    assert_eq!(
+        titles(&s.search("linked list", 5).unwrap()),
+        ["Linked list"]
+    );
+}
+
+#[test]
 fn fact_questions_find_the_article_they_ask_about() {
     let described = |title: &str, views: u64, description: &str| {
         let mut page = page(title, views, &[]);
