@@ -1173,14 +1173,15 @@ fn docs_pages_named_by_part_of_a_search_keep_the_rest_as_detail() {
         first_docs("python logging"),
         Some(("logging — Logging facility for Python".to_string(), true))
     );
-    // Nothing says random's page is about forests, nor is a version code.
+    // Nothing says random's page is about forests, nor is a version code,
+    // so the page "python random" names is only found (#604), not named.
     for query in ["python random forest", "python 3.12 random forest"] {
         assert!(
             searcher
                 .search(query, 10)
                 .unwrap()
                 .iter()
-                .all(|hit| !hit.page.title.starts_with("random")),
+                .all(|hit| !hit.named || !hit.page.title.starts_with("random")),
             "{query}"
         );
     }
