@@ -321,6 +321,12 @@ pub trait StatusSource: Send + Sync {
         let _ = url;
         false
     }
+    /// Told what a person searched for here and what was found, so the
+    /// node can go looking for the pages it wanted
+    /// ([`crate::wanted_pages`]).
+    fn searched(&self, query: &str, results: &SearchResults) {
+        let _ = (query, results);
+    }
     /// Names the bucket table private search fetches from, when the node
     /// serves private search and its index has buckets.
     fn bucket_table(&self) -> Option<String> {

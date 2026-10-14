@@ -21,7 +21,7 @@ use super::{
     PAPERS_SET, PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
     REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
-    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
+    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WANTED_SET, WELL_KNOWN_PACKAGE,
 };
 use crate::analysis;
 
@@ -195,7 +195,7 @@ impl PageSearcher {
         }
         if crowded {
             let mut apart: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, Box::new(every_word))];
-            for set in [SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET] {
+            for set in [SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET, WANTED_SET] {
                 apart.push((Occur::MustNot, self.scope_term(&format!("set:{set}"))));
             }
             for (_, address) in searcher.search(
@@ -916,7 +916,8 @@ impl PageSearcher {
     /// And whether the query asks the question as a whole: it has all of
     /// the query's words, and the query at least [`QUESTION_TITLE_SHARE`]
     /// of its title's. A question without `topic_word`, the query's rarest
-    /// word, matches not at all. The question's words are its title and
+    /// word, or whose title has none of `sure`, matches not at all. The
+    /// question's words are its title and
     /// tags, or the title of a duplicate of it and its tags, whichever
     /// covers the query best ([`Page::asked_as`]). A word only the
     /// duplicate's title has counts [`DUPLICATE_WORD_SHARE`], unless the
@@ -981,6 +982,16 @@ impl PageSearcher {
                 continue;
             }
             let title = stemmed(title);
+            // Its tags alone do not make a question about the query: "What
+            // is the tax status of assets recovered via bankruptcy
+            // proceedings?", tagged capital-gains-tax and australia, does
+            // not ask "what is the capital of australia".
+            if page.is_question()
+                && !sure.is_empty()
+                && !sure.iter().any(|stem| title.contains(stem))
+            {
+                continue;
+            }
             let asked = share >= 1.0
                 && !title.is_empty()
                 && title.iter().filter(|word| stems.contains(word)).count() as f32
@@ -1485,7 +1496,7 @@ const BELOW_NAMED_ARTICLE: f32 = 0.99;
 /// page at chessprogramming.org for "napoleon", loc.gov's for "abraham
 /// lincoln". A page on the article's own website keeps its score: nps.gov's
 /// "Yosemite National Park" is the park's own page.
-pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
+pub fn site_pages_after_named_article(hits: &mut [PageHit]) {
     let Some(article) = hits
         .iter()
         .filter(|hit| {
@@ -1511,7 +1522,13 @@ pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
 /// words of "javascript array sort" are more read than MDN's page on it,
 /// and would crowd it out.
 pub(crate) fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
-    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET];
+    let kept = [
+        DOCS_SET,
+        SUBPAGES_SET,
+        REFERENCE_SET,
+        REFERENCE2_SET,
+        WANTED_SET,
+    ];
     for set in kept {
         if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
             continue;

@@ -66,6 +66,58 @@ fn words_that_say_what_is_wanted_keep_the_name() {
 }
 
 #[test]
+fn a_person_wikidata_gives_no_dates_for_is_a_person() {
+    let described = |title: &str, views: u64, description: &str, lead: &str| {
+        let mut page = page(title, views, &[]);
+        page.description = Some(description.into());
+        page.lead = Some(lead.into());
+        page
+    };
+    let stafford = described(
+        "Terry Stafford",
+        1_001,
+        "American singer-songwriter (1941–1996)",
+        "Terry LaVerne Stafford (November 22, 1941 – March 17, 1996) was an American singer.",
+    );
+    let roe = described(
+        "Tommy Roe",
+        1_086,
+        "American rock and pop singer-songwriter",
+        "Thomas David Roe (/roʊ/; born May 9, 1942) is an American rock and pop singer.",
+    );
+    let mut fuller = page("Bobby Fuller", 1_953, &[]);
+    fuller.facts = vec![plumb_core::facts::Fact {
+        kind: plumb_core::facts::FactKind::Died,
+        value: "1966-07-18".into(),
+    }];
+    let band = described(
+        "The Bobby Fuller Four",
+        625,
+        "American rock & roll band (1962–1966)",
+        "The Bobby Fuller Four (sometimes stylized as Bobby Fuller 4) was a rock band.",
+    );
+    let war = described(
+        "World War II",
+        900_000,
+        "1939–1945 global conflict",
+        "World War II (1 September 1939 – 2 September 1945) was a global conflict.",
+    );
+    assert!(stafford.is_person() && roe.is_person() && fuller.is_person());
+    assert!(!band.is_person() && !war.is_person());
+    let (_dir, s) = searcher(&[stafford, roe, fuller, band, page("Stafford", 50_000, &[])]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("terry stafford death"), ["Terry Stafford"]);
+    assert_eq!(named("tommy roe songs"), ["Tommy Roe"]);
+    assert_eq!(named("bobby fuller death"), ["Bobby Fuller"]);
+}
+
+#[test]
 fn a_search_for_one_part_of_a_thing_finds_the_thing() {
     let (_dir, s) = searcher(&[
         page("Ibuprofen", 200_000, &[]),
@@ -805,6 +857,44 @@ fn comparisons_find_the_articles_on_both_sides() {
     let hits = s.search("crocodile vs alligator", 5).unwrap();
     assert_eq!(hits[0].page.title, "Crocodiles vs. Alligators", "{hits:?}");
     assert!(hits.iter().all(|hit| !hit.named), "{hits:?}");
+}
+
+#[test]
+fn one_side_of_a_thing_finds_its_article_unless_one_is_called_so() {
+    for (query, name) in [
+        ("benefits of meditation", "meditation"),
+        ("uses of graphene", "graphene"),
+        ("Causes of the French Revolution?", "french revolution"),
+        (
+            "advantages and disadvantages of nuclear energy",
+            "nuclear energy",
+        ),
+    ] {
+        assert_eq!(aspect_asked(query).as_deref(), Some(name), "{query:?}");
+    }
+    assert_eq!(aspect_asked("meditation"), None);
+    assert_eq!(aspect_asked("benefits of it"), None);
+    let (_dir, s) = searcher(&[
+        page("Meditation", 300_000, &[]),
+        page("Meditation (album)", 2_000, &[]),
+        page("French Revolution", 900_000, &[]),
+        page("Causes of the French Revolution", 30_000, &[]),
+    ]);
+    let hits = s.search("benefits of meditation", 5).unwrap();
+    assert_eq!(hits[0].page.title, "Meditation", "{hits:?}");
+    assert!(hits[0].named, "{hits:?}");
+    // The article on that side is called the whole query, and the more
+    // read article on the whole thing is not looked up to come before it.
+    let hits = s.search("causes of the french revolution", 5).unwrap();
+    assert_eq!(
+        hits[0].page.title, "Causes of the French Revolution",
+        "{hits:?}"
+    );
+    assert!(
+        hits.iter()
+            .all(|hit| !hit.named || hit.page.title != "French Revolution"),
+        "{hits:?}"
+    );
 }
 
 #[test]
