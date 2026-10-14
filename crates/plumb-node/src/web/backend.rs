@@ -67,6 +67,12 @@ pub trait SearchBackend: Send + Sync {
         let _ = domain;
         None
     }
+    /// Whether many sites' titles have `word`
+    /// ([`Searcher::is_common_word`]). By default every word is.
+    fn common_word(&self, word: &str) -> bool {
+        let _ = word;
+        true
+    }
 
     /// The town (or else other place) `text` names, for a weather answer;
     /// see [`plumb_index::places::PlaceSearcher::locate`]. By default none.
@@ -276,6 +282,10 @@ impl SearchBackend for IndexBackend {
         self.map.as_ref()?.get()
     }
 
+    fn common_word(&self, word: &str) -> bool {
+        self.searcher.is_common_word(word)
+    }
+
     fn site(&self, domain: &str) -> Option<Hit> {
         if !self.searcher.has_domain(domain) {
             return None;
@@ -310,6 +320,12 @@ pub trait StatusSource: Send + Sync {
     fn denies(&self, url: &str) -> bool {
         let _ = url;
         false
+    }
+    /// Told what a person searched for here and what was found, so the
+    /// node can go looking for the pages it wanted
+    /// ([`crate::wanted_pages`]).
+    fn searched(&self, query: &str, results: &SearchResults) {
+        let _ = (query, results);
     }
     /// Names the bucket table private search fetches from, when the node
     /// serves private search and its index has buckets.
