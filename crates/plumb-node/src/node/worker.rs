@@ -380,7 +380,7 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     };
     let downloaded = store::dir_size(&inner.paths.seed).saturating_sub(before);
     let built = blocking(inner, move |inner| {
-        let records = seed_records(inner, &files)?;
+        let (records, _) = seed_records(inner, &files)?;
         let mut fresh = SavedState::fresh(inner.config.initial_crawl);
         fresh.wikidata_missing = true;
         fresh.quick_start = true;
@@ -477,7 +477,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     let wikidata_missing = wikidata_err.is_some();
     let built = blocking(inner, move |inner| {
         let _records = inner.hold_records();
-        let seed = seed_records(inner, &files)?;
+        let (seed, void) = seed_records(inner, &files)?;
         inner.set_step(Step::Ingesting, "Reading the site records");
         let mut set = load_records(&inner.paths.records)?;
         let before = set.len();
@@ -489,6 +489,12 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             });
         }
         take_back_misread(&files, &mut set);
+        for site in &void {
+            let names: Vec<&str> = std::iter::once(site.label.trim())
+                .chain(site.names.iter().map(String::as_str))
+                .collect();
+            set.take_back_official_site(&site.domain, &names);
+        }
         set.split_subdomain_sites(&seed);
         set.extend(seed);
         let titled = set
@@ -939,9 +945,12 @@ fn is_recent(path: &Path) -> bool {
 }
 
 /// Folds the seed files into site records and keeps the best
-/// [`NodeConfig::sites`], best first.
-fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
+/// [`NodeConfig::sites`], best first. Also gives the front page claims
+/// that count for nothing ([`OfficialSite::claims_nothing`]), to take back
+/// off records an earlier fold made with them.
+fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<(Vec<SiteRecord>, Vec<OfficialSite>)> {
     let wikidata = files.wikidata.as_ref().ok();
+    let mut void = Vec::new();
     let sources = 1 + usize::from(wikidata.is_some()) + usize::from(files.cc_ranks.is_some());
     let mut builder = Builder::new();
 
@@ -988,6 +997,11 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
                 Err(err) => warn!("going on without Wikipedia's intros: {err:#}"),
             }
         }
+        void = sites
+            .iter()
+            .filter(|site| site.claims_nothing() && site.is_root_homepage())
+            .cloned()
+            .collect();
         builder.add_official_sites(&sites);
         drop(sites);
         inner.check_stop()?;
@@ -999,7 +1013,7 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
         "kept the best {} of {found} sites from the seed data",
         records.len()
     );
-    Ok(records)
+    Ok((records, void))
 }
 
 /// Saves the records of a setup as the records file.
