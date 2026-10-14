@@ -581,11 +581,21 @@ pub fn shown_profiles(profiles: &[Profile]) -> Vec<(&'static Service, String)> {
     shown
 }
 
+/// Words that ask for their service first too, with "to", "for" or "of"
+/// before the name: "lyrics to hey jude".
+const LEADING_WORDS: &[&str] = &["lyrics"];
+
 /// The services named by the end of `query` ("mrbeast youtube", "valve
-/// steam") and the words before them, which must be there.
+/// steam"), or by one of [`LEADING_WORDS`] at its start, and the words
+/// that name what they are asked for, which must be there.
 pub fn services_asked(query: &str) -> Option<(Vec<&'static Service>, String)> {
     let words = crate::normalize_text(query);
     let words: Vec<&str> = words.split_whitespace().collect();
+    if let [first, "to" | "for" | "of", name @ ..] = words.as_slice() {
+        if LEADING_WORDS.contains(first) && !name.is_empty() {
+            return services_asked(&format!("{} {first}", name.join(" ")));
+        }
+    }
     let mut best: Option<(usize, &str)> = None;
     for service in SERVICES {
         for phrase in service.words {
@@ -760,6 +770,18 @@ mod tests {
         );
         assert_eq!(services_asked("youtube"), None);
         assert_eq!(services_asked("python docs"), None);
+        // Lyrics are asked for first too.
+        for query in [
+            "lyrics to hey jude",
+            "Lyrics for Hey Jude",
+            "lyrics of hey jude",
+        ] {
+            let (services, name) = services_asked(query).unwrap();
+            assert_eq!((services[0].name, name.as_str()), ("Genius", "hey jude"));
+        }
+        assert_eq!(services_asked("lyrics to"), None);
+        assert_eq!(services_asked("youtube to mp3"), None);
+        assert_eq!(services_asked("facebook for business"), None);
     }
 
     #[test]
