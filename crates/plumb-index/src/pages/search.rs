@@ -61,6 +61,10 @@ pub(crate) enum Hint {
     /// order"). "madrid spanish" (of "madrid spanish capital city") names
     /// nothing, and the clubs it describes would push Madrid out.
     Named,
+    /// Of the pages the name names, those on a field's sense of it, when
+    /// there are any ([`plumb_core::article::field_asked`]): "what is a
+    /// cell in biology" asks about the cell of biology.
+    Field(&'static [&'static str]),
 }
 
 /// What a song is called in its title or description ([`Page::is_work_of`]).
@@ -554,6 +558,10 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
         _ => name,
     };
     let hint = hint?;
+    let (name, hint) = match (hint, plumb_core::article::field_asked(name)) {
+        (Hint::Any, Some((rest, marks))) => (rest, Hint::Field(marks)),
+        _ => (name, hint),
+    };
     (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
 }
 
@@ -1436,6 +1444,21 @@ impl PageSearcher {
                                 * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity),
                         );
                     }
+                }
+            }
+            Hint::Field(marks) => {
+                let in_field = |hit: &PageHit| {
+                    let page = &hit.page;
+                    hit.named
+                        && plumb_core::article::in_field(
+                            marks,
+                            &page.title,
+                            page.description.as_deref(),
+                            page.lead.as_deref(),
+                        )
+                };
+                if found.iter().any(in_field) {
+                    found.retain(|hit| !hit.named || in_field(hit));
                 }
             }
             // Only the thing's article: "python examples" asks for code,
