@@ -606,7 +606,9 @@ fn observe(
                 })
             }
             None if !ops.any() => {
-                plumb_index::health::sources_lead(words, &mut found.hits, &mut placed)
+                plumb_index::health::sources_lead(words, &mut found.hits, &mut placed, &|word| {
+                    setup.searcher.is_common_word(word)
+                })
             }
             None => {}
         }
