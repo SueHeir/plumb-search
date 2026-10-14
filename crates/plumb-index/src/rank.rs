@@ -104,6 +104,7 @@ impl Searcher {
         // it is what the look-alikes are measured against. So is every site
         // of the kind the query names.
         let mut names = self.name_matches(&searcher, &query, cfg)?;
+        self.drop_borrowed_names(&searcher, &query, &mut names)?;
         let mut kinds = match &query.kind {
             Some(key) => matching_docs(
                 &searcher,
