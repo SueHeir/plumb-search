@@ -574,14 +574,6 @@ fn words_are_only_looked_up() {
 
 #[test]
 fn what_is_asked_about_a_person_finds_their_article() {
-    let person = |title: &str, views: u64, aliases: &[&str]| {
-        let mut page = page(title, views, aliases);
-        page.facts = vec![plumb_core::facts::Fact {
-            kind: plumb_core::facts::FactKind::Born,
-            value: "1961-08-04".into(),
-        }];
-        page
-    };
     let (_dir, s) = searcher(&[
         person("Barack Obama", 900_000, &["Obama"]),
         person("Pablo Picasso", 400_000, &["Picasso"]),
@@ -591,13 +583,7 @@ fn what_is_asked_about_a_person_finds_their_article() {
         page("Black Death", 300_000, &[]),
         page("Christmas", 500_000, &[]),
     ]);
-    let named = |q: &str| -> Vec<String> {
-        let hits = s.search(q, 5).unwrap();
-        hits.iter()
-            .filter(|hit| hit.named)
-            .map(|hit| hit.page.title.clone())
-            .collect()
-    };
+    let named = |q: &str| named_titles(&s, q);
     assert_eq!(named("obama daughters"), ["Barack Obama"]);
     assert_eq!(named("picasso paintings"), ["Pablo Picasso"]);
     assert_eq!(named("steve jobs cause of death"), ["Steve Jobs"]);
@@ -608,4 +594,43 @@ fn what_is_asked_about_a_person_finds_their_article() {
         hinted_name("Lebron James kids"),
         Some(("lebron james".into(), Hint::Person))
     );
+}
+
+#[test]
+fn a_monarch_typed_with_a_number_is_named() {
+    let mut book = page("Henry the Eighth", 3, &[]);
+    book.set = BOOKS_SET.into();
+    let (_dir, s) = searcher(&[
+        person("Henry VIII", 85_702, &["Henry 8"]),
+        page("Henry VIII (play)", 1_900, &[]),
+        person("Henry Percy, 8th Earl of Northumberland", 300, &[]),
+        book,
+        person("Louis XIV", 39_618, &[]),
+        person("Charles III", 120_000, &["King Charles III"]),
+        person("Pope Benedict XVI", 30_000, &[]),
+        page("Queen Elizabeth 2", 6_000, &["QE2"]),
+        person("Elizabeth II", 200_000, &["Queen Elizabeth II"]),
+        page("Epistle of James", 2_302, &["James 1"]),
+        page("Windows 11", 50_000, &[]),
+    ]);
+    let named = |q: &str| named_titles(&s, q);
+    for q in ["henry 8th", "henry the 8th", "henry the eighth", "henry 8"] {
+        assert_eq!(named(q)[0], "Henry VIII", "{q}");
+    }
+    assert_eq!(named("louis the 14th"), ["Louis XIV"]);
+    assert_eq!(named("charles 3"), ["Charles III"]);
+    assert_eq!(named("king charles 3"), ["Charles III"]);
+    assert_eq!(named("pope benedict 16"), ["Pope Benedict XVI"]);
+    assert_eq!(named("elizabeth the 2nd"), ["Elizabeth II"]);
+    // Not when an article is called the query as typed.
+    assert_eq!(named("queen elizabeth 2"), ["Queen Elizabeth 2"]);
+    assert_eq!(named("james 1"), ["Epistle of James"]);
+    assert_eq!(
+        regnal_name("Louis the Fourteenth"),
+        Some("louis xiv".into())
+    );
+    assert_eq!(regnal_name("pope pius 12"), Some("pope pius xii".into()));
+    assert_eq!(regnal_name("windows 11 pro"), None);
+    assert_eq!(regnal_name("the 8th"), None);
+    assert_eq!(regnal_name("covid-19"), None);
 }
