@@ -105,6 +105,8 @@ pub struct RowSignals {
     /// In training data: how well the row meets the search, 0 to 3, as
     /// an LLM graded it.
     pub grade: Option<u8>,
+    /// How well the row's text fits the query, as the reader scores it.
+    pub reader: Option<f32>,
 }
 
 impl RowSignals {
@@ -151,7 +153,7 @@ impl RowSignals {
 }
 
 /// The names of the values [`features`] gives each row, in order.
-pub const FEATURES: [&str; 45] = [
+pub const FEATURES: [&str; 46] = [
     "pos_inv",
     "pos",
     "nwords",
@@ -197,6 +199,7 @@ pub const FEATURES: [&str; 45] = [
     "set_reference",
     "set_subpages",
     "set_docs",
+    "reader",
 ];
 
 /// The query's words that say what it is about, as
@@ -343,6 +346,7 @@ pub fn features(query: &str, rows: &[RowSignals]) -> Vec<[f64; FEATURES.len()]> 
             f[31] = coverage(&words, &[title, address]);
             f[32] = coverage(&words, &[title, address, description]);
             f[40] = flag(ascii_query && mostly_foreign(&format!("{title} {description}")));
+            f[45] = row.reader.map_or(-20.0, f64::from);
             f
         })
         .collect()
