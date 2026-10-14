@@ -215,6 +215,29 @@ pub struct ProfileAnswer {
     pub page: Page,
 }
 
+impl ProfileAnswer {
+    /// What kind of link it is: only an account of its own is an
+    /// official profile, not a song's page on Genius.
+    pub(crate) fn kind(&self) -> &'static str {
+        if self.search {
+            "Search"
+        } else if self.official {
+            "Official profile"
+        } else {
+            "Listing"
+        }
+    }
+
+    /// Where it comes from, said under it: "Listing, from MusicBrainz".
+    pub(crate) fn note(&self) -> String {
+        if self.search {
+            format!("Searched for on {}", self.service)
+        } else {
+            format!("{}, from {}", self.kind(), self.source)
+        }
+    }
+}
+
 /// What a results page shows besides the results.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Extras {
@@ -488,6 +511,9 @@ fn kind_named<'a>(name: &'a str, kinds: &[&str]) -> Option<&'a str> {
 /// god's. Looked up with its kind ("top gun movie"), only a work called
 /// so, since a search names every film of the title then, and the film
 /// called Top Gun is looked up by its name alone ([`profile_lookups`]).
+/// Of the works of that kind the name names, one read far more than each
+/// of the others is the one meant: "titanic cast" is the 1997 film's, not
+/// the 1953 one's or the 1996 miniseries'.
 /// For an account ([`ACCOUNTS`]), only a person, group or organization
 /// when some are: "drake instagram" is the rapper's, not the name list's,
 /// and "pink instagram" the singer's, not the colour's.
@@ -549,6 +575,17 @@ pub fn profile_candidates(
     };
     if candidates.iter().any(of_kind) {
         candidates.retain(of_kind);
+        let mut views: Vec<u64> = candidates
+            .iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.views)
+            .collect();
+        views.sort_unstable_by(|a, b| b.cmp(a));
+        if let [most, next, ..] = views[..] {
+            if next.saturating_mul(MOST_READ_WORK) < most {
+                candidates.retain(|hit| hit.named && hit.page.views == most);
+            }
+        }
     }
     candidates
 }
@@ -663,33 +700,15 @@ pub(crate) fn render_profile(out: &mut String, profile: &ProfileAnswer, icon: Op
         "<section class=\"pf\" aria-label=\"{kind}\"><a class=\"r\" href=\"{}\" \
          rel=\"noreferrer\"><span class=\"site\">{}<span class=\"sn\"><span class=\"dn\">{}</span>\
          <span class=\"u\">{}</span></span></span><span class=\"t\">{} on {}</span></a>\
-         <p class=\"m\">{note}</p></section>",
+         <p class=\"m\">{}</p></section>",
         escape_html(&profile.url),
         super::site_badge(&domain, icon),
         escape_html(profile.service),
         escape_html(&shown),
         escape_html(&truncate_chars(&profile.of, 120)),
         escape_html(profile.service),
-        kind = if profile.search {
-            "Search"
-        } else if profile.official {
-            "Official profile"
-        } else {
-            "Listing"
-        },
-        note = if profile.search {
-            format!("Searched for on {}", escape_html(profile.service))
-        } else {
-            format!(
-                "{}, from {}",
-                if profile.official {
-                    "Official profile"
-                } else {
-                    "Listing"
-                },
-                profile.source
-            )
-        },
+        escape_html(&profile.note()),
+        kind = profile.kind(),
     );
 }
 
@@ -865,6 +884,12 @@ pub fn resolve_entity<'a>(
             candidates = organizations;
         }
     }
+    if let Some(works) = works_made(&subject, &candidates, kinds) {
+        match works.as_slice() {
+            [work] => return EntityResolution::Resolved(&work.page),
+            _ => candidates = works,
+        }
+    }
     if candidates.is_empty() {
         return EntityResolution::Unresolved;
     }
@@ -881,7 +906,7 @@ pub fn resolve_entity<'a>(
             .iter()
             .copied()
             .filter(|hit| {
-                key(&hit.page.title) == subject
+                plumb_index::same_words(&hit.page.title, &subject)
                     || legal_name(&hit.page.title) == subject
                     || hit.named
                     || hit.whole
@@ -894,7 +919,7 @@ pub fn resolve_entity<'a>(
     let exact: Vec<_> = candidates
         .iter()
         .copied()
-        .filter(|hit| key(&hit.page.title) == subject)
+        .filter(|hit| plumb_index::same_words(&hit.page.title, &subject))
         .collect();
     if exact.len() == 1 {
         return EntityResolution::Resolved(&exact[0].page);
@@ -958,6 +983,61 @@ fn main_sense<'a>(subject: &str, tied: &[&'a plumb_index::pages::PageHit]) -> En
     match (own.next(), own.next()) {
         (Some(hit), None) => EntityResolution::Resolved(&hit.page),
         _ => EntityResolution::Ambiguous(tied.iter().map(|hit| &hit.page).collect()),
+    }
+}
+
+/// What a question about a work's maker asks: the subject is the work.
+/// Only works have these, so a page without one is no answer to it, an
+/// exception to [`EntityResolution`]'s rule ([`works_made`]).
+const MAKERS: &[plumb_core::facts::FactKind] = {
+    use plumb_core::facts::FactKind::*;
+    &[Author, Director, Composer, Creator]
+};
+
+/// How many times as read as every other work the subject names the work
+/// a maker question or a listing means must be ("Titanic (1997 film)", not
+/// the 1953 one).
+const MOST_READ_WORK: u64 = 10;
+
+/// The works a question about a work's maker can be about, when it is one
+/// and `candidates` hold any: those `subject` (lowercased) names, by their
+/// title or another name, with or without a qualifier or "the", that have
+/// the maker it asks for first. Only a work has an author or a director,
+/// and compact records say what a page is only by such facts: "who wrote
+/// 1984" asks about the novel known as 1984, not the year, and "who
+/// directed titanic" about a film, not the ship. Of several, one read far
+/// more than each of the others is the one meant, so it is given alone.
+/// Only the first kind asked counts: "director of the fbi" asks for no TV
+/// series' creator.
+fn works_made<'a>(
+    subject: &str,
+    candidates: &[&'a plumb_index::pages::PageHit],
+    kinds: Option<&[plumb_core::facts::FactKind]>,
+) -> Option<Vec<&'a plumb_index::pages::PageHit>> {
+    let maker = kinds?.first().filter(|kind| MAKERS.contains(kind))?;
+    // fact_asked keeps a work's "the" for "The Hobbit", but "the mona
+    // lisa" is "Mona Lisa".
+    let named = |name: &str| {
+        let name =
+            plumb_core::collapse_whitespace(plumb_index::pages::base_title(name)).to_lowercase();
+        name == subject || subject.strip_prefix("the ") == Some(name.as_str())
+    };
+    let mut works: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|hit| {
+            let page = &hit.page;
+            (hit.named || named(&page.title) || page.aliases.iter().any(|alias| named(alias)))
+                && page.facts.iter().any(|fact| fact.kind == *maker)
+        })
+        .collect();
+    works.sort_by_key(|hit| std::cmp::Reverse(hit.page.views));
+    match works.as_slice() {
+        [] => None,
+        [most, next, ..] if next.page.views.saturating_mul(MOST_READ_WORK) >= most.page.views => {
+            Some(works)
+        }
+        [most, ..] => Some(vec![*most]),
     }
 }
 
@@ -1537,6 +1617,36 @@ mod tests {
     }
 
     #[test]
+    fn a_name_typed_without_its_accents_is_the_title() {
+        let entity = |title: &str, item: &str| {
+            let mut hit = article(title, "", None);
+            hit.page.item = Some(item.into());
+            hit
+        };
+        // Both named by "beyonce": the singer's title is the name asked
+        // for, whatever its accent.
+        let candidates = [
+            entity("Beyoncé (album)", "Q15079464"),
+            entity("Beyoncé", "Q36153"),
+        ];
+        let EntityResolution::Resolved(page) = resolve_entity("beyonce", &candidates, None) else {
+            panic!("beyonce is Beyoncé");
+        };
+        assert_eq!(page.title, "Beyoncé");
+        let candidates = [
+            entity("Mötley Crüe", "Q151215"),
+            entity("Mötley Crüe (album)", "Q1546186"),
+        ];
+        assert!(matches!(
+            resolve_entity("motley crue", &candidates, None),
+            EntityResolution::Resolved(page) if page.title == "Mötley Crüe"
+        ));
+        // Other words are another name.
+        assert!(!plumb_index::same_words("Beyoncé", "beyonce knowles"));
+        assert!(plumb_index::same_words("AC/DC", "ac dc"));
+    }
+
+    #[test]
     fn facts_of_the_main_sense_of_a_name_despite_namesakes() {
         use plumb_core::facts::{fact_asked, FactKind::*};
         let entity = |title: &str, item: &str, facts: &[(plumb_core::facts::FactKind, &str)]| {
@@ -1623,6 +1733,139 @@ mod tests {
         };
         assert_eq!(page.item.as_deref(), Some("Q910012"));
         assert_eq!(fact_answer_from_page(&asked, page, 0), None);
+    }
+
+    #[test]
+    fn makers_are_asked_of_the_work_the_name_means() {
+        use plumb_core::facts::{fact_asked, FactKind, FactKind::*};
+        let page = |title: &str, item: &str, views: u64, facts: &[(FactKind, &str)]| {
+            let mut hit = with_facts(article(title, "", None), facts);
+            hit.page.item = Some(item.into());
+            hit.page.views = views;
+            hit
+        };
+        let ask = |q: &str, candidates: &[PageHit]| {
+            let asked = fact_asked(q).unwrap();
+            match resolve_entity(&asked.subject, candidates, Some(&asked.kinds)) {
+                EntityResolution::Resolved(page) => fact_answer_from_page(&asked, page, 0),
+                _ => None,
+            }
+        };
+        // The year is called 1984; the novel is known as "1984 (novel)".
+        let mut novel = page(
+            "Nineteen Eighty-Four",
+            "Q208460",
+            30_159,
+            &[(Author, "George Orwell")],
+        );
+        novel.named = false;
+        novel.page.aliases = vec!["1984 (novel)".into()];
+        let advert = page(
+            "1984 (advertisement)",
+            "Q4566",
+            900,
+            &[(Director, "Ridley Scott")],
+        );
+        let nineteen = [page("1984", "Q2432", 2_014, &[]), advert, novel];
+        let answer = ask("who wrote 1984", &nineteen).unwrap();
+        assert_eq!(answer.question, "Author of Nineteen Eighty-Four");
+        assert_eq!(answer.answer, "George Orwell");
+        assert_eq!(
+            ask("who directed 1984", &nineteen).unwrap().answer,
+            "Ridley Scott"
+        );
+        // Of films called Titanic, the one read far more.
+        let titanic = [
+            page("Titanic", "Q25173", 39_360, &[(Owner, "White Star Line")]),
+            page(
+                "Titanic (1953 film)",
+                "Q1140317",
+                1_500,
+                &[(Director, "Jean Negulesco")],
+            ),
+            page(
+                "Titanic (1997 film)",
+                "Q44578",
+                30_683,
+                &[(Director, "James Cameron")],
+            ),
+        ];
+        let answer = ask("who directed titanic", &titanic).unwrap();
+        assert_eq!(
+            (answer.question.as_str(), answer.answer.as_str()),
+            ("Director of Titanic (1997 film)", "James Cameron")
+        );
+        assert_eq!(
+            ask("titanic owner", &titanic).unwrap().answer,
+            "White Star Line"
+        );
+        // Works read alike stay a question, and a work called the name
+        // keeps it ("The Lion King" over its remake).
+        let alien = [
+            page(
+                "Alien (film)",
+                "Q103569",
+                23_181,
+                &[(Director, "Ridley Scott")],
+            ),
+            page(
+                "Alien (franchise)",
+                "Q1813470",
+                21_144,
+                &[(Director, "James Cameron")],
+            ),
+        ];
+        assert_eq!(ask("who directed alien", &alien), None);
+        let lion = [
+            page(
+                "The Lion King (2019 film)",
+                "Q27964762",
+                20_000,
+                &[(Director, "Jon Favreau")],
+            ),
+            page(
+                "The Lion King",
+                "Q36479",
+                40_000,
+                &[(Director, "Roger Allers")],
+            ),
+        ];
+        assert_eq!(
+            ask("who directed the lion king", &lion).unwrap().answer,
+            "Roger Allers"
+        );
+        // A work's "the" need not be in its title.
+        let mona = [
+            page(
+                "Mona Lisa",
+                "Q12418",
+                34_216,
+                &[(Creator, "Leonardo da Vinci")],
+            ),
+            page(
+                "Mona Lisa (Prado)",
+                "Q2126369",
+                1_497,
+                &[(Owner, "Museo del Prado")],
+            ),
+        ]
+        .map(|mut hit| {
+            hit.named = false;
+            hit
+        });
+        let answer = ask("who painted the mona lisa", &mona).unwrap();
+        assert_eq!(answer.answer, "Leonardo da Vinci");
+        // "director of" asks a creator only of what the name means.
+        let fbi = [
+            page("Federal Bureau of Investigation", "Q8333", 60_000, &[]),
+            page(
+                "FBI (TV series)",
+                "Q57571045",
+                14_151,
+                &[(Creator, "Dick Wolf")],
+            ),
+        ];
+        assert_eq!(ask("director of fbi", &fbi), None);
     }
 
     #[test]
@@ -2172,6 +2415,32 @@ mod tests {
         );
         let titles: Vec<_> = kept.iter().map(|hit| hit.page.title.as_str()).collect();
         assert_eq!(titles, ["Top Gun"]);
+        // Of films of one name, one read far more than each other.
+        let film = |title: &str, description: &str, views: u64| {
+            let mut hit = article(title, description, None);
+            hit.page.views = views;
+            hit
+        };
+        let titanic = |remake_views: u64| {
+            vec![
+                film(
+                    "Titanic",
+                    "British passenger liner that sank in 1912",
+                    90_000,
+                ),
+                film("Titanic (1997 film)", "Film by James Cameron", 100_000),
+                film("Titanic (1953 film)", "1953 film by Jean Negulesco", 2_000),
+                film("Titanic (1996 miniseries)", "Miniseries", remake_views),
+            ]
+        };
+        let kept = profile_candidates("titanic cast", "titanic", titanic(5_000));
+        let titles: Vec<_> = kept.iter().map(|hit| hit.page.title.as_str()).collect();
+        assert_eq!(titles, ["Titanic (1997 film)"]);
+        // Not when another is read nearly as much.
+        assert_eq!(
+            profile_candidates("titanic cast", "titanic", titanic(20_000)).len(),
+            3
+        );
         // No song has a film's listing.
         assert!(!searches_songs(
             "top gun movie cast",

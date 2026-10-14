@@ -97,41 +97,49 @@ pub fn route(query: &str, answer: Option<Kind>, country: Option<&str>) -> Option
         Some(Kind::Currency) => return sites(&["xe.com", "wise.com"]),
         _ => {}
     }
-    if let Some(word) = defined_word(&text) {
+    if let Some((word, asked)) = word_asked(&text) {
         let encoded: String = url::form_urlencoded::byte_serialize(word.as_bytes()).collect();
+        let encoded = encoded.replace('+', "%20");
         let wiki = word.replace(' ', "_");
         let wiki: String = url::form_urlencoded::byte_serialize(wiki.as_bytes()).collect();
-        return Some(Route {
-            sources: vec![
-                Source {
-                    domain: "merriam-webster.com",
-                    page: Some((
-                        format!(
-                            "https://www.merriam-webster.com/dictionary/{}",
-                            encoded.replace('+', "%20")
-                        ),
-                        format!("{word}: Merriam-Webster dictionary"),
-                    )),
-                },
-                Source {
-                    domain: "dictionary.com",
-                    page: Some((
-                        format!(
-                            "https://www.dictionary.com/browse/{}",
-                            encoded.replace('+', "%20")
-                        ),
-                        format!("{word}: Dictionary.com"),
-                    )),
-                },
-                Source {
-                    domain: "wiktionary.org",
-                    page: Some((
-                        format!("https://en.wiktionary.org/wiki/{wiki}"),
-                        format!("{word}: Wiktionary, the free dictionary"),
-                    )),
-                },
+        let page = |domain, url: String, title: String| Source {
+            domain,
+            page: Some((url, title)),
+        };
+        let wiktionary = page(
+            "wiktionary.org",
+            format!("https://en.wiktionary.org/wiki/{wiki}"),
+            format!("{word}: Wiktionary, the free dictionary"),
+        );
+        let sources = match asked {
+            WordAsk::Meaning => vec![
+                page(
+                    "merriam-webster.com",
+                    format!("https://www.merriam-webster.com/dictionary/{encoded}"),
+                    format!("{word}: Merriam-Webster dictionary"),
+                ),
+                page(
+                    "dictionary.com",
+                    format!("https://www.dictionary.com/browse/{encoded}"),
+                    format!("{word}: Dictionary.com"),
+                ),
+                wiktionary,
             ],
-        });
+            WordAsk::Others => vec![
+                page(
+                    "merriam-webster.com",
+                    format!("https://www.merriam-webster.com/thesaurus/{encoded}"),
+                    format!("{word}: Merriam-Webster thesaurus"),
+                ),
+                page(
+                    "thesaurus.com",
+                    format!("https://www.thesaurus.com/browse/{encoded}"),
+                    format!("{word}: Thesaurus.com"),
+                ),
+                wiktionary,
+            ],
+        };
+        return Some(Route { sources });
     }
     if let Some(route) = tools(&text) {
         return Some(route);
@@ -159,32 +167,102 @@ pub fn asks_the_time(text: &str) -> bool {
     )
 }
 
-/// The word or two `text` (normalized) asks the meaning of: "define
-/// prioritize", "prioritize definition", "meaning of ubiquitous", "what
-/// does ubiquitous mean", "what does asap stand for".
-fn defined_word(text: &str) -> Option<String> {
+/// What a search asks of a word ([`word_asked`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordAsk {
+    /// Its meaning, forms or spelling, which a dictionary gives.
+    Meaning,
+    /// Words that mean the same or the opposite, which a thesaurus gives.
+    Others,
+}
+
+/// Words before a word that ask what a dictionary gives of it.
+const MEANING_LEADS: &[&str] = &[
+    "define ",
+    "definition of ",
+    "meaning of ",
+    "what is the meaning of ",
+    "what is the definition of ",
+    "plural of ",
+    "the plural of ",
+    "what is the plural of ",
+    "past tense of ",
+    "the past tense of ",
+    "what is the past tense of ",
+    "how to spell ",
+    "how do you spell ",
+    "how do i spell ",
+    "spelling of ",
+    "how to pronounce ",
+    "how do you pronounce ",
+    "how do i pronounce ",
+    "pronunciation of ",
+    "pronounce ",
+];
+/// Words after a word that ask what a dictionary gives of it. Not
+/// " plural" or " past tense": "first person plural" and "simple past
+/// tense" ask about grammar.
+const MEANING_TAILS: &[&str] = &[" definition", " meaning", " define"];
+/// Words before a word that ask what a thesaurus gives of it.
+const OTHERS_LEADS: &[&str] = &[
+    "synonym for ",
+    "synonyms for ",
+    "synonym of ",
+    "synonyms of ",
+    "another word for ",
+    "what is another word for ",
+    "other words for ",
+    "antonym for ",
+    "antonyms for ",
+    "antonym of ",
+    "antonyms of ",
+    "opposite of ",
+    "the opposite of ",
+    "what is the opposite of ",
+];
+/// Words after a word that ask what a thesaurus gives of it.
+const OTHERS_TAILS: &[&str] = &[" synonym", " synonyms", " antonym", " antonyms"];
+
+/// The word or two `text` (normalized) asks about, and what it asks:
+/// "define prioritize", "prioritize definition", "what does ubiquitous
+/// mean", "what does asap stand for", "plural of mouse", "how to spell
+/// necessary", "how do you pronounce gif", "is irregardless a word" ask a
+/// dictionary; "synonyms for good", "opposite of brave" a thesaurus.
+fn word_asked(text: &str) -> Option<(String, WordAsk)> {
     let text = text
         .strip_prefix("whats ")
         .map_or(text.to_string(), |rest| format!("what is {rest}"));
-    let word = text
-        .strip_prefix("define ")
-        .or_else(|| text.strip_prefix("definition of "))
-        .or_else(|| text.strip_prefix("meaning of "))
-        .or_else(|| text.strip_prefix("what is the meaning of "))
-        .or_else(|| text.strip_prefix("what is the definition of "))
-        .or_else(|| text.strip_suffix(" definition"))
-        .or_else(|| text.strip_suffix(" meaning"))
-        .or_else(|| text.strip_suffix(" define"))
+    let lead = |leads: &[&str]| leads.iter().find_map(|lead| text.strip_prefix(lead));
+    let tail = |tails: &[&str]| tails.iter().find_map(|tail| text.strip_suffix(tail));
+    let what_does = || {
+        let rest = text.strip_prefix("what does ")?;
+        [" mean", " stand for", " stands for"]
+            .iter()
+            .find_map(|tail| rest.strip_suffix(tail))
+    };
+    let is_word = || {
+        let rest = text.strip_prefix("is ")?;
+        [" a word", " a real word"]
+            .iter()
+            .find_map(|tail| rest.strip_suffix(tail))
+    };
+    let meaning = |word| (word, WordAsk::Meaning);
+    let others = |word| (word, WordAsk::Others);
+    let (word, asked) = lead(MEANING_LEADS)
+        .map(meaning)
+        .or_else(|| lead(OTHERS_LEADS).map(others))
         .or_else(|| {
-            let rest = text.strip_prefix("what does ")?;
-            [" mean", " stand for", " stands for"]
-                .iter()
-                .find_map(|tail| rest.strip_suffix(tail))
-        })?
-        .trim();
+            tail(MEANING_TAILS)
+                .or_else(what_does)
+                .or_else(is_word)
+                .map(meaning)
+        })
+        .or_else(|| tail(OTHERS_TAILS).map(others))?;
+    let word = word.trim();
     let word = word.strip_prefix("the word ").unwrap_or(word);
-    // "meaning of shiloh name" asks what a name means, not a dictionary.
-    if word.ends_with(" name") {
+    // "meaning of shiloh name" asks what a name means, not a dictionary,
+    // and "how to spell check" for a spelling checker.
+    if word.ends_with(" name") || word == "check" {
         return None;
     }
     let n = word.split(' ').count();
@@ -193,7 +271,7 @@ fn defined_word(text: &str) -> Option<String> {
         && word
             .chars()
             .all(|c| c.is_alphabetic() || c == ' ' || c == '-'))
-    .then(|| word.to_string())
+    .then(|| (word.to_string(), asked))
 }
 
 /// Languages people translate between, as they type them.
@@ -314,6 +392,15 @@ fn tools(text: &str) -> Option<Route> {
         [a, "translation" | "translator" | "translate"] => is_language(a),
         [a, "to", b, "translation" | "translator" | "translate"] => {
             is_language(a) && is_language(b)
+        }
+        // "how do you say thank you in german", "happy birthday in spanish
+        // translation", "mood swings meaning in hindi". A bare "bible in
+        // spanish" may ask for one written in it, so it is not one.
+        ["how", "do" | "would" | "can", "you" | "i" | "we", "say", phrase @ .., "in", to]
+        | ["how", "to", "say", phrase @ .., "in", to]
+        | [phrase @ .., "in", to, "translation"]
+        | [phrase @ .., "meaning", "in", to] => {
+            !phrase.is_empty() && phrase.len() <= 5 && is_language(to)
         }
         _ => false,
     };
@@ -541,6 +628,25 @@ mod tests {
             domains(route("traductor", None, None))[0],
             "translate.google.com"
         );
+        // Asking how to say something in a language.
+        for (query, first) in [
+            ("how do you say thank you in german", "translate.google.com"),
+            ("how to say good morning in french", "translate.google.com"),
+            ("How do you say “cat” in Spanish?", "spanishdict.com"),
+            ("happy birthday in spanish translation", "spanishdict.com"),
+            ("mood swings meaning in hindi", "translate.google.com"),
+        ] {
+            assert_eq!(domains(route(query, None, None))[0], first, "{query}");
+        }
+        // Something written in a language, or said in a place, is not.
+        for query in [
+            "bible in spanish",
+            "movies in hindi",
+            "how do you say goodbye in a letter",
+            "how to say no in a meeting",
+        ] {
+            assert!(route(query, None, None).is_none(), "{query}");
+        }
         assert_eq!(domains(route("speed test", None, None))[0], "speedtest.net");
         assert_eq!(domains(route("food near me", None, None))[0], "yelp.com");
         assert_eq!(
@@ -581,23 +687,58 @@ mod tests {
         ] {
             assert_eq!(route(query, None, None), None, "{query}");
         }
-        assert_eq!(defined_word("define"), None);
-        assert_eq!(
-            defined_word("prioritize meaning"),
-            Some("prioritize".into())
-        );
-        assert_eq!(
-            defined_word("what does ubiquitous mean"),
-            Some("ubiquitous".into())
-        );
-        assert_eq!(
-            defined_word("what does asap stand for"),
-            Some("asap".into())
-        );
-        assert_eq!(
-            defined_word("whats the meaning of serendipity"),
-            Some("serendipity".into())
-        );
+        for query in [
+            "define",
+            "how to spell check",
+            "plural of",
+            "first person plural",
+            "simple past tense",
+            "how to pronounce my name",
+            "english pronunciation",
+            "is this a good word to use here",
+        ] {
+            assert_eq!(word_asked(query), None, "{query}");
+        }
+        for (query, word, asked) in [
+            ("prioritize meaning", "prioritize", WordAsk::Meaning),
+            ("what does ubiquitous mean", "ubiquitous", WordAsk::Meaning),
+            ("what does asap stand for", "asap", WordAsk::Meaning),
+            (
+                "whats the meaning of serendipity",
+                "serendipity",
+                WordAsk::Meaning,
+            ),
+            ("plural of mouse", "mouse", WordAsk::Meaning),
+            ("whats the plural of cactus", "cactus", WordAsk::Meaning),
+            ("past tense of swim", "swim", WordAsk::Meaning),
+            ("how to spell necessary", "necessary", WordAsk::Meaning),
+            (
+                "how do you spell definitely",
+                "definitely",
+                WordAsk::Meaning,
+            ),
+            ("define synonym", "synonym", WordAsk::Meaning),
+            ("how do you pronounce gif", "gif", WordAsk::Meaning),
+            (
+                "pronunciation of worcestershire",
+                "worcestershire",
+                WordAsk::Meaning,
+            ),
+            ("is irregardless a word", "irregardless", WordAsk::Meaning),
+            ("is alot a real word", "alot", WordAsk::Meaning),
+            ("synonyms for good", "good", WordAsk::Others),
+            ("another word for very happy", "very happy", WordAsk::Others),
+            (
+                "whats another word for important",
+                "important",
+                WordAsk::Others,
+            ),
+            ("opposite of brave", "brave", WordAsk::Others),
+            ("antonym of generous", "generous", WordAsk::Others),
+            ("happy synonyms", "happy", WordAsk::Others),
+        ] {
+            assert_eq!(word_asked(query), Some((word.into(), asked)), "{query}");
+        }
     }
 
     fn hit(domain: &str, named: bool) -> Hit {
@@ -716,5 +857,21 @@ mod tests {
         assert_eq!(hits[1].url, "https://www.dictionary.com/browse/prioritize");
         assert_eq!(hits[2].url, "https://en.wiktionary.org/wiki/prioritize");
         assert_eq!(hits[3].domain, "prioritize.io");
+    }
+
+    #[test]
+    fn synonyms_and_opposites_link_to_the_thesauruses() {
+        let route = route("opposite of brave", None, None).unwrap();
+        let mut hits = vec![hit("brave.com", false), hit("thesaurus.com", false)];
+        lead_with(&mut hits, &mut [], &route, |domain| {
+            Some(hit(domain, false))
+        });
+        assert_eq!(
+            hits[0].url,
+            "https://www.merriam-webster.com/thesaurus/brave"
+        );
+        assert_eq!(hits[1].url, "https://www.thesaurus.com/browse/brave");
+        assert_eq!(hits[2].url, "https://en.wiktionary.org/wiki/brave");
+        assert_eq!(hits[3].domain, "brave.com");
     }
 }

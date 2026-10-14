@@ -1,0 +1,60 @@
+name: Zotero plugin
+
+# Tests and packs the Zotero plugin in zotero/. Each run uploads the .xpi as
+# the artifact plumb-search-zotero; a zotero-v* tag also attaches it to a
+# draft release.
+on:
+  pull_request:
+    paths:
+      - "zotero/**"
+      - ".github/workflows/zotero.yml"
+  push:
+    branches: [main]
+    paths:
+      - "zotero/**"
+      - ".github/workflows/zotero.yml"
+    tags: ["zotero-v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: node --test zotero/test/plumb.test.js
+      - name: Check that a release tag names the plugin's version
+        if: startsWith(github.ref, 'refs/tags/zotero-v')
+        run: test "zotero-v$(node -p 'require("./zotero/manifest.json").version')" = "$GITHUB_REF_NAME"
+      - run: zotero/build.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plumb-search-zotero
+          path: target/zotero/
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/zotero-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: plumb-search-zotero
+          path: dist
+      # Not the latest release: that stays Plumb's own, which the desktop
+      # app's download links point at.
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          draft: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: dist/*.xpi
