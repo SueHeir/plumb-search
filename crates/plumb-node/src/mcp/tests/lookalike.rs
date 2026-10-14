@@ -1,5 +1,5 @@
 use super::*;
-use crate::mcp::lookalike::{edit_distance, name_queries, resembles, squash};
+use crate::mcp::lookalike::{borrowed_at, edit_distance, name_queries, squash};
 
 #[test]
 fn name_queries_read_the_brand_out_of_a_host() {
@@ -22,10 +22,12 @@ fn name_queries_read_the_brand_out_of_a_host() {
 
 #[test]
 fn resembles_spelled_out_names_and_typos() {
-    let check = |host: &str, real: &str| {
+    let titled = |host: &str, real: &str, title: Option<&str>| {
         let domain = registrable_domain(host).unwrap();
-        resembles(&squash(host), &squash(&domain_label(&domain)), real)
+        borrowed_at(&squash(host), &squash(&domain_label(&domain)), real, title)
     };
+    let at = |host: &str, real: &str| titled(host, real, None);
+    let check = |host: &str, real: &str| at(host, real).is_some();
     assert!(check("paypal-login.us", "paypal.com"));
     assert!(check("paypa1.com", "paypal.com"));
     assert!(check("twiter.com", "twitter.com"));
@@ -36,6 +38,24 @@ fn resembles_spelled_out_names_and_typos() {
     assert!(!check("bing.com", "ebay.com"));
     // Two-letter names match too much to count.
     assert!(!check("aardvark.com", "aa.com"));
+    // A site on another's domain is named by its first name when its
+    // title says it in capitals.
+    let aws = Some("Cloud Computing Services - Amazon Web Services (AWS)");
+    assert_eq!(
+        titled("aws-console-login.com", "aws.amazon.com", aws),
+        Some(0)
+    );
+    assert!(!check("aws-console-login.com", "aws.amazon.com"));
+    assert!(titled("console-login.com", "aws.amazon.com", aws).is_none());
+    let maps = Some("Google Maps");
+    assert!(titled("maps-of-europe.com", "maps.google.com", maps).is_none());
+    // Where the name is borrowed: the BBC's comes before live.com's.
+    assert_eq!(at("bbc-news-live.com", "bbc.co.uk"), Some(0));
+    assert_eq!(at("bbc-news-live.com", "live.com"), Some(7));
+    assert_eq!(at("paypa1.com", "paypal.com"), Some(0));
+    // A typo is where the host's own label is.
+    let host = "secure.paypal.amazno.com";
+    assert!(at(host, "paypal.com") < at(host, "amazon.com"));
     assert_eq!(edit_distance("kitten", "sitting"), 3);
     assert_eq!(edit_distance("ab", "ba"), 1);
 }
@@ -136,5 +156,54 @@ fn check_lookalike_preserves_impersonation_and_unverified_tenant_controls() {
         assert_eq!(answer["verdict"], "suspected", "{host}: {answer}");
         assert_eq!(answer["lookalike"], true);
         assert_eq!(answer["suspected"], true);
+    }
+}
+
+#[test]
+fn check_lookalike_names_the_site_whose_name_comes_first() {
+    let mcp = scripted(|query| {
+        let site = |domain: &str, link_score: f32| {
+            let mut site = hit(domain, 2.0, link_score, true);
+            site.official = true;
+            site
+        };
+        let hits = if query.contains("bbc") {
+            vec![site("bbc.co.uk", 0.8)]
+        } else if query == "live" {
+            vec![site("live.com", 0.85)]
+        } else if query.contains("paypal") {
+            vec![site("paypal.com", 0.9)]
+        } else if query == "shop" {
+            vec![site("shop.app", 0.95)]
+        } else if query.contains("aws") {
+            let mut aws = site("aws.amazon.com", 0.8);
+            aws.title = Some("Cloud Computing Services - Amazon Web Services (AWS)".into());
+            vec![aws]
+        } else {
+            Vec::new()
+        };
+        results(hits, Vec::new())
+    });
+    for (host, real) in [
+        ("bbc-news-live.com", "bbc.co.uk"),
+        ("aws-console-login.com", "aws.amazon.com"),
+    ] {
+        let answer = mcp
+            .check_lookalike(host, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "lookalike", "{host}: {answer}");
+        assert_eq!(answer["imitates"]["domain"], real, "{host}: {answer}");
+    }
+    // The same name on another ending is only suspected, and comes before
+    // a word ahead of it.
+    for (host, real) in [
+        ("shop.paypal.de", "paypal.com"),
+        ("aws.dev", "aws.amazon.com"),
+    ] {
+        let answer = mcp
+            .check_lookalike(host, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "suspected", "{host}: {answer}");
+        assert_eq!(answer["imitates"]["domain"], real, "{host}: {answer}");
     }
 }

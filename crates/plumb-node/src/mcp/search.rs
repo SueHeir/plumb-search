@@ -145,10 +145,7 @@ impl Mcp {
             // "fastapi docs" is not "fastai docs".
             results.spelling = None;
         }
-        let places = if sites_only
-            || plumb_core::Operators::parse(query).any()
-            || plumb_index::places::parse_place_query(query).is_none()
-        {
+        let places = if sites_only || plumb_core::Operators::parse(query).any() {
             None
         } else {
             crate::assembly::places(
@@ -205,6 +202,7 @@ impl Mcp {
             &mut results,
             limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
             |domain| self.backend.site(domain),
+            |word| self.backend.common_word(word),
         );
         // Placed as the results page places them, which the info box needs.
         let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();

@@ -1042,20 +1042,21 @@ pub fn run_facts(args: FetchFactsArgs) -> Result<()> {
     Ok(())
 }
 
-/// Makes the places set file `dest` from an OpenStreetMap extract, by
+/// Makes the places set file `dest` from OpenStreetMap extracts, by
 /// default the whole planet (about 90 GB), downloaded into --work.
 fn run_places(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     use crate::build::osm;
-    let pbf = match &args.osm {
-        Some(pbf) => pbf.clone(),
-        None => fetch_dump(args, osm::PLANET_URL, "OpenStreetMap's planet file")?,
+    let pbfs = match args.osm.as_slice() {
+        [] => vec![fetch_dump(
+            args,
+            osm::PLANET_URL,
+            "OpenStreetMap's planet file",
+        )?],
+        pbfs => pbfs.to_vec(),
     };
-    let places = osm::read_places(&pbf)?;
+    let places = osm::read_places(&pbfs, args.articles.as_deref())?;
     if places.is_empty() {
-        bail!(
-            "no places were found in {}; nothing was written",
-            pbf.display()
-        );
+        bail!("no places were found in {pbfs:?}; nothing was written");
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
