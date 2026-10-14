@@ -138,13 +138,13 @@ impl PageSearcher {
         // A page of the site found by its words that says more of the rest:
         // who.int's "Questions and answers on RTS,S and R21 malaria
         // vaccines" for "who malaria vaccine", not its "Malaria".
-        let said = self.said(&best.page, &named);
+        let said = self.named_words_said(&best.page, &named);
         let own = registrable_domain(&site.domain);
         if found.iter().any(|hit| {
             hit.page.is_site_page()
                 && own.is_some()
                 && registrable_domain(&hit.page.url) == own
-                && self.said(&hit.page, &named) > said
+                && self.named_words_said(&hit.page, &named) > said
         }) {
             return Ok(());
         }
@@ -286,7 +286,8 @@ impl PageSearcher {
     /// as the words they stand for ([`join_initials`]): for
     /// [`Naming::Covers`], the share of the part the rest is; for
     /// [`Naming::Within`], the share of the rest the title and the page's
-    /// path say ([`PageSearcher::said`]). 0 when no part is named so.
+    /// path say ([`PageSearcher::named_words_said`]). 0 when no part is
+    /// named so.
     fn named_share(&self, page: &Page, named: &Named, naming: Naming) -> f32 {
         let asked = named.asked;
         let title = page.title.as_str();
@@ -320,7 +321,7 @@ impl PageSearcher {
             // /fact-sheets/detail/malaria is the "malaria fact sheet", not
             // its page "Fact sheets".
             Naming::Within if shares.any(|share| share >= NAMED_TITLE_SHARE) => {
-                self.said(page, named) as f32 / asked.len() as f32
+                self.named_words_said(page, named) as f32 / asked.len() as f32
             }
             Naming::Within => 0.0,
         }
@@ -328,7 +329,7 @@ impl PageSearcher {
 
     /// How many words of the rest of the search `page`'s title and path
     /// have, initials read as the words they stand for.
-    fn said(&self, page: &Page, named: &Named) -> usize {
+    fn named_words_said(&self, page: &Page, named: &Named) -> usize {
         let mut words = analysis::tokens(&self.stemmed, &page.title);
         join_initials(&mut words, named.initials);
         let path = page.url.split_once("://").map_or("", |(_, rest)| rest);
