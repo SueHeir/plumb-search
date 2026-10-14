@@ -157,6 +157,14 @@ pub(crate) fn joined_analyzer() -> TextAnalyzer {
         .build()
 }
 
+/// Whether `a` and `b` are the same words, whatever their case, accents
+/// and punctuation, as the index matches them: "beyonce" is "Beyoncé",
+/// "motley crue" "Mötley Crüe".
+pub fn same_words(a: &str, b: &str) -> bool {
+    let analyzer = words_analyzer();
+    tokens(&analyzer, a) == tokens(&analyzer, b)
+}
+
 /// The tokens `analyzer` produces for `text`.
 pub(crate) fn tokens(analyzer: &TextAnalyzer, text: &str) -> Vec<String> {
     let mut analyzer = analyzer.clone();

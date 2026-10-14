@@ -22,6 +22,15 @@ use crate::cli::{MeaningArgs, QueryInstruction};
 /// Sites nearest a query in meaning: closeness is spread over them, and
 /// the search ranks the nearest of them and the most popular.
 const NEAREST: usize = 1_000;
+/// How far the nearest site's cosine must stand above the last of the
+/// [`NEAREST`] for closeness to reach 1; below that, closeness shrinks in
+/// proportion. The raw cosine can't tell what is near: on hpc's 1,000
+/// review searches, a right site found by meaning and an unrelated one
+/// leading the results ("trifling glyph of magicka": an Italian theme
+/// park) both scored about 0.7. How far the nearest stood out did: by 0.12
+/// (median) where an unrelated site led, 0.15 where meaning found the
+/// right one.
+const LEAST_SPREAD: f32 = 0.15;
 /// Vectors made between saves of the vectors file, so a stopped run keeps
 /// most of its work.
 pub const SAVE_EVERY: usize = 10_000;
@@ -172,7 +181,9 @@ impl SharedMeaning {
 /// last of them 0, and sites farther away 0 too. A thousand, not fewer:
 /// with hundreds of thousands of sites, a big one the query describes is
 /// often a few hundred places down, behind small sites that repeat the
-/// query's words, and must still count as close.
+/// query's words, and must still count as close. When the nearest stands
+/// out little from the last of them, nothing is really near, and closeness
+/// stays below 1 ([`LEAST_SPREAD`]).
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
     nearest: Vec<String>,
@@ -187,6 +198,19 @@ struct Spread {
     vector: Vec<i8>,
     best: f32,
     floor: f32,
+}
+
+impl Spread {
+    /// `cosine` spread from the last of the nearest (0) to the nearest
+    /// (1), over at least [`LEAST_SPREAD`].
+    fn stretch(&self, cosine: f32) -> f32 {
+        if self.best > self.floor {
+            (cosine - self.floor) / (self.best - self.floor).max(LEAST_SPREAD)
+        } else {
+            cosine
+        }
+        .clamp(0.0, 1.0)
+    }
 }
 
 impl<'a> QueryMeaning<'a> {
@@ -229,12 +253,7 @@ impl<'a> QueryMeaning<'a> {
     }
 
     fn spread(&self, spread: &Spread, domain: &str) -> Option<f32> {
-        let cosine = self.vectors.closeness(&spread.vector, domain)?;
-        if spread.best > spread.floor {
-            Some(((cosine - spread.floor) / (spread.best - spread.floor)).clamp(0.0, 1.0))
-        } else {
-            Some(cosine.clamp(0.0, 1.0))
-        }
+        Some(spread.stretch(self.vectors.closeness(&spread.vector, domain)?))
     }
 }
 
@@ -673,6 +692,25 @@ mod tests {
         let vectors = vectors.into_inner().unwrap();
         assert_eq!(vectors.len(), 1);
         assert!(vectors.get("zzz.example").is_some());
+    }
+
+    #[test]
+    fn closeness_reaches_one_only_when_the_nearest_stands_out() {
+        let spread = |best, floor| Spread {
+            vector: Vec::new(),
+            best,
+            floor,
+        };
+        // hpc's "trifling glyph of magicka": the nearest stands out by 0.09,
+        // and an Italian theme park at 0.659 no longer counts as close.
+        let nothing_near = spread(0.702, 0.611);
+        assert!((nothing_near.stretch(0.659) - 0.32).abs() < 0.01);
+        assert!((nothing_near.stretch(0.702) - 0.61).abs() < 0.01);
+        // "paris saint-germain": psg.fr stands out by 0.16 and stays at 1.
+        let near = spread(0.794, 0.634);
+        assert_eq!(near.stretch(0.794), 1.0);
+        assert!((near.stretch(0.714) - 0.5).abs() < 0.01);
+        assert_eq!(near.stretch(0.6), 0.0);
     }
 
     #[test]
