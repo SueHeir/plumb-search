@@ -12,7 +12,7 @@ use super::docs::{docs_found_by_words, docs_named_as_code};
 use super::sites::{base_title, describes_an_organization, is_government, site_is_titled, squash};
 use super::{
     LearnedPlace, Page, PageHit, PlacedPage, ASKING_WORDS, DOCS_SET, FILMS_SET, GITHUB_SET,
-    PODCASTS_SET, REFERENCE2_SET, SUBPAGES_SET, WIKIDATA_SET,
+    PODCASTS_SET, SUBPAGES_SET, WIKIDATA_SET,
 };
 use crate::analysis;
 
@@ -271,24 +271,30 @@ const SUBPAGE_TITLE_SHARE: f32 = 0.75;
 /// The same share when the title holds every word of the query.
 const SUBPAGE_HELD_SHARE: f32 = 0.5;
 
+/// Most words of a reference page's title holding both words of a
+/// two-word query side by side, for it to be asked for.
+const REFERENCE_PAIR_TITLE_WORDS: usize = 5;
+
 /// Words a title shares with anything, left out of [`SUBPAGE_TITLE_SHARE`].
 const TITLE_STOP_WORDS: &[&str] = &[
     "a", "an", "and", "at", "by", "for", "from", "in", "my", "of", "on", "or", "the", "to", "with",
     "you", "your",
 ];
 
-/// Whether `hit`, when it is a subpage or staged reference page, may be listed for
+/// Whether `hit`, when it is a subpage or reference page, may be listed for
 /// `query`: named by its whole title, on one of the query's best sites
 /// ("rotten tomatoes oppenheimer", "met museum hours"), or with most of
 /// its title's words, or of its title before a colon, in the query
 /// ("amazon leadership principles" for "Amazon Leadership Principles:
-/// Values and company culture"). A big site's news, press releases and reviews
-/// share words with all sorts of searches: "seven summits" is not a
-/// leadership summit at jnj.com, nor "mount everest" a film review at
-/// ign.com. A tag archive is listed only on one of the best sites, named
-/// or not. Pages of other sets always may.
+/// Values and company culture"), or, for a reference page, with all of the
+/// query's. A big site's news, press releases and reviews share words with
+/// all sorts of searches: "seven summits" is not a leadership summit at
+/// jnj.com, nor "mount everest" a film review at ign.com, nor "work
+/// australia" Live Science's story on how a second El Niño works. A tag
+/// archive is listed only on one of the best sites, named or not. Pages of
+/// other sets always may.
 pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
-    if hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET {
+    if !hit.page.is_site_page() {
         return true;
     }
     let domain = registrable_domain(&hit.page.url);
@@ -339,11 +345,13 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
             .flat_map(|word| analysis::tokens(&STEMS, &word))
             .collect()
     };
-    let asked: HashSet<String> = words(query).into_iter().collect();
+    let query_words = words(query);
+    let asked: HashSet<String> = query_words.iter().cloned().collect();
     let fewest = asked.len().min(2);
     if fewest == 0 {
         return false;
     }
+    let reference = hit.page.set != SUBPAGES_SET;
     let has_most = |title: &str| {
         let in_order = words(title);
         let title: HashSet<String> = in_order.iter().cloned().collect();
@@ -370,7 +378,23 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
         } else {
             SUBPAGE_TITLE_SHARE
         };
-        shared >= fewest && shared as f32 >= share * title.len() as f32
+        // A reference page's title with every word of a query of three
+        // words or more is asked for however long it is: "pain with
+        // ovarian cyst" for "Will an ovarian cyst cause back pain? What to
+        // know". Two words side by side are enough in a short title,
+        // "epley's maneuver" for "Epley Maneuver (Canalith Repositioning
+        // Procedure)", as is a longer query but for its last word, often
+        // the kind of thing it is: "lemon drop cocktail" for "Lemon drop
+        // martini recipe". A longer title with them is mostly news, "hulk
+        // hogan" for "Hulk Hogan's Daughter Brooke Welcomes Twins". A
+        // subpage's long title with them is more often a big site's news or
+        // press release.
+        let lead = &query_words[..query_words.len() - 1];
+        let pair = title.len() <= REFERENCE_PAIR_TITLE_WORDS
+            && (asked.len() == 2 && held
+                || lead.len() >= 2 && in_order.windows(lead.len()).any(|run| run == lead));
+        let whole = reference && (shared == asked.len() && asked.len() >= 3 || pair);
+        whole || shared >= fewest && shared as f32 >= share * title.len() as f32
     };
     // Or of its title before a subtitle, "Declaration of Independence" in
     // "Declaration of Independence: A Transcription", or before the site's
@@ -402,7 +426,7 @@ fn is_tag_archive(url: &str) -> bool {
 }
 
 /// Whether `word` is a year: four digits from 1000 to 2999.
-fn is_year(word: &str) -> bool {
+pub(crate) fn is_year(word: &str) -> bool {
     word.len() == 4
         && word.bytes().all(|b| b.is_ascii_digit())
         && matches!(word.as_bytes()[0], b'1' | b'2')
@@ -433,6 +457,18 @@ fn in_other_language(url: &str) -> bool {
     first.len() <= 5 && OTHER_LANGUAGES.contains(&language)
 }
 
+/// Whether the query names the best of `sites` along with its own page,
+/// which [`add_named_site_page`](super::PageSearcher::add_named_site_page)
+/// put under it: "who fact sheets" wants who.int, with its "Fact sheets",
+/// before the CDC's fact sheet on sepsis.
+pub(crate) fn names_best_site_page(sites: &[crate::Hit], placed: &[PlacedPage]) -> bool {
+    sites.first().is_some_and(|best| {
+        placed
+            .iter()
+            .any(|p| p.under.as_deref() == Some(best.domain.as_str()) && p.hit.page.is_site_page())
+    })
+}
+
 /// Whether `hit` must come after the best of `sites`, whatever the
 /// learned ranking says. A docs page found by its words: "python package
 /// index" wants pypi.org first, and "bash parameter expansion" anything
@@ -442,7 +478,9 @@ fn in_other_language(url: &str) -> bool {
 /// "minecraft" wants minecraft.net before the Computer History Museum's
 /// page on Minecraft, "walmart" walmart.com before CNET's page of news on
 /// Walmart, and "red dead redemption 2" rockstargames.com, with the
-/// article under it, before IGN's guide to the game. Such a page's
+/// article under it, before IGN's guide to the game. `names_best` is also
+/// set when the query names the best site with one of its pages
+/// ([`names_best_site_page`]). Such a page's
 /// popularity is measured within its set, often a small one, so it reads
 /// as more read than the site's own article. Only a page of the best site
 /// itself may come before it, as docs.python.org's "python sorting
@@ -477,7 +515,8 @@ fn on_site(page: &Page, domain: &str) -> bool {
 /// article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
     placed.retain(|page| crate::health::page_allowed(query, &page.hit.page));
-    let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0);
+    let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0)
+        || names_best_site_page(sites, placed);
     let code = |p: &PlacedPage| p.under.is_none() && docs_named_as_code(&p.hit, query, sites);
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
         if code(page) {

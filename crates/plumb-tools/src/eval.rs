@@ -755,10 +755,9 @@ fn evaluate(
         let applied = results.spelling.as_ref().is_some_and(|s| s.applied);
         if !args.exact && !applied {
             if let Some(pages) = pages.as_ref() {
-                let spelled_right = pages
-                    .search(&q.query, 10)?
-                    .iter()
-                    .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+                let found = pages.search(&q.query, 10)?;
+                let spelled_right =
+                    pages.spelled_right(&q.query, &found, results.spelling.as_ref());
                 results.spelling = match results.spelling.take() {
                     Some(spelling) if !spelled_right => pages.check_spelling(&q.query, spelling)?,
                     _ => None,
@@ -796,7 +795,9 @@ fn evaluate(
                         searcher.site(domain).ok().flatten()
                     })
                 }
-                None => plumb_index::health::sources_lead(&searched, &mut hits, &mut []),
+                None => plumb_index::health::sources_lead(&searched, &mut hits, &mut [], &|word| {
+                    searcher.is_common_word(word)
+                }),
             }
         }
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
@@ -851,7 +852,12 @@ fn evaluate(
                             searcher.site(domain).ok().flatten()
                         })
                     }
-                    None => plumb_index::health::sources_lead(&searched, &mut lifted, &mut placed),
+                    None => plumb_index::health::sources_lead(
+                        &searched,
+                        &mut lifted,
+                        &mut placed,
+                        &|word| searcher.is_common_word(word),
+                    ),
                 }
                 if let Some(features) = features.as_deref_mut() {
                     let closeness = |domain: &str| {

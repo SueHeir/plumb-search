@@ -35,6 +35,7 @@ mod named_site;
 mod page;
 mod papers;
 mod placing;
+mod repos;
 mod scoring;
 mod search;
 mod sites;
@@ -48,7 +49,9 @@ pub use self::placing::{
     MAX_PAGES_LISTED, MAX_SITE_PAGES, MIN_PARTIAL_SCORE, OPERATOR_PAGES, PARTIAL_AFTER,
     WEAK_SITE_MATCH,
 };
-pub(crate) use self::placing::{asked_as_question, kept_below, named_page_site};
+pub(crate) use self::placing::{
+    asked_as_question, kept_below, named_page_site, names_best_site_page,
+};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
 pub use self::sites::base_title;
 
@@ -143,12 +146,14 @@ pub const DESCRIBED_QUERY_WORDS: usize = 2;
 pub const DESCRIBED_MISSING_FROM: usize = 3;
 
 /// How much a query word an article only says counts, against one of its
-/// title.
+/// title. It has to say the word itself, in the singular or the plural,
+/// not only its stem: "scheduled monument" does not say "schedule".
 pub const DESCRIBED_WORD: f32 = 0.5;
 
 /// Most `name` of a Wikipedia article whose lead ([`Page::lead`]), with
-/// its names and description, has every word of a query (stemmed, without
-/// the asking words) of at least [`DESCRIBED_QUERY_WORDS`]: the article
+/// its names and description, says every word of a query (without the
+/// asking words, as [`DESCRIBED_WORD`] says) of at least
+/// [`DESCRIBED_QUERY_WORDS`]: the article
 /// whose lead matches them best gets it, others less by how much worse
 /// theirs does. "triassic jurassic cretaceous" finds Mesozoic.
 pub const LEAD_MATCH: f32 = 0.55;
@@ -288,12 +293,13 @@ pub const DOCS_SET: &str = "docs";
 
 /// The set of inner pages of well-known reference sites: health,
 /// dictionaries, recipes, how-tos, government (see
-/// `plumb_tools::reference_sites`).
+/// `plumb_tools::reference_sites`). Found by their words, they are listed
+/// only when the search asks for them (`subpage_asked`).
 pub const REFERENCE_SET: &str = "reference";
 
-/// Opt-in staged reference pages with the stricter title relevance gate.
-/// Legacy `reference` remains readable until a complete, coverage-checked
-/// generation is explicitly selected. Older readers never request this id.
+/// The reference set under a name v0.2.0 nodes never request: they list
+/// "reference" pages with no such check. Opt-in until a complete,
+/// coverage-checked generation of it is selected.
 pub const REFERENCE2_SET: &str = "reference2";
 
 /// The set of inner pages of other well-known sites: universities and
