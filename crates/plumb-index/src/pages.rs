@@ -426,10 +426,11 @@ pub struct PageHit {
     /// ([`crate::learned::reorder`]), which [`place_pages`] keeps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learned: Option<LearnedPlace>,
-    /// Only meant by a part of the query ([`PageSearcher::linked`]), not
-    /// named by it: listed after [`PARTIAL_AFTER`] sites, wherever the
-    /// learned ranking puts it, as "cons of drinking coffee" is not about
-    /// Cons.
+    /// Listed only for what a part of the query means
+    /// ([`PageSearcher::linked`]), not found any other way: listed after
+    /// [`PARTIAL_AFTER`] sites, wherever the learned ranking puts it, as
+    /// "cons of drinking coffee" is not about Cons. A page also named by
+    /// another reading of the query ("tylenol formula") is not.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub meant: bool,
 }

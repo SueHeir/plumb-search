@@ -637,7 +637,7 @@ pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<Place
         }
         if is_record(&page.hit) || code(page) {
             page.at = 0;
-        } else if namesake || page.hit.meant {
+        } else if namesake || page.hit.meant && !page.hit.named && !page.hit.whole {
             page.at = page.at.max(PARTIAL_AFTER).min(sites.len());
         } else if kept_below(&page.hit, sites, names_best) {
             page.at = page.at.max(1).min(sites.len());

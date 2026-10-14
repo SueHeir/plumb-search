@@ -749,6 +749,7 @@ fn keep_found(hits: &mut Vec<PageHit>, found: Vec<PageHit>) {
             Some(kept) => {
                 kept.named |= hit.named;
                 kept.whole |= hit.whole;
+                kept.meant &= hit.meant;
                 kept.score = kept.score.max(hit.score);
             }
             None => hits.push(hit),

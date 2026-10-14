@@ -1127,14 +1127,15 @@ mod tests {
             }],
             None,
         );
-        for meant in [false, true] {
+        // Named by another reading of the query too, it is not held.
+        for (meant, named) in [(false, false), (true, false), (true, true)] {
             let mut hits: Vec<Hit> = ["a.com", "b.com", "c.com", "d.com"]
                 .into_iter()
                 .map(|domain| site(domain, 0.5, false))
                 .collect();
             let found = PageHit {
                 meant,
-                ..article("Cons", false)
+                ..article("Cons", named)
             };
             let mut placed = place_pages("cons of drinking coffee", &hits, vec![found]);
             reorder(
@@ -1148,8 +1149,8 @@ mod tests {
                 &hits,
                 placed.iter().map(|p| p.hit.clone()).collect(),
             );
-            let at = if meant { PARTIAL_AFTER } else { 0 };
-            assert_eq!((placed[0].at, again[0].at), (at, at), "meant: {meant}");
+            let at = if meant && !named { PARTIAL_AFTER } else { 0 };
+            assert_eq!((placed[0].at, again[0].at), (at, at), "{meant} {named}");
         }
     }
 
