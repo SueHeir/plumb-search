@@ -42,6 +42,7 @@ impl PageSearcher {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let words = &*plumb_core::docs::docs_query(words);
         let scope = self.page_scope(ops, docs);
         let mut hits = self.search_general(words, limit, scope.as_deref())?;
         for hit in self.search_docs(words, ops, docs, limit)? {

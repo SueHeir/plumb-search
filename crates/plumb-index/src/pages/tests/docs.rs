@@ -997,3 +997,58 @@ fn manual_pages_are_named_without_their_section() {
     // A bare name may be anything.
     assert!(searcher.search("ls", 10).unwrap().is_empty());
 }
+
+#[test]
+fn numbered_documents_go_packages_and_error_codes_are_named() {
+    // As the docs set writes them: plumb-tools build/docs.rs.
+    let pep = "https://peps.python.org/pep-0008/";
+    let rfc = "https://www.rfc-editor.org/info/rfc9110/";
+    let slog = "https://pkg.go.dev/log/slog";
+    let borrow = "https://doc.rust-lang.org/error_codes/E0499.html";
+    let (_dir, searcher) = searcher(&[
+        docs_page(
+            pep,
+            "PEP 8 — Style Guide for Python Code",
+            &["PEP 8"],
+            "Coding conventions for the Python code in the standard library.",
+        ),
+        docs_page(
+            rfc,
+            "RFC 9110 — HTTP Semantics",
+            &["RFC 9110"],
+            "The overall architecture of HTTP and its common terminology.",
+        ),
+        docs_page(
+            slog,
+            "slog — log/slog",
+            &["Go slog", "slog Go"],
+            "Package slog provides structured logging.",
+        ),
+        docs_page(
+            borrow,
+            "E0499 — Error codes index",
+            &["Rust E0499", "E0499 Rust"],
+            "A variable was borrowed as mutable more than once.",
+        ),
+    ]);
+    for (query, url) in [
+        ("PEP 8", pep),
+        ("pep8", pep),
+        ("RFC 9110", rfc),
+        ("rfc9110", rfc),
+        ("golang slog", slog),
+        ("rust E0499", borrow),
+        (
+            "error[E0499]: cannot borrow `x` as mutable more than once",
+            borrow,
+        ),
+    ] {
+        let hits = searcher.search(query, 10).unwrap();
+        assert!(
+            hits.first()
+                .is_some_and(|hit| hit.page.url == url && hit.named),
+            "{query}: {:?}",
+            titles(&hits)
+        );
+    }
+}
