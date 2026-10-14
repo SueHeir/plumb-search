@@ -86,6 +86,24 @@ pub(crate) fn pieces(word: &str) -> Vec<String> {
     pieces
 }
 
+/// A word of Arabic script with the letters it is written either way made
+/// one: an alef with or without hamza or madda, a final yeh with or
+/// without dots, Persian yeh and kaf for the Arabic ones, and no tatweel.
+/// `None` for other words.
+pub(crate) fn folded(word: &str) -> Option<String> {
+    if !word.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)) {
+        return None;
+    }
+    let letters = word.chars().filter_map(|letter| match letter {
+        'أ' | 'إ' | 'آ' | 'ٱ' => Some('ا'),
+        'ى' | 'ی' => Some('ي'),
+        'ک' => Some('ك'),
+        'ـ' => None,
+        _ => Some(letter),
+    });
+    Some(letters.collect())
+}
+
 /// The analyzer registered as [`STEMMED_ANALYZER`].
 pub(crate) fn stemmed_analyzer() -> TextAnalyzer {
     stemmed_in(Language::English)
@@ -155,6 +173,14 @@ pub(crate) fn joined_analyzer() -> TextAnalyzer {
         .filter(LowerCaser)
         .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
         .build()
+}
+
+/// Whether `a` and `b` are the same words, whatever their case, accents
+/// and punctuation, as the index matches them: "beyonce" is "Beyoncé",
+/// "motley crue" "Mötley Crüe".
+pub fn same_words(a: &str, b: &str) -> bool {
+    let analyzer = words_analyzer();
+    tokens(&analyzer, a) == tokens(&analyzer, b)
 }
 
 /// The tokens `analyzer` produces for `text`.

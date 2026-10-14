@@ -223,9 +223,14 @@ pub async fn fetch_site_pages_with_extraction(
                     {
                         seen.insert(at.to_string());
                         final_url = Some(at.to_string());
+                        // A site's pages are held until it is done: without
+                        // their links to the site, which nothing here reads.
                         result.pages.push(SitePage {
                             url: at.into(),
-                            meta: page.meta,
+                            meta: plumb_crawl::PageMeta {
+                                own_links: Vec::new(),
+                                ..page.meta
+                            },
                         });
                         None
                     }

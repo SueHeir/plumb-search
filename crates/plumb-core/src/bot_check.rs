@@ -10,10 +10,13 @@
 //!
 //! The same goes for other pages that stand in for a homepage: an error or
 //! maintenance page ("FedEx | System Down"), an identity check ("Verifica
-//! tu identidad", "Client Challenge") or a parked domain's "this domain is
-//! for sale".
+//! tu identidad", "Client Challenge"), a refusal of the crawler's browser
+//! ("Unsupported client – Canva") or a parked domain's "this domain is for
+//! sale" or bare "Hello!".
 
-use crate::{canonical_domain, normalize_text, registrable_domain, SiteRecord};
+use crate::{
+    canonical_domain, normalize_text, parent_domain, registrable_domain, Redirect, SiteRecord,
+};
 
 /// Whole titles, after [`normalize_text`], that only a bot check has.
 const CHECK_TITLES: &[&str] = &[
@@ -28,6 +31,7 @@ const CHECK_TITLES: &[&str] = &[
     "error",
     "browser check",
     "captcha",
+    "captcha check",
     "captcha verification",
     "checking your browser",
     "ddos protection",
@@ -58,7 +62,8 @@ const CHECK_TITLES: &[&str] = &[
 
 /// Title parts, after [`normalize_text`], of a page standing in for the
 /// homepage, wherever they are in a title split at its separators: "FedEx |
-/// System Down", "Walmart: Verifica tu identidad".
+/// System Down", "Walmart: Verifica tu identidad", "Unsupported Browser |
+/// Microsoft Teams".
 const STAND_IN_TITLE_PARTS: &[&str] = &[
     "404 not found",
     "500 internal server error",
@@ -66,25 +71,34 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
     "503 service unavailable",
     "access denied",
     "bad gateway",
+    "browser not supported",
     "client challenge",
+    "domain for sale",
+    "domain parked",
     "down for maintenance",
     "internal server error",
     "page not found",
+    "parked domain",
+    "server busy",
     "service unavailable",
     "site maintenance",
     "site unavailable",
     "system down",
     "temporarily unavailable",
     "under maintenance",
+    "unsupported browser",
+    "unsupported client",
     "verifica tu identidad",
     "verify your identity",
     "website unavailable",
+    "your browser is not supported",
 ];
 
 /// Whole titles, after [`normalize_text`], of a placeholder where a
-/// homepage should be: a web server's default page, a site not built yet,
-/// a suspended hosting account.
+/// homepage should be: a web server's default page or a suspended hosting
+/// account. A site not built yet is [`NOT_BUILT_ENDS`].
 const PLACEHOLDER_TITLES: &[&str] = &[
+    "caddy works",
     "welcome to nginx",
     "welcome to nginx on debian",
     "welcome to centos",
@@ -93,18 +107,32 @@ const PLACEHOLDER_TITLES: &[&str] = &[
     "test page for the apache http server",
     "iis windows server",
     "it works",
-    "coming soon",
-    "website coming soon",
-    "site coming soon",
-    "under construction",
-    "website under construction",
-    "site under construction",
     "account suspended",
     "this account has been suspended",
     "suspended domain",
     "default web site page",
     "web server s default page",
 ];
+
+/// Title endings, after [`normalize_text`], of a blog host's page for a
+/// domain no one has a blog on yet: "anime-japan.net | 忍者ブログ - 忍者ツールズ".
+const UNUSED_DOMAIN_TITLE_ENDS: &[&str] = &["忍者ブログ 忍者ツールズ"];
+
+/// How a title part, after [`normalize_text`], of a site not built yet
+/// ends, after nothing but [`NOT_BUILT_WORDS`]: "Coming Soon", "This Web
+/// site coming soon", "Nobel — New website coming soon".
+const NOT_BUILT_ENDS: &[&str] = &["coming soon", "under construction"];
+
+/// Words that may come before a [`NOT_BUILT_ENDS`] in a title part.
+const NOT_BUILT_WORDS: &[&str] = &[
+    "new", "our", "page", "site", "the", "this", "web", "website",
+];
+
+/// Words, after [`normalize_text`], of a homepage that only greets: "Hello!",
+/// "hello hello", ":: HELLO ::", "Hello world". Parked domains show such
+/// pages by the thousand, and a query with "hello" in it found them by
+/// their one word and by meaning.
+const GREETING_WORDS: &[&str] = &["hello", "hi", "hey", "hallo", "hola", "welcome", "world"];
 
 /// What a page title is split at into parts for [`STAND_IN_TITLE_PARTS`].
 const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»', '«', '/', '\\'];
@@ -213,14 +241,23 @@ pub fn is_bot_check_page(
                 .strip_prefix(start)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
         };
+        let ends = |end: &&str| {
+            title
+                .strip_suffix(end)
+                .is_some_and(|rest| rest.is_empty() || rest.ends_with(' '))
+        };
         if CHECK_TITLES.contains(&title.as_str())
             || PLACEHOLDER_TITLES.contains(&title.as_str())
             || CHECK_TITLE_STARTS.iter().any(starts)
+            || UNUSED_DOMAIN_TITLE_ENDS.iter().any(ends)
         {
             return true;
         }
     }
-    let stand_in = |part: &str| STAND_IN_TITLE_PARTS.contains(&normalize_text(part).as_str());
+    let stand_in = |part: &str| {
+        let part = normalize_text(part);
+        STAND_IN_TITLE_PARTS.contains(&part.as_str()) || not_built_yet(&part)
+    };
     if title.is_some_and(|title| {
         title
             .split(TITLE_SEPARATORS)
@@ -235,6 +272,64 @@ pub fn is_bot_check_page(
             .iter()
             .any(|phrase| text.contains(&format!(" {phrase} ")))
     })
+}
+
+/// Whether a normalized title part says the site is not built yet
+/// ([`NOT_BUILT_ENDS`]).
+fn not_built_yet(part: &str) -> bool {
+    NOT_BUILT_ENDS.iter().any(|end| {
+        part.strip_suffix(end).is_some_and(|rest| {
+            (rest.is_empty() || rest.ends_with(' '))
+                && rest
+                    .split_whitespace()
+                    .all(|word| NOT_BUILT_WORDS.contains(&word))
+        })
+    })
+}
+
+/// Whether a crawled homepage stands in for the site: a bot check or
+/// placeholder ([`is_bot_check_page`]), or a page that only greets
+/// ([`only_greets`]). A page someone asks to read is what it is, so the
+/// page reader asks [`is_bot_check_page`] alone.
+pub fn is_stand_in_homepage(
+    domain: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    headings: &[String],
+    body_text: Option<&str>,
+) -> bool {
+    is_bot_check_page(domain, title, description, headings, body_text)
+        || only_greets(title, description, headings, body_text)
+}
+
+/// Whether a homepage's whole text greets and says nothing else
+/// ([`GREETING_WORDS`]). Judged only with the page's text to hand: a crawl
+/// passed on as facts has its title alone, and a band's site titled
+/// "Hello" says more below it. "World" alone is not a greeting.
+fn only_greets(
+    title: Option<&str>,
+    description: Option<&str>,
+    headings: &[String],
+    body_text: Option<&str>,
+) -> bool {
+    if headings.is_empty() && body_text.is_none_or(|text| text.trim().is_empty()) {
+        return false;
+    }
+    let texts = title
+        .into_iter()
+        .chain(description)
+        .chain(headings.iter().map(String::as_str))
+        .chain(body_text);
+    let mut greets = false;
+    for text in texts {
+        for word in normalize_text(text).split_whitespace() {
+            if !GREETING_WORDS.contains(&word) {
+                return false;
+            }
+            greets |= word != "world";
+        }
+    }
+    greets
 }
 
 /// Whole titles, after [`normalize_text`], of sign-in pages that
@@ -315,9 +410,55 @@ fn shows_the_user_agent(text: &str) -> bool {
     text.to_ascii_lowercase().contains("plumbsearch/")
 }
 
+/// Sites a domain that is not in use redirects to: marketplaces selling
+/// it, and MarkMonitor's "coming soon" for a brand that holds it
+/// (`excite.com`). Such a domain is no longer the site it was.
+const PARKING_SITES: &[&str] = &[
+    "afternic.com",
+    "atom.com",
+    "brandbucket.com",
+    "buydomains.com",
+    "dan.com",
+    "dynadot.com",
+    "expireddomains.com",
+    "expiredwixdomain.com",
+    "hugedomains.com",
+    "markmonitor.com",
+    "nicsell.com",
+    "sedo.com",
+];
+
+/// Bot checks and sign-ins that answer for sites they do not run:
+/// Radware's `validate.perfdrive.com` (`esteri.it`), Cloudflare Access.
+const GATE_SITES: &[&str] = &["cloudflareaccess.com", "perfdrive.com"];
+
+impl Redirect {
+    /// The canonical domain of the site that a site at `domain`, whose
+    /// homepage redirects this way, is under another name: `pnc.com` for
+    /// `pncbank.com`. The index folds it into that one, which it names.
+    /// Empty when it redirects to no valid domain.
+    ///
+    /// `None`, keeping it a site of its own, when the redirect went to an
+    /// inner page ([`Redirect::inner`]) or a gate ([`GATE_SITES`]), or when
+    /// a site on a subdomain sent its visitor to the domain it is on: Gmail
+    /// (`mail.google.com`) to Google's sign-in, Yahoo News to Yahoo. A
+    /// parked domain ([`PARKING_SITES`]) is folded into where it went,
+    /// whatever the page, which leaves it out of the index.
+    pub fn folds_into(&self, domain: &str) -> Option<String> {
+        let to = canonical_domain(&self.to).unwrap_or_default();
+        if PARKING_SITES.contains(&to.as_str()) {
+            return Some(to);
+        }
+        let kept = self.inner
+            || GATE_SITES.contains(&to.as_str())
+            || parent_domain(domain) == Some(to.as_str());
+        (!kept).then_some(to)
+    }
+}
+
 impl SiteRecord {
-    /// Whether the record's page fields came from a bot check
-    /// ([`is_bot_check_page`]) rather than the site's homepage.
+    /// Whether the record's page fields came from a bot check or another
+    /// page standing in for the site's homepage ([`is_stand_in_homepage`]).
     ///
     /// So is a homepage read on another site's host: prevention.nih.gov's
     /// "NIH Office of Disease Prevention" kept for nih.gov, or
@@ -338,7 +479,7 @@ impl SiteRecord {
                 return true;
             }
         }
-        is_bot_check_page(
+        is_stand_in_homepage(
             &self.domain,
             self.title.as_deref(),
             self.description.as_deref(),
@@ -397,6 +538,7 @@ mod tests {
             "Bot Verification | North Lincolnshire Council",
             "One moment, please...",
             "Captcha",
+            "Captcha Check",
             "Link11 - CAPTCHA",
             "Access Denied",
             "Verification",
@@ -414,6 +556,18 @@ mod tests {
             ("example.com", "Example: Under Maintenance"),
             ("example.com", "503 Service Unavailable"),
             ("example.com", "Error"),
+            ("amazon.com.au", "Server Busy"),
+            ("canva.com", "Unsupported client – Canva"),
+            (
+                "teams.microsoft.com",
+                "Unsupported Browser | Microsoft Teams",
+            ),
+            ("example.com", "Your browser is not supported"),
+            ("labubu.st", "Domain Parked"),
+            (
+                "charlotterampling.net",
+                "Domain for Sale – charlotterampling.net | Brandable & Ready to Use",
+            ),
         ] {
             assert!(check(domain, title), "{title}");
         }
@@ -437,6 +591,7 @@ mod tests {
             "Downdetector",
             "Errors in Medicine Journal",
             "Not Found Records",
+            "Unsupported: a podcast",
         ] {
             assert!(!check("example.com", title), "{title}");
         }
@@ -556,20 +711,53 @@ mod tests {
         for title in [
             "Welcome to nginx!",
             "Coming Soon",
+            "endgame.info — Coming Soon",
+            "This Web site coming soon",
+            "Nobel — New website coming soon",
             "Under Construction",
             "Account Suspended",
             "Index of /",
             "Apache2 Ubuntu Default Page: It works",
+            "Caddy works!",
+            "anime-japan.net | 忍者ブログ - 忍者ツールズ",
         ] {
             assert!(check("example.com", title), "{title}");
         }
         for title in [
             "Gladiator II | Coming Soon to Theaters",
+            "Odeon | Films Now Showing and Coming Soon",
+            "Caddy - The Ultimate Server with Automatic HTTPS",
+            "忍者ツールズ｜ホームページ ブログ アクセス解析 カウンター メールフォーム",
+            "アニメ日記 | 忍者ブログ",
             "Nginx: Advanced Load Balancer",
             "Index Ventures",
         ] {
             assert!(!check("example.com", title), "{title}");
         }
+        // Parked pages that only greet, whatever field the greeting is in.
+        let page = |title: Option<&str>, description: Option<&str>, body: Option<&str>| {
+            is_stand_in_homepage("example.com", title, description, &[], body)
+        };
+        assert!(page(None, None, Some("hello")));
+        assert!(page(None, None, Some("hello hello")));
+        assert!(page(Some(":: HELLO ::"), None, Some(":: HELLO ::")));
+        assert!(page(Some("Hello!"), Some("Hello!"), Some("Hello")));
+        assert!(page(Some("Hello World"), None, Some("Hello, world!")));
+        // A greeting with anything more is a homepage.
+        assert!(!page(Some("Hello"), Some("English band"), Some("Hello")));
+        assert!(!page(Some("Hello"), None, Some("Hello, we sell bikes")));
+        assert!(!page(Some("Hello Kitty"), None, Some("Hello")));
+        assert!(!page(None, None, Some("World")));
+        // A title alone, as a crawl passed on as facts has it, is not enough.
+        assert!(!page(Some("Hello!"), None, None));
+        // Nor is it a bot check for a page someone asks to read.
+        assert!(!is_bot_check_page(
+            "example.com",
+            Some("Hello World"),
+            None,
+            &[],
+            Some("Hello, world!")
+        ));
     }
 
     #[test]
@@ -597,6 +785,40 @@ mod tests {
             ("squareup.com", "https://squareup.com/us/en"),
         ] {
             assert!(!record(domain, url).is_bot_check(), "{url}");
+        }
+    }
+
+    #[test]
+    fn only_a_site_sent_elsewhere_for_good_is_folded() {
+        let folds = |domain: &str, to: &str, inner: bool| {
+            let redirect = Redirect {
+                to: to.into(),
+                at: 1,
+                inner,
+            };
+            redirect.folds_into(domain)
+        };
+        assert_eq!(
+            folds("pncbank.com", "pnc.com", false).as_deref(),
+            Some("pnc.com")
+        );
+        assert_eq!(folds("x.com", "Not A Domain", false).as_deref(), Some(""));
+        // Sent to an inner page, a gate, or the domain a subdomain is on.
+        assert_eq!(folds("destinythegame.com", "bungie.net", true), None);
+        assert_eq!(folds("esteri.it", "perfdrive.com", false), None);
+        assert_eq!(folds("mail.google.com", "google.com", false), None);
+        assert_eq!(folds("news.yahoo.com", "yahoo.com", true), None);
+        // A subdomain moved to another domain still is that one.
+        assert_eq!(
+            folds("pypi.python.org", "pypi.org", false).as_deref(),
+            Some("pypi.org")
+        );
+        // Parked, whatever the page.
+        for (domain, to) in [
+            ("excite.com", "markmonitor.com"),
+            ("cygnus.com", "brandbucket.com"),
+        ] {
+            assert_eq!(folds(domain, to, true).as_deref(), Some(to));
         }
     }
 
