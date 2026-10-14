@@ -21,6 +21,52 @@ async fn instant_answers_go_above_the_results() {
     assert!(json["hits"].is_array());
 }
 
+/// Suggests a spelling for one query, as the node's spellers do.
+struct SpellingBackend;
+
+impl SearchBackend for SpellingBackend {
+    fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+
+    fn num_docs(&self) -> u64 {
+        1
+    }
+
+    fn search_full(&self, query: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
+        let fixed = match query {
+            "10 kilomters in miles" => "10 kilometers in miles",
+            "2+2" => "2+3",
+            _ => return Ok(SearchResults::default()),
+        };
+        Ok(SearchResults {
+            spelling: Some(Spelling {
+                query: fixed.into(),
+                site: None,
+                applied: false,
+            }),
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_misspelled_ask_gets_the_answer_to_its_spelling() {
+    let app = router_with(Arc::new(SpellingBackend), HomeCountry::Off);
+    let (_, _, body) = send(app.clone(), "/search?q=10+kilomters+in+miles").await;
+    assert!(body.contains("6.21371 miles"), "{body}");
+    let (_, _, body) = send(app.clone(), "/api/search?q=10+kilomters+in+miles&full=1").await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json["answer"]["answer"]
+        .as_str()
+        .unwrap()
+        .contains("6.21371"));
+    // The answer to what was typed comes first.
+    let (_, _, body) = send(app, "/api/search?q=2%2B2&full=1").await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["answer"]["answer"], "4");
+}
+
 struct EntityAnswersBackend {
     displayed: Vec<plumb_index::pages::PlacedPage>,
     candidates: Vec<PageHit>,
