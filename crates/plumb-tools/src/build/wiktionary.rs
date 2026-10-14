@@ -12,7 +12,8 @@
 //! translations), so the best-known words come first. Senses that only
 //! point at another word ("plural of mouse"), and obsolete and archaic
 //! ones when there are others, are left out; so are proper names, which
-//! Wikipedia covers.
+//! Wikipedia covers. An initialism's sense points at the words its letters
+//! stand for, and is kept: "(adverb) Initialism of as soon as possible."
 
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -90,11 +91,23 @@ struct Word {
 
 /// The first usual sense of `senses`, or the first at all.
 fn first_sense(senses: &[Sense]) -> Option<String> {
+    // An unexpanded template ("Template:init of.") says nothing.
+    let says = |g: &str| !g.trim().is_empty() && !g.starts_with("Template:");
     let defining: Vec<&Sense> = senses
         .iter()
-        .filter(|s| s.form_of.is_empty() && s.alt_of.is_empty())
-        .filter(|s| !s.tags.iter().any(|t| t == "form-of" || t == "alt-of"))
-        .filter(|s| s.glosses.iter().any(|g| !g.trim().is_empty()))
+        .filter(|s| {
+            // An initialism says what its letters stand for: "Initialism of
+            // as soon as possible."
+            let stands_for = s
+                .tags
+                .iter()
+                .any(|t| matches!(t.as_str(), "abbreviation" | "initialism" | "acronym"));
+            stands_for
+                || s.form_of.is_empty()
+                    && s.alt_of.is_empty()
+                    && !s.tags.iter().any(|t| t == "form-of" || t == "alt-of")
+        })
+        .filter(|s| s.glosses.iter().any(|g| says(g)))
         .collect();
     let usual = defining
         .iter()
@@ -107,7 +120,7 @@ fn first_sense(senses: &[Sense]) -> Option<String> {
         .glosses
         .iter()
         .rev()
-        .find(|g| !g.trim().is_empty() && !g.starts_with("Terms relating to"))?;
+        .find(|g| says(g) && !g.starts_with("Terms relating to"))?;
     Some(plumb_core::collapse_whitespace(gloss))
 }
 
@@ -205,6 +218,8 @@ mod tests {
             r#"{"word": "free", "pos": "verb", "lang_code": "en", "senses": [{"glosses": ["To make free."]}]}"#,
             r#"{"word": "cat", "pos": "noun", "lang_code": "en", "senses": [{"glosses": ["Terms relating to animals.", "A mammal of the family Felidae."]}]}"#,
             r#"{"word": "mice", "pos": "noun", "lang_code": "en", "senses": [{"glosses": ["plural of mouse"], "form_of": [{"word": "mouse"}], "tags": ["form-of", "plural"]}]}"#,
+            r#"{"word": "ASAP", "pos": "adv", "lang_code": "en", "senses": [{"glosses": ["Initialism of as soon as possible."], "alt_of": [{"word": "as soon as possible"}], "tags": ["abbreviation", "alt-of", "initialism"]}]}"#,
+            r#"{"word": "IMO", "pos": "noun", "lang_code": "en", "senses": [{"glosses": ["Template:init of."]}]}"#,
             r#"{"word": "Paris", "pos": "name", "lang_code": "en", "senses": [{"glosses": ["The capital of France."]}]}"#,
             r#"{"word": "frei", "pos": "adj", "lang_code": "de", "senses": [{"glosses": ["free"]}]}"#,
         ]
@@ -221,6 +236,7 @@ mod tests {
             shown,
             [
                 ("free", "(adjective) Unconstrained. (verb) To make free."),
+                ("ASAP", "(adverb) Initialism of as soon as possible."),
                 (
                     "anadromous",
                     "(adjective) Of fish, migrating up rivers from the sea to breed in fresh water."

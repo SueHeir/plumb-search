@@ -46,7 +46,12 @@ impl Searcher {
     /// address. Nothing a person sees then ties it to the search, and the
     /// vectors of sites with little text are near many queries the model
     /// barely knows ("pyenv" found five expired domains). emmys.com for
-    /// "emmy awards" shows its word in its address, so it stays.
+    /// "emmy awards" shows its word in its address, so it stays. So is a
+    /// site only meaning found whose title and description are in another
+    /// script than the query ([`plumb_core::written_apart`]), unless well
+    /// known or described by Wikidata: an English model reads little of
+    /// such text, and its vector sits near niche searches ("OEIS A000108
+    /// Catalan numbers" found a Chinese gambling site).
     pub(crate) fn untitled_last(
         &self,
         searcher: &tantivy::Searcher,
@@ -67,7 +72,13 @@ impl Searcher {
                 && site.link_score < WELL_KNOWN_LINK_SCORE
                 && !self.says_what_it_is(searcher, site.addr)?
                 && !self.has_aliases(searcher, site.addr)?;
-            if !(bare && !site.named && found_by_meaning_alone(&site, &words)) {
+            let alone = !site.named && found_by_meaning_alone(&site, &words);
+            let apart = alone
+                && !bare
+                && site.link_score < WELL_KNOWN_LINK_SCORE
+                && !self.is_official(searcher, site.addr)?
+                && self.written_apart(searcher, site.addr, query)?;
+            if !(alone && bare || apart) {
                 kept.push((site, bare));
             }
         }
@@ -86,6 +97,22 @@ impl Searcher {
         titled.extend(untitled);
         titled.extend(rest);
         Ok(titled)
+    }
+
+    /// Whether the site's title and description are in another script
+    /// than `query` ([`plumb_core::written_apart`]).
+    fn written_apart(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: tantivy::DocAddress,
+        query: &str,
+    ) -> Result<bool> {
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let text: Vec<&str> = [self.fields.title, self.fields.description]
+            .into_iter()
+            .filter_map(|field| doc.get_first(field).and_then(|value| value.as_str()))
+            .collect();
+        Ok(plumb_core::written_apart(&text.join(" "), query))
     }
 
     /// Reads the stored fields of a ranked document, with the
@@ -299,13 +326,29 @@ pub fn suggested_site_second(hits: &mut Vec<Hit>, site: &str) {
 ///   they rank above it (23andme.org's copy of 23andMe's title above
 ///   23andme.com); otherwise the best known (most linked) stays. Every official site
 ///   stays (cbc.ca next to cbc.com), and so does a country site with a
-///   title of its own (amazon.co.jp's).
+///   title of its own (amazon.co.jp's), short of the next case.
+/// - The brand's site for a country the searcher is not in and did not
+///   name, when the query is the brand's name, under its better-known
+///   site on a generic ending, official or not and in whatever language:
+///   mcdonalds.co.jp, mcdonalds.co.kr and mcdonalds.ca under
+///   mcdonalds.com, skyscanner.nl under skyscanner.net. An official one
+///   goes only under an official one (paris.fr stays next to paris.com),
+///   or under one of the brand's official sites titled and described as
+///   it is (google.fr's "Google Search" for "google maps").
 /// - A site nobody links to whose title is that of a site listed above it
 ///   (a copy of Coinbase's title on elephant-blue.org).
 ///
 /// `typed` is the domain the query is, which always stays, and so do the
-/// sites of `home`, the searcher's country (bbc.co.uk in Britain).
-pub(crate) fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Vec<Hit> {
+/// sites of `home`, the searcher's country (bbc.co.uk in Britain). The
+/// brand's site for a country the query names (`asked`) is no copy
+/// either: amazon.co.uk for "amazon uk", mcdonalds.co.jp for "mcdonald's
+/// japan".
+pub(crate) fn without_copies(
+    hits: Vec<Hit>,
+    typed: Option<&str>,
+    home: Option<&str>,
+    asked: &[&str],
+) -> Vec<Hit> {
     // The title names the brand anywhere in it: "StubHub UK", "Buy and
     // sell tickets | StubHub".
     let names_brand = |hit: &Hit, label: &str| {
@@ -313,17 +356,65 @@ pub(crate) fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&
             .as_deref()
             .is_none_or(|title| normalize_text(title).replace(' ', "").contains(label))
     };
+    // Endings used as generic ones (.io, .me, .co) are not countries', but
+    // the same ending under a country's own (.com.co, Colombia's; .com.ai)
+    // still is.
+    let country = |suffix: &str| {
+        suffix.rsplit('.').next().is_some_and(|tld| {
+            tld.len() == 2 && (suffix.contains('.') || !GENERIC_COUNTRY_ENDINGS.contains(&tld))
+        })
+    };
+    // The best known, not the best ranked: ranking comes again after this
+    // (the learned order), and cbc.bb ranked above cbc.ca is no reason to
+    // leave out cbc.ca.
+    let better_known = |i: usize, j: usize| {
+        j != i
+            && (hits[j].link_score > hits[i].link_score
+                || (hits[j].link_score == hits[i].link_score && j < i))
+    };
+    // By its ending, not by the country its record gives: skyscanner.de
+    // is Germany's site of a British company. An ending used worldwide
+    // (.eu, .md) is no country's.
+    let elsewhere = |hit: &Hit| {
+        plumb_core::tld_country(&hit.domain)
+            .is_some_and(|at| home != Some(at) && !asked.contains(&at))
+    };
+    let named_country =
+        |hit: &Hit| plumb_core::tld_country(&hit.domain).is_some_and(|at| asked.contains(&at));
     let mut copies = vec![false; hits.len()];
     for (i, hit) in hits.iter().enumerate() {
-        if hit.official
-            || typed == Some(hit.domain.as_str())
-            || (home.is_some() && hit.country.as_deref() == home)
-        {
+        if typed == Some(hit.domain.as_str()) {
             continue;
         }
         let title = hit.title.as_deref().map(normalize_text);
         let same_title =
             |other: &Hit| title.is_some() && other.title.as_deref().map(normalize_text) == title;
+        // The brand's site for another country, when the query is the
+        // brand's name and its site on a generic ending is better known
+        // (time.is, which "time" does not name, stays), or when official
+        // and titled and described word for word as a better-known official
+        // site of the brand: Wikidata gives Google Search a dozen addresses
+        // (google.fr, google.ca, all "Google Search", "search engine by
+        // Google LLC").
+        copies[i] = brand_label(&hit.domain).is_some_and(|(label, suffix)| {
+            country(suffix)
+                && elsewhere(hit)
+                && hits.iter().enumerate().any(|(j, other)| {
+                    better_known(i, j)
+                        && brand_label(&other.domain).is_some_and(|(l, s)| {
+                            l == label
+                                && ((hit.named && !country(s) && (other.official || !hit.official))
+                                    || (hit.official
+                                        && other.official
+                                        && same_title(other)
+                                        && hit.description.is_some()
+                                        && other.description == hit.description))
+                        })
+                })
+        });
+        if copies[i] || hit.official || (home.is_some() && hit.country.as_deref() == home) {
+            continue;
+        }
         // Another site's title word for word, naming that site and not
         // this one: elephant-blue.org titled "Coinbase - Buy and Sell
         // Bitcoin…", however linked, short of a well-known site (live.com
@@ -342,7 +433,7 @@ pub(crate) fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&
             copies[i] = true;
             continue;
         }
-        let Some((label, suffix)) = brand_label(&hit.domain) else {
+        let Some((label, suffix)) = brand_label(&hit.domain).filter(|_| !named_country(hit)) else {
             continue;
         };
         // A copy is the brand again somewhere it says nothing of its own:
@@ -355,14 +446,6 @@ pub(crate) fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&
         // namesake whose title does not name the brand (hm.com of hm.edu)
         // nor when it is well known: no title is then a gap in the crawl
         // (abc.net.au next to abc.com, weather.com next to weather.gov).
-        // Endings used as generic ones (.io, .me, .co) are not countries',
-        // but the same ending under a country's own (.com.co, Colombia's;
-        // .com.ai) still is.
-        let country = |suffix: &str| {
-            suffix.rsplit('.').next().is_some_and(|tld| {
-                tld.len() == 2 && (suffix.contains('.') || !GENERIC_COUNTRY_ENDINGS.contains(&tld))
-            })
-        };
         let same_brand = |other: &Hit| {
             brand_label(&other.domain).is_some_and(|(l, s)| {
                 l == label
@@ -387,15 +470,10 @@ pub(crate) fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&
         let official = hits
             .iter()
             .any(|other| other.official && other.link_score >= hit.link_score && same_brand(other));
-        // The best known of them, not the best ranked: ranking comes
-        // again after this (the learned order), and cbc.bb ranked above
-        // cbc.ca is no reason to leave out cbc.ca.
-        let better = hits.iter().enumerate().any(|(j, other)| {
-            j != i
-                && same_brand(other)
-                && (other.link_score > hit.link_score
-                    || (other.link_score == hit.link_score && j < i))
-        });
+        let better = hits
+            .iter()
+            .enumerate()
+            .any(|(j, other)| same_brand(other) && better_known(i, j));
         copies[i] = official || better;
     }
     hits.into_iter()
