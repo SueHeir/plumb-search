@@ -563,6 +563,68 @@ fn spelled_right_words_get_no_suggestion() {
 }
 
 #[test]
+fn a_site_s_name_typed_stays_unless_a_far_better_known_one_is_meant() {
+    let mut records = typo_corpus();
+    records.extend([
+        site(
+            "plagiarisma.net",
+            Some("Plagiarisma"),
+            Some("Free plagiarism checker online"),
+            &[],
+            &[],
+            ranked(200_000, 300),
+        ),
+        site(
+            "plagiarismcheck.org",
+            Some("Plagiarism Checker"),
+            None,
+            &["Plagiarism Checker"],
+            &[],
+            ranked(60_000, 1_500),
+        ),
+    ]);
+    let (_dir, searcher) = build(&records);
+    let score = |domain: &str| searcher.site(domain).unwrap().unwrap().link_score;
+    let (typed, meant) = (score("plagiarisma.net"), score("plagiarismcheck.org"));
+    assert!(
+        typed < meant && meant < typed + crate::search::TYPO_POPULARITY_MARGIN,
+        "{typed} {meant}"
+    );
+    let results = search_spelled(&searcher, "plagiarisma checker");
+    assert_eq!(results.spelling, None);
+    assert_eq!(domains(&results.hits)[0], "plagiarisma.net");
+    // A slip of the better-known name is still one.
+    assert_eq!(
+        suggestion(&search_spelled(&searcher, "plagiarism chekcer")),
+        suggested("plagiarism checker")
+    );
+}
+
+#[test]
+fn a_known_word_that_names_a_site_is_still_a_slip_of_a_better_known_name() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "capitol.example",
+        Some("Capitol"),
+        None,
+        &[],
+        &[],
+        ranked(2_000, 5_000),
+    ));
+    let (_dir, searcher) = build(&records);
+    let score = |domain: &str| searcher.site(domain).unwrap().unwrap().link_score;
+    let (typed, meant) = (score("capitol.example"), score("capitalone.com"));
+    assert!(
+        typed < meant && meant < typed + crate::search::TYPO_POPULARITY_MARGIN,
+        "{typed} {meant}"
+    );
+    assert_eq!(
+        suggestion(&search_spelled(&searcher, "capitol one")),
+        suggested("capital one")
+    );
+}
+
+#[test]
 fn known_words_and_short_words_are_left_alone() {
     let (_dir, searcher) = build(&typo_corpus());
     // piazza.com is a letter away, but pizza is a word the index knows.

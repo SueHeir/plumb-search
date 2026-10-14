@@ -48,6 +48,7 @@ use tantivy_fst::Automaton;
 
 use crate::query::matching_docs;
 use crate::schema::Fields;
+use crate::search::TYPO_POPULARITY_MARGIN;
 use crate::spell_model::Model;
 use crate::{analysis, MAX_QUERY_WORDS, WELL_KNOWN_LINK_SCORE};
 
@@ -450,11 +451,20 @@ impl Speller<'_> {
                         plausible = false;
                         break;
                     }
-                    // A word that is the name of a site as popular as the
-                    // correction's stays: "lyft app" is not "syft app".
-                    if !within_edits(word, fixed)
-                        || self.names_a_site(word, score.max(MIN_FIX_LINK_SCORE), link_score)?
-                    {
+                    // A word that is the name of a site stays unless the
+                    // correction's has TYPO_POPULARITY_MARGIN more link
+                    // score, as a name typed in full does: "lyft app" is
+                    // not "syft app", nor "plagiarisma checker" (0.25)
+                    // "plagiarism checker" (0.42). A word the index knows
+                    // as a word needs only a better-known correction:
+                    // "capitol one" is Capital One, though a site is called
+                    // Capitol.
+                    let least = if self.docs_with(word)? >= KNOWN_WORD_DOCS {
+                        score.max(MIN_FIX_LINK_SCORE)
+                    } else {
+                        score - TYPO_POPULARITY_MARGIN
+                    };
+                    if !within_edits(word, fixed) || self.names_a_site(word, least, link_score)? {
                         plausible = false;
                         break;
                     }
