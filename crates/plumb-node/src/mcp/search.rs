@@ -205,33 +205,30 @@ impl Mcp {
             |word| self.backend.common_word(word),
         );
         // Placed as the results page places them, which the info box needs.
-        let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
-        let operators = plumb_core::Operators::parse(query);
-        let mut placed = if operators.any() {
-            place_operator_pages(&operators, &results.hits, found_pages)
-        } else {
-            place_pages(query, &results.hits, found_pages)
-        };
+        // A package the search doesn't ask for outright is placed apart, so
+        // it never takes the place of a page listed beside the sites:
+        // "left-pad javascript" keeps its repository and article. It still
+        // goes where it would go on its own, ahead of the pages placed
+        // there, since after every site the limit cuts it: "requests
+        // python" lists PyPI's page.
         let promote_package = crate::assembly::promote_package(query);
-        if !promote_package {
-            let mut supplementary = Vec::new();
-            placed.retain(|page| {
-                if page.hit.page.package.is_some() {
-                    supplementary.push(page.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            let after = results
-                .hits
-                .len()
-                .max(placed.iter().map(|p| p.at + 1).max().unwrap_or(0));
-            for mut page in supplementary {
-                page.at = after;
-                page.under = None;
-                placed.push(page);
+        let (supplementary, found_pages): (Vec<_>, Vec<_>) = results
+            .pages
+            .iter()
+            .map(|p| p.hit.clone())
+            .partition(|hit| !promote_package && hit.page.package.is_some());
+        let operators = plumb_core::Operators::parse(query);
+        let place = |pages| {
+            if operators.any() {
+                place_operator_pages(&operators, &results.hits, pages)
+            } else {
+                place_pages(query, &results.hits, pages)
             }
+        };
+        let mut placed = place(found_pages);
+        for page in place(supplementary) {
+            let at = placed.iter().position(|p| p.at >= page.at);
+            placed.insert(at.unwrap_or(placed.len()), page);
         }
         if let Some(page) = &guessed {
             placed.retain(|p| p.hit.page.url != page.url);

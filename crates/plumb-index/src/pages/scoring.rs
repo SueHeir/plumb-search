@@ -267,7 +267,7 @@ impl PageSearcher {
             }
         }
         // Packages, only ever found when the query asks for one: "serde
-        // crate", "latest version of requests python".
+        // crate", "latest version of requests python", "serde_json".
         let package_query = plumb_core::packages::package_query(query);
         let package_key = package_query
             .as_ref()
@@ -464,13 +464,18 @@ impl PageSearcher {
                     _ => false,
                 };
                 if asked {
+                    // Searched by its name alone ("serde_json"), the
+                    // package is asked for as a whole.
+                    let whole = std::iter::once(&page.title)
+                        .chain(&page.aliases)
+                        .any(|name| name.eq_ignore_ascii_case(query.trim()));
                     hits.push(PageHit {
                         score: ALIAS_MATCH
                             * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
                         page,
                         named: true,
                         popularity,
-                        whole: false,
+                        whole,
                         learned: None,
                     });
                 }
@@ -551,6 +556,24 @@ impl PageSearcher {
             });
         }
         described_repos.name(&mut hits);
+        // A name alone is a package's only when nothing else is called so:
+        // "content-type" is the header's, "left-pad" its repository's.
+        if let Some(key) = package_key.filter(|_| package_query.is_some_and(|asked| asked.alone)) {
+            let called = |page: &Page| {
+                std::iter::once(&page.title)
+                    .chain(&page.aliases)
+                    .chain(&page.names)
+                    .any(|name| {
+                        analysis::tokens(&self.joined, name).pop().as_deref() == Some(key.as_str())
+                    })
+            };
+            if hits
+                .iter()
+                .any(|hit| hit.named && hit.page.package.is_none() && called(&hit.page))
+            {
+                hits.retain(|hit| hit.page.package.is_none());
+            }
+        }
         match words.as_slice() {
             [word] => self.name_by_surname(word, &joined, &mut hits),
             [title, name @ ..] => self.name_by_title(title, name, &joined, &mut hits),
