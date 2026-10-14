@@ -14,11 +14,12 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 
 use super::building::schema;
 use super::page::is_item_id;
+use super::placing::is_year;
 use super::scoring::truncate_keeping_inner_pages;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
-    KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET, POPULARITY_SCALE,
-    POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
+    GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET,
+    POPULARITY_SCALE, POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
 };
 use crate::analysis;
 
@@ -27,19 +28,31 @@ use crate::analysis;
 pub(crate) enum Hint {
     /// Its encyclopedia article: "lululemon wikipedia".
     Article,
+    /// Its repository on GitHub: "tokio github".
+    Repo,
     /// A paper of that title: "batch normalization paper".
     Paper,
+    /// A person of that name, of whom something is asked: "obama
+    /// daughters", "picasso paintings".
+    Person,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
+    /// Only pages the name names: what a fact question asks about. "madrid
+    /// spanish" (of "madrid spanish capital city") names nothing, and the
+    /// clubs it describes would push Madrid out.
+    Named,
 }
 
-/// Words before a name that ask about it.
+/// Words before a name that ask about it. "What's" is read as "what is";
+/// "whats" is not, since "whats app" is a misspelled name.
 const HINT_LEADS: &[&str] = &[
     "who is ",
     "who was ",
     "who are ",
     "who were ",
     "tell me about ",
+    "what is the meaning of ",
+    "what is the definition of ",
     "what is a ",
     "what is an ",
     "what is the ",
@@ -47,6 +60,16 @@ const HINT_LEADS: &[&str] = &[
     "what are ",
     "what was ",
     "what were ",
+    "who won the ",
+    "who won ",
+    "who wins the ",
+    "who wins ",
+    "who will win the ",
+    "who will win ",
+    "winner of the ",
+    "winner of ",
+    "winners of the ",
+    "winners of ",
     "what does ",
     "define ",
     "definition of ",
@@ -54,15 +77,58 @@ const HINT_LEADS: &[&str] = &[
     "info about ",
     "information about ",
     "facts about ",
+    "what causes a ",
+    "what causes an ",
+    "what causes the ",
+    "what causes ",
+    "where is the ",
+    "where is ",
+    "where are the ",
+    "where are ",
+    "how many people live in ",
 ];
+
+/// What "how ... is" asks the measure of: "how tall is the eiffel tower".
+const MEASURES: &[&str] = &[
+    "tall", "old", "big", "long", "deep", "high", "far", "wide", "large", "heavy",
+];
+
+/// What a question of how something works or how big it is asks about:
+/// "refrigerator" of "how does a refrigerator work", "eiffel tower" of
+/// "how tall is the eiffel tower". `None` for other questions ("how do i
+/// make pancakes", where "how do" starts any question) and for "it".
+fn asked_how(q: &str) -> Option<&str> {
+    let works = ["how does ", "how do "]
+        .iter()
+        .find_map(|lead| q.strip_prefix(lead)?.strip_suffix(" work"));
+    let measured = || {
+        let (measure, rest) = q.strip_prefix("how ")?.split_once(' ')?;
+        let rest = ["is ", "are ", "was "]
+            .iter()
+            .find_map(|verb| rest.strip_prefix(verb))?;
+        MEASURES.contains(&measure).then_some(rest)
+    };
+    let about = works.or_else(measured)?;
+    let about = ["a ", "an ", "the "]
+        .iter()
+        .find_map(|article| about.strip_prefix(article))
+        .unwrap_or(about);
+    (!matches!(about, "it" | "this" | "that" | "they" | "these" | "those")).then_some(about)
+}
 
 /// Words after a name that say what about it is wanted.
 const HINT_TAILS: &[(&str, Hint)] = &[
     (" wikipedia", Hint::Article),
     (" wiki", Hint::Article),
+    (" github repo", Hint::Repo),
+    (" github", Hint::Repo),
+    (" repository", Hint::Repo),
+    (" repo", Hint::Repo),
     (" paper", Hint::Paper),
     (" papers", Hint::Paper),
     (" arxiv", Hint::Paper),
+    (" winner", Hint::Any),
+    (" winners", Hint::Any),
     (" summary", Hint::Any),
     (" plot", Hint::Any),
     (" biography", Hint::Any),
@@ -73,6 +139,37 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" net worth", Hint::Any),
     (" wife", Hint::Any),
     (" husband", Hint::Any),
+    // What people ask about a person, which a person's article answers but
+    // whose words it is not called by. "Cause of death" before "death".
+    (" cause of death", Hint::Person),
+    (" death", Hint::Person),
+    (" kids", Hint::Person),
+    (" children", Hint::Person),
+    (" daughter", Hint::Person),
+    (" daughters", Hint::Person),
+    (" son", Hint::Person),
+    (" sons", Hint::Person),
+    (" parents", Hint::Person),
+    (" mother", Hint::Person),
+    (" father", Hint::Person),
+    (" siblings", Hint::Person),
+    (" family", Hint::Person),
+    (" girlfriend", Hint::Person),
+    (" boyfriend", Hint::Person),
+    (" education", Hint::Person),
+    (" nationality", Hint::Person),
+    (" religion", Hint::Person),
+    (" awards", Hint::Person),
+    (" stats", Hint::Person),
+    (" movies", Hint::Person),
+    (" films", Hint::Person),
+    (" books", Hint::Person),
+    (" novels", Hint::Person),
+    (" poems", Hint::Person),
+    (" songs", Hint::Person),
+    (" albums", Hint::Person),
+    (" paintings", Hint::Person),
+    (" inventions", Hint::Person),
     (" cast", Hint::Any),
     (" author", Hint::Any),
     (" movie", Hint::Any),
@@ -81,6 +178,8 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" mean", Hint::Any),
     (" means", Hint::Any),
     (" definition", Hint::Any),
+    (" stand for", Hint::Any),
+    (" stands for", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
 ];
@@ -89,10 +188,17 @@ const HINT_TAILS: &[(&str, Hint)] = &[
 /// wanted, and what kind of page they ask for: "lululemon" of "lululemon
 /// wikipedia". `None` when there are none, or nothing else.
 pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
-    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?')).to_lowercase();
-    let mut name = q.as_str();
+    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?'))
+        .to_lowercase()
+        .replace('’', "'");
+    let asked = q
+        .strip_prefix("what's ")
+        .map(|rest| format!("what is {rest}"));
+    let mut name = asked.as_deref().unwrap_or(&q);
     let mut hint = None;
-    if let Some(rest) = HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)) {
+    if let Some(rest) =
+        asked_how(name).or_else(|| HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)))
+    {
         name = rest;
         hint = Some(Hint::Any);
     }
@@ -106,6 +212,71 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     let name = name.trim();
     let hint = hint?;
     (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
+}
+
+/// `name` with the year at one of its ends moved to the other: "2025 tour
+/// de france" of "tour de france 2025". `None` without one, or with a year
+/// alone.
+pub(crate) fn year_moved(name: &str) -> Option<String> {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    match words.as_slice() {
+        [first, rest @ ..] if !rest.is_empty() && is_year(first) => {
+            Some(format!("{} {first}", rest.join(" ")))
+        }
+        [rest @ .., last] if !rest.is_empty() && is_year(last) => {
+            Some(format!("{last} {}", rest.join(" ")))
+        }
+        _ => None,
+    }
+}
+
+/// Words after a name that ask for the list of the works of an artist,
+/// actor or writer, with the titles of Wikipedia's lists of them, best
+/// first, `{}` for the name: "drake albums" for "Drake albums
+/// discography", "tom hanks movies" for "Tom Hanks filmography".
+const WORK_LISTS: &[(&str, &[&str])] = &[
+    ("albums", &["{} albums discography", "{} discography"]),
+    ("discography", &["{} discography", "{} albums discography"]),
+    ("singles", &["{} singles discography", "{} discography"]),
+    (
+        "songs",
+        &[
+            "List of songs recorded by {}",
+            "{} singles discography",
+            "{} discography",
+        ],
+    ),
+    ("movies", &["{} filmography"]),
+    ("films", &["{} filmography"]),
+    ("filmography", &["{} filmography"]),
+    ("books", &["{} bibliography"]),
+    ("novels", &["{} bibliography"]),
+    ("bibliography", &["{} bibliography"]),
+];
+
+/// The titles of the lists of works `query` asks for ([`WORK_LISTS`]),
+/// best first: "Pink Floyd discography" for "pink floyd albums". The
+/// name may be said without "the": "beatles songs".
+pub(crate) fn work_lists(query: &str) -> Vec<String> {
+    let query = plumb_core::collapse_whitespace(query.trim()).to_lowercase();
+    let Some((artist, asked)) = query.rsplit_once(' ') else {
+        return Vec::new();
+    };
+    let Some((_, titles)) = WORK_LISTS.iter().find(|(word, _)| *word == asked) else {
+        return Vec::new();
+    };
+    let mut artists = vec![artist.to_string()];
+    if !artist.starts_with("the ") {
+        artists.push(format!("the {artist}"));
+    }
+    titles
+        .iter()
+        .flat_map(|title| {
+            artists
+                .iter()
+                .map(move |artist| title.replace("{}", artist))
+        })
+        .collect()
 }
 
 /// Least listeners of a song or album that [`PageSearcher::known_song`]
@@ -325,6 +496,11 @@ impl PageSearcher {
         model: Option<&crate::spell_model::Model>,
         site_known: &dyn Fn(&str) -> bool,
     ) -> Result<Option<crate::Spelling>> {
+        // A web address is a name, not words: "amazn.com" is not "amazon
+        // com". The sites suggest the address it is a slip of.
+        if crate::names::typed_domain(query).is_some() {
+            return Ok(None);
+        }
         let searcher = self.reader.searcher();
         let docs = |word: &str| -> Result<u64> {
             Ok(searcher.doc_freq(&Term::from_field_text(self.fields.words, word))?)
@@ -389,21 +565,21 @@ impl PageSearcher {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let stems = self.described_words(query);
+        let described = self.described_words(query);
         let words = analysis::tokens(&self.words, query);
         let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
             return Ok(Vec::new());
         };
         let query_words: HashSet<&str> = words.iter().map(String::as_str).collect();
         let mut hits = Vec::new();
-        if !stems.is_empty() {
-            let clauses = stems
+        if !described.is_empty() {
+            let clauses = described
                 .iter()
-                .map(|stem| {
+                .map(|word| {
                     (
                         Occur::Must,
                         Box::new(TermQuery::new(
-                            Term::from_field_text(self.fields.about, stem),
+                            Term::from_field_text(self.fields.about, &word.stem),
                             IndexRecordOption::Basic,
                         )) as Box<dyn Query>,
                     )
@@ -428,8 +604,8 @@ impl PageSearcher {
                     continue;
                 }
                 let (name, named) = self.name_match(&page, query, &joined, &query_words);
-                let described = self.described_match(&page, &stems);
-                if name <= 0.0 && described <= 0.0 {
+                let covered = self.described_match(&page, &described);
+                if name <= 0.0 && covered <= 0.0 {
                     continue;
                 }
                 let popularity = document
@@ -440,8 +616,8 @@ impl PageSearcher {
                 hits.push(PageHit {
                     page,
                     named,
-                    whole: described > 0.0,
-                    score: name.max(described)
+                    whole: covered > 0.0,
+                    score: name.max(covered)
                         * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
                     popularity,
                     learned: None,
@@ -484,15 +660,73 @@ impl PageSearcher {
         scope: Option<&dyn Query>,
     ) -> Result<Vec<PageHit>> {
         let mut hits = self.search_once(query, limit, scope)?;
+        // "drake albums", "tom hanks movies": Wikipedia's list of the
+        // works of an artist, actor or writer, which the query names only
+        // in part.
+        if scope.is_none() {
+            if let Some(list) = self.first_titled(&work_lists(query))? {
+                match hits.iter_mut().find(|hit| hit.page == list.page) {
+                    Some(kept) => {
+                        kept.named = true;
+                        kept.score = kept.score.max(list.score);
+                    }
+                    None => hits.push(list),
+                }
+                hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+            }
+        }
         // "lululemon wikipedia", "batch normalization paper", "who is
         // galileo": the words that say what is wanted are not part of the
-        // name, so the name is searched for too.
-        let Some((name, hint)) = hinted_name(query) else {
+        // name, so the name is searched for too. So is what a fact question
+        // asks about, or "when was isaac newton born" lists Newton's mother
+        // and namesakes, whose descriptions hold its words, and not him;
+        // but not when the query is itself a name ("age of empires").
+        let hinted = hinted_name(query).or_else(|| {
+            plumb_core::facts::fact_asked(query)
+                .filter(|_| !hits.iter().any(|hit| hit.named))
+                .map(|asked| (asked.subject, Hint::Named))
+        });
+        // An event's article has its year first or last ("2025 Tour de
+        // France", "Eurovision Song Contest 2025"), so a name with a year
+        // at one end is searched with it at the other too.
+        let (name, hint) = hinted
+            .clone()
+            .unwrap_or_else(|| (query.to_lowercase(), Hint::Any));
+        let moved = year_moved(&name).map(|name| (name, hint));
+        let searches: Vec<(String, Hint)> = hinted.into_iter().chain(moved).collect();
+        if searches.is_empty() {
             return Ok(hits);
-        };
-        let mut found = self.search_once(&name, limit, scope)?;
+        }
+        for (name, hint) in searches {
+            self.add_found(&mut hits, &name, hint, limit, scope)?;
+        }
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        truncate_keeping_inner_pages(&mut hits, limit);
+        Ok(hits)
+    }
+
+    /// Adds to `hits` the pages found for `name`, the kind `hint` asks for.
+    fn add_found(
+        &self,
+        hits: &mut Vec<PageHit>,
+        name: &str,
+        hint: Hint,
+        limit: usize,
+        scope: Option<&dyn Query>,
+    ) -> Result<()> {
+        let mut found = self.search_once(name, limit, scope)?;
         match hint {
+            // Only a person the name names, and not when a page is called
+            // the whole query: "black death" is not about the singer Black,
+            // nor "christmas songs" about Christmas.
+            Hint::Person => {
+                let called = hits.iter().any(|hit| hit.named);
+                found.retain(|hit| !called && hit.named && hit.page.is_person());
+            }
+            Hint::Named => found.retain(|hit| hit.named),
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
+            // Only a repository called so: "reverse repo" is finance.
+            Hint::Repo => found.retain(|hit| hit.named && hit.page.set == GITHUB_SET),
             Hint::Paper => {
                 if found.iter().any(|hit| hit.page.set == PAPERS_SET) {
                     found.retain(|hit| hit.page.set == PAPERS_SET);
@@ -525,9 +759,7 @@ impl PageSearcher {
                 None => hits.push(hit),
             }
         }
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        truncate_keeping_inner_pages(&mut hits, limit);
-        Ok(hits)
+        Ok(())
     }
 
     pub(crate) fn scope_term(&self, text: &str) -> Box<dyn Query> {
@@ -642,6 +874,49 @@ impl PageSearcher {
             found.truncate(limit);
         }
         Ok(())
+    }
+
+    /// The Wikipedia article titled the first of `titles` there is one
+    /// of, named by it.
+    fn first_titled(&self, titles: &[String]) -> Result<Option<PageHit>> {
+        let searcher = self.reader.searcher();
+        for title in titles {
+            let Some(joined) = analysis::tokens(&self.joined, title).pop() else {
+                continue;
+            };
+            let keyed = TermQuery::new(
+                Term::from_field_text(self.fields.keys, &joined),
+                IndexRecordOption::Basic,
+            );
+            let top = TopDocs::with_limit(TITLE_CANDIDATES)
+                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+            for (popularity, address) in
+                searcher.search(self.language_query(&keyed).as_ref(), &top)?
+            {
+                let document: TantivyDocument = searcher.doc(address)?;
+                let Some(stored) = document
+                    .get_first(self.fields.page)
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                let page: Page = serde_json::from_str(stored)?;
+                let titled = analysis::tokens(&self.joined, &page.title).pop();
+                if !page.is_article() || titled.as_deref() != Some(joined.as_str()) {
+                    continue;
+                }
+                let popularity = popularity.unwrap_or(0) as f32 / POPULARITY_SCALE;
+                return Ok(Some(PageHit {
+                    page,
+                    named: true,
+                    whole: false,
+                    score: 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity,
+                    popularity,
+                    learned: None,
+                }));
+            }
+        }
+        Ok(None)
     }
 
     /// The song or album of the music set whose title is the whole of

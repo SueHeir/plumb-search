@@ -246,7 +246,7 @@ impl ParsedQuery {
             {
                 continue;
             }
-            clauses.add(Term::from_field_text(field, word), boost);
+            clauses.add_word(field, word, boost);
         }
         let Some(other) = &self.others[i] else {
             return Ok(());
@@ -313,6 +313,47 @@ impl ParsedQuery {
         Ok(covered)
     }
 
+    /// The positions of the query's main words: those other than
+    /// [`FILLER_WORDS`] and [`plumb_core::FUNCTION_WORDS`].
+    fn main_words(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.words.len()).filter(|&i| {
+            let word = self.words[i].as_str();
+            !is_function_word(word) && !FILLER_WORDS.contains(&word)
+        })
+    }
+
+    /// Which of `docs` have only the query's numbers of its main words, as
+    /// a site with nothing but the year has of "glastonbury 2026". None
+    /// unless the query has both numbers and other main words.
+    pub(crate) fn only_numbers(
+        &self,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+        docs: &[DocAddress],
+    ) -> Result<HashSet<DocAddress>> {
+        let (numbers, words): (Vec<usize>, Vec<usize>) = self
+            .main_words()
+            .partition(|&i| self.words[i].bytes().all(|b| b.is_ascii_digit()));
+        if numbers.is_empty() || words.is_empty() || docs.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let having = |indices: &[usize]| -> Result<HashSet<DocAddress>> {
+            let mut clauses = Clauses::default();
+            for &i in indices {
+                self.word_clauses(i, searcher, f, &mut clauses)?;
+            }
+            Ok(bm25_of(searcher, &clauses.into_query(), docs.to_vec())?
+                .into_iter()
+                .filter_map(|(bm25, addr)| (bm25 > 0.0).then_some(addr))
+                .collect())
+        };
+        let words = having(&words)?;
+        Ok(having(&numbers)?
+            .into_iter()
+            .filter(|addr| !words.contains(addr))
+            .collect())
+    }
+
     /// Which of `docs` lack one of the query's main words: those other
     /// than [`FILLER_WORDS`] and [`plumb_core::FUNCTION_WORDS`]. None for a
     /// query of one main word or fewer.
@@ -322,12 +363,7 @@ impl ParsedQuery {
         f: &Fields,
         docs: &[DocAddress],
     ) -> Result<HashSet<DocAddress>> {
-        let main: Vec<usize> = (0..self.words.len())
-            .filter(|&i| {
-                let word = self.words[i].as_str();
-                !is_function_word(word) && !FILLER_WORDS.contains(&word)
-            })
-            .collect();
+        let main: Vec<usize> = self.main_words().collect();
         let mut missing = HashSet::new();
         if main.len() < 2 || docs.is_empty() {
             return Ok(missing);
@@ -374,27 +410,56 @@ impl ParsedQuery {
     }
 }
 
-/// Boosted term clauses of a disjunction. A term added twice keeps the
-/// larger boost (in a one-word query, the word is also the whole query).
+/// Boosted clauses of a disjunction, each of one term or of all of a
+/// word's [`analysis::pieces`]. A clause added twice keeps the larger
+/// boost (in a one-word query, the word is also the whole query).
 #[derive(Default)]
-pub(crate) struct Clauses(Vec<(Term, f32)>);
+pub(crate) struct Clauses(Vec<(Vec<Term>, f32)>);
 
 impl Clauses {
     pub(crate) fn add(&mut self, term: Term, boost: f32) {
-        match self.0.iter_mut().find(|(known, _)| *known == term) {
+        self.add_all(vec![term], boost);
+    }
+
+    /// `word` in the word field `field`: a word of Chinese, Japanese or
+    /// Thai by all of its pieces, which share the boost, and also whole,
+    /// as an index built before it was in pieces holds it.
+    pub(crate) fn add_word(&mut self, field: Field, word: &str, boost: f32) {
+        let pieces = analysis::pieces(word);
+        if pieces.len() > 1 {
+            let terms = pieces
+                .iter()
+                .map(|piece| Term::from_field_text(field, piece));
+            self.add_all(terms.collect(), boost);
+        }
+        self.add(Term::from_field_text(field, word), boost);
+    }
+
+    fn add_all(&mut self, terms: Vec<Term>, boost: f32) {
+        match self.0.iter_mut().find(|(known, _)| *known == terms) {
             Some((_, known_boost)) => *known_boost = known_boost.max(boost),
-            None => self.0.push((term, boost)),
+            None => self.0.push((terms, boost)),
         }
     }
 
     pub(crate) fn into_query(self) -> BooleanQuery {
+        // Fields indexed without frequencies fall back to `Basic`.
+        let term_query = |term| -> Box<dyn Query> {
+            Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+        };
         let clauses = self
             .0
             .into_iter()
-            .map(|(term, boost)| {
-                // Fields indexed without frequencies fall back to `Basic`.
-                let term_query = TermQuery::new(term, IndexRecordOption::WithFreqs);
-                let query: Box<dyn Query> = Box::new(BoostQuery::new(Box::new(term_query), boost));
+            .map(|(mut terms, boost)| {
+                // The pieces of a word share its boost.
+                let boost = boost / terms.len() as f32;
+                let query = if terms.len() == 1 {
+                    term_query(terms.remove(0))
+                } else {
+                    let all = terms.into_iter().map(|t| (Occur::Must, term_query(t)));
+                    Box::new(BooleanQuery::new(all.collect()))
+                };
+                let query: Box<dyn Query> = Box::new(BoostQuery::new(query, boost));
                 (Occur::Should, query)
             })
             .collect();

@@ -12,7 +12,8 @@ use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{TantivyDocument, Term};
 
 use super::placing::operators_allow;
-use super::scoring::{scoped_query, truncate_keeping_inner_pages};
+use super::scoring::{scoped_query, site_pages_after_named_article, truncate_keeping_inner_pages};
+use super::sites::squash;
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, CANDIDATES, DOCS_SET, PARTIAL_MATCH,
     POPULARITY_SCALE, POPULARITY_SHARE, QUESTION_QUERY_WORDS, QUESTION_SHARE,
@@ -53,6 +54,7 @@ impl PageSearcher {
         hits.retain(|hit| {
             operators_allow(ops, &hit.page) && docs_exact_query_allows(&hit.page, words)
         });
+        site_pages_after_named_article(&mut hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
         Ok(hits)
@@ -278,26 +280,44 @@ impl PageSearcher {
     }
 }
 
-/// Whether `hit` is a docs page found by its words that must come after
-/// the best of `sites`: "python package index" wants pypi.org first, and
-/// "bash parameter expansion" anything but expansion.com. Only the docs'
-/// own site may come after it, as python.org for docs.python.org's
-/// "python sorting techniques".
-pub(crate) fn docs_kept_below(hit: &PageHit, sites: &[crate::Hit]) -> bool {
-    docs_found_by_words(hit)
-        && sites
-            .first()
-            .is_some_and(|best| !docs_of(&hit.page, &best.domain))
+/// Whether the docs page `hit` is just what `query` names in code's own
+/// spelling ("Object.keys", "std::vector", "useState"), and the best of
+/// `sites` is not called that, as jquery.com is for "jQuery". Such a page
+/// leads: nobody types `Promise.all` for aclu.org or `std::vector` for
+/// vector.dev, the sites that share a word with it. The page must hold
+/// the whole name, so "macOS" is not `std::os::macos`.
+pub(crate) fn docs_named_as_code(hit: &PageHit, query: &str, sites: &[crate::Hit]) -> bool {
+    let query = query.trim();
+    let Some(symbol) = canonical_docs_symbol(query) else {
+        return false;
+    };
+    let name = squash(query);
+    hit.page.set == DOCS_SET
+        && written_as_code(query)
+        && docs_whole_names(&hit.page).contains(&symbol)
+        && strong_docs_symbol(&hit.page, query)
+        && !sites.first().is_some_and(|best| {
+            squash(&best.domain) == name
+                || squash(best.domain.split('.').next().unwrap_or("")) == name
+        })
 }
 
-/// Whether the docs page `page` is on `domain` or one of its subdomains.
-fn docs_of(page: &Page, domain: &str) -> bool {
-    plumb_core::host_of(&page.url).is_some_and(|host| {
-        host == domain
-            || host
-                .strip_suffix(domain)
-                .is_some_and(|sub| sub.ends_with('.'))
-    })
+/// Whether `query` is one name written as code: with call parentheses,
+/// `::`, a `.`, `_` or `-` inside it ("read_csv", "z-index"), or a capital
+/// after a small first letter ("useState"). "malloc" and "vector" may be
+/// words.
+fn written_as_code(query: &str) -> bool {
+    let chars: Vec<char> = query.chars().collect();
+    !query.contains(char::is_whitespace)
+        && (query.ends_with("()")
+            || query.contains("::")
+            || chars.windows(3).any(|w| {
+                w[0].is_alphanumeric() && matches!(w[1], '.' | '_' | '-') && w[2].is_alphanumeric()
+            })
+            || chars.first().is_some_and(|c| c.is_lowercase())
+                && chars
+                    .windows(2)
+                    .any(|w| w[0].is_lowercase() && w[1].is_uppercase()))
 }
 
 /// Whether `query` asks about something in the docs of the docs page
@@ -394,20 +414,68 @@ fn docs_host_requested(site: &plumb_core::docs::DocsSite, ops: &Operators) -> bo
         })
 }
 
+/// `text` as a docs symbol: lower case, without call parentheses or a
+/// manual page's section ("ls(1)" documents ls), and only letters,
+/// digits, `_`, `.`, `:` and inner hyphens ("border-radius",
+/// "Content-Type").
 fn canonical_docs_symbol(text: &str) -> Option<String> {
     let text = text.trim().trim_end_matches("()");
+    let text = match text.strip_suffix(')').and_then(|t| t.rsplit_once('(')) {
+        Some((name, section))
+            if !section.is_empty() && section.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            name
+        }
+        _ => text,
+    };
     (!text.is_empty()
         && text.len() < 256
         && text.chars().any(char::is_alphabetic)
+        && !text.starts_with('-')
+        && !text.ends_with('-')
         && text
             .chars()
-            .all(|c| c.is_alphanumeric() || "_.:".contains(c)))
+            .all(|c| c.is_alphanumeric() || "_.:-".contains(c)))
     .then(|| text.to_lowercase())
 }
 
-fn docs_title_symbols(title: &str) -> Vec<String> {
-    let head = title.split(" — ").next().unwrap_or(title);
-    docs_identifier_symbols(head)
+/// The whole names the docs page `page` documents: its title before
+/// " — ", the name its title and address share, and its rich symbols.
+fn docs_whole_names(page: &Page) -> Vec<String> {
+    let head = page.title.split(" — ").next().unwrap_or(&page.title);
+    let rich = page.search.as_ref().and_then(SearchContent::bounded);
+    std::iter::once(head)
+        .chain(rich.iter().flat_map(|search| {
+            search
+                .symbols
+                .iter()
+                .map(|symbol| symbol.identifier.as_str())
+        }))
+        .filter_map(canonical_docs_symbol)
+        .chain(docs_address_symbol(page))
+        .collect()
+}
+
+/// The name a docs page's title writes as code and its address ends
+/// with: MDN's "Document: querySelectorAll() method" at
+/// …/Document/querySelectorAll, "border-radius CSS property" at
+/// …/Properties/border-radius. Call parentheses alone don't make a name
+/// code here, so "Window: open() method" doesn't name "open", nor
+/// "Built-in Functions" at functions.html "functions".
+fn docs_address_symbol(page: &Page) -> Option<String> {
+    let leaf = docs_address_leaf(&page.url)?;
+    let head = page.title.split(" — ").next().unwrap_or(&page.title);
+    head.split_whitespace()
+        .map(|word| word.trim_end_matches([':', ',']))
+        .filter(|word| written_as_code(word.trim_end_matches("()")))
+        .find_map(|word| canonical_docs_symbol(word).filter(|symbol| *symbol == leaf))
+}
+
+/// The last part of a docs page's address as a symbol: "querySelectorAll"
+/// for …/Document/querySelectorAll, "tomllib" for …/library/tomllib.html.
+fn docs_address_leaf(url: &str) -> Option<String> {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    canonical_docs_symbol(path.rsplit('/').next()?.trim_end_matches(".html"))
 }
 
 fn docs_identifier_symbols(identifier: &str) -> Vec<String> {
@@ -433,12 +501,10 @@ pub fn docs_symbol_matches(query: &str, identifier: &str) -> bool {
 }
 
 pub(crate) fn docs_symbols(page: &Page) -> Vec<String> {
-    let mut symbols = docs_title_symbols(&page.title);
-    if let Some(search) = page.search.as_ref().and_then(SearchContent::bounded) {
-        for symbol in search.symbols {
-            symbols.extend(docs_identifier_symbols(&symbol.identifier));
-        }
-    }
+    let mut symbols: Vec<String> = docs_whole_names(page)
+        .iter()
+        .flat_map(|name| docs_identifier_symbols(name))
+        .collect();
     symbols.sort();
     symbols.dedup();
     symbols
@@ -469,16 +535,7 @@ fn strong_docs_symbol(page: &Page, query: &str) -> bool {
         || head.chars().skip(1).any(char::is_uppercase)
         || (page.title.contains(" — ")
             && symbol.len() >= 5
-            && page
-                .url
-                .split(['?', '#'])
-                .next()
-                .unwrap_or("")
-                .rsplit('/')
-                .next()
-                .and_then(|leaf| canonical_docs_symbol(leaf.trim_end_matches(".html")))
-                .as_ref()
-                == Some(&symbol))
+            && docs_address_leaf(&page.url).as_ref() == Some(&symbol))
 }
 
 pub(crate) fn docs_overview(page: &Page, site: &plumb_core::docs::DocsSite) -> bool {

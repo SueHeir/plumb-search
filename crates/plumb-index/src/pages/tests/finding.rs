@@ -262,6 +262,90 @@ fn questions_without_the_word_asked_about_are_not_found() {
 }
 
 #[test]
+fn asking_words_count_half_toward_a_question() {
+    let question = |title: &str, tags: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some(tags.into()),
+            item: Some(item.into()),
+            views: 100_000,
+            ..Article::default()
+        })
+    };
+    let pages = [
+        question(
+            "How many amps should my car pull while it is turned off?",
+            "battery, relay, power",
+            "1",
+        ),
+        question(
+            "How long does cooked pasta last in the fridge?",
+            "pasta, storage-lifetime, refrigerator",
+            "2",
+        ),
+        question(
+            "How do I get my toddler to sleep by himself?",
+            "sleep, toddler",
+            "3",
+        ),
+        question("Is it safe to drive through the night?", "road-trips", "4"),
+        question(
+            "Can I eat cheese which has been infected with blue cheese mold?",
+            "cheese, food-safety",
+            "5",
+        ),
+        question(
+            "Is it healthy for a cat to regularly eat cheese?",
+            "cats, diet",
+            "6",
+        ),
+        question("Why does my cat knead?", "cats, behavior", "7"),
+        question("How do I stop my cat scratching furniture?", "cats", "8"),
+    ];
+    // Names that make the query's other words known, not typos.
+    let known = [
+        "Climate change",
+        "Social change",
+        "Change management",
+        "Social work",
+        "Work ethic",
+        "Work (physics)",
+        "Twelfth Night",
+        "Night owl",
+        "Through the Night",
+        "Through the Looking-Glass",
+        "Through the Wall",
+        "Get Out",
+        "Get Smart",
+        "My Fair Lady",
+        "I, Robot",
+        "I Love Lucy",
+    ]
+    .map(|title| page(title, 1_000, &[]));
+    let (_dir, s) = searcher(&[&pages[..], &known[..]].concat());
+    let found = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.is_question())
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    // Only the asking words and one or two others.
+    assert!(found("how to change a car battery").is_empty());
+    assert!(found("how does a refrigerator work").is_empty());
+    assert_eq!(
+        found("can cats eat cheese"),
+        ["Is it healthy for a cat to regularly eat cheese?"]
+    );
+    // Most of what the query asks about.
+    assert_eq!(
+        found("how do i get my toddler to sleep through the night"),
+        ["How do I get my toddler to sleep by himself?"]
+    );
+}
+
+#[test]
 fn no_question_is_found_for_a_known_word_none_asks_about() {
     let question = |title: &str, tags: &str, item: &str| {
         Page::from_question(Article {
@@ -467,6 +551,66 @@ fn partial_names_score_lower() {
     assert!(s.search("marie antoinette", 1).unwrap().is_empty());
     assert!(s.search("", 1).unwrap().is_empty());
 }
+#[test]
+fn a_name_inside_a_longer_search_finds_its_page() {
+    let article = |title: &str, description: &str, views: u64, aliases: &[&str]| {
+        let mut article = page(title, views, aliases);
+        article.description = Some(description.into());
+        article.item = Some("Q1".into());
+        article
+    };
+    let asyncio = Page::from_docs(Article {
+        title: "asyncio".into(),
+        description: Some(
+            "asyncio is a library to write concurrent code using the async/await syntax.".into(),
+        ),
+        item: Some("https://docs.python.org/3/library/asyncio.html".into()),
+        views: 5_000,
+        aliases: vec!["Python asyncio".into(), "asyncio Python".into()],
+        ..Article::default()
+    })
+    .unwrap();
+    let (_dir, s) = searcher(&[
+        asyncio,
+        article(
+            "Upper Peninsula of Michigan",
+            "northern of the two peninsulas of Michigan",
+            60_000,
+            &["Upper Peninsula"],
+        ),
+        article("Michigan", "state of the United States", 500_000, &[]),
+        article("Ninja", "covert agent in feudal Japan", 300_000, &[]),
+        article(
+            "Terry Stafford",
+            "American singer-songwriter (1941–1996)",
+            1_001,
+            &[],
+        ),
+        article("Stafford", "town in Staffordshire, England", 20_000, &[]),
+        article(
+            "Death",
+            "permanent cessation of vital functions",
+            200_000,
+            &[],
+        ),
+    ]);
+    let listed = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 10).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named || hit.score >= MIN_PARTIAL_SCORE)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    // A docs page by its product and title, an article by its title.
+    assert_eq!(listed("python asyncio tutorial"), ["asyncio"]);
+    assert_eq!(listed("terry stafford death"), ["Terry Stafford"]);
+    assert_eq!(
+        listed("upper peninsula michigan map")[0],
+        "Upper Peninsula of Michigan"
+    );
+    // An article named by one word of two is no closer for the other.
+    assert!(listed("ninja terms").len() <= 1);
+}
 
 #[test]
 fn words_of_things_are_corrected_from_page_names() {
@@ -500,6 +644,8 @@ fn words_of_things_are_corrected_from_page_names() {
     assert_eq!(suggest("budapest"), None);
     assert_eq!(suggest("anub"), None);
     assert_eq!(suggest("budafest2"), None);
+    // A web address is a name, not words.
+    assert_eq!(suggest("budafest.com"), None);
     // A rare word is no slip of another rare one: few pages say "perfi".
     // Nor of a common one with another first letter: "erft".
     assert_eq!(suggest("perft"), None);
@@ -619,4 +765,125 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
     assert_eq!(sites[0].title.as_deref(), Some("New York Post"));
     assert_eq!(sites[1].title.as_deref(), Some("Welcome to Steam"));
     assert_eq!(sites[2].title.as_deref(), Some("California Post"));
+}
+
+#[test]
+fn a_famous_surname_alone_names_the_person() {
+    let person = |title: &str, views: u64| {
+        let mut person = page(title, views, &[]);
+        person.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1925-10-13".into(),
+        }];
+        person
+    };
+    let mut hilton = page("Hilton Worldwide", 3_448, &[]);
+    hilton.description = Some("American hospitality company".into());
+    hilton.site = Some("hilton.com".into());
+    let (_dir, s) = searcher(&[
+        person("Margaret Thatcher", 43_807),
+        person("Denis Thatcher", 3_863),
+        page("Thatcher effect", 900, &[]),
+        person("Franz Kafka", 32_449),
+        page("Kafka (film)", 1_200, &[]),
+        page("Kafka on the Shore", 4_270, &[]),
+        // Read too little more than another of the name.
+        person("Franklin D. Roosevelt", 69_007),
+        person("Theodore Roosevelt", 52_362),
+        // An article is called the word, or a company's site is.
+        person("Bruno Mars", 90_557),
+        page("Mars", 80_000, &[]),
+        person("Paris Hilton", 34_645),
+        hilton,
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("thatcher"), ["Margaret Thatcher"]);
+    assert_eq!(named("kafka"), ["Franz Kafka", "Kafka (film)"]);
+    assert!(named("roosevelt").is_empty());
+    assert_eq!(named("mars"), ["Mars"]);
+    assert!(named("hilton").is_empty());
+    // A surname and more words still name no one.
+    assert!(named("thatcher era").is_empty());
+}
+
+#[test]
+fn a_title_and_a_name_name_the_person_who_held_it() {
+    let person = |title: &str, views: u64, aliases: &[&str], description: &str| {
+        let mut person = page(title, views, aliases);
+        person.description = Some(description.into());
+        person.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1917-05-29".into(),
+        }];
+        person
+    };
+    let (_dir, s) = searcher(&[
+        person(
+            "John F. Kennedy",
+            75_228,
+            &["JFK"],
+            "President of the United States from 1961 to 1963",
+        ),
+        person(
+            "Kennedy (commentator)",
+            17_415,
+            &[],
+            "American television personality",
+        ),
+        person(
+            "Robert F. Kennedy",
+            31_922,
+            &[],
+            "American politician and lawyer (1925–1968)",
+        ),
+        person(
+            "Diana, Princess of Wales",
+            94_857,
+            &["Lady Diana Spencer"],
+            "Member of the British royal family (1961–1997)",
+        ),
+        page("Princess Diana (song)", 1_500, &[]),
+        person("Isaac Newton", 40_694, &[], "English polymath (1642–1727)"),
+        page("Newton (unit)", 4_568, &[]),
+        person(
+            "George W. Bush",
+            69_493,
+            &[],
+            "President of the United States from 2001 to 2009",
+        ),
+        person(
+            "George H. W. Bush",
+            41_000,
+            &[],
+            "President of the United States from 1989 to 1993",
+        ),
+        person(
+            "Abraham Lincoln",
+            80_000,
+            &["President Lincoln"],
+            "President of the United States",
+        ),
+        page("General Motors", 30_000, &[]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("president kennedy"), ["John F. Kennedy"]);
+    assert_eq!(named("princess diana")[0], "Diana, Princess of Wales");
+    assert_eq!(named("sir isaac newton"), ["Isaac Newton"]);
+    // Two presidents of the name, a page called the whole query, and no
+    // person of the name.
+    assert!(named("president bush").is_empty());
+    assert_eq!(named("president lincoln"), ["Abraham Lincoln"]);
+    assert_eq!(named("general motors"), ["General Motors"]);
 }

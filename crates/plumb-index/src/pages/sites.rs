@@ -11,11 +11,23 @@ use super::{Page, PageSearcher, TITLE_CANDIDATES};
 
 /// `title` without a trailing qualifier in brackets: `Python (programming
 /// language)` -> `Python`.
-pub(crate) fn base_title(title: &str) -> &str {
+pub fn base_title(title: &str) -> &str {
     match title.rfind(" (") {
         Some(i) if title.ends_with(')') && i > 0 => &title[..i],
         _ => title,
     }
+}
+
+/// The title of a work in a series without the series' name: "Tears of
+/// the Kingdom" of "The Legend of Zelda: Tears of the Kingdom", "The
+/// Phantom Menace" of "Star Wars: Episode I – The Phantom Menace". `None`
+/// when there is no such part, or it has fewer than two words that are
+/// not stop words ("Mission: Impossible", "Pokémon: The Movie"), too
+/// little to name the work alone.
+pub(crate) fn subtitle(title: &str) -> Option<&str> {
+    let (_, rest) = base_title(title).rsplit_once(": ")?;
+    let rest = rest.rsplit_once(" – ").map_or(rest, |(_, last)| last);
+    (crate::analysis::tokens(&crate::analysis::stemmed_analyzer(), rest).len() >= 2).then_some(rest)
 }
 
 impl PageSearcher {

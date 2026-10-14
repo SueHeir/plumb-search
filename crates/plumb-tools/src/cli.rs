@@ -479,10 +479,16 @@ pub struct FetchPagesArgs {
     /// Packages: most packages kept of each registry, the most used.
     #[arg(long, value_name = "N", default_value_t = crate::build::packages::DEFAULT_MAX_PER_REGISTRY)]
     pub max_per_registry: usize,
-    /// Places: read this OpenStreetMap extract (.osm.pbf) instead of
-    /// downloading the whole planet (about 90 GB) into --work.
+    /// Places: read these OpenStreetMap extracts (.osm.pbf, which may
+    /// overlap) instead of downloading the whole planet (about 90 GB) into
+    /// --work.
+    #[arg(long, value_name = "PATH", num_args = 1..)]
+    pub osm: Vec<PathBuf>,
+    /// Places: the English Wikipedia articles file (the wikipedia-en set),
+    /// whose titles and redirects name the places their Wikidata items
+    /// are: "Big Ben", "Philly".
     #[arg(long, value_name = "PATH")]
-    pub osm: Option<PathBuf>,
+    pub articles: Option<PathBuf>,
     /// Docs: the docs sites to fetch (mdn, python, rust and others; see
     /// plumb_core::docs), comma-separated; all when left out.
     #[arg(long, value_name = "KEYS", value_delimiter = ',')]

@@ -38,13 +38,15 @@ pub mod storage;
 pub mod subsites;
 
 pub use article::{article_url, Article};
-pub use bot_check::{echoes_the_request, is_bot_check_page, is_sign_in_portal};
+pub use bot_check::{
+    echoes_the_request, is_bot_check_page, is_sign_in_portal, is_stand_in_homepage,
+};
 pub use country::{
     country_of_any_name, country_of_name, normalize_country, site_country, tld_country,
     COUNTRY_CHOICES,
 };
 pub use key_pages::{KeyPage, PageIntent, MAX_KEY_PAGES};
-pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
+pub use kinds::{is_generic_kind, kind_key, other_number, singular, MAX_KINDS};
 pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
@@ -1188,10 +1190,12 @@ pub fn domain_label(domain: &str) -> String {
 }
 
 /// Normalizes text for matching: lowercase, letters and digits only, every
-/// other run of characters becomes one space. Apostrophes are dropped
-/// (`McDonald's` -> `mcdonalds`) and runs of single-character tokens are
-/// joined, so `U.S. Bank` -> `us bank` and `A.T.M.` -> `atm`.
+/// other run of characters becomes one space. Apostrophes and combining
+/// marks are dropped (`McDonald's` -> `mcdonalds`, Thai `ข่าว` -> `ขาว`)
+/// and runs of single-character tokens are joined, so `U.S. Bank` ->
+/// `us bank` and `A.T.M.` -> `atm`.
 pub fn normalize_text(text: &str) -> String {
+    use unicode_categories::UnicodeCategories;
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
     for ch in text.chars() {
@@ -1199,8 +1203,10 @@ pub fn normalize_text(text: &str) -> String {
             // Only letters and digits of the lowercase form, so a second
             // pass changes nothing: `İ` lowercases to `i` plus a combining dot.
             current.extend(ch.to_lowercase().filter(|c| c.is_alphanumeric()));
-        } else if matches!(ch, '\'' | '\u{2019}' | '\u{02BC}') {
-            // Apostrophes join the two halves of a word.
+        } else if matches!(ch, '\'' | '\u{2019}' | '\u{02BC}') || ch.is_mark() {
+            // Apostrophes join the two halves of a word, and a mark is part
+            // of its letter: a Thai tone mark or the virama of Hindi's `न्द`
+            // is inside a word, not between two.
         } else if !current.is_empty() {
             tokens.push(std::mem::take(&mut current));
         }
@@ -1421,6 +1427,18 @@ pub fn language_fits(wanted: &str, site: &str) -> bool {
     }
 }
 
+/// Whether `query` has letters in a script `language` is not written in:
+/// "天気予報", "погода москва" or "iphone 価格" with English chosen. Such
+/// a search is for sites in that script, which a filter for `language`
+/// would leave out. Latin letters never count, since names and codes are
+/// typed in them whatever the language.
+pub fn written_outside(language: &str, query: &str) -> bool {
+    query.chars().filter_map(char_script).any(|(script, _)| {
+        let script = if script == "Kana" { "Jpan" } else { script };
+        !matches!(script, "Latn" | "other") && !language_fits(language, script)
+    })
+}
+
 /// Keep valid declared language metadata authoritative. Only missing or
 /// invalid declarations fall back to dominant title/description script.
 /// Short excerpts and multilingual names do not reliably contradict an
@@ -1635,6 +1653,39 @@ mod tests {
     }
 
     #[test]
+    fn queries_in_another_script_than_the_language() {
+        for query in [
+            "天気予報",
+            "東京タワー",
+            "iphone 価格",
+            "погода москва",
+            "네이버",
+            "الجزيرة",
+            "मौसम",
+        ] {
+            assert!(written_outside("en", query), "{query}");
+        }
+        for (language, query) in [
+            ("en", "weather tokyo"),
+            ("en", "Nestlé café"),
+            ("de", "münchen wetter"),
+            ("ru", "погода москва"),
+            ("ru", "weather"),
+            ("ja", "天気予報"),
+            ("ja", "東京タワー"),
+            ("ko", "네이버 날씨"),
+            ("ar", "الجزيرة"),
+            ("bo", "བོད་"),
+            ("en", "12345 !?"),
+        ] {
+            assert!(!written_outside(language, query), "{language} {query}");
+        }
+        // Kana is Japanese, not Chinese; Han alone fits either.
+        assert!(written_outside("zh", "東京タワー"));
+        assert!(!written_outside("zh", "天气预报"));
+    }
+
+    #[test]
     fn language_codes_from_tags() {
         assert_eq!(language_code("en-US").as_deref(), Some("en"));
         assert_eq!(language_code("zh_Hant_TW").as_deref(), Some("zh"));
@@ -1758,6 +1809,11 @@ mod tests {
         // `İ` lowercases to `i` plus a combining dot; the dot is dropped so
         // normalizing twice gives the same text.
         assert_eq!(normalize_text("İstanbul Havalimanı"), "istanbul havalimanı");
+        // Marks that are not letters stay inside their word: a Thai tone
+        // mark, Hindi's virama, an accent typed as a combining mark.
+        assert_eq!(normalize_text("รวมข่าว บันเทิง"), "รวมขาว บันเทิง");
+        assert_eq!(normalize_text("हिन्दी समाचार"), "हिनदी समाचार");
+        assert_eq!(normalize_text("cafe\u{301}s"), "cafes");
         for text in ["İstanbul", "Ǆemal", "ﬁnance", "Straße", "ΣΊΣΥΦΟΣ", "İİ.İ"] {
             let once = normalize_text(text);
             assert_eq!(normalize_text(&once), once, "{text:?}");

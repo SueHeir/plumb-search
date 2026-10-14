@@ -31,23 +31,27 @@ use tantivy::IndexReader;
 
 mod building;
 mod docs;
+mod named_site;
 mod page;
 mod papers;
 mod placing;
+mod repos;
 mod scoring;
 mod search;
 mod sites;
 
 pub use self::building::{build_page_index, build_page_index_with_budget, GO_ON_EVERY};
-pub(crate) use self::docs::docs_kept_below;
 pub use self::docs::{docs_query_topic, docs_symbol_matches};
+pub(crate) use self::page::is_site_page_set;
 pub use self::placing::{
-    add_named_site, drop_namesakes_of_words, keep_page_rules, lift_named_sites, operators_allow,
-    options_allow, page_key, place_operator_pages, place_pages, DEMAND_MARGIN, MAX_PAGES_LISTED,
-    MAX_SITE_PAGES, MIN_PARTIAL_SCORE, OPERATOR_PAGES, PARTIAL_AFTER, WEAK_SITE_MATCH,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, keep_page_rules, lift_named_sites,
+    operators_allow, options_allow, page_key, place_operator_pages, place_pages, DEMAND_MARGIN,
+    MAX_PAGES_LISTED, MAX_SITE_PAGES, MIN_PARTIAL_SCORE, OPERATOR_PAGES, PARTIAL_AFTER,
+    WEAK_SITE_MATCH,
 };
-pub(crate) use self::placing::{asked_as_question, named_page_site};
+pub(crate) use self::placing::{asked_as_question, kept_below, named_page_site};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
+pub use self::sites::base_title;
 
 /// `name` of a page one of whose aliases the query is.
 pub const ALIAS_MATCH: f32 = 0.9;
@@ -61,6 +65,38 @@ pub const PARTIAL_MATCH: f32 = 0.6;
 /// query names, but enough to be listed.
 pub const OTHER_NAME_MATCH: f32 = 0.6;
 
+/// How many times as much a person must be read as any other article with
+/// their surname in its title to be named by it alone
+/// ([`PageSearcher::name_by_surname`]), or by a title and their name.
+const SURNAME_MARGIN: u64 = 3;
+
+/// Words before a person's name that are none of it: "sir isaac newton",
+/// "st francis of assisi" ([`PageSearcher::name_by_title`]).
+const HONORIFICS: &[&str] = &[
+    "sir", "dame", "dr", "mr", "mrs", "ms", "saint", "st", "lord", "lady", "tsar", "czar",
+];
+
+/// Titles before a person's name that their article's title or
+/// description says they held: "president kennedy" is John F. Kennedy,
+/// "President of the United States", and not Kennedy the commentator.
+const OFFICES: &[&str] = &[
+    "president",
+    "senator",
+    "governor",
+    "mayor",
+    "chancellor",
+    "chairman",
+    "pope",
+    "emperor",
+    "empress",
+    "king",
+    "queen",
+    "prince",
+    "princess",
+    "general",
+    "admiral",
+];
+
 /// How much popularity counts, against how well the query names the page.
 pub const POPULARITY_SHARE: f32 = 0.5;
 
@@ -73,6 +109,13 @@ pub const QUESTION_QUERY_WORDS: usize = 3;
 
 /// Least share of those words a question's title and tags must have.
 pub const QUESTION_SHARE: f32 = 0.75;
+/// How much a word that only asks ([`ASKING_WORDS`]) counts toward a
+/// question's [`QUESTION_SHARE`]: nearly every question has some, so they
+/// say little of what it asks. Counted whole, "how to change a car battery"
+/// found "How many amps should my car pull while it is turned off?" by
+/// "how", "car" and "battery". A word no page knows, likely a typo, counts
+/// as little: "how to undo git comit" still finds the question.
+const UNSURE_WORD_SHARE: f32 = 0.5;
 
 /// Least number of pages whose names have a word for the word to be
 /// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
@@ -101,12 +144,14 @@ pub const DESCRIBED_QUERY_WORDS: usize = 2;
 pub const DESCRIBED_MISSING_FROM: usize = 3;
 
 /// How much a query word an article only says counts, against one of its
-/// title.
+/// title. It has to say the word itself, in the singular or the plural,
+/// not only its stem: "scheduled monument" does not say "schedule".
 pub const DESCRIBED_WORD: f32 = 0.5;
 
 /// Most `name` of a Wikipedia article whose lead ([`Page::lead`]), with
-/// its names and description, has every word of a query (stemmed, without
-/// the asking words) of at least [`DESCRIBED_QUERY_WORDS`]: the article
+/// its names and description, says every word of a query (without the
+/// asking words, as [`DESCRIBED_WORD`] says) of at least
+/// [`DESCRIBED_QUERY_WORDS`]: the article
 /// whose lead matches them best gets it, others less by how much worse
 /// theirs does. "triassic jurassic cretaceous" finds Mesozoic.
 pub const LEAD_MATCH: f32 = 0.55;
@@ -119,13 +164,14 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 const LEAD_CANDIDATES: usize = 20;
 
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v6-paper-dates-rich-symbol-docs-scope";
+pub const PAGE_INDEX_VERSION: &str = "v8-docs-address-symbols-subtitles";
 
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
 const ASKING_WORDS: &[&str] = &[
     "about",
     "are",
+    "can",
     "define",
     "definition",
     "did",
@@ -139,6 +185,7 @@ const ASKING_WORDS: &[&str] = &[
     "mean",
     "meaning",
     "means",
+    "should",
     "was",
     "were",
     "what",

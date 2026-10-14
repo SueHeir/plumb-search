@@ -5,8 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use plumb_core::{
-    is_function_word, kind_key, language_code, language_fits, normalize_country,
-    registrable_domain, AdultLevel,
+    is_function_word, kind_key, language_fits, normalize_country, registrable_domain, AdultLevel,
 };
 use tantivy::collector::TopDocs;
 use tantivy::query::{EnableScoring, Query, Scorer};
@@ -495,7 +494,7 @@ impl Searcher {
 
         let max_bm25 = candidates.iter().map(|&(bm25, _)| bm25).fold(0.0, f32::max);
         let mut ranked: Vec<Ranked> = Vec::with_capacity(candidates.len());
-        let language = options.language.as_deref().and_then(language_code);
+        let language = self.language_for(options, query_text);
         for (bm25, addr) in candidates {
             let column = &columns[addr.segment_ord as usize];
             if options.safe.hides(column.adult(addr.doc_id)) {
@@ -600,9 +599,16 @@ impl Searcher {
             };
             let relevance_tier = u8::from(cfg.whole_query_relevance && convincing);
             // A site whose domain the whole query names stays whatever its
-            // language: "spiegel" finds spiegel.de with English chosen.
+            // language: "spiegel" finds spiegel.de with English chosen. So
+            // does a well-known site the query's first two words or more
+            // name: "real madrid tickets" keeps realmadrid.com, "deutsche
+            // bahn tickets" bahn.de. One word is too often a common one
+            // ("free games" is not free.fr's).
+            let known_name = name.typed
+                || name.label >= query.len
+                || name.words() >= 2 && link_score >= WELL_KNOWN_LINK_SCORE;
             if let (Some(wanted), Some(site)) = (&language, column.language(addr.doc_id)) {
-                if !language_fits(wanted, &site) && !name.typed && name.label < query.len {
+                if !language_fits(wanted, &site) && !known_name {
                     continue;
                 }
             }
@@ -783,7 +789,21 @@ impl Searcher {
                 // "back bay hilton", not valley.com in "elephant valley". An
                 // official site is known by its Wikidata name, not by its
                 // domain label (valley.com is Valley National Bank's).
+                // Nor for one that has no other main word of the query and
+                // is not among the sites nearest it in meaning, unless the
+                // query starts with its name: that is a namesake of one
+                // word (x.com for "derivative of sin x", web.com for "visit
+                // japan web"). delta.com has "flights" for "flights to paris
+                // delta", and target.com is near "coffee maker target". An
+                // address typed from "www" starts with its name too
+                // (netflix.com for "www.netflix").
+                let namesake = evidence[&r.addr].main_words <= 1
+                    && query.words.first().is_none_or(|word| word != "www")
+                    && r.query_evidence.as_ref().is_some_and(|e| {
+                        e.partial_name_words == 0 && e.semantic_closeness.is_some_and(|c| c <= 0.0)
+                    });
                 if named_inside.contains(&r.addr)
+                    && !namesake
                     && (r.link_score >= WELL_KNOWN_LINK_SCORE
                         || (alias_inside.contains(&r.addr)
                             && self.is_official(&searcher, r.addr)?))
@@ -824,6 +844,18 @@ impl Searcher {
             let missing = query.missing_main_words(&searcher, &self.fields, &partial)?;
             ranked.retain(|r| !missing.contains(&r.addr));
         }
+
+        // A number shared with a query of other words is no match, however
+        // near in meaning: the year of "glastonbury 2026" says which one,
+        // not what (a rugby championship's or a lottery's "2026"). A site
+        // the query starts by naming keeps its place (163.com).
+        let unnamed: Vec<DocAddress> = ranked
+            .iter()
+            .filter(|r| !r.named && names.get(&r.addr).is_none_or(|name| name.words() == 0))
+            .map(|r| r.addr)
+            .collect();
+        let numbers_only = query.only_numbers(&searcher, &self.fields, &unnamed)?;
+        ranked.retain(|r| !numbers_only.contains(&r.addr));
 
         // Far below a site the query names: filler.
         if let (Some(share), Some(top)) = (cfg.named_share, ranked.first()) {
@@ -928,7 +960,7 @@ impl Searcher {
         // known homepages that are only a company's sign-in page for
         // someone else's product ("Outlook Web App" on bpl.net for
         // "microsoft outlook"). live.com, titled "Outlook", is Microsoft's.
-        let ranked = self.untitled_last(&searcher, ranked, limit)?;
+        let ranked = self.untitled_last(&searcher, ranked, query_text, limit)?;
         // A few more than asked for, so that copies left out below leave
         // the page full.
         let wanted = limit.saturating_add(COPY_LOOKAHEAD);
