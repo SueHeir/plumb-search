@@ -805,13 +805,25 @@ mod tests {
                 "generic top-level domain",
                 "top-level Internet domain",
             ),
+            claim(
+                "Q1",
+                ".NET Foundation",
+                "dotnetfoundation.org",
+                "foundation",
+                "non-profit organization",
+            ),
+            claim("Q2", ".KTW", "ktw.com.pl", "magazine", "Polish magazine"),
         ]);
-        let records = builder.finish(None);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].domain, "mayen.de");
-        assert_eq!(records[0].aliases, ["Mayen"]);
+        let mut records = builder.finish(None);
+        records.sort_by(|a, b| a.domain.cmp(&b.domain));
+        let domains: Vec<&str> = records
+            .iter()
+            .map(|record| record.domain.as_str())
+            .collect();
+        assert_eq!(domains, ["dotnetfoundation.org", "ktw.com.pl", "mayen.de"]);
+        assert_eq!(records[2].aliases, ["Mayen"]);
         assert_eq!(
-            records[0].about.as_deref(),
+            records[2].about.as_deref(),
             Some("town in Rhineland-Palatinate")
         );
     }

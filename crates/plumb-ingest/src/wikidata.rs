@@ -149,13 +149,22 @@ impl OfficialSite {
 
     /// True when the item's claim names no site: the item is a page of the
     /// wikis rather than a thing (a disambiguation page, a category or a
-    /// template, [`OfficialSite::kinds`]) or a domain ending, whose label
-    /// starts with a dot. Some claim a website anyway: the disambiguation
-    /// page "Radioactive" a guitarist's site, "Microsoft Web Services"
+    /// template, [`OfficialSite::kinds`]) or a domain ending, labelled a dot
+    /// and one word. Some claim a website anyway: the disambiguation page
+    /// "Radioactive" a guitarist's site, "Microsoft Web Services"
     /// outlook.com, and ".microsoft" its registry's nic.microsoft, which
-    /// "microsoft" would then name as an official site.
+    /// "microsoft" would then name as an official site. Things whose name
+    /// starts with a dot (".NET Foundation", ".hack//The Movie", the
+    /// magazine ".KTW") keep their sites.
     pub fn claims_nothing(&self) -> bool {
-        self.label.starts_with('.')
+        let ending = self.label.strip_prefix('.').is_some_and(|word| {
+            !word.is_empty() && word.chars().all(|c| c.is_alphanumeric() || c == '-')
+        }) && (self.kinds.is_empty()
+            || self
+                .kinds
+                .iter()
+                .any(|kind| kind.ends_with("top-level domain")));
+        ending
             || self
                 .kinds
                 .iter()
