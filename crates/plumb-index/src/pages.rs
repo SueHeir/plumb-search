@@ -35,6 +35,8 @@ mod named_site;
 mod page;
 mod papers;
 mod placing;
+mod records;
+mod repos;
 mod scoring;
 mod search;
 mod sites;
@@ -48,7 +50,10 @@ pub use self::placing::{
     MAX_PAGES_LISTED, MAX_SITE_PAGES, MIN_PARTIAL_SCORE, OPERATOR_PAGES, PARTIAL_AFTER,
     WEAK_SITE_MATCH,
 };
-pub(crate) use self::placing::{asked_as_question, kept_below, named_page_site};
+pub(crate) use self::placing::{
+    asked_as_question, is_record, kept_below, named_page_site, names_best_site_page,
+};
+pub use self::scoring::made_by;
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
 pub use self::sites::base_title;
 
@@ -68,6 +73,11 @@ pub const OTHER_NAME_MATCH: f32 = 0.6;
 /// their surname in its title to be named by it alone
 /// ([`PageSearcher::name_by_surname`]), or by a title and their name.
 const SURNAME_MARGIN: u64 = 3;
+
+/// How many times as much an article called a query without its leading
+/// "the" must be read as every article the whole query names to be named
+/// too ([`PageSearcher::name_without_the`]).
+const WITHOUT_THE_MARGIN: u64 = 10;
 
 /// Words before a person's name that are none of it: "sir isaac newton",
 /// "st francis of assisi" ([`PageSearcher::name_by_title`]).
@@ -118,7 +128,8 @@ const UNSURE_WORD_SHARE: f32 = 0.5;
 
 /// Least number of pages whose names have a word for the word to be
 /// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
-/// sites say them.
+/// sites say them. Unless it is a slip the sites show people make, of a
+/// word in far more pages ([`PAGE_SLIP_WEIGHT`]): "recieve" is in 68.
 pub const KNOWN_WORD_PAGES: u64 = 3;
 
 /// A word the pages hardly know is corrected to a near word found in this
@@ -128,6 +139,14 @@ pub const PAGE_FIX_RATIO: u64 = 20;
 /// ...and in at least this many: a slip of a rare word is no likelier than
 /// a rare word typed as meant ("kiwipete" is not "kimipet").
 pub const MIN_PAGE_FIX_PAGES: u64 = 20;
+
+/// The power how much commoner a word is in pages' names is weighed by,
+/// against a slip the spelling model learned ([`PageSearcher::suggest_spelling`]).
+/// Pages are named after things, so everyday words are rarer in their
+/// names than in what people type: "definitely" is in 228, "receive" in
+/// 3,668, and at a power of 1 neither "definately" nor "recieve" would be
+/// taken for a slip of them.
+pub const PAGE_SLIP_WEIGHT: f64 = 2.0;
 
 /// Most read articles about a site looked at for one about the site itself
 /// ([`PageSearcher::title_untitled`]).
@@ -143,12 +162,14 @@ pub const DESCRIBED_QUERY_WORDS: usize = 2;
 pub const DESCRIBED_MISSING_FROM: usize = 3;
 
 /// How much a query word an article only says counts, against one of its
-/// title.
+/// title. It has to say the word itself, in the singular or the plural,
+/// not only its stem: "scheduled monument" does not say "schedule".
 pub const DESCRIBED_WORD: f32 = 0.5;
 
 /// Most `name` of a Wikipedia article whose lead ([`Page::lead`]), with
-/// its names and description, has every word of a query (stemmed, without
-/// the asking words) of at least [`DESCRIBED_QUERY_WORDS`]: the article
+/// its names and description, says every word of a query (without the
+/// asking words, as [`DESCRIBED_WORD`] says) of at least
+/// [`DESCRIBED_QUERY_WORDS`]: the article
 /// whose lead matches them best gets it, others less by how much worse
 /// theirs does. "triassic jurassic cretaceous" finds Mesozoic.
 pub const LEAD_MATCH: f32 = 0.55;
@@ -161,7 +182,7 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 const LEAD_CANDIDATES: usize = 20;
 
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v8-docs-address-symbols-subtitles";
+pub const PAGE_INDEX_VERSION: &str = "v9-docs-address-symbols-short-titles";
 
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
@@ -288,12 +309,13 @@ pub const DOCS_SET: &str = "docs";
 
 /// The set of inner pages of well-known reference sites: health,
 /// dictionaries, recipes, how-tos, government (see
-/// `plumb_tools::reference_sites`).
+/// `plumb_tools::reference_sites`). Found by their words, they are listed
+/// only when the search asks for them (`subpage_asked`).
 pub const REFERENCE_SET: &str = "reference";
 
-/// Opt-in staged reference pages with the stricter title relevance gate.
-/// Legacy `reference` remains readable until a complete, coverage-checked
-/// generation is explicitly selected. Older readers never request this id.
+/// The reference set under a name v0.2.0 nodes never request: they list
+/// "reference" pages with no such check. Opt-in until a complete,
+/// coverage-checked generation of it is selected.
 pub const REFERENCE2_SET: &str = "reference2";
 
 /// The set of inner pages of other well-known sites: universities and
@@ -331,6 +353,11 @@ pub const PAPERS_SET: &str = "papers";
 /// Wikipedia article (Linus Tech Tips the channel), each only ever listed
 /// under its own website.
 pub const WIKIDATA_SET: &str = "wikidata";
+
+/// Records a search names by their identifier ("rfc 3339", "pep 8"),
+/// built from the identifier rather than read from a file (see
+/// `pages/records.rs`) and always listed first ([`keep_page_rules`]).
+pub const RECORDS_SET: &str = "records";
 
 /// The set of English words and what they mean, from Wiktionary
 /// ([`plumb_core::article`] files made by `plumb-tools fetch-pages --set

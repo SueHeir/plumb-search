@@ -19,6 +19,10 @@ Zotero then keeps it up to date.
 - Right-click an item and choose **Search Plumb for This Item** to search for its title (a book's with its author).
 - Click a result's address to open it in your browser.
 
+## Your library in Plumb's searches
+
+The other way round, the [Zotero plugin for Plumb](../plugins/zotero/README.md) lists items from your Zotero library in your own node's results and in its MCP answers to AI apps.
+
 ## What an added item holds
 
 With **Look up full details when adding** on, as it is at first:
