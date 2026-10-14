@@ -107,7 +107,7 @@ pub use crate::names::without_intent_words;
 pub use crate::query_evidence::CandidateEvidence;
 pub use crate::replace::remove_build_leftovers;
 use crate::schema::Fields;
-pub use crate::states::asked_state_first;
+pub use crate::states::{asked_state_first, namesakes_last};
 
 // Function words ("pizza in denver", "bank of america") name no site in a
 // longer query: between two other words they never match a domain label or
