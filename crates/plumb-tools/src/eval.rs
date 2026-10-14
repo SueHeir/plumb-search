@@ -1600,6 +1600,7 @@ mod tests {
             popularity: 0.9,
             whole: false,
             learned: None,
+            meant: false,
         };
         let hits = [site("curie.org", false), site("python.org", false)];
         let placed = place_pages(

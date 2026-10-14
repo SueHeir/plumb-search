@@ -487,6 +487,7 @@ impl PageSearcher {
                         popularity,
                         whole,
                         learned: None,
+                        meant: false,
                     });
                 }
                 continue;
@@ -510,7 +511,8 @@ impl PageSearcher {
             // Named by part of the query, by its title or another name in
             // full, or meant by it: "queen tour" is not about Queen (album).
             let link = linked.get(&address).map(Vec::as_slice);
-            let span = inside.span(&page, &self.joined).or(link);
+            let named_part = inside.span(&page, &self.joined);
+            let span = named_part.or(link);
             let left_out = span.is_none()
                 && (by_title_first.contains(&address) && !asked_by_title
                     || film_title_first.contains(&address)
@@ -523,6 +525,7 @@ impl PageSearcher {
             }
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
             let mut whole = false;
+            let mut meant = false;
             if asked_by_title {
                 let least = if title_end {
                     PARTIAL_MATCH
@@ -543,7 +546,10 @@ impl PageSearcher {
                 }
                 if let Some(span) = span {
                     name = name.max(self.inside_match(&page, span, &described));
+                    // Listed for what a part means, not names: after
+                    // three sites, whatever the learned ranking says.
                     if link.is_some() {
+                        meant = named_part.is_none() || name < ENTITY_MATCH;
                         name = name.max(ENTITY_MATCH);
                     }
                 }
@@ -567,6 +573,7 @@ impl PageSearcher {
                 popularity,
                 whole,
                 learned: None,
+                meant,
             });
         }
         described_repos.name(&mut hits);

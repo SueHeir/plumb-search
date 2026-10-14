@@ -1452,6 +1452,7 @@ impl PageSearcher {
                         * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
                     popularity,
                     learned: None,
+                    meant: false,
                 });
             }
         }
@@ -1909,6 +1910,7 @@ impl PageSearcher {
                     score: 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity,
                     popularity,
                     learned: None,
+                    meant: false,
                 }));
             }
         }

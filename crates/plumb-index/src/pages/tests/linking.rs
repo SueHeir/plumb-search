@@ -60,6 +60,10 @@ fn a_part_of_the_query_links_to_the_article_it_usually_means() {
         first("hamstring insertion point").as_deref(),
         Some("Hamstring")
     );
+    // Meant, not named, so listed after three sites whatever the learned
+    // ranking says.
+    assert!(s.search("hamstring insertion point", 5).unwrap()[0].meant);
+    assert!(!s.search("hamstring", 5).unwrap()[0].meant);
     // The last word, after a word like "for".
     assert_eq!(first("uses for wood").as_deref(), Some("Wood"));
     // Not "a lien", which joins to Alien, so would hold "lien".

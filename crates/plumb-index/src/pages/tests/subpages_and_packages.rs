@@ -167,6 +167,7 @@ fn tag_archives_are_listed_only_on_their_site() {
         popularity: 0.9,
         whole: false,
         learned: None,
+        meant: false,
     };
     let lupus = hit("https://www.jnj.com/tag/lupus", "Lupus");
     let sites =
@@ -209,6 +210,7 @@ fn section_pages_are_listed_only_on_their_site() {
         popularity: 0.98,
         whole: false,
         learned: None,
+        meant: false,
     };
     let sites =
         |domains: &[&str]| -> Vec<crate::Hit> { domains.iter().map(|d| site(d, false)).collect() };
@@ -291,6 +293,7 @@ fn subpages_are_listed_only_when_asked_for() {
         popularity: 0.5,
         whole: false,
         learned: None,
+        meant: false,
     };
     let listed = |query: &str, sites: &[&str], hit: PageHit| {
         let sites: Vec<crate::Hit> = sites.iter().map(|d| site(d, false)).collect();
@@ -602,6 +605,7 @@ fn another_sites_page_titled_what_has_a_site_waits_for_that_site() {
         popularity: 0.9,
         whole: false,
         learned: None,
+        meant: false,
     };
     let mut race = found("Boston Marathon", Some("baa.org"), true, 0.8);
     race.page.item = Some("Q826288".into());

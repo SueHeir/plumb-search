@@ -142,6 +142,7 @@ fn found(title: &str, site: Option<&str>, named: bool, score: f32) -> PageHit {
         popularity: score,
         whole: false,
         learned: None,
+        meant: false,
     }
 }
 

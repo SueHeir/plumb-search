@@ -275,6 +275,7 @@ fn reference_pages_are_listed_only_when_asked_for() {
             popularity: 0.5,
             whole: false,
             learned: None,
+            meant: false,
         };
         subpage_asked(query, &[], &hit)
     };
@@ -534,6 +535,7 @@ fn docs_pages_are_found_by_product_and_title_or_most_words() {
                 popularity: 1.0,
                 whole: true,
                 learned: None,
+                meant: false,
             },
         }];
         keep_page_rules("sort a list in python", &sites, &mut placed);
