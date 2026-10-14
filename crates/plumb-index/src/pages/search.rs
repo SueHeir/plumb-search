@@ -33,6 +33,13 @@ pub(crate) enum Hint {
     Repo,
     /// A paper of that title: "batch normalization paper".
     Paper,
+    /// A work of one of these kinds of that name, of which something is
+    /// asked: "titanic trailer", "let it be chords".
+    Work(&'static [&'static str]),
+    /// A film, show or game of that name when there is one, else
+    /// whatever is named so: "titanic movie" for the 1997 film, not the
+    /// ship, but "tom hanks movie" still for Tom Hanks.
+    Screen,
     /// A person of that name, of whom something is asked: "obama
     /// daughters", "picasso paintings".
     Person,
@@ -47,6 +54,35 @@ pub(crate) enum Hint {
     /// nothing, and the clubs it describes would push Madrid out.
     Named,
 }
+
+/// What a song is called in its title or description ([`Page::is_work_of`]).
+const SONG: &[&str] = &["song", "single"];
+
+/// What a film, show or game is called so.
+const SCREEN: &[&str] = &[
+    "film",
+    "movie",
+    "series",
+    "miniseries",
+    "sitcom",
+    "show",
+    "game",
+];
+
+/// Words before a name that ask who sang a song, where to see a film or
+/// show, or how long one is. Longer leads come first.
+const WORK_LEADS: &[(&str, &[&str])] = &[
+    ("who sings the song ", SONG),
+    ("who sang the song ", SONG),
+    ("who sings ", SONG),
+    ("who sang ", SONG),
+    ("where to watch ", SCREEN),
+    ("where can i watch ", SCREEN),
+    ("where to stream ", SCREEN),
+    ("where can i stream ", SCREEN),
+    ("how many seasons of ", SCREEN),
+    ("how many episodes of ", SCREEN),
+];
 
 /// Words before a name that ask about it. "What's" is read as "what is";
 /// "whats" is not, since "whats app" is a misspelled name.
@@ -255,9 +291,33 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" albums", Hint::Person),
     (" paintings", Hint::Person),
     (" inventions", Hint::Person),
+    // What people ask of a song or a film, show or game, whose article is
+    // not called by these words. Longer tails first: "hey jude piano
+    // chords" is not about a song "hey jude piano".
+    (" song lyrics", Hint::Work(SONG)),
+    (" lyrics", Hint::Work(SONG)),
+    (" guitar chords", Hint::Work(SONG)),
+    (" piano chords", Hint::Work(SONG)),
+    (" ukulele chords", Hint::Work(SONG)),
+    (" chords", Hint::Work(SONG)),
+    (" guitar tabs", Hint::Work(SONG)),
+    (" guitar tab", Hint::Work(SONG)),
+    (" karaoke", Hint::Work(SONG)),
+    (" music video", Hint::Work(SONG)),
+    (" official trailer", Hint::Work(SCREEN)),
+    (" trailer", Hint::Work(SCREEN)),
+    (" box office", Hint::Work(SCREEN)),
+    (" reviews", Hint::Work(SCREEN)),
+    (" review", Hint::Work(SCREEN)),
+    (" release date", Hint::Work(SCREEN)),
+    (" ending explained", Hint::Work(SCREEN)),
+    (" ending", Hint::Work(SCREEN)),
+    (" finale", Hint::Work(SCREEN)),
+    (" characters", Hint::Work(SCREEN)),
+    (" actors", Hint::Work(SCREEN)),
     (" cast", Hint::Any),
     (" author", Hint::Any),
-    (" movie", Hint::Any),
+    (" movie", Hint::Screen),
     (" film", Hint::Any),
     (" meaning", Hint::Any),
     (" mean", Hint::Any),
@@ -299,6 +359,12 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     {
         name = rest;
         hint = Some(Hint::Any);
+    } else if let Some((rest, kinds)) = WORK_LEADS
+        .iter()
+        .find_map(|(lead, kinds)| Some((name.strip_prefix(lead)?, *kinds)))
+    {
+        name = rest;
+        hint = Some(Hint::Work(kinds));
     }
     if let Some((rest, tail_hint)) = HINT_TAILS
         .iter()
@@ -951,6 +1017,21 @@ impl PageSearcher {
                                 * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity),
                         );
                     }
+                }
+            }
+            // Only a work of the kinds asked for, and not when a page is
+            // called the whole query: "power chords" is not about the song
+            // "Power".
+            Hint::Work(kinds) => {
+                let called = hits.iter().any(|hit| hit.named);
+                found.retain(|hit| !called && hit.named && hit.page.is_work_of(kinds));
+            }
+            // Only a film, show or game the name names, when it names
+            // one: "titanic movie" is not about the ship.
+            Hint::Screen => {
+                let screen = |hit: &PageHit| hit.named && hit.page.is_work_of(SCREEN);
+                if found.iter().any(screen) {
+                    found.retain(|hit| !hit.named || screen(hit));
                 }
             }
             Hint::Any => {}

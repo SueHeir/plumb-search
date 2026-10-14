@@ -13,7 +13,7 @@ use tantivy::{TantivyDocument, Term};
 
 use super::docs::docs_asked;
 use super::page::is_item_id;
-use super::sites::{base_title, subtitle};
+use super::sites::{base_title, short_titles};
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
     DESCRIBED_MISSING_FROM, DESCRIBED_QUERY_WORDS, DESCRIBED_WORD, DOCS_SET, FILMS_SET, GITHUB_SET,
@@ -52,7 +52,7 @@ const WORKS: &[(&str, &[&str])] = &[
 /// unless the word before "by" is a work's kind ([`WORKS`]) and nothing
 /// before it ties the article to another one's work: "Protagonist of 1949
 /// novel by George Orwell" is a character, not the novel.
-fn made_by(description: &str) -> Option<(&str, &'static [&'static str])> {
+pub fn made_by(description: &str) -> Option<(&str, &'static [&'static str])> {
     let (what, by) = description.rsplit_once(" by ")?;
     let what: Vec<String> = what.split_whitespace().map(str::to_lowercase).collect();
     let (kind, before) = what.split_last()?;
@@ -267,7 +267,7 @@ impl PageSearcher {
             }
         }
         // Packages, only ever found when the query asks for one: "serde
-        // crate", "latest version of requests python".
+        // crate", "latest version of requests python", "serde_json".
         let package_query = plumb_core::packages::package_query(query);
         let package_key = package_query
             .as_ref()
@@ -464,13 +464,18 @@ impl PageSearcher {
                     _ => false,
                 };
                 if asked {
+                    // Searched by its name alone ("serde_json"), the
+                    // package is asked for as a whole.
+                    let whole = std::iter::once(&page.title)
+                        .chain(&page.aliases)
+                        .any(|name| name.eq_ignore_ascii_case(query.trim()));
                     hits.push(PageHit {
                         score: ALIAS_MATCH
                             * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
                         page,
                         named: true,
                         popularity,
-                        whole: false,
+                        whole,
                         learned: None,
                     });
                 }
@@ -551,10 +556,33 @@ impl PageSearcher {
             });
         }
         described_repos.name(&mut hits);
+        // A name alone is a package's only when nothing else is called so:
+        // "content-type" is the header's, "left-pad" its repository's.
+        if let Some(key) = package_key.filter(|_| package_query.is_some_and(|asked| asked.alone)) {
+            let called = |page: &Page| {
+                std::iter::once(&page.title)
+                    .chain(&page.aliases)
+                    .chain(&page.names)
+                    .any(|name| {
+                        analysis::tokens(&self.joined, name).pop().as_deref() == Some(key.as_str())
+                    })
+            };
+            if hits
+                .iter()
+                .any(|hit| hit.named && hit.page.package.is_none() && called(&hit.page))
+            {
+                hits.retain(|hit| hit.page.package.is_none());
+            }
+        }
         match words.as_slice() {
             [word] => self.name_by_surname(word, &joined, &mut hits),
             [title, name @ ..] => self.name_by_title(title, name, &joined, &mut hits),
             [] => {}
+        }
+        if let [the, rest @ ..] = words.as_slice() {
+            if the == "the" && !rest.is_empty() {
+                self.name_without_the(rest, &mut hits);
+            }
         }
         let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -1098,11 +1126,16 @@ impl PageSearcher {
         // "Mozart (film)" and "Mozart!" are no better a match for "mozart"
         // than the redirect "Mozart" to "Wolfgang Amadeus Mozart":
         // popularity decides between them, as between "No Way Home (1996
-        // film)" and "Spider-Man: No Way Home" for "no way home".
+        // film)" and "Spider-Man: No Way Home" for "no way home", or "Far
+        // side of the Moon" (a redirect "Dark side of the Moon") and "The
+        // Dark Side of the Moon" for "dark side of the moon".
         if key(&page.title) == joined
             || key(base_title(&page.title)) == joined
             || page.aliases.iter().any(|alias| key(alias) == joined)
-            || page.is_article() && subtitle(&page.title).is_some_and(|sub| key(sub) == joined)
+            || page.is_article()
+                && short_titles(&page.title)
+                    .into_iter()
+                    .any(|short| key(short) == joined)
         {
             return (ALIAS_MATCH, true);
         }
@@ -1235,6 +1268,38 @@ impl PageSearcher {
             return;
         }
         name_by_alias(&mut hits[best]);
+    }
+
+    /// Names the articles a query of "the" and a name calls without its
+    /// "the" (`rest`): "the pope" is Pope, not the book The Pope, and "the
+    /// titanic" the ship before the song. Only when they are read
+    /// [`super::WITHOUT_THE_MARGIN`] times as much as every article the
+    /// whole query names: "the police" and "the strokes" are the bands.
+    fn name_without_the(&self, rest: &[String], hits: &mut [PageHit]) {
+        let Some(joined) = analysis::tokens(&self.joined, &rest.join(" ")).pop() else {
+            return;
+        };
+        let called = |text: &str| {
+            analysis::tokens(&self.joined, text).pop().as_deref() == Some(joined.as_str())
+        };
+        let most_named = hits
+            .iter()
+            .filter(|hit| hit.named && hit.page.is_article())
+            .map(|hit| hit.page.views)
+            .max()
+            .unwrap_or(0);
+        for hit in hits.iter_mut().filter(|hit| {
+            !hit.named
+                && hit.page.is_article()
+                && hit.page.views >= most_named.saturating_mul(super::WITHOUT_THE_MARGIN)
+        }) {
+            if std::iter::once(base_title(&hit.page.title))
+                .chain(hit.page.aliases.iter().map(String::as_str))
+                .any(called)
+            {
+                name_by_alias(hit);
+            }
+        }
     }
 }
 
