@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use plumb_core::facts::FactKind;
 use plumb_core::{
     adult_level, host_of, normalize_text, registrable_domain, AdultLevel, Operators, SafeSearch,
 };
@@ -51,7 +52,7 @@ const LIFT_LINK_MARGIN: f32 = 0.2;
 /// and codastory.com, having one word of it, are no answer. The page's
 /// own site stays. Returns how many were left out.
 pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -> usize {
-    drop_namesakes(sites, pages, |hit| hit.missing_words)
+    drop_namesakes(sites, pages, |hit, _| hit.missing_words)
 }
 
 /// [`drop_namesakes_of_words`] for the sites that only one word of the
@@ -64,7 +65,10 @@ pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -
 /// nationalarchives.gov.uk, once the Public Record Office (PRO), is no
 /// answer, nor is carbon3d.com for "thinkpad x1 carbon" or mini.com for
 /// "ipad mini". A site the name starts with stays (apple.com, found by
-/// "mac", for "mac mini"), and so does one with no vector to judge it by.
+/// "mac", for "mac mini"), unless the article is on a person, who has a
+/// date of birth: a first name is no name of theirs, so ted.com is no
+/// answer for "ted kaczynski", nor sydney.edu.au for "sydney sweeney".
+/// One with no vector to judge it by stays too.
 pub fn drop_far_namesakes(
     sites: &mut Vec<crate::Hit>,
     pages: &[PageHit],
@@ -73,21 +77,26 @@ pub fn drop_far_namesakes(
     let Some(floor) = floor else {
         return 0;
     };
-    drop_namesakes(sites, pages, |hit| {
+    drop_namesakes(sites, pages, |hit, named| {
+        let person = named
+            .page
+            .facts
+            .iter()
+            .any(|fact| fact.kind == FactKind::Born);
         hit.missing_words
             && hit.query_evidence.as_ref().is_some_and(|evidence| {
-                evidence.partial_name_words == 0
+                (evidence.partial_name_words == 0 || person)
                     && evidence.semantic_closeness.is_some_and(|c| c < floor)
             })
     })
 }
 
-/// Leaves out the `namesake` sites, but the page's own, when the whole
-/// query is the name of an article or Wikidata item.
+/// Leaves out the sites that `namesake` takes for namesakes of the
+/// article or Wikidata item the whole query names, but the page's own.
 fn drop_namesakes(
     sites: &mut Vec<crate::Hit>,
     pages: &[PageHit],
-    namesake: impl Fn(&crate::Hit) -> bool,
+    namesake: impl Fn(&crate::Hit, &PageHit) -> bool,
 ) -> usize {
     let Some(named) = pages
         .iter()
@@ -97,7 +106,7 @@ fn drop_namesakes(
     };
     let own = named.page.site.as_deref();
     let before = sites.len();
-    sites.retain(|hit| !namesake(hit) || Some(hit.domain.as_str()) == own);
+    sites.retain(|hit| !namesake(hit, named) || Some(hit.domain.as_str()) == own);
     before - sites.len()
 }
 
