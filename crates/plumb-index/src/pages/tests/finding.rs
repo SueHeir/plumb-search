@@ -613,6 +613,43 @@ fn a_name_inside_a_longer_search_finds_its_page() {
 }
 
 #[test]
+fn a_qualifier_the_search_says_counts_as_part_of_the_name() {
+    let article = |title: &str, description: &str, views: u64, aliases: &[&str]| {
+        let mut article = page(title, views, aliases);
+        article.description = Some(description.into());
+        article.item = Some(format!("Q{views}"));
+        article
+    };
+    let (_dir, s) = searcher(&[
+        article(
+            "Mercury (element)",
+            "Chemical element with atomic number 80",
+            400_000,
+            &["Hg", "quicksilver"],
+        ),
+        article(
+            "Chemical element",
+            "Chemical substance not composed of simpler ones",
+            300_000,
+            &["element"],
+        ),
+        article(
+            "Mercury (planet)",
+            "smallest and closest planet to the Sun",
+            900_000,
+            &["Mercury"],
+        ),
+        article("Earth", "planet", 5_000_000, &[]),
+    ]);
+    let first = |q: &str| s.search(q, 5).unwrap()[0].page.title.clone();
+    // Its title and qualifier apart name the element more fully than the
+    // two words in a row name Chemical element.
+    assert_eq!(first("the chemical element mercury"), "Mercury (element)");
+    assert_eq!(first("chemical element mercury"), "Mercury (element)");
+    assert_eq!(first("mercury element"), "Mercury (element)");
+}
+
+#[test]
 fn words_of_things_are_corrected_from_page_names() {
     let mut pages = Vec::new();
     for i in 0..25 {
@@ -981,4 +1018,33 @@ fn a_question_of_only_asking_words_and_code_names_nothing() {
     assert!(questions("what does nasa stand for").is_empty());
     // A question that asks about something is still found.
     assert_eq!(questions("what is a monad"), ["What is a monad?"]);
+}
+
+#[test]
+fn the_and_a_name_names_what_the_name_alone_does_when_far_more_read() {
+    let (_dir, s) = searcher(&[
+        page("Titanic (1997 film)", 150_000, &[]),
+        page("Titanic", 120_000, &["RMS Titanic"]),
+        page("Stroke", 30_000, &["Strokes"]),
+        page("Pope", 28_157, &["Supreme Pontiff"]),
+        page("The Strokes", 19_059, &[]),
+        page("The Police", 17_369, &[]),
+        page("Police", 15_000, &["Police officer"]),
+        page("Bible", 14_969, &["The Bible"]),
+        page("The Titanic (song)", 114, &[]),
+        page("The Pope (book)", 65, &["Du Pape", "On the Pope"]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("the pope"), ["Pope", "The Pope (book)"]);
+    assert_eq!(named("the titanic"), ["Titanic", "The Titanic (song)"]);
+    // Read too little more than what "the" and the name call.
+    assert_eq!(named("the police"), ["The Police"]);
+    assert_eq!(named("the strokes"), ["The Strokes"]);
+    assert_eq!(named("the bible"), ["Bible"]);
 }

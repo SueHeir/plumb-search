@@ -257,7 +257,7 @@ fn short_docs_preserve_operators_ecosystems_and_navigation() {
 }
 
 #[test]
-fn staged_reference_gate_rejects_partial_topics_and_keeps_practical_pages() {
+fn reference_pages_are_listed_only_when_asked_for() {
     let allowed = |set: &str, query: &str, title: &str| {
         let hit = PageHit {
             page: Page::from_set(
@@ -278,43 +278,90 @@ fn staged_reference_gate_rejects_partial_topics_and_keeps_practical_pages() {
         };
         subpage_asked(query, &[], &hit)
     };
-    for (query, title) in [
-        ("celiac disease", "Celiac disease"),
-        (
-            "how to renew a green card",
-            "How to renew or replace your green card",
-        ),
-        (
-            "symptoms of type 2 diabetes",
-            "Type 2 diabetes: Symptoms, diagnosis and treatment",
-        ),
-        ("define prioritize", "Prioritize Definition & Meaning"),
-        ("stool smell", "Foul-Smelling Stool: Causes and Treatment"),
-        ("how to fix a leaking faucet", "Fixing a leaking faucet"),
-    ] {
-        assert!(allowed(REFERENCE2_SET, query, title), "{query}: {title}");
+    for set in [REFERENCE_SET, REFERENCE2_SET] {
+        for (query, title) in [
+            ("celiac disease", "Celiac disease"),
+            (
+                "how to renew a green card",
+                "How to renew or replace your green card",
+            ),
+            (
+                "symptoms of type 2 diabetes",
+                "Type 2 diabetes: Symptoms, diagnosis and treatment",
+            ),
+            ("define prioritize", "Prioritize Definition & Meaning"),
+            ("stool smell", "Foul-Smelling Stool: Causes and Treatment"),
+            ("how to fix a leaking faucet", "Fixing a leaking faucet"),
+            // Long titles with all of the query's words.
+            (
+                "pain with ovarian cyst",
+                "Will an ovarian cyst cause back pain? What to know",
+            ),
+            (
+                "toilet leaks at base",
+                "How to Fix a Toilet That Leaks Around the Base",
+            ),
+            (
+                "epley's maneuver",
+                "Epley Maneuver (Canalith Repositioning Procedure)",
+            ),
+            ("ribeye steak", "Charcoal-Grilled Ribeye Steak Recipe"),
+            // A short title with all but the query's last word.
+            ("lemon drop cocktail", "Lemon drop martini recipe"),
+            ("time zone converter", "Time Zone Calculator"),
+        ] {
+            assert!(allowed(set, query, title), "{set} {query}: {title}");
+        }
+        for (query, title) in [
+            ("seven summits", "The Seven Second Summits of the World"),
+            (
+                "time in st john's",
+                "The Best Time to Visit the US Virgin Islands",
+            ),
+            (
+                "nobel prize in physics 2025",
+                "John F. Clauser: Nobel Prize-winning physicist",
+            ),
+            (
+                "the great gatsby f scott fitzgerald",
+                "The Great Gatsby Questions for Study and Discussion",
+            ),
+            ("leaking faucet repair", "Faucet installation cost"),
+            (
+                "fifa world cup schedule",
+                "FIFA World Cup 2026 travel guide",
+            ),
+            // From the 1,000-search review on hpc, where each was first.
+            (
+                "work australia",
+                "There's a 2nd El Niño — and scientists just figured out how it works",
+            ),
+            (
+                "crater lakes",
+                "NASA's Perseverance rover confirms presence of ancient lake on Mars",
+            ),
+            (
+                "google flights",
+                "Some Very Smart Money Can't Agree On What to Do With Alphabet's Soaring Stock",
+            ),
+            (
+                "lack of friends",
+                "Indoor Grilling: Leeks with Asian Vinaigrette Recipe",
+            ),
+            // News on what a two-word query names, listed under its site.
+            ("hulk hogan", "Hulk Hogan's Daughter Brooke Welcomes Twins"),
+            (
+                "taco bell",
+                "Taco Bell Has a New Version of the Menu Item That Sold Out in Days",
+            ),
+        ] {
+            assert!(!allowed(set, query, title), "{set} {query}: {title}");
+        }
     }
-    for (query, title) in [
-        ("seven summits", "The Seven Second Summits of the World"),
-        (
-            "time in st john's",
-            "The Best Time to Visit the US Virgin Islands",
-        ),
-        (
-            "nobel prize in physics 2025",
-            "John F. Clauser: Nobel Prize-winning physicist",
-        ),
-        (
-            "the great gatsby f scott fitzgerald",
-            "The Great Gatsby Questions for Study and Discussion",
-        ),
-        ("leaking faucet repair", "Faucet installation cost"),
-    ] {
-        // Legacy coverage stays available until the new generation
-        // has passed the combined evaluation and is explicitly chosen.
-        assert!(allowed(REFERENCE_SET, query, title));
-        assert!(!allowed(REFERENCE2_SET, query, title), "{query}: {title}");
-    }
+    // A subpage needs most of its title in the query, however much of the
+    // query its title has.
+    let cyst = "Will an ovarian cyst cause back pain? What to know";
+    assert!(!allowed(SUBPAGES_SET, "pain with ovarian cyst", cyst));
     let page = Page::from_set(
         REFERENCE2_SET,
         Article {
@@ -996,4 +1043,60 @@ fn manual_pages_are_named_without_their_section() {
     }
     // A bare name may be anything.
     assert!(searcher.search("ls", 10).unwrap().is_empty());
+}
+
+#[test]
+fn docs_pages_asked_for_as_a_tutorial_or_examples_are_named() {
+    let asyncio = docs_page(
+        "https://docs.python.org/3/library/asyncio.html",
+        "asyncio — Asynchronous I/O",
+        &["Python asyncio", "asyncio Python"],
+        "asyncio is a library to write concurrent code using the async/await syntax.",
+    );
+    let tutorial = docs_page(
+        "https://docs.python.org/3/tutorial/index.html",
+        "The Python Tutorial",
+        &["Python The Python Tutorial"],
+        "Python is an easy to learn, powerful programming language.",
+    );
+    let (_dir, searcher) = searcher(&[asyncio, tutorial]);
+    for query in [
+        "python asyncio tutorial",
+        "asyncio python examples",
+        "python asyncio guide",
+    ] {
+        let hits = searcher.search(query, 10).unwrap();
+        assert_eq!(hits[0].page.title, "asyncio — Asynchronous I/O", "{query}");
+        assert!(hits[0].named, "{query}: {hits:?}");
+    }
+    // The word alone is still the topic: the tutorial, not asyncio.
+    let hits = searcher.search("python tutorial", 10).unwrap();
+    assert!(
+        hits.iter()
+            .all(|hit| hit.page.title != "asyncio — Asynchronous I/O"),
+        "{hits:?}"
+    );
+    // A page titled so keeps its place first: the argparse tutorial.
+    let argparse = docs_page(
+        "https://docs.python.org/3/library/argparse.html",
+        "argparse — Parser for command-line options, arguments and subcommands",
+        &["Python argparse", "argparse Python"],
+        "The argparse module makes it easy to write user-friendly command-line interfaces.",
+    );
+    let howto = docs_page(
+        "https://docs.python.org/3/howto/argparse.html",
+        "Argparse Tutorial",
+        &["Python Argparse Tutorial", "Argparse Tutorial Python"],
+        "This tutorial is intended to be a gentle introduction to argparse.",
+    );
+    let (_dir2, searcher) = super::searcher(&[argparse, howto]);
+    let hits = searcher.search("python argparse tutorial", 10).unwrap();
+    assert_eq!(hits[0].page.title, "Argparse Tutorial", "{hits:?}");
+    let sites = [site("python.org", true), site("other.com", false)];
+    let placed = place_pages("python argparse tutorial", &sites, hits);
+    let first = placed.iter().find(|p| p.under.is_none());
+    assert_eq!(
+        first.map(|p| p.hit.page.title.as_str()),
+        Some("Argparse Tutorial")
+    );
 }
