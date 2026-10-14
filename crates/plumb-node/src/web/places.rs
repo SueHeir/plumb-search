@@ -102,7 +102,7 @@ fn capitalized(what: &str) -> String {
 /// About page where the searcher can give their town; `country` the
 /// searcher's country, for miles or km. `link` gives the address a place's
 /// link goes to, from the place's own (a `/go` link that notes the box was
-/// used, or the address itself).
+/// used, or the address itself), and `search` the address of a search.
 pub(super) fn render_places(
     found: &PlaceResults,
     base_map: Option<&crate::map::BaseMap>,
@@ -110,6 +110,7 @@ pub(super) fn render_places(
     country: Option<&str>,
     icons: &Icons,
     link: &dyn Fn(&str) -> String,
+    search: &dyn Fn(&str) -> String,
 ) -> String {
     let what = escape_html(&found.what);
     let Some(center) = &found.center else {
@@ -122,7 +123,14 @@ pub(super) fn render_places(
                         .collect::<Vec<_>>().join("; ");
                     format!("Several indexed places match <strong>{requested}</strong>: {alternatives}. Add a region or country.")
                 }
-                LocationStatus::UnknownLocation => format!("The places index cannot locate <strong>{requested}</strong>. Add a city, region or country; this does not establish that the place has no businesses."),
+                LocationStatus::UnknownLocation => {
+                    // A big city the name mistypes ("cincinatti").
+                    let offer = location.candidates.first().map(|city| {
+                        let query = format!("{} in {}", found.what, place_name(city));
+                        format!(" Did you mean <a href=\"{}\">{}</a>?", escape_html(&search(&query)), escape_html(&query))
+                    });
+                    format!("The places index cannot locate <strong>{requested}</strong>. Add a city, region or country; this does not establish that the place has no businesses.{}", offer.unwrap_or_default())
+                }
                 LocationStatus::MissingLocation if !location.requested.is_empty() => format!("Add a city or region within <strong>{requested}</strong> to search indexed places."),
                 LocationStatus::ConflictingConstraints => format!("<strong>{requested}</strong> conflicts with the requested country. Keep a matching city and country to search places."),
                 _ => String::new(),
@@ -499,6 +507,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_place_that_links_a_page_in_a_bigger_site_keeps_its_page() {
+        let link = |name: &str, website: &str| PlaceHit {
+            place: Place {
+                website: Some(website.into()),
+                ..place(name, "amenity=cafe", 39.75, -104.98)
+            },
+            km: 1.0,
+        };
+        let found = PlaceResults {
+            hits: vec![
+                link("Monkey Cave", "https://www.facebook.com/monkeycave"),
+                link("Canti Warung", "https://canti-warung.business.site/"),
+                link("Kiraku", "https://tabelog.com/tokyo/A1303/13001705/"),
+                link("Blue Pan", "https://www.bluepan.com/"),
+            ],
+            ..found()
+        };
+        // Every site is in the index, titled as its homepage is.
+        let homepage = |domain: &str| {
+            Some(Hit {
+                domain: domain.into(),
+                url: format!("https://{domain}/"),
+                title: Some(format!("{domain} homepage")),
+                description: None,
+                score: 1.0,
+                text_score: 1.0,
+                link_score: 0.9,
+                placing_text_score: None,
+                country: None,
+                named: false,
+                official: false,
+                key_pages: Vec::new(),
+                demand: None,
+                missing_words: false,
+                query_evidence: None,
+            })
+        };
+        let sites = crate::assembly::linked_sites(&found, homepage, |_| Vec::new());
+        let listed: Vec<(&str, &str)> = sites
+            .iter()
+            .map(|hit| (hit.url.as_str(), hit.title.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("https://www.facebook.com/monkeycave", "Monkey Cave"),
+                ("https://canti-warung.business.site/", "Canti Warung"),
+                ("https://tabelog.com/tokyo/A1303/13001705/", "Kiraku"),
+                ("https://bluepan.com/", "bluepan.com homepage"),
+            ]
+        );
+    }
+
+    fn search(query: &str) -> String {
+        format!("/search?q={query}")
+    }
+
     fn same(href: &str) -> String {
         href.to_owned()
     }
@@ -544,9 +610,16 @@ mod tests {
     #[test]
     fn place_links_can_go_through_go_and_fold() {
         let found = found();
-        let html = render_places(&found, None, true, Some("US"), &Icons::default(), &|href| {
-            format!("/go?u={href}")
-        });
+        let go = |href: &str| format!("/go?u={href}");
+        let html = render_places(
+            &found,
+            None,
+            true,
+            Some("US"),
+            &Icons::default(),
+            &go,
+            &search,
+        );
         assert!(
             html.contains("href=\"/go?u=https://www.bluepan.com/menu\""),
             "{html}"
@@ -604,6 +677,7 @@ mod tests {
             Some("US"),
             &Icons::default(),
             &same,
+            &search,
         );
         let svg = &html[html.find("<svg").unwrap()..html.find("</svg>").unwrap()];
         assert!(svg.contains("<rect class=\"sea\""), "{svg}");
@@ -614,7 +688,15 @@ mod tests {
 
     #[test]
     fn places_are_listed_with_a_map_and_credit() {
-        let html = render_places(&found(), None, true, Some("US"), &Icons::default(), &same);
+        let html = render_places(
+            &found(),
+            None,
+            true,
+            Some("US"),
+            &Icons::default(),
+            &same,
+            &search,
+        );
         assert!(html.contains("<h2>Pizza in Denver, CO</h2>"));
         assert!(html.contains("Blue &lt;Pan&gt;"));
         assert!(html.contains("1 Main &lt;St&gt;"));
@@ -629,7 +711,15 @@ mod tests {
         assert!(!map.contains("http"));
         assert_eq!(map.matches("class=\"pin\"").count(), 2);
         // Kilometres elsewhere.
-        let html = render_places(&found(), None, true, Some("DE"), &Icons::default(), &same);
+        let html = render_places(
+            &found(),
+            None,
+            true,
+            Some("DE"),
+            &Icons::default(),
+            &same,
+            &search,
+        );
         assert!(html.contains("1.4 km"));
     }
 
@@ -639,9 +729,9 @@ mod tests {
         found.center = None;
         found.near_me = true;
         found.hits.clear();
-        let html = render_places(&found, None, true, None, &Icons::default(), &same);
+        let html = render_places(&found, None, true, None, &Icons::default(), &same, &search);
         assert!(html.contains("href=\"/about\""));
-        let html = render_places(&found, None, false, None, &Icons::default(), &same);
+        let html = render_places(&found, None, false, None, &Icons::default(), &same, &search);
         assert!(html.contains("pizza in Denver"));
     }
 
@@ -655,14 +745,21 @@ mod tests {
             status: LocationStatus::AmbiguousLocation,
             candidates: vec![place("Portland", "place=city", 45.5, -122.6)],
         });
-        let html = render_places(&found, None, true, None, &Icons::default(), &same);
+        let html = render_places(&found, None, true, None, &Icons::default(), &same, &search);
         assert!(html.contains("Several indexed places"));
         assert!(html.contains("Portland &lt;unknown&gt;"));
         assert!(!html.contains("About you"));
         found.location.as_mut().unwrap().status = LocationStatus::UnknownLocation;
-        let html = render_places(&found, None, true, None, &Icons::default(), &same);
+        let html = render_places(&found, None, true, None, &Icons::default(), &same, &search);
         assert!(html.contains("cannot locate"));
         assert!(!html.contains("About you"));
+        // A mistyped city's candidate is offered as a search.
+        assert!(
+            html.contains(
+                "Did you mean <a href=\"/search?q=pizza in Portland, CO\">pizza in Portland, CO</a>?"
+            ),
+            "{html}"
+        );
     }
 
     /// Finds pizza in Denver and nothing else.
@@ -729,7 +826,7 @@ mod tests {
     fn one_place_still_makes_a_map() {
         let mut found = found();
         found.hits.truncate(1);
-        let html = render_places(&found, None, false, None, &Icons::default(), &same);
+        let html = render_places(&found, None, false, None, &Icons::default(), &same, &search);
         assert!(html.contains("class=\"pin\""));
         assert!(!html.contains("NaN") && !html.contains("inf"));
     }

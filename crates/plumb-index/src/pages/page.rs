@@ -5,9 +5,26 @@ use plumb_core::article::{article_url, Article, SearchContent};
 
 use super::{
     Page, BOOKS_SET, DOCS_SET, ENGLISH_WIKIPEDIA, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET,
-    PAPERS_SET, PODCASTS_SET, REFERENCE2_SET, REFERENCE_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET,
-    SUBPAGES_SET, WIKIDATA_SET, WIKTIONARY_SET,
+    PAPERS_SET, PODCASTS_SET, RECORDS_SET, REFERENCE2_SET, REFERENCE_SET, STACKEXCHANGE_SET,
+    STACKOVERFLOW_SET, SUBPAGES_SET, WANTED_SET, WIKIDATA_SET, WIKTIONARY_SET,
 };
+
+/// Where a description stops saying what its page is and goes on to who
+/// made it or what it is part of.
+const DESCRIPTION_HEAD_ENDS: &[&str] = &[
+    " by ",
+    " directed ",
+    " created ",
+    " starring ",
+    " based ",
+    " written ",
+    " recorded ",
+    " performed ",
+    " of ",
+    " from ",
+    " (",
+    ",",
+];
 
 impl Page {
     /// The Wikipedia article `article` of Wikipedia in `lang`.
@@ -156,11 +173,47 @@ impl Page {
         self.set.starts_with("wikipedia-")
     }
 
-    /// Whether the page is about a person: it has a birth date.
+    /// Whether the page is about a person: Wikidata gives their birth or
+    /// death, or the lead opens with their dates, since Wikidata's are
+    /// missing for many less-read people ("Terry LaVerne Stafford
+    /// (November 22, 1941 – March 17, 1996) was"). The lead's opening
+    /// brackets count when they say "born" or hold the years the
+    /// description's brackets end it with: a band's or a country's years
+    /// end its description too ("American rock & roll band (1962–1966)"),
+    /// but its lead does not open with them.
     pub fn is_person(&self) -> bool {
-        self.facts
+        use plumb_core::facts::FactKind::{Born, Died};
+        if self
+            .facts
             .iter()
-            .any(|fact| fact.kind == plumb_core::facts::FactKind::Born)
+            .any(|fact| matches!(fact.kind, Born | Died))
+        {
+            return true;
+        }
+        let Some(dates) = self.lead.as_deref().and_then(opening_brackets) else {
+            return false;
+        };
+        let words = |text: &str| -> Vec<String> {
+            text.split(|c: char| !c.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_lowercase)
+                .collect()
+        };
+        let said = words(dates);
+        if said.iter().any(|word| word == "born") {
+            return true;
+        }
+        let years: Vec<String> = self
+            .description
+            .as_deref()
+            .and_then(|description| description.trim_end().strip_suffix(')'))
+            .and_then(|described| described.rsplit_once('('))
+            .map(|(_, years)| words(years))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|word| word.bytes().all(|b| b.is_ascii_digit()))
+            .collect();
+        !years.is_empty() && years.iter().all(|year| said.contains(year))
     }
 
     /// Whether the page is a question, of Stack Overflow or another Stack
@@ -385,10 +438,10 @@ impl Page {
         is_site_page_set(&self.set)
     }
 
-    /// The host of a docs, reference or subpages page's address, without
-    /// `www.`: `docs.python.org`, `healthline.com`.
+    /// The host of a docs, reference, subpages or record page's address,
+    /// without `www.`: `docs.python.org`, `healthline.com`.
     fn docs_host(&self) -> Option<&str> {
-        if self.set != DOCS_SET && !self.is_site_page() {
+        if self.set != DOCS_SET && self.set != RECORDS_SET && !self.is_site_page() {
             return None;
         }
         let host = self
@@ -428,6 +481,30 @@ impl Page {
     /// Whether the page is a song of the music set, rather than an album.
     pub fn is_song(&self) -> bool {
         self.set == MUSIC_SET && self.url.starts_with("https://musicbrainz.org/recording/")
+    }
+
+    /// Whether the page is a work of one of `kinds`, as its title's
+    /// qualifier ("Barbie (film)", "Hades (video game)") or the head of its
+    /// description ("1986 action drama film by Tony Scott", "Song by the
+    /// Beatles, 1968") calls it.
+    pub fn is_work_of(&self, kinds: &[&str]) -> bool {
+        let qualifier = self
+            .title
+            .strip_suffix(')')
+            .and_then(|title| title.rsplit_once(" ("));
+        let description = self.description.as_deref().unwrap_or("").to_lowercase();
+        let head_end = DESCRIPTION_HEAD_ENDS
+            .iter()
+            .filter_map(|end| description.find(end))
+            .min()
+            .unwrap_or(description.len());
+        qualifier.is_some_and(|(_, what)| {
+            what.split_whitespace()
+                .any(|word| kinds.contains(&word.to_lowercase().as_str()))
+        }) || description[..head_end]
+            .split_whitespace()
+            .last()
+            .is_some_and(|word| kinds.contains(&word))
     }
 
     /// The paper `paper`, written as an article whose item is its DOI or
@@ -567,6 +644,7 @@ impl Page {
             || set == REFERENCE_SET
             || set == REFERENCE2_SET
             || set == SUBPAGES_SET
+            || set == WANTED_SET
             || Page::from_set(set, Article::default()).is_some()
     }
 
@@ -590,6 +668,7 @@ impl Page {
             REFERENCE_SET => Page::from_reference(article)?,
             REFERENCE2_SET => Page::from_site_page(REFERENCE2_SET, article)?,
             SUBPAGES_SET => Page::from_site_page(SUBPAGES_SET, article)?,
+            WANTED_SET => Page::from_site_page(WANTED_SET, article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
@@ -778,10 +857,33 @@ impl Page {
     }
 }
 
-/// Whether `set` holds inner pages of sites, of the reference or
-/// subpages sets ([`Page::is_site_page`]).
+/// Whether `set` holds inner pages of sites, of the reference, subpages
+/// or wanted sets ([`Page::is_site_page`]).
 pub(crate) fn is_site_page_set(set: &str) -> bool {
-    set == REFERENCE_SET || set == REFERENCE2_SET || set == SUBPAGES_SET
+    set == REFERENCE_SET || set == REFERENCE2_SET || set == SUBPAGES_SET || set == WANTED_SET
+}
+
+/// What the brackets `lead` opens with hold, before it says what its
+/// subject is: "November 22, 1941 – March 17, 1996" of "Terry LaVerne
+/// Stafford (November 22, 1941 – March 17, 1996) was an American singer".
+fn opening_brackets(lead: &str) -> Option<&str> {
+    let open = lead.find('(')?;
+    if [" is ", " was "]
+        .iter()
+        .any(|verb| lead[..open].contains(verb))
+    {
+        return None;
+    }
+    let mut depth = 0;
+    for (at, c) in lead[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 1 => return Some(&lead[open + 1..open + at]),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Whether `id` is a Wikidata item's: `Q25188`.

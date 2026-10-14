@@ -131,7 +131,8 @@ fn share(limit: u64, percent: u64) -> u64 {
 #[derive(Debug, Default)]
 pub(super) struct Keep {
     pub topics: Topics,
-    /// Sites an About page always puts first, or a searcher opened.
+    /// Sites an About page always puts first, a searcher opened, or the
+    /// node crawls as local ([`super::places::local_sites`]).
     pub domains: HashSet<String>,
 }
 
@@ -141,6 +142,7 @@ impl Keep {
         let mut domains: HashSet<String> = crate::about::all_pinned(&history)
             .into_iter()
             .chain(crate::history::all_opened(&history))
+            .chain(super::places::local_sites(inner))
             .collect();
         domains.insert(plumb_core::HOME_SITE.to_owned());
         Keep {
