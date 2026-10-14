@@ -789,7 +789,7 @@ impl PageSearcher {
     pub fn open(dir: &Path) -> Result<Self> {
         let index = Index::open_in_dir(dir)
             .with_context(|| format!("opening the page index in {}", dir.display()))?;
-        analysis::register(index.tokenizers());
+        analysis::register_pages(index.tokenizers());
         let (schema, fields) = schema();
         if index.schema() != schema {
             bail!(
@@ -809,7 +809,7 @@ impl PageSearcher {
             reader,
             fields,
             words: analysis::words_analyzer(),
-            joined: analysis::joined_analyzer(),
+            joined: analysis::page_joined_analyzer(),
             stemmed: analysis::stemmed_analyzer(),
             stats,
             requested_language: None,
@@ -973,6 +973,47 @@ impl PageSearcher {
             query: fixed.join(" "),
             ..spelling
         }))
+    }
+
+    /// The key `query` names pages by. A sharp after a letter is read out
+    /// ([`analysis::page_joined_analyzer`]) when a page is named so: "c#"
+    /// is C Sharp. Otherwise it is left out, as before: with no page on J
+    /// Sharp, "j#" is J.
+    pub(crate) fn query_key(&self, query: &str) -> Result<Option<String>> {
+        let read = analysis::tokens(&self.joined, query).pop();
+        let plain = analysis::tokens(&analysis::joined_analyzer(), query).pop();
+        if read == plain {
+            return Ok(read);
+        }
+        let searcher = self.reader.searcher();
+        Ok(match read {
+            Some(key) if searcher.doc_freq(&Term::from_field_text(self.fields.keys, &key))? > 0 => {
+                Some(key)
+            }
+            _ => plain,
+        })
+    }
+
+    /// The key the run `span` of a query's words names pages by, as
+    /// [`PageSearcher::query_key`] reads it: a letter the query wrote a
+    /// sharp after (`sharped`, [`analysis::sharp_letters`]) gets it back,
+    /// since the words drop it. "c# in depth" of "c# in depth jon skeet" is
+    /// the book.
+    pub(crate) fn span_key(&self, span: &[String], sharped: &[String]) -> Result<Option<String>> {
+        let typed: Vec<String> = span
+            .iter()
+            .map(|word| {
+                if sharped.contains(word) {
+                    format!("{word}#")
+                } else {
+                    word.clone()
+                }
+            })
+            .collect();
+        if typed == span {
+            return Ok(analysis::tokens(&self.joined, &span.join(" ")).pop());
+        }
+        self.query_key(&typed.join(" "))
     }
 
     /// Whether `word` is a misspelling of `fix` that Wikipedia keeps as a
@@ -1356,7 +1397,7 @@ impl PageSearcher {
         }
         let described = self.described_words(query);
         let words = analysis::tokens(&self.words, query);
-        let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
+        let Some(joined) = self.query_key(query)? else {
             return Ok(Vec::new());
         };
         let query_words: HashSet<&str> = words.iter().map(String::as_str).collect();
