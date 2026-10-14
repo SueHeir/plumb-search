@@ -587,6 +587,31 @@ fn organizations_by_description() {
 }
 
 #[test]
+fn events_by_description() {
+    for yes in [
+        "European association football tournament",
+        "National Basketball Association team",
+        "Annual music and arts festival in Indio, California",
+        "Motorsport championship held worldwide",
+        "Series of international multi-sport events",
+        "Annual awards for cinematic achievements",
+        "Multi-purpose indoor arena in New York City",
+        "American mixed martial arts promotion company",
+    ] {
+        assert!(describes_an_event(Some(yes)), "{yes}");
+    }
+    for no in [
+        "Large road vehicle for carrying passengers",
+        "Town in Somerset, England",
+        "American singer-songwriter (born 1989)",
+        "Range of incomes taxed at a given rate",
+    ] {
+        assert!(!describes_an_event(Some(no)), "{no}");
+    }
+    assert!(!describes_an_event(None));
+}
+
+#[test]
 fn sites_called_after_pages() {
     assert!(site_is_titled("cvs.com", "CVS Pharmacy"));
     assert!(site_is_titled("capitalone.com", "Capital One"));
