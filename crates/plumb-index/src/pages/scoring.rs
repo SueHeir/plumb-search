@@ -477,7 +477,15 @@ impl PageSearcher {
                 continue;
             }
             let asked_as_film = self.film_match(&page, &words);
-            let asked_by_title = asked_as_film || self.book_match(&page, &words);
+            let asked_in_full = asked_as_film || self.book_match(&page, &words);
+            // A podcast asked for by the end of its title alone ("hardcore
+            // history podcast") ranks below one asked for by its whole
+            // title or its host: "the daily podcast" is The Daily before
+            // "On the Daily", "joe rogan podcast" The Joe Rogan Experience
+            // before "At Least its Not Joe Rogan".
+            let title_end =
+                !asked_in_full && page.set == PODCASTS_SET && self.podcast_named(&page, &words);
+            let asked_by_title = asked_in_full || title_end;
             // Songs and albums share their titles with too much ("Dead
             // Sea", "Notion", "Lord of the Flies"): one is only listed
             // when asked for by its artist or as a song or album.
@@ -500,7 +508,12 @@ impl PageSearcher {
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
             let mut whole = false;
             if asked_by_title {
-                (name, named, whole) = (name.max(ALIAS_MATCH), true, true);
+                let least = if title_end {
+                    PARTIAL_MATCH
+                } else {
+                    ALIAS_MATCH
+                };
+                (name, named, whole) = (name.max(least), true, true);
             } else if !named && (page.set != DOCS_SET || docs_asked(&page, query)) {
                 let (question, asked) = self.question_match(&page, &stems, &sure, topic_word);
                 name = name.max(question);
@@ -647,12 +660,22 @@ impl PageSearcher {
     /// the share of them its name has, a word only what it says of itself
     /// has counting [`DESCRIBED_WORD`]. Nothing when that is half or less:
     /// such a name leaves most of the query unsaid. "terry stafford death"
-    /// is the singer, but "london hotels" is not the article London.
+    /// is the singer, but "london hotels" is not the article London. An
+    /// article's qualifier is part of its name, so "the chemical element
+    /// mercury" is closer to Mercury (element) than to Chemical element.
     fn inside_match(&self, page: &Page, span: &[String], described: &[Described]) -> f32 {
         if described.is_empty() {
             return 0.0;
         }
-        let named: HashSet<String> = self.question_words(&span.join(" ")).into_iter().collect();
+        let qualifier = super::sites::title_qualifier(&page.title).filter(|_| page.is_article());
+        let named: HashSet<String> = self
+            .question_words(&format!(
+                "{} {}",
+                span.join(" "),
+                qualifier.unwrap_or_default()
+            ))
+            .into_iter()
+            .collect();
         let mut said = page.about().or_else(|| page.topic()).unwrap_or_else(|| {
             std::iter::once(&page.title)
                 .chain(&page.aliases)
@@ -911,11 +934,13 @@ impl PageSearcher {
     /// or album's title followed by words of its author's name or by what
     /// it is ("book", "novel", "podcast", "paper"), or both: "dune frank
     /// herbert", "the great gatsby book", "nevermind nirvana album",
-    /// "hardcore history podcast", "random forests breiman". A paper's
-    /// year and venue may follow too, and a paper's whole title of
+    /// "the daily podcast", "random forests breiman". A paper's year and
+    /// venue may follow too, and a paper's whole title of
     /// [`PAPER_TITLE_WORDS`] words or more asks for it alone. A Wikipedia
     /// article on a work ([`made_by`]) is asked for so too, by its title
-    /// or another name: "1984 george orwell" for Nineteen Eighty-Four.
+    /// or another name: "1984 george orwell" for Nineteen Eighty-Four. A
+    /// podcast is asked for by its host and "podcast" too: "joe rogan
+    /// podcast".
     pub(crate) fn book_match(&self, page: &Page, words: &[String]) -> bool {
         let description = page.description.as_deref().unwrap_or("");
         let byline = |byline: &str| description.strip_prefix(byline).unwrap_or("");
@@ -953,6 +978,14 @@ impl PageSearcher {
             .find_map(|joiner| author.split_once(joiner))
             .map_or(author.as_str(), |(main, _)| main);
         let artist = analysis::tokens(&self.words, main);
+        // A band led by someone is asked for by its leader's name, not by
+        // its backing band's alone: "sports news" is not Huey Lewis and the
+        // News's album Sports.
+        let lower = main.to_lowercase();
+        let leader = [" and the ", " & the "]
+            .iter()
+            .find_map(|joiner| lower.split_once(joiner))
+            .map(|(leader, _)| analysis::tokens(&self.words, leader));
         let author: HashSet<String> = analysis::tokens(&self.words, &author).into_iter().collect();
         // The title, or the title without its subtitle: "Frankenstein" for
         // "Frankenstein; or, The Modern Prometheus". An article's without
@@ -1005,7 +1038,14 @@ impl PageSearcher {
                 rest => rest,
             };
             maker.iter().all(|word| author.contains(word))
-        }) || (page.set == PODCASTS_SET && self.podcast_named(page, words))
+                && (maker.is_empty()
+                    || leader
+                        .as_ref()
+                        .is_none_or(|leader| maker.iter().any(|word| leader.contains(word))))
+        }) || page.set == PODCASTS_SET
+            && words.split_last().is_some_and(|(kind, host)| {
+                kinds.contains(&kind.as_str()) && !host.is_empty() && host == artist
+            })
     }
 
     /// Whether `words` are the end of a podcast's title, two words or more,
@@ -1249,18 +1289,27 @@ impl Inside {
     /// title alone names nothing ("Glossary"). Repositories are told apart
     /// by what they say of themselves ([`PageSearcher::repo_described`]),
     /// and pages of other sets share their titles with too much to be
-    /// named so.
+    /// named so. An article's title without its qualifier names it when
+    /// another part says the qualifier: "the chemical element mercury"
+    /// names Mercury (element), but "queen tour" not Queen (album).
     fn span(&self, page: &Page, joined: &tantivy::tokenizer::TextAnalyzer) -> Option<&[String]> {
-        let names: Vec<&String> = if page.is_article() {
-            std::iter::once(&page.title).chain(&page.aliases).collect()
+        let key = |name: &str| analysis::tokens(joined, name).pop();
+        let names: Vec<&str> = if page.is_article() {
+            let qualified = super::sites::title_qualifier(&page.title)
+                .and_then(key)
+                .is_some_and(|qualifier| self.keys.contains_key(&qualifier));
+            std::iter::once(page.title.as_str())
+                .chain(qualified.then(|| base_title(&page.title)))
+                .chain(page.aliases.iter().map(String::as_str))
+                .collect()
         } else if page.set == DOCS_SET {
-            page.aliases.iter().collect()
+            page.aliases.iter().map(String::as_str).collect()
         } else {
             return None;
         };
         names
             .into_iter()
-            .filter_map(|name| self.keys.get(&analysis::tokens(joined, name).pop()?))
+            .filter_map(|name| self.keys.get(&key(name)?))
             .max_by_key(|span| span.len())
             .map(Vec::as_slice)
     }
@@ -1304,7 +1353,7 @@ pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
 /// words of "javascript array sort" are more read than MDN's page on it,
 /// and would crowd it out.
 pub(crate) fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
-    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE2_SET];
+    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET];
     for set in kept {
         if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
             continue;
