@@ -658,6 +658,9 @@ fn comparisons_find_the_articles_on_both_sides() {
             "weather",
             "climate",
         ),
+        ("is a tomato a fruit", "tomato", "fruit"),
+        ("is the sun a star", "sun", "star"),
+        ("is pluto a planet", "pluto", "planet"),
     ] {
         assert_eq!(compared(query), Some([a.into(), b.into()]), "{query:?}");
     }
@@ -667,6 +670,11 @@ fn comparisons_find_the_articles_on_both_sides() {
         "batman v superman",
         "how to choose a roth ira vs a traditional ira",
         "difference between",
+        "is it a good idea",
+        "is there a god",
+        "is a virus alive",
+        "is bitcoin a good investment",
+        "is it safe to eat a raw egg",
     ] {
         assert_eq!(compared(query), None, "{query:?}");
     }
@@ -692,4 +700,13 @@ fn comparisons_find_the_articles_on_both_sides() {
     let hits = s.search("crocodile vs alligator", 5).unwrap();
     assert_eq!(hits[0].page.title, "Crocodiles vs. Alligators", "{hits:?}");
     assert!(hits.iter().all(|hit| !hit.named), "{hits:?}");
+    let (_dir, s) = searcher(&[page("Tomato", 300_000, &[]), page("Fruit", 250_000, &[])]);
+    let hits = s.search("is a tomato a fruit", 5).unwrap();
+    let mut named: Vec<_> = hits
+        .iter()
+        .filter(|hit| hit.named)
+        .map(|hit| hit.page.title.as_str())
+        .collect();
+    named.sort();
+    assert_eq!(named, ["Fruit", "Tomato"], "{hits:?}");
 }
