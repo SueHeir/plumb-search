@@ -379,21 +379,6 @@ pub(crate) fn without_copies(
     home: Option<&str>,
     asked: &[&str],
 ) -> Vec<Hit> {
-    // The title names the brand anywhere in it: "StubHub UK", "Buy and
-    // sell tickets | StubHub".
-    let names_brand = |hit: &Hit, label: &str| {
-        hit.title
-            .as_deref()
-            .is_none_or(|title| normalize_text(title).replace(' ', "").contains(label))
-    };
-    // Endings used as generic ones (.io, .me, .co) are not countries', but
-    // the same ending under a country's own (.com.co, Colombia's; .com.ai)
-    // still is.
-    let country = |suffix: &str| {
-        suffix.rsplit('.').next().is_some_and(|tld| {
-            tld.len() == 2 && (suffix.contains('.') || !GENERIC_COUNTRY_ENDINGS.contains(&tld))
-        })
-    };
     // The best known, not the best ranked: ranking comes again after this
     // (the learned order), and cbc.bb ranked above cbc.ca is no reason to
     // leave out cbc.ca.
@@ -431,13 +416,15 @@ pub(crate) fn without_copies(
         // (google.fr, google.ca, all "Google Search", "search engine by
         // Google LLC").
         copies[i] = brand_label(&hit.domain).is_some_and(|(label, suffix)| {
-            country(suffix)
+            is_country_ending(suffix)
                 && elsewhere(hit)
                 && hits.iter().enumerate().any(|(j, other)| {
                     better_known(i, j)
                         && brand_label(&other.domain).is_some_and(|(l, s)| {
                             l == label
-                                && ((hit.named && !country(s) && (other.official || !hit.official))
+                                && ((hit.named
+                                    && !is_country_ending(s)
+                                    && (other.official || !hit.official))
                                     || (hit.official
                                         && other.official
                                         && same_title(other)
@@ -493,7 +480,7 @@ pub(crate) fn without_copies(
             brand_label(&other.domain).is_some_and(|(l, s)| {
                 l == label
                     && s != suffix
-                    && (country(suffix) || !country(s))
+                    && (is_country_ending(suffix) || !is_country_ending(s))
                     && match &hit.title {
                         None => {
                             hit.link_score < WELL_KNOWN_LINK_SCORE
@@ -501,7 +488,7 @@ pub(crate) fn without_copies(
                                 && names_brand(other, label)
                         }
                         Some(_) => {
-                            (country(suffix) || hit.link_score < COPYCAT_LINK_SCORE)
+                            (is_country_ending(suffix) || hit.link_score < COPYCAT_LINK_SCORE)
                                 && (names_brand(hit, label) || same_title(other))
                         }
                     }
@@ -523,6 +510,23 @@ pub(crate) fn without_copies(
         .zip(copies)
         .filter_map(|(hit, copy)| (!copy).then_some(hit))
         .collect()
+}
+
+/// Whether `hit`'s title names the brand `label` anywhere in it: "StubHub
+/// UK", "Buy and sell tickets | StubHub". A site with no title does too.
+fn names_brand(hit: &Hit, label: &str) -> bool {
+    hit.title
+        .as_deref()
+        .is_none_or(|title| normalize_text(title).replace(' ', "").contains(label))
+}
+
+/// Whether `suffix` is a country's ending. Endings used as generic ones
+/// (.io, .me, .co) are not countries', but the same ending under a
+/// country's own (.com.co, Colombia's; .com.ai) still is.
+fn is_country_ending(suffix: &str) -> bool {
+    suffix.rsplit('.').next().is_some_and(|tld| {
+        tld.len() == 2 && (suffix.contains('.') || !GENERIC_COUNTRY_ENDINGS.contains(&tld))
+    })
 }
 
 /// Which of `hits` are look-alikes of a well-known site `query` names

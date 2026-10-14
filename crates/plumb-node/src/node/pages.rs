@@ -1330,39 +1330,47 @@ pub(super) fn add_pages(
                     &mut results.pages,
                 );
             }
-            // A county search that ends in its state lists that state's
-            // county before its namesakes elsewhere.
-            plumb_index::asked_state_first(query, &mut results.hits);
-            // And a search about a town lists the sites of its namesakes
-            // elsewhere last: "berlin wall memorial" is not Berlin, NH.
-            let town = |name: &str| {
-                super::places::locate(inner, name, None).filter(plumb_core::place::Place::is_town)
-            };
-            plumb_index::namesakes_last(query, &mut results.hits, &town);
-            // The learned order knows nothing of spelling: the site a
-            // suggestion names stays second, and so does the page.
-            if let Some(spelling) = &results.spelling {
-                if let Some(site) = &spelling.site {
-                    plumb_index::suggested_site_second(&mut results.hits, site);
-                }
-                if let Err(err) =
-                    searcher.list_suggested_page(spelling, options, &mut results.pages)
-                {
-                    warn!("listing the page a spelling names: {err:#}");
-                }
-            }
-            // Only shown, after the ranking, which weighs a site's own
-            // title.
-            if let Err(err) = searcher.title_untitled(&mut results.hits) {
-                warn!("titling sites from their articles: {err:#}");
-            }
-            // A pasted address is the page at it, whatever the ranking
-            // says.
-            if let Err(err) = searcher.list_typed_page(query, options, &mut results.pages) {
-                warn!("listing the page at a typed address: {err:#}");
-            }
+            after_learned_order(inner, &searcher, query, options, results);
         }
         Err(err) => warn!("searching pages: {err:#}"),
+    }
+}
+
+/// What [`add_pages`] does to `results` after the learned order, which
+/// knows nothing of states, towns, spelling or typed addresses.
+fn after_learned_order(
+    inner: &Inner,
+    searcher: &PageSearcher,
+    query: &str,
+    options: &SearchOptions,
+    results: &mut SearchResults,
+) {
+    // A county search that ends in its state lists that state's county
+    // before its namesakes elsewhere.
+    plumb_index::asked_state_first(query, &mut results.hits);
+    // And a search about a town lists the sites of its namesakes
+    // elsewhere last: "berlin wall memorial" is not Berlin, NH.
+    let town = |name: &str| {
+        super::places::locate(inner, name, None).filter(plumb_core::place::Place::is_town)
+    };
+    plumb_index::namesakes_last(query, &mut results.hits, &town);
+    // The learned order knows nothing of spelling: the site a suggestion
+    // names stays second, and so does the page.
+    if let Some(spelling) = &results.spelling {
+        if let Some(site) = &spelling.site {
+            plumb_index::suggested_site_second(&mut results.hits, site);
+        }
+        if let Err(err) = searcher.list_suggested_page(spelling, options, &mut results.pages) {
+            warn!("listing the page a spelling names: {err:#}");
+        }
+    }
+    // Only shown, after the ranking, which weighs a site's own title.
+    if let Err(err) = searcher.title_untitled(&mut results.hits) {
+        warn!("titling sites from their articles: {err:#}");
+    }
+    // A pasted address is the page at it, whatever the ranking says.
+    if let Err(err) = searcher.list_typed_page(query, options, &mut results.pages) {
+        warn!("listing the page at a typed address: {err:#}");
     }
 }
 
