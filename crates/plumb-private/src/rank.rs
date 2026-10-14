@@ -19,10 +19,10 @@
 use std::collections::{HashMap, HashSet};
 
 use plumb_core::{
-    domain_label, is_function_word, joined, kind_key, language_code, language_fits,
-    normalize_country, normalize_text, other_number, record_adult_level, registrable_domain,
-    site_country, site_language, truncate_chars, Operators, SafeSearch, SiteRecord, MAX_ALIASES,
-    MAX_HEADINGS, MAX_TERMS, MAX_TEXT_CHARS,
+    domain_label, is_function_word, is_sign_in_page, joined, kind_key, language_code,
+    language_fits, names_label, normalize_country, normalize_text, other_number,
+    record_adult_level, registrable_domain, site_country, site_language, truncate_chars, Operators,
+    SafeSearch, SiteRecord, MAX_ALIASES, MAX_HEADINGS, MAX_TERMS, MAX_TEXT_CHARS,
 };
 use serde::Serialize;
 
@@ -306,7 +306,7 @@ fn rank_words(
         );
         let site_language = site_language(site.language.as_deref(), &written);
         if let (Some(wanted), Some(site)) = (&language, &site_language) {
-            if !language_fits(wanted, site) && !name.typed && name.label < query.len {
+            if !language_fits(wanted, site) && !name.typed && name.words() < query.len {
                 continue;
             }
         }
@@ -327,6 +327,21 @@ fn rank_words(
         let link_score = link_scores[i];
         let full_hostname = self::words(&site.domain) == query.tokens;
         let named = name.typed || full_hostname || name.words() >= query.len;
+        let url = site
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map_or_else(|| format!("https://{}/", site.domain), str::to_string);
+        // A stranger's sign-in form, left out as on a node.
+        if !named
+            && link_score < WELL_KNOWN_LINK_SCORE
+            && site.about.is_none()
+            && is_sign_in_page(&url, site.title.as_deref())
+            && !names_label(query_text, &site.domain)
+        {
+            continue;
+        }
         let protected = named && named_subject_words == 0
             || name.typed
             || full_hostname
@@ -392,12 +407,7 @@ fn rank_words(
             named,
             Ranked {
                 domain: site.domain.clone(),
-                url: site
-                    .url
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|url| !url.is_empty())
-                    .map_or_else(|| format!("https://{}/", site.domain), str::to_string),
+                url,
                 title: site.title.clone().filter(|t| !t.trim().is_empty()),
                 description: site.description.clone().filter(|d| !d.trim().is_empty()),
                 score: alpha * prior
