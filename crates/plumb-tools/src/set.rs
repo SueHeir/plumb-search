@@ -37,7 +37,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::page_items::{differing_members, page_fields, page_item_or_why, visible};
-use crate::site_rules::{hosts_to_check, moved_sites, Moved};
+use crate::site_rules::{hosts_to_check, moved_sites, well_linked_subsites, Moved};
 
 /// How many items the parts hold, counted from the most weighted: the
 /// first 100,000, up to the first 1,000,000, then the rest.
@@ -259,6 +259,14 @@ pub struct SiteRulesArgs {
     /// name.
     #[arg(long, value_name = "FILE")]
     pub hosts: Option<PathBuf>,
+    /// Common Crawl's host ranks (`<release>-host-ranks.txt.gz`): the
+    /// direct subdomains among the best linked `--top-hosts` become sites
+    /// of their own ([`crate::site_rules::well_linked_subsites`]).
+    #[arg(long, value_name = "FILE")]
+    pub host_ranks: Option<PathBuf>,
+    /// How many hosts of `--host-ranks` to read, best linked first.
+    #[arg(long, default_value_t = 50_000)]
+    pub top_hosts: usize,
     /// The zstd level of the parts.
     #[arg(long, default_value_t = 19)]
     pub level: i32,
@@ -918,9 +926,10 @@ pub fn denylist(args: &DenylistArgs) -> Result<Written> {
     )
 }
 
-/// Writes the rules of the Public Suffix List in `args.psl` and the
-/// built-in subsite lists as a site rules set, then checks the hosts the
-/// rules name, and those in `args.hosts`, against the built-in lists.
+/// Writes the rules of the Public Suffix List in `args.psl`, the built-in
+/// subsite lists and the well-linked subdomains of `args.host_ranks` as a
+/// site rules set, then checks the hosts the rules name, and those in
+/// `args.hosts`, against the built-in lists.
 /// Returns what it wrote, how many hosts it checked and those whose site
 /// the set moves.
 pub fn site_rules(args: &SiteRulesArgs) -> Result<(Written, usize, Vec<Moved>)> {
@@ -933,6 +942,13 @@ pub fn site_rules(args: &SiteRulesArgs) -> Result<(Written, usize, Vec<Moved>)> 
         fs::read_to_string(&args.psl).with_context(|| format!("reading {}", args.psl.display()))?;
     let mut rules = read_suffix_list(&text).with_context(|| args.psl.display().to_string())?;
     rules.extend(built_in_rules());
+    if let Some(path) = &args.host_ranks {
+        let set: SiteRules = rules.iter().cloned().collect();
+        let ranks = plumb_ingest::open_maybe_gz(path)?;
+        let subsites = well_linked_subsites(ranks, args.top_hosts, &set)
+            .with_context(|| format!("reading {}", path.display()))?;
+        rules.extend(subsites);
+    }
     let mut hosts = hosts_to_check(&rules);
     if let Some(path) = &args.hosts {
         let text =

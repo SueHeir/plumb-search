@@ -12,6 +12,9 @@
 //!   popularity to show, so a typo never leads to them. With the spelling
 //!   model, one word is not taken for a name when another word is a
 //!   likelier slip of it: "existance" is "existence", not distance.to.
+//!   A well-known site's name one slip away loses only to a word reached
+//!   by a likelier slip, however common: "shien" is shein.com, though
+//!   "shine" is a commoner word, but "wierd" is "weird", not wired.com.
 //! - **Words.** Any other word that hardly appears in the index (in fewer
 //!   than [`KNOWN_WORD_DOCS`] sites) is replaced by the nearest known word
 //!   that appears in many more ([`FIX_DOCS_RATIO`] times as many). A rare
@@ -312,14 +315,18 @@ impl Speller<'_> {
     /// what `word` was meant as by the noisy channel, `P(word | meant) *
     /// P(meant)`, each counted as a word of the sites: "existance" is a
     /// slip of "existence", not of distance.to's name, and "supercede" of
-    /// "supersede", not supercell.com's.
-    fn likelier_word_than(&self, word: &str, name: &str) -> Result<bool> {
+    /// "supersede", not supercell.com's. When `name` is a well-known site's
+    /// one slip away, only a word reached by a likelier slip is: "shien" is
+    /// shein.com though "shine" is commoner, but "wierd" is "weird", not
+    /// wired.com, and "suprise" "surprise", not sunrise.ch.
+    fn likelier_word_than(&self, word: &str, name: &str, well_known: bool) -> Result<bool> {
         let Some(model) = self.model.filter(|_| self.tuning.channel) else {
             return Ok(false);
         };
         let likelihood =
             |term: &str, docs: u64| model.ln_channel(word, term) + (docs.max(1) as f64).ln();
         let as_name = likelihood(name, self.docs_with(name)?);
+        let name_slip = model.ln_channel(word, name);
         let needed = KNOWN_WORD_DOCS.max(FIX_DOCS_RATIO.saturating_mul(self.docs_with(word)?));
         for term in self
             .near_words(word, max_edits(word.chars().count()))?
@@ -329,7 +336,10 @@ impl Speller<'_> {
                 continue;
             }
             let docs = self.docs_with(&term)?;
-            if docs >= needed && likelihood(&term, docs) > as_name {
+            if docs >= needed
+                && likelihood(&term, docs) > as_name
+                && !(well_known && model.ln_channel(word, &term) <= name_slip)
+            {
                 return Ok(true);
             }
         }
@@ -415,7 +425,7 @@ impl Speller<'_> {
                         .then_with(|| a.3.cmp(&b.3))
                 }),
             }
-            for (_, _, score, name) in found {
+            for (distance, _, score, name) in found {
                 // Each word may only be misspelled as much as its length
                 // allows, and none may vanish: "americanairlines fr" is not
                 // a typo of "americanairlines".
@@ -460,7 +470,11 @@ impl Speller<'_> {
                 }
                 // A word is no site's name when another word is a likelier
                 // slip of it: "sentance" is "sentence", not sundance.org.
-                if plausible && covers == 1 && self.likelier_word_than(&words[0], &fixed[0])? {
+                let well_known_slip = distance <= 1 && score >= WELL_KNOWN_LINK_SCORE;
+                if plausible
+                    && covers == 1
+                    && self.likelier_word_than(&words[0], &fixed[0], well_known_slip)?
+                {
                     continue;
                 }
                 if plausible {
@@ -647,7 +661,7 @@ pub(crate) fn near_terms(
 /// Whether `fixed` is close enough to `word`, one word of a corrected
 /// name: within [`max_edits`], or one edit for a word of two or three
 /// letters ("taco bel").
-fn within_edits(word: &str, fixed: &str) -> bool {
+pub(crate) fn within_edits(word: &str, fixed: &str) -> bool {
     let edits = match word.chars().count() {
         0 | 1 => 0,
         2 | 3 => 1,
