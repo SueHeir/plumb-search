@@ -163,9 +163,14 @@ pub fn town_size(kind: &str) -> Option<f64> {
 }
 
 /// How far around a place that is no town, in km, places count as near
-/// it: national parks and nature reserves are wide. `None` for the rest.
+/// it: national parks, nature reserves and islands are wide. `None` for
+/// the rest.
 pub fn area_size(kind: &str) -> Option<f64> {
-    matches!(kind, "boundary=national_park" | "leisure=nature_reserve").then_some(10.0)
+    matches!(
+        kind,
+        "boundary=national_park" | "leisure=nature_reserve" | "place=island" | "place=archipelago"
+    )
+    .then_some(10.0)
 }
 
 /// Tiers of [`place_rank`], a million apart.
@@ -378,7 +383,15 @@ pub fn normalize_region(region: &str) -> String {
     US_STATES
         .iter()
         .chain(CANADIAN_PROVINCES)
-        .find(|(_, full)| crate::normalize_text(full) == name)
+        .find(|(_, full)| {
+            // A name of two parts is often given as its first:
+            // "Newfoundland" for Newfoundland and Labrador.
+            let full = crate::normalize_text(full);
+            full == name
+                || full
+                    .strip_prefix(&name)
+                    .is_some_and(|rest| rest.starts_with(" and "))
+        })
         .map_or(region, |(code, _)| (*code).to_string())
 }
 
@@ -821,6 +834,7 @@ mod tests {
         };
         assert!(!village.is_landmark());
         assert_eq!(area_size("leisure=nature_reserve"), Some(10.0));
+        assert_eq!(area_size("place=island"), Some(10.0));
         assert_eq!(area_size("tourism=museum"), None);
     }
 
@@ -831,6 +845,8 @@ mod tests {
         assert_eq!(normalize_region("Québec"), "QC");
         assert_eq!(normalize_region("ON"), "ON");
         assert_eq!(normalize_region("Bayern"), "Bayern");
+        assert_eq!(normalize_region("Newfoundland"), "NL");
+        assert_eq!(normalize_region("Labrador"), "Labrador");
     }
 
     #[test]

@@ -1,0 +1,90 @@
+{
+ "assembled": {
+  "rows": [
+   {
+    "kind": "page",
+    "page": {
+     "page": {
+      "set": "stackoverflow",
+      "url": "https://stackoverflow.com/questions/927358",
+      "title": "How do I undo the most recent local commits in Git?",
+      "description": "git, version-control, git-commit, undo",
+      "views": 13962748
+     },
+     "score": 0.6,
+     "named": false,
+     "popularity": 1.0,
+     "whole": true,
+     "at": 0
+    }
+   },
+   {
+    "kind": "page",
+    "page": {
+     "page": {
+      "set": "stackoverflow",
+      "url": "https://stackoverflow.com/questions/2845731",
+      "title": "How to uncommit my last commit in Git",
+      "description": "git, undo, git-reset, git-index",
+      "views": 1916168
+     },
+     "score": 0.56378436,
+     "named": false,
+     "popularity": 0.879281,
+     "whole": true,
+     "at": 0
+    }
+   },
+   {
+    "kind": "site",
+    "site": {
+     "domain": "ohshitgit.com",
+     "url": "https://ohshitgit.com/",
+     "title": "Oh Shit, Git!?!",
+     "description": null,
+     "score": 0.57453084
+    },
+    "pages": []
+   }
+  ]
+ },
+ "hits": [
+  {
+   "domain": "ohshitgit.com",
+   "url": "https://ohshitgit.com/",
+   "title": "Oh Shit, Git!?!",
+   "description": null,
+   "score": 0.57453084
+  }
+ ],
+ "pages": [
+  {
+   "page": {
+    "set": "stackoverflow",
+    "url": "https://stackoverflow.com/questions/927358",
+    "title": "How do I undo the most recent local commits in Git?",
+    "description": "git, version-control, git-commit, undo",
+    "views": 13962748
+   },
+   "score": 0.6,
+   "named": false,
+   "popularity": 1.0,
+   "whole": true,
+   "at": 0
+  },
+  {
+   "page": {
+    "set": "stackoverflow",
+    "url": "https://stackoverflow.com/questions/2845731",
+    "title": "How to uncommit my last commit in Git",
+    "description": "git, undo, git-reset, git-index",
+    "views": 1916168
+   },
+   "score": 0.56378436,
+   "named": false,
+   "popularity": 0.879281,
+   "whole": true,
+   "at": 0
+  }
+ ]
+}
