@@ -18,6 +18,13 @@ pub fn base_title(title: &str) -> &str {
     }
 }
 
+/// The qualifier in brackets that [`base_title`] leaves out: `element` of
+/// `Mercury (element)`.
+pub(crate) fn title_qualifier(title: &str) -> Option<&str> {
+    let base = base_title(title);
+    (base.len() < title.len()).then(|| &title[base.len() + 2..title.len() - 1])
+}
+
 /// The title of a work in a series without the series' name: "Tears of
 /// the Kingdom" of "The Legend of Zelda: Tears of the Kingdom", "The
 /// Phantom Menace" of "Star Wars: Episode I – The Phantom Menace". `None`

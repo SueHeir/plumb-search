@@ -613,6 +613,43 @@ fn a_name_inside_a_longer_search_finds_its_page() {
 }
 
 #[test]
+fn a_qualifier_the_search_says_counts_as_part_of_the_name() {
+    let article = |title: &str, description: &str, views: u64, aliases: &[&str]| {
+        let mut article = page(title, views, aliases);
+        article.description = Some(description.into());
+        article.item = Some(format!("Q{views}"));
+        article
+    };
+    let (_dir, s) = searcher(&[
+        article(
+            "Mercury (element)",
+            "Chemical element with atomic number 80",
+            400_000,
+            &["Hg", "quicksilver"],
+        ),
+        article(
+            "Chemical element",
+            "Chemical substance not composed of simpler ones",
+            300_000,
+            &["element"],
+        ),
+        article(
+            "Mercury (planet)",
+            "smallest and closest planet to the Sun",
+            900_000,
+            &["Mercury"],
+        ),
+        article("Earth", "planet", 5_000_000, &[]),
+    ]);
+    let first = |q: &str| s.search(q, 5).unwrap()[0].page.title.clone();
+    // Its title and qualifier apart name the element more fully than the
+    // two words in a row name Chemical element.
+    assert_eq!(first("the chemical element mercury"), "Mercury (element)");
+    assert_eq!(first("chemical element mercury"), "Mercury (element)");
+    assert_eq!(first("mercury element"), "Mercury (element)");
+}
+
+#[test]
 fn words_of_things_are_corrected_from_page_names() {
     let mut pages = Vec::new();
     for i in 0..25 {
