@@ -163,9 +163,21 @@ pub fn town_size(kind: &str) -> Option<f64> {
 }
 
 /// How far around a place that is no town, in km, places count as near
-/// it: national parks and nature reserves are wide. `None` for the rest.
+/// it: national parks, nature reserves, islands, lakes, mountains and
+/// beaches are wide. `None` for the rest.
 pub fn area_size(kind: &str) -> Option<f64> {
-    matches!(kind, "boundary=national_park" | "leisure=nature_reserve").then_some(10.0)
+    matches!(
+        kind,
+        "boundary=national_park"
+            | "leisure=nature_reserve"
+            | "place=island"
+            | "place=archipelago"
+            | "natural=water"
+            | "natural=peak"
+            | "natural=volcano"
+            | "natural=beach"
+    )
+    .then_some(10.0)
 }
 
 /// Tiers of [`place_rank`], a million apart.
@@ -369,6 +381,45 @@ pub const CANADIAN_PROVINCES: &[(&str, &str)] = &[
     ("YT", "Yukon"),
 ];
 
+/// US states as the GPO Style Manual and the AP Stylebook abbreviate
+/// them, where that is not the postal code: "boston, mass." is Boston, MA.
+/// Read only after a town's name ([`us_state_abbreviated`]), since several
+/// are words or towns too ("Ala", "Ore", "Mich." for Michoacán).
+const US_STATE_ABBREVIATIONS: &[(&str, &str)] = &[
+    ("AL", "Ala."),
+    ("AZ", "Ariz."),
+    ("AR", "Ark."),
+    ("CA", "Calif."),
+    ("CO", "Colo."),
+    ("CT", "Conn."),
+    ("DE", "Del."),
+    ("FL", "Fla."),
+    ("IL", "Ill."),
+    ("IN", "Ind."),
+    ("KS", "Kan."),
+    ("KS", "Kans."),
+    ("MA", "Mass."),
+    ("MI", "Mich."),
+    ("MN", "Minn."),
+    ("MS", "Miss."),
+    ("MT", "Mont."),
+    ("NE", "Neb."),
+    ("NE", "Nebr."),
+    ("NV", "Nev."),
+    ("NM", "N. Mex."),
+    ("ND", "N. Dak."),
+    ("OK", "Okla."),
+    ("OR", "Ore."),
+    ("OR", "Oreg."),
+    ("SD", "S. Dak."),
+    ("TN", "Tenn."),
+    ("TX", "Tex."),
+    ("WA", "Wash."),
+    ("WV", "W. Va."),
+    ("WI", "Wis."),
+    ("WY", "Wyo."),
+];
+
 /// A region as addresses write it, with a United States state's or a
 /// Canadian province's name made its code: "Colorado" -> "CO", "Québec"
 /// -> "QC".
@@ -378,8 +429,26 @@ pub fn normalize_region(region: &str) -> String {
     US_STATES
         .iter()
         .chain(CANADIAN_PROVINCES)
-        .find(|(_, full)| crate::normalize_text(full) == name)
+        .find(|(_, full)| {
+            // A name of two parts is often given as its first:
+            // "Newfoundland" for Newfoundland and Labrador.
+            let full = crate::normalize_text(full);
+            full == name
+                || full
+                    .strip_prefix(&name)
+                    .is_some_and(|rest| rest.starts_with(" and "))
+        })
         .map_or(region, |(code, _)| (*code).to_string())
+}
+
+/// The code of the US state `text` abbreviates as the style books do:
+/// "Mass." -> "MA", "w va" -> "WV".
+pub fn us_state_abbreviated(text: &str) -> Option<&'static str> {
+    let text = crate::normalize_text(text);
+    US_STATE_ABBREVIATIONS
+        .iter()
+        .find(|(_, short)| crate::normalize_text(short) == text)
+        .map(|(code, _)| *code)
 }
 
 /// Great-circle distance in km.
@@ -642,6 +711,7 @@ pub fn kind_label(kind: &str) -> String {
         "shop" => format!("{value} shop"),
         "office" => format!("{value} office"),
         "craft" => format!("{value} workshop"),
+        "natural" if value == "water" => "lake".to_string(),
         _ => value,
     };
     if let Some(first) = label.get(..1) {
@@ -756,6 +826,7 @@ mod tests {
     fn kinds_have_labels_and_words() {
         assert_eq!(kind_label("amenity=cafe"), "Café");
         assert_eq!(kind_label("shop=kite"), "Kite shop");
+        assert_eq!(kind_label("natural=water"), "Lake");
         let pizza = Place {
             kind: "amenity=restaurant".into(),
             tags: vec!["cuisine=pizza;italian".into()],
@@ -821,6 +892,8 @@ mod tests {
         };
         assert!(!village.is_landmark());
         assert_eq!(area_size("leisure=nature_reserve"), Some(10.0));
+        assert_eq!(area_size("place=island"), Some(10.0));
+        assert_eq!(area_size("natural=peak"), Some(10.0));
         assert_eq!(area_size("tourism=museum"), None);
     }
 
@@ -831,6 +904,12 @@ mod tests {
         assert_eq!(normalize_region("Québec"), "QC");
         assert_eq!(normalize_region("ON"), "ON");
         assert_eq!(normalize_region("Bayern"), "Bayern");
+        assert_eq!(normalize_region("Newfoundland"), "NL");
+        assert_eq!(normalize_region("Labrador"), "Labrador");
+        assert_eq!(normalize_region("Mich."), "Mich.", "Michoacán's too");
+        assert_eq!(us_state_abbreviated("Mass."), Some("MA"));
+        assert_eq!(us_state_abbreviated("w va"), Some("WV"));
+        assert_eq!(us_state_abbreviated("Massachusetts"), None);
     }
 
     #[test]

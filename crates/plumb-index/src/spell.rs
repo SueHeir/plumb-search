@@ -664,7 +664,7 @@ pub(crate) fn within_edits(word: &str, fixed: &str) -> bool {
 
 /// Levenshtein automata builders, which are costly to make, for 1 and 2
 /// edits, with a swap of neighbouring letters as one edit.
-fn builder(edits: u8) -> &'static LevenshteinAutomatonBuilder {
+pub(crate) fn builder(edits: u8) -> &'static LevenshteinAutomatonBuilder {
     static ONE: OnceLock<LevenshteinAutomatonBuilder> = OnceLock::new();
     static TWO: OnceLock<LevenshteinAutomatonBuilder> = OnceLock::new();
     match edits {
