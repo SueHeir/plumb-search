@@ -60,6 +60,7 @@ mod run;
 pub mod sets;
 pub mod site_rules;
 pub mod sources;
+pub mod wanted_pages;
 
 use cli::{Cli, Command};
 

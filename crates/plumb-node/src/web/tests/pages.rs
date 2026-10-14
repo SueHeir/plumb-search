@@ -210,6 +210,16 @@ async fn search_page_lists_hits() {
 }
 
 #[tokio::test]
+async fn a_garbled_search_is_read_as_it_was_written() {
+    let fake = backend(bank_hits());
+    // "MÃ¼nchen", UTF-8 that something read as windows-1252.
+    let (status, _, body) = get(fake.clone(), "/search?q=M%C3%83%C2%BCnchen").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("value=\"München\""), "{body}");
+    assert_eq!(fake.calls.lock().unwrap()[0].0, "München");
+}
+
+#[tokio::test]
 async fn the_site_searched_for_lists_its_key_pages() {
     let page = |label: &str, url: &str| KeyPage {
         label: label.into(),
