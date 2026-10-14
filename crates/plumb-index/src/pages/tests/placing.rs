@@ -72,16 +72,80 @@ fn main_articles_beat_their_namesakes() {
         site("b.com", false),
         site("c.com", false),
     ];
+    let mut namesake = found("Eiffel Tower (Six Flags)", None, true, 0.6);
     let placed = place_pages(
         "eiffel tower",
         &sites,
         vec![
             found("Eiffel Tower", Some("toureiffel.paris"), true, 0.9),
-            found("Eiffel Tower (Six Flags)", None, true, 0.6),
+            namesake.clone(),
         ],
     );
     assert_eq!(placed[0].under.as_deref(), Some("toureiffel.paris"));
     assert_eq!(placed[1].at, PARTIAL_AFTER);
+    // Whatever the learned ranking says: "taylor swift" listed the album
+    // "Taylor Swift" second.
+    namesake.learned = Some(LearnedPlace::Before("a.com".into()));
+    let placed = place_pages(
+        "eiffel tower",
+        &sites,
+        vec![
+            found("Eiffel Tower", Some("toureiffel.paris"), true, 0.9),
+            namesake,
+        ],
+    );
+    assert_eq!(placed[1].at, PARTIAL_AFTER);
+    // Of two namesakes on their own, the better one stays.
+    let mut placed = vec![
+        PlacedPage {
+            at: 0,
+            under: None,
+            hit: found("The Bear (1984 film)", None, true, 0.6),
+        },
+        PlacedPage {
+            at: 1,
+            under: None,
+            hit: found("The Bear (1988 film)", None, true, 0.7),
+        },
+    ];
+    keep_page_rules("the bear", &sites, &mut placed);
+    let at: Vec<usize> = placed.iter().map(|p| p.at).collect();
+    assert_eq!(at, [PARTIAL_AFTER, 1]);
+}
+
+#[test]
+fn namesakes_read_far_less_than_the_article_are_not_listed() {
+    let read = |title: &str, site: Option<&str>, score: f32, views: u64| {
+        let mut hit = found(title, site, true, score);
+        hit.page.views = views;
+        hit
+    };
+    let sites = [
+        site("royal.uk", false),
+        site("pwcgov.org", false),
+        site("prince.com", false),
+    ];
+    let placed = place_pages(
+        "prince william",
+        &sites,
+        vec![
+            read("William, Prince of Wales", Some("royal.uk"), 0.76, 400_000),
+            read("Prince William (TV series)", None, 0.54, 20),
+            read("Prince William (1788 ship)", None, 0.52, 5),
+        ],
+    );
+    let titles: Vec<&str> = placed.iter().map(|p| p.hit.page.title.as_str()).collect();
+    assert_eq!(titles, ["William, Prince of Wales"]);
+    // One read at least a fiftieth as much is listed.
+    let placed = place_pages(
+        "cleopatra",
+        &[site("cleorecs.com", false)],
+        vec![
+            read("Cleopatra", None, 0.85, 66_000),
+            read("Cleopatra (1963 film)", None, 0.70, 7_000),
+        ],
+    );
+    assert_eq!(placed.len(), 2);
 }
 
 #[test]
@@ -255,6 +319,56 @@ fn sites_only_a_later_word_of_a_named_article_finds_are_left_out() {
             "pro.example"
         ]
     );
+}
+
+#[test]
+fn sites_only_a_first_name_finds_are_left_out_for_people() {
+    // Each lacks a word of "ted kaczynski" and is named by "ted".
+    let evidence = |domain: &str, closeness: f32| {
+        let mut hit = known_site(domain, false, 0.7);
+        hit.missing_words = true;
+        hit.query_evidence = Some(crate::CandidateEvidence {
+            domain: domain.into(),
+            lexical_score: 30.0,
+            semantic_closeness: Some(closeness),
+            query_coverage: 0.5,
+            substantive_coverage: 0.5,
+            remaining_coverage: 0.0,
+            named_subject_words: 0,
+            named_subject_domain: None,
+            named_subject_reason: None,
+            subject_coverage: None,
+            subject_remaining_coverage: None,
+            full_name: false,
+            typed_domain: false,
+            partial_name_words: 1,
+            relevance_tier: 0,
+            source_quality: None,
+        });
+        hit
+    };
+    let sites = vec![
+        evidence("ted.com", 0.0),
+        evidence("tedfans.example", 0.6),
+        evidence("own.example", 0.1),
+    ];
+    let mut article = found("Ted Kaczynski", Some("own.example"), true, 0.9);
+    article.page.item = Some("Q222134".into());
+    let floor = crate::RankConfig::default().meaning_only_relevance;
+    // Not a person: the site the name starts with stays.
+    assert_eq!(
+        drop_far_namesakes(&mut sites.clone(), &[article.clone()], floor),
+        0
+    );
+    article.page.facts = vec![plumb_core::facts::Fact {
+        kind: plumb_core::facts::FactKind::Born,
+        value: "1942-05-22".into(),
+    }];
+    let mut left = sites.clone();
+    assert_eq!(drop_far_namesakes(&mut left, &[article], floor), 1);
+    let order: Vec<&str> = left.iter().map(|s| s.domain.as_str()).collect();
+    // One near in meaning and the person's own site stay.
+    assert_eq!(order, ["tedfans.example", "own.example"]);
 }
 
 #[test]
@@ -508,6 +622,31 @@ fn organizations_by_description() {
 }
 
 #[test]
+fn events_by_description() {
+    for yes in [
+        "European association football tournament",
+        "National Basketball Association team",
+        "Annual music and arts festival in Indio, California",
+        "Motorsport championship held worldwide",
+        "Series of international multi-sport events",
+        "Annual awards for cinematic achievements",
+        "Multi-purpose indoor arena in New York City",
+        "American mixed martial arts promotion company",
+    ] {
+        assert!(describes_an_event(Some(yes)), "{yes}");
+    }
+    for no in [
+        "Large road vehicle for carrying passengers",
+        "Town in Somerset, England",
+        "American singer-songwriter (born 1989)",
+        "Range of incomes taxed at a given rate",
+    ] {
+        assert!(!describes_an_event(Some(no)), "{no}");
+    }
+    assert!(!describes_an_event(None));
+}
+
+#[test]
 fn sites_called_after_pages() {
     assert!(site_is_titled("cvs.com", "CVS Pharmacy"));
     assert!(site_is_titled("capitalone.com", "Capital One"));
@@ -521,4 +660,58 @@ fn sites_called_after_pages() {
         "Navy Federal Credit Union"
     ));
     assert!(!site_is_titled("navyfed.org", "Navy Federal Credit Union"));
+}
+
+#[test]
+fn a_suggested_spelling_lists_the_page_it_names_second() {
+    let (_dir, s) = searcher(&[
+        page("Isaac Newton", 50_000, &[]),
+        page("Newton (unit)", 9_000, &[]),
+    ]);
+    let spelling = |query: &str, applied: bool| crate::Spelling {
+        query: query.into(),
+        site: None,
+        applied,
+    };
+    let options = crate::SearchOptions::default();
+    let placed = |title: &str, at: usize| PlacedPage {
+        hit: found(title, None, true, 0.9),
+        under: None,
+        at,
+    };
+    let listed = |placed: &[PlacedPage]| -> Vec<(String, usize)> {
+        placed
+            .iter()
+            .map(|p| (p.hit.page.title.clone(), p.at))
+            .collect()
+    };
+    // Second: after the first site and a page listed first, before the
+    // pages listed with the second site.
+    let mut pages = vec![placed("Newton, Massachusetts", 0), placed("Fig Newton", 1)];
+    s.list_suggested_page(&spelling("isaac newton", false), &options, &mut pages)
+        .unwrap();
+    assert_eq!(
+        listed(&pages),
+        [
+            ("Newton, Massachusetts".to_string(), 0),
+            ("Isaac Newton".to_string(), 1),
+            ("Fig Newton".to_string(), 1),
+        ]
+    );
+    // Named by the spelling, not the query: no info box.
+    assert!(!pages[1].hit.named);
+    // Listed already, it stays where it is.
+    s.list_suggested_page(&spelling("isaac newton", false), &options, &mut pages)
+        .unwrap();
+    assert_eq!(pages.len(), 3);
+    // Nothing when the results are for the spelling, or it names no page.
+    for spelling in [
+        spelling("isaac newton", true),
+        spelling("newton apple", false),
+    ] {
+        let mut pages = Vec::new();
+        s.list_suggested_page(&spelling, &options, &mut pages)
+            .unwrap();
+        assert!(pages.is_empty(), "{}", spelling.query);
+    }
 }
