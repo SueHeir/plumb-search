@@ -492,11 +492,13 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
         }
     }
     // A docs page found by its words, or another site's page while the
-    // query names the best site's owner, never comes before the best site
-    // but its own, whatever the model says: "python package index" wants
-    // pypi.org first, "minecraft" minecraft.net.
-    let names_best =
-        crate::pages::named_page_site(&new_hits, placed.iter().map(|p| &p.hit)) == Some(0);
+    // query names the best site's owner, or the best site with one of its
+    // pages, never comes before the best site but its own, whatever the
+    // model says: "python package index" wants pypi.org first, "minecraft"
+    // minecraft.net.
+    let names_best = crate::pages::named_page_site(&new_hits, placed.iter().map(|p| &p.hit))
+        == Some(0)
+        || crate::pages::names_best_site_page(&new_hits, placed);
     for page in alone
         .iter_mut()
         .filter(|p| p.at == 0 && crate::pages::kept_below(&p.hit, &new_hits, names_best))

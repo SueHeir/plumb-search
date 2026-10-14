@@ -339,3 +339,57 @@ fn the_model_reads_a_site_as_it_did_without_its_own_page() {
         crate::learned::features("census population clock", &[row(&[&article])])
     );
 }
+
+#[test]
+fn another_sites_page_comes_after_the_site_and_its_page_named() {
+    let (_dir, searcher) = searcher(&[inner(
+        "https://www.who.int/news-room/fact-sheets",
+        "Fact sheets",
+        900,
+    )]);
+    // Listed first by the learned ranking, which reads it as well read.
+    let sepsis = PageHit {
+        page: Page::from_set(
+            REFERENCE_SET,
+            Article {
+                title: "Sepsis Survivors: Fact sheet and graphics for people who are recovering"
+                    .into(),
+                item: Some(
+                    "https://www.cdc.gov/sepsis/communication-resources/survivor.html".into(),
+                ),
+                views: 5_000,
+                ..Article::default()
+            },
+        )
+        .unwrap(),
+        score: 0.9,
+        named: false,
+        popularity: 0.9,
+        whole: false,
+        learned: Some(LearnedPlace::Before("who.int".into())),
+    };
+    let who = [titled_site("who.int", "World Health Organization (WHO)")];
+    let place = |query: &str| {
+        let mut found = vec![sepsis.clone()];
+        searcher
+            .add_named_site_page(query, &who, &mut found)
+            .unwrap();
+        place_pages(query, &who, found)
+            .into_iter()
+            .map(|p| (p.hit.page.title, p.under, p.at))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        place("who fact sheets"),
+        [
+            ("Fact sheets".to_string(), Some("who.int".to_string()), 0),
+            (sepsis.page.title.clone(), None, 1)
+        ]
+    );
+    // Without a page of the site named, the learned ranking keeps its
+    // place.
+    assert_eq!(
+        place("who sepsis survivors"),
+        [(sepsis.page.title.clone(), None, 0)]
+    );
+}

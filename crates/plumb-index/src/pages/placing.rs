@@ -457,6 +457,18 @@ fn in_other_language(url: &str) -> bool {
     first.len() <= 5 && OTHER_LANGUAGES.contains(&language)
 }
 
+/// Whether the query names the best of `sites` along with its own page,
+/// which [`add_named_site_page`](super::PageSearcher::add_named_site_page)
+/// put under it: "who fact sheets" wants who.int, with its "Fact sheets",
+/// before the CDC's fact sheet on sepsis.
+pub(crate) fn names_best_site_page(sites: &[crate::Hit], placed: &[PlacedPage]) -> bool {
+    sites.first().is_some_and(|best| {
+        placed
+            .iter()
+            .any(|p| p.under.as_deref() == Some(best.domain.as_str()) && p.hit.page.is_site_page())
+    })
+}
+
 /// Whether `hit` must come after the best of `sites`, whatever the
 /// learned ranking says. A docs page found by its words: "python package
 /// index" wants pypi.org first, and "bash parameter expansion" anything
@@ -466,7 +478,9 @@ fn in_other_language(url: &str) -> bool {
 /// "minecraft" wants minecraft.net before the Computer History Museum's
 /// page on Minecraft, "walmart" walmart.com before CNET's page of news on
 /// Walmart, and "red dead redemption 2" rockstargames.com, with the
-/// article under it, before IGN's guide to the game. Such a page's
+/// article under it, before IGN's guide to the game. `names_best` is also
+/// set when the query names the best site with one of its pages
+/// ([`names_best_site_page`]). Such a page's
 /// popularity is measured within its set, often a small one, so it reads
 /// as more read than the site's own article. Only a page of the best site
 /// itself may come before it, as docs.python.org's "python sorting
@@ -501,7 +515,8 @@ fn on_site(page: &Page, domain: &str) -> bool {
 /// article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
     placed.retain(|page| crate::health::page_allowed(query, &page.hit.page));
-    let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0);
+    let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0)
+        || names_best_site_page(sites, placed);
     let code = |p: &PlacedPage| p.under.is_none() && docs_named_as_code(&p.hit, query, sites);
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
         if code(page) {
