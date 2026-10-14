@@ -81,7 +81,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "rust",
         product: "Rust",
-        asked_by: &["rust", "rustlang", "cargo"],
+        asked_by: &["rust", "rustlang", "rustc", "cargo"],
         domain: "doc.rust-lang.org",
         roots: &[
             "https://doc.rust-lang.org/std/",
@@ -89,10 +89,12 @@ pub const DOCS_SITES: &[DocsSite] = &[
             "https://doc.rust-lang.org/reference/",
             "https://doc.rust-lang.org/cargo/",
             "https://doc.rust-lang.org/rust-by-example/",
+            "https://doc.rust-lang.org/error_codes/",
         ],
         sitemaps: &[],
         index_pages: &[
             "https://doc.rust-lang.org/std/all.html",
+            "https://doc.rust-lang.org/error_codes/error-index.html",
             // The books' chapters, which their one-page prints link to
             // only by anchors.
             "https://doc.rust-lang.org/book/toc.html",
@@ -120,6 +122,43 @@ pub const DOCS_SITES: &[DocsSite] = &[
         index_pages: &["https://go.dev/doc/"],
         names: &["The Go Programming Language"],
         weight: 7,
+    },
+    DocsSite {
+        key: "gopkg",
+        product: "Go",
+        asked_by: &["go", "golang", "pkg.go.dev"],
+        domain: "pkg.go.dev",
+        roots: &["https://pkg.go.dev/"],
+        // Not robots.txt's sitemaps, which list every Go module (157 files
+        // of 50,000): the standard library's page, which reads as no
+        // sitemap, stands in for them, and its links are the pages.
+        sitemaps: &["https://pkg.go.dev/std"],
+        index_pages: &["https://pkg.go.dev/std"],
+        names: &["Go Packages"],
+        weight: 6,
+    },
+    DocsSite {
+        key: "pep",
+        product: "PEP",
+        asked_by: &["pep", "peps"],
+        domain: "python.org",
+        roots: &["https://peps.python.org/pep-"],
+        sitemaps: &[],
+        index_pages: &["https://peps.python.org/pep-0000/"],
+        names: &["peps.python.org"],
+        weight: 6,
+    },
+    DocsSite {
+        key: "rfc",
+        product: "RFC",
+        asked_by: &["rfc", "rfcs"],
+        domain: "rfc-editor.org",
+        // Only the RFCs, not the BCP, STD and FYI series that list them.
+        roots: &["https://www.rfc-editor.org/info/rfc"],
+        sitemaps: &[],
+        index_pages: &[],
+        names: &["RFC Editor"],
+        weight: 6,
     },
     DocsSite {
         key: "node",
@@ -695,6 +734,19 @@ pub fn page_title(site: &DocsSite, title: &str) -> Option<String> {
             _ => vec![part],
         })
         .collect();
+    // "RFC 9110: HTTP Semantics": the numbered document, then its title.
+    let numbered = |head: &str| {
+        head.to_lowercase()
+            .strip_prefix(&format!("{} ", site.product.to_lowercase()))
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    };
+    parts = parts
+        .into_iter()
+        .flat_map(|part| match part.split_once(": ") {
+            Some((head, rest)) if numbered(head) => vec![head, rest],
+            _ => vec![part],
+        })
+        .collect();
     // A leading part that is only the site's name: "TypeScript:
     // Documentation".
     let only_site = |part: &str| {
@@ -732,6 +784,19 @@ pub fn page_title(site: &DocsSite, title: &str) -> Option<String> {
     }
     if parts.len() == 1 && names_site(parts[0]) {
         return own_docs(site, parts[0]).map(str::to_string);
+    }
+    // "slog package - log/slog": Go's package slog, at log/slog.
+    if let [head, path, ..] = parts[..] {
+        if let Some(name) = head
+            .strip_suffix(" package")
+            .or_else(|| head.strip_suffix(" command"))
+            .filter(|name| path.rsplit('/').next() == Some(*name))
+        {
+            parts[0] = name;
+            if path == name {
+                parts.remove(1);
+            }
+        }
     }
     Some(parts.join(" — "))
 }
@@ -850,6 +915,25 @@ pub fn named_site(name: &str) -> Option<&'static DocsSite> {
             || site.names.iter().any(|other| other.to_lowercase() == name)
             || site.asked_by.contains(&name.as_str())
     })
+}
+
+/// `query` as a docs search: rustc's "error[E0499]" asks for Rust's page
+/// on that error code, "rustc E0499".
+pub fn docs_query(query: &str) -> std::borrow::Cow<'_, str> {
+    let code = query
+        .trim()
+        .strip_prefix("error[")
+        .and_then(|rest| rest.split_once(']'))
+        .map(|(code, _)| code)
+        .filter(|code| {
+            code.len() == 5
+                && code.starts_with('E')
+                && code[1..].chars().all(|c| c.is_ascii_digit())
+        });
+    match code {
+        Some(code) => format!("rustc {code}").into(),
+        None => query.into(),
+    }
 }
 
 /// The site of `key`.
@@ -991,6 +1075,47 @@ mod tests {
         assert_eq!(
             page_title(rust, "Built-in   Functions").as_deref(),
             Some("Built-in Functions")
+        );
+    }
+
+    #[test]
+    fn numbered_documents_and_go_packages_keep_their_names() {
+        let rfc = site("rfc").unwrap();
+        assert_eq!(
+            page_title(rfc, "RFC 9110: HTTP Semantics").as_deref(),
+            Some("RFC 9110 — HTTP Semantics")
+        );
+        let pep = site("pep").unwrap();
+        assert_eq!(
+            page_title(pep, "PEP 8 – Style Guide for Python Code | peps.python.org").as_deref(),
+            Some("PEP 8 — Style Guide for Python Code")
+        );
+        let go = site("gopkg").unwrap();
+        assert_eq!(
+            page_title(go, "slog package - log/slog - Go Packages").as_deref(),
+            Some("slog — log/slog")
+        );
+        assert_eq!(
+            page_title(go, "context package - context - Go Packages").as_deref(),
+            Some("context")
+        );
+        let key = |url: &str| site_of_url(url).map(|site| site.key);
+        assert_eq!(key("https://pkg.go.dev/log/slog"), Some("gopkg"));
+        assert_eq!(key("https://go.dev/doc/effective_go"), Some("go"));
+        assert_eq!(key("https://peps.python.org/pep-0008/"), Some("pep"));
+        assert_eq!(key("https://www.rfc-editor.org/info/rfc9110/"), Some("rfc"));
+        assert_eq!(
+            key("https://doc.rust-lang.org/error_codes/E0499.html"),
+            Some("rust")
+        );
+        assert_eq!(named_site("golang").map(|site| site.key), Some("go"));
+        assert_eq!(
+            docs_query("error[E0499]: cannot borrow `x` as mutable more than once"),
+            "rustc E0499"
+        );
+        assert_eq!(
+            docs_query("error handling in rust"),
+            "error handling in rust"
         );
     }
 }
