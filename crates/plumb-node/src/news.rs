@@ -55,6 +55,10 @@ const MIN_TOPIC_SITES: usize = 2;
 const TOPIC_WINDOW_SECS: u64 = 3 * 24 * 60 * 60;
 /// Queries longer than this many words get no topic block.
 const MAX_TOPIC_WORDS: usize = 6;
+/// A site with at least this many headlines in the last day is a
+/// newsroom, which the latest news lists first ([`NewsStore::latest_block`]).
+const BUSY_HEADLINES: usize = 3;
+const DAY_SECS: u64 = 24 * 60 * 60;
 
 /// Words that ask for news rather than name a topic.
 const NEWS_WORDS: &[&str] = &[
@@ -66,6 +70,19 @@ const NEWS_WORDS: &[&str] = &[
     "breaking",
     "update",
     "updates",
+];
+/// Words that, beside a word asking for news and alone, ask for the day's
+/// news rather than name a topic: "world news", "top headlines".
+const GENERAL_WORDS: &[&str] = &[
+    "top",
+    "world",
+    "international",
+    "global",
+    "current",
+    "events",
+    "stories",
+    "biggest",
+    "major",
 ];
 /// Words too common to match a headline by.
 const STOP_WORDS: &[&str] = &[
@@ -551,7 +568,8 @@ impl NewsStore {
             }
         }
         drop(state);
-        let mut topical = (!topic.is_empty() && topic.len() <= MAX_TOPIC_WORDS)
+        let general = wants_news && topic.iter().all(|w| is_one_of(w, GENERAL_WORDS));
+        let mut topical = (!topic.is_empty() && !general && topic.len() <= MAX_TOPIC_WORDS)
             .then(|| self.topic_block(&topic, query, wants_news, now, language))
             .flatten();
         if !wants_news && top.is_some_and(|(_, named)| named) {
@@ -562,35 +580,55 @@ impl NewsStore {
         if topical.is_some() || !wants_news {
             return topical;
         }
-        topic
-            .is_empty()
+        general
             .then(|| self.latest_block(query, now, language))
             .flatten()
     }
 
+    /// The newest headline of each site, for a search that asks for news
+    /// alone ("news", "latest headlines"). Newsrooms come first, best-ranked
+    /// first (sites are watched in the order the node ranks them), so the
+    /// block is the day's news from the big outlets, not whichever feeds
+    /// were read last: a tech site's power-bank deal, a local paper's shop
+    /// opening.
     fn latest_block(&self, query: &str, now: u64, language: Option<&str>) -> Option<Recent> {
         let operators = plumb_core::Operators::parse(query);
         let state = self.read();
-        let mut found: Vec<RecentHeadline> = state
+        let rank: HashMap<&str, usize> = state
+            .watched
+            .iter()
+            .enumerate()
+            .map(|(i, watched)| (watched.domain.as_str(), i))
+            .collect();
+        let mut found: Vec<(bool, usize, RecentHeadline)> = state
             .headlines
             .iter()
             .filter(|(domain, _)| state.fits(domain, language))
             .filter_map(|(domain, kept)| {
-                let newest = kept
-                    .iter()
-                    .filter(|h| {
+                let current = || {
+                    kept.iter().filter(|h| {
                         fresh(h.at, TOPIC_WINDOW_SECS, now) && allows_headline(&operators, h)
                     })
-                    .max_by_key(|h| h.at)?;
-                fresh(newest.at, TOPIC_WINDOW_SECS, now).then(|| shown(domain, newest))
+                };
+                let newest = current().max_by_key(|h| h.at)?;
+                let busy = current().filter(|h| fresh(h.at, DAY_SECS, now)).count();
+                let rank = rank.get(domain.as_str()).copied().unwrap_or(usize::MAX);
+                Some((busy < BUSY_HEADLINES, rank, shown(domain, newest)))
             })
             .collect();
         if found.is_empty() {
             return None;
         }
-        found.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.url.cmp(&b.url)));
+        found.sort_by(|a, b| {
+            (a.0, a.1)
+                .cmp(&(b.0, b.1))
+                .then_with(|| b.2.at.cmp(&a.2.at))
+                .then_with(|| a.2.url.cmp(&b.2.url))
+        });
+        let mut found: Vec<RecentHeadline> = found.into_iter().map(|(_, _, h)| h).collect();
         drop_copies(&mut found);
         found.truncate(MAX_SHOWN);
+        found.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.url.cmp(&b.url)));
         Some(Recent {
             site: None,
             sources: found
@@ -1174,7 +1212,7 @@ mod tests {
     #[test]
     fn news_alone_shows_the_newest_headline_of_each_site() {
         let (_dir, store) = store();
-        for query in ["news", "latest news today"] {
+        for query in ["news", "latest news today", "world news", "top headlines"] {
             let recent = store
                 .recent(query, Some(("cnn.com", false)), NOW, None)
                 .unwrap();
@@ -1190,6 +1228,54 @@ mod tests {
             );
         }
         assert_eq!(store.recent("news", None, NOW + 3 * 24 * HOUR, None), None);
+    }
+
+    #[test]
+    fn the_latest_news_comes_from_the_best_ranked_newsrooms() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NewsStore::open(dir.path().join("news"));
+        // Watched best-ranked first: a quiet blog, five newsrooms, then a
+        // local paper that published last.
+        let sites = [
+            "quiet.org",
+            "big1.com",
+            "big2.com",
+            "big3.com",
+            "big4.com",
+            "big5.com",
+            "local.co.uk",
+        ];
+        store.watch(
+            sites
+                .iter()
+                .map(|site| Watched {
+                    domain: site.to_string(),
+                    homepage: format!("https://{site}/"),
+                    ..Watched::default()
+                })
+                .collect(),
+        );
+        let stories = |site: &str, newest: u64| {
+            let headlines = (0..3)
+                .map(|n| headline(site, &format!("Story {n} from {site}"), newest + n * HOUR))
+                .collect();
+            shared(site, headlines)
+        };
+        let mut records: Vec<_> = (1..=5)
+            .map(|i| stories(&format!("big{i}.com"), i * HOUR))
+            .collect();
+        records.push(stories("local.co.uk", 60));
+        records.push(shared(
+            "quiet.org",
+            vec![headline("quiet.org", "Our new office", 30)],
+        ));
+        store.put_shared(records, NOW);
+        let recent = store.recent("latest headlines", None, NOW, None).unwrap();
+        let domains: Vec<&str> = recent.headlines.iter().map(|h| h.domain.as_str()).collect();
+        assert_eq!(
+            domains,
+            ["big1.com", "big2.com", "big3.com", "big4.com", "big5.com"]
+        );
     }
 
     #[test]

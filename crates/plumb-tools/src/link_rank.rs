@@ -121,14 +121,14 @@ impl Graph {
                 .signals
                 .tranco_rank
                 .is_some_and(|rank| rank <= SEED_TRANCO);
+        // Links to a site folded into another count for that one.
         if let Some(to) = record
             .redirect
             .as_ref()
-            .and_then(|r| canonical_domain(&r.to))
+            .and_then(|r| r.folds_into(&domain))
+            .filter(|to| !to.is_empty() && *to != domain)
         {
-            if to != domain {
-                self.resolve[src as usize] = self.id(&to);
-            }
+            self.resolve[src as usize] = self.id(&to);
         }
         let targets: Vec<u32> = record
             .links_to
@@ -657,6 +657,7 @@ mod tests {
         old.redirect = Some(Redirect {
             to: "pnc.com".into(),
             at: 1,
+            inner: false,
         });
         let ranked = ranked(&[
             old,
@@ -673,16 +674,36 @@ mod tests {
     }
 
     #[test]
+    fn links_to_a_site_behind_a_bot_check_count_for_it() {
+        let mut gated = site("esteri.it", &[]);
+        gated.redirect = Some(Redirect {
+            to: "perfdrive.com".into(),
+            at: 1,
+            inner: false,
+        });
+        let ranked = ranked(&[
+            gated,
+            site("a.com", &["esteri.it"]),
+            site("b.com", &["esteri.it"]),
+        ]);
+        assert_eq!(names(&ranked)[0], "esteri.it");
+        assert!(!ranked.graph.ids.contains_key("perfdrive.com"));
+        assert_eq!(ranked.in_links[ranked.graph.ids["esteri.it"] as usize], 2);
+    }
+
+    #[test]
     fn a_redirect_loop_stays_put() {
         let mut a = site("a.com", &[]);
         a.redirect = Some(Redirect {
             to: "b.com".into(),
             at: 1,
+            inner: false,
         });
         let mut b = site("b.com", &[]);
         b.redirect = Some(Redirect {
             to: "a.com".into(),
             at: 1,
+            inner: false,
         });
         let ranked = ranked(&[a, b, site("c.com", &["a.com"])]);
         assert_eq!(names(&ranked).len(), 3);
