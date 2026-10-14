@@ -88,6 +88,7 @@ mod schema;
 mod search;
 mod spell;
 pub mod spell_model;
+mod states;
 mod storage;
 mod topics;
 
@@ -98,6 +99,7 @@ use serde::{Deserialize, Serialize};
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::IndexReader;
 
+pub use crate::analysis::same_words;
 pub use crate::hits::suggested_site_second;
 pub use crate::indexing::{
     build_index, build_index_with_budget, redirect_name, redirect_targets, IndexBuild,
@@ -106,6 +108,7 @@ pub use crate::names::without_intent_words;
 pub use crate::query_evidence::CandidateEvidence;
 pub use crate::replace::remove_build_leftovers;
 use crate::schema::Fields;
+pub use crate::states::{asked_state_first, namesakes_last};
 
 // Function words ("pizza in denver", "bank of america") name no site in a
 // longer query: between two other words they never match a domain label or
@@ -271,7 +274,9 @@ pub struct RankConfig {
     /// rid of aphids") names no site by its words: none of them matches a
     /// domain label or joined name on its own, and its first words are no
     /// leading name. Questions describe what they want; rid.it and get.gov
-    /// are not it.
+    /// are not it. Only a text most links to a site use still names it
+    /// inside a question ([`RankConfig::link_names`]), so it is kept where
+    /// it ranks: netflix.com in "how to cancel netflix".
     pub questions_name_nothing: bool,
     /// Add the official site of the article the query names when no site
     /// found is it ([`pages::add_named_site`]).
@@ -469,8 +474,9 @@ pub struct SearchOptions {
     /// What safe search leaves out; see [`plumb_core::safe`].
     pub safe: SafeSearch,
     /// Leave out sites whose homepage is in another language than this
-    /// one (a language code, `en`). Sites that do not say stay, and so do
-    /// sites the whole query names.
+    /// one (a language code, `en`), as it declares or as its script or
+    /// common words tell ([`plumb_core::site_language`]). Sites none of
+    /// these tells stay, and so do sites the whole query names.
     pub language: Option<String>,
     /// How the results page shows recent headlines; the index ignores it.
     pub recent: plumb_core::RecentNews,

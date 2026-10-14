@@ -19,7 +19,7 @@ use super::hit::{block_go_link, render_page};
 use super::home::{bad_search_query, home_or_setup, request_origin, setup_response};
 use super::html::{
     escape_html, html_response, http_url, page, results_form, safe_href, search_link,
-    security_headers,
+    security_headers, settings_link,
 };
 use super::network::network_search;
 use super::params::{error_settings, flag, NetSetting, SearchParams, Settings};
@@ -433,6 +433,14 @@ pub(crate) async fn search_page(
                         href.to_owned()
                     }
                 };
+                let search = |query: &str| {
+                    let options = SearchOptions {
+                        exact: false,
+                        ..settings.options.clone()
+                    };
+                    let net = settings.network == NetSetting::On;
+                    settings_link("/search", query, &settings, &options, net)
+                };
                 let base_map = state.backend.base_map();
                 let mut html = places::render_places(
                     found,
@@ -443,6 +451,7 @@ pub(crate) async fn search_page(
                     settings.options.country.as_deref(),
                     &icons,
                     &link,
+                    &search,
                 );
                 if let (Some(edit), Some(context), Some(visitor)) = (
                     settings.history.as_ref().and_then(|h| h.edit.as_ref()),
@@ -603,10 +612,15 @@ pub(crate) async fn extras(
             continue;
         }
         // MusicBrainz songs have no Wikidata ID.
-        profile = run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
-            .await
-            .ok()
-            .and_then(|found| answers::songs_profile(query, &resolution, found.pages));
+        for lookup in answers::song_lookups(&name, &resolution) {
+            profile = run_search(state, &lookup, PROFILE_SEARCH_LIMIT, options)
+                .await
+                .ok()
+                .and_then(|found| answers::songs_profile(query, &resolution, found.pages));
+            if profile.is_some() {
+                break;
+            }
+        }
         if profile.is_some() {
             break;
         }
@@ -671,9 +685,15 @@ pub(crate) fn route_sources(
     results: &mut SearchResults,
     limit: usize,
 ) {
-    crate::assembly::route_sources(query, answer, country, results, limit, |domain| {
-        state.backend.site(domain)
-    });
+    crate::assembly::route_sources(
+        query,
+        answer,
+        country,
+        results,
+        limit,
+        |domain| state.backend.site(domain),
+        |word| state.backend.common_word(word),
+    );
 }
 
 /// Results asked for when looking up whose profile a query asks for.
