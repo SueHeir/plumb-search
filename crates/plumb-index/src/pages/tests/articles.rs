@@ -619,6 +619,18 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("what is the meaning of serendipity", "serendipity"),
         ("what causes hiccups", "hiccups"),
         ("what causes the northern lights", "northern lights"),
+        ("where is machu picchu", "machu picchu"),
+        ("how many people live in tokyo", "tokyo"),
+    ] {
+        assert_eq!(
+            hinted_name(query),
+            Some((name.into(), Hint::Any)),
+            "{query:?}"
+        );
+    }
+    // A question of how a thing works, what it does or how to be rid of
+    // it asks about the thing itself, not its namesakes.
+    for (query, name) in [
         ("how does a refrigerator work", "refrigerator"),
         ("how do vaccines work", "vaccines"),
         ("how tall is the eiffel tower", "eiffel tower"),
@@ -626,8 +638,6 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("how tall is the eiffel tower in feet", "eiffel tower"),
         ("how big is texas in square miles", "texas"),
         ("how old is obama now", "obama"),
-        ("where is machu picchu", "machu picchu"),
-        ("how many people live in tokyo", "tokyo"),
         ("how metabolism works", "metabolism"),
         ("how the stock market works", "stock market"),
         ("how vaccines work", "vaccines"),
@@ -647,14 +657,16 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("who invented the telephone", "telephone"),
         ("who discovered penicillin", "penicillin"),
         ("when was the printing press invented", "printing press"),
-    ] {
-        assert_eq!(
-            hinted_name(query),
-            Some((name.into(), Hint::Any)),
-            "{query:?}"
-        );
-    }
-    for (query, name) in [
+        ("what do giraffes eat", "giraffes"),
+        ("what does a koala eat", "koala"),
+        ("where do penguins live", "penguins"),
+        ("how long do dogs live", "dogs"),
+        ("how long does a turtle live", "turtle"),
+        ("how fast can a cheetah run", "cheetah"),
+        ("how big do great danes get", "great danes"),
+        ("how many legs does a spider have", "spider"),
+        ("how many moons does jupiter have", "jupiter"),
+        ("how many kids does elon musk have", "elon musk"),
         ("how to get rid of hiccups", "hiccups"),
         ("how do i get rid of fruit flies", "fruit flies"),
         ("how to treat a sunburn", "sunburn"),
@@ -688,6 +700,10 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         "what do i do",
         "how to get rid of it",
         "how to stop you from doing it",
+        "what do you eat",
+        "where do i live",
+        "how many do you have",
+        "how many hours do nurses work",
     ] {
         assert_eq!(hinted_name(query), None, "{query:?}");
     }
@@ -719,6 +735,24 @@ fn a_problem_asked_how_to_be_rid_of_names_its_own_article() {
         named("how to get rid of a mole"),
         ["Mole (animal)", "Mole (skin)"]
     );
+}
+
+#[test]
+fn a_question_of_what_a_thing_does_names_its_own_article() {
+    let (_dir, s) = searcher(&[
+        page("Spider", 90_000, &[]),
+        page("Spider (2002 film)", 20_000, &[]),
+        page("Giraffe", 60_000, &[]),
+    ]);
+    let named = |query: &str| -> Vec<String> {
+        let hits = s.search(query, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("how many legs does a spider have"), ["Spider"]);
+    assert_eq!(named("what do giraffes eat"), ["Giraffe"]);
 }
 
 #[test]
