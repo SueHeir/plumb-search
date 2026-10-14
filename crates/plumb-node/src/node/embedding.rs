@@ -138,6 +138,7 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             info!("search by meaning: {} site vectors loaded", vectors.len());
             let meaning = Arc::new(MeaningIndex::new(embedder, vectors));
             inner.meaning.set(Arc::clone(&meaning));
+            inner.set_meaning_work(None);
             meaning
         }
     };
@@ -147,6 +148,9 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
     });
     let mut embedded_for = None;
     let mut taken_at: Option<Instant> = None;
+    // Searches have meaning from here. Trusted nodes are waited for from
+    // the network join on.
+    inner.joined();
     let started_at = Instant::now();
     while !inner.stopping() {
         let Some((index, _)) = inner.current_summary() else {

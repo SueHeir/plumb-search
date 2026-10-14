@@ -1,0 +1,9 @@
+{
+  "name": "Zotero",
+  "about": "Your Zotero library, through the local API of Zotero on this computer.",
+  "hosts": ["127.0.0.1:23119"],
+  "keywords": ["zotero", "my papers"],
+  "always": true,
+  "cache_seconds": 60,
+  "seconds": 3
+}
