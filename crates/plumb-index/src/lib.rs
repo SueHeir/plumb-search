@@ -98,6 +98,7 @@ use serde::{Deserialize, Serialize};
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::IndexReader;
 
+pub use crate::analysis::same_words;
 pub use crate::hits::suggested_site_second;
 pub use crate::indexing::{
     build_index, build_index_with_budget, redirect_name, redirect_targets, IndexBuild,

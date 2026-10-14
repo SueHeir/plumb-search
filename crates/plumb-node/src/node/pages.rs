@@ -1260,12 +1260,7 @@ pub(super) fn add_pages(
             if let Err(err) = searcher.note_demand(&mut results.hits) {
                 warn!("reading what sites' articles are read: {err:#}");
             }
-            // A query that names a package or a page, or asks a question
-            // in full, is spelled right: "serde crate" is not "serde
-            // create", and "git undo last commit" is not "git und".
-            let spelled_right = found
-                .iter()
-                .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+            let spelled_right = searcher.spelled_right(query, &found, results.spelling.as_ref());
             if spelled_right && applied.is_none() {
                 results.spelling = None;
             }
