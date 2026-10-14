@@ -17,9 +17,9 @@ use super::sites::{base_title, short_titles};
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
     DESCRIBED_MISSING_FROM, DESCRIBED_QUERY_WORDS, DESCRIBED_WORD, DOCS_SET, DUPLICATE_WORD_SHARE,
-    FILMS_SET, GITHUB_SET, LEAD_CANDIDATES, LEAD_MATCH, MUSIC_SET, OTHER_NAME_MATCH, PACKAGES_SET,
-    PAPERS_SET, PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
-    QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
+    ENTITY_MATCH, FILMS_SET, GITHUB_SET, LEAD_CANDIDATES, LEAD_MATCH, MUSIC_SET, OTHER_NAME_MATCH,
+    PACKAGES_SET, PAPERS_SET, PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE,
+    POPULARITY_SHARE, QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
     REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
     TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WANTED_SET, WELL_KNOWN_PACKAGE,
 };
@@ -78,13 +78,13 @@ pub(crate) struct Described {
 
 /// The stems and the singular words of what a Wikipedia article says of
 /// itself ([`PageSearcher::said`]).
-struct Said {
+pub(super) struct Said {
     stems: HashSet<String>,
     forms: HashSet<String>,
 }
 
 impl Said {
-    fn says(&self, word: &Described) -> bool {
+    pub(super) fn says(&self, word: &Described) -> bool {
         self.stems.contains(&word.stem) && self.forms.contains(&word.form)
     }
 }
@@ -443,6 +443,14 @@ impl PageSearcher {
             .cloned()
             .collect();
         let inside = self.named_inside(&searcher, &words, &sharped, scope, &mut addresses)?;
+        let linked = self.linked(
+            &searcher,
+            &words,
+            &sharped,
+            &described,
+            scope,
+            &mut addresses,
+        )?;
         let mut hits = Vec::new();
         let mut described_repos = super::repos::DescribedRepos::default();
         for address in addresses {
@@ -500,8 +508,9 @@ impl PageSearcher {
                 continue;
             }
             // Named by part of the query, by its title or another name in
-            // full: "queen tour" is not about Queen (album).
-            let span = inside.span(&page, &self.joined);
+            // full, or meant by it: "queen tour" is not about Queen (album).
+            let link = linked.get(&address).map(Vec::as_slice);
+            let span = inside.span(&page, &self.joined).or(link);
             let left_out = span.is_none()
                 && (by_title_first.contains(&address) && !asked_by_title
                     || film_title_first.contains(&address)
@@ -534,6 +543,9 @@ impl PageSearcher {
                 }
                 if let Some(span) = span {
                     name = name.max(self.inside_match(&page, span, &described));
+                    if link.is_some() {
+                        name = name.max(ENTITY_MATCH);
+                    }
                 }
             }
             if name <= 0.0 && repo_described.is_none() {
@@ -834,7 +846,7 @@ impl PageSearcher {
 
     /// What a Wikipedia article says of itself ([`Page::about`], and its
     /// lead); `None` for other pages.
-    fn said(&self, page: &Page) -> Option<Said> {
+    pub(super) fn said(&self, page: &Page) -> Option<Said> {
         let mut text = page.about()?;
         if let Some(lead) = &page.lead {
             text.push(' ');
