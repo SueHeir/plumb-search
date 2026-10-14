@@ -15,7 +15,7 @@ This guide is for people who search with Plumb, on [plumbsearch.org](https://plu
 
 ## The results page
 
-![Plumb Search results for "nasa": nasa.gov with its key pages and Wikipedia line, a folded "Latest from nasa.gov" block, and an info box with official profiles](images/results.png)
+![Plumb Search results for "nasa": nasa.gov with its key pages and Wikipedia line, a folded "Latest from nasa.gov" block, and an info box with official profiles](images/results-nasa.png)
 
 Plumb indexes sites by their homepages, names, descriptions and the words other sites link to them with, plus sets of pages (Wikipedia articles, Stack Overflow questions, packages, papers and more). A results page puts these together, from the top:
 
