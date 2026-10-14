@@ -626,3 +626,57 @@ fn sites_called_after_pages() {
     ));
     assert!(!site_is_titled("navyfed.org", "Navy Federal Credit Union"));
 }
+
+#[test]
+fn a_suggested_spelling_lists_the_page_it_names_second() {
+    let (_dir, s) = searcher(&[
+        page("Isaac Newton", 50_000, &[]),
+        page("Newton (unit)", 9_000, &[]),
+    ]);
+    let spelling = |query: &str, applied: bool| crate::Spelling {
+        query: query.into(),
+        site: None,
+        applied,
+    };
+    let options = crate::SearchOptions::default();
+    let placed = |title: &str, at: usize| PlacedPage {
+        hit: found(title, None, true, 0.9),
+        under: None,
+        at,
+    };
+    let listed = |placed: &[PlacedPage]| -> Vec<(String, usize)> {
+        placed
+            .iter()
+            .map(|p| (p.hit.page.title.clone(), p.at))
+            .collect()
+    };
+    // Second: after the first site and a page listed first, before the
+    // pages listed with the second site.
+    let mut pages = vec![placed("Newton, Massachusetts", 0), placed("Fig Newton", 1)];
+    s.list_suggested_page(&spelling("isaac newton", false), &options, &mut pages)
+        .unwrap();
+    assert_eq!(
+        listed(&pages),
+        [
+            ("Newton, Massachusetts".to_string(), 0),
+            ("Isaac Newton".to_string(), 1),
+            ("Fig Newton".to_string(), 1),
+        ]
+    );
+    // Named by the spelling, not the query: no info box.
+    assert!(!pages[1].hit.named);
+    // Listed already, it stays where it is.
+    s.list_suggested_page(&spelling("isaac newton", false), &options, &mut pages)
+        .unwrap();
+    assert_eq!(pages.len(), 3);
+    // Nothing when the results are for the spelling, or it names no page.
+    for spelling in [
+        spelling("isaac newton", true),
+        spelling("newton apple", false),
+    ] {
+        let mut pages = Vec::new();
+        s.list_suggested_page(&spelling, &options, &mut pages)
+            .unwrap();
+        assert!(pages.is_empty(), "{}", spelling.query);
+    }
+}

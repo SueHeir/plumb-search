@@ -1340,9 +1340,16 @@ pub(super) fn add_pages(
             };
             plumb_index::namesakes_last(query, &mut results.hits, &town);
             // The learned order knows nothing of spelling: the site a
-            // suggestion names stays second.
-            if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.clone()) {
-                plumb_index::suggested_site_second(&mut results.hits, &site);
+            // suggestion names stays second, and so does the page.
+            if let Some(spelling) = &results.spelling {
+                if let Some(site) = &spelling.site {
+                    plumb_index::suggested_site_second(&mut results.hits, site);
+                }
+                if let Err(err) =
+                    searcher.list_suggested_page(spelling, options, &mut results.pages)
+                {
+                    warn!("listing the page a spelling names: {err:#}");
+                }
             }
             // Only shown, after the ranking, which weighs a site's own
             // title.
