@@ -864,7 +864,7 @@ mod tests {
         // A museum's page on Minecraft, or a news site's, comes after
         // minecraft.net.
         assert!(!led(named(crate::pages::SUBPAGES_SET, museum), true));
-        let news = "https://www.cnet.com/tags/minecraft/";
+        let news = "https://www.cnet.com/tech/gaming/minecraft/";
         assert!(!led(named(crate::pages::REFERENCE_SET, news), true));
         // The official site's own page, one named while the best site is
         // not an official one, and the article are left to the model.
