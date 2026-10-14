@@ -18,8 +18,8 @@ use axum::Json;
 use clap::Parser;
 use plumb_core::Operators;
 use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, operators_allow, options_allow,
-    place_operator_pages, place_pages, Page, PageHit, PageSearcher, OPERATOR_PAGES,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
+    options_allow, place_operator_pages, place_pages, Page, PageHit, PageSearcher, OPERATOR_PAGES,
 };
 use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher};
 use plumb_node::cli::MeaningArgs;
@@ -108,6 +108,7 @@ impl FrozenBackend {
         if rank.add_named_site {
             add_named_site(&mut results.hits, &found, |domain| self.sites.site(domain));
         }
+        drop_far_namesakes(&mut results.hits, &found, rank.meaning_only_relevance);
         if rank.drop_namesakes {
             drop_namesakes_of_words(&mut results.hits, &found);
         }
@@ -115,9 +116,7 @@ impl FrozenBackend {
         pages.add_named_site_page(query, &results.hits, &mut found)?;
         found.retain(|hit| options_allow(options, &hit.page));
         pages.note_demand(&mut results.hits)?;
-        let spelled_right = found
-            .iter()
-            .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+        let spelled_right = pages.spelled_right(query, &found, results.spelling.as_ref());
         if spelled_right && applied.is_none() {
             results.spelling = None;
         }
@@ -147,6 +146,13 @@ impl FrozenBackend {
                 &mut results.pages,
             );
         }
+        plumb_index::asked_state_first(query, &mut results.hits);
+        let town = |name: &str| {
+            self.sites
+                .locate(name, None)
+                .filter(plumb_core::place::Place::is_town)
+        };
+        plumb_index::namesakes_last(query, &mut results.hits, &town);
         if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.as_deref()) {
             plumb_index::suggested_site_second(&mut results.hits, site);
         }
@@ -190,6 +196,10 @@ impl SearchBackend for FrozenBackend {
 
     fn site(&self, domain: &str) -> Option<Hit> {
         SearchBackend::site(&self.sites, domain)
+    }
+
+    fn common_word(&self, word: &str) -> bool {
+        self.sites.common_word(word)
     }
 
     fn places(
@@ -713,6 +723,57 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
             assert_eq!(error["id"], 7);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_health_search_lists_the_site_it_names_first() {
+        // As on a node, "mucinex" is in few sites' titles, so mucinex.com
+        // goes back above the authorities after the learned order. It was
+        // fourth while this server called every word common.
+        let (dir, _) = fixture();
+        let index = dir.path().join("health");
+        let site = |domain: &str, title: &str| SiteRecord {
+            domain: domain.into(),
+            title: Some(title.into()),
+            description: Some(format!("{title} health information")),
+            ..SiteRecord::default()
+        };
+        plumb_index::build_index(
+            &index,
+            &[
+                site("mucinex.com", "Mucinex"),
+                site("medlineplus.gov", "MedlinePlus"),
+                site("mayoclinic.org", "Mayo Clinic"),
+                site("clevelandclinic.org", "Cleveland Clinic"),
+            ],
+        )
+        .unwrap();
+        let rank = RankConfig::default();
+        let backend = Arc::new(FrozenBackend {
+            sites: IndexBackend::new(Searcher::open(&index).unwrap(), rank),
+            pages: PageSearcher::open(&dir.path().join("pages")).unwrap(),
+            rank,
+        });
+        let app = router(
+            backend,
+            WebSettings::from(HomeCountry::Off),
+            json!({"schema": 1}),
+        );
+        for query in [
+            "can i take zyrtec with mucinex",
+            "mucinex zyrtec safe together",
+        ] {
+            let uri = format!("/api/search?q={}&full=1", query.replace(' ', "+"));
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["hits"][0]["domain"], "mucinex.com", "{query}: {body}");
         }
     }
 

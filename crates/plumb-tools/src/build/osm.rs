@@ -118,7 +118,15 @@ const PLACE_KEYS: &[&str] = &[
     "aeroway",
     "railway",
     "boundary",
+    "natural",
 ];
+/// Values of `natural` that are sights people search around ("hotels
+/// near lake tahoe", "near mount fuji") when Wikidata knows them. Those
+/// no English article names plainly are dropped once the articles are
+/// read: most mountains and lakes have none.
+const NATURAL_SIGHTS: &[&str] = &["water", "peak", "volcano", "beach"];
+/// Values of `water` that make a lake, not a river or a canal.
+const LAKE_WATERS: &[&str] = &["lake", "reservoir", "lagoon"];
 /// Values of `place` that are towns or parts of them.
 const TOWN_VALUES: &[&str] = &[
     "city",
@@ -141,6 +149,11 @@ const OUTER_WAYS: usize = 32;
 const PLACES_PER_ITEM: u32 = 3;
 /// Every US state and Canadian province lies west of this longitude.
 const AMERICAS_EAST_LON: f64 = -50.0;
+/// The kind of a state or province read for its ISO 3166-2 code.
+const STATE_KIND: &str = "boundary=administrative";
+/// Farther than the middle of any state is from its edge (Alaska's is
+/// about 2,000 km from Attu).
+const STATE_REACH_KM: f64 = 2_500.0;
 
 /// What step 1 finds: a place, its Wikidata item, and where it is or what
 /// leads there.
@@ -179,11 +192,35 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
     {
         return None;
     }
+    // A state or province, which says what country its code is in: WA is
+    // Washington's and Western Australia's. It is not kept as a place.
+    let code = get("ISO3166-2").filter(|_| !node && get("boundary") == Some("administrative"));
+    if let Some((country, _)) = code.and_then(|code| code.split_once('-')) {
+        // A territory with a country code of its own is in it: US-PR is
+        // Puerto Rico, PR.
+        let own = get("ISO3166-1:alpha2").or_else(|| get("ISO3166-1"));
+        return Some(Place {
+            name: cut(name, MAX_PLACE_NAME_CHARS),
+            kind: STATE_KIND.to_string(),
+            region: code.map(str::to_string),
+            country: Some(
+                own.and_then(normalize_country)
+                    .or_else(|| normalize_country(country))?,
+            ),
+            osm,
+            ..Place::default()
+        });
+    }
     let kind = match get("place") {
         Some(value) if TOWN_VALUES.contains(&value) => {
             if !node {
                 return None;
             }
+            format!("place={value}")
+        }
+        // An island is searched around ("hotels in maui") when Wikidata
+        // knows it; there are tens of thousands of nameless rocks.
+        Some(value @ ("island" | "archipelago")) if get("wikidata").is_some() => {
             format!("place={value}")
         }
         _ => {
@@ -198,6 +235,12 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
                 "aeroway" => value == "aerodrome",
                 "railway" => value == "station",
                 "boundary" => value == "national_park",
+                "natural" => {
+                    NATURAL_SIGHTS.contains(&value)
+                        && get("wikidata").is_some()
+                        && get("water").is_none_or(|water| LAKE_WATERS.contains(&water))
+                        && get("waterway").is_none()
+                }
                 _ => value != "no" && value != "vacant",
             };
             if !kept || value.contains(';') {
@@ -235,14 +278,22 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
             place_tags.push(format!("sport={}", sport.to_lowercase()));
         }
     }
+    // An embassy's or consulate's address can give the country it serves,
+    // not the one it is in: El Salvador's consulate in Camuy, Puerto Rico
+    // says SV, and was the only country the towns around it were given.
+    let diplomatic = matches!(kind.as_str(), "office=diplomatic" | "amenity=embassy");
     let country = get("addr:country")
         .or_else(|| get("is_in:country_code"))
-        .and_then(normalize_country);
+        .and_then(normalize_country)
+        .filter(|_| !diplomatic);
     // Canada's addresses give the province as addr:province, and so do
     // Italy's (MI, PE), whose would be taken for states and provinces.
+    // Where they give none, the postal code says it: shops by Glen Walter,
+    // Ontario give K6H and no province.
     let province = get("addr:province")
         .map(normalize_region)
         .filter(|region| CANADIAN_PROVINCES.iter().any(|(code, _)| code == region))
+        .or_else(|| postal_province(get("addr:postcode")?).map(str::to_string))
         .filter(|_| country.as_deref().is_none_or(|country| country == "CA"));
     let website = ["website", "contact:website", "url", "brand:website"]
         .iter()
@@ -298,6 +349,44 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
         website,
         osm,
         aliases,
+    })
+}
+
+/// The province of a Canadian postal code ("K6H 2R4"), by the first
+/// letter Canada Post gives each. Other countries' codes are no A9A 9A9.
+fn postal_province(code: &str) -> Option<&'static str> {
+    let code: Vec<char> = code
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    let canadian = code.len() == 6
+        && code.iter().enumerate().all(|(i, c)| {
+            if i % 2 == 0 {
+                c.is_ascii_uppercase()
+            } else {
+                c.is_ascii_digit()
+            }
+        });
+    if !canadian {
+        return None;
+    }
+    Some(match code[0] {
+        'A' => "NL",
+        'B' => "NS",
+        'C' => "PE",
+        'E' => "NB",
+        'G' | 'H' | 'J' => "QC",
+        'K' | 'L' | 'M' | 'N' | 'P' => "ON",
+        'R' => "MB",
+        'S' => "SK",
+        'T' => "AB",
+        'V' => "BC",
+        // X0A to X0C are Nunavut's, the rest the Northwest Territories'.
+        'X' if code[1] == '0' && matches!(code[2], 'A' | 'B' | 'C') => "NU",
+        'X' => "NT",
+        'Y' => "YT",
+        _ => return None,
     })
 }
 
@@ -514,11 +603,17 @@ pub fn read_places(paths: &[PathBuf], articles: Option<&Path>) -> Result<Vec<Pla
         found.sort_by(|a, b| a.0.osm.cmp(&b.0.osm));
         found.dedup_by(|a, b| a.0.osm == b.0.osm);
     }
-    if let Some(articles) = articles {
-        add_article_names(&mut found, articles)?;
+    let (states, mut found): (Vec<_>, Vec<_>) = found
+        .into_iter()
+        .partition(|(place, _)| place.kind == STATE_KIND);
+    match articles {
+        Some(articles) => add_article_names(&mut found, articles)?,
+        // Then no article names a lake or mountain.
+        None => found.retain(|(place, _)| !place.kind.starts_with("natural=")),
     }
     let mut located: Vec<Place> = found.into_iter().map(|(place, _)| place).collect();
-    fill_in_towns(&mut located);
+    let states: Vec<Place> = states.into_iter().map(|(state, _)| state).collect();
+    fill_in_towns(&mut located, &states);
     located.sort_by(|a, b| {
         b.rank
             .cmp(&a.rank)
@@ -664,20 +759,24 @@ fn titled_region(title: &str, lon: f64) -> Option<(String, &'static str)> {
 /// English Wikipedia article on its Wikidata item, from the articles file
 /// `path`: "Big Ben" for the Elizabeth Tower, "Philly" for Philadelphia.
 /// The best known place of an item that is no town, and that the title
-/// names plainly, is a landmark ([`landmark_rank`]). A place with its
-/// town's item (a town hall) takes nothing from it.
-fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<()> {
+/// names plainly, is a landmark ([`landmark_rank`]); a lake or mountain
+/// that is not one is dropped. A place with its town's item (a town hall)
+/// takes nothing from it.
+fn add_article_names(found: &mut Vec<(Place, Option<u64>)>, path: &Path) -> Result<()> {
     let mut places_of: HashMap<u64, ItemPlaces> = HashMap::new();
+    // The parts of a lake or a beach are one place, not a brand's many,
+    // and a park or museum of the item stays its landmark.
+    let natural = |place: &Place| place.kind.starts_with("natural=");
     for (i, (place, item)) in found.iter().enumerate() {
         let Some(item) = item else { continue };
         let of = places_of.entry(*item).or_default();
-        of.places += 1;
+        of.places += u32::from(!natural(place));
         of.town |= place.is_town();
-        if !place.is_town()
-            && of
-                .landmark
-                .is_none_or(|best| found[best].0.rank < place.rank)
-        {
+        let better = |best: usize| {
+            let best = &found[best].0;
+            (!natural(best), best.rank) < (!natural(place), place.rank)
+        };
+        if !place.is_town() && of.landmark.is_none_or(better) {
             of.landmark = Some(i);
         }
     }
@@ -749,6 +848,7 @@ fn add_article_names(found: &mut [(Place, Option<u64>)], path: &Path) -> Result<
             .filter(|(_, item)| item.is_some_and(|item| articles.contains_key(&item)))
             .count()
     );
+    found.retain(|(place, _)| !place.kind.starts_with("natural=") || place.is_landmark());
     Ok(())
 }
 
@@ -843,12 +943,116 @@ fn winner(votes: &HashMap<String, u32>) -> Option<String> {
         .map(|(value, _)| value.clone())
 }
 
+/// Gives towns that know their region but no country the country of the
+/// nearest of `states` with that code, and takes from towns that know
+/// their country a region no state of it has: Rainy River, Ontario, voted
+/// Minnesota's by shops across the river, has no region rather than MN.
+/// A territory's towns are in its own country (Puerto Rico's in PR).
+fn countries_from_states(places: &mut [Place], settlements: &[usize], states: &[Place]) {
+    // A state's region is its whole code; it is looked up by the part
+    // after the country's: "WA" for AU-WA and US-WA.
+    fn split(state: &Place) -> Option<(&str, &str)> {
+        state.region.as_deref()?.split_once('-')
+    }
+    let mut coded: HashMap<String, Vec<&Place>> = HashMap::new();
+    for state in states {
+        if let Some((_, code)) = split(state) {
+            coded.entry(code.to_uppercase()).or_default().push(state);
+        }
+    }
+    for &i in settlements {
+        let town = &places[i];
+        let Some(states) = town
+            .region
+            .as_ref()
+            .and_then(|r| coded.get(&r.to_uppercase()))
+        else {
+            continue;
+        };
+        match &town.country {
+            None => {
+                places[i].country = states
+                    .iter()
+                    .map(|state| (distance_km(town.lat, town.lon, state.lat, state.lon), state))
+                    .filter(|(km, _)| *km < STATE_REACH_KM)
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .and_then(|(_, state)| state.country.clone());
+            }
+            // A territory's state is its own country's and its parent's:
+            // US-PR is Puerto Rico's and the US's, and its towns are in
+            // Puerto Rico, though some of their shops say US.
+            Some(country) => {
+                let ours = |state: &&Place| {
+                    state.country.as_ref() == Some(country)
+                        || split(state).is_some_and(|(parent, _)| parent == country)
+                };
+                match states.iter().copied().find(ours) {
+                    None => places[i].region = None,
+                    Some(state) => {
+                        if split(state).is_some_and(|(parent, _)| parent == country) {
+                            places[i].country = state.country.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Gives towns that still have no country their neighbours', in their
+/// region when one there has it. They are filled in rounds, each from
+/// towns that knew theirs before it, towns that know their region first,
+/// so a town takes the side of the nearest town that knows before a guess
+/// can reach it from across a border; where none knows, the guess still
+/// goes on from town to town (northern Ontario).
+fn lend_countries(places: &mut [Place], grid: &TownGrid, settlements: &[usize]) {
+    let reach = 4.0 * TOWN_REACH_KM;
+    let mut unknown: Vec<usize> = settlements
+        .iter()
+        .copied()
+        .filter(|&i| places[i].country.is_none())
+        .collect();
+    loop {
+        let before = unknown.len();
+        for with_region in [true, false] {
+            let lent: Vec<(usize, usize)> = unknown
+                .iter()
+                .filter(|&&i| places[i].region.is_some() == with_region)
+                .filter_map(|&i| {
+                    let (lat, lon, region) = (places[i].lat, places[i].lon, &places[i].region);
+                    let near =
+                        |ok: &dyn Fn(&Place) -> bool| grid.nearest(places, lat, lon, reach, ok);
+                    near(&|t| {
+                        t.country.is_some()
+                            && t.region.is_some()
+                            && (region.is_none() || t.region == *region)
+                    })
+                    .or_else(|| near(&|t| t.country.is_some()))
+                    .map(|near| (i, near))
+                })
+                .collect();
+            for (i, near) in lent {
+                places[i].country = places[near].country.clone();
+                if places[i].region.is_none() {
+                    places[i].region = places[near].region.clone();
+                }
+            }
+        }
+        unknown.retain(|&i| places[i].country.is_none());
+        if unknown.len() == before {
+            break;
+        }
+    }
+}
+
 /// Gives towns the region their places' addresses mostly give, and the
 /// country those in that region mostly give, and places without a town,
 /// region or country in their address those of the nearest town that
 /// fits them. Across a border, the places on the other side say another
-/// region: both Niagara Falls are nearest to shops of both.
-pub fn fill_in_towns(places: &mut [Place]) {
+/// region: both Niagara Falls are nearest to shops of both. A town whose
+/// places give no country takes that of the nearest of `states` with its
+/// region's code, since Australia's addresses give none.
+pub fn fill_in_towns(places: &mut [Place], states: &[Place]) {
     let settlements: Vec<usize> = (0..places.len())
         .filter(|&i| is_settlement(&places[i].kind))
         .collect();
@@ -899,34 +1103,14 @@ pub fn fill_in_towns(places: &mut [Place]) {
             places[i].country = winner(&countries);
         }
     }
-    // Towns none of whose places gave a country: their neighbours', in
-    // their region when one there has it. Towns that know their region go
-    // first, and a town lends only what it had before that pass, so a
-    // guess doesn't spread town by town across a border.
-    let reach = 4.0 * TOWN_REACH_KM;
-    for with_region in [true, false] {
-        let lent: Vec<(usize, usize)> = settlements
-            .iter()
-            .filter(|&&i| places[i].country.is_none() && places[i].region.is_some() == with_region)
-            .filter_map(|&i| {
-                let (lat, lon, region) = (places[i].lat, places[i].lon, &places[i].region);
-                let near = |ok: &dyn Fn(&Place) -> bool| grid.nearest(places, lat, lon, reach, ok);
-                near(&|t| {
-                    t.country.is_some()
-                        && t.region.is_some()
-                        && (region.is_none() || t.region == *region)
-                })
-                .or_else(|| near(&|t| t.country.is_some()))
-                .map(|near| (i, near))
-            })
-            .collect();
-        for (i, near) in lent {
-            places[i].country = places[near].country.clone();
-            if places[i].region.is_none() {
-                places[i].region = places[near].region.clone();
-            }
-        }
-    }
+    // Towns none of whose places gave a country: a neighbour's that knows
+    // its own, and where none does, the country of the nearest state with
+    // the town's region's code, which near a border can be the other
+    // side's (Rainy River, Ontario is nearest to shops in Minnesota). The
+    // towns those fill lend in turn.
+    lend_countries(places, &grid, &settlements);
+    countries_from_states(places, &settlements, states);
+    lend_countries(places, &grid, &settlements);
     // The country most towns of each region are in.
     let mut countries: HashMap<&str, HashMap<String, u32>> = HashMap::new();
     for &i in &settlements {
@@ -1091,7 +1275,7 @@ mod tests {
             at("Capitol Hill", "place=neighbourhood", 39.73, -104.98),
             at("Far away", "amenity=cafe", 0.0, 0.0),
         ];
-        fill_in_towns(&mut places);
+        fill_in_towns(&mut places, &[]);
         assert_eq!(places[0].country.as_deref(), Some("US"));
         assert_eq!(places[0].region.as_deref(), Some("CO"));
         // Boulder had no addresses: it takes Denver's country.
@@ -1145,6 +1329,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shop.region.as_deref(), Some("ON"));
+        // Or their postal codes do; a British one says nothing.
+        let postal = |code: &str| {
+            let shop = [
+                ("name", "Esso"),
+                ("amenity", "fuel"),
+                ("addr:postcode", code),
+            ];
+            place_of(&tags(&shop), "n9".into(), true).unwrap().region
+        };
+        assert_eq!(postal("K6H 2R4").as_deref(), Some("ON"));
+        assert_eq!(postal("x0a0h0").as_deref(), Some("NU"));
+        assert_eq!(postal("W1A 0AX"), None);
+        assert_eq!(postal("80202"), None);
         // Italy's provinces are no states.
         let bar = place_of(
             &tags(&[
@@ -1167,6 +1364,52 @@ mod tests {
         assert_eq!(park.kind, "boundary=national_park");
         let county = &[("name", "Mariposa County"), ("boundary", "administrative")];
         assert!(place_of(&tags(county), "r2".into(), false).is_none());
+        // So is an island Wikidata knows, however it is mapped.
+        let maui = &[
+            ("name", "Maui"),
+            ("place", "island"),
+            ("wikidata", "Q183222"),
+        ];
+        assert_eq!(
+            place_of(&tags(maui), "r3".into(), false).unwrap().kind,
+            "place=island"
+        );
+        let rock = &[("name", "Seal Rock"), ("place", "island")];
+        assert!(place_of(&tags(rock), "w4".into(), false).is_none());
+        // And a lake or a mountain Wikidata knows, not a river.
+        let lake = &[
+            ("name", "Lake Tahoe"),
+            ("natural", "water"),
+            ("water", "lake"),
+            ("wikidata", "Q107374"),
+        ];
+        assert_eq!(
+            place_of(&tags(lake), "r5".into(), false).unwrap().kind,
+            "natural=water"
+        );
+        let peak = &[("name", "Mount Hood"), ("natural", "peak")];
+        assert!(place_of(&tags(peak), "n6".into(), true).is_none());
+        let peak = &[peak[0], peak[1], ("wikidata", "Q217577")];
+        assert!(place_of(&tags(peak), "n6".into(), true).is_some());
+        let river = &[
+            ("name", "Thames"),
+            ("natural", "water"),
+            ("water", "river"),
+            ("wikidata", "Q19686"),
+        ];
+        assert!(place_of(&tags(river), "r7".into(), false).is_none());
+        let bank = &[river[0], river[1], ("waterway", "riverbank"), river[3]];
+        assert!(place_of(&tags(bank), "r7".into(), false).is_none());
+        // A consulate's address says whose it is, not where.
+        let consulate = &[
+            ("name", "Consulado de El Salvador"),
+            ("office", "diplomatic"),
+            ("addr:state", "PR"),
+            ("addr:country", "SV"),
+        ];
+        let consulate = place_of(&tags(consulate), "n8".into(), true).unwrap();
+        assert_eq!(consulate.country, None);
+        assert_eq!(consulate.region.as_deref(), Some("PR"));
     }
 
     #[test]
@@ -1218,13 +1461,35 @@ mod tests {
                 },
                 Some(1003),
             ),
+            // A lake an article names, and a mountain none does.
+            (at("Lake Tahoe", "natural=water", "r13"), Some(107374)),
+            (at("Mount Nobody", "natural=peak", "n14"), Some(99)),
+            // A park stays its item's landmark, and a beach of four parts
+            // is no brand.
+            (
+                at("Emerald Bay State Park", "leisure=park", "w15"),
+                Some(555),
+            ),
+            (
+                Place {
+                    rank: place_rank("natural=water", 0, true, true, 9),
+                    ..at("Emerald Bay", "natural=water", "r16")
+                },
+                Some(555),
+            ),
         ];
+        found.extend((17..21).map(|n| {
+            (
+                at("Bondi Beach", "natural=beach", &format!("w{n}")),
+                Some(666),
+            )
+        }));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wikipedia-en.tsv");
         std::fs::write(
             &path,
             format!(
-                "{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}{}",
                 plumb_core::article::ARTICLES_HEADER,
                 "a line with no columns\n",
                 "90000\tBig Ben\tclock tower\tQ41225\t\tElizabeth Tower|BigBen|10.57232|Clock Tower (Westminster)|Big Ben, London\n",
@@ -1233,6 +1498,9 @@ mod tests {
                 "70000\tStarbucks\tcoffeehouse chain\tQ37158\t\t\n",
                 "2293\tNiagara Falls, Ontario\tcity\tQ274120\t\tNiagara Falls, ON|Crowland Township\n",
                 "900\tGori, Georgia\ttown\tQ1003\t\t\n",
+                "60000\tLake Tahoe\tlake\tQ107374\t\tTahoe\n",
+                "40000\tEmerald Bay State Park\tpark\tQ555\t\t\n",
+                "50000\tBondi Beach\tbeach\tQ666\t\t\n",
             ),
         )
         .unwrap();
@@ -1261,6 +1529,13 @@ mod tests {
         assert_eq!(falls.country.as_deref(), Some("CA"));
         assert_eq!(falls.aliases, ["Crowland Township"]);
         assert_eq!(found[11].0.region, None);
+        // The lake is a landmark; the mountain no article names is gone.
+        assert!(found[12].0.is_landmark());
+        assert_eq!(found[13].0.name, "Emerald Bay State Park");
+        assert!(found[13].0.is_landmark());
+        assert_eq!(found[14].0.name, "Bondi Beach");
+        assert!(found[14].0.is_landmark());
+        assert_eq!(found.len(), 15);
     }
 
     #[test]
@@ -1305,7 +1580,7 @@ mod tests {
         places.push(shop(43.088, -79.075, Some("CA"), "ON"));
         places.push(shop(43.089, -79.074, Some("CA"), "ON"));
         places.push(shop(43.100, -79.058, None, "NY"));
-        fill_in_towns(&mut places);
+        fill_in_towns(&mut places, &[]);
         let said = |i: usize| (places[i].region.clone(), places[i].country.clone());
         assert_eq!(said(0), (Some("NY".into()), Some("US".into())));
         assert_eq!(said(1), (Some("ON".into()), Some("CA".into())));
@@ -1335,22 +1610,110 @@ mod tests {
             town("Massena", 45.00, -74.64, Some("NY"), Some("US")),
             town("Cornwall", 45.02, -74.69, Some("ON"), None),
             town("Alexandria", 45.31, -74.64, Some("ON"), Some("CA")),
+            // And a remote town that only a town between learns it from.
+            town("Nordegg", 52.47, -116.08, Some("AB"), None),
+            town("Rocky Mountain House", 52.37, -114.92, Some("AB"), None),
+            town("Red Deer", 52.27, -113.81, Some("AB"), Some("CA")),
         ];
-        fill_in_towns(&mut places);
-        for i in [0, 2] {
-            assert_eq!(
-                places[i].region.as_deref(),
-                Some("ON"),
-                "{}",
-                places[i].name
-            );
-            assert_eq!(
-                places[i].country.as_deref(),
-                Some("CA"),
-                "{}",
-                places[i].name
-            );
-        }
+        fill_in_towns(&mut places, &[]);
+        let said = |i: usize| (places[i].region.as_deref(), places[i].country.as_deref());
+        assert_eq!(said(0), (Some("ON"), Some("CA")));
+        assert_eq!(said(2), (Some("ON"), Some("CA")));
+        assert_eq!(said(4), (Some("AB"), Some("CA")));
+    }
+
+    #[test]
+    fn a_town_takes_its_country_from_its_states_code() {
+        let state = |name: &str, code: &str, own: &str, lat: f64, lon: f64| {
+            let tags = [
+                ("name", name),
+                ("boundary", "administrative"),
+                ("ISO3166-2", code),
+                ("ISO3166-1:alpha2", own),
+            ];
+            Place {
+                lat,
+                lon,
+                ..place_of(&tags, "r1".into(), false).unwrap()
+            }
+        };
+        let states = [
+            state("Western Australia", "AU-WA", "", -24.4, 121.0),
+            state("Washington", "US-WA", "", 47.3, -120.8),
+            state("Minnesota", "US-MN", "", 46.3, -94.3),
+            state("Puerto Rico", "US-PR", "PR", 18.2, -66.5),
+        ];
+        assert_eq!(states[0].kind, STATE_KIND);
+        // A boundary without a code is no place, and a node is no state.
+        let unnamed = [("name", "Shire"), ("boundary", "administrative")];
+        assert!(place_of(&unnamed, "r2".into(), false).is_none());
+        let node = [
+            ("name", "Western Australia"),
+            ("place", "state"),
+            ("boundary", "administrative"),
+            ("ISO3166-2", "AU-WA"),
+        ];
+        assert!(place_of(&node, "n1".into(), true).is_none());
+        let at = |name: &str, kind: &str, lat: f64, lon: f64| Place {
+            name: name.into(),
+            kind: kind.into(),
+            region: kind.starts_with("shop").then(|| "WA".into()),
+            lat,
+            lon,
+            ..Place::default()
+        };
+        let shop = |region: &str, lat: f64, lon: f64| Place {
+            region: Some(region.into()),
+            ..at("Shop", "shop=gift", lat, lon)
+        };
+        // Perth's shops give their state and, as all over Australia, no
+        // country, and so do Spokane's; a village by Perth gives nothing.
+        // Rainy River, Ontario is nearest to shops in Minnesota, but a
+        // neighbour knows it is in Canada. Puerto Rico is a country too.
+        let mut places = vec![
+            at("Perth", "place=city", -31.95, 115.86),
+            at("Boffins", "shop=books", -31.951, 115.857),
+            at("Spokane", "place=city", 47.66, -117.43),
+            at("Auntie's", "shop=books", 47.658, -117.425),
+            at("Kalamunda", "place=town", -31.97, 116.06),
+            at("Rainy River", "place=town", 48.72, -94.57),
+            shop("MN", 48.721, -94.571),
+            Place {
+                region: Some("ON".into()),
+                country: Some("CA".into()),
+                ..at("Emo", "place=town", 48.63, -93.83)
+            },
+            at("Hatillo", "place=town", 18.49, -66.83),
+            shop("PR", 18.491, -66.831),
+        ];
+        fill_in_towns(&mut places, &states);
+        let said = |i: usize| (places[i].region.as_deref(), places[i].country.as_deref());
+        assert_eq!(said(0), (Some("WA"), Some("AU")));
+        assert_eq!(said(1), (Some("WA"), Some("AU")));
+        assert_eq!(said(2), (Some("WA"), Some("US")));
+        assert_eq!(said(4), (Some("WA"), Some("AU")));
+        // Canada has no MN, so Rainy River keeps no region.
+        assert_eq!(said(5), (None, Some("CA")));
+        assert_eq!(said(8), (Some("PR"), Some("PR")));
+        // A town whose addresses put Puerto Rico in the US keeps its state,
+        // and is in Puerto Rico.
+        let mut places = vec![
+            at("Arecibo", "place=town", 18.47, -66.72),
+            Place {
+                country: Some("US".into()),
+                ..shop("PR", 18.471, -66.721)
+            },
+        ];
+        fill_in_towns(&mut places, &states);
+        assert_eq!(places[0].region.as_deref(), Some("PR"));
+        assert_eq!(places[0].country.as_deref(), Some("PR"));
+        // Without the states, no country is made up.
+        let mut places = vec![
+            at("Perth", "place=city", -31.95, 115.86),
+            at("Boffins", "shop=books", -31.951, 115.857),
+        ];
+        fill_in_towns(&mut places, &[]);
+        assert_eq!(places[0].country, None);
     }
 
     #[test]

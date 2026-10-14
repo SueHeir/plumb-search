@@ -63,6 +63,26 @@ fn a_work_in_a_series_is_named_by_its_own_title() {
 }
 
 #[test]
+fn a_title_is_named_without_its_leading_the() {
+    let (_dir, s) = searcher(&[
+        page("The Dark Side of the Moon", 18_000, &[]),
+        page("Far side of the Moon", 2_800, &["Dark side of the Moon"]),
+        page("The Dark Knight", 40_000, &[]),
+        page("Dark Knight (TV series)", 300, &[]),
+    ]);
+    for (query, title) in [
+        ("dark side of the moon", "The Dark Side of the Moon"),
+        ("dark knight", "The Dark Knight"),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert!(
+            hits[0].named && hits[0].page.title == title,
+            "{query}: {hits:?}"
+        );
+    }
+}
+
+#[test]
 fn songs_and_albums_are_found_by_their_name_and_artist() {
     let jude = song(
         "Hey Jude",
@@ -158,6 +178,40 @@ fn songs_and_albums_are_found_by_their_name_and_artist() {
 }
 
 #[test]
+fn a_makers_albums_songs_films_or_books_find_the_list_of_them() {
+    let (_dir, s) = searcher(&[
+        page("Drake (musician)", 90_000, &["Drake"]),
+        page("Drake albums discography", 9_000, &[]),
+        page("Drake discography", 8_000, &[]),
+        page("Pink Floyd discography", 7_000, &[]),
+        page("The Beatles", 100_000, &[]),
+        page("List of songs recorded by the Beatles", 7_000, &[]),
+        page("Tom Hanks filmography", 6_000, &[]),
+        page("Stephen King bibliography", 6_000, &[]),
+    ]);
+    for (query, title) in [
+        ("drake albums", "Drake albums discography"),
+        ("drake discography", "Drake discography"),
+        ("pink floyd albums", "Pink Floyd discography"),
+        ("pink floyd songs", "Pink Floyd discography"),
+        ("beatles songs", "List of songs recorded by the Beatles"),
+        ("The Beatles songs", "List of songs recorded by the Beatles"),
+        ("tom hanks movies", "Tom Hanks filmography"),
+        ("stephen king books", "Stephen King bibliography"),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.page.title == title && hit.named),
+            "{query}: {hits:?}"
+        );
+    }
+    // Only someone's works have such a list.
+    for query in ["best albums", "horror movies"] {
+        assert!(s.search(query, 5).unwrap().iter().all(|hit| !hit.named));
+    }
+}
+
+#[test]
 fn works_are_found_by_their_article_with_their_maker() {
     let work = |title: &str, description: &str, views: u64, aliases: &[&str]| {
         let mut page = page(title, views, aliases);
@@ -203,6 +257,12 @@ fn works_are_found_by_their_article_with_their_maker() {
             "release-group/a1b2c3d4-387b-4658-8678-8678046e4cef",
             90_000,
         ),
+        song(
+            "Sports",
+            "Album by Huey Lewis and the News",
+            "release-group/a1b2c3d4-1983-4658-8678-8678046e4cef",
+            2_000,
+        ),
     ]);
     for (query, title) in [
         ("radiohead ok computer", "OK Computer"),
@@ -217,6 +277,7 @@ fn works_are_found_by_their_article_with_their_maker() {
         // A song or album of the music set is asked for with its
         // artist and what it is, too.
         ("nevermind nirvana album", "Nevermind"),
+        ("sports huey lewis", "Sports"),
     ] {
         let hits = s.search(query, 5).unwrap();
         assert!(
@@ -234,6 +295,8 @@ fn works_are_found_by_their_article_with_their_maker() {
         "winston smith george orwell",
         "1989 radiohead",
         "nevermind album album",
+        // A led band's backing band alone is not its maker.
+        "sports news",
     ] {
         assert!(
             s.search(query, 5).unwrap().iter().all(|hit| !hit.whole),
@@ -458,4 +521,44 @@ fn podcasts_are_found_by_their_name_and_podcast() {
         .unwrap()
         .iter()
         .any(|hit| hit.whole));
+}
+
+#[test]
+fn a_podcast_asked_for_by_its_title_or_host_leads_one_ending_so() {
+    let podcast = |item: &str, title: &str, host: &str, views: u64| {
+        Page::from_podcast(Article {
+            title: title.into(),
+            description: Some(format!("Podcast by {host} · comedy")),
+            item: Some(item.into()),
+            views,
+            aliases: vec![format!("{host} podcast")],
+            ..Article::default()
+        })
+    };
+    let (_dir, s) = searcher(&[
+        podcast("1", "The Joe Rogan Experience", "Joe Rogan", 404_999),
+        podcast(
+            "2",
+            "At Least its Not Joe Rogan",
+            "atleastitsnotjoerogan",
+            405_008,
+        ),
+        podcast("3", "The Daily", "The New York Times", 401_999),
+        podcast("4", "On the Daily", "Blue Wire", 402_160),
+    ]);
+    for (query, title, ending) in [
+        (
+            "joe rogan podcast",
+            "The Joe Rogan Experience",
+            "At Least its Not Joe Rogan",
+        ),
+        ("the daily podcast", "The Daily", "On the Daily"),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert!(
+            hits[0].whole && hits[0].page.title == title,
+            "{query}: {hits:?}"
+        );
+        assert!(hits.iter().any(|hit| hit.whole && hit.page.title == ending));
+    }
 }
