@@ -1384,7 +1384,10 @@ impl PageSearcher {
         let mut hits = if paper.constrained {
             self.search_papers(&paper, limit)?
         } else {
-            self.search_naming_docs(query, &Operators::default(), false, limit)?
+            let mut hits = self.search_naming_docs(query, &Operators::default(), false, limit)?;
+            self.name_typed_site(query, &mut hits)?;
+            hits.truncate(limit);
+            hits
         };
         let mut records = records_named(query);
         hits.retain(|hit| !records.iter().any(|record| record.page.url == hit.page.url));
