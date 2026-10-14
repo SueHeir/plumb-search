@@ -317,6 +317,48 @@ fn fact_questions_find_the_article_they_ask_about() {
 }
 
 #[test]
+fn a_question_about_a_works_maker_finds_the_work_without_its_the() {
+    use plumb_core::facts::{Fact, FactKind};
+    let work = |title: &str, views: u64, maker: Option<(FactKind, &str)>| {
+        let mut page = page(title, views, &[]);
+        page.facts = maker
+            .map(|(kind, value)| Fact {
+                kind,
+                value: value.into(),
+            })
+            .into_iter()
+            .collect();
+        page
+    };
+    let (_dir, s) = searcher(&[
+        work(
+            "Mona Lisa",
+            34_216,
+            Some((FactKind::Creator, "Leonardo da Vinci")),
+        ),
+        work("The Mona Lisa (song)", 24, None),
+        work(
+            "The Hobbit",
+            30_000,
+            Some((FactKind::Author, "J. R. R. Tolkien")),
+        ),
+        work("Hobbit", 10_000, None),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        s.search(q, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert!(named("who painted the mona lisa").contains(&"Mona Lisa".to_string()));
+    // Named without "the" only when it holds what is asked: the hobbits
+    // have no author.
+    assert_eq!(named("who wrote the hobbit"), ["The Hobbit"]);
+}
+
+#[test]
 fn an_event_is_named_whichever_end_its_year_is_on_and_asked_who_won() {
     let (_dir, s) = searcher(&[
         page("Tour de France", 200_000, &[]),

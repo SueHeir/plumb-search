@@ -622,6 +622,21 @@ pub(crate) fn work_lists(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Adds `found` to `hits`. Found both ways, a page keeps its better score
+/// and whatever either way says of it.
+fn keep_found(hits: &mut Vec<PageHit>, found: Vec<PageHit>) {
+    for hit in found {
+        match hits.iter_mut().find(|h| h.page == hit.page) {
+            Some(kept) => {
+                kept.named |= hit.named;
+                kept.whole |= hit.whole;
+                kept.score = kept.score.max(hit.score);
+            }
+            None => hits.push(hit),
+        }
+    }
+}
+
 /// Least listeners of a song or album that [`PageSearcher::known_song`]
 /// takes a search of its title alone to be for: about the 7,000 most
 /// listened.
@@ -1356,6 +1371,19 @@ impl PageSearcher {
         for (name, hint) in searches {
             self.add_found(hits, &name, hint, limit, scope)?;
         }
+        // A work keeps its "the" for "The Hobbit", but "who painted the
+        // mona lisa" asks about Mona Lisa, not the song The Mona Lisa: what
+        // the name names without it counts too when it holds the fact asked.
+        let asked = plumb_core::facts::fact_asked(query).filter(|_| hint == Hint::Named);
+        if let (Some(bare), Some(asked)) = (name.strip_prefix("the "), asked) {
+            let holds = |hit: &PageHit| {
+                let facts = &hit.page.facts;
+                facts.iter().any(|fact| asked.kinds.contains(&fact.kind))
+            };
+            let mut found = self.search_once(bare, limit, scope)?;
+            found.retain(|hit| hit.named && holds(hit));
+            keep_found(hits, found);
+        }
         Ok(true)
     }
 
@@ -1450,18 +1478,7 @@ impl PageSearcher {
                 }
             }
         }
-        for hit in found {
-            // Found both ways, a page keeps its better score and whatever
-            // either way says of it.
-            match hits.iter_mut().find(|h| h.page == hit.page) {
-                Some(kept) => {
-                    kept.named |= hit.named;
-                    kept.whole |= hit.whole;
-                    kept.score = kept.score.max(hit.score);
-                }
-                None => hits.push(hit),
-            }
-        }
+        keep_found(hits, found);
         Ok(())
     }
 
