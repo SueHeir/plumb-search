@@ -505,6 +505,37 @@ fn words_are_only_looked_up() {
 }
 
 #[test]
+fn what_happened_to_a_person_names_its_article() {
+    let (_dir, s) = searcher(&[
+        page("Abraham Lincoln", 900_000, &["Lincoln"]),
+        page("Assassination of Abraham Lincoln", 300_000, &[]),
+        page("Lincoln, Nebraska", 100_000, &[]),
+        page("Death of Diana, Princess of Wales", 200_000, &[]),
+        page("Murder of George Floyd", 200_000, &[]),
+        page("Battle of Lincoln", 5_000, &[]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title.clone())
+            .collect()
+    };
+    assert_eq!(
+        named("lincoln assassination"),
+        ["Assassination of Abraham Lincoln"]
+    );
+    assert_eq!(
+        named("princess diana death"),
+        ["Death of Diana, Princess of Wales"]
+    );
+    assert_eq!(named("george floyd murder"), ["Murder of George Floyd"]);
+    // Only what happens to a person, and only with the name.
+    assert!(named("lincoln battle").is_empty());
+    assert_eq!(named("lincoln"), ["Abraham Lincoln"]);
+}
+
+#[test]
 fn what_is_asked_about_a_person_finds_their_article() {
     let person = |title: &str, views: u64, aliases: &[&str]| {
         let mut page = page(title, views, aliases);

@@ -1013,6 +1013,11 @@ impl PageSearcher {
                 best = best.max(PARTIAL_MATCH * share);
             }
         }
+        // "lincoln assassination" is about the Assassination of Abraham
+        // Lincoln, which no redirect may call so.
+        if page.is_article() && super::sites::event_of(&page.title, raw_query) {
+            return (ALIAS_MATCH, true);
+        }
         (best, false)
     }
 
