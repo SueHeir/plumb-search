@@ -1374,6 +1374,13 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
             "President of the United States",
         ),
         page("General Motors", 30_000, &[]),
+        described(
+            "Bernie Sanders",
+            60_000,
+            &[],
+            "American politician and activist (born 1941)",
+        ),
+        described("Colonel Sanders", 20_000, &[], "American businessman"),
     ]);
     let named = |q: &str| named_titles(&s, q);
     assert_eq!(named("president kennedy"), ["John F. Kennedy"]);
@@ -1384,6 +1391,8 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
     assert!(named("president bush").is_empty());
     assert_eq!(named("president lincoln"), ["Abraham Lincoln"]);
     assert_eq!(named("general motors"), ["General Motors"]);
+    // A senator's description often says only "politician".
+    assert_eq!(named("senator bernie sanders"), ["Bernie Sanders"]);
 }
 
 #[test]
