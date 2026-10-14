@@ -9,34 +9,28 @@
 //! National Park (U.S. National Park Service)"); a bracketed ending three
 //! or more pages share is dropped too.
 
-use std::collections::HashMap;
-
 use plumb_core::article::Article;
 
 use crate::build::docs::FetchedDoc;
-use crate::build::reference::reference_articles;
+use crate::build::reference::{reference_articles, shared_by, unlocalized};
 use crate::subpage_sites::SubpageSite;
-
-/// Pages of a site whose titles share a bracketed ending for it to be the
-/// site's name.
-const SHARED_BY: usize = 3;
 
 /// The articles of `site`'s pages `docs`, in the order given (see
 /// [`reference_articles`]).
 pub fn subpage_articles(site: &SubpageSite, docs: &[FetchedDoc]) -> Vec<Article> {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for title in docs.iter().filter_map(|doc| doc.title.as_deref()) {
-        if let Some((_, ending)) = bracketed_ending(title) {
-            *counts.entry(ending).or_default() += 1;
-        }
-    }
+    let pages: Vec<String> = docs.iter().map(|doc| unlocalized(&doc.url)).collect();
+    let endings = shared_by(
+        docs.iter()
+            .zip(&pages)
+            .filter_map(|(doc, page)| Some((bracketed_ending(doc.title.as_deref()?)?.1, page))),
+    );
     let docs: Vec<FetchedDoc> = docs
         .iter()
         .map(|doc| {
             let title = doc.title.as_deref().map(|title| {
                 match bracketed_ending(title) {
                     // The reference rules drop an ending after " | ".
-                    Some((head, ending)) if counts.get(ending).is_some_and(|&n| n >= SHARED_BY) => {
+                    Some((head, ending)) if endings.contains(ending) => {
                         format!("{head} | {ending}")
                     }
                     _ => title.to_string(),
@@ -99,6 +93,15 @@ mod tests {
                 "https://www.chessprogramming.org/Stockfish",
                 "Stockfish (chess engine)",
             ),
+            // Copies of one page in other languages are one page.
+            doc(
+                "https://www.chessprogramming.org/de/Stockfish",
+                "Stockfish (chess engine)",
+            ),
+            doc(
+                "https://www.chessprogramming.org/fr/Stockfish",
+                "Stockfish (chess engine)",
+            ),
         ];
         let titles: Vec<String> = subpage_articles(site, &docs)
             .into_iter()
@@ -114,6 +117,123 @@ mod tests {
                 "Stockfish (chess engine)"
             ]
         );
+    }
+
+    #[test]
+    fn a_brands_page_in_many_countries_is_kept_from_its_own() {
+        // Outside the US, Apple's titles end "- Apple (UK)": without the
+        // site's name every English copy of a product's page was the same
+        // title, so all were dropped and only the Arabic copy was left.
+        let site = crate::subpage_sites::site("www.apple.com").unwrap();
+        let mut docs = Vec::new();
+        for (folder, country, language) in [
+            ("uk/", " (UK)", "en-GB"),
+            ("au/", " (AU)", "en-AU"),
+            ("ae/", " (AE)", "en-AE"),
+            ("ae-ar/", " (AE)", "ar-AE"),
+            ("", "", "en-US"),
+        ] {
+            for (path, name) in [
+                ("airpods-pro/", "AirPods Pro 3 - Apple"),
+                ("iphone/", "iPhone - Apple"),
+                ("watch/", "Apple Watch - Apple"),
+            ] {
+                docs.push(FetchedDoc {
+                    language: Some(language.to_string()),
+                    ..doc(
+                        &format!("https://www.apple.com/{folder}{path}"),
+                        &format!("{name}{country}"),
+                    )
+                });
+            }
+        }
+        docs.push(doc("https://www.apple.com/", "Apple"));
+        let pages: Vec<(String, Option<String>, Option<String>)> = subpage_articles(site, &docs)
+            .into_iter()
+            .map(|article| (article.title, article.item, article.language))
+            .collect();
+        let page = |title: &str, at: &str, language: &str| {
+            (
+                title.to_string(),
+                Some(format!("https://www.apple.com/{at}")),
+                Some(language.to_string()),
+            )
+        };
+        // The US pages, though listed last, are the shallowest; the front
+        // page is the site, not one of its pages.
+        let english: Vec<_> = pages
+            .iter()
+            .filter(|(_, _, language)| language.as_deref() == Some("en"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            english,
+            [
+                page("AirPods Pro 3", "airpods-pro/", "en"),
+                page("iPhone", "iphone/", "en"),
+                page("Apple Watch", "watch/", "en"),
+            ]
+        );
+        assert!(pages.contains(&page("AirPods Pro 3", "ae-ar/airpods-pro/", "ar")));
+    }
+
+    #[test]
+    fn copies_of_a_page_others_share_a_title_with_are_one_page() {
+        // "iPhone - Apple", "iPhone - Compare Models - Apple" and
+        // "iPhone - Tech Specs - Apple" are all "iPhone" without their
+        // endings: each keeps the ending before "Apple" back, and so do
+        // its copies in other countries. A gone page's title on pages in
+        // three countries is the site's.
+        let site = crate::subpage_sites::site("www.apple.com").unwrap();
+        let mut docs = Vec::new();
+        for (folder, country, gone) in [("uk/", " (UK)", "a"), ("au/", " (AU)", "b"), ("", "", "c")]
+        {
+            for name in ["iPhone", "Mac", "iPad"] {
+                let path = name.to_lowercase();
+                for (tab, ending) in [
+                    ("", ""),
+                    ("compare/", " - Compare Models"),
+                    ("specs/", " - Tech Specs"),
+                ] {
+                    docs.push(FetchedDoc {
+                        language: Some("en".into()),
+                        ..doc(
+                            &format!("https://www.apple.com/{folder}{path}/{tab}"),
+                            &format!("{name}{ending} - Apple{country}"),
+                        )
+                    });
+                }
+            }
+            docs.push(FetchedDoc {
+                language: Some("en".into()),
+                ..doc(
+                    &format!("https://www.apple.com/{folder}gone-{gone}/"),
+                    &format!("Sorry, this page isn't available - Apple{country}"),
+                )
+            });
+        }
+        let pages: Vec<(String, String)> = subpage_articles(site, &docs)
+            .into_iter()
+            .map(|article| (article.title, article.item.unwrap()))
+            .collect();
+        let expected: Vec<(String, String)> = ["iPhone", "Mac", "iPad"]
+            .into_iter()
+            .flat_map(|name| {
+                let path = name.to_lowercase();
+                [
+                    ("", " - Apple"),
+                    ("compare/", " - Compare Models"),
+                    ("specs/", " - Tech Specs"),
+                ]
+                .map(|(tab, ending)| {
+                    (
+                        format!("{name}{ending}"),
+                        format!("https://www.apple.com/{path}/{tab}"),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(pages, expected);
     }
 
     #[test]

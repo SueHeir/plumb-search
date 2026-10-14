@@ -11,7 +11,9 @@
 //! - the time in a place: `time in tokyo`, `what time is it in paris`, and
 //!   a time from one place in another: `3pm est to pst` (with the `zones`
 //!   feature, on by default). For a town not in its own list, a caller
-//!   that can look up towns asks [`asked_town`] and [`time_in_town`].
+//!   that can look up towns asks [`asked_town`] and [`time_in_town`];
+//! - the date of a holiday or another day kept every year: `when is
+//!   thanksgiving 2026`, `easter 2027`, `how many days until christmas`.
 //!
 //! Nothing here reads the network, the clock or the computer's settings:
 //! the caller passes the current time and the rates it has, so the same
@@ -24,6 +26,7 @@ mod calc;
 mod currency;
 mod format;
 mod help;
+mod holidays;
 #[cfg(feature = "zones")]
 mod places;
 #[cfg(feature = "zones")]
@@ -58,6 +61,8 @@ pub enum Kind {
     /// What something is, from the first sentence of its Wikipedia
     /// article ("what is a manatee"); worked out by the node too.
     Definition,
+    /// The date of a day kept every year ("when is thanksgiving").
+    Date,
 }
 
 /// An answer to the query, as shown: the question as understood, the
@@ -83,6 +88,7 @@ const MAX_QUERY: usize = 120;
 /// `now` is the current time, in seconds since 1970 (UTC); `rates` the
 /// currency rates the caller has, if any.
 pub fn answer(query: &str, now: i64, rates: Option<&Rates>) -> Option<Answer> {
+    let query = half_width(query);
     let query = query.trim();
     if query.is_empty() || query.chars().count() > MAX_QUERY {
         return None;
@@ -94,8 +100,9 @@ pub fn answer(query: &str, now: i64, rates: Option<&Rates>) -> Option<Answer> {
     if let Some(answer) = time::answer(query, now) {
         return Some(answer);
     }
-    #[cfg(not(feature = "zones"))]
-    let _ = now;
+    if let Some(answer) = holidays::answer(query, now) {
+        return Some(answer);
+    }
     units::answer(query)
         .or_else(|| rates.and_then(|rates| currency::answer(query, rates)))
         .or_else(|| calc::answer(query))
@@ -104,7 +111,21 @@ pub fn answer(query: &str, now: i64, rates: Option<&Rates>) -> Option<Answer> {
 /// Whether `query` may be a currency conversion, to know whether rates are
 /// worth fetching for it before calling [`answer`].
 pub fn may_need_rates(query: &str) -> bool {
-    query.chars().count() <= MAX_QUERY && currency::looks_like(query)
+    let query = half_width(query);
+    query.chars().count() <= MAX_QUERY && currency::looks_like(&query)
+}
+
+/// `text` with full-width letters, digits and signs, and the ideographic
+/// space, as Chinese and Japanese keyboards type them, in their ASCII
+/// forms: "１＋１" is 1+1.
+fn half_width(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            '\u{3000}' => ' ',
+            _ => c,
+        })
+        .collect()
 }
 
 /// `text` lowercased, with runs of spaces made one and some punctuation
@@ -121,6 +142,21 @@ fn simplify(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_full_width_as_typed_on_cjk_keyboards() {
+        for (query, sum) in [
+            ("１＋１", "2"),
+            ("３×４", "12"),
+            ("２＾１０", "1,024"),
+            ("１０％ ｏｆ ２００", "20"),
+            ("１００ｋｍ　ｉｎ　ｍｉｌｅｓ", "62.1371 miles"),
+        ] {
+            let answer = answer(query, 0, None).map(|a| a.answer);
+            assert_eq!(answer.as_deref(), Some(sum), "{query}");
+        }
+        assert!(may_need_rates("１００ ｕｓｄ ｔｏ ｅｕｒ"));
+    }
 
     #[test]
     fn plain_searches_get_no_answer() {

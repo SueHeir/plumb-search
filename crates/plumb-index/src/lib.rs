@@ -87,6 +87,7 @@ mod schema;
 mod search;
 mod spell;
 pub mod spell_model;
+mod states;
 mod storage;
 mod topics;
 
@@ -97,6 +98,7 @@ use serde::{Deserialize, Serialize};
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::IndexReader;
 
+pub use crate::analysis::same_words;
 pub use crate::hits::suggested_site_second;
 pub use crate::indexing::{
     build_index, build_index_with_budget, redirect_name, redirect_targets, IndexBuild,
@@ -105,6 +107,7 @@ pub use crate::names::without_intent_words;
 pub use crate::query_evidence::CandidateEvidence;
 pub use crate::replace::remove_build_leftovers;
 use crate::schema::Fields;
+pub use crate::states::asked_state_first;
 
 // Function words ("pizza in denver", "bank of america") name no site in a
 // longer query: between two other words they never match a domain label or
@@ -270,7 +273,9 @@ pub struct RankConfig {
     /// rid of aphids") names no site by its words: none of them matches a
     /// domain label or joined name on its own, and its first words are no
     /// leading name. Questions describe what they want; rid.it and get.gov
-    /// are not it.
+    /// are not it. Only a text most links to a site use still names it
+    /// inside a question ([`RankConfig::link_names`]), so it is kept where
+    /// it ranks: netflix.com in "how to cancel netflix".
     pub questions_name_nothing: bool,
     /// Add the official site of the article the query names when no site
     /// found is it ([`pages::add_named_site`]).
