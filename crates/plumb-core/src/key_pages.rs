@@ -180,6 +180,14 @@ impl PageIntent {
         })
     }
 
+    /// The intent a page's whole title names, with nothing more: "Contact
+    /// Us", "Careers", "Help Center", but not "Download for Mac".
+    pub fn of_title(title: &str) -> Option<PageIntent> {
+        let words = normalize_text(title);
+        let words: Vec<&str> = words.split_whitespace().collect();
+        best_match(|phrase| words == phrase)
+    }
+
     /// Whether a host name or path holds one of the intent's phrases, as
     /// addresses spell them (`/login`, `/sign-in`, `docs.`, `/help-center`).
     fn in_address(self, part: &str) -> bool {
@@ -497,6 +505,24 @@ mod tests {
             ("", None),
         ] {
             assert_eq!(PageIntent::of_label(label), intent, "{label:?}");
+        }
+    }
+
+    #[test]
+    fn whole_titles_name_intents() {
+        for (title, intent) in [
+            ("Contact Us", Some(PageIntent::Contact)),
+            ("Careers", Some(PageIntent::Careers)),
+            ("Help Center", Some(PageIntent::Support)),
+            ("Plans & Pricing", Some(PageIntent::Pricing)),
+            ("Newsroom", Some(PageIntent::Blog)),
+            ("Download for Mac", None),
+            ("Sign in to your account", None),
+            ("Help for parents", None),
+            ("Products", None),
+            ("", None),
+        ] {
+            assert_eq!(PageIntent::of_title(title), intent, "{title:?}");
         }
     }
 
