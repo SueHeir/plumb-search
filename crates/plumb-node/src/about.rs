@@ -82,6 +82,10 @@ pub const KINDS: &[(&str, &str)] = &[
         "Pages of universities, companies, government and museums",
     ),
     (plumb_index::pages::WIKIDATA_SET, "Official profiles"),
+    (
+        plumb_index::pages::WANTED_SET,
+        "Pages this node found for its searches",
+    ),
 ];
 
 /// The kind of result a page is, as [`KINDS`] names it.

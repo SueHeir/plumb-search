@@ -3,6 +3,8 @@
 
 use std::collections::HashSet;
 
+use plumb_core::facts::FactKind;
+use plumb_core::key_pages::PageIntent;
 use plumb_core::{
     adult_level, host_of, normalize_text, registrable_domain, AdultLevel, Operators, SafeSearch,
 };
@@ -12,7 +14,7 @@ use super::docs::{docs_found_by_words, docs_named_as_code};
 use super::sites::{base_title, describes_an_organization, is_government, site_is_titled, squash};
 use super::{
     LearnedPlace, Page, PageHit, PlacedPage, ASKING_WORDS, DOCS_SET, FILMS_SET, GITHUB_SET,
-    PODCASTS_SET, REFERENCE2_SET, SUBPAGES_SET, WIKIDATA_SET,
+    PODCASTS_SET, RECORDS_SET, REFERENCE2_SET, SUBPAGES_SET, WIKIDATA_SET,
 };
 use crate::analysis;
 
@@ -51,7 +53,7 @@ const LIFT_LINK_MARGIN: f32 = 0.2;
 /// and codastory.com, having one word of it, are no answer. The page's
 /// own site stays. Returns how many were left out.
 pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -> usize {
-    drop_namesakes(sites, pages, |hit| hit.missing_words)
+    drop_namesakes(sites, pages, |hit, _| hit.missing_words)
 }
 
 /// [`drop_namesakes_of_words`] for the sites that only one word of the
@@ -64,7 +66,10 @@ pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -
 /// nationalarchives.gov.uk, once the Public Record Office (PRO), is no
 /// answer, nor is carbon3d.com for "thinkpad x1 carbon" or mini.com for
 /// "ipad mini". A site the name starts with stays (apple.com, found by
-/// "mac", for "mac mini"), and so does one with no vector to judge it by.
+/// "mac", for "mac mini"), unless the article is on a person, who has a
+/// date of birth: a first name is no name of theirs, so ted.com is no
+/// answer for "ted kaczynski", nor sydney.edu.au for "sydney sweeney".
+/// One with no vector to judge it by stays too.
 pub fn drop_far_namesakes(
     sites: &mut Vec<crate::Hit>,
     pages: &[PageHit],
@@ -73,21 +78,26 @@ pub fn drop_far_namesakes(
     let Some(floor) = floor else {
         return 0;
     };
-    drop_namesakes(sites, pages, |hit| {
+    drop_namesakes(sites, pages, |hit, named| {
+        let person = named
+            .page
+            .facts
+            .iter()
+            .any(|fact| fact.kind == FactKind::Born);
         hit.missing_words
             && hit.query_evidence.as_ref().is_some_and(|evidence| {
-                evidence.partial_name_words == 0
+                (evidence.partial_name_words == 0 || person)
                     && evidence.semantic_closeness.is_some_and(|c| c < floor)
             })
     })
 }
 
-/// Leaves out the `namesake` sites, but the page's own, when the whole
-/// query is the name of an article or Wikidata item.
+/// Leaves out the sites that `namesake` takes for namesakes of the
+/// article or Wikidata item the whole query names, but the page's own.
 fn drop_namesakes(
     sites: &mut Vec<crate::Hit>,
     pages: &[PageHit],
-    namesake: impl Fn(&crate::Hit) -> bool,
+    namesake: impl Fn(&crate::Hit, &PageHit) -> bool,
 ) -> usize {
     let Some(named) = pages
         .iter()
@@ -97,7 +107,7 @@ fn drop_namesakes(
     };
     let own = named.page.site.as_deref();
     let before = sites.len();
-    sites.retain(|hit| !namesake(hit) || Some(hit.domain.as_str()) == own);
+    sites.retain(|hit| !namesake(hit, named) || Some(hit.domain.as_str()) == own);
     before - sites.len()
 }
 
@@ -235,9 +245,23 @@ pub(crate) fn named_page_site<'a>(
 /// A page the learned ranking listed on its own ([`PageHit::learned`])
 /// stays where it put it: before the same site, or last, except that a
 /// docs page found by its words never comes before the best site.
-pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -> Vec<PlacedPage> {
+pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
+    let (records, mut pages): (Vec<PageHit>, Vec<PageHit>) = pages.into_iter().partition(is_record);
+    // The site of what the query names, when it is listed.
+    let home = pages
+        .iter()
+        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET)
+        .and_then(|hit| hit.page.site.as_deref())
+        .and_then(registrable_domain)
+        .filter(|home| {
+            sites
+                .iter()
+                .any(|site| registrable_domain(&site.domain).as_ref() == Some(home))
+        });
     pages.retain(|hit| {
-        crate::health::page_allowed(query, &hit.page) && subpage_asked(query, sites, hit)
+        crate::health::page_allowed(query, &hit.page)
+            && subpage_asked(query, sites, hit)
+            && !covered_elsewhere(hit, sites, home.as_deref())
     });
     if !asks_for_podcasts(query) {
         // Podcasts it does not ask for take no other page's place
@@ -256,8 +280,19 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -
             None => {}
         }
     }
+    placed.extend(records.into_iter().map(|hit| PlacedPage {
+        hit,
+        under: None,
+        at: 0,
+    }));
     keep_page_rules(query, sites, &mut placed);
     placed
+}
+
+/// Whether `hit` is a record the query names by its identifier
+/// ([`RECORDS_SET`]).
+pub(crate) fn is_record(hit: &PageHit) -> bool {
+    hit.page.set == RECORDS_SET
 }
 
 /// Best sites of a query looked at for the site of a subpage found by its
@@ -271,38 +306,40 @@ const SUBPAGE_TITLE_SHARE: f32 = 0.75;
 /// The same share when the title holds every word of the query.
 const SUBPAGE_HELD_SHARE: f32 = 0.5;
 
+/// Most words of a reference page's title holding both words of a
+/// two-word query side by side, for it to be asked for.
+const REFERENCE_PAIR_TITLE_WORDS: usize = 5;
+
 /// Words a title shares with anything, left out of [`SUBPAGE_TITLE_SHARE`].
 const TITLE_STOP_WORDS: &[&str] = &[
     "a", "an", "and", "at", "by", "for", "from", "in", "my", "of", "on", "or", "the", "to", "with",
     "you", "your",
 ];
 
-/// Whether `hit`, when it is a subpage or staged reference page, may be listed for
+/// Whether `hit`, when it is a subpage or reference page, may be listed for
 /// `query`: named by its whole title, on one of the query's best sites
 /// ("rotten tomatoes oppenheimer", "met museum hours"), or with most of
 /// its title's words, or of its title before a colon, in the query
 /// ("amazon leadership principles" for "Amazon Leadership Principles:
-/// Values and company culture"). A big site's news, press releases and reviews
-/// share words with all sorts of searches: "seven summits" is not a
-/// leadership summit at jnj.com, nor "mount everest" a film review at
-/// ign.com. A tag archive is listed only on one of the best sites, named
+/// Values and company culture"), or, for a reference page, with all of the
+/// query's. A big site's news, press releases and reviews share words with
+/// all sorts of searches: "seven summits" is not a leadership summit at
+/// jnj.com, nor "mount everest" a film review at ign.com, nor "work
+/// australia" Live Science's story on how a second El Niño works. A tag
+/// archive, or a page titled just what kind of page it is
+/// ([`is_section_page`]), is listed only on one of the best sites, named
 /// or not. Pages of other sets always may.
 pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
-    if hit.page.set != SUBPAGES_SET && hit.page.set != REFERENCE2_SET {
+    if !hit.page.is_site_page() {
         return true;
     }
-    let domain = registrable_domain(&hit.page.url);
-    let on_best_site = || {
-        domain.is_some()
-            && sites
-                .iter()
-                .take(SUBPAGE_SITES)
-                .any(|site| registrable_domain(&site.domain) == domain)
-    };
+    let on_best_site = || among_best_sites(&hit.page.url, sites);
     // A site's list of its posts with one tag is titled just the tag, and
     // says nothing of it: jnj.com's "Lupus" ("Explore Johnson & Johnson's
     // lupus resources") was named by "lupus" and led it, above the article.
-    if is_tag_archive(&hit.page.url) {
+    // So is a site's news or contact page titled just that: cam.ac.uk's
+    // "News" was named by "news" and led it, above every news site.
+    if is_tag_archive(&hit.page.url) || is_section_page(&hit.page.title) {
         return on_best_site();
     }
     if hit.named {
@@ -339,11 +376,13 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
             .flat_map(|word| analysis::tokens(&STEMS, &word))
             .collect()
     };
-    let asked: HashSet<String> = words(query).into_iter().collect();
+    let query_words = words(query);
+    let asked: HashSet<String> = query_words.iter().cloned().collect();
     let fewest = asked.len().min(2);
     if fewest == 0 {
         return false;
     }
+    let reference = hit.page.set != SUBPAGES_SET;
     let has_most = |title: &str| {
         let in_order = words(title);
         let title: HashSet<String> = in_order.iter().cloned().collect();
@@ -370,7 +409,23 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
         } else {
             SUBPAGE_TITLE_SHARE
         };
-        shared >= fewest && shared as f32 >= share * title.len() as f32
+        // A reference page's title with every word of a query of three
+        // words or more is asked for however long it is: "pain with
+        // ovarian cyst" for "Will an ovarian cyst cause back pain? What to
+        // know". Two words side by side are enough in a short title,
+        // "epley's maneuver" for "Epley Maneuver (Canalith Repositioning
+        // Procedure)", as is a longer query but for its last word, often
+        // the kind of thing it is: "lemon drop cocktail" for "Lemon drop
+        // martini recipe". A longer title with them is mostly news, "hulk
+        // hogan" for "Hulk Hogan's Daughter Brooke Welcomes Twins". A
+        // subpage's long title with them is more often a big site's news or
+        // press release.
+        let lead = &query_words[..query_words.len() - 1];
+        let pair = title.len() <= REFERENCE_PAIR_TITLE_WORDS
+            && (asked.len() == 2 && held
+                || lead.len() >= 2 && in_order.windows(lead.len()).any(|run| run == lead));
+        let whole = reference && (shared == asked.len() && asked.len() >= 3 || pair);
+        whole || shared >= fewest && shared as f32 >= share * title.len() as f32
     };
     // Or of its title before a subtitle, "Declaration of Independence" in
     // "Declaration of Independence: A Transcription", or before the site's
@@ -383,6 +438,67 @@ pub(crate) fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) ->
                 .split_once(mark)
                 .is_some_and(|(head, _)| has_most(head))
         })
+}
+
+/// Whether `url` is on one of the query's best [`SUBPAGE_SITES`] sites.
+fn among_best_sites(url: &str, sites: &[crate::Hit]) -> bool {
+    let domain = registrable_domain(url);
+    domain.is_some()
+        && sites
+            .iter()
+            .take(SUBPAGE_SITES)
+            .any(|site| registrable_domain(&site.domain) == domain)
+}
+
+/// Whether `hit` is another site's page titled what the query names, when
+/// that has a site of its own among the results, `home` (the named
+/// article's): lanl.gov's "Boston Marathon" tells of staff who ran it, and
+/// the race's site is baa.org. It is listed only on one of the best sites,
+/// as a tag archive is.
+fn covered_elsewhere(hit: &PageHit, sites: &[crate::Hit], home: Option<&str>) -> bool {
+    let Some(home) = home else {
+        return false;
+    };
+    hit.named
+        && (hit.page.set == SUBPAGES_SET || hit.page.set == REFERENCE2_SET)
+        && registrable_domain(&hit.page.url).as_deref() != Some(home)
+        && !among_best_sites(&hit.page.url, sites)
+}
+
+/// Titles of a site's news and events pages, normalized. With the titles
+/// of its key pages ([`PageIntent::of_title`]: "Contact Us", "Careers"),
+/// they say what kind of page it is, not what it is about.
+const SECTION_TITLES: &[&str] = &[
+    "news and events",
+    "calendar",
+    "events calendar",
+    "press",
+    "press room",
+    "media",
+    "media center",
+    "media centre",
+    "whats on",
+];
+
+/// Last words of such titles, alone or after one other word: "News",
+/// "Latest News", "Business News", "Upcoming Events", "Press Releases".
+const SECTION_ENDS: &[&str] = &["news", "events", "releases", "announcements", "updates"];
+
+/// Whether `title`, before any site name after a bar or a dash, only says
+/// what kind of page it is: "News", "Upcoming Events", "Press Releases |
+/// Target Corporate", "Contact Us".
+fn is_section_page(title: &str) -> bool {
+    let head = [" | ", " - ", " – ", " — "]
+        .iter()
+        .filter_map(|mark| title.split_once(mark).map(|(head, _)| head))
+        .min_by_key(|head| head.len())
+        .unwrap_or(title);
+    let words = normalize_text(head);
+    let words: Vec<&str> = words.split_whitespace().collect();
+    let ends_so = words.len() <= 2 && words.last().is_some_and(|w| SECTION_ENDS.contains(w));
+    ends_so
+        || SECTION_TITLES.contains(&words.join(" ").as_str())
+        || PageIntent::of_title(head).is_some()
 }
 
 /// Whether `url` is a site's list of its posts with one tag:
@@ -433,6 +549,18 @@ fn in_other_language(url: &str) -> bool {
     first.len() <= 5 && OTHER_LANGUAGES.contains(&language)
 }
 
+/// Whether the query names the best of `sites` along with its own page,
+/// which [`add_named_site_page`](super::PageSearcher::add_named_site_page)
+/// put under it: "who fact sheets" wants who.int, with its "Fact sheets",
+/// before the CDC's fact sheet on sepsis.
+pub(crate) fn names_best_site_page(sites: &[crate::Hit], placed: &[PlacedPage]) -> bool {
+    sites.first().is_some_and(|best| {
+        placed
+            .iter()
+            .any(|p| p.under.as_deref() == Some(best.domain.as_str()) && p.hit.page.is_site_page())
+    })
+}
+
 /// Whether `hit` must come after the best of `sites`, whatever the
 /// learned ranking says. A docs page found by its words: "python package
 /// index" wants pypi.org first, and "bash parameter expansion" anything
@@ -442,7 +570,9 @@ fn in_other_language(url: &str) -> bool {
 /// "minecraft" wants minecraft.net before the Computer History Museum's
 /// page on Minecraft, "walmart" walmart.com before CNET's page of news on
 /// Walmart, and "red dead redemption 2" rockstargames.com, with the
-/// article under it, before IGN's guide to the game. Such a page's
+/// article under it, before IGN's guide to the game. `names_best` is also
+/// set when the query names the best site with one of its pages
+/// ([`names_best_site_page`]). Such a page's
 /// popularity is measured within its set, often a small one, so it reads
 /// as more read than the site's own article. Only a page of the best site
 /// itself may come before it, as docs.python.org's "python sorting
@@ -467,27 +597,39 @@ fn on_site(page: &Page, domain: &str) -> bool {
 }
 
 /// The places no ranking overrides, applied after [`place_pages`] and
-/// after [`crate::learned::reorder`]: the docs page of an API the query
-/// names as code comes first ("Object.keys" wants MDN's page, see
+/// after [`crate::learned::reorder`]: a record the query names by its
+/// identifier comes first ("rfc 3339" wants RFC 3339 itself, not
+/// rfc-editor.org); then the docs page of an API the query
+/// names as code ("Object.keys" wants MDN's page, see
 /// [`docs_named_as_code`]); any other docs page found by its words, or
 /// another site's page while the query names the best site's owner, never
-/// comes before the best site (see [`kept_below`]); and, unless the
-/// query asks for them, podcasts come after the best site and the other
-/// pages listed on their own ("better call saul" wants amc.com and the
-/// article first).
+/// comes before the best site (see [`kept_below`]); a namesake of a better
+/// page comes after [`PARTIAL_AFTER`] sites, as [`place_pages_by_rules`]
+/// put it ("taylor swift" wants the singer's article under
+/// taylorswift.com, then sites, then the album "Taylor Swift"); and,
+/// unless the query asks for them, podcasts come after the best site and
+/// the other pages listed on their own ("better call saul" wants amc.com
+/// and the article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
     placed.retain(|page| crate::health::page_allowed(query, &page.hit.page));
-    let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0);
+    let names_best = named_page_site(sites, placed.iter().map(|p| &p.hit)) == Some(0)
+        || names_best_site_page(sites, placed);
     let code = |p: &PlacedPage| p.under.is_none() && docs_named_as_code(&p.hit, query, sites);
-    for page in placed.iter_mut().filter(|p| p.under.is_none()) {
-        if code(page) {
+    let namesakes = namesakes(placed);
+    for (page, namesake) in placed.iter_mut().zip(namesakes) {
+        if page.under.is_some() {
+            continue;
+        }
+        if is_record(&page.hit) || code(page) {
             page.at = 0;
+        } else if namesake {
+            page.at = page.at.max(PARTIAL_AFTER).min(sites.len());
         } else if kept_below(&page.hit, sites, names_best) {
             page.at = page.at.max(1).min(sites.len());
         }
     }
     // Pages at one place are listed in order, so it leads the questions too.
-    placed.sort_by_key(|p| !code(p));
+    placed.sort_by_key(|p| (!is_record(&p.hit), !code(p)));
     if asks_for_podcasts(query) {
         return;
     }
@@ -505,6 +647,31 @@ pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<Place
         rest.push(page);
     }
     *placed = rest;
+}
+
+/// Which of `placed` are named like a better page of their set the query
+/// also names, as [`place_pages_by_rules`] found them in order of score:
+/// "The Bear (1988 film)" beside "The Bear (TV series)", under
+/// fxnetworks.com.
+fn namesakes(placed: &[PlacedPage]) -> Vec<bool> {
+    let keys: Vec<_> = placed
+        .iter()
+        .map(|p| {
+            p.hit
+                .named
+                .then(|| (&p.hit.page.set, page_key(base_title(&p.hit.page.title))))
+        })
+        .collect();
+    let before = |one: usize, other: usize| {
+        let (one_score, other_score) = (placed[one].hit.score, placed[other].hit.score);
+        one_score > other_score || one_score == other_score && one < other
+    };
+    (0..placed.len())
+        .map(|i| {
+            keys[i].is_some()
+                && (0..placed.len()).any(|j| j != i && keys[j] == keys[i] && before(j, i))
+        })
+        .collect()
 }
 
 /// Whether `query` asks for podcasts or episodes.
@@ -622,6 +789,9 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
                 continue;
             }
         }
+        if obscure_namesake(&hit, &placed) {
+            continue;
+        }
         // An item without an article is only told apart from its
         // namesakes by its website.
         if hit.page.set == WIKIDATA_SET {
@@ -698,6 +868,31 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         });
     }
     placed
+}
+
+/// How many times as read as a namesake an article that has the name to
+/// itself is when the namesake is not listed ([`obscure_namesake`]).
+const OBSCURE_NAMESAKE: u64 = 50;
+
+/// Whether `hit` is an article the query names only by its title before a
+/// qualifier, read less than a fiftieth as much as an article of its set
+/// already placed that has the name to itself: "Prince William (1788
+/// ship)" and "Prince William (TV series)" for "prince william", "Lady Gaga
+/// (song)" for "lady gaga". Named so, it scored nearly as high as the
+/// article, popularity being only half a page's score, and took a place
+/// among the first results. "Cleopatra (1963 film)" and "Julius Caesar
+/// (play)" are read enough to stay.
+fn obscure_namesake(hit: &PageHit, placed: &[PlacedPage]) -> bool {
+    let unqualified = |page: &Page| base_title(&page.title) == page.title;
+    hit.named
+        && hit.page.is_article()
+        && !unqualified(&hit.page)
+        && placed.iter().any(|p| {
+            p.hit.named
+                && p.hit.page.set == hit.page.set
+                && unqualified(&p.hit.page)
+                && hit.page.views.saturating_mul(OBSCURE_NAMESAKE) < p.hit.page.views
+        })
 }
 
 /// Words a search asked as a question starts with.

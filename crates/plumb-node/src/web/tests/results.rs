@@ -645,4 +645,20 @@ async fn a_local_site_put_first_is_opened_from_its_link() {
     let (_, headers, _) = send(app(), "/go?q=brewery+in+denver&d=evil.example").await;
     let location = headers.get("location").unwrap().to_str().unwrap();
     assert!(location.starts_with("/search?"), "{location}");
+    // A brewery's page on a site the results also list is listed under
+    // the brewery's name and opened, not the site's homepage.
+    let query = "brewery+in+denver+westword";
+    let (_, _, page) = send(app(), &format!("/search?q={query}")).await;
+    let row = &page[page
+        .find("<span class=\"u\">www.westword.com/bars/great-divide")
+        .unwrap_or_else(|| panic!("{page}"))..];
+    assert!(
+        row[..row.find("</a>").unwrap()].contains("Great Divide"),
+        "{row}"
+    );
+    let (_, headers, _) = send(app(), &format!("/go?q={query}&d=westword.com")).await;
+    assert_eq!(
+        headers["location"],
+        "https://www.westword.com/bars/great-divide"
+    );
 }
