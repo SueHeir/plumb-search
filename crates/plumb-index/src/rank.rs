@@ -84,7 +84,7 @@ impl Searcher {
             return Ok(Default::default());
         }
 
-        query.add_arabic_spellings(&searcher, &self.fields)?;
+        query.add_marked_spellings(&searcher, &self.fields)?;
         let text_query = query.text_query(&searcher, &self.fields)?;
         let num_candidates = cfg.candidates.max(limit).min(num_docs);
         let mut candidates = searcher.search(
@@ -817,11 +817,8 @@ impl Searcher {
                 // query starts with its name: that is a namesake of one
                 // word (x.com for "derivative of sin x", web.com for "visit
                 // japan web"). delta.com has "flights" for "flights to paris
-                // delta", and target.com is near "coffee maker target". An
-                // address typed from "www" starts with its name too
-                // (netflix.com for "www.netflix").
+                // delta", and target.com is near "coffee maker target".
                 let namesake = evidence[&r.addr].main_words <= 1
-                    && query.words.first().is_none_or(|word| word != "www")
                     && r.query_evidence.as_ref().is_some_and(|e| {
                         e.partial_name_words == 0 && e.semantic_closeness.is_some_and(|c| c <= 0.0)
                     });

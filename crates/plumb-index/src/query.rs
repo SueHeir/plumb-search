@@ -105,8 +105,9 @@ pub(crate) struct ParsedQuery {
     /// [`COMPARISON_WORDS`] entry between two others is left out.
     pub(crate) words: Vec<String>,
     /// Each word in its other number ([`plumb_core::other_number`]), if it
-    /// has one: `videos` -> `video`. A word of Arabic script typed bare
-    /// has the spelling [`ParsedQuery::add_arabic_spellings`] finds instead.
+    /// has one: `videos` -> `video`. A word of Arabic, Greek or Russian
+    /// typed bare has the spelling [`ParsedQuery::add_marked_spellings`]
+    /// finds instead.
     pub(crate) others: Vec<Option<String>>,
     /// The whole query as one joined token: `U.S. Bank` -> `usbank`.
     pub(crate) joined: Option<String>,
@@ -188,24 +189,27 @@ impl ParsedQuery {
         })
     }
 
-    /// Gives a word of Arabic script typed bare, as it often is (`اخبار`,
-    /// `الاهلي`, `مصري`), the spelling most sites have of it one letter
-    /// away (`أخبار`, `مصرى`) as its other form, found the same way, a
-    /// little weaker. A word typed with its hamza or madda keeps to it and
-    /// is ranked as before.
-    pub(crate) fn add_arabic_spellings(
+    /// Gives a word of Arabic, Greek or Russian typed bare, as it often is
+    /// (`اخبار`, `مصري`, `θεσσαλονικη`, `королев`), the spelling most sites
+    /// have of it one letter away (`أخبار`, `مصرى`, `θεσσαλονίκη`,
+    /// `королёв`) as its other form, found the same way, a little weaker.
+    /// A word typed with its marks keeps to them and is ranked as before.
+    pub(crate) fn add_marked_spellings(
         &mut self,
         searcher: &tantivy::Searcher,
         f: &Fields,
     ) -> Result<()> {
         for (word, other) in self.words.iter().zip(&mut self.others) {
-            if other.is_some() || analysis::folded(word).as_deref() != Some(word.as_str()) {
+            let Some(key) = analysis::folded(word) else {
+                continue;
+            };
+            if other.is_some() || !analysis::typed_bare(word) {
                 continue;
             }
             let mut docs: BTreeMap<String, u64> = BTreeMap::new();
             for field in spell::word_fields(f) {
                 for (term, _) in spell::near_terms(searcher, field, word, 1)? {
-                    if analysis::folded(&term).as_deref() == Some(word.as_str()) {
+                    if analysis::folded(&term).as_ref() == Some(&key) {
                         let found = searcher.doc_freq(&Term::from_field_text(field, &term))?;
                         *docs.entry(term).or_default() += found;
                     }
@@ -250,9 +254,10 @@ impl ParsedQuery {
 
     /// The clauses for the `i`th query word: the word in every field, and
     /// its other number in the fields of free text, a little weaker, so
-    /// "videos" finds a site about "video" but names stay exact. An Arabic
-    /// word typed bare is taken the same way: `اخبار` finds `أخبار`, a
-    /// little below what is written `اخبار`.
+    /// "videos" finds a site about "video" but names stay exact. A word
+    /// typed bare is taken the same way: `اخبار` finds `أخبار` and
+    /// `θεσσαλονικη` finds `Θεσσαλονίκη`, a little below what is written as
+    /// typed.
     ///
     /// The other number never counts for more than the word as typed: when
     /// "videos" is common and "video" rare, BM25 would make the rare form
