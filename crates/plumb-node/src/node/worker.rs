@@ -100,6 +100,13 @@ const FIRST_FETCH_CATCH_UP_PER_ROUND: usize = 500;
 /// 60,000 of the Tranco list, or any official site.
 const FIRST_FETCH_MIN_SCORE: f32 = 0.3;
 
+/// Most of the node's local sites ([`super::places::local_sites`]) crawled
+/// in a round, out of the round's budget like the catch-ups above. A
+/// desktop (1,000 homepages every 12 hours) goes through its 5,000 in 25
+/// days, about as often as they come due, and keeps most of its rounds
+/// for the sites the network gives it.
+const LOCAL_SITES_PER_ROUND: usize = 100;
+
 /// Sites without an icon here that a crawl round fetches just the icon of,
 /// most linked first: crawls that came from the network before nodes shared
 /// icons, or through filling, carry none, and those sites would otherwise
@@ -1196,6 +1203,8 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
         store.save(std::slice::from_ref(&change))?;
         set.apply(change);
     }
+    let local = super::places::local_sites(inner);
+    add_local_sites(&mut set, &mut store, &local)?;
 
     let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
     let net = network::handle(inner).cloned();
@@ -1252,6 +1261,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     for record in key_page_catch_up(&set)
         .into_iter()
         .chain(first_fetch_catch_up(&set, now, window))
+        .chain(local_catch_up(&set, &local, now, window))
     {
         if !rechecks
             .iter()
@@ -1493,6 +1503,43 @@ fn first_fetch_catch_up(set: &RoundSites, now: u64, window: u64) -> Vec<&RoundSi
     });
     due.truncate(FIRST_FETCH_CATCH_UP_PER_ROUND);
     due
+}
+
+/// Adds the node's local sites that the records lack, so they are
+/// crawled and kept like any other site.
+fn add_local_sites(set: &mut RoundSites, store: &mut RecordStore, local: &[String]) -> Result<()> {
+    let changes: Vec<Change> = local
+        .iter()
+        .filter(|domain| set.get(domain).is_none())
+        .map(|domain| Change::Merge {
+            record: SiteRecord::new(domain.as_str()),
+        })
+        .collect();
+    if changes.is_empty() {
+        return Ok(());
+    }
+    store.save(&changes)?;
+    info!("added {} local sites to crawl", changes.len());
+    for change in changes {
+        set.apply(change);
+    }
+    Ok(())
+}
+
+/// The node's local sites due for a crawl, nearest first, at most
+/// [`LOCAL_SITES_PER_ROUND`].
+fn local_catch_up<'a>(
+    set: &'a RoundSites,
+    local: &[String],
+    now: u64,
+    window: u64,
+) -> Vec<&'a RoundSite> {
+    local
+        .iter()
+        .filter_map(|domain| set.get(domain))
+        .filter(|record| due_at(*record, window).is_none_or(|due| due <= now))
+        .take(LOCAL_SITES_PER_ROUND)
+        .collect()
 }
 
 /// Whether a site was last read by a crawler older than
@@ -2308,6 +2355,31 @@ mod tests {
                 "official.com"
             ]
         );
+    }
+
+    #[test]
+    fn local_sites_are_added_once_and_crawled_nearest_first_when_due() {
+        const NOW: u64 = 100 * SECONDS_PER_DAY;
+        const WINDOW: u64 = 30 * SECONDS_PER_DAY;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let mut store = RecordStore::open(&path);
+        let mut crawled = SiteRecord::new("crawled.com");
+        crawled.crawled_at = Some(NOW - SECONDS_PER_DAY);
+        let mut set = RoundSites::of([crawled, SiteRecord::new("known.com")]);
+        let local = ["near.com", "crawled.com", "known.com", "far.com"].map(String::from);
+        add_local_sites(&mut set, &mut store, &local).unwrap();
+        add_local_sites(&mut set, &mut store, &local).unwrap();
+        let domains: Vec<&str> = local_catch_up(&set, &local, NOW, WINDOW)
+            .iter()
+            .map(|r| r.domain())
+            .collect();
+        assert_eq!(domains, ["near.com", "known.com", "far.com"]);
+        drop(store);
+        let saved = load_records(&path).unwrap();
+        assert!(saved.get("near.com").is_some() && saved.get("far.com").is_some());
+        assert!(saved.get("known.com").is_none(), "only the sites it lacked");
     }
 
     #[test]
