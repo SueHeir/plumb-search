@@ -983,6 +983,47 @@ fn comparisons_find_the_articles_on_both_sides() {
 }
 
 #[test]
+fn a_page_on_one_use_of_both_sides_does_not_compare_them() {
+    let question = |title: &str, tags: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some(tags.into()),
+            item: Some(item.into()),
+            views: 100_000,
+            ..Article::default()
+        })
+    };
+    let (_dir, s) = searcher(&[
+        page("Solid-state drive", 300_000, &["SSD"]),
+        page("Hard disk drive", 250_000, &["HDD"]),
+        question("Power consumption: SSD vs HDD", "ssd, power", "1"),
+        question("SSD vs HDD for databases", "database, ssd", "2"),
+    ]);
+    let hits = s.search("ssd vs hdd", 5).unwrap();
+    let named: Vec<_> = hits
+        .iter()
+        .filter(|hit| hit.named)
+        .map(|hit| hit.page.title.as_str())
+        .collect();
+    assert_eq!(named, ["Solid-state drive", "Hard disk drive"], "{hits:?}");
+    // A question that asks only the comparison is one.
+    let (_dir, s) = searcher(&[
+        page("Mitosis", 300_000, &[]),
+        page("Meiosis", 250_000, &[]),
+        question(
+            "What is the difference between mitosis and meiosis?",
+            "cell-biology, mitosis",
+            "3",
+        ),
+    ]);
+    let hits = s
+        .search("difference between mitosis and meiosis", 5)
+        .unwrap();
+    assert!(hits[0].page.is_question(), "{hits:?}");
+    assert!(hits.iter().all(|hit| !hit.named), "{hits:?}");
+}
+
+#[test]
 fn one_side_of_a_thing_finds_its_article_unless_one_is_called_so() {
     for (query, name) in [
         ("benefits of meditation", "meditation"),
