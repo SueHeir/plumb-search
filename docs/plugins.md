@@ -139,10 +139,12 @@ Each call runs in a fresh [wasmi](https://github.com/wasmi-labs/wasmi) instance.
 
 A plugin still running after its time is left out of that search. It is not stopped at once: its requests fail once the time is up, and it computes on in the background until it returns or runs out of fuel. A plugin that fails, runs too long or runs out of fuel is left out, and the node's log says why.
 
-**Requests.** A request must be `http` or `https`, to a host and port its `hosts` allows, with the method `GET`, `POST`, `PUT`, `PATCH`, `DELETE` or `HEAD`. Redirects are followed for up to 5 hops, and only to allowed hosts. Requests carry the user agent `PlumbSearch/<version> plugin <folder name> (+https://github.com/SueHeir/plumb-search)`, connect within 3 seconds and end when the call's time does.
+**Requests.** A request must be `http` or `https`, to a host and port its `hosts` allows, with the method `GET`, `POST`, `PUT`, `PATCH`, `DELETE` or `HEAD`. Redirects are followed for up to 5 hops, and only to allowed hosts. Requests carry the user agent `PlumbSearch/<version> plugin <folder name> (+https://github.com/SueHeir/plumb-search)`, connect within 3 seconds and end when the call's time does. They go out directly, not through a system proxy.
+
+Names are looked up through plumb-crawl's resolver ([`Resolver::for_named_hosts`](../crates/plumb-crawl/src/dns.rs)). A name on the web, one under a suffix in the public suffix list such as `api.example.org`, reaches only public addresses, so whoever runs its DNS can't point it at your network. A local name (one label such as `nas` or `localhost`, a suffix the list doesn't know such as `media.lan` or `box.local`, or `home.arpa`) and an address reach what they name: that is how the Zotero plugin reaches `127.0.0.1:23119`. A home name under a real top-level domain, such as `nas.fritz.box`, counts as a name on the web, so list the machine's address or a one-label name instead.
 
 > [!WARNING]
-> Plugin requests do not go through plumb-crawl's resolver, which keeps the node's crawls and other server-side fetches off private and local addresses. For a plugin, `hosts` is the whole rule: that is how the Zotero plugin reaches `127.0.0.1:23119`. A plugin that lists `localhost`, a machine on your network, or a name that resolves to one can reach the services there. Read `hosts` before you install a plugin.
+> A plugin that lists `localhost`, a machine on your network or its address can reach the services there. Read `hosts` before you install a plugin.
 
 **What is shown.** The node checks a plugin's results before showing them ([`clean`](../crates/plumb-node/src/plugins.rs)):
 

@@ -510,6 +510,12 @@ impl Plugin {
                 env!("CARGO_PKG_VERSION")
             ))
             .connect_timeout(Duration::from_secs(3))
+            // A name in `hosts` that is on the web reaches only public
+            // addresses, so a plugin can't point it at the owner's network;
+            // its local names and addresses reach what they name. Through a
+            // proxy, the resolver would see only the proxy's name.
+            .dns_resolver(plumb_crawl::Resolver::for_named_hosts())
+            .no_proxy()
             // Redirects stay on the plugin's own hosts.
             .redirect(reqwest::redirect::Policy::custom(move |attempt| {
                 let ok = attempt.previous().len() < 5 && allowed.allows(attempt.url());

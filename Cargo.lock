@@ -5947,6 +5947,7 @@ dependencies = [
  "html5ever",
  "image",
  "plumb-core",
+ "psl",
  "regex-automata 0.4.18",
  "reqwest",
  "roxmltree",

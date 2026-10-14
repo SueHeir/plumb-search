@@ -251,7 +251,7 @@ Once the backend returns sites and placed pages, the web layer adds what a searc
 | Info box | `info_box` in [web/answers.rs](../crates/plumb-node/src/web/answers.rs) | the article the query is clearly about, or the article of the official site it names |
 | Recent | `recent` in [assembly.rs](../crates/plumb-node/src/assembly.rs) | headlines from the news feeds, at most 5; see [News](news.md) |
 
-The node's denylist also applies to the pages, places, headlines and plugin results, and with safe search on the adult blocklist applies to places and network results too.
+The node's denylist also applies to the pages, places, headlines, network results and plugin results, and with safe search on the adult blocklist applies to places and network results too.
 
 The API, MCP and SearXNG answers lay out the list with `ordered_rows` in [assembly.rs](../crates/plumb-node/src/assembly.rs): each row is a site with the pages placed under it, or a page on its own (`Row::Site`, `Row::Page`). A page placed at site `i` goes just before it, and pages placed past the last site go after. The results page lays out the same lists itself in [web/results.rs](../crates/plumb-node/src/web/results.rs): network results merge with the node's own by score (a site both found shows once, as the node's), places go above the sites, and "Recent" headlines and plugin results go after the first result.
 

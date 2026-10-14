@@ -105,14 +105,22 @@ pub(crate) async fn network_search(
         .map_or_else(RankConfig::default, |node| node.rank());
     // Search operators narrow the ranking below; only words pick buckets.
     let lookup = plumb_core::Operators::parse(query).lookup_text();
-    let found = net.search(&lookup, NETWORK_SEARCH_WAIT).await?;
+    let mut found = net.search(&lookup, NETWORK_SEARCH_WAIT).await?;
     let query = query.to_string();
     let options = options.clone();
     let node = state.node.clone();
     tokio::task::spawn_blocking(move || {
-        // Signed crawls of sites this node holds fill in what its own
-        // records lack, for its next index and search by meaning.
         if let Some(node) = &node {
+            // What the denylist takes off is neither ranked, shown nor kept.
+            found.found.retain_mut(|site| {
+                node.allows_record(&mut site.record)
+                    && site
+                        .shared
+                        .as_mut()
+                        .is_none_or(|shared| node.allows_record(shared))
+            });
+            // Signed crawls of sites this node holds fill in what its own
+            // records lack, for its next index and search by meaning.
             let shared: Vec<SiteRecord> = found
                 .found
                 .iter()
@@ -123,11 +131,18 @@ pub(crate) async fn network_search(
             }
         }
         let mut results = rank_found(found, &query, limit, &rank, &options)?;
-        // Adult sites stay out of network results too.
-        if let (Some(node), true) = (&node, options.safe != SafeSearch::Off) {
-            results
-                .hits
-                .retain(|result| !node.blocks_adult(&result.hit.domain));
+        if let Some(node) = &node {
+            // The index fills in the key pages of a few sites that keep
+            // crawlers out (`key_pages_or_known`), past the check above.
+            for result in &mut results.hits {
+                result.hit.key_pages.retain(|page| !node.denies(&page.url));
+            }
+            // Adult sites stay out of network results too.
+            if options.safe != SafeSearch::Off {
+                results
+                    .hits
+                    .retain(|result| !node.blocks_adult(&result.hit.domain));
+            }
         }
         Ok(results)
     })

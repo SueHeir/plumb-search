@@ -335,6 +335,28 @@ async fn plugins_fetch_from_their_hosts() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn plugins_reach_local_names_their_hosts_list() {
+    use axum::routing::get;
+    let app = axum::Router::new().route(
+        "/search",
+        get(|| async { r#"{"results":[{"title":"From the NAS","url":"https://a.example/1"}]}"# }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    // "localhost" is looked up through plumb-crawl's resolver, which lets
+    // a local name reach the owner's own machines; a name on the web it
+    // keeps to public addresses (tested in plumb_crawl::dns).
+    let request = format!(r#"{{"method":"GET","url":"http://localhost:{port}/search"}}"#);
+    let local = Arc::new(plugin(
+        manifest(&["x"], &[&format!("localhost:{port}")]),
+        &fetching(&request),
+    ));
+    let found = local.try_query("x rust").await.unwrap();
+    assert_eq!(found[0].title, "From the NAS");
+}
+
 #[test]
 fn fetches_are_limited() {
     let runtime = tokio::runtime::Runtime::new().unwrap();

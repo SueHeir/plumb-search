@@ -43,6 +43,7 @@ pub use crawl::{
     page_delay, read_body, redirect_target, same_site, Failure, FeedCheck, FeedOutcome, FeedTarget,
     HomepageCrawler, Robots, Visit,
 };
+pub use dns::Resolver;
 pub use extract::{
     extract_inner_page_meta, extract_page_meta, InnerPageExtraction, DOCS_EXTRACTOR_VERSION,
     MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS, MAX_PAGE_TEXT_WORDS, MAX_SECTIONS, MAX_SECTION_WORDS,
