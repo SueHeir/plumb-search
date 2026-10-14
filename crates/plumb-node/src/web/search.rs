@@ -19,7 +19,7 @@ use super::hit::{block_go_link, render_page};
 use super::home::{bad_search_query, home_or_setup, request_origin, setup_response};
 use super::html::{
     escape_html, html_response, http_url, page, results_form, safe_href, search_link,
-    security_headers,
+    security_headers, settings_link,
 };
 use super::network::network_search;
 use super::params::{error_settings, flag, NetSetting, SearchParams, Settings};
@@ -213,6 +213,9 @@ pub(crate) async fn search_page(
         _ => None,
     };
     let local = run_search_ranked(&state, &query, limit, &settings.options, rank).await;
+    if let (Ok(results), Some(node)) = (&local, &state.node) {
+        node.searched(&query, results);
+    }
     // "Near me", "weather" and "what time is it" go by the town the
     // searcher gave.
     let town = match &visitor {
@@ -436,6 +439,14 @@ pub(crate) async fn search_page(
                         href.to_owned()
                     }
                 };
+                let search = |query: &str| {
+                    let options = SearchOptions {
+                        exact: false,
+                        ..settings.options.clone()
+                    };
+                    let net = settings.network == NetSetting::On;
+                    settings_link("/search", query, &settings, &options, net)
+                };
                 let base_map = state.backend.base_map();
                 let mut html = places::render_places(
                     found,
@@ -446,6 +457,7 @@ pub(crate) async fn search_page(
                     settings.options.country.as_deref(),
                     &icons,
                     &link,
+                    &search,
                 );
                 if let (Some(edit), Some(context), Some(visitor)) = (
                     settings.history.as_ref().and_then(|h| h.edit.as_ref()),
@@ -608,10 +620,15 @@ pub(crate) async fn extras(
             continue;
         }
         // MusicBrainz songs have no Wikidata ID.
-        profile = run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
-            .await
-            .ok()
-            .and_then(|found| answers::songs_profile(query, &resolution, found.pages));
+        for lookup in answers::song_lookups(&name, &resolution) {
+            profile = run_search(state, &lookup, PROFILE_SEARCH_LIMIT, options)
+                .await
+                .ok()
+                .and_then(|found| answers::songs_profile(query, &resolution, found.pages));
+            if profile.is_some() {
+                break;
+            }
+        }
         if profile.is_some() {
             break;
         }
@@ -658,7 +675,7 @@ async fn short_answer(
     // What something is ("what is a manatee"): the first sentence of the
     // article it names, or what the word means ("define anadromous").
     match (answer, answers::definition_asked(query)) {
-        (None, Some(name)) => {
+        (None, Some((name, field))) => {
             let backend = Arc::clone(&state.backend);
             let word = {
                 let name = name.clone();
@@ -674,7 +691,7 @@ async fn short_answer(
                 run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
                     .await
                     .ok()
-                    .and_then(|found| answers::definition_answer(&found.pages))
+                    .and_then(|found| answers::definition_answer(&found.pages, field))
                     .or(word)
             }
         }
@@ -694,9 +711,15 @@ pub(crate) fn route_sources(
     results: &mut SearchResults,
     limit: usize,
 ) {
-    crate::assembly::route_sources(query, answer, country, results, limit, |domain| {
-        state.backend.site(domain)
-    });
+    crate::assembly::route_sources(
+        query,
+        answer,
+        country,
+        results,
+        limit,
+        |domain| state.backend.site(domain),
+        |word| state.backend.common_word(word),
+    );
 }
 
 /// Results asked for when looking up whose profile a query asks for.
@@ -862,7 +885,9 @@ pub(crate) fn search_about(
     if let Some(profile) = &extras.profile {
         return Some(crate::plugins::about_page(&profile.page));
     }
-    if plumb_core::Operators::parse(query).any() {
+    if plumb_core::Operators::parse(query).any_but_phrases()
+        || answers::is_sum(extras.answer.as_ref())
+    {
         return None;
     }
     let placed = place_pages(
@@ -887,9 +912,11 @@ pub(crate) async fn plugin_about(
     options: &SearchOptions,
 ) -> Option<plumb_plugin::About> {
     let about = search_about(query, results, extras);
-    if about
-        .as_ref()
-        .is_some_and(|about| same_title(&about.title, query))
+    // A sum is about nothing, not a song its digits name either.
+    if answers::is_sum(extras.answer.as_ref())
+        || about
+            .as_ref()
+            .is_some_and(|about| same_title(&about.title, query))
     {
         return about;
     }

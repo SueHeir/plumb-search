@@ -51,9 +51,9 @@ struct Limits {
 const LIMITS: Limits = Limits {
     raw_locks: 2,
     direct_writes: 62,
-    bare_spawns: 17,
+    bare_spawns: 15,
     unwraps: 19,
-    long_functions: 30,
+    long_functions: 28,
     long_files: 0,
 };
 

@@ -727,6 +727,75 @@ pub fn first_sentence(lead: &str) -> &str {
     }
 }
 
+/// Fields a question can name after what it asks about ("what is a cell
+/// in biology"), and the words an article on that field's sense has in its
+/// title, description or first sentence: "Cell (biology)", "In
+/// mathematics, a function ...". Not "english", which "what is gato in
+/// english" asks to translate into.
+const FIELDS: &[(&str, &[&str])] = &[
+    ("biology", &["biolog"]),
+    ("chemistry", &["chemi"]),
+    ("physics", &["physic"]),
+    ("math", &["mathemat"]),
+    ("maths", &["mathemat"]),
+    ("mathematics", &["mathemat"]),
+    ("geometry", &["geometr"]),
+    ("algebra", &["algebra"]),
+    ("calculus", &["calculus"]),
+    ("statistics", &["statistic"]),
+    ("programming", &["programming", "computer", "computing"]),
+    ("coding", &["programming", "computer", "computing"]),
+    (
+        "computer science",
+        &["programming", "computer", "computing"],
+    ),
+    ("computing", &["programming", "computer", "computing"]),
+    ("economics", &["econom"]),
+    ("finance", &["financ"]),
+    ("accounting", &["accounting"]),
+    (
+        "grammar",
+        &["grammar", "linguistic", "part of speech", "word class"],
+    ),
+    ("linguistics", &["linguistic"]),
+    ("literature", &["literat", "literary", "fiction"]),
+    ("poetry", &["poetry", "poem", "literary"]),
+    ("music", &["music"]),
+    ("psychology", &["psycholog"]),
+    ("philosophy", &["philosoph"]),
+    ("geography", &["geograph"]),
+    ("medicine", &["medic"]),
+];
+
+/// `text` without a field it ends in, and that field's words ([`FIELDS`]):
+/// "cell" of "cell in biology", "what is a cell" of "what is a cell in
+/// biology". `None` when it ends in none.
+pub fn field_asked(text: &str) -> Option<(&str, &'static [&'static str])> {
+    FIELDS.iter().find_map(|(field, marks)| {
+        let rest = text.strip_suffix(field)?.strip_suffix(" in ")?;
+        (!rest.is_empty()).then_some((rest, *marks))
+    })
+}
+
+/// Whether an article is on a field's sense of its name: whether its
+/// title, description or first sentence of `lead` has one of the field's
+/// `marks` ([`field_asked`]).
+pub fn in_field(
+    marks: &[&str],
+    title: &str,
+    description: Option<&str>,
+    lead: Option<&str>,
+) -> bool {
+    let first = lead.map(first_sentence);
+    [Some(title), description, first]
+        .into_iter()
+        .flatten()
+        .any(|text| {
+            let text = text.to_lowercase();
+            marks.iter().any(|mark| text.contains(mark))
+        })
+}
+
 /// Short words that end in a full stop without ending a sentence.
 const ABBREVIATIONS: &[&str] = &[
     "mr", "mrs", "ms", "dr", "st", "jr", "sr", "mt", "ft", "no", "vs", "inc", "ltd", "co", "corp",
@@ -798,6 +867,30 @@ pub fn read_articles(reader: impl BufRead, limit: usize) -> Result<Vec<Article>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_field_after_a_name_says_which_sense_is_asked() {
+        let rest = |text| field_asked(text).map(|(rest, _)| rest);
+        assert_eq!(rest("cell in biology"), Some("cell"));
+        assert_eq!(
+            rest("what is an array in computer science"),
+            Some("what is an array")
+        );
+        assert_eq!(rest("what is gato in english"), None);
+        assert_eq!(rest("in biology"), None);
+        assert_eq!(rest("molecular biology"), None);
+        let (_, marks) = field_asked("function in math").unwrap();
+        let lead = "In mathematics, a function from a set X to a set Y assigns to each element \
+            of X exactly one element of Y. The set X is called the domain.";
+        assert!(in_field(marks, "Function (mathematics)", None, None));
+        assert!(in_field(marks, "Function", None, Some(lead)));
+        assert!(!in_field(
+            marks,
+            "Function (music)",
+            Some("chord progression"),
+            None
+        ));
+    }
 
     #[test]
     fn paper_extension_keeps_six_columns_and_rejects_invalid_metadata() {

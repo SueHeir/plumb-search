@@ -72,6 +72,9 @@ pub(crate) async fn api_search(
     }
     let options = params.options(&state.settings, &headers);
     let found = run_search(&state, &query, params.limit(), &options).await;
+    if let (Ok(results), Some(node)) = (&found, &state.node) {
+        node.searched(&query, results);
+    }
     match found {
         Ok(mut results) if full => {
             let places = crate::assembly::places(
@@ -117,6 +120,13 @@ pub(crate) async fn api_search(
                     .offers(&query, about.as_ref(), params.run.as_deref());
             let info = match &extras.profile {
                 Some(profile) => answers::info_from_page(&profile.page, &results.hits),
+                // As on the results page: operators other than quotes
+                // change what the query names, and a sum names nothing.
+                None if plumb_core::Operators::parse(&query).any_but_phrases()
+                    || answers::is_sum(extras.answer.as_ref()) =>
+                {
+                    None
+                }
                 None => {
                     let placed = place_pages(
                         &query,

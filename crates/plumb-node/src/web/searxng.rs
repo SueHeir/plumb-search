@@ -36,8 +36,8 @@ use url::Url;
 
 use super::answers::InfoBox;
 use super::{
-    answers, extras, run_search, security_headers, AppState, SearchParams, MAX_LIMIT,
-    MAX_QUERY_CHARS, SETUP_RELOAD_SECONDS,
+    answers, extras, query_text, run_search, security_headers, AppState, SearchParams, MAX_LIMIT,
+    SETUP_RELOAD_SECONDS,
 };
 
 /// Most pages of results asked for.
@@ -242,7 +242,7 @@ async fn collect(
     };
     let info = match &extras.profile {
         Some(profile) => answers::info_from_page(&profile.page, &results.hits),
-        None if operators.any() => None,
+        None if operators.any_but_phrases() || answers::is_sum(extras.answer.as_ref()) => None,
         None => answers::info_box(&results.hits, &placed),
     };
     let mut recent = crate::assembly::recent(
@@ -269,7 +269,7 @@ async fn collect(
         entries.push(Entry {
             url: profile.url.clone(),
             title: format!("{} on {}", profile.of, profile.service),
-            content: "Official profile, from Wikidata".to_string(),
+            content: profile.note(),
             category: "general",
             published: None,
             engine: "plumb".into(),
@@ -502,10 +502,7 @@ pub(super) async fn external(
     if let Some(response) = not_ready(&state) {
         return response;
     }
-    let query = plumb_core::truncate_chars(
-        &plumb_core::collapse_whitespace(&asked.query),
-        MAX_QUERY_CHARS,
-    );
+    let query = query_text(&asked.query);
     if query.is_empty() {
         return reply(StatusCode::OK, json!([]));
     }
