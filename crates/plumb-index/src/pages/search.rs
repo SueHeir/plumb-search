@@ -16,6 +16,7 @@ use super::building::schema;
 use super::page::is_item_id;
 use super::placing::is_year;
 use super::scoring::truncate_keeping_inner_pages;
+use super::sites::base_title;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
     GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET,
@@ -35,6 +36,9 @@ pub(crate) enum Hint {
     /// A person of that name, of whom something is asked: "obama
     /// daughters", "picasso paintings".
     Person,
+    /// A monarch or pope of that name and number: "henry viii" of "henry
+    /// the 8th" ([`regnal_name`]).
+    Regnal,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
     /// Only pages the name names: what a fact question asks about, or the
@@ -453,8 +457,10 @@ impl PageSearcher {
     /// ([`PageSearcher::knows_word`]) put back as typed; `None` when no
     /// change is left. The sites index hardly knows "pkce", "dplyr" or
     /// "stain", so it suggests "pace", "plyr" and "spain"; pages name them.
-    /// A correction to a site's name ([`crate::Spelling::site`]) is kept:
-    /// "wels fargo" is a typo even though Wels is a town.
+    /// A word the pages know only as a misspelling of the word suggested
+    /// ([`PageSearcher::misspells`]) is not put back. A correction to a
+    /// site's name ([`crate::Spelling::site`]) is kept: "wels fargo" is a
+    /// typo even though Wels is a town.
     pub fn check_spelling(
         &self,
         query: &str,
@@ -471,7 +477,7 @@ impl PageSearcher {
             .collect();
         if typed.len() == fixed.len() {
             for (word, fix) in typed.iter().zip(fixed.iter_mut()) {
-                if word != fix && self.knows_word(word)? {
+                if word != fix && self.knows_word(word)? && !self.misspells(word, fix)? {
                     fix.clone_from(word);
                 }
             }
@@ -491,6 +497,79 @@ impl PageSearcher {
             query: fixed.join(" "),
             ..spelling
         }))
+    }
+
+    /// Whether `word` is a misspelling of `fix` that Wikipedia keeps as a
+    /// redirect: the most read article with the word among its names is
+    /// titled with `fix` and not with the word. "mississipi" is in the
+    /// names of ten pages, but only as a redirect to Mississippi and the
+    /// like; "stain" is the title of Stain, not a misspelling of "spain".
+    fn misspells(&self, word: &str, fix: &str) -> Result<bool> {
+        let searcher = self.reader.searcher();
+        let named = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.fields.words, word),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ),
+            (Occur::Must, self.scope_term("set:wikipedia-en")),
+        ]);
+        let top =
+            TopDocs::with_limit(1).order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        let Some((_, address)) = searcher.search(&named, &top)?.pop() else {
+            return Ok(false);
+        };
+        let document: TantivyDocument = searcher.doc(address)?;
+        let Some(stored) = document
+            .get_first(self.fields.page)
+            .and_then(|v| v.as_str())
+        else {
+            return Ok(false);
+        };
+        let page: Page = serde_json::from_str(stored)?;
+        let title = analysis::tokens(&self.words, &page.title);
+        Ok(title.iter().any(|t| t == fix) && !title.iter().any(|t| t == word))
+    }
+
+    /// Whether the pages `found` for `query` say it is spelled as meant, so
+    /// that no other spelling is suggested: one is a package, holds all of
+    /// a question's main words ("git undo last commit" is not "git und") or
+    /// is named by it ("serde crate" is not "serde create"). A page does
+    /// not count when `fix`, the spelling suggested, names it before the
+    /// query does, by its title or by another name read more (the most
+    /// read come first): Wikipedia keeps the misspellings people type as
+    /// redirects, so "einstien" names Albert Einstein, but after
+    /// "Einstein".
+    pub fn spelled_right(
+        &self,
+        query: &str,
+        found: &[PageHit],
+        fix: Option<&crate::Spelling>,
+    ) -> bool {
+        let key = |text: &str| {
+            analysis::tokens(&self.joined, text)
+                .pop()
+                .unwrap_or_default()
+        };
+        let typed = key(query);
+        let fixed = fix
+            .map(|fix| key(&fix.query))
+            .filter(|fixed| *fixed != typed);
+        let misnamed = |page: &Page| {
+            fixed.as_ref().is_some_and(|fixed| {
+                [page.title.as_str(), base_title(&page.title)]
+                    .into_iter()
+                    .chain(page.aliases.iter().map(String::as_str))
+                    .map(key)
+                    .find(|name| *name == typed || name == fixed)
+                    .is_some_and(|name| name == *fixed)
+            })
+        };
+        found
+            .iter()
+            .any(|hit| hit.page.package.is_some() || hit.whole || hit.named && !misnamed(&hit.page))
     }
 
     /// A suggested spelling of `query` from the words of the pages' names,
@@ -697,16 +776,24 @@ impl PageSearcher {
         // but not when the query is itself a name ("age of empires"). So is
         // the list a search for one asks for: "popes in order" finds Pope
         // John numbering and not List of popes, which "list of popes"
-        // names.
-        let hinted = hinted_name(query).or_else(|| {
-            list_asked(query)
-                .or_else(|| {
-                    plumb_core::facts::fact_asked(query)
-                        .filter(|_| !hits.iter().any(|hit| hit.named))
-                        .map(|asked| asked.subject)
-                })
-                .map(|name| (name, Hint::Named))
-        });
+        // names. A monarch or pope typed with a number is searched in Roman
+        // numerals when no article is named as typed: "charles 3", "henry
+        // the 8th".
+        let hinted = hinted_name(query)
+            .or_else(|| {
+                list_asked(query)
+                    .or_else(|| {
+                        plumb_core::facts::fact_asked(query)
+                            .filter(|_| !hits.iter().any(|hit| hit.named))
+                            .map(|asked| asked.subject)
+                    })
+                    .map(|name| (name, Hint::Named))
+            })
+            .or_else(|| {
+                regnal_name(query)
+                    .filter(|_| !hits.iter().any(|hit| hit.named && hit.page.is_article()))
+                    .map(|name| (name, Hint::Regnal))
+            });
         // An event's article has its year first or last ("2025 Tour de
         // France", "Eurovision Song Contest 2025"), so a name with a year
         // at one end is searched with it at the other too.
@@ -744,6 +831,8 @@ impl PageSearcher {
                 let called = hits.iter().any(|hit| hit.named);
                 found.retain(|hit| !called && hit.named && hit.page.is_person());
             }
+            // Only a person: "henry v" also names Shakespeare's play.
+            Hint::Regnal => found.retain(|hit| hit.named && hit.page.is_person()),
             Hint::Named => found.retain(|hit| hit.named),
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             // Only a repository called so: "reverse repo" is finance.
@@ -822,7 +911,9 @@ impl PageSearcher {
 
     /// The Wiktionary word `name` is ([`WIKTIONARY_SET`]), written as it
     /// is or with other capitals ("anadromous", "AWOL"): the best-known
-    /// such word, the one written alike first.
+    /// such word, or the one written alike when `name` has capitals. In
+    /// lower case it says nothing of them: "aka" asks for AKA, not the
+    /// little-known vine aka.
     pub fn definition(&self, name: &str) -> Result<Option<Page>> {
         let Some(joined) = analysis::tokens(&self.joined, name).pop() else {
             return Ok(None);
@@ -848,7 +939,7 @@ impl PageSearcher {
             if page.set != WIKTIONARY_SET || !page.title.eq_ignore_ascii_case(&wanted) {
                 continue;
             }
-            if page.title == wanted {
+            if page.title == wanted && wanted.chars().any(char::is_uppercase) {
                 return Ok(Some(page));
             }
             best.get_or_insert(page);
@@ -1003,6 +1094,56 @@ pub(crate) fn last_word_in_other_number(query: &str) -> Option<String> {
         Some(head) => format!("{head} {other}"),
         None => other,
     })
+}
+
+/// Ordinals a monarch's number is written as after "the": "henry the
+/// eighth".
+const ORDINALS: &str = "first second third fourth fifth sixth seventh eighth ninth tenth \
+    eleventh twelfth thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth \
+    twentieth";
+
+/// `query` with the number it ends with, in digits or an ordinal, in
+/// Roman numerals, as Wikipedia titles monarchs and popes: "henry viii"
+/// for "henry 8", "henry 8th", "henry the 8th" and "henry the eighth".
+/// `None` when it ends with no number from 1 to 39 after a name of
+/// letters.
+pub(crate) fn regnal_name(query: &str) -> Option<String> {
+    let lower = query.to_lowercase();
+    let mut words: Vec<&str> = lower.split_whitespace().collect();
+    let last = words.pop()?;
+    let digits = ["st", "nd", "rd", "th"]
+        .iter()
+        .find_map(|suffix| last.strip_suffix(suffix))
+        .unwrap_or(last);
+    let mut number = match digits.parse::<usize>() {
+        Ok(number) => number,
+        Err(_) if words.last() == Some(&"the") => {
+            ORDINALS
+                .split_whitespace()
+                .position(|ordinal| ordinal == last)?
+                + 1
+        }
+        Err(_) => return None,
+    };
+    if words.last() == Some(&"the") {
+        words.pop();
+    }
+    if !(1..40).contains(&number)
+        || words.is_empty()
+        || !words
+            .iter()
+            .all(|word| word.chars().all(char::is_alphabetic))
+    {
+        return None;
+    }
+    let mut roman = String::new();
+    for (value, numeral) in [(10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")] {
+        while number >= value {
+            roman.push_str(numeral);
+            number -= value;
+        }
+    }
+    Some(format!("{} {roman}", words.join(" ")))
 }
 
 /// The text match ([`crate::Hit::text_score`]) below which a site the

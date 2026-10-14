@@ -115,9 +115,7 @@ impl FrozenBackend {
         pages.add_named_site_page(query, &results.hits, &mut found)?;
         found.retain(|hit| options_allow(options, &hit.page));
         pages.note_demand(&mut results.hits)?;
-        let spelled_right = found
-            .iter()
-            .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+        let spelled_right = pages.spelled_right(query, &found, results.spelling.as_ref());
         if spelled_right && applied.is_none() {
             results.spelling = None;
         }
