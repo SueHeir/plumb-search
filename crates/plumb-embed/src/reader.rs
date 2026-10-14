@@ -155,29 +155,29 @@ impl Reader {
     }
 }
 
-/// Writes a tiny BERT reader with random weights into `dir`, laid out as
-/// Plumb's reader is, for tests.
-pub fn write_test_reader(dir: &Path) -> Result<()> {
-    let (config, tokenizer) = crate::tiny_config_and_tokenizer();
-    std::fs::write(dir.join("config.json"), &config)?;
-    std::fs::write(dir.join("tokenizer.json"), tokenizer)?;
-    let config: bert::Config = serde_json::from_str(&config)?;
-    let weights = candle_nn::VarMap::new();
-    let vb = VarBuilder::from_varmap(&weights, DType::F32, &Device::Cpu);
-    bert::BertModel::load(vb.pp("bert"), &config)?;
-    linear(
-        config.hidden_size,
-        config.hidden_size,
-        vb.pp("bert.pooler.dense"),
-    )?;
-    linear(config.hidden_size, 1, vb.pp("classifier"))?;
-    weights.save(dir.join("model.safetensors"))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writes a tiny BERT reader with random weights into `dir`, laid out as
+    /// Plumb's reader is, for tests.
+    fn write_test_reader(dir: &Path) -> Result<()> {
+        let (config, tokenizer) = crate::tiny_config_and_tokenizer();
+        std::fs::write(dir.join("config.json"), &config)?;
+        std::fs::write(dir.join("tokenizer.json"), tokenizer)?;
+        let config: bert::Config = serde_json::from_str(&config)?;
+        let weights = candle_nn::VarMap::new();
+        let vb = VarBuilder::from_varmap(&weights, DType::F32, &Device::Cpu);
+        bert::BertModel::load(vb.pp("bert"), &config)?;
+        linear(
+            config.hidden_size,
+            config.hidden_size,
+            vb.pp("bert.pooler.dense"),
+        )?;
+        linear(config.hidden_size, 1, vb.pp("classifier"))?;
+        weights.save(dir.join("model.safetensors"))?;
+        Ok(())
+    }
 
     #[test]
     fn scores_each_text_as_it_would_alone() {
