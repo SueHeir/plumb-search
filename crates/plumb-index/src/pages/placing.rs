@@ -426,7 +426,7 @@ fn is_tag_archive(url: &str) -> bool {
 }
 
 /// Whether `word` is a year: four digits from 1000 to 2999.
-fn is_year(word: &str) -> bool {
+pub(crate) fn is_year(word: &str) -> bool {
     word.len() == 4
         && word.bytes().all(|b| b.is_ascii_digit())
         && matches!(word.as_bytes()[0], b'1' | b'2')
