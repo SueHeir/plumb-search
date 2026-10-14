@@ -188,9 +188,9 @@ pub(crate) const LANGUAGE_CHOICES: &[(&str, &str)] = &[
     ("zh", "中文"),
 ];
 
-pub(crate) fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
-    let options = &settings.options;
-    let current = Some(settings.country_mode.as_str());
+/// The country `<select>` options, with the selected one marked and a
+/// code the node was given that the list lacks added as its own.
+fn country_options(current: Option<&str>) -> String {
     let mut choices =
         format!(
         "<option value=\"auto\"{}>Automatic</option><option value=\"any\"{}>Any country</option>",
@@ -218,6 +218,13 @@ pub(crate) fn settings_form(query: &str, autofocus: bool, settings: &Settings) -
             "<option value=\"{code}\"{selected}>{name}</option>"
         );
     }
+    choices
+}
+
+pub(crate) fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
+    let options = &settings.options;
+    let current = Some(settings.country_mode.as_str());
+    let choices = country_options(current);
     let safe_choices: String = [
         (SafeSearch::Off, "Off"),
         (SafeSearch::Moderate, "Moderate"),

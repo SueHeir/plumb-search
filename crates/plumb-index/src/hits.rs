@@ -338,6 +338,14 @@ pub fn suggested_site_second(hits: &mut Vec<Hit>, site: &str) {
     hits.insert(1, hit);
 }
 
+/// Whether the title names the brand anywhere in it, as "StubHub UK" and
+/// "Buy and sell tickets | StubHub" do; a hit with no title does.
+fn names_brand(hit: &Hit, label: &str) -> bool {
+    hit.title
+        .as_deref()
+        .is_none_or(|title| normalize_text(title).replace(' ', "").contains(label))
+}
+
 /// `hits` without the copies of a site listed with them:
 ///
 /// - One site per brand: airbnb.fr, airbnb.co.uk and airbnb.tech next to
@@ -379,13 +387,6 @@ pub(crate) fn without_copies(
     home: Option<&str>,
     asked: &[&str],
 ) -> Vec<Hit> {
-    // The title names the brand anywhere in it: "StubHub UK", "Buy and
-    // sell tickets | StubHub".
-    let names_brand = |hit: &Hit, label: &str| {
-        hit.title
-            .as_deref()
-            .is_none_or(|title| normalize_text(title).replace(' ', "").contains(label))
-    };
     // Endings used as generic ones (.io, .me, .co) are not countries', but
     // the same ending under a country's own (.com.co, Colombia's; .com.ai)
     // still is.
