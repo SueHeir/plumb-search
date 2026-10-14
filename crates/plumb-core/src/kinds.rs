@@ -85,7 +85,7 @@ pub fn other_number(word: &str) -> Option<String> {
 /// `banks` -> `bank`, `companies` -> `company`, `churches` -> `church`,
 /// `glasses` -> `glass`. Words ending in `ss`, `us` or `is`, and short
 /// words, stay as they are.
-fn singular(word: &str) -> String {
+pub fn singular(word: &str) -> String {
     let len = word.len();
     if len <= 3 || !word.is_ascii() {
         return word.to_string();

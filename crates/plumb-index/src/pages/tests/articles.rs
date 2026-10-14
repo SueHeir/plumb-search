@@ -66,6 +66,222 @@ fn words_that_say_what_is_wanted_keep_the_name() {
 }
 
 #[test]
+fn repository_words_find_the_repository() {
+    let mut tokio = Page::from_repo(Article {
+        title: "tokio-rs/tokio".into(),
+        aliases: vec!["tokio".into()],
+        views: 30_000,
+        ..Article::default()
+    });
+    tokio.site = Some("tokio.rs".into());
+    let reverse = Page::from_repo(Article {
+        title: "someone/reverse-proxy".into(),
+        views: 30_000,
+        ..Article::default()
+    });
+    let (_dir, s) = searcher(&[
+        tokio,
+        reverse,
+        page("Tokio Hotel", 200_000, &[]),
+        page("Repurchase agreement", 90_000, &["Reverse repo"]),
+    ]);
+    let sites = [site("github.com", false), site("tokio.rs", false)];
+    for query in [
+        "tokio github",
+        "tokio repo",
+        "tokio github repo",
+        "Tokio repository",
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(hits[0].page.title, "tokio-rs/tokio", "{query}");
+        assert!(hits[0].named, "{query}");
+        let placed = place_pages(query, &sites, hits.clone());
+        assert!(
+            placed.iter().any(|p| p.hit.page.title == "tokio-rs/tokio"),
+            "{query}"
+        );
+        // Without its site, it comes right after github.com.
+        let placed = place_pages(query, &[site("github.com", true)], hits);
+        assert_eq!(placed[0].at, 1, "{query}");
+    }
+    assert_eq!(
+        hinted_name("tokio github"),
+        Some(("tokio".into(), Hint::Repo))
+    );
+    assert_eq!(hinted_name("github"), None);
+    // A repository named only in part is not taken for the one asked for.
+    let hits = s.search("reverse repo", 5).unwrap();
+    assert_eq!(titles(&hits), ["Repurchase agreement"]);
+}
+
+#[test]
+fn a_search_for_a_list_finds_the_list_article() {
+    let (_dir, s) = searcher(&[
+        page("List of popes", 90_000, &[]),
+        page("Pope John numbering", 5_000, &[]),
+        page("Order of St. Sylvester", 2_000, &[]),
+        page(
+            "List of presidents of the United States",
+            300_000,
+            &["List of US presidents"],
+        ),
+        page("Linked list", 80_000, &[]),
+    ]);
+    for (query, list) in [
+        ("popes in order", "List of popes"),
+        ("list of popes in order", "List of popes"),
+        (
+            "us presidents list",
+            "List of presidents of the United States",
+        ),
+        (
+            "US presidents list in order",
+            "List of presidents of the United States",
+        ),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(hits[0].page.title, list, "{query}");
+        assert!(hits[0].named, "{query}");
+    }
+    // Nothing is called "list of linked".
+    assert_eq!(
+        titles(&s.search("linked list", 5).unwrap()),
+        ["Linked list"]
+    );
+}
+
+#[test]
+fn fact_questions_find_the_article_they_ask_about() {
+    let described = |title: &str, views: u64, description: &str| {
+        let mut page = page(title, views, &[]);
+        page.description = Some(description.into());
+        page
+    };
+    let (_dir, s) = searcher(&[
+        page("Isaac Newton", 400_000, &[]),
+        described(
+            "Hannah Ayscough",
+            3_000,
+            "Mother of Sir Isaac Newton (1616–1679)",
+        ),
+        described(
+            "Nate Newton (American football)",
+            5_000,
+            "American football player (born 1961)",
+        ),
+        page("Mont Blanc", 60_000, &[]),
+        described("SS Mont-Blanc", 8_000, "French cargo ship"),
+        page("Age of Empires", 80_000, &[]),
+        page("Empires (film)", 2_000, &[]),
+        described("Madrid", 90_000, "Capital and largest city of Spain"),
+        described("Real Madrid CF", 300_000, "Spanish football club"),
+        described("Atlético Madrid", 120_000, "Spanish football club"),
+        described("Rome", 90_000, "Capital city of Italy"),
+        described("S.S. Lazio", 300_000, "Italian football club in Rome"),
+    ]);
+    let first = |q: &str| {
+        let hits = s.search(q, 5).unwrap();
+        hits.first().map(|h| (h.page.title.clone(), h.named))
+    };
+    assert_eq!(
+        first("when was isaac newton born"),
+        Some(("Isaac Newton".into(), true))
+    );
+    assert_eq!(
+        first("how high is mont blanc"),
+        Some(("Mont Blanc".into(), true))
+    );
+    // Only what the subject names is added: "madrid spanish" names
+    // nothing, and the clubs it describes are no answer.
+    assert_eq!(
+        first("madrid spanish capital city"),
+        Some(("Madrid".into(), false))
+    );
+    assert_eq!(
+        first("rome italian capital city"),
+        Some(("Rome".into(), false))
+    );
+    // A query that names something is not a question about its last words.
+    let hits = s.search("age of empires", 5).unwrap();
+    assert_eq!(hits[0].page.title, "Age of Empires");
+    assert!(!hits
+        .iter()
+        .any(|h| h.page.title == "Empires (film)" && h.named));
+}
+
+#[test]
+fn an_event_is_named_whichever_end_its_year_is_on_and_asked_who_won() {
+    let (_dir, s) = searcher(&[
+        page("Tour de France", 200_000, &[]),
+        page("2025 Tour de France", 40_000, &[]),
+        page("2026 Tour de France", 30_000, &[]),
+        page("Eurovision Song Contest 2025", 60_000, &[]),
+        page("2025 World Series", 50_000, &[]),
+        page("World Series", 80_000, &[]),
+    ]);
+    let first = |q: &str| {
+        let hits = s.search(q, 5).unwrap();
+        hits.first().map(|h| (h.page.title.clone(), h.named))
+    };
+    for query in ["tour de france 2025", "2025 tour de france"] {
+        assert_eq!(
+            first(query),
+            Some(("2025 Tour de France".into(), true)),
+            "{query}"
+        );
+    }
+    assert_eq!(
+        first("2025 eurovision song contest"),
+        Some(("Eurovision Song Contest 2025".into(), true))
+    );
+    for query in ["who won the 2025 world series", "world series 2025 winner"] {
+        assert_eq!(
+            first(query),
+            Some(("2025 World Series".into(), true)),
+            "{query}"
+        );
+    }
+    assert_eq!(
+        year_moved("tour de france 2025").as_deref(),
+        Some("2025 tour de france")
+    );
+    assert_eq!(year_moved("1984"), None);
+    assert_eq!(year_moved("route 66"), None);
+}
+
+#[test]
+fn an_article_is_found_by_its_alias_past_popular_site_pages_with_the_word() {
+    // Site pages are as popular as their sites, more than all but the most
+    // read articles: hundreds with "NFL" in their titles filled the
+    // candidates, and the article named by "nfl" was never seen.
+    let mut pages = vec![
+        page("United States", 5_000_000, &[]),
+        page("National Football League", 51_000, &["Nfl", "The NFL"]),
+        page("NFL+", 363, &[]),
+    ];
+    pages.extend((0..CANDIDATES + 50).map(|i| {
+        Page::from_set(
+            SUBPAGES_SET,
+            Article {
+                title: format!("NFL Scores Week {i}"),
+                item: Some(format!("https://sports{i}.example/nfl/scores")),
+                views: 5_000,
+                ..Article::default()
+            },
+        )
+        .unwrap()
+    }));
+    let (_dir, s) = searcher(&pages);
+    let hits = s.search("nfl", 5).unwrap();
+    assert_eq!(
+        hits.first().map(|h| (h.page.title.as_str(), h.named)),
+        Some(("National Football League", true)),
+        "{:?}",
+        titles(&hits)
+    );
+}
+
+#[test]
 fn articles_whose_title_is_part_of_the_query_are_found() {
     let (_dir, s) = searcher(&[
         page("Titanic", 400_000, &["RMS Titanic"]),
@@ -217,6 +433,25 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("how big is texas", "texas"),
         ("where is machu picchu", "machu picchu"),
         ("how many people live in tokyo", "tokyo"),
+        ("how metabolism works", "metabolism"),
+        ("how the stock market works", "stock market"),
+        ("how vaccines work", "vaccines"),
+        ("where does photosynthesis take place", "photosynthesis"),
+        ("where does meiosis occur", "meiosis"),
+        ("where do babies come from", "babies"),
+        ("where is taylor swift from", "taylor swift"),
+        ("where are the beatles from", "beatles"),
+        ("is coffee bad for you", "coffee"),
+        ("is intermittent fasting healthy", "intermittent fasting"),
+        ("are eggs good for you", "eggs"),
+        ("does creatine work", "creatine"),
+        ("do charcoal masks really work", "charcoal masks"),
+        ("what does the liver do", "liver"),
+        ("what does a pharmacist do", "pharmacist"),
+        ("what do bees do", "bees"),
+        ("who invented the telephone", "telephone"),
+        ("who discovered penicillin", "penicillin"),
+        ("when was the printing press invented", "printing press"),
     ] {
         assert_eq!(
             hinted_name(query),
@@ -229,6 +464,24 @@ fn articles_are_found_by_what_they_say_of_themselves() {
     assert_eq!(hinted_name("how long is it"), None);
     assert_eq!(hinted_name("how long does it take to boil an egg"), None);
     assert_eq!(hinted_name("how do i make pancakes"), None);
+    // A pronoun or a clause between the words is not a name.
+    for query in [
+        "how it works",
+        "does it work",
+        "is it safe",
+        "is this website safe",
+        "do you work",
+        "how do i make it work",
+        "how to make money work",
+        "how many hours do nurses work",
+        "is the new bridge over the river safe",
+        "who invented it",
+        "when was it invented",
+        "what do you do",
+        "what do i do",
+    ] {
+        assert_eq!(hinted_name(query), None, "{query:?}");
+    }
 }
 
 #[test]
@@ -297,6 +550,65 @@ fn articles_are_found_by_their_leads() {
 }
 
 #[test]
+fn a_word_said_only_in_another_form_with_its_stem_is_another_word() {
+    let led = |title: &str, views: u64, description: &str, lead: &str| {
+        let mut page = page(title, views, &[]);
+        page.description = Some(description.into());
+        page.lead = Some(lead.into());
+        page
+    };
+    let (_dir, s) = searcher(&[
+        led(
+            "Thomas Cook Airlines",
+            760,
+            "Charter and scheduled airline of the United Kingdom (2003-2019)",
+            "Thomas Cook Airlines Ltd. was a British charter and scheduled airline \
+             headquartered in Manchester, England.",
+        ),
+        led(
+            "Robin Hood's Stone",
+            300,
+            "Scheduled monument in Liverpool",
+            "Robin Hood's Stone is a standing stone in Liverpool, England.",
+        ),
+        led(
+            "2027 Rugby World Cup",
+            9_000,
+            "Eleventh edition of the Rugby World Cup",
+            "The 2027 Rugby World Cup is scheduled to be the eleventh Rugby World Cup.",
+        ),
+        led(
+            "Fixture list",
+            2_000,
+            "List of the matches a league plays",
+            "A fixture list gives the schedules of the Premier League's clubs.",
+        ),
+    ]);
+    // "scheduled" has the stem of "schedule" but is another word, in a
+    // lead, a description, or beside a name with the query's words.
+    for query in [
+        "manchester united schedule",
+        "liverpool schedule",
+        "world cup schedule",
+    ] {
+        assert_eq!(
+            titles(&s.search(query, 5).unwrap()),
+            Vec::<&str>::new(),
+            "{query}"
+        );
+    }
+    // The word itself is said in the singular or the plural.
+    assert_eq!(
+        titles(&s.search("premier league schedule", 5).unwrap()),
+        ["Fixture list"]
+    );
+    assert_eq!(
+        titles(&s.search("rugby world cup scheduled", 5).unwrap()),
+        ["2027 Rugby World Cup"]
+    );
+}
+
+#[test]
 fn words_are_only_looked_up() {
     let word = |title: &str, description: &str, views: u64| {
         Page::from_word(Article {
@@ -311,6 +623,12 @@ fn words_are_only_looked_up() {
         word("free", "(adjective) Unconstrained.", 900),
         word("Free", "(noun) A surname.", 5),
         word("AWOL", "(adjective) Absent without leave.", 50),
+        word(
+            "aka",
+            "(noun) The New Zealand vine Metrosideros fulgens.",
+            1,
+        ),
+        word("AKA", "(preposition) Initialism of also known as.", 12),
     ]);
     // Never a result.
     assert_eq!(titles(&s.search("free", 5).unwrap()), ["Free (album)"]);
@@ -321,5 +639,127 @@ fn words_are_only_looked_up() {
     );
     assert_eq!(free.url, "https://en.wiktionary.org/wiki/free");
     assert_eq!(s.definition("awol").unwrap().unwrap().title, "AWOL");
+    // Lower case says nothing of capitals: the best-known form.
+    assert_eq!(s.definition("aka").unwrap().unwrap().title, "AKA");
+    assert_eq!(s.definition("Free").unwrap().unwrap().title, "Free");
     assert_eq!(s.definition("freedom").unwrap(), None);
+}
+
+#[test]
+fn what_is_asked_about_a_person_finds_their_article() {
+    let (_dir, s) = searcher(&[
+        person("Barack Obama", 900_000, &["Obama"]),
+        person("Pablo Picasso", 400_000, &["Picasso"]),
+        page("Picasso (crater)", 9_000, &[]),
+        person("Steve Jobs", 700_000, &[]),
+        person("Black (singer)", 20_000, &[]),
+        page("Black Death", 300_000, &[]),
+        page("Christmas", 500_000, &[]),
+    ]);
+    let named = |q: &str| named_titles(&s, q);
+    assert_eq!(named("obama daughters"), ["Barack Obama"]);
+    assert_eq!(named("picasso paintings"), ["Pablo Picasso"]);
+    assert_eq!(named("steve jobs cause of death"), ["Steve Jobs"]);
+    // Only a person, and not when a page is called the whole query.
+    assert_eq!(named("black death"), ["Black Death"]);
+    assert!(named("christmas songs").is_empty());
+    assert_eq!(
+        hinted_name("Lebron James kids"),
+        Some(("lebron james".into(), Hint::Person))
+    );
+}
+
+#[test]
+fn comparisons_find_the_articles_on_both_sides() {
+    for (query, a, b) in [
+        ("mitosis vs meiosis", "mitosis", "meiosis"),
+        ("Virus vs. bacteria?", "virus", "bacteria"),
+        (
+            "physical therapy versus occupational therapy",
+            "physical therapy",
+            "occupational therapy",
+        ),
+        (
+            "what is the difference between a crocodile and an alligator",
+            "crocodile",
+            "alligator",
+        ),
+        (
+            "difference between weather and climate",
+            "weather",
+            "climate",
+        ),
+    ] {
+        assert_eq!(compared(query), Some([a.into(), b.into()]), "{query:?}");
+    }
+    for query in [
+        "mitosis",
+        "vs code",
+        "batman v superman",
+        "how to choose a roth ira vs a traditional ira",
+        "difference between",
+    ] {
+        assert_eq!(compared(query), None, "{query:?}");
+    }
+    let (_dir, s) = searcher(&[
+        page("Mitosis", 300_000, &[]),
+        page("Meiosis", 250_000, &[]),
+        page("Mitosis (blockchain)", 1_000, &[]),
+        page("Cell cycle", 200_000, &[]),
+    ]);
+    let hits = s.search("mitosis vs meiosis", 5).unwrap();
+    let named: Vec<_> = hits
+        .iter()
+        .filter(|hit| hit.named)
+        .map(|hit| hit.page.title.as_str())
+        .collect();
+    assert_eq!(named[..2], ["Mitosis", "Meiosis"], "{hits:?}");
+    // A page that compares them already is what is asked for.
+    let (_dir, s) = searcher(&[
+        page("Crocodile", 300_000, &[]),
+        page("Alligator", 250_000, &[]),
+        page("Crocodiles vs. Alligators", 50_000, &[]),
+    ]);
+    let hits = s.search("crocodile vs alligator", 5).unwrap();
+    assert_eq!(hits[0].page.title, "Crocodiles vs. Alligators", "{hits:?}");
+    assert!(hits.iter().all(|hit| !hit.named), "{hits:?}");
+}
+
+#[test]
+fn a_monarch_typed_with_a_number_is_named() {
+    let mut book = page("Henry the Eighth", 3, &[]);
+    book.set = BOOKS_SET.into();
+    let (_dir, s) = searcher(&[
+        person("Henry VIII", 85_702, &["Henry 8"]),
+        page("Henry VIII (play)", 1_900, &[]),
+        person("Henry Percy, 8th Earl of Northumberland", 300, &[]),
+        book,
+        person("Louis XIV", 39_618, &[]),
+        person("Charles III", 120_000, &["King Charles III"]),
+        person("Pope Benedict XVI", 30_000, &[]),
+        page("Queen Elizabeth 2", 6_000, &["QE2"]),
+        person("Elizabeth II", 200_000, &["Queen Elizabeth II"]),
+        page("Epistle of James", 2_302, &["James 1"]),
+        page("Windows 11", 50_000, &[]),
+    ]);
+    let named = |q: &str| named_titles(&s, q);
+    for q in ["henry 8th", "henry the 8th", "henry the eighth", "henry 8"] {
+        assert_eq!(named(q)[0], "Henry VIII", "{q}");
+    }
+    assert_eq!(named("louis the 14th"), ["Louis XIV"]);
+    assert_eq!(named("charles 3"), ["Charles III"]);
+    assert_eq!(named("king charles 3"), ["Charles III"]);
+    assert_eq!(named("pope benedict 16"), ["Pope Benedict XVI"]);
+    assert_eq!(named("elizabeth the 2nd"), ["Elizabeth II"]);
+    // Not when an article is called the query as typed.
+    assert_eq!(named("queen elizabeth 2"), ["Queen Elizabeth 2"]);
+    assert_eq!(named("james 1"), ["Epistle of James"]);
+    assert_eq!(
+        regnal_name("Louis the Fourteenth"),
+        Some("louis xiv".into())
+    );
+    assert_eq!(regnal_name("pope pius 12"), Some("pope pius xii".into()));
+    assert_eq!(regnal_name("windows 11 pro"), None);
+    assert_eq!(regnal_name("the 8th"), None);
+    assert_eq!(regnal_name("covid-19"), None);
 }

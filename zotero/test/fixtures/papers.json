@@ -1,0 +1,51 @@
+{
+ "coverage": {
+  "earliest_day": null,
+  "latest_day": null,
+  "publication_day": 0,
+  "publication_year": 0,
+  "total": 199982
+ },
+ "kind": "paper",
+ "message": null,
+ "pages": [
+  {
+   "named": false,
+   "page": {
+    "description": "Paper by Zihang Dai et al., 2019, Annual Meeting of the Association for Computational Linguistics (ACL)",
+    "set": "papers",
+    "title": "Transformer-XL: Attentive Language Models beyond a Fixed-Length Context",
+    "url": "https://doi.org/10.18653/v1/p19-1285",
+    "views": 3233
+   },
+   "popularity": 0.6311789751052856,
+   "score": 0.4893537163734436
+  },
+  {
+   "named": false,
+   "page": {
+    "description": "Paper by Yanrong Ji et al., 2021, Bioinformatics",
+    "set": "papers",
+    "title": "DNABERT: pre-trained Bidirectional Encoder Representations from Transformers model for DNA-language in genome",
+    "url": "https://doi.org/10.1093/bioinformatics/btab083",
+    "views": 1362
+   },
+   "popularity": 0.563696026802063,
+   "score": 0.46910881996154785
+  },
+  {
+   "named": false,
+   "page": {
+    "description": "Paper by T. Florian Jaeger, 2008, Journal of Memory and Language",
+    "set": "papers",
+    "title": "Categorical data analysis: Away from ANOVAs (transformation or not) and towards logit mixed models",
+    "url": "https://doi.org/10.1016/j.jml.2007.11.007",
+    "views": 3390
+   },
+   "popularity": 0.6348810195922852,
+   "score": 0.39237144589424133
+  }
+ ],
+ "query": "transformer language model sort:relevance",
+ "results": []
+}

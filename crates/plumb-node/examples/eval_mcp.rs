@@ -18,8 +18,8 @@ use axum::Json;
 use clap::Parser;
 use plumb_core::Operators;
 use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, operators_allow, options_allow,
-    place_operator_pages, place_pages, Page, PageHit, PageSearcher, OPERATOR_PAGES,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
+    options_allow, place_operator_pages, place_pages, Page, PageHit, PageSearcher, OPERATOR_PAGES,
 };
 use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher};
 use plumb_node::cli::MeaningArgs;
@@ -108,6 +108,7 @@ impl FrozenBackend {
         if rank.add_named_site {
             add_named_site(&mut results.hits, &found, |domain| self.sites.site(domain));
         }
+        drop_far_namesakes(&mut results.hits, &found, rank.meaning_only_relevance);
         if rank.drop_namesakes {
             drop_namesakes_of_words(&mut results.hits, &found);
         }
@@ -115,9 +116,7 @@ impl FrozenBackend {
         pages.add_named_site_page(query, &results.hits, &mut found)?;
         found.retain(|hit| options_allow(options, &hit.page));
         pages.note_demand(&mut results.hits)?;
-        let spelled_right = found
-            .iter()
-            .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+        let spelled_right = pages.spelled_right(query, &found, results.spelling.as_ref());
         if spelled_right && applied.is_none() {
             results.spelling = None;
         }
@@ -147,6 +146,7 @@ impl FrozenBackend {
                 &mut results.pages,
             );
         }
+        plumb_index::asked_state_first(query, &mut results.hits);
         if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.as_deref()) {
             plumb_index::suggested_site_second(&mut results.hits, site);
         }
