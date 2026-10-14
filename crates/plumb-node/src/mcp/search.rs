@@ -277,7 +277,7 @@ impl Mcp {
         };
         // What something is ("what is a manatee").
         let answer = match (answer, answers::definition_asked(query)) {
-            (None, Some(name)) => {
+            (None, Some((name, field))) => {
                 let word = self
                     .backend
                     .definition(&name)
@@ -287,7 +287,7 @@ impl Mcp {
                 } else {
                     self.lookup(&name, PROFILE_SEARCH_LIMIT, options)
                         .ok()
-                        .and_then(|found| answers::definition_answer(&found.pages))
+                        .and_then(|found| answers::definition_answer(&found.pages, field))
                         .or(word)
                 }
             }

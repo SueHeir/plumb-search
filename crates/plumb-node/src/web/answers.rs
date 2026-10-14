@@ -1117,10 +1117,12 @@ const DOES_TAILS: &[&str] = &[" mean", " stand for", " stands for", " do"];
 
 /// The name `query` asks what it is: "manatee" of "what is a manatee?",
 /// "photosynthesis" of "define photosynthesis", "nasa" of "what does nasa
-/// stand for". `None` for a query that asks nothing so, or more than that
-/// ("what is the capital of france" asks a fact, "what is my ip" about the
-/// searcher).
-pub(crate) fn definition_asked(query: &str) -> Option<String> {
+/// stand for", and the words of a field it names after it ("cell" and
+/// biology's of "what is a cell in biology", see
+/// [`plumb_core::article::field_asked`]). `None` for a query that asks
+/// nothing so, or more than that ("what is the capital of france" asks a
+/// fact, "what is my ip" about the searcher).
+pub(crate) fn definition_asked(query: &str) -> Option<(String, Option<&'static [&'static str]>)> {
     let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches(['?', '.', '!']))
         .to_lowercase()
         .replace('’', "'");
@@ -1149,6 +1151,8 @@ pub(crate) fn definition_asked(query: &str) -> Option<String> {
                 .find_map(|tail| q.strip_suffix(tail))
         })?
         .trim();
+    let field = plumb_core::article::field_asked(name);
+    let name = field.map_or(name, |(name, _)| name);
     let words: Vec<&str> = name.split_whitespace().collect();
     // A name, not a question of its own.
     if words.is_empty()
@@ -1174,16 +1178,32 @@ pub(crate) fn definition_asked(query: &str) -> Option<String> {
     {
         return None;
     }
-    Some(name.to_string())
+    Some((name.to_string(), field.map(|(_, marks)| marks)))
 }
 
 /// The first sentence of the article that `pages` (found for the name a
 /// query asks about, [`definition_asked`]) name, when its lead is held:
 /// "The West Indian manatee is the largest surviving member of the order
 /// Sirenia." Only a page the name names in full, about one thing and not
-/// a disambiguation page, answers.
-pub(crate) fn definition_answer(pages: &[PlacedPage]) -> Option<plumb_answer::Answer> {
-    let placed = fact_pages(pages).find(|placed| placed.hit.named)?;
+/// a disambiguation page, answers; when the query names a field, only one
+/// on that field's sense ([`plumb_core::article::in_field`]), so "what is
+/// a mole in chemistry" is not answered by the animal.
+pub(crate) fn definition_answer(
+    pages: &[PlacedPage],
+    field: Option<&[&str]>,
+) -> Option<plumb_answer::Answer> {
+    let placed = fact_pages(pages).find(|placed| {
+        let page = &placed.hit.page;
+        placed.hit.named
+            && field.is_none_or(|marks| {
+                plumb_core::article::in_field(
+                    marks,
+                    &page.title,
+                    page.description.as_deref(),
+                    page.lead.as_deref(),
+                )
+            })
+    })?;
     let page = &placed.hit.page;
     if !page.is_article() {
         return None;
@@ -1472,24 +1492,12 @@ mod tests {
 
     #[test]
     fn definitions_answer_what_something_is() {
-        assert_eq!(
-            definition_asked("What is a manatee?").as_deref(),
-            Some("manatee")
-        );
-        assert_eq!(
-            definition_asked("define photosynthesis").as_deref(),
-            Some("photosynthesis")
-        );
-        assert_eq!(
-            definition_asked("entropy definition").as_deref(),
-            Some("entropy")
-        );
-        assert_eq!(
-            definition_asked("who was ada lovelace").as_deref(),
-            Some("ada lovelace")
-        );
         // However it is asked.
         for (query, name) in [
+            ("What is a manatee?", "manatee"),
+            ("define photosynthesis", "photosynthesis"),
+            ("entropy definition", "entropy"),
+            ("who was ada lovelace", "ada lovelace"),
             ("what does lol mean", "lol"),
             ("What does NASA stand for?", "nasa"),
             ("what does a cpa do", "cpa"),
@@ -1498,7 +1506,11 @@ mod tests {
             ("what is the meaning of serendipity", "serendipity"),
             ("what is the definition of inflation", "inflation"),
         ] {
-            assert_eq!(definition_asked(query).as_deref(), Some(name), "{query}");
+            assert_eq!(
+                definition_asked(query).map(|(name, _)| name).as_deref(),
+                Some(name),
+                "{query}"
+            );
         }
         assert_eq!(definition_asked("what is my ip"), None);
         assert_eq!(definition_asked("what is the capital of france"), None);
@@ -1512,7 +1524,7 @@ mod tests {
             "The West Indian manatee is the largest surviving member of the order Sirenia. It lives in shallow waters."
                 .into(),
         );
-        let answer = definition_answer(&[placed(manatee.clone(), None, 1)]).unwrap();
+        let answer = definition_answer(&[placed(manatee.clone(), None, 1)], None).unwrap();
         assert_eq!(answer.question, "West Indian manatee");
         assert_eq!(
             answer.answer,
@@ -1521,10 +1533,10 @@ mod tests {
         // Only an article the name names in full answers.
         let mut partly = manatee.clone();
         partly.named = false;
-        assert_eq!(definition_answer(&[placed(partly, None, 3)]), None);
+        assert_eq!(definition_answer(&[placed(partly, None, 3)], None), None);
         // Nor one without a lead.
         assert_eq!(
-            definition_answer(&[placed(article("Manatee", "genus", None), None, 1)]),
+            definition_answer(&[placed(article("Manatee", "genus", None), None, 1)], None),
             None
         );
         // The info box shows the lead, under Wikipedia's licence.
@@ -1535,6 +1547,25 @@ mod tests {
         assert!(html.contains("CC BY-SA"));
     }
 
+    #[test]
+    fn a_field_after_the_name_picks_its_sense() {
+        let (name, field) = definition_asked("What is a mole in chemistry?").unwrap();
+        assert_eq!(name, "mole");
+        let mut unit = article(
+            "Mole (unit)",
+            "SI unit of amount of substance in chemistry",
+            None,
+        );
+        unit.page.lead = Some("The mole is the unit of amount of substance.".into());
+        let mut animal = article("Mole (animal)", "small burrowing mammal", None);
+        animal.page.lead =
+            Some("Moles are small mammals adapted to a subterranean lifestyle.".into());
+        let pages = [placed(animal.clone(), None, 1), placed(unit, None, 2)];
+        let answer = definition_answer(&pages, field).unwrap();
+        assert_eq!(answer.question, "Mole (unit)");
+        // No answer rather than another sense's.
+        assert_eq!(definition_answer(&[placed(animal, None, 1)], field), None);
+    }
     #[test]
     fn words_answer_what_they_mean() {
         assert!(asks_word("define anadromous"));

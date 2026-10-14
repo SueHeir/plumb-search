@@ -41,6 +41,10 @@ pub(crate) enum Hint {
     /// spanish" (of "madrid spanish capital city") names nothing, and the
     /// clubs it describes would push Madrid out.
     Named,
+    /// Of the pages the name names, those on a field's sense of it, when
+    /// there are any ([`plumb_core::article::field_asked`]): "what is a
+    /// cell in biology" asks about the cell of biology.
+    Field(&'static [&'static str]),
 }
 
 /// Words before a name that ask about it. "What's" is read as "what is";
@@ -209,8 +213,12 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
         name = rest;
         hint = Some(tail_hint);
     }
-    let name = name.trim();
-    let hint = hint?;
+    let mut name = name.trim();
+    let mut hint = hint?;
+    if let (Hint::Any, Some((rest, marks))) = (hint, plumb_core::article::field_asked(name)) {
+        name = rest;
+        hint = Hint::Field(marks);
+    }
     (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
 }
 
@@ -743,6 +751,21 @@ impl PageSearcher {
                                 * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity),
                         );
                     }
+                }
+            }
+            Hint::Field(marks) => {
+                let in_field = |hit: &PageHit| {
+                    let page = &hit.page;
+                    hit.named
+                        && plumb_core::article::in_field(
+                            marks,
+                            &page.title,
+                            page.description.as_deref(),
+                            page.lead.as_deref(),
+                        )
+                };
+                if found.iter().any(in_field) {
+                    found.retain(|hit| !hit.named || in_field(hit));
                 }
             }
             Hint::Any => {}
