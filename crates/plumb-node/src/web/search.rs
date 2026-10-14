@@ -1,6 +1,7 @@
 //! A search from the results page: this node's results, the network's,
 //! pages, places, answers and plugins, put together.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -26,6 +27,7 @@ use super::params::{error_settings, flag, NetSetting, SearchParams, Settings};
 use super::results::{render_error, render_results_with};
 use super::{
     answers, control, history, mcp, panel, places, plugins, searxng, tune, weather, AppState,
+    DEFAULT_LIMIT,
 };
 use crate::about::About;
 use crate::learn::{self, Block, Choice};
@@ -212,7 +214,7 @@ pub(crate) async fn search_page(
         (Some(lab), Some(node)) if !arms.is_empty() => Some(lab.rank(node.rank(), &arms)),
         _ => None,
     };
-    let local = run_search_ranked(&state, &query, limit, &settings.options, rank).await;
+    let local = page_search(&state, &query, limit, &settings.options, rank).await;
     if let (Ok(results), Some(node)) = (&local, &state.node) {
         node.searched(&query, results);
     }
@@ -825,6 +827,47 @@ async fn run_search_ranked(
         results.hits = said.into_iter().chain(bare).collect();
     }
     debug!("local search completed: {} hits", results.hits.len());
+    Ok(results)
+}
+
+/// [`run_search_ranked`] for a results page `limit` long. A page that
+/// "More results" made longer lists the shorter page it came from first,
+/// as it was, then what the longer search finds beyond it: the longer
+/// search alone can rank a site the shorter one never reached above sites
+/// already shown, where the searcher, sent past those, would miss it.
+async fn page_search(
+    state: &AppState,
+    query: &str,
+    limit: usize,
+    options: &SearchOptions,
+    rank: Option<RankConfig>,
+) -> Result<SearchResults> {
+    let before = limit.saturating_sub(DEFAULT_LIMIT);
+    if before == 0 {
+        return run_search_ranked(state, query, limit, options, rank).await;
+    }
+    let (shown, deeper) = tokio::join!(
+        run_search_ranked(state, query, before, options, rank),
+        run_search_ranked(state, query, limit, options, rank)
+    );
+    let (mut results, deeper) = (shown?, deeper?);
+    let seen: HashSet<String> = results.hits.iter().map(|hit| hit.domain.clone()).collect();
+    let new_hits = deeper
+        .hits
+        .into_iter()
+        .filter(|hit| !seen.contains(&hit.domain));
+    results.hits.extend(new_hits);
+    results.hits.truncate(limit);
+    let seen: HashSet<String> = results
+        .pages
+        .iter()
+        .map(|p| p.hit.page.url.clone())
+        .collect();
+    let new_pages = deeper
+        .pages
+        .into_iter()
+        .filter(|p| !seen.contains(&p.hit.page.url));
+    results.pages.extend(new_pages);
     Ok(results)
 }
 
