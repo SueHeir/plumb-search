@@ -2208,6 +2208,11 @@ impl SearchBackend for Inner {
         self.unless_denied_site(self.current()?.backend().site(domain))
     }
 
+    fn common_word(&self, word: &str) -> bool {
+        self.current()
+            .is_none_or(|index| index.backend().common_word(word))
+    }
+
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         self.map.get()
     }
