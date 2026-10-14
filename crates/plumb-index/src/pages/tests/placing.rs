@@ -114,6 +114,41 @@ fn main_articles_beat_their_namesakes() {
 }
 
 #[test]
+fn namesakes_read_far_less_than_the_article_are_not_listed() {
+    let read = |title: &str, site: Option<&str>, score: f32, views: u64| {
+        let mut hit = found(title, site, true, score);
+        hit.page.views = views;
+        hit
+    };
+    let sites = [
+        site("royal.uk", false),
+        site("pwcgov.org", false),
+        site("prince.com", false),
+    ];
+    let placed = place_pages(
+        "prince william",
+        &sites,
+        vec![
+            read("William, Prince of Wales", Some("royal.uk"), 0.76, 400_000),
+            read("Prince William (TV series)", None, 0.54, 20),
+            read("Prince William (1788 ship)", None, 0.52, 5),
+        ],
+    );
+    let titles: Vec<&str> = placed.iter().map(|p| p.hit.page.title.as_str()).collect();
+    assert_eq!(titles, ["William, Prince of Wales"]);
+    // One read at least a fiftieth as much is listed.
+    let placed = place_pages(
+        "cleopatra",
+        &[site("cleorecs.com", false)],
+        vec![
+            read("Cleopatra", None, 0.85, 66_000),
+            read("Cleopatra (1963 film)", None, 0.70, 7_000),
+        ],
+    );
+    assert_eq!(placed.len(), 2);
+}
+
+#[test]
 fn pages_about_a_listed_site_go_under_it() {
     let sites = [site("python.org", true), site("pythonanywhere.com", false)];
     let placed = place_pages(
