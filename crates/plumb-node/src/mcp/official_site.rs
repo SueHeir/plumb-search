@@ -893,7 +893,7 @@ fn named_article_site(pages: &[PlacedPage]) -> Option<(&Page, String)> {
 /// item: its site, or for a person whose website is a page of a bigger
 /// site, which [`Page::site`] leaves out as not theirs, that site
 /// (senate.gov for sanders.senate.gov).
-fn website_domain(page: &Page) -> Option<String> {
+pub(super) fn website_domain(page: &Page) -> Option<String> {
     page.site
         .clone()
         .or_else(|| registrable_domain(page.website.as_deref()?))
