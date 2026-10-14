@@ -237,6 +237,12 @@ fn works_are_found_by_their_article_with_their_maker() {
             "release-group/a1b2c3d4-387b-4658-8678-8678046e4cef",
             90_000,
         ),
+        song(
+            "Sports",
+            "Album by Huey Lewis and the News",
+            "release-group/a1b2c3d4-1983-4658-8678-8678046e4cef",
+            2_000,
+        ),
     ]);
     for (query, title) in [
         ("radiohead ok computer", "OK Computer"),
@@ -251,6 +257,7 @@ fn works_are_found_by_their_article_with_their_maker() {
         // A song or album of the music set is asked for with its
         // artist and what it is, too.
         ("nevermind nirvana album", "Nevermind"),
+        ("sports huey lewis", "Sports"),
     ] {
         let hits = s.search(query, 5).unwrap();
         assert!(
@@ -268,6 +275,8 @@ fn works_are_found_by_their_article_with_their_maker() {
         "winston smith george orwell",
         "1989 radiohead",
         "nevermind album album",
+        // A led band's backing band alone is not its maker.
+        "sports news",
     ] {
         assert!(
             s.search(query, 5).unwrap().iter().all(|hit| !hit.whole),

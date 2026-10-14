@@ -963,6 +963,14 @@ impl PageSearcher {
             .find_map(|joiner| author.split_once(joiner))
             .map_or(author.as_str(), |(main, _)| main);
         let artist = analysis::tokens(&self.words, main);
+        // A band led by someone is asked for by its leader's name, not by
+        // its backing band's alone: "sports news" is not Huey Lewis and the
+        // News's album Sports.
+        let lower = main.to_lowercase();
+        let leader = [" and the ", " & the "]
+            .iter()
+            .find_map(|joiner| lower.split_once(joiner))
+            .map(|(leader, _)| analysis::tokens(&self.words, leader));
         let author: HashSet<String> = analysis::tokens(&self.words, &author).into_iter().collect();
         // The title, or the title without its subtitle: "Frankenstein" for
         // "Frankenstein; or, The Modern Prometheus". An article's without
@@ -1015,6 +1023,10 @@ impl PageSearcher {
                 rest => rest,
             };
             maker.iter().all(|word| author.contains(word))
+                && (maker.is_empty()
+                    || leader
+                        .as_ref()
+                        .is_none_or(|leader| maker.iter().any(|word| leader.contains(word))))
         }) || (page.set == PODCASTS_SET && self.podcast_named(page, words))
     }
 
