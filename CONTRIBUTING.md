@@ -8,7 +8,7 @@ To report a security problem, don't open an issue: see [SECURITY.md](SECURITY.md
 
 - All code is Rust. The browser side of private search and plugins are Rust compiled to WebAssembly. HTML, CSS and Markdown are fine; no JavaScript is added to pages. The one exception is the Zotero plugin in `zotero/`, which is JavaScript because Zotero runs plugins in no other language.
 - Pages load nothing from other servers, and nodes log no searches. Keep it that way.
-- Keep docs in step with the code, in the same plain style: short sentences, what it does and how to use it.
+- Keep docs in step with the code, in the same plain style: short sentences, what it does and how to use it. Each crate has a README, and [docs/README.md](docs/README.md) lists the other pages; a change that makes one of them wrong updates it in the same pull request. Diagrams are Mermaid `flowchart` or `sequenceDiagram` blocks with no colors or styles, so GitHub draws them in light and dark mode.
 
 ## Checks
 

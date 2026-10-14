@@ -66,6 +66,12 @@ CONTRIBUTING.md lists the extra checks for the WebAssembly crates and the deskto
 - A refactor of ranking code has to leave the frozen eval results identical.
 - The node and the evals should run the same results pipeline. Where they don't yet, change both, or the evals measure something the node doesn't serve.
 
+## Docs
+
+- Each crate has a README with its design, modules and tests, [docs/architecture.md](docs/architecture.md) is the map, and [docs/README.md](docs/README.md) lists every page. A change that makes one of them wrong fixes it in the same change.
+- [docs/search-quality.md](docs/search-quality.md) reports the 1,000-search review. After a run, add its row to `docs/search-quality/runs.tsv`, run `python3 docs/search-quality/charts.py` and update the numbers in the text. Only runs of builds on main go in.
+- Public docs name no private servers, sessions or people, and quote search-quality numbers only there and in the README, so one update keeps them true.
+
 ## Review
 
 Pull requests here merge on local checks, often with no human review. Before merging a change to plumb-net, plumb-format, the denylist, the plugin sandbox, or anything the web layer uses to decide what is local or allowed, have a separate reviewer (a fresh agent) read the diff for bugs where two parts meet. The 2026-10-13 review (`code-review/review-2026-10-13.md` in the project's files) found most of its bugs there.

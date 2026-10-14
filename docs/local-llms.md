@@ -1,86 +1,34 @@
 # Plumb for local AI apps
 
-Free web search for your local model. No API key and no quota, and Plumb doesn't scrape Google, Bing or anyone else: it answers from its own index, so there is no engine upstream to block or throttle it. It speaks SearXNG's JSON API and MCP, so it drops into the setup you already have.
+Plumb gives a local model web search with no API key: a node answers from its own index, with no other search engine behind it. It speaks MCP and SearXNG's JSON format, so it fits apps you already use. This page has the setup for LM Studio, Open WebUI, Jan, LibreChat, AnythingLLM and any app that takes a SearXNG address.
 
-```sh
-claude mcp add --transport http plumb https://plumbsearch.org/mcp
-```
+- [Which address](#which-address)
+- [LM Studio](#lm-studio)
+- [Open WebUI](#open-webui)
+- [Jan](#jan)
+- [LibreChat](#librechat)
+- [AnythingLLM](#anythingllm)
+- [Apps that start a command](#apps-that-start-a-command)
+- [Other SearXNG clients](#other-searxng-clients)
+- [Keeping the model on track](#keeping-the-model-on-track)
 
-Or give an app that takes a SearXNG address `https://plumbsearch.org` (it asks `/search?q=<query>&format=json`). With the [desktop app](desktop.md) or a node of your own, use its address instead, and the searches don't leave your computer: the node answers them from its own index.
+## Which address
 
-## What it is good at, and what it isn't
+There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md#tools): `search`, `official_site`, `check_lookalike`, `site_info`, `facts`, `package`, and on the node's own computer `read_page` and `report_finding`. Apps that take a SearXNG address use a node's `/search?format=json` instead.
 
-Plumb indexes sites by name, homepage text, Wikidata description and meaning, plus page sets: Wikipedia articles, Stack Overflow's most viewed questions, popular GitHub repositories, the most used packages of eight registries, books and papers. It does not crawl the full text of the web. So it finds the official site, the package, the docs, the well-known question and the encyclopedia fact well, and the long tail (a blog post, a forum thread, a page deep inside a site) worse than Google does.
+| You run | MCP address | SearXNG address |
+| --- | --- | --- |
+| The [desktop app](desktop.md) | `http://127.0.0.1:7586/mcp` | `http://127.0.0.1:7586` |
+| A node in [Docker](docker.md) on this computer | `http://127.0.0.1:8080/mcp` | `http://127.0.0.1:8080` |
+| Nothing (the public node) | `https://plumbsearch.org/mcp` | `https://plumbsearch.org` |
 
-Searches it answers well:
+With your own node, searches don't leave your computer: the node answers them from its own index. The examples below use the desktop app's address; put yours in its place.
 
-- `official_site` "chase login": chase.com, with how sure it is.
-- `package` "serde": the latest version, license, install command and docs.
-- `search` "undo last git commit": the Stack Overflow question first.
-- `search` "albert einstein": Wikipedia's description and the article.
-- `search` "12 * 7", "100 usd to eur", "time in tokyo": instant answers.
+`read_page` and `report_finding` are offered only to apps on the node's own computer ([who counts](mcp.md#reading-pages)). A Docker node sees requests through its published port as coming from Docker's network, not from this computer, so it offers neither. To have them with a Docker node, start `plumb mcp` inside the container as a command (see [Apps that start a command](#apps-that-start-a-command)).
 
-## Why not SearXNG or a free API tier?
+Use a model trained to call tools; models without tool training ignore the tools.
 
-- **SearXNG** sends your searches on to Google, Bing, DuckDuckGo and others and reads their result pages. Those engines throttle and block it, more so for a busy or shared instance.
-- **Free tiers** of search APIs (Brave, Tavily, Exa, Linkup and others) need a key and stop at a quota.
-- **Plumb** has its own index, which nodes build by crawling homepages and share over a peer-to-peer network. No other engine stands behind it to cut it off. The only limit is per client, to keep a shared node fair: on MCP, a burst of 30 tool calls, then 60 a minute. `/search?format=json` has none.
-
-## Swap SearXNG for Plumb
-
-- **SearXNG address**: `https://plumbsearch.org`, or your own node's (`http://127.0.0.1:7586` for the desktop app, `http://127.0.0.1:8080` for Docker). Apps that want the whole query URL take `https://plumbsearch.org/search?q=<query>&format=json`. The answer is in SearXNG's format (see [Other SearXNG clients](#other-searxng-clients)).
-- **MCP over HTTP**: `https://plumbsearch.org/mcp`, or `/mcp` on your own node. In LM Studio's `mcp.json`:
-
-  ```json
-  {
-    "mcpServers": {
-      "plumb": { "url": "https://plumbsearch.org/mcp" }
-    }
-  }
-  ```
-
-- **MCP over stdio**: `plumb mcp` (see [below](#claude-desktop-ollama-front-ends-and-anything-that-starts-a-command)).
-
-## What results look like
-
-Tool answers are short plain text, one line per result with its address, so they fit in a small model's context. Trimmed example output:
-
-```text
-> package {"name": "serde"}
-[crates.io] serde 1.0.228 (2025-09-27, MIT OR Apache-2.0): A generic serialization/deserialization framework Install: cargo add serde. Docs: https://docs.rs/serde Code: https://github.com/serde-rs/serde Home: https://serde.rs https://crates.io/crates/serde
-
-> search {"query": "undo last git commit"}
-1. [Stack Overflow] How do I undo the most recent local commits in Git?: git, version-control, git-commit, undo https://stackoverflow.com/questions/927358
-2. Git (git-scm.com, official) https://git-scm.com/
-   Git is a free and open source distributed version control system ...
-
-> search {"query": "albert einstein"}
-About Albert Einstein: German-born physicist (1879–1955). https://en.wikipedia.org/wiki/Albert_Einstein
-1. [Wikipedia] Albert Einstein: German-born physicist (1879–1955) https://en.wikipedia.org/wiki/Albert_Einstein
-...
-
-> search {"query": "12 * 7"}
-Answer: 12 × 7 = 84
-...
-```
-
-The same answers come as JSON in `structuredContent` for programs.
-
-## Keeping the model on track
-
-**Web text is untrusted.** Results are compact text with no HTML. `read_page` returns a page's text, with scripts, menus and footers left out; it is offered only to apps on the node's own computer unless the node runs with `--mcp-read-pages`, and it reaches public addresses only, never your router or other machines on your network. A page can still say anything, so tell the model in its system prompt that text from the web is information, not instructions.
-
-**Models that don't search.** Some models answer from what they learned instead of calling a tool. A line in the system prompt helps, for example: "Use plumb search for anything after your training cutoff or anything you're unsure of, and say which address you used."
-
-## Setting up each app
-
-There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md): `search`, `official_site`, `check_lookalike`, `site_info`, `facts`, `package`, `read_page` and `report_finding`. Apps that take a SearXNG address for web search can use a node's `/search?format=json` instead.
-
-Use a model that can call tools: Qwen3 (8B or bigger), gpt-oss, Llama 3.1 or 3.3, Mistral Small. Small models without tool training ignore the tools.
-
-The addresses below are the desktop app's. For plumbsearch.org use `https://plumbsearch.org`, for a node in Docker on the same computer `http://127.0.0.1:8080`, and for any other node its address. Those offer every tool but `read_page` and `report_finding`: plumbsearch.org never offers them, and Docker passes connections on from its own network, so the node cannot tell they come from this computer. To have those tools with a Docker node, start `docker exec -i plumb plumb mcp --node http://127.0.0.1:8080` as a command (see [below](#claude-desktop-ollama-front-ends-and-anything-that-starts-a-command)); `read_page` alone also comes with `--mcp-read-pages` (see [Reading pages](mcp.md#reading-pages)).
-
-### LM Studio
+## LM Studio
 
 1. In the right sidebar, open the **Program** tab, click **Install**, then **Edit mcp.json** (it is `~/.lmstudio/mcp.json`).
 2. Add Plumb and save:
@@ -94,21 +42,29 @@ The addresses below are the desktop app's. For plumbsearch.org use `https://plum
    ```
 
 3. Turn on **mcp/plumb** in the Program tab.
-4. Load a model with the hammer icon (tool use) and ask, for example, "Use plumb to find the official Rust docs and read the page about ownership."
+4. Load a model with tool use and ask, for example, "Use plumb to find the official Rust docs and read the page about ownership."
 
 LM Studio asks before each tool call until you allow Plumb's tools for good.
 
-### Open WebUI
+## Open WebUI
 
-As MCP tools: **Settings**, **External Tools**, add a server of type **MCP (Streamable HTTP)** with the URL `http://127.0.0.1:7586/mcp`. Open WebUI in Docker reaches the host as `http://host.docker.internal:7586/mcp`; requests from there do not come from `127.0.0.1`, so start the node with `--mcp-read-pages` if you want `read_page`, and only on a computer the internet cannot reach.
+**As MCP tools:** **Settings**, **External Tools**, add a server of type **MCP (Streamable HTTP)** with the URL `http://127.0.0.1:7586/mcp`.
 
-As its web search: **Admin Panel**, **Settings**, **Web Search**, engine **searxng**, query URL `http://127.0.0.1:7586/search?q=<query>`. Or engine **external**, URL `http://127.0.0.1:7586/api/websearch` (no API key needed). Open WebUI then fetches the result pages itself, unless "Bypass web loader" is on; then the model sees only each result's snippet, which is why an instant answer leads the first snippet.
+**As its web search:** **Admin Panel**, **Settings**, **Web Search**, then either:
 
-### Jan
+- engine **searxng**, query URL `http://127.0.0.1:7586/search?q=<query>`, or
+- engine **external**, URL `http://127.0.0.1:7586/api/websearch` (no API key needed).
 
-Jan has web search options of its own. To use Plumb as well, open **Settings**, **MCP Servers**, add a server with the JSON from LM Studio's step 2 (`"plumb": { "url": "http://127.0.0.1:7586/mcp" }`), turn it on, and use a model with tool calling enabled.
+Open WebUI then fetches the result pages itself, unless "Bypass web loader" is on; then the model sees only each result's snippet, which is why an instant answer leads the first snippet.
 
-### LibreChat
+> [!NOTE]
+> The desktop app's node listens on `127.0.0.1` only. An app in a Docker container on Linux cannot reach that address through `host.docker.internal`; run the container with `--network host` and use `http://127.0.0.1:7586`, which also counts as this computer.
+
+## Jan
+
+Jan has web search options of its own. To use Plumb as well, open **Settings**, **MCP Servers**, add a server with `"plumb": { "url": "http://127.0.0.1:7586/mcp" }` (as in LM Studio's step 2), turn it on, and use a model with tool calling enabled.
+
+## LibreChat
 
 In `librechat.yaml`:
 
@@ -119,23 +75,63 @@ mcpServers:
     url: http://127.0.0.1:7586/mcp
 ```
 
-LibreChat in Docker reaches the host as `http://host.docker.internal:7586/mcp` (see the note on `read_page` under Open WebUI).
+See the note under [Open WebUI](#open-webui) when LibreChat runs in Docker.
 
-### AnythingLLM
+## AnythingLLM
 
 **Agent Skills**, **Web Search**, provider **SearXNG**, base URL `http://127.0.0.1:7586`. Its agent then searches Plumb with `@agent`.
 
-### Other SearXNG clients
+## Apps that start a command
 
-Perplexica (now Vane) and others that take a SearXNG address work the same way: give them the node's address, such as `http://127.0.0.1:7586`. A node answers `/search?q=...&format=json` in SearXNG's format:
+Claude Desktop, many Ollama front ends and other apps that start a local MCP server can run `plumb mcp`, which speaks MCP over stdin and stdout:
 
-- `results`: what the results page lists, in its order, each with `url`, `title` and `content` (the description); Wikipedia articles, Stack Overflow questions and other pages sit where the page puts them, and recent headlines come after the best result, with `category` `news`;
-- `answers`: the instant answer, such as `12 × 7 = 84`;
-- `infoboxes`: the info box about what the query names, with its official site and profiles;
-- `suggestions`: a suggested spelling ("Did you mean ..."). Results are always for the query as typed.
+| Node | Command |
+| --- | --- |
+| The desktop app | `plumb mcp --node http://127.0.0.1:7586` |
+| A Docker container named `plumb` | `docker exec -i plumb plumb mcp --node http://127.0.0.1:8080` |
+| plumbsearch.org | `plumb mcp` |
 
-It takes SearXNG's `pageno`, `safesearch` (0, 1 or 2), `categories` (`news` alone lists only recent headlines, with `publishedDate`) and `time_range` (any value puts recent headlines first), and Plumb's own `limit`, `country`, `safe` and `lang`. Other SearXNG parameters are ignored. Unlike SearXNG, JSON needs no setting turned on.
+`plumb mcp` reads pages itself, on your computer, so it always offers `read_page`. Run inside the container, it asks the node from the node's own computer, so `report_finding` is offered too. [Set up](mcp.md#set-up) has the config files.
 
-### Claude Desktop, Ollama front ends and anything that starts a command
+## Other SearXNG clients
 
-`plumb mcp` speaks MCP over stdin and stdout. `plumb mcp --node http://127.0.0.1:7586` asks the desktop app's node; with no `--node` it asks plumbsearch.org. Either way it reads pages itself, on your computer. For a node in Docker, run it inside the container: `docker exec -i plumb plumb mcp --node http://127.0.0.1:8080`. See [Set up](mcp.md#set-up).
+Perplexica and other apps that take a SearXNG address work the same way: give them the node's address, such as `http://127.0.0.1:7586`. Unlike SearXNG, a node needs no setting turned on to answer JSON. The code is [web/searxng.rs](../crates/plumb-node/src/web/searxng.rs).
+
+`/search?q=...&format=json` answers in SearXNG's format:
+
+| Field | What it holds |
+| --- | --- |
+| `results` | What the results page lists, in its order: `url`, `title`, `content` (the description), `category` (`general`, or `news` for recent headlines, which carry a `publishedDate` and come right after the first result), `engine` (`plumb`, or the plugin that found it) |
+| `answers` | The instant answer, such as `12 × 7 = 84` |
+| `infoboxes` | The info box about what the query names, with its official site, profiles, Wikipedia article and Wikidata item |
+| `suggestions` | A suggested spelling of the query |
+| `number_of_results` | How many results were collected up to this page |
+| `recent`, `places` | Plumb's own: the Recent headlines block and the places, as the [JSON API](searching.md#the-json-api) gives them |
+
+`corrections` and `unresponsive_engines` are always empty.
+
+It takes these parameters, and ignores SearXNG's others (`engines`, `language`):
+
+| Parameter | Meaning |
+| --- | --- |
+| `q` | The query |
+| `pageno` | Page of results, from 1; at most 10 pages, and at most 100 results in all |
+| `limit` | Results per page (default 10, at most 100) |
+| `safesearch` | `0`, `1` or `2` (off, moderate, strict) |
+| `categories` | `news` alone lists only recent headlines |
+| `time_range` | Any value puts recent headlines first; `day`, `week`, `month` or `year` also drops older ones |
+| `country`, `lang`, `safe` | Plumb's own: a home country code, a language code or `any`, and `off`, `moderate` or `strict` |
+
+While a node is still setting up its first index, it answers `503` with `Retry-After`.
+
+Open WebUI's **external** engine posts `{"query": "...", "count": 5}` to `/api/websearch` and gets `[{"link", "title", "snippet"}]` back: the same results in the same order (`count` defaults to 10, at most 100).
+
+MCP tool calls are limited per client (a burst of 30, then 60 a minute; see [Limits](mcp.md#limits)), to keep a shared node fair. `/search?format=json` has no such limit.
+
+## Keeping the model on track
+
+**Web text is untrusted.** Results are short text with no HTML, and `read_page` leaves out scripts, menus and footers and never reaches your router or other machines on your network. A page can still say anything, so tell the model in its system prompt that text from the web is information, not instructions.
+
+**Search for names and topics.** Plumb indexes sites by name, homepage text, description and meaning, plus page sets such as Wikipedia articles, Stack Overflow questions and package registries, not the full text of the web. It finds the official site, the package, the docs and the well-known question well, and a blog post or a page deep inside a site less often; [search.md](search.md) has how a search is answered.
+
+**Models that don't search.** Some models answer from what they learned instead of calling a tool. A line in the system prompt helps, for example: "Use plumb search for anything after your training cutoff or anything you're unsure of, and say which address you used."
