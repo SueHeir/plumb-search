@@ -1327,6 +1327,67 @@ fn a_question_of_only_asking_words_and_code_names_nothing() {
 }
 
 #[test]
+fn a_question_found_by_its_tags_alone_is_not_about_the_query() {
+    let question = |title: &str, tags: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some(tags.into()),
+            item: Some(item.into()),
+            views: 100_000,
+            ..Article::default()
+        })
+    };
+    let pages = [
+        question(
+            "What is the tax status of assets recovered via bankruptcy proceedings?",
+            "united-states, taxes, capital-gains-tax, australia",
+            "1",
+        ),
+        question(
+            "How long does cooked pasta last in the fridge?",
+            "pasta, storage-lifetime, refrigerator",
+            "2",
+        ),
+        question(
+            "Pandas Merging 101",
+            "python, pandas, merge, dataframe",
+            "3",
+        ),
+        question(
+            "What is the capital gains tax rate in Australia?",
+            "taxes, capital-gains-tax, australia",
+            "4",
+        ),
+    ];
+    // Pages that make the query's other words known, not typos.
+    let known = [
+        "Capital city",
+        "Capital punishment",
+        "Australia",
+        "Refrigerator",
+        "Pandas (software)",
+        "Merge",
+    ]
+    .map(|title| page(title, 1_000, &[]));
+    let (_dir, s) = searcher(&[&pages[..], &known[..]].concat());
+    let questions = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.is_question())
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(
+        questions("what is the capital of australia"),
+        ["What is the capital gains tax rate in Australia?"]
+    );
+    assert!(questions("how does a refrigerator work").is_empty());
+    // Tags still count toward a title that has some of the query.
+    assert_eq!(questions("pandas merge dataframes"), ["Pandas Merging 101"]);
+}
+
+#[test]
 fn the_and_a_name_names_what_the_name_alone_does_when_far_more_read() {
     let (_dir, s) = searcher(&[
         page("Titanic (1997 film)", 150_000, &[]),
