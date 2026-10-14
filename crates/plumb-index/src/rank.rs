@@ -988,6 +988,10 @@ impl Searcher {
             }
             _ => None,
         };
+        let site_search = match site_search {
+            Some(link) => Some(link),
+            None => self.site_search_at_end(&searcher, query_text, cfg)?,
+        };
 
         let ranked = self.untitled_last(&searcher, ranked, query_text, limit)?;
         // A few more than asked for, so that copies left out below leave
@@ -1045,7 +1049,10 @@ pub(crate) fn best_link_score(searcher: &tantivy::Searcher, docs: &HashSet<DocAd
 }
 
 /// The link score of each of `docs` that has one.
-fn link_scores(searcher: &tantivy::Searcher, docs: &HashSet<DocAddress>) -> Vec<(f32, DocAddress)> {
+pub(crate) fn link_scores(
+    searcher: &tantivy::Searcher,
+    docs: &HashSet<DocAddress>,
+) -> Vec<(f32, DocAddress)> {
     let mut columns: HashMap<u32, Option<tantivy::columnar::Column<f64>>> = HashMap::new();
     let mut scores = Vec::with_capacity(docs.len());
     for &addr in docs {
