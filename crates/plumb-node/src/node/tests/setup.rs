@@ -325,13 +325,28 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     assert_eq!(names(&dir.path().join("indexes")).len(), 1);
 
     // Records made before a change to how seed data is read are folded
-    // again on request, from the seed files on disk, without downloading.
+    // again on request, from the seed files on disk, without downloading,
+    // and a disambiguation page's claim is taken back off them.
     let mut records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
     for record in &mut records {
         record.signals.official_site = false;
         record.aliases.clear();
     }
+    let usbank = records
+        .iter_mut()
+        .find(|r| r.domain == "usbank.com")
+        .unwrap();
+    usbank.aliases.push("USB".into());
     write_jsonl(&dir.path().join("records.jsonl"), &records).unwrap();
+    let seed = dir.path().join("seed");
+    let mut tsv = std::fs::read_to_string(seed.join(download::WIKIDATA_FILE_NAME)).unwrap();
+    tsv.push_str("http://www.wikidata.org/entity/Q90000097\tUSB\thttps://www.usbank.com/\n");
+    std::fs::write(seed.join(download::WIKIDATA_FILE_NAME), tsv).unwrap();
+    let facts = format!(
+        "{}Q90000097\t\tWikimedia disambiguation page\t\t\t3\n",
+        plumb_ingest::facts::FACTS_HEADER
+    );
+    std::fs::write(seed.join(plumb_ingest::facts::FACTS_FILE_NAME), facts).unwrap();
     assert!(request_reseed(dir.path()).unwrap());
     assert!(store::load_state(&paths).unwrap().wikidata_missing);
     let offline = SeedHost::start(|_, _| http("500 Internal Server Error", b"offline")).await;
@@ -349,6 +364,11 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
     assert!(usbank.signals.official_site);
     assert!(usbank.aliases.iter().any(|alias| alias == "U.S. Bancorp"));
+    assert!(
+        !usbank.aliases.iter().any(|alias| alias == "USB"),
+        "{:?}",
+        usbank.aliases
+    );
 
     // Records made before the lists of sites on subdomains are folded
     // again too, from the seed files however old: Google Scholar, folded
