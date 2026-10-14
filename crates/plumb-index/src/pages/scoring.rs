@@ -892,6 +892,18 @@ impl PageSearcher {
         best
     }
 
+    /// Whether `name` is only asking and function words once its code is
+    /// dropped: the question "What does :(){ : :& };: do?" says in words
+    /// what every "what does the liver do" says, and asks about nothing.
+    /// "Stand for" asks as "mean" does: "What does ~$ stand for?".
+    fn only_asks(&self, name: &str) -> bool {
+        analysis::tokens(&self.words, name).iter().all(|word| {
+            crate::is_function_word(word)
+                || ASKING_WORDS.contains(&word.as_str())
+                || matches!(word.as_str(), "stand" | "stands")
+        })
+    }
+
     /// How well a question's words cover the query's stemmed words
     /// `stems`: [`PARTIAL_MATCH`] times the share they have, when that is
     /// at least [`QUESTION_SHARE`] of at least [`QUESTION_QUERY_WORDS`].
@@ -929,6 +941,9 @@ impl PageSearcher {
         let all: f32 = stems.iter().map(weight).sum();
         let mut best = (0.0f32, false);
         for (title, topic) in page.asked_as() {
+            if page.is_question() && self.only_asks(title) {
+                continue;
+            }
             let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
                 .into_iter()
                 .collect();
@@ -1148,7 +1163,7 @@ impl PageSearcher {
             std::iter::once(base_title(&page.title)).chain(page.aliases.iter().map(String::as_str))
         {
             let words: HashSet<String> = analysis::tokens(&self.words, name).into_iter().collect();
-            if words.is_empty() {
+            if words.is_empty() || page.is_question() && self.only_asks(name) {
                 continue;
             }
             let shared = words
