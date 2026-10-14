@@ -43,9 +43,9 @@ pub struct Outline {
     pub(crate) score: f32,
     /// The canonical domain.
     pub(crate) domain: Box<str>,
-    /// The canonical domain the homepage redirects to; empty when it
-    /// redirects to no valid domain, as [`plumb_index::redirect_targets`]
-    /// takes it.
+    /// The canonical domain of the site it is under another name
+    /// ([`Redirect::folds_into`]); empty when it redirects to no valid
+    /// domain, as [`plumb_index::redirect_targets`] takes it.
     pub(crate) redirect_to: Option<Box<str>>,
     /// Judged dead ([`SiteRecord::gone_at`]).
     pub(crate) gone: bool,
@@ -61,14 +61,11 @@ impl Outline {
             redirect_to: record
                 .redirect
                 .as_ref()
-                .map(|redirect| redirect_target(redirect).into()),
+                .and_then(|redirect| redirect.folds_into(&record.domain))
+                .map(Into::into),
             gone: record.gone_at.is_some(),
         }
     }
-}
-
-fn redirect_target(redirect: &Redirect) -> String {
-    canonical_domain(&redirect.to).unwrap_or_default()
 }
 
 /// The fields of a record [`outline`] reads when it has no journal to fold
@@ -469,7 +466,8 @@ fn scan(path: &Path) -> Result<Option<Vec<Outline>>> {
             redirect_to: head
                 .redirect
                 .as_ref()
-                .map(|redirect| redirect_target(redirect).into()),
+                .and_then(|redirect| redirect.folds_into(&head.domain))
+                .map(Into::into),
             domain: head.domain.into(),
             gone: head.gone_at.is_some(),
         });
@@ -957,6 +955,7 @@ mod tests {
         redirecting.redirect = Some(Redirect {
             to: "pnc.com".into(),
             at: 40,
+            inner: false,
         });
         write_jsonl(
             path,

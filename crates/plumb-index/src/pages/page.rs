@@ -5,9 +5,26 @@ use plumb_core::article::{article_url, Article, SearchContent};
 
 use super::{
     Page, BOOKS_SET, DOCS_SET, ENGLISH_WIKIPEDIA, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET,
-    PAPERS_SET, PODCASTS_SET, REFERENCE2_SET, REFERENCE_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET,
-    SUBPAGES_SET, WIKIDATA_SET, WIKTIONARY_SET,
+    PAPERS_SET, PODCASTS_SET, RECORDS_SET, REFERENCE2_SET, REFERENCE_SET, STACKEXCHANGE_SET,
+    STACKOVERFLOW_SET, SUBPAGES_SET, WIKIDATA_SET, WIKTIONARY_SET,
 };
+
+/// Where a description stops saying what its page is and goes on to who
+/// made it or what it is part of.
+const DESCRIPTION_HEAD_ENDS: &[&str] = &[
+    " by ",
+    " directed ",
+    " created ",
+    " starring ",
+    " based ",
+    " written ",
+    " recorded ",
+    " performed ",
+    " of ",
+    " from ",
+    " (",
+    ",",
+];
 
 impl Page {
     /// The Wikipedia article `article` of Wikipedia in `lang`.
@@ -368,10 +385,10 @@ impl Page {
         is_site_page_set(&self.set)
     }
 
-    /// The host of a docs, reference or subpages page's address, without
-    /// `www.`: `docs.python.org`, `healthline.com`.
+    /// The host of a docs, reference, subpages or record page's address,
+    /// without `www.`: `docs.python.org`, `healthline.com`.
     fn docs_host(&self) -> Option<&str> {
-        if self.set != DOCS_SET && !self.is_site_page() {
+        if self.set != DOCS_SET && self.set != RECORDS_SET && !self.is_site_page() {
             return None;
         }
         let host = self
@@ -411,6 +428,30 @@ impl Page {
     /// Whether the page is a song of the music set, rather than an album.
     pub fn is_song(&self) -> bool {
         self.set == MUSIC_SET && self.url.starts_with("https://musicbrainz.org/recording/")
+    }
+
+    /// Whether the page is a work of one of `kinds`, as its title's
+    /// qualifier ("Barbie (film)", "Hades (video game)") or the head of its
+    /// description ("1986 action drama film by Tony Scott", "Song by the
+    /// Beatles, 1968") calls it.
+    pub fn is_work_of(&self, kinds: &[&str]) -> bool {
+        let qualifier = self
+            .title
+            .strip_suffix(')')
+            .and_then(|title| title.rsplit_once(" ("));
+        let description = self.description.as_deref().unwrap_or("").to_lowercase();
+        let head_end = DESCRIPTION_HEAD_ENDS
+            .iter()
+            .filter_map(|end| description.find(end))
+            .min()
+            .unwrap_or(description.len());
+        qualifier.is_some_and(|(_, what)| {
+            what.split_whitespace()
+                .any(|word| kinds.contains(&word.to_lowercase().as_str()))
+        }) || description[..head_end]
+            .split_whitespace()
+            .last()
+            .is_some_and(|word| kinds.contains(&word))
     }
 
     /// The paper `paper`, written as an article whose item is its DOI or

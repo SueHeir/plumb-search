@@ -228,6 +228,44 @@ fn official_site_keeps_matching_brands_that_include_country_names() {
 }
 
 #[test]
+fn official_site_keeps_a_place_whose_name_ends_in_a_country() {
+    // New Mexico is not "new" in Mexico, nor New South Wales "new south" in
+    // Wales: Wikidata knows each by its whole name.
+    let mcp = scripted(|_| {
+        let mut state = titled("newmexico.gov", "New Mexico", 0.7, true);
+        state.official = true;
+        state.country = Some("US".into());
+        results(
+            vec![state],
+            vec![article("New Mexico", Some("newmexico.gov"), None)],
+        )
+    });
+    let answer = official(&mcp, "New Mexico");
+    assert_eq!(answer["domain"], "newmexico.gov", "{answer}");
+    assert_eq!(answer["confidence"], "high");
+    assert!(answer["country_conflict"].is_null(), "{answer}");
+
+    let mcp = scripted(|_| {
+        let tourism = titled(
+            "newsouthwalestourism.com",
+            "New South Wales Tourism - Events Australia",
+            0.3,
+            false,
+        );
+        let mut government = titled("nsw.gov.au", "NSW Government", 0.7, true);
+        government.official = true;
+        government.country = Some("AU".into());
+        results(
+            vec![tourism, government],
+            vec![article("New South Wales", Some("nsw.gov.au"), None)],
+        )
+    });
+    let answer = official(&mcp, "New South Wales");
+    assert_eq!(answer["domain"], "nsw.gov.au", "{answer}");
+    assert_eq!(answer["confidence"], "high");
+}
+
+#[test]
 fn official_site_uses_the_query_jurisdiction_and_reports_conflicting_preferences() {
     struct Countries;
     impl SearchBackend for Countries {
