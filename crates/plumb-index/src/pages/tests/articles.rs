@@ -3,6 +3,30 @@
 use super::*;
 
 #[test]
+fn a_judged_name_finds_what_it_judges() {
+    let (_dir, s) = searcher(&[
+        page("Blood pressure", 90_000, &[]),
+        page("Normal distribution", 80_000, &[]),
+        page("Distribution (economics)", 20_000, &[]),
+        page("BMI (company)", 5_000, &["BMI"]),
+    ]);
+    let named = |query: &str| -> Vec<String> {
+        let hits = s.search(query, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("what is a normal blood pressure"), ["Blood pressure"]);
+    // A page called the whole name keeps its namesakes away.
+    assert_eq!(
+        named("what is a normal distribution"),
+        ["Normal distribution"]
+    );
+    assert!(named("what is a healthy bmi").is_empty());
+}
+
+#[test]
 fn a_field_after_the_name_keeps_that_sense() {
     let mut film = page("Cell (film)", 90_000, &[]);
     film.description = Some("2016 film by Tod Williams".into());
@@ -599,6 +623,9 @@ fn articles_are_found_by_what_they_say_of_themselves() {
         ("how do vaccines work", "vaccines"),
         ("how tall is the eiffel tower", "eiffel tower"),
         ("how big is texas", "texas"),
+        ("how tall is the eiffel tower in feet", "eiffel tower"),
+        ("how big is texas in square miles", "texas"),
+        ("how old is obama now", "obama"),
         ("where is machu picchu", "machu picchu"),
         ("how many people live in tokyo", "tokyo"),
         ("how metabolism works", "metabolism"),
@@ -678,6 +705,36 @@ fn who_played_a_role_names_the_character() {
     assert_eq!(
         hinted_name("who plays spiderman"),
         Some(("spiderman".into(), Hint::Any))
+    );
+}
+
+#[test]
+fn a_bands_members_name_the_band() {
+    let (_dir, s) = searcher(&[
+        page("BTS", 900_000, &[]),
+        page("BTS: Bon Voyage", 40_000, &[]),
+        page("ABBA", 500_000, &[]),
+        page("Mansour Abbas", 60_000, &[]),
+        page("Member of parliament", 80_000, &[]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title.clone())
+            .collect()
+    };
+    for q in [
+        "bts members",
+        "who are the members of bts",
+        "BTS band members",
+    ] {
+        assert_eq!(named(q), ["BTS"], "{q}");
+    }
+    assert_eq!(named("abba members"), ["ABBA"]);
+    assert_eq!(
+        hinted_name("members of the rolling stones"),
+        Some(("rolling stones".into(), Hint::Any))
     );
 }
 
@@ -843,6 +900,37 @@ fn words_are_only_looked_up() {
 }
 
 #[test]
+fn what_happened_to_a_person_names_its_article() {
+    let (_dir, s) = searcher(&[
+        page("Abraham Lincoln", 900_000, &["Lincoln"]),
+        page("Assassination of Abraham Lincoln", 300_000, &[]),
+        page("Lincoln, Nebraska", 100_000, &[]),
+        page("Death of Diana, Princess of Wales", 200_000, &[]),
+        page("Murder of George Floyd", 200_000, &[]),
+        page("Battle of Lincoln", 5_000, &[]),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title.clone())
+            .collect()
+    };
+    assert_eq!(
+        named("lincoln assassination"),
+        ["Assassination of Abraham Lincoln"]
+    );
+    assert_eq!(
+        named("princess diana death"),
+        ["Death of Diana, Princess of Wales"]
+    );
+    assert_eq!(named("george floyd murder"), ["Murder of George Floyd"]);
+    // Only what happens to a person, and only with the name.
+    assert!(named("lincoln battle").is_empty());
+    assert_eq!(named("lincoln"), ["Abraham Lincoln"]);
+}
+
+#[test]
 fn what_is_asked_about_a_person_finds_their_article() {
     let (_dir, s) = searcher(&[
         person("Barack Obama", 900_000, &["Obama"]),
@@ -984,6 +1072,47 @@ fn comparisons_find_the_articles_on_both_sides() {
     ]);
     let hits = s.search("crocodile vs alligator", 5).unwrap();
     assert_eq!(hits[0].page.title, "Crocodiles vs. Alligators", "{hits:?}");
+    assert!(hits.iter().all(|hit| !hit.named), "{hits:?}");
+}
+
+#[test]
+fn a_page_on_one_use_of_both_sides_does_not_compare_them() {
+    let question = |title: &str, tags: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some(tags.into()),
+            item: Some(item.into()),
+            views: 100_000,
+            ..Article::default()
+        })
+    };
+    let (_dir, s) = searcher(&[
+        page("Solid-state drive", 300_000, &["SSD"]),
+        page("Hard disk drive", 250_000, &["HDD"]),
+        question("Power consumption: SSD vs HDD", "ssd, power", "1"),
+        question("SSD vs HDD for databases", "database, ssd", "2"),
+    ]);
+    let hits = s.search("ssd vs hdd", 5).unwrap();
+    let named: Vec<_> = hits
+        .iter()
+        .filter(|hit| hit.named)
+        .map(|hit| hit.page.title.as_str())
+        .collect();
+    assert_eq!(named, ["Solid-state drive", "Hard disk drive"], "{hits:?}");
+    // A question that asks only the comparison is one.
+    let (_dir, s) = searcher(&[
+        page("Mitosis", 300_000, &[]),
+        page("Meiosis", 250_000, &[]),
+        question(
+            "What is the difference between mitosis and meiosis?",
+            "cell-biology, mitosis",
+            "3",
+        ),
+    ]);
+    let hits = s
+        .search("difference between mitosis and meiosis", 5)
+        .unwrap();
+    assert!(hits[0].page.is_question(), "{hits:?}");
     assert!(hits.iter().all(|hit| !hit.named), "{hits:?}");
 }
 

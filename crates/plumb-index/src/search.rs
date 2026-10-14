@@ -17,7 +17,7 @@ use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{DocAddress, Index, ReloadPolicy, TantivyDocument, Term};
 
 use crate::hits::{docs_site_first, hit_texts, look_alikes, suggested_site_second};
-use crate::names::{named_by_links, without_intent_words};
+use crate::names::{named_by_links, without_intent_words, without_www};
 use crate::query::{matching_docs, words_after, ParsedQuery, COMPARISON_WORDS};
 use crate::rank::{best_link_score, bm25_of, domain_of, link_scores};
 use crate::schema::Fields;
@@ -212,7 +212,8 @@ impl Searcher {
     /// with a link into its own search; `"quotes"` keep the sites whose
     /// name, title or description has the words in that order; `-word`
     /// leaves out the sites that have the word. Queries with operators are
-    /// not corrected for typos.
+    /// not corrected for typos. A leading "www" is left out
+    /// ([`without_www`]).
     pub fn search_meaning(
         &self,
         query_text: &str,
@@ -221,6 +222,7 @@ impl Searcher {
         options: &SearchOptions,
         meaning: Option<&dyn Meaning>,
     ) -> Result<SearchResults> {
+        let query_text = without_www(query_text);
         let ops = Operators::parse(query_text);
         if !ops.any() {
             let mut results = self.search_words(query_text, limit, cfg, options, meaning)?;
@@ -580,6 +582,7 @@ impl Searcher {
         if num_docs == 0 {
             return Ok(Some(WordsOrder::default()));
         }
+        query.add_arabic_spellings(&searcher, &self.fields)?;
         let text_query = query.text_query(&searcher, &self.fields)?;
         let found = searcher.search(
             &text_query,

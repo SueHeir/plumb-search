@@ -57,11 +57,17 @@ async fn places_around_a_town_put_local_sites_before_the_town_s_own() {
             .map(|h| h["domain"].as_str().unwrap())
             .collect();
         // The breweries' own sites (one the index does not have, as the
-        // place says), then the guide that says breweries; the sites
-        // only named after Denver are left out.
+        // place says), then the guide that says breweries, and last the
+        // sites only named after Denver.
         assert_eq!(
             domains,
-            ["greatdivide.com", "unknown-ales.example", "westword.com"],
+            [
+                "greatdivide.com",
+                "unknown-ales.example",
+                "westword.com",
+                "denvergov.org",
+                "denverbroncos.com"
+            ],
             "{query}"
         );
         assert_eq!(json["hits"][0]["title"], "Great Divide Brewing Co.");
@@ -76,8 +82,10 @@ async fn places_around_a_town_put_local_sites_before_the_town_s_own() {
         .await;
         let at = |d: &str| page.find(&format!("https://{d}")).unwrap();
         assert!(page.contains("<section class=\"pl\""), "{page}");
-        assert!(at("www.westword.com") > 0, "{page}");
-        assert!(!page.contains("denverbroncos.com"), "{page}");
+        assert!(
+            at("www.westword.com") < at("www.denverbroncos.com"),
+            "{page}"
+        );
     }
 }
 

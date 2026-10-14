@@ -316,3 +316,52 @@ fn may_be_borrowed(site: &crate::Hit) -> bool {
             .as_deref()
             .is_some_and(|title| !squash(title).contains(&label))
 }
+
+/// What happens to a person that Wikipedia titles "Assassination of
+/// Abraham Lincoln", "Wedding of Prince Harry and Meghan Markle".
+const EVENTS: &[&str] = &[
+    "abdication",
+    "arrest",
+    "assassination",
+    "burial",
+    "coronation",
+    "death",
+    "disappearance",
+    "execution",
+    "funeral",
+    "impeachment",
+    "inauguration",
+    "kidnapping",
+    "killing",
+    "murder",
+    "presidency",
+    "resignation",
+    "shooting",
+    "trial",
+    "wedding",
+];
+
+/// Whether `query` is a name and then what happened to them, which
+/// `title` is the article on: "lincoln assassination" for
+/// "Assassination of Abraham Lincoln", "george floyd murder" for "Murder
+/// of George Floyd". Every word of the name has to be in the title.
+pub(crate) fn event_of(title: &str, query: &str) -> bool {
+    let words = |text: &str| -> Vec<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let Some((event, whom)) = base_title(title).split_once(" of ") else {
+        return false;
+    };
+    let query = words(query);
+    let Some((asked, name)) = query.split_last() else {
+        return false;
+    };
+    let whom = words(whom);
+    !name.is_empty()
+        && EVENTS.contains(&asked.as_str())
+        && words(event) == [asked.clone()]
+        && name.iter().all(|word| whom.contains(word))
+}

@@ -20,8 +20,8 @@ use super::scoring::truncate_keeping_inner_pages;
 use super::sites::{base_title, describes_an_event};
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, PlacedPage, ALIAS_MATCH,
-    CANDIDATES, FILMS_SET, GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET,
-    PAGE_FIX_RATIO, PAGE_SLIP_WEIGHT, PAPERS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
+    ASKING_WORDS, CANDIDATES, FILMS_SET, GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES,
+    MUSIC_SET, PAGE_FIX_RATIO, PAGE_SLIP_WEIGHT, PAPERS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
 };
 use crate::analysis;
@@ -102,6 +102,10 @@ const WORK_LEADS: &[(&str, &[&str])] = &[
 const HINT_LEADS: &[&str] = &[
     "who is ",
     "who was ",
+    // "who are the members of bts" asks about BTS.
+    "who are the members of ",
+    "members of the ",
+    "members of ",
     "who are ",
     "who were ",
     "tell me about ",
@@ -224,6 +228,11 @@ fn asked_how(q: &str) -> Option<&str> {
         let rest = ["is ", "are ", "was "]
             .iter()
             .find_map(|verb| rest.strip_prefix(verb))?;
+        // "how tall is tom cruise in feet" and "how old is obama now" ask
+        // about Tom Cruise and Obama.
+        let rest = plumb_core::facts::without_size_unit(rest)
+            .or_else(|| plumb_core::facts::without_now(rest))
+            .unwrap_or(rest);
         MEASURES.contains(&measure).then_some(rest)
     };
     asked_name(between.or_else(measured)?)
@@ -243,6 +252,21 @@ fn asked_name(text: &str) -> Option<&str> {
         && !words().any(|word| NOT_NAMES.contains(&word)))
     .then_some(name)
 }
+
+/// Words of a title that only set two things side by side: "the
+/// difference between mitosis and meiosis".
+const COMPARING_WORDS: &[&str] = &[
+    "vs",
+    "versus",
+    "v",
+    "difference",
+    "differences",
+    "between",
+    "compared",
+    "comparison",
+    "better",
+    "or",
+];
 
 /// The two things a comparison sets side by side, each looked up as a
 /// name: "mitosis" and "meiosis" of "mitosis vs meiosis" or "difference
@@ -399,6 +423,8 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" predictions", Hint::Event),
     (" start time", Hint::Event),
     (" cast", Hint::Any),
+    (" band members", Hint::Any),
+    (" members", Hint::Any),
     (" author", Hint::Any),
     (" movie", Hint::Screen),
     (" film", Hint::Any),
@@ -425,6 +451,21 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" uses", Hint::Aspect),
     (" diagram", Hint::Aspect),
 ];
+
+/// Words before a name that ask what is usual or wise for it, not what it
+/// is: "normal" of "normal blood pressure".
+const JUDGING_WORDS: &[&str] = &[
+    "normal", "good", "bad", "healthy", "average", "ideal", "typical", "safe",
+];
+
+/// `name` without a word in front that judges it ([`JUDGING_WORDS`]):
+/// "blood pressure" of "normal blood pressure". `None` without one, or
+/// when a single word is left, which is as often initials: "healthy bmi"
+/// would name BMI, a research firm.
+fn judged_name(name: &str) -> Option<&str> {
+    let (first, rest) = name.split_once(' ')?;
+    (JUDGING_WORDS.contains(&first) && rest.contains(' ')).then_some(rest)
+}
 
 /// What a search asks of a thing of science, which the thing's article
 /// says, before its name with "of" or after it: "melting point of iron",
@@ -1287,7 +1328,7 @@ impl PageSearcher {
                 else {
                     continue;
                 };
-                let page: Page = serde_json::from_str(stored)?;
+                let mut page: Page = serde_json::from_str(stored)?;
                 if !page.is_article() || !page.item.as_deref().is_some_and(is_item_id) {
                     continue;
                 }
@@ -1296,6 +1337,7 @@ impl PageSearcher {
                 if name <= 0.0 && covered <= 0.0 {
                     continue;
                 }
+                page.drop_borrowed_site();
                 let popularity = document
                     .get_first(self.fields.popularity)
                     .and_then(|v| v.as_u64())
@@ -1428,6 +1470,7 @@ impl PageSearcher {
             .clone()
             .unwrap_or_else(|| (query.to_lowercase(), Hint::Any));
         let moved = year_moved(&name).map(|name| (name, hint));
+        let judged = hinted.is_some().then(|| judged_name(&name)).flatten();
         let searches: Vec<(String, Hint)> = hinted.into_iter().chain(moved).collect();
         if searches.is_empty() {
             return Ok(false);
@@ -1447,6 +1490,12 @@ impl PageSearcher {
             let mut found = self.search_once(bare, limit, scope)?;
             found.retain(|hit| hit.named && holds(hit));
             keep_found(hits, found);
+        }
+        // "what is a normal blood pressure" asks what is normal for blood
+        // pressure: when no page is called that, the pages "blood
+        // pressure" names are found too. "Normal distribution" is.
+        if let Some(judged) = judged.filter(|_| !hits.iter().any(|hit| hit.named)) {
+            self.add_found(hits, judged, Hint::Named, limit, scope)?;
         }
         Ok(true)
     }
@@ -1565,7 +1614,8 @@ impl PageSearcher {
     /// sets side by side ([`compared`]): the articles on mitosis and
     /// meiosis for "mitosis vs meiosis". `false` when one of `hits`
     /// already compares them, as "Crocodiles vs. Alligators" does
-    /// "crocodile vs alligator".
+    /// "crocodile vs alligator": a page whose title has nothing else of
+    /// substance. "Power consumption: SSD vs HDD" asks something narrower.
     fn add_compared(
         &self,
         hits: &mut Vec<PageHit>,
@@ -1574,8 +1624,20 @@ impl PageSearcher {
         scope: Option<&dyn Query>,
     ) -> Result<bool> {
         let compares = |hit: &PageHit| {
-            let title = hit.page.title.to_lowercase();
-            sides.iter().all(|side| title.contains(side.as_str()))
+            let mut title = hit.page.title.to_lowercase();
+            for side in sides {
+                let Some(at) = title.find(side.as_str()) else {
+                    return false;
+                };
+                title.replace_range(at..at + side.len(), " ");
+            }
+            // What is left of "crocodiles vs. alligators" is "s vs. s".
+            analysis::tokens(&self.words, &title).iter().all(|word| {
+                word.len() == 1
+                    || crate::is_function_word(word)
+                    || ASKING_WORDS.contains(&word.as_str())
+                    || COMPARING_WORDS.contains(&word.as_str())
+            })
         };
         if hits.iter().any(compares) {
             return Ok(false);

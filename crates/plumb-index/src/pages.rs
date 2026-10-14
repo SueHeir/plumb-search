@@ -51,7 +51,7 @@ pub use self::placing::{
     WEAK_SITE_MATCH,
 };
 pub(crate) use self::placing::{
-    asked_as_question, is_record, kept_below, named_page_site, names_best_site_page,
+    asked_as_question, is_record, is_year, kept_below, named_page_site, names_best_site_page,
 };
 pub use self::scoring::{made_by, site_pages_after_named_article};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
@@ -251,7 +251,8 @@ pub struct Page {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<plumb_core::profiles::Profile>,
     /// The item's official website when it is a subdomain or an inner page
-    /// of [`Page::site`]: `https://music.youtube.com/` for YouTube Music.
+    /// of [`Page::site`]: `https://music.youtube.com/` for YouTube Music. A
+    /// person's then has no site ([`Page::drop_borrowed_site`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<String>,
     /// A software package's card: its version, install command, docs.

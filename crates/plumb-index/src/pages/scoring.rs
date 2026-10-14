@@ -452,7 +452,8 @@ impl PageSearcher {
             else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
+            let mut page: Page = serde_json::from_str(stored)?;
+            page.drop_borrowed_site();
             let popularity = document
                 .get_first(self.fields.popularity)
                 .and_then(|v| v.as_u64())
@@ -1230,6 +1231,11 @@ impl PageSearcher {
                 let share = shared as f32 / words.len().max(query.len()) as f32;
                 best = best.max(PARTIAL_MATCH * share);
             }
+        }
+        // "lincoln assassination" is about the Assassination of Abraham
+        // Lincoln, which no redirect may call so.
+        if page.is_article() && super::sites::event_of(&page.title, raw_query) {
+            return (ALIAS_MATCH, true);
         }
         (best, false)
     }

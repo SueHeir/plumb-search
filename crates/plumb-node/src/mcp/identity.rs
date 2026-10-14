@@ -98,10 +98,13 @@ impl Intent {
             .iter()
             .any(|word| title.split_whitespace().any(|shown| shown == word))
             || self.expands_acronym(&title);
+        // A person's page on a bigger site keeps no site (plumb-index's
+        // drop_borrowed_site), so their country shows in their website.
+        let site = super::official_site::website_domain(page).unwrap_or_default();
         title_names
             && self.matches(page.website.as_deref().unwrap_or(""), &page.title)
-            && self.matches_country(page.site.as_deref().unwrap_or(""), None)
-            && self.shows_jurisdiction(page.site.as_deref().unwrap_or(""), &page.title, None)
+            && self.matches_country(&site, None)
+            && self.shows_jurisdiction(&site, &page.title, None)
     }
 
     /// A name match is retrieval evidence, not ownership. A bare domain

@@ -1046,6 +1046,76 @@ fn manual_pages_are_named_without_their_section() {
 }
 
 #[test]
+fn numbered_documents_go_packages_and_error_codes_are_named() {
+    // As the docs set writes them: plumb-tools build/docs.rs.
+    let pep = "https://peps.python.org/pep-0008/";
+    let rfc = "https://www.rfc-editor.org/info/rfc9110/";
+    let slog = "https://pkg.go.dev/log/slog";
+    let borrow = "https://doc.rust-lang.org/error_codes/E0499.html";
+    let (_dir, searcher) = searcher(&[
+        docs_page(
+            pep,
+            "PEP 8 — Style Guide for Python Code",
+            &["PEP 8"],
+            "Coding conventions for the Python code in the standard library.",
+        ),
+        docs_page(
+            rfc,
+            "RFC 9110 — HTTP Semantics",
+            &["RFC 9110"],
+            "The overall architecture of HTTP and its common terminology.",
+        ),
+        docs_page(
+            slog,
+            "slog — log/slog",
+            &["Go slog", "slog Go"],
+            "Package slog provides structured logging.",
+        ),
+        docs_page(
+            borrow,
+            "E0499 — Error codes index",
+            &["Rust E0499", "E0499 Rust"],
+            "A variable was borrowed as mutable more than once.",
+        ),
+    ]);
+    // PEPs and RFCs are records too (records.rs), whose links lead; the
+    // RFC's docs page, at its info address, comes next.
+    let rfc_record = "https://www.rfc-editor.org/rfc/rfc9110.html";
+    for (query, record) in [
+        ("PEP 8", pep),
+        ("pep8", pep),
+        ("RFC 9110", rfc_record),
+        ("rfc9110", rfc_record),
+    ] {
+        let hits = searcher.search(query, 10).unwrap();
+        assert_eq!(
+            hits.first().map(|hit| hit.page.url.as_str()),
+            Some(record),
+            "{query}"
+        );
+        if record == rfc_record {
+            assert!(hits.iter().any(|hit| hit.page.url == rfc && hit.named));
+        }
+    }
+    for (query, url) in [
+        ("golang slog", slog),
+        ("rust E0499", borrow),
+        (
+            "error[E0499]: cannot borrow `x` as mutable more than once",
+            borrow,
+        ),
+    ] {
+        let hits = searcher.search(query, 10).unwrap();
+        assert!(
+            hits.first()
+                .is_some_and(|hit| hit.page.url == url && hit.named),
+            "{query}: {:?}",
+            titles(&hits)
+        );
+    }
+}
+
+#[test]
 fn docs_pages_named_by_part_of_a_search_keep_the_rest_as_detail() {
     let with_sections = |mut page: Page, sections: &[&str]| {
         page.sections = sections.iter().map(|s| s.to_string()).collect();
