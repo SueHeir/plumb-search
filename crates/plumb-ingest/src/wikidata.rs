@@ -12,6 +12,15 @@ use url::Url;
 
 use crate::{open_maybe_gz, snippet, too_long_note, Line, LineReader, MAX_LINE_BYTES};
 
+/// What Wikidata calls an item that is a page of the wikis
+/// ([`OfficialSite::claims_nothing`]).
+const WIKI_PAGE_KINDS: [&str; 4] = [
+    "Wikimedia disambiguation page",
+    "Wikimedia human name disambiguation page",
+    "Wikimedia category",
+    "Wikimedia template",
+];
+
 /// One "official website" statement: an item, its label and the URL it
 /// claims. Build it with [`OfficialSite::new`], which derives the other fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +147,30 @@ impl OfficialSite {
         self.is_root_inner_page() && self.domain_name_share() * 3.0 >= 2.0
     }
 
+    /// True when the item's claim names no site: the item is a page of the
+    /// wikis rather than a thing (a disambiguation page, a category or a
+    /// template, [`OfficialSite::kinds`]) or a domain ending, labelled a dot
+    /// and one word. Some claim a website anyway: the disambiguation page
+    /// "Radioactive" a guitarist's site, "Microsoft Web Services"
+    /// outlook.com, and ".microsoft" its registry's nic.microsoft, which
+    /// "microsoft" would then name as an official site. Things whose name
+    /// starts with a dot (".NET Foundation", ".hack//The Movie", the
+    /// magazine ".KTW") keep their sites.
+    pub fn claims_nothing(&self) -> bool {
+        let ending = self.label.strip_prefix('.').is_some_and(|word| {
+            !word.is_empty() && word.chars().all(|c| c.is_alphanumeric() || c == '-')
+        }) && (self.kinds.is_empty()
+            || self
+                .kinds
+                .iter()
+                .any(|kind| kind.ends_with("top-level domain")));
+        ending
+            || self
+                .kinds
+                .iter()
+                .any(|kind| WIKI_PAGE_KINDS.contains(&kind.as_str()))
+    }
+
     /// True when the item's label or one of its other names contains the
     /// domain's name, its part before the suffix (`perplexity` of
     /// perplexity.ai in "Perplexity AI"), ignoring case, spaces and
@@ -178,9 +211,12 @@ impl OfficialSite {
 
 /// The site of a Wikidata item, from its official website claims: the
 /// registrable domain of its first claim and, when no claim is a front
-/// page of a domain ([`OfficialSite::is_root_homepage`]), the first
-/// address on that domain, such as `https://music.youtube.com/` for
-/// YouTube Music: a part of youtube.com rather than a site of its own.
+/// page of a domain ([`OfficialSite::is_root_homepage`]), the address on
+/// that domain with the fewest folders, such as `https://music.youtube.com/`
+/// for YouTube Music: a part of youtube.com rather than a site of its own.
+/// Fewest folders, because an item often lists its page in other languages
+/// too, and the order of claims is no guide: the Yankees' `mlb.com/yankees`
+/// rather than `mlb.com/es/yankees`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemSite {
     pub domain: String,
@@ -198,11 +234,18 @@ impl ItemSite {
             front_page: false,
         });
         site.front_page |= front_page;
-        if !front_page && site.inner.is_none() && claim.domain == site.domain {
-            let url = claim.url.trim();
-            if url.starts_with("https://") || url.starts_with("http://") {
-                site.inner = Some(url.to_string());
-            }
+        let url = claim.url.trim();
+        let folders = |url: &str| url_path(url).split('/').filter(|s| !s.is_empty()).count();
+        let shallower = site
+            .inner
+            .as_deref()
+            .is_none_or(|inner| folders(url) < folders(inner));
+        if !front_page
+            && shallower
+            && claim.domain == site.domain
+            && (url.starts_with("https://") || url.starts_with("http://"))
+        {
+            site.inner = Some(url.to_string());
         }
     }
 
@@ -371,6 +414,16 @@ mod tests {
         assert_eq!(sites["Q3"].domain, "karjakin.ru");
         assert!(sites["Q3"].front_page());
         assert_eq!(sites["Q4"].domain, "perplexity.ai");
+        // Its page in other languages too: the one with the fewest folders.
+        let yankees = &mut HashMap::new();
+        for url in [
+            "https://www.mlb.com/es/yankees",
+            "https://www.mlb.com/yankees",
+            "https://www.mlb.com/yankees/tickets",
+        ] {
+            ItemSite::add(yankees, &site("Q6", "New York Yankees", url));
+        }
+        assert_eq!(yankees["Q6"].website(), Some("https://www.mlb.com/yankees"));
 
         let mut named = site(
             "Q5",

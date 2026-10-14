@@ -100,6 +100,14 @@ impl Operators {
             && self.excluded.is_empty())
     }
 
+    /// Whether the query used an operator other than a quoted phrase.
+    /// `site:`, `-site:` and `-word` change what a query is about; a
+    /// phrase only how its words are found: "the godfather" in quotes is
+    /// still about the film.
+    pub fn any_but_phrases(&self) -> bool {
+        !(self.sites.is_empty() && self.not_sites.is_empty() && self.excluded.is_empty())
+    }
+
     /// The words to look sites up by: [`Operators::words`], or else the
     /// site the first `site:` names (`site:github.com` looks up github.com).
     pub fn lookup_text(&self) -> String {
@@ -224,6 +232,16 @@ mod tests {
         assert_eq!(ops.excluded, ["actix", "hello world"]);
         assert_eq!(ops.site_terms, r#"rust "web server" -actix -"hello world""#);
         assert!(ops.any());
+        assert!(ops.any_but_phrases());
+        let ops = Operators::parse(r#""the godfather""#);
+        assert!(ops.any() && !ops.any_but_phrases());
+        for query in [
+            "jaguar -car",
+            "site:imdb.com godfather",
+            "-site:imdb.com godfather",
+        ] {
+            assert!(Operators::parse(query).any_but_phrases(), "{query}");
+        }
     }
 
     #[test]
