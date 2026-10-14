@@ -66,15 +66,13 @@ fn whole_query_subjects_precede_domain_words_with_and_without_meaning() {
         )];
         // Three independently retrieved subject rows ensure partial
         // names cannot occupy the requested top three, even when the
-        // misleading name has much greater popularity and BM25.
-        for domain in [
-            "subject-guide.example",
-            "subject-reference.example",
-            "subject-library.example",
-        ] {
+        // misleading name has much greater popularity and BM25. Each is
+        // titled with its own name too, or they would be one site's copies.
+        for name in ["guide", "reference", "library"] {
+            let title = format!("{subject} | Subject {name}");
             records.push(site(
-                domain,
-                Some(subject),
+                &format!("subject-{name}.example"),
+                Some(&title),
                 Some(subject),
                 &[],
                 &[],
