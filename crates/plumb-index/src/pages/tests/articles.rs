@@ -412,6 +412,35 @@ fn articles_are_found_by_what_they_say_of_themselves() {
 }
 
 #[test]
+fn who_played_a_role_names_the_character() {
+    let (_dir, s) = searcher(&[
+        page("Joker (character)", 500_000, &[]),
+        page("The People's Joker", 40_000, &[]),
+        page("Joker (playing card)", 50_000, &[]),
+        page("Woody (Toy Story)", 100_000, &[]),
+        page("Woodie King Jr.", 5_000, &[]),
+    ]);
+    let first = |q: &str| {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .find(|hit| hit.named)
+            .map(|hit| hit.page.title)
+    };
+    assert_eq!(
+        first("who played the joker").as_deref(),
+        Some("Joker (character)")
+    );
+    assert_eq!(
+        first("who voiced woody").as_deref(),
+        Some("Woody (Toy Story)")
+    );
+    assert_eq!(
+        hinted_name("who plays spiderman"),
+        Some(("spiderman".into(), Hint::Any))
+    );
+}
+
+#[test]
 fn articles_are_found_by_their_other_names() {
     let mut sternum = page("Sternum", 300_000, &["Breastbone"]);
     sternum.names = vec!["Manubrium".into(), "Manubrium sterni".into()];
