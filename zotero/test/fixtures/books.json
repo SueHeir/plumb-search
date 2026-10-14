@@ -1,0 +1,127 @@
+{
+ "assembled": {
+  "rows": [
+   {
+    "kind": "site",
+    "site": {
+     "domain": "dunenovels.com",
+     "url": "https://dunenovels.com/",
+     "title": "Dune",
+     "description": "1965 science fiction novel by Frank Herbert",
+     "score": 0.7665247,
+     "official": true
+    },
+    "pages": [
+     {
+      "page": {
+       "set": "wikipedia-en",
+       "url": "https://en.wikipedia.org/wiki/Dune_(novel)",
+       "title": "Dune (novel)",
+       "description": "1965 science fiction novel by Frank Herbert",
+       "site": "dunenovels.com",
+       "views": 19101,
+       "item": "Q190192",
+       "lead": "Dune is a 1965 epic science fiction novel by American author Frank Herbert, originally published as two separate serials (1963–64 novel Dune World and 1965 novel Prophet of Dune) in Analog magazine."
+      },
+      "score": 0.34492567,
+      "named": false,
+      "popularity": 0.619215,
+      "under": "dunenovels.com",
+      "at": 0
+     }
+    ]
+   },
+   {
+    "kind": "page",
+    "page": {
+     "page": {
+      "set": "wikipedia-en",
+      "url": "https://en.wikipedia.org/wiki/Children_of_Dune",
+      "title": "Children of Dune",
+      "description": "1976 novel by Frank Herbert",
+      "views": 4763,
+      "item": "Q437365",
+      "lead": "Children of Dune is a 1976 science fiction novel by Frank Herbert, the third in his Dune series of six novels. Originally serialized in Analog Science Fiction and Fact in 1976, it was the last Dune novel to be serialized before book publication."
+     },
+     "score": 0.3789321,
+     "named": false,
+     "popularity": 0.531981,
+     "at": 1
+    }
+   },
+   {
+    "kind": "page",
+    "page": {
+     "page": {
+      "set": "stackexchange",
+      "url": "https://english.stackexchange.com/questions/360106",
+      "title": "What does this word mean in this passage from Frank Herbert's Dune?",
+      "description": "meaning-in-context, books, colors",
+      "views": 9796
+     },
+     "score": 0.4738143,
+     "named": false,
+     "popularity": 0.579381,
+     "at": 1
+    }
+   }
+  ]
+ },
+ "hits": [
+  {
+   "domain": "dunenovels.com",
+   "url": "https://dunenovels.com/",
+   "title": "Dune",
+   "description": "1965 science fiction novel by Frank Herbert",
+   "score": 0.7665247,
+   "official": true
+  }
+ ],
+ "pages": [
+  {
+   "page": {
+    "set": "wikipedia-en",
+    "url": "https://en.wikipedia.org/wiki/Dune_(novel)",
+    "title": "Dune (novel)",
+    "description": "1965 science fiction novel by Frank Herbert",
+    "site": "dunenovels.com",
+    "views": 19101,
+    "item": "Q190192",
+    "lead": "Dune is a 1965 epic science fiction novel by American author Frank Herbert, originally published as two separate serials (1963–64 novel Dune World and 1965 novel Prophet of Dune) in Analog magazine."
+   },
+   "score": 0.34492567,
+   "named": false,
+   "popularity": 0.619215,
+   "under": "dunenovels.com",
+   "at": 0
+  },
+  {
+   "page": {
+    "set": "wikipedia-en",
+    "url": "https://en.wikipedia.org/wiki/Children_of_Dune",
+    "title": "Children of Dune",
+    "description": "1976 novel by Frank Herbert",
+    "views": 4763,
+    "item": "Q437365",
+    "lead": "Children of Dune is a 1976 science fiction novel by Frank Herbert, the third in his Dune series of six novels. Originally serialized in Analog Science Fiction and Fact in 1976, it was the last Dune novel to be serialized before book publication."
+   },
+   "score": 0.3789321,
+   "named": false,
+   "popularity": 0.531981,
+   "at": 1
+  },
+  {
+   "page": {
+    "set": "stackexchange",
+    "url": "https://english.stackexchange.com/questions/360106",
+    "title": "What does this word mean in this passage from Frank Herbert's Dune?",
+    "description": "meaning-in-context, books, colors",
+    "views": 9796
+   },
+   "score": 0.4738143,
+   "named": false,
+   "popularity": 0.579381,
+   "at": 1
+  }
+ ]
+}

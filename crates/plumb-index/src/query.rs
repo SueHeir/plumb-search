@@ -319,6 +319,47 @@ impl ParsedQuery {
         Ok(covered)
     }
 
+    /// The positions of the query's main words: those other than
+    /// [`FILLER_WORDS`] and [`plumb_core::FUNCTION_WORDS`].
+    fn main_words(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.words.len()).filter(|&i| {
+            let word = self.words[i].as_str();
+            !is_function_word(word) && !FILLER_WORDS.contains(&word)
+        })
+    }
+
+    /// Which of `docs` have only the query's numbers of its main words, as
+    /// a site with nothing but the year has of "glastonbury 2026". None
+    /// unless the query has both numbers and other main words.
+    pub(crate) fn only_numbers(
+        &self,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+        docs: &[DocAddress],
+    ) -> Result<HashSet<DocAddress>> {
+        let (numbers, words): (Vec<usize>, Vec<usize>) = self
+            .main_words()
+            .partition(|&i| self.words[i].bytes().all(|b| b.is_ascii_digit()));
+        if numbers.is_empty() || words.is_empty() || docs.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let having = |indices: &[usize]| -> Result<HashSet<DocAddress>> {
+            let mut clauses = Clauses::default();
+            for &i in indices {
+                self.word_clauses(i, searcher, f, &mut clauses)?;
+            }
+            Ok(bm25_of(searcher, &clauses.into_query(), docs.to_vec())?
+                .into_iter()
+                .filter_map(|(bm25, addr)| (bm25 > 0.0).then_some(addr))
+                .collect())
+        };
+        let words = having(&words)?;
+        Ok(having(&numbers)?
+            .into_iter()
+            .filter(|addr| !words.contains(addr))
+            .collect())
+    }
+
     /// Which of `docs` lack one of the query's main words: those other
     /// than [`FILLER_WORDS`] and [`plumb_core::FUNCTION_WORDS`]. None for a
     /// query of one main word or fewer.
@@ -328,12 +369,7 @@ impl ParsedQuery {
         f: &Fields,
         docs: &[DocAddress],
     ) -> Result<HashSet<DocAddress>> {
-        let main: Vec<usize> = (0..self.words.len())
-            .filter(|&i| {
-                let word = self.words[i].as_str();
-                !is_function_word(word) && !FILLER_WORDS.contains(&word)
-            })
-            .collect();
+        let main: Vec<usize> = self.main_words().collect();
         let mut missing = HashSet::new();
         if main.len() < 2 || docs.is_empty() {
             return Ok(missing);
