@@ -302,7 +302,7 @@ pub enum CrawlOutcome {
     },
     /// The page was a bot check standing in for the homepage (Cloudflare's
     /// "Just a moment...", a KillBot verification and the like; see
-    /// [`plumb_core::is_bot_check_page`]). It says nothing about the site,
+    /// [`plumb_core::is_stand_in_homepage`]). It says nothing about the site,
     /// so nothing on it is kept: no title, no links.
     BotCheck {
         /// The check's title.
