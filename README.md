@@ -31,6 +31,8 @@ Search at https://plumbsearch.org. It keeps no access log, and its results pages
 
 To make it your browser's search engine, open a Plumb page and add it from the address bar (in Firefox, right-click the address bar and choose **Add "Plumb Search"**), or add `https://plumbsearch.org/search?q=%s` by hand.
 
+To search it from Zotero and add the papers, books and pages you find to your library, install the [Zotero plugin](zotero/README.md).
+
 ## What it does
 
 - **Official sites first.** Names outrank text, and look-alike sites stuffed with a brand's keywords are kept below the real one.
@@ -256,6 +258,8 @@ score = α · link_score + trust · ((1 − α) · text_score + name_bonus)
 
 `α` defaults to 0.35 and can be changed with `--alpha`.
 
+A search for a county that ends in its state ("franklin county sheriff ohio") lists the sites that say they are in another state, by name, postal code or domain, after the rest: two dozen states have a Franklin County. In the same way a search about a town lists the sites of other towns of its name after the rest: "berlin wall memorial" lists Berlin, New Hampshire's site last, and "springfield city hall illinois" Springfield, Massachusetts's. A town's own site is one whose title gives the name with a state or country ("Berlin, NH", "City of Springfield Ohio"), or is the name while its description is a town's. The town meant is the one the query places by a state, province or country right after the name, a postal code, or a place at its end, when the place index has such a town there ("portland maine", "springfield il", "springfield city hall illinois", not "rome to new york"). When the query says nothing of where, it is the one places are searched around ([docs/places.md](docs/places.md)), but only when a site that names it is in it: "plymouth thanksgiving dinner" lists sites of Plymouth, Massachusetts alone, so none moves for Plymouth, England. A town whose name is also a state's or country's ("victoria", "georgia") or ends in "city" ("kansas city") is not looked for. A site is where it says after the name, or in the states it names, or in its country, and one that says it is somewhere the query names keeps its place ("university of idaho moscow").
+
 Besides its names, title, description and headings, a site is also found by up to 30 search terms that each crawl picks from the whole homepage text with [YAKE](https://github.com/LIAAD/yake), a statistical keyword extractor (no model, a few milliseconds a page). They count for less than names. `plumb-tools fetch-text` and `plumb-tools terms` measure other choices on saved pages without crawling again.
 
 ### Trying ranking changes on real searches
@@ -303,7 +307,7 @@ A node does this on its own with `plumb run --search-by-meaning` (the desktop ap
 | `crates/plumb-desktop` | The desktop app: a [Tauri](https://v2.tauri.app) window around a node running inside it. A plain `cargo build` leaves it out; see [docs/desktop.md](docs/desktop.md) |
 | `crates/plumb-e2e` | End-to-end tests that run the Docker image, kill containers mid-work and restart them |
 
-`fixtures/` holds the synthetic test data and `eval/brand_queries.tsv` the brand-name test list for real data.
+`zotero/` holds the Zotero plugin. `fixtures/` holds the synthetic test data and `eval/brand_queries.tsv` the brand-name test list for real data.
 
 ## Data sources
 

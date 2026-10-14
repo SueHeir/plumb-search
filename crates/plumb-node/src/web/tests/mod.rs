@@ -366,7 +366,16 @@ impl SearchBackend for BreweryPlaces {
             guessed: !query.contains(" in "),
             radius_km: 12.0,
             hits: vec![
-                brewery("Great Divide", "n2", Some("https://greatdivide.com/")),
+                // Or with its page on a site the results list.
+                brewery(
+                    "Great Divide",
+                    "n2",
+                    Some(if query.contains("westword") {
+                        "https://www.westword.com/bars/great-divide"
+                    } else {
+                        "https://greatdivide.com/"
+                    }),
+                ),
                 brewery("Unknown Ales", "n3", Some("https://unknown-ales.example/")),
                 brewery("No Site Brewing", "n4", None),
             ],

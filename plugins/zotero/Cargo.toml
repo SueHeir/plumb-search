@@ -1,0 +1,17 @@
+[package]
+name = "plumb-plugin-zotero"
+description = "A Plumb Search plugin: your Zotero library, through Zotero's local API."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+plumb-plugin = { version = "0.3.0", path = "../../crates/plumb-plugin" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+unicode-normalization = "0.1.24"

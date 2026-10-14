@@ -16,13 +16,15 @@ fn brand_plus_intent_queries_find_the_official_site() {
         ),
         ("us bank login", "usbank.com", "usbank-login-help.com"),
         ("U.S. Bank login", "usbank.com", "usbank-login-help.com"),
-        ("us bank login help", "usbank.com", "usbank-login-help.com"),
     ] {
         let hits = searcher.search(query, 10).unwrap();
         assert_eq!(hits[0].domain, official, "{query:?}: {hits:#?}");
         // The look-alike is still found, below the site it imitates.
         assert!(domains(&hits).contains(&lookalike), "{query:?}");
     }
+    // Unless it is the query spelled as one name.
+    let hits = searcher.search("us bank login help", 10).unwrap();
+    assert_eq!(domains(&hits), ["usbank.com"]);
     // Typing its hostname still goes to the look-alike.
     assert_eq!(
         top(&searcher, "usbank-login-help.com"),

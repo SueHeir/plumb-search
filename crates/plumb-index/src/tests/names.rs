@@ -563,26 +563,62 @@ fn sites_that_redirect_name_the_site_they_redirect_to() {
     lookalike.redirect = Some(plumb_core::Redirect {
         to: "pnc.com".into(),
         at: 1,
+        inner: false,
     });
     // A redirect to a site not in the index changes nothing.
     let mut elsewhere = site("fb.example", None, None, &[], &[], ranked(50_000, 10));
     elsewhere.redirect = Some(plumb_core::Redirect {
         to: "facebook.example".into(),
         at: 1,
+        inner: false,
+    });
+    // Sent to a page about it, or to the sign-in of the domain it is on,
+    // a site stays one of its own.
+    let mut section = site(
+        "destinythegame.com",
+        Some("Destiny 2"),
+        None,
+        &[],
+        &[],
+        ranked(9_000, 50),
+    );
+    section.redirect = Some(plumb_core::Redirect {
+        to: "bungie.net".into(),
+        at: 1,
+        inner: true,
+    });
+    let mut gmail = site(
+        "mail.google.com",
+        Some("Gmail"),
+        None,
+        &[],
+        &[],
+        ranked(1, 900),
+    );
+    gmail.redirect = Some(plumb_core::Redirect {
+        to: "google.com".into(),
+        at: 1,
+        inner: false,
     });
     let records = vec![
         site("pnc.com", None, None, &[], &[], ranked(2_000, 900)),
         lookalike,
         elsewhere,
         site("bank.com", None, None, &[], &[], ranked(3_000, 900)),
+        site("bungie.net", None, None, &[], &[], ranked(9_000, 400)),
+        section,
+        site("google.com", None, None, &[], &[], ranked(1, 900)),
+        gmail,
     ];
     let dir = TempDir::new().unwrap();
     let stats = build_index(dir.path(), &records).unwrap();
-    assert_eq!((stats.docs, stats.redirected), (3, 1));
+    assert_eq!((stats.docs, stats.redirected), (7, 1));
     let searcher = Searcher::open(dir.path()).unwrap();
     let hits = searcher.search("pnc bank", 10).unwrap();
     assert_eq!(hits[0].domain, "pnc.com", "{hits:?}");
     assert!(domains(&hits).iter().all(|d| *d != "pncbank.com"));
     assert_eq!(top(&searcher, "pncbank"), "pnc.com");
     assert_eq!(top(&searcher, "fb example"), "fb.example");
+    assert_eq!(top(&searcher, "destiny 2"), "destinythegame.com");
+    assert_eq!(top(&searcher, "gmail"), "mail.google.com");
 }

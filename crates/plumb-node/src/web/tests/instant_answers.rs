@@ -21,6 +21,52 @@ async fn instant_answers_go_above_the_results() {
     assert!(json["hits"].is_array());
 }
 
+/// Suggests a spelling for one query, as the node's spellers do.
+struct SpellingBackend;
+
+impl SearchBackend for SpellingBackend {
+    fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+
+    fn num_docs(&self) -> u64 {
+        1
+    }
+
+    fn search_full(&self, query: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
+        let fixed = match query {
+            "10 kilomters in miles" => "10 kilometers in miles",
+            "2+2" => "2+3",
+            _ => return Ok(SearchResults::default()),
+        };
+        Ok(SearchResults {
+            spelling: Some(Spelling {
+                query: fixed.into(),
+                site: None,
+                applied: false,
+            }),
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_misspelled_ask_gets_the_answer_to_its_spelling() {
+    let app = router_with(Arc::new(SpellingBackend), HomeCountry::Off);
+    let (_, _, body) = send(app.clone(), "/search?q=10+kilomters+in+miles").await;
+    assert!(body.contains("6.21371 miles"), "{body}");
+    let (_, _, body) = send(app.clone(), "/api/search?q=10+kilomters+in+miles&full=1").await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json["answer"]["answer"]
+        .as_str()
+        .unwrap()
+        .contains("6.21371"));
+    // The answer to what was typed comes first.
+    let (_, _, body) = send(app, "/api/search?q=2%2B2&full=1").await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["answer"]["answer"], "4");
+}
+
 struct EntityAnswersBackend {
     displayed: Vec<plumb_index::pages::PlacedPage>,
     candidates: Vec<PageHit>,
@@ -125,6 +171,33 @@ async fn facts_resolve_japan_when_who_takes_the_displayed_result() {
     assert!(body.contains("Counted in 2024, from Wikidata"));
     assert!(body.contains("https://www.who.int/countries/jpn/"));
     assert_eq!(*backend.lookups.lock().unwrap(), ["japan", "japan"]);
+}
+
+#[tokio::test]
+async fn sums_and_operators_other_than_quotes_get_no_info_box() {
+    // The results for "2*3" lead with its digits read without the sign.
+    let number = answer_entity("23 (number)", "Q713498", "natural number");
+    let backend = Arc::new(EntityAnswersBackend::new(vec![number], Vec::new()));
+    let app = router_with(backend, HomeCountry::Off);
+    let (_, _, body) = send(app.clone(), "/api/search?q=2*3&full=1").await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["answer"]["answer"], "6");
+    assert!(json["info"].is_null(), "{body}");
+    let (_, _, body) = send(app.clone(), "/search?q=2*3").await;
+    assert!(body.contains("<p class=\"iaa\">6</p>"), "{body}");
+    assert!(!body.contains("class=\"ib\""), "{body}");
+    // Nor does a search with operators, in the API as on the page.
+    let (_, _, body) = send(app.clone(), "/api/search?q=23+-film&full=1").await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json["info"].is_null(), "{body}");
+    // The number asked for alone gets its box, in quotes too.
+    for query in ["23", "%2223%22"] {
+        let (_, _, body) = send(app.clone(), &format!("/api/search?q={query}&full=1")).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["info"]["title"], "23 (number)", "{query}");
+        let (_, _, body) = send(app.clone(), &format!("/search?q={query}")).await;
+        assert!(body.contains("class=\"ib\""), "{query}: {body}");
+    }
 }
 
 #[tokio::test]

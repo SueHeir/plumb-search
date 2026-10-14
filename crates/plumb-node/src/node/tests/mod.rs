@@ -11,6 +11,7 @@ mod sets;
 mod setup;
 mod storage;
 mod trusted;
+mod wanted_pages;
 mod with_peers;
 
 use std::collections::HashMap;
@@ -88,8 +89,9 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.refresh_every = None;
     config.crawl_per_refresh = 0;
     config.crawl_home_site = false;
-    // No feed of a test site is ever fetched.
+    // No feed of a test site is ever fetched, nor its pages for searches.
     config.news_feeds = 0;
+    config.wanted_pages = false;
     // As if "Set up my node" was answered, so filling goes ahead.
     config.settings.setup_chosen = true;
     // No model is downloaded unless a test asks for one.

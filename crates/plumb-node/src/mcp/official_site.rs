@@ -29,22 +29,33 @@ impl Mcp {
         options: &SearchOptions,
         prefixes: bool,
     ) -> Result<Value> {
-        let intent = identity::Intent::of(name);
-        let country_conflict = intent.country.filter(|country| {
-            options.country.as_deref().is_some_and(|preference| preference != *country)
-        }).map(|country| json!({
-            "query": country,
-            "preference": options.country,
-            "resolution": "The jurisdiction named in the query takes precedence over the country preference.",
-        }));
+        let mut intent = identity::Intent::of(name);
+        let asked = options;
         let options = &SearchOptions {
             country: intent
                 .country
                 .map(str::to_string)
-                .or_else(|| options.country.clone()),
-            ..options.clone()
+                .or_else(|| asked.country.clone()),
+            ..asked.clone()
         };
         let mut results = self.lookup(name, 1 + ALTERNATIVES, options)?;
+        // A country's name can end a place's own: New Mexico is not "new"
+        // in Mexico, nor New South Wales "new south" in Wales.
+        let whole = identity::Intent::whole(name);
+        let options = if intent.country.is_some() && whole.is_known_name(&results) {
+            intent = whole;
+            results = self.lookup(name, 1 + ALTERNATIVES, asked)?;
+            asked
+        } else {
+            options
+        };
+        let country_conflict = intent.country.filter(|country| {
+            asked.country.as_deref().is_some_and(|preference| preference != *country)
+        }).map(|country| json!({
+            "query": country,
+            "preference": asked.country,
+            "resolution": "The jurisdiction named in the query takes precedence over the country preference.",
+        }));
         // Keep ranking within the requested entity. A popular spelling
         // suggestion or a task-word domain cannot validate another entity.
         if let Some(at) = results
@@ -819,7 +830,7 @@ impl Mcp {
 
 /// Whether `page` is about one thing Wikidata describes: a Wikipedia
 /// article or a Wikidata item.
-fn is_article(page: &Page) -> bool {
+pub(super) fn is_article(page: &Page) -> bool {
     page.set.starts_with("wikipedia-") || page.set == WIKIDATA_SET
 }
 

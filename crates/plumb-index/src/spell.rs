@@ -661,7 +661,7 @@ pub(crate) fn near_terms(
 /// Whether `fixed` is close enough to `word`, one word of a corrected
 /// name: within [`max_edits`], or one edit for a word of two or three
 /// letters ("taco bel").
-fn within_edits(word: &str, fixed: &str) -> bool {
+pub(crate) fn within_edits(word: &str, fixed: &str) -> bool {
     let edits = match word.chars().count() {
         0 | 1 => 0,
         2 | 3 => 1,
@@ -678,7 +678,7 @@ fn within_edits(word: &str, fixed: &str) -> bool {
 
 /// Levenshtein automata builders, which are costly to make, for 1 and 2
 /// edits, with a swap of neighbouring letters as one edit.
-fn builder(edits: u8) -> &'static LevenshteinAutomatonBuilder {
+pub(crate) fn builder(edits: u8) -> &'static LevenshteinAutomatonBuilder {
     static ONE: OnceLock<LevenshteinAutomatonBuilder> = OnceLock::new();
     static TWO: OnceLock<LevenshteinAutomatonBuilder> = OnceLock::new();
     match edits {
