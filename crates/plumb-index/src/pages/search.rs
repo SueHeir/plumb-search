@@ -106,6 +106,11 @@ fn asked_how(q: &str) -> Option<&str> {
         let rest = ["is ", "are ", "was "]
             .iter()
             .find_map(|verb| rest.strip_prefix(verb))?;
+        // "how tall is tom cruise in feet" and "how old is obama now" ask
+        // about Tom Cruise and Obama.
+        let rest = plumb_core::facts::without_size_unit(rest)
+            .or_else(|| plumb_core::facts::without_now(rest))
+            .unwrap_or(rest);
         MEASURES.contains(&measure).then_some(rest)
     };
     let about = works.or_else(measured)?;
