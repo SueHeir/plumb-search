@@ -808,6 +808,34 @@ fn comparisons_find_the_articles_on_both_sides() {
 }
 
 #[test]
+fn a_plural_that_names_only_namesakes_asks_about_its_singular() {
+    let (_dir, s) = searcher(&[
+        page("Cloud", 300_000, &[]),
+        page("Clouds (2020 film)", 5_000, &[]),
+        page("Clouds (Joni Mitchell album)", 8_000, &[]),
+        page("Solar panel", 100_000, &[]),
+        page("Python (programming language)", 400_000, &[]),
+        page("Python (genus)", 20_000, &[]),
+        page("Pythonidae", 30_000, &["Pythons"]),
+    ]);
+    let named = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("what are clouds")[0], "Cloud");
+    assert_eq!(named("what are solar panels"), ["Solar panel"]);
+    // A singular asks about what it names, qualified or not.
+    let python = named("what is python");
+    assert!(!python.contains(&"Pythonidae".to_string()), "{python:?}");
+    let pythons = named("what is a ball python");
+    assert!(!pythons.contains(&"Pythonidae".to_string()), "{pythons:?}");
+}
+
+#[test]
 fn a_monarch_typed_with_a_number_is_named() {
     let mut book = page("Henry the Eighth", 3, &[]);
     book.set = BOOKS_SET.into();
