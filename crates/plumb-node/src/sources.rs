@@ -97,43 +97,54 @@ pub fn route(query: &str, answer: Option<Kind>, country: Option<&str>) -> Option
         Some(Kind::Currency) => return sites(&["xe.com", "wise.com"]),
         _ => {}
     }
-    if let Some(word) = defined_word(&text) {
+    if let Some((word, asked)) = word_asked(&text) {
         let encoded: String = url::form_urlencoded::byte_serialize(word.as_bytes()).collect();
+        let encoded = encoded.replace('+', "%20");
         let wiki = word.replace(' ', "_");
         let wiki: String = url::form_urlencoded::byte_serialize(wiki.as_bytes()).collect();
-        return Some(Route {
-            sources: vec![
-                Source {
-                    domain: "merriam-webster.com",
-                    page: Some((
-                        format!(
-                            "https://www.merriam-webster.com/dictionary/{}",
-                            encoded.replace('+', "%20")
-                        ),
-                        format!("{word}: Merriam-Webster dictionary"),
-                    )),
-                },
-                Source {
-                    domain: "dictionary.com",
-                    page: Some((
-                        format!(
-                            "https://www.dictionary.com/browse/{}",
-                            encoded.replace('+', "%20")
-                        ),
-                        format!("{word}: Dictionary.com"),
-                    )),
-                },
-                Source {
-                    domain: "wiktionary.org",
-                    page: Some((
-                        format!("https://en.wiktionary.org/wiki/{wiki}"),
-                        format!("{word}: Wiktionary, the free dictionary"),
-                    )),
-                },
+        let page = |domain, url: String, title: String| Source {
+            domain,
+            page: Some((url, title)),
+        };
+        let wiktionary = page(
+            "wiktionary.org",
+            format!("https://en.wiktionary.org/wiki/{wiki}"),
+            format!("{word}: Wiktionary, the free dictionary"),
+        );
+        let sources = match asked {
+            WordAsk::Meaning => vec![
+                page(
+                    "merriam-webster.com",
+                    format!("https://www.merriam-webster.com/dictionary/{encoded}"),
+                    format!("{word}: Merriam-Webster dictionary"),
+                ),
+                page(
+                    "dictionary.com",
+                    format!("https://www.dictionary.com/browse/{encoded}"),
+                    format!("{word}: Dictionary.com"),
+                ),
+                wiktionary,
             ],
-        });
+            WordAsk::Others => vec![
+                page(
+                    "merriam-webster.com",
+                    format!("https://www.merriam-webster.com/thesaurus/{encoded}"),
+                    format!("{word}: Merriam-Webster thesaurus"),
+                ),
+                page(
+                    "thesaurus.com",
+                    format!("https://www.thesaurus.com/browse/{encoded}"),
+                    format!("{word}: Thesaurus.com"),
+                ),
+                wiktionary,
+            ],
+        };
+        return Some(Route { sources });
     }
     if let Some(route) = tools(&text) {
+        return Some(route);
+    }
+    if let Some(route) = government(&text, country) {
         return Some(route);
     }
     near_me(&text)
@@ -159,32 +170,102 @@ pub fn asks_the_time(text: &str) -> bool {
     )
 }
 
-/// The word or two `text` (normalized) asks the meaning of: "define
-/// prioritize", "prioritize definition", "meaning of ubiquitous", "what
-/// does ubiquitous mean", "what does asap stand for".
-fn defined_word(text: &str) -> Option<String> {
+/// What a search asks of a word ([`word_asked`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordAsk {
+    /// Its meaning, forms or spelling, which a dictionary gives.
+    Meaning,
+    /// Words that mean the same or the opposite, which a thesaurus gives.
+    Others,
+}
+
+/// Words before a word that ask what a dictionary gives of it.
+const MEANING_LEADS: &[&str] = &[
+    "define ",
+    "definition of ",
+    "meaning of ",
+    "what is the meaning of ",
+    "what is the definition of ",
+    "plural of ",
+    "the plural of ",
+    "what is the plural of ",
+    "past tense of ",
+    "the past tense of ",
+    "what is the past tense of ",
+    "how to spell ",
+    "how do you spell ",
+    "how do i spell ",
+    "spelling of ",
+    "how to pronounce ",
+    "how do you pronounce ",
+    "how do i pronounce ",
+    "pronunciation of ",
+    "pronounce ",
+];
+/// Words after a word that ask what a dictionary gives of it. Not
+/// " plural" or " past tense": "first person plural" and "simple past
+/// tense" ask about grammar.
+const MEANING_TAILS: &[&str] = &[" definition", " meaning", " define"];
+/// Words before a word that ask what a thesaurus gives of it.
+const OTHERS_LEADS: &[&str] = &[
+    "synonym for ",
+    "synonyms for ",
+    "synonym of ",
+    "synonyms of ",
+    "another word for ",
+    "what is another word for ",
+    "other words for ",
+    "antonym for ",
+    "antonyms for ",
+    "antonym of ",
+    "antonyms of ",
+    "opposite of ",
+    "the opposite of ",
+    "what is the opposite of ",
+];
+/// Words after a word that ask what a thesaurus gives of it.
+const OTHERS_TAILS: &[&str] = &[" synonym", " synonyms", " antonym", " antonyms"];
+
+/// The word or two `text` (normalized) asks about, and what it asks:
+/// "define prioritize", "prioritize definition", "what does ubiquitous
+/// mean", "what does asap stand for", "plural of mouse", "how to spell
+/// necessary", "how do you pronounce gif", "is irregardless a word" ask a
+/// dictionary; "synonyms for good", "opposite of brave" a thesaurus.
+fn word_asked(text: &str) -> Option<(String, WordAsk)> {
     let text = text
         .strip_prefix("whats ")
         .map_or(text.to_string(), |rest| format!("what is {rest}"));
-    let word = text
-        .strip_prefix("define ")
-        .or_else(|| text.strip_prefix("definition of "))
-        .or_else(|| text.strip_prefix("meaning of "))
-        .or_else(|| text.strip_prefix("what is the meaning of "))
-        .or_else(|| text.strip_prefix("what is the definition of "))
-        .or_else(|| text.strip_suffix(" definition"))
-        .or_else(|| text.strip_suffix(" meaning"))
-        .or_else(|| text.strip_suffix(" define"))
+    let lead = |leads: &[&str]| leads.iter().find_map(|lead| text.strip_prefix(lead));
+    let tail = |tails: &[&str]| tails.iter().find_map(|tail| text.strip_suffix(tail));
+    let what_does = || {
+        let rest = text.strip_prefix("what does ")?;
+        [" mean", " stand for", " stands for"]
+            .iter()
+            .find_map(|tail| rest.strip_suffix(tail))
+    };
+    let is_word = || {
+        let rest = text.strip_prefix("is ")?;
+        [" a word", " a real word"]
+            .iter()
+            .find_map(|tail| rest.strip_suffix(tail))
+    };
+    let meaning = |word| (word, WordAsk::Meaning);
+    let others = |word| (word, WordAsk::Others);
+    let (word, asked) = lead(MEANING_LEADS)
+        .map(meaning)
+        .or_else(|| lead(OTHERS_LEADS).map(others))
         .or_else(|| {
-            let rest = text.strip_prefix("what does ")?;
-            [" mean", " stand for", " stands for"]
-                .iter()
-                .find_map(|tail| rest.strip_suffix(tail))
-        })?
-        .trim();
+            tail(MEANING_TAILS)
+                .or_else(what_does)
+                .or_else(is_word)
+                .map(meaning)
+        })
+        .or_else(|| tail(OTHERS_TAILS).map(others))?;
+    let word = word.trim();
     let word = word.strip_prefix("the word ").unwrap_or(word);
-    // "meaning of shiloh name" asks what a name means, not a dictionary.
-    if word.ends_with(" name") {
+    // "meaning of shiloh name" asks what a name means, not a dictionary,
+    // and "how to spell check" for a spelling checker.
+    if word.ends_with(" name") || word == "check" {
         return None;
     }
     let n = word.split(' ').count();
@@ -193,7 +274,7 @@ fn defined_word(text: &str) -> Option<String> {
         && word
             .chars()
             .all(|c| c.is_alphabetic() || c == ' ' || c == '-'))
-    .then(|| word.to_string())
+    .then(|| (word.to_string(), asked))
 }
 
 /// Languages people translate between, as they type them.
@@ -441,6 +522,179 @@ fn near_me(text: &str) -> Option<Route> {
     }
 }
 
+/// A government service's page for one country: the country's code, the
+/// site's domain as the index keys it, the page's address and its title.
+type OfficialPage = (&'static str, &'static str, &'static str, &'static str);
+
+/// Government services that paid middlemen also sell under names that
+/// look official ("U.S. Passport Online Application", "US Birth
+/// Certificates and Vital Records"), which rank well for the service's
+/// words: what the service is called, and its official page by country
+/// ([`OfficialPage`]).
+const GOVERNMENT: &[(&[&str], &[OfficialPage])] = &[
+    (
+        &["passport", "passports"],
+        &[
+            (
+                "US",
+                "travel.state.gov",
+                "https://travel.state.gov/content/travel/en/passports.html",
+                "U.S. Passports | Travel.State.Gov",
+            ),
+            (
+                "GB",
+                "www.gov.uk",
+                "https://www.gov.uk/apply-renew-passport",
+                "Apply for or renew a British passport - GOV.UK",
+            ),
+        ],
+    ),
+    (
+        &[
+            "birth certificate",
+            "birth certificates",
+            "death certificate",
+            "marriage certificate",
+            "vital records",
+        ],
+        &[
+            (
+                "US",
+                "cdc.gov",
+                "https://www.cdc.gov/nchs/w2w/index.htm",
+                "Where to Write for Vital Records | CDC",
+            ),
+            (
+                "GB",
+                "www.gov.uk",
+                "https://www.gov.uk/order-copy-birth-death-marriage-certificate",
+                "Order a copy of a birth, death or marriage certificate - GOV.UK",
+            ),
+        ],
+    ),
+    (
+        &["real id"],
+        &[(
+            "US",
+            "usa.gov",
+            "https://www.usa.gov/real-id",
+            "REAL ID | USAGov",
+        )],
+    ),
+    (
+        &["social security card", "social security cards"],
+        &[(
+            "US",
+            "ssa.gov",
+            "https://www.ssa.gov/number-card",
+            "Social Security number and card | SSA",
+        )],
+    ),
+];
+
+/// Words around a service's name that ask how to get or use it.
+const GOVERNMENT_ASKING: &[&str] = &[
+    "how",
+    "where",
+    "what",
+    "when",
+    "get",
+    "getting",
+    "apply",
+    "applying",
+    "application",
+    "renew",
+    "renewing",
+    "renewal",
+    "replace",
+    "replacement",
+    "lost",
+    "stolen",
+    "order",
+    "request",
+    "copy",
+    "certified",
+    "expedite",
+    "expedited",
+    "status",
+    "check",
+    "cost",
+    "fee",
+    "fees",
+    "need",
+    "required",
+    "requirements",
+    "documents",
+    "long",
+    "much",
+    "take",
+    "new",
+    "first",
+    "online",
+    "form",
+    "forms",
+];
+
+/// Words that may go with those, saying nothing themselves: "my" alone
+/// does not ask for a passport ("my passport" is a hard drive).
+const GOVERNMENT_FILLER: &[&str] = &[
+    "can", "do", "does", "is", "i", "you", "it", "to", "a", "an", "the", "my", "for", "of", "s",
+];
+
+/// Words that say whose service is meant, and the country's code.
+const GOVERNMENT_COUNTRIES: &[(&str, &str)] = &[
+    ("us", "US"),
+    ("usa", "US"),
+    ("u", "US"),
+    ("american", "US"),
+    ("uk", "GB"),
+    ("british", "GB"),
+    ("britain", "GB"),
+];
+
+/// The official page of the government service `text` (normalized) asks
+/// how to get: "how to renew passport", "lost passport", "how to get a
+/// birth certificate", "real id requirements". Only the service's name
+/// with words that ask for it or say whose it is, and one of those: "us
+/// passport" or "passport renewal", not "passport photo", "laravel
+/// passport" or "my passport". The country said, else the searcher's
+/// (the United States when not given).
+fn government(text: &str, country: Option<&str>) -> Option<Route> {
+    let words: Vec<&str> = text.split(' ').collect();
+    GOVERNMENT.iter().find_map(|(names, pages)| {
+        let rest = names.iter().find_map(|name| {
+            let name: Vec<&str> = name.split(' ').collect();
+            let at = words.windows(name.len()).position(|run| run == name)?;
+            Some([&words[..at], &words[at + name.len()..]].concat())
+        })?;
+        let said = rest.iter().find_map(|word| {
+            GOVERNMENT_COUNTRIES
+                .iter()
+                .find(|(country_word, _)| country_word == word)
+                .map(|(_, code)| *code)
+        });
+        let asks = rest.iter().any(|word| GOVERNMENT_ASKING.contains(word));
+        let known = |word: &&str| {
+            GOVERNMENT_ASKING.contains(word)
+                || GOVERNMENT_FILLER.contains(word)
+                || GOVERNMENT_COUNTRIES.iter().any(|(name, _)| name == word)
+        };
+        if !rest.iter().all(known) || !(asks || said.is_some()) {
+            return None;
+        }
+        let country = said.or(country).unwrap_or("US");
+        let &(_, domain, url, title) = pages
+            .iter()
+            .find(|(code, ..)| code.eq_ignore_ascii_case(country))?;
+        Some(Route {
+            sources: vec![Source {
+                domain,
+                page: Some((url.to_string(), title.to_string())),
+            }],
+        })
+    })
+}
+
 /// Lists `route`'s sources first among `hits`, below a first site the
 /// query names in full, each as the index has it (`site` looks one up) or
 /// moved up from further down. Sources the index lacks are left out. The
@@ -591,6 +845,74 @@ mod tests {
     }
 
     #[test]
+    fn routes_government_services_to_their_official_page() {
+        let page = |query: &str, country: Option<&str>| {
+            route(query, None, country)
+                .and_then(|route| route.sources[0].page.clone())
+                .map(|(url, _)| url)
+        };
+        let passports = "https://travel.state.gov/content/travel/en/passports.html";
+        for query in [
+            "how to renew passport",
+            "how to get a passport",
+            "passport renewal",
+            "lost passport",
+            "how long does it take to get a passport",
+            "us passport",
+            "u.s. passport application",
+        ] {
+            assert_eq!(page(query, None).as_deref(), Some(passports), "{query}");
+        }
+        assert_eq!(
+            page("how to renew my passport", Some("GB")).as_deref(),
+            Some("https://www.gov.uk/apply-renew-passport")
+        );
+        // Whose passport is said: a British one from the United States.
+        assert_eq!(
+            page("uk passport renewal", Some("US")).as_deref(),
+            Some("https://www.gov.uk/apply-renew-passport")
+        );
+        assert_eq!(
+            page("how to get a birth certificate", None).as_deref(),
+            Some("https://www.cdc.gov/nchs/w2w/index.htm")
+        );
+        assert_eq!(
+            page("order a copy of my birth certificate", Some("GB")).as_deref(),
+            Some("https://www.gov.uk/order-copy-birth-death-marriage-certificate")
+        );
+        assert_eq!(
+            page("real id requirements", None).as_deref(),
+            Some("https://www.usa.gov/real-id")
+        );
+        for query in [
+            "how to get a social security card",
+            "replace social security card",
+            "lost social security card",
+        ] {
+            assert_eq!(
+                page(query, None).as_deref(),
+                Some("https://www.ssa.gov/number-card"),
+                "{query}"
+            );
+        }
+        // No page for that country, or words that ask for something else.
+        assert_eq!(page("how to renew passport", Some("FR")), None);
+        for query in [
+            "passport",
+            "my passport",
+            "passport photo",
+            "laravel passport get token",
+            "passport index",
+            "passport office near me",
+            "obama birth certificate",
+            "birth certificate translation",
+            "social security card template",
+        ] {
+            assert_eq!(page(query, None), None, "{query}");
+        }
+    }
+
+    #[test]
     fn leaves_other_searches_alone() {
         for query in [
             "python",
@@ -609,23 +931,58 @@ mod tests {
         ] {
             assert_eq!(route(query, None, None), None, "{query}");
         }
-        assert_eq!(defined_word("define"), None);
-        assert_eq!(
-            defined_word("prioritize meaning"),
-            Some("prioritize".into())
-        );
-        assert_eq!(
-            defined_word("what does ubiquitous mean"),
-            Some("ubiquitous".into())
-        );
-        assert_eq!(
-            defined_word("what does asap stand for"),
-            Some("asap".into())
-        );
-        assert_eq!(
-            defined_word("whats the meaning of serendipity"),
-            Some("serendipity".into())
-        );
+        for query in [
+            "define",
+            "how to spell check",
+            "plural of",
+            "first person plural",
+            "simple past tense",
+            "how to pronounce my name",
+            "english pronunciation",
+            "is this a good word to use here",
+        ] {
+            assert_eq!(word_asked(query), None, "{query}");
+        }
+        for (query, word, asked) in [
+            ("prioritize meaning", "prioritize", WordAsk::Meaning),
+            ("what does ubiquitous mean", "ubiquitous", WordAsk::Meaning),
+            ("what does asap stand for", "asap", WordAsk::Meaning),
+            (
+                "whats the meaning of serendipity",
+                "serendipity",
+                WordAsk::Meaning,
+            ),
+            ("plural of mouse", "mouse", WordAsk::Meaning),
+            ("whats the plural of cactus", "cactus", WordAsk::Meaning),
+            ("past tense of swim", "swim", WordAsk::Meaning),
+            ("how to spell necessary", "necessary", WordAsk::Meaning),
+            (
+                "how do you spell definitely",
+                "definitely",
+                WordAsk::Meaning,
+            ),
+            ("define synonym", "synonym", WordAsk::Meaning),
+            ("how do you pronounce gif", "gif", WordAsk::Meaning),
+            (
+                "pronunciation of worcestershire",
+                "worcestershire",
+                WordAsk::Meaning,
+            ),
+            ("is irregardless a word", "irregardless", WordAsk::Meaning),
+            ("is alot a real word", "alot", WordAsk::Meaning),
+            ("synonyms for good", "good", WordAsk::Others),
+            ("another word for very happy", "very happy", WordAsk::Others),
+            (
+                "whats another word for important",
+                "important",
+                WordAsk::Others,
+            ),
+            ("opposite of brave", "brave", WordAsk::Others),
+            ("antonym of generous", "generous", WordAsk::Others),
+            ("happy synonyms", "happy", WordAsk::Others),
+        ] {
+            assert_eq!(word_asked(query), Some((word.into(), asked)), "{query}");
+        }
     }
 
     fn hit(domain: &str, named: bool) -> Hit {
@@ -744,5 +1101,21 @@ mod tests {
         assert_eq!(hits[1].url, "https://www.dictionary.com/browse/prioritize");
         assert_eq!(hits[2].url, "https://en.wiktionary.org/wiki/prioritize");
         assert_eq!(hits[3].domain, "prioritize.io");
+    }
+
+    #[test]
+    fn synonyms_and_opposites_link_to_the_thesauruses() {
+        let route = route("opposite of brave", None, None).unwrap();
+        let mut hits = vec![hit("brave.com", false), hit("thesaurus.com", false)];
+        lead_with(&mut hits, &mut [], &route, |domain| {
+            Some(hit(domain, false))
+        });
+        assert_eq!(
+            hits[0].url,
+            "https://www.merriam-webster.com/thesaurus/brave"
+        );
+        assert_eq!(hits[1].url, "https://www.thesaurus.com/browse/brave");
+        assert_eq!(hits[2].url, "https://en.wiktionary.org/wiki/brave");
+        assert_eq!(hits[3].domain, "brave.com");
     }
 }

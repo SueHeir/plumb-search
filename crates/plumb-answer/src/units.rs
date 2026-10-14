@@ -891,7 +891,7 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
         &typed[at..at + part.len()]
     };
     let conversion = |from: &str, to: &str| conversion(from, to, as_typed);
-    let text = lower.strip_prefix("convert ").unwrap_or(&lower);
+    let text = crate::unasked(&lower);
     // "how many feet in a mile", "how many cm are in 5 inches"
     if let Some(rest) = text.strip_prefix("how many ") {
         // "how many cm is 5'10"
@@ -1020,6 +1020,19 @@ mod tests {
             "16 US fluid ounces = 2 US cups"
         );
         assert_eq!(convert("1 lb to oz").unwrap(), "1 pound = 16 ounces");
+        // Asked how to convert.
+        for (asked, query) in [
+            (
+                "how to convert celsius to fahrenheit",
+                "celsius to fahrenheit",
+            ),
+            ("how do you convert miles to km", "miles to km"),
+            ("how can i convert 5 kg to lbs?", "5 kg to lbs"),
+        ] {
+            assert!(convert(query).is_some(), "{query}");
+            assert_eq!(convert(asked), convert(query), "{asked}");
+        }
+        assert_eq!(convert("how to convert pdf to word"), None);
         assert_eq!(
             convert("how many cm are in 5 inches?").unwrap(),
             "5 inches = 12.7 centimetres"

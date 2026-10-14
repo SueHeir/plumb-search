@@ -530,6 +530,52 @@ fn unfilled_descriptions_are_told_from_short_ones() {
 }
 
 #[test]
+fn a_big_site_named_last_is_searched_for_the_words_before() {
+    let mut records = corpus();
+    for (domain, title, rank) in [
+        ("reddit.com", "Reddit", 20),
+        ("target.com", "Target", 200),
+        ("netflix.com", "Netflix", 30),
+    ] {
+        records.push(site(
+            domain,
+            Some(title),
+            None,
+            &[title],
+            &[(title, 5_000)],
+            popular(rank, 100_000),
+        ));
+    }
+    let (_dir, searcher) = build(&records);
+    let link = |q: &str| {
+        searcher
+            .search_full(q, 10, &RankConfig::default(), &SearchOptions::default())
+            .unwrap()
+            .site_search
+            .map(|link| (link.domain, link.terms, link.url))
+    };
+    assert_eq!(
+        link("how to fix a leaky faucet reddit"),
+        Some((
+            "reddit.com".into(),
+            "how to fix a leaky faucet".into(),
+            "https://www.reddit.com/search/?q=how%20to%20fix%20a%20leaky%20faucet".into()
+        ))
+    );
+    assert_eq!(
+        link("coffee maker target").map(|(_, terms, _)| terms),
+        Some("coffee maker".into())
+    );
+    // What is asked about, not where to look: one main word before it.
+    assert_eq!(link("how to cancel netflix"), None);
+    assert_eq!(link("laptop reddit"), None);
+    // Words that run into the name, and the name alone.
+    assert_eq!(link("hulu vs netflix"), None);
+    assert_eq!(link("the best of reddit"), None);
+    assert_eq!(link("reddit"), None);
+}
+
+#[test]
 fn site_search_needs_the_site_first_and_more_than_a_common_word() {
     let mut records = corpus();
     let mut get = site("get.gov", Some("Get"), None, &[], &[], ranked(50_000, 10));
@@ -605,6 +651,15 @@ fn safe_search_and_language_leave_sites_out() {
         &[],
         ranked(755, 5_000),
     ));
+    // Says no language, but its words are French.
+    records.push(site(
+        "bankfr.example",
+        Some("Bank Populaire: la banque pour vous et votre famille, avec nos conseils"),
+        None,
+        &[],
+        &[],
+        ranked(750, 5_000),
+    ));
     // Explicit English metadata remains authoritative.
     let mut template = site(
         "banktemplate.example",
@@ -663,6 +718,15 @@ fn safe_search_and_language_leave_sites_out() {
     assert!(has(&off, "bankru.example"));
     assert!(!has(&english, "bankru.example"));
     assert!(!has(&german, "bankru.example"));
+    // So is missing-language text whose common words are another language's.
+    assert!(has(&off, "bankfr.example"));
+    assert!(!has(&english, "bankfr.example"));
+    let french = with(SearchOptions {
+        language: Some("fr".into()),
+        ..SearchOptions::default()
+    });
+    assert!(has(&french, "bankfr.example"));
+    assert!(!has(&french, "bankde.example"));
     // Explicit language is authoritative, even for a multilingual excerpt.
     assert!(has(&english, "banktemplate.example"));
     for language in ["ru", "uk"] {
