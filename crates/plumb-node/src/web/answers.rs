@@ -488,6 +488,9 @@ fn kind_named<'a>(name: &'a str, kinds: &[&str]) -> Option<&'a str> {
 /// god's. Looked up with its kind ("top gun movie"), only a work called
 /// so, since a search names every film of the title then, and the film
 /// called Top Gun is looked up by its name alone ([`profile_lookups`]).
+/// Of the works of that kind the name names, one read far more than each
+/// of the others is the one meant: "titanic cast" is the 1997 film's, not
+/// the 1953 one's or the 1996 miniseries'.
 /// For an account ([`ACCOUNTS`]), only a person, group or organization
 /// when some are: "drake instagram" is the rapper's, not the name list's,
 /// and "pink instagram" the singer's, not the colour's.
@@ -549,6 +552,17 @@ pub fn profile_candidates(
     };
     if candidates.iter().any(of_kind) {
         candidates.retain(of_kind);
+        let mut views: Vec<u64> = candidates
+            .iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.views)
+            .collect();
+        views.sort_unstable_by(|a, b| b.cmp(a));
+        if let [most, next, ..] = views[..] {
+            if next.saturating_mul(MOST_READ_WORK) < most {
+                candidates.retain(|hit| hit.named && hit.page.views == most);
+            }
+        }
     }
     candidates
 }
@@ -976,7 +990,8 @@ const MAKERS: &[plumb_core::facts::FactKind] = {
 };
 
 /// How many times as read as every other work the subject names the work
-/// a maker question means must be ("Titanic (1997 film)", not the 1953 one).
+/// a maker question or a listing means must be ("Titanic (1997 film)", not
+/// the 1953 one).
 const MOST_READ_WORK: u64 = 10;
 
 /// The works a question about a work's maker can be about, when it is one
@@ -2395,6 +2410,32 @@ mod tests {
         );
         let titles: Vec<_> = kept.iter().map(|hit| hit.page.title.as_str()).collect();
         assert_eq!(titles, ["Top Gun"]);
+        // Of films of one name, one read far more than each other.
+        let film = |title: &str, description: &str, views: u64| {
+            let mut hit = article(title, description, None);
+            hit.page.views = views;
+            hit
+        };
+        let titanic = |remake_views: u64| {
+            vec![
+                film(
+                    "Titanic",
+                    "British passenger liner that sank in 1912",
+                    90_000,
+                ),
+                film("Titanic (1997 film)", "Film by James Cameron", 100_000),
+                film("Titanic (1953 film)", "1953 film by Jean Negulesco", 2_000),
+                film("Titanic (1996 miniseries)", "Miniseries", remake_views),
+            ]
+        };
+        let kept = profile_candidates("titanic cast", "titanic", titanic(5_000));
+        let titles: Vec<_> = kept.iter().map(|hit| hit.page.title.as_str()).collect();
+        assert_eq!(titles, ["Titanic (1997 film)"]);
+        // Not when another is read nearly as much.
+        assert_eq!(
+            profile_candidates("titanic cast", "titanic", titanic(20_000)).len(),
+            3
+        );
         // No song has a film's listing.
         assert!(!searches_songs(
             "top gun movie cast",
