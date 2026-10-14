@@ -160,9 +160,10 @@ impl Searcher {
             title: own(self.fields.title).filter(|title| !title.contains('\u{FFFD}')),
             official: about.is_some(),
             // The site's own description, unless its template left it
-            // unfilled, else Wikipedia's, else what Wikidata says it is.
+            // unfilled or it is in the wrong encoding, else Wikipedia's,
+            // else what Wikidata says it is.
             description: own(self.fields.description)
-                .filter(|description| !is_unfilled(description))
+                .filter(|description| !is_unfilled(description) && !is_garbled(description))
                 .or(about),
             domain,
             score: ranked.score,
@@ -251,6 +252,24 @@ pub(crate) fn is_unfilled(description: &str) -> bool {
         || words
             .split_once(' ')
             .is_some_and(|(_, last)| last == "desc")
+}
+
+/// Whether `text` was read in the wrong encoding, so it says nothing: a
+/// quarter or more of its characters are `�` ("���¾�γ�����…" for the
+/// Chinese of jwview.com), or it is one long run of base64
+/// ("JTNDZGl2JTIwY2xhc3Mi…" for motorsportweek.com's markup). One
+/// accent lost ("D�couvrez et explorez") leaves the rest readable.
+pub(crate) fn is_garbled(text: &str) -> bool {
+    let text = text.trim();
+    let chars = text.chars().filter(|c| !c.is_whitespace()).count();
+    let lost = text.chars().filter(|&c| c == '\u{FFFD}').count();
+    let base64 = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=');
+    lost * 4 >= chars.max(1)
+        || (chars >= 24
+            && text.chars().all(base64)
+            && text.chars().any(|c| c.is_ascii_digit())
+            && text.chars().any(|c| c.is_ascii_uppercase())
+            && text.chars().any(|c| c.is_ascii_lowercase()))
 }
 
 /// The text of `hit` that search operators look at, besides its domain.
