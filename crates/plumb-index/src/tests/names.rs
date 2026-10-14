@@ -91,6 +91,126 @@ fn little_known_sites_without_a_title_come_after_titled_ones() {
 }
 
 #[test]
+fn a_name_a_site_borrows_does_not_name_it() {
+    let official = |domain, title, aliases: &[&str], about: &str, signals| {
+        let mut record = site(domain, Some(title), None, aliases, &[], signals);
+        record.about = Some(about.to_string());
+        record
+    };
+    let records = [
+        official(
+            "facebook.com",
+            "Facebook - log in or sign up",
+            &["Facebook"],
+            "social networking service",
+            popular(5, 900_000),
+        ),
+        // Its homepage gives "Facebook" as its og:site_name.
+        official(
+            "holden.com.au",
+            "Holden Australia: Service & Ownership Information",
+            &["Holden", "Facebook"],
+            "Australian automobile manufacturer",
+            popular(30_000, 4_000),
+        ),
+        // Wikipedia's words for it say it was Facebook.
+        {
+            let mut meta = official(
+                "meta.com",
+                "Meta",
+                &["Meta Platforms", "Facebook"],
+                "American technology company",
+                popular(400, 300_000),
+            );
+            meta.intro = Some(
+                "Meta Platforms, Inc., formerly Facebook, Inc., is an American technology company."
+                    .to_string(),
+            );
+            meta
+        },
+        // Not official, and its description names the brand in passing.
+        site(
+            "proyectoianua.com",
+            Some("Proyecto Ianua"),
+            Some("Follow us on Facebook for updates"),
+            &["Facebook"],
+            &[],
+            obscure(900_000, 3),
+        ),
+        official(
+            "delta.com",
+            "Delta Air Lines | Flights & Plane Tickets",
+            &["Delta Air Lines"],
+            "American airline",
+            popular(800, 60_000),
+        ),
+        official(
+            "deltafaucet.com",
+            "Delta Faucet | Kitchen and Bathroom Faucets",
+            &["Delta"],
+            "American faucet maker",
+            popular(20_000, 5_000),
+        ),
+        official(
+            "nestle.com",
+            "Nestlé Global",
+            &["Nestlé"],
+            "Swiss food company",
+            popular(300, 200_000),
+        ),
+        official(
+            "nestle-cereals.com",
+            "Nestlé Cereals",
+            &["Nestlé Cereals", "Nestlé"],
+            "breakfast cereal brand",
+            popular(40_000, 2_000),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let hits = searcher.search("facebook", 10).unwrap();
+    assert_eq!(domains(&hits)[0], "facebook.com");
+    for borrower in ["holden.com.au", "proyectoianua.com"] {
+        assert!(!domains(&hits).contains(&borrower), "{hits:?}");
+    }
+    let hits = searcher.search_with("facebook", 10, &keep_all()).unwrap();
+    let named: Vec<&str> = hits
+        .iter()
+        .filter(|hit| hit.named)
+        .map(|hit| hit.domain.as_str())
+        .collect();
+    assert_eq!(named, ["facebook.com", "meta.com"]);
+    // The same goes for a name the query starts with.
+    let hits = searcher
+        .search_with("facebook marketplace", 10, &keep_all())
+        .unwrap();
+    let named_first = |domain: &str| {
+        hits.iter().any(|hit| {
+            hit.domain == domain
+                && hit
+                    .query_evidence
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.partial_name_words > 0)
+        })
+    };
+    assert!(named_first("facebook.com"), "{hits:?}");
+    assert!(!named_first("holden.com.au"), "{hits:?}");
+    // Its own name still names it.
+    assert_eq!(top(&searcher, "holden"), "holden.com.au");
+    // A site whose title has the name keeps it.
+    let hits = searcher.search_with("delta", 10, &keep_all()).unwrap();
+    assert!(hits
+        .iter()
+        .any(|hit| hit.domain == "deltafaucet.com" && hit.named));
+    // So does one whose title spells it with an accent the query lacks.
+    let hits = searcher.search_with("nestle", 10, &keep_all()).unwrap();
+    assert!(
+        hits.iter()
+            .any(|hit| hit.domain == "nestle-cereals.com" && hit.named),
+        "{hits:?}"
+    );
+}
+
+#[test]
 fn a_little_known_namesake_of_the_words_leaves_the_rest_listed() {
     let records = [
         site(
