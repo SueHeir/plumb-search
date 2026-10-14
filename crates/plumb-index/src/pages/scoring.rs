@@ -575,7 +575,10 @@ impl PageSearcher {
             }
         }
         match words.as_slice() {
-            [word] => self.name_by_surname(word, &joined, &mut hits),
+            [word] => {
+                self.name_by_surname(word, &joined, &mut hits);
+                self.ask_about_identifier(query, word, &mut hits);
+            }
             [title, name @ ..] => self.name_by_title(title, name, &joined, &mut hits),
             [] => {}
         }
@@ -1185,6 +1188,31 @@ impl PageSearcher {
             }
         }
         (best, false)
+    }
+
+    /// A search of one name written with capitals inside, which names no
+    /// page, asks about it: "CrashLoopBackOff", "UnicodeDecodeError",
+    /// "ECONNREFUSED". The questions with `word` in their title are
+    /// about it, so they are listed as a question with every word of a
+    /// longer search is, the most read first. "YouTube" and "iPhone"
+    /// name their articles, and a word in lower case may be anything.
+    fn ask_about_identifier(&self, query: &str, word: &str, hits: &mut [PageHit]) {
+        let query = query.trim();
+        let inner_capital = query.chars().skip(1).any(char::is_uppercase)
+            && query.chars().all(char::is_alphanumeric);
+        if !inner_capital || hits.iter().any(|hit| hit.named) {
+            return;
+        }
+        for hit in hits.iter_mut().filter(|hit| hit.page.is_question()) {
+            if analysis::tokens(&self.words, &hit.page.title)
+                .iter()
+                .any(|w| w == word)
+            {
+                let question =
+                    PARTIAL_MATCH * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity);
+                hit.score = hit.score.max(question);
+            }
+        }
     }
 
     /// Names the person a query of one `word` (whose key is `joined`) is
