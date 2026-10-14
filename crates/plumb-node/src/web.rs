@@ -132,6 +132,16 @@ pub const MAX_LIMIT: usize = 100;
 /// Longer queries are cut to this many characters.
 pub const MAX_QUERY_CHARS: usize = 200;
 
+/// `text` as a search: garbled text read as it was written
+/// ([`plumb_core::unmangled`]), whitespace collapsed, and cut to
+/// [`MAX_QUERY_CHARS`].
+pub fn query_text(text: &str) -> String {
+    plumb_core::truncate_chars(
+        &plumb_core::collapse_whitespace(&plumb_core::unmangled(text)),
+        MAX_QUERY_CHARS,
+    )
+}
+
 /// No scripts, no external resources, forms only to this server. Inline
 /// styles are allowed for the page's own `<style>` element.
 const CONTENT_SECURITY_POLICY: &str =

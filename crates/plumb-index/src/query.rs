@@ -1,7 +1,7 @@
 //! A query parsed into the index's terms, and the Tantivy query built from
 //! them with each field's weight.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 use plumb_core::{is_function_word, kind_key, other_number, truncate_chars, MAX_TEXT_CHARS};
@@ -12,9 +12,10 @@ use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{DocAddress, Term};
 
 use crate::names::typed_domain;
+use crate::pages::is_year;
 use crate::rank::bm25_of;
 use crate::schema::Fields;
-use crate::{analysis, FILLER_WORDS, MAX_QUERY_WORDS};
+use crate::{analysis, spell, FILLER_WORDS, MAX_QUERY_WORDS};
 
 /// BM25 boost of a query word matching the domain label.
 const LABEL_BOOST: f32 = 4.0;
@@ -104,7 +105,8 @@ pub(crate) struct ParsedQuery {
     /// [`COMPARISON_WORDS`] entry between two others is left out.
     pub(crate) words: Vec<String>,
     /// Each word in its other number ([`plumb_core::other_number`]), if it
-    /// has one: `videos` -> `video`.
+    /// has one: `videos` -> `video`. A word of Arabic script typed bare
+    /// has the spelling [`ParsedQuery::add_arabic_spellings`] finds instead.
     pub(crate) others: Vec<Option<String>>,
     /// The whole query as one joined token: `U.S. Bank` -> `usbank`.
     pub(crate) joined: Option<String>,
@@ -186,6 +188,37 @@ impl ParsedQuery {
         })
     }
 
+    /// Gives a word of Arabic script typed bare, as it often is (`اخبار`,
+    /// `الاهلي`, `مصري`), the spelling most sites have of it one letter
+    /// away (`أخبار`, `مصرى`) as its other form, found the same way, a
+    /// little weaker. A word typed with its hamza or madda keeps to it and
+    /// is ranked as before.
+    pub(crate) fn add_arabic_spellings(
+        &mut self,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+    ) -> Result<()> {
+        for (word, other) in self.words.iter().zip(&mut self.others) {
+            if other.is_some() || analysis::folded(word).as_deref() != Some(word.as_str()) {
+                continue;
+            }
+            let mut docs: BTreeMap<String, u64> = BTreeMap::new();
+            for field in spell::word_fields(f) {
+                for (term, _) in spell::near_terms(searcher, field, word, 1)? {
+                    if analysis::folded(&term).as_deref() == Some(word.as_str()) {
+                        let found = searcher.doc_freq(&Term::from_field_text(field, &term))?;
+                        *docs.entry(term).or_default() += found;
+                    }
+                }
+            }
+            *other = docs
+                .into_iter()
+                .max_by_key(|&(_, found)| found)
+                .map(|(term, _)| term);
+        }
+        Ok(())
+    }
+
     /// Whether `word` is a [`FILLER_WORDS`] entry and they are taken as
     /// such.
     pub(crate) fn is_filler(&self, word: &str) -> bool {
@@ -217,7 +250,9 @@ impl ParsedQuery {
 
     /// The clauses for the `i`th query word: the word in every field, and
     /// its other number in the fields of free text, a little weaker, so
-    /// "videos" finds a site about "video" but names stay exact.
+    /// "videos" finds a site about "video" but names stay exact. An Arabic
+    /// word typed bare is taken the same way: `اخبار` finds `أخبار`, a
+    /// little below what is written `اخبار`.
     ///
     /// The other number never counts for more than the word as typed: when
     /// "videos" is common and "video" rare, BM25 would make the rare form
@@ -313,26 +348,64 @@ impl ParsedQuery {
         Ok(covered)
     }
 
+    /// The positions of the query's main words: those other than
+    /// [`FILLER_WORDS`] and [`plumb_core::FUNCTION_WORDS`].
+    fn main_words(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.words.len()).filter(|&i| {
+            let word = self.words[i].as_str();
+            !is_function_word(word) && !FILLER_WORDS.contains(&word)
+        })
+    }
+
+    /// Which of `docs` have only the query's numbers of its main words, as
+    /// a site with nothing but the year has of "glastonbury 2026". None
+    /// unless the query has both numbers and other main words.
+    pub(crate) fn only_numbers(
+        &self,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+        docs: &[DocAddress],
+    ) -> Result<HashSet<DocAddress>> {
+        let (numbers, words): (Vec<usize>, Vec<usize>) = self
+            .main_words()
+            .partition(|&i| self.words[i].bytes().all(|b| b.is_ascii_digit()));
+        if numbers.is_empty() || words.is_empty() || docs.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let having = |indices: &[usize]| -> Result<HashSet<DocAddress>> {
+            let mut clauses = Clauses::default();
+            for &i in indices {
+                self.word_clauses(i, searcher, f, &mut clauses)?;
+            }
+            Ok(bm25_of(searcher, &clauses.into_query(), docs.to_vec())?
+                .into_iter()
+                .filter_map(|(bm25, addr)| (bm25 > 0.0).then_some(addr))
+                .collect())
+        };
+        let words = having(&words)?;
+        Ok(having(&numbers)?
+            .into_iter()
+            .filter(|addr| !words.contains(addr))
+            .collect())
+    }
+
     /// Which of `docs` lack one of the query's main words: those other
     /// than [`FILLER_WORDS`] and [`plumb_core::FUNCTION_WORDS`]. None for a
-    /// query of one main word or fewer.
+    /// query of one main word or fewer. A year is not asked of a site: it
+    /// says which one, and wimbledon.com is what "wimbledon tickets 2026"
+    /// wants without the year on its homepage.
     pub(crate) fn missing_main_words(
         &self,
         searcher: &tantivy::Searcher,
         f: &Fields,
         docs: &[DocAddress],
     ) -> Result<HashSet<DocAddress>> {
-        let main: Vec<usize> = (0..self.words.len())
-            .filter(|&i| {
-                let word = self.words[i].as_str();
-                !is_function_word(word) && !FILLER_WORDS.contains(&word)
-            })
-            .collect();
+        let main: Vec<usize> = self.main_words().collect();
         let mut missing = HashSet::new();
         if main.len() < 2 || docs.is_empty() {
             return Ok(missing);
         }
-        for i in main {
+        for i in main.into_iter().filter(|&i| !is_year(&self.words[i])) {
             let mut clauses = Clauses::default();
             self.word_clauses(i, searcher, f, &mut clauses)?;
             for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs.to_vec())? {

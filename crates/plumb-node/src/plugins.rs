@@ -126,7 +126,8 @@ pub struct Manifest {
     pub suggest: Suggest,
     /// Sites whose pages it can say something about (`*.example.org`),
     /// for `/api/plugins/page`, which a browser extension asks about the
-    /// page open in a tab.
+    /// page open in a tab; a plugin with `ids` is also shown the results
+    /// on them to mark up.
     #[serde(default)]
     pub pages: Vec<String>,
     /// How long its results for a search are reused: 0 for never (live
@@ -535,7 +536,8 @@ impl Plugin {
     }
 
     /// The results of `shown` it is shown: those about something it knows
-    /// (`ids`), or all of them for a plugin without `ids`.
+    /// (`ids`) or on a site its `pages` lists, or all of them for a plugin
+    /// without `ids`.
     fn picks_shown(&self, shown: &[ShownResult]) -> Vec<ShownResult> {
         shown
             .iter()
@@ -545,6 +547,7 @@ impl Plugin {
                         .about
                         .as_ref()
                         .is_some_and(|about| self.manifest.knows(about))
+                    || url::Url::parse(&result.url).is_ok_and(|url| self.manifest.covers_page(&url))
             })
             .take(MAX_SHOWN)
             .cloned()
