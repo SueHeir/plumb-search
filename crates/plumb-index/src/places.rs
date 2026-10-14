@@ -893,11 +893,19 @@ impl PlaceSearcher {
             // Only a place called that, as far out as places are listed,
             // is a business named: "bible reading" asks for no Bible
             // church in Reading, Pennsylvania, and "boulder denver" for no
-            // town near Denver.
+            // town near Denver. So is a branch called that and the town:
+            // "sheraton charlotte" is the Sheraton Charlotte Hotel, though
+            // nothing is called just Sheraton. "university of denver" is
+            // one place's name, not a University of in Denver.
+            let joined = what
+                .last()
+                .is_some_and(|word| ["of", "de", "di", "du"].contains(word));
             let what = what.join(" ");
             let km = 3.0 * town_size(&town.kind).unwrap_or(LANDMARK_KM);
             let named = self.named_within(&what, Some((town, km)))?;
-            if named.iter().any(|place| !place.is_town()) {
+            if named.iter().any(|place| !place.is_town())
+                || (!joined && self.branch_within(&normalized, town, km, required_country)?)
+            {
                 return Ok(Some(PlaceQuery {
                     what,
                     near: Near::Named(name),
@@ -906,6 +914,28 @@ impl PlaceSearcher {
             }
         }
         Ok(None)
+    }
+
+    /// Whether a place within `km` of `town`, other than a town, has every
+    /// word of `query` in its name: "Sheraton Charlotte Hotel" for
+    /// "sheraton charlotte".
+    fn branch_within(
+        &self,
+        query: &str,
+        town: &Place,
+        km: f64,
+        required_country: Option<&str>,
+    ) -> Result<bool> {
+        let stems = analysis::tokens(&self.stemmed, query);
+        let hits = self.around(query, town, km, required_country, CANDIDATES)?;
+        Ok(hits.iter().any(|hit| {
+            std::iter::once(&hit.place.name)
+                .chain(&hit.place.aliases)
+                .any(|name| {
+                    let named = analysis::tokens(&self.stemmed, name);
+                    stems.iter().all(|stem| named.contains(stem))
+                })
+        }))
     }
 
     /// The places matching `what` within `radius` km of `center`, or three
@@ -1925,6 +1955,20 @@ mod tests {
                 40.35,
                 -75.92,
             ),
+            city("Charlotte", 875_000, "NC", "US", 35.227, -80.843),
+            at(
+                "Sheraton Charlotte Airport Hotel",
+                "tourism=hotel",
+                35.21,
+                -80.94,
+            ),
+            at("Sheraton Charlotte Hotel", "tourism=hotel", 35.223, -80.846),
+            at(
+                "University of Denver",
+                "amenity=university",
+                39.676,
+                -104.962,
+            ),
         ]);
         let (_dir, searcher) = index(fixtures);
         // Denver, Colorado, though a village is called Denver too.
@@ -1940,6 +1984,23 @@ mod tests {
         // Nothing in Reading is called Bible.
         let bible = searcher.search("bible reading", None, Some("US"), 5);
         assert!(bible.unwrap().is_none());
+        // Nothing is called just Sheraton, but a branch is called that and
+        // the town.
+        let branch = searcher
+            .search("sheraton charlotte", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(branch.what, "sheraton");
+        let names: Vec<&str> = branch.hits.iter().map(|h| h.place.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Sheraton Charlotte Hotel",
+                "Sheraton Charlotte Airport Hotel"
+            ]
+        );
+        let university = searcher.search("university of denver", None, Some("US"), 5);
+        assert!(university.unwrap().is_none());
         // A town by Denver is no business, and an IKEA 46 km out is
         // farther than places are listed.
         for query in ["aurora denver", "ikea denver"] {
