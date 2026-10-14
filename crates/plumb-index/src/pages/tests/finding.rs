@@ -577,6 +577,64 @@ fn sites_called_like_organizations_stay_first() {
 }
 
 #[test]
+fn a_name_and_what_the_person_is_name_them() {
+    let person = |title: &str, views: u64, aliases: &[&str], description: &str| {
+        let mut page = page(title, views, aliases);
+        page.description = Some(description.into());
+        page.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1956-07-09".into(),
+        }];
+        page
+    };
+    let (_dir, s) = searcher(&[
+        person(
+            "Tom Hanks",
+            300_000,
+            &[],
+            "American actor and filmmaker (born 1956)",
+        ),
+        person(
+            "Chet Hanks",
+            20_000,
+            &[],
+            "American actor and musician (born 1990)",
+        ),
+        person(
+            "Wolfgang Amadeus Mozart",
+            400_000,
+            &[],
+            "Composer and musician (1756–1791)",
+        ),
+        person("Leopold Mozart", 60_000, &[], "German composer (1719–1787)"),
+        person(
+            "Chris Smith (footballer, born 1981)",
+            2_000,
+            &[],
+            "English footballer",
+        ),
+        person(
+            "Chris Smith (footballer, born 1977)",
+            1_500,
+            &[],
+            "Welsh footballer",
+        ),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("tom hanks actor"), ["Tom Hanks"]);
+    assert_eq!(named("mozart composer"), ["Wolfgang Amadeus Mozart"]);
+    // Not what the description does not say, nor one of several who fit.
+    assert!(named("tom hanks singer").is_empty());
+    assert!(named("chris smith footballer").is_empty());
+}
+
+#[test]
 fn namesakes_are_weighed_by_how_much_their_articles_are_read() {
     let mut planet = page("Mars", 2_000_000, &[]);
     planet.description = Some("Fourth planet from the Sun".into());
