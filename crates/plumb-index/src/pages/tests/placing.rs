@@ -407,6 +407,66 @@ fn the_site_of_the_article_named_is_added_when_missing() {
 }
 
 #[test]
+fn a_persons_page_on_a_bigger_site_does_not_make_it_theirs() {
+    let on = |title: &str, site: &str, website: &str, born: bool| {
+        let mut article = page(title, 900_000, &[]);
+        if born {
+            article.facts = vec![plumb_core::facts::Fact {
+                kind: plumb_core::facts::FactKind::Born,
+                value: "1941-09-08".into(),
+            }];
+        }
+        article.item = Some(format!("Q{}", title.len()));
+        // As an index built before keeps it.
+        article.site = Some(site.into());
+        article.website = Some(website.into());
+        article
+    };
+    let (_dir, s) = searcher(&[
+        on(
+            "Bernie Sanders",
+            "senate.gov",
+            "https://www.sanders.senate.gov/",
+            true,
+        ),
+        on(
+            "YouTube Music",
+            "youtube.com",
+            "https://music.youtube.com/",
+            false,
+        ),
+    ]);
+    let sanders = s.search("bernie sanders", 5).unwrap();
+    assert_eq!(sanders[0].page.site, None);
+    assert_eq!(
+        sanders[0].page.website.as_deref(),
+        Some("https://www.sanders.senate.gov/")
+    );
+    assert_eq!(s.entities("bernie sanders", 5).unwrap()[0].page.site, None);
+    let mut sites = vec![site("berniesanders.com", false)];
+    assert!(!add_named_site(&mut sites, &sanders, |domain| {
+        Some(site(domain, false))
+    }));
+    // A company's subdomain is still its site.
+    let music = s.search("youtube music", 5).unwrap();
+    assert_eq!(music[0].page.site.as_deref(), Some("youtube.com"));
+    // Nor is it kept when the index is built.
+    let built = Page::from_article(
+        "en",
+        Article {
+            title: "Ronald Reagan".into(),
+            site: Some("whitehouse.gov".into()),
+            website: Some(
+                "https://www.whitehouse.gov/about-the-white-house/presidents/ronald-reagan/".into(),
+            ),
+            facts: on("Ronald Reagan", "", "", true).facts,
+            ..Article::default()
+        },
+    );
+    assert_eq!(built.site, None);
+}
+
+#[test]
 fn the_homepage_of_the_repository_the_query_names_goes_first() {
     let mut python = known_site("python.org", false, 0.9);
     python.official = true;

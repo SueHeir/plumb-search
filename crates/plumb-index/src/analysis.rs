@@ -86,6 +86,24 @@ pub(crate) fn pieces(word: &str) -> Vec<String> {
     pieces
 }
 
+/// A word of Arabic script with the letters it is written either way made
+/// one: an alef with or without hamza or madda, a final yeh with or
+/// without dots, Persian yeh and kaf for the Arabic ones, and no tatweel.
+/// `None` for other words.
+pub(crate) fn folded(word: &str) -> Option<String> {
+    if !word.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)) {
+        return None;
+    }
+    let letters = word.chars().filter_map(|letter| match letter {
+        'أ' | 'إ' | 'آ' | 'ٱ' => Some('ا'),
+        'ى' | 'ی' => Some('ي'),
+        'ک' => Some('ك'),
+        'ـ' => None,
+        _ => Some(letter),
+    });
+    Some(letters.collect())
+}
+
 /// The analyzer registered as [`STEMMED_ANALYZER`].
 pub(crate) fn stemmed_analyzer() -> TextAnalyzer {
     stemmed_in(Language::English)

@@ -4,12 +4,13 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
-use plumb_core::{is_function_word, kind_key, normalize_text, registrable_domain};
+use plumb_core::{domain_label, is_function_word, kind_key, normalize_text, registrable_domain};
 use tantivy::postings::Postings;
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{DocAddress, DocSet, TantivyDocument, Term, TERMINATED};
 
 use crate::query::{matching_docs, ParsedQuery, COMPARISON_WORDS};
+use crate::rank::{domain_of, link_scores};
 use crate::{
     analysis, spell, RankConfig, Searcher, FILLER_WORDS, LINK_NAME_SHARE, MAX_QUERY_WORDS,
 };
@@ -127,6 +128,83 @@ impl Searcher {
                 None => false,
             },
         )
+    }
+
+    /// Leaves out of `names` the sites the query's first words name only by
+    /// a name they don't call themselves by ([`Searcher::calls_itself`]),
+    /// when an official site better known than they are has it as its
+    /// domain label. Such a site borrowed the name: holden.com.au's homepage
+    /// gives "Facebook" as its og:site_name, and sites built with Laravel
+    /// keep its default name "Laravel", so "facebook" named holden.com.au in
+    /// full next to facebook.com, and "spotify premium price" named okta.com
+    /// by its first word. A site that calls itself by the name keeps it:
+    /// deltafaucet.com, "Delta Faucet", for "delta", and x.com, "formerly
+    /// Twitter", for "twitter".
+    pub(crate) fn drop_borrowed_names(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &ParsedQuery,
+        names: &mut HashMap<DocAddress, NameMatch>,
+    ) -> Result<()> {
+        for (key, words) in &query.leading {
+            let named: HashSet<DocAddress> = names
+                .iter()
+                .filter(|(_, name)| name.words() == *words && !name.typed)
+                .map(|(&addr, _)| addr)
+                .collect();
+            let scores = link_scores(searcher, &named);
+            let own_label = |addr| {
+                domain_of(searcher, addr).is_some_and(|domain| domain_label(&domain) == *key)
+            };
+            let mut owner = 0.0;
+            for &(score, addr) in &scores {
+                if score > owner && own_label(addr) && self.is_official(searcher, addr)? {
+                    owner = score;
+                }
+            }
+            for (score, addr) in scores {
+                if score < owner && !own_label(addr) && !self.calls_itself(searcher, addr, key)? {
+                    names.remove(&addr);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether words that, joined, are `key` are in the site's title or,
+    /// for an official site, in its description, where Wikipedia's words
+    /// for it go: x.com is "formerly known as Twitter", meta.com "formerly
+    /// Facebook, Inc.". Another site's description can name the brand in
+    /// passing ("Follow us on Instagram").
+    fn calls_itself(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+        key: &str,
+    ) -> Result<bool> {
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let has = |field| {
+            doc.get_all(field)
+                .filter_map(|value| value.as_str())
+                .any(|text| {
+                    let words = analysis::tokens(&self.words, text);
+                    (0..words.len()).any(|start| {
+                        let mut run = String::new();
+                        for word in &words[start..] {
+                            run.push_str(word);
+                            if run.len() >= key.len() {
+                                return run == key;
+                            }
+                        }
+                        false
+                    })
+                })
+        };
+        if has(self.fields.title) {
+            return Ok(true);
+        }
+        let described = has(self.fields.description);
+        Ok(described && self.is_official(searcher, addr)?)
     }
 
     /// Whether the first `words` words of `query` are one word that many
@@ -434,6 +512,28 @@ pub(crate) fn typed_domain(query: &str) -> Option<String> {
         return None;
     }
     registrable_domain(query)
+}
+
+/// `query` without the "www" an address starts with, which names no site:
+/// "www.ikea" is searched as "ikea", not also for the sites whose domain
+/// label is "www" (www.gov.uk, on a public suffix) or that links call
+/// "www". An address whose site needs it ("www.gov.uk") keeps it.
+pub(crate) fn without_www(query: &str) -> &str {
+    let query = query.trim();
+    let rest = match query.get(..4) {
+        Some(www) if www.eq_ignore_ascii_case("www.") || www.eq_ignore_ascii_case("www ") => {
+            query[4..].trim_start()
+        }
+        _ => return query,
+    };
+    // "www.gov.uk" needs it, as gov.uk is no site's address. "www.ikea"
+    // is a site's address on IKEA's own ending, but it means ikea.com.
+    let needs_it = rest.contains('.') && typed_domain(rest) != typed_domain(query);
+    if rest.contains(char::is_alphanumeric) && !needs_it {
+        rest
+    } else {
+        query
+    }
 }
 
 /// Whether `text` holds `words` consecutive words whose [`kind_key`] is

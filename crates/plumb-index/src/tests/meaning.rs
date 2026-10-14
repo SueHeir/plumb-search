@@ -66,15 +66,13 @@ fn whole_query_subjects_precede_domain_words_with_and_without_meaning() {
         )];
         // Three independently retrieved subject rows ensure partial
         // names cannot occupy the requested top three, even when the
-        // misleading name has much greater popularity and BM25.
-        for domain in [
-            "subject-guide.example",
-            "subject-reference.example",
-            "subject-library.example",
-        ] {
+        // misleading name has much greater popularity and BM25. Each is
+        // titled with its own name too, or they would be one site's copies.
+        for name in ["guide", "reference", "library"] {
+            let title = format!("{subject} | Subject {name}");
             records.push(site(
-                domain,
-                Some(subject),
+                &format!("subject-{name}.example"),
+                Some(&title),
                 Some(subject),
                 &[],
                 &[],
@@ -1232,4 +1230,58 @@ fn sites_in_another_script_only_meaning_finds_are_left_out() {
     // Searched in its own script, or by name, such a site is found.
     assert_eq!(found("和记娱乐")[0], "gambling.example");
     assert!(found("animg").contains(&"anime.example".to_string()));
+}
+
+#[test]
+fn a_year_is_not_asked_of_a_site() {
+    let records = vec![
+        site(
+            "hurricanes.example",
+            Some("National Hurricane Center"),
+            Some("Atlantic hurricane season outlooks and advisories."),
+            &[],
+            &[],
+            ranked(40_000, 300),
+        ),
+        site(
+            "atlantic.example",
+            Some("The Atlantic"),
+            Some("News and essays."),
+            &[],
+            &[],
+            ranked(30_000, 300),
+        ),
+        site(
+            "storms.example",
+            Some("Storms"),
+            Some("Hurricane season 2026 storm tracker."),
+            &[],
+            &[],
+            ranked(20_000, 300),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let meaning = near_and_far(&[("storms.example", 0.5)], &[]);
+    let found = |query: &str| {
+        let hits = searcher
+            .search_meaning(
+                query,
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(found("atlantic hurricane season")[0], "hurricanes.example");
+    // The year says which season: the site without it stays, and one
+    // without another word still goes.
+    let year = found("2026 atlantic hurricane season");
+    assert!(year.contains(&"hurricanes.example".to_string()), "{year:?}");
+    assert!(!year.contains(&"atlantic.example".to_string()), "{year:?}");
 }

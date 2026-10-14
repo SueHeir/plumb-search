@@ -13,7 +13,7 @@ When a query only might say where ("denver brewery", with no "in" or "near") and
 - `WHAT in WHERE`, `WHAT near WHERE`, `WHAT around WHERE`, `WHAT close to WHERE`.
 - `WHAT near me`, `WHAT nearby`, `nearby WHAT`, `WHAT near here`, `WHAT in the area`, and `WHAT open now` (or "open late", "open at night", "24 hours"). A WHAT followed only by "now", "today" or "tonight" is near me when all its words are kinds of place: "pizza tonight", not "stock market today". Words after "near me" (or "in my area") say no more of where: "dentist near me that takes medicaid" is a dentist near me, and the sites are searched for "dentist that takes medicaid".
 - `WHERE WHAT` or `WHAT WHERE` when WHAT is a kind of place ("denver pizza", "sushi fort collins").
-- `NAME WHERE` when WHERE is a city and a place in or near it, other than a town, is called NAME ("starbucks denver", "pizza hut denver"), and no site is named by the whole query. These list the places but leave the results in their order, since NAME may also be a word for something else ("subway new york").
+- `NAME WHERE` when WHERE is a city and a place in or near it, other than a town, is called NAME ("starbucks denver", "pizza hut denver") or NAME and WHERE ("sheraton charlotte", for the Sheraton Charlotte Hotel), and no site is named by the whole query. These list the places but leave the results in their order, since NAME may also be a word for something else ("subway new york").
 
 Words like "best", "good" or "cheap" are left out of WHAT, and so are "nearest" and "closest", which before a kind of place with no town mean near me: "nearest pharmacy". WHAT must be in a place's name or among the words for its kind: a café is found by "cafe", "coffee" and "coffee shop", a supermarket by "grocery store".
 

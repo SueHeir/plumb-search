@@ -520,6 +520,51 @@ pub struct FactQuestion {
     pub age: bool,
 }
 
+/// Units a size may be asked in: "how tall is tom cruise in feet".
+const SIZE_UNITS: &[&str] = &[
+    "feet",
+    "foot",
+    "ft",
+    "feet and inches",
+    "inches",
+    "cm",
+    "centimeters",
+    "centimetres",
+    "m",
+    "meters",
+    "metres",
+    "km",
+    "kilometers",
+    "kilometres",
+    "miles",
+    "mi",
+    "km2",
+    "km²",
+    "sq km",
+    "square km",
+    "square kilometers",
+    "square kilometres",
+    "sq mi",
+    "square miles",
+    "acres",
+    "hectares",
+];
+
+/// `q` without the unit of size that ends it: "tom cruise" of "tom cruise
+/// in feet". `None` when it ends in none.
+pub fn without_size_unit(q: &str) -> Option<&str> {
+    let (rest, unit) = q.rsplit_once(" in ")?;
+    SIZE_UNITS.contains(&unit).then_some(rest)
+}
+
+/// `q` without the "now" or "today" that ends it: "obama" of "obama now".
+/// `None` when it ends in neither.
+pub fn without_now(q: &str) -> Option<&str> {
+    [" right now", " now", " today", " currently"]
+        .iter()
+        .find_map(|now| q.strip_suffix(now))
+}
+
 /// The fact `query` asks for, if it asks for one in a way people do:
 /// "capital of australia", "how tall is mount everest", "when was einstein
 /// born", "who is the ceo of nvidia", "tesla founder".
@@ -530,6 +575,25 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         .to_lowercase()
         .replace('’', "'");
     let q = crate::collapse_whitespace(&q);
+    // "tom cruise height in cm", "area of texas in square miles": the unit
+    // says how a size is told, not whose it is, and the answer tells it in
+    // metres and feet or km² and square miles.
+    if let Some(asked) = without_size_unit(&q).and_then(fact_asked).filter(|asked| {
+        use FactKind::*;
+        let size = |kind: &FactKind| matches!(kind, Height | Elevation | Area | Radius);
+        asked.kinds.iter().all(size)
+    }) {
+        return Some(asked);
+    }
+    // "how old is obama now", "who is the ceo of tesla now": what holds now
+    // is what is told anyway. A work's title may end in it ("who directed
+    // apocalypse now").
+    if let Some(asked) = without_now(&q).and_then(fact_asked).filter(|asked| {
+        let now = |kind: &FactKind| kind.current() || *kind == FactKind::Population;
+        asked.age || asked.kinds.iter().all(now)
+    }) {
+        return Some(asked);
+    }
     // "what year was einstein born" asks when.
     let q = match q.strip_prefix("what year ") {
         Some(rest) => format!("when {rest}"),
@@ -870,6 +934,83 @@ mod tests {
             year_only.years_until(&Date::parse("2026-10-06").unwrap()),
             None
         );
+    }
+
+    #[test]
+    fn a_size_asked_in_a_unit_is_asked_of_what_it_names() {
+        let asked = |q: &str| fact_asked(q).map(|f| (f.kinds, f.subject));
+        use FactKind::*;
+        for (q, kinds, subject) in [
+            (
+                "tom cruise height in cm",
+                &[Height, Elevation][..],
+                "tom cruise",
+            ),
+            (
+                "how tall is tom cruise in feet",
+                &[Height, Elevation],
+                "tom cruise",
+            ),
+            (
+                "lebron james height in feet and inches",
+                &[Height, Elevation],
+                "lebron james",
+            ),
+            (
+                "how tall is the empire state building in feet?",
+                &[Height, Elevation],
+                "empire state building",
+            ),
+            (
+                "what is the height of mount everest in meters",
+                &[Height, Elevation],
+                "mount everest",
+            ),
+            ("area of texas in square miles", &[Area], "texas"),
+            ("size of russia in km2", &[Area], "russia"),
+            ("radius of the earth in miles", &[Radius], "earth"),
+        ] {
+            assert_eq!(asked(q), Some((kinds.to_vec(), subject.into())), "{q}");
+        }
+        // Only a unit is dropped.
+        assert_eq!(
+            asked("who wrote murder in the cathedral"),
+            Some((vec![Author], "murder in the cathedral".into()))
+        );
+    }
+
+    #[test]
+    fn a_question_of_now_is_asked_of_what_it_names() {
+        let asked = |q: &str| fact_asked(q).map(|f| (f.kinds[0], f.subject, f.age));
+        use FactKind::*;
+        for (q, kind, subject, age) in [
+            ("how old is obama now", Born, "obama", true),
+            ("elon musk age now", Born, "elon musk", true),
+            ("lebron james age today", Born, "lebron james", true),
+            (
+                "how old is keanu reeves right now",
+                Born,
+                "keanu reeves",
+                true,
+            ),
+            ("who is the ceo of tesla now", Ceo, "tesla", false),
+            (
+                "president of france currently",
+                HeadOfState,
+                "france",
+                false,
+            ),
+            ("population of india today", Population, "india", false),
+            // A title that ends in "now" keeps it.
+            (
+                "who directed apocalypse now",
+                Director,
+                "apocalypse now",
+                false,
+            ),
+        ] {
+            assert_eq!(asked(q), Some((kind, subject.into(), age)), "{q}");
+        }
     }
 
     #[test]
