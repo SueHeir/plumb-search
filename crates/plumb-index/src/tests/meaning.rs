@@ -1108,3 +1108,72 @@ fn a_number_alone_matches_nothing_in_a_query_of_other_words() {
     // A site the query starts by naming keeps its place.
     assert_eq!(found("163 mail")[0], "163.com");
 }
+
+#[test]
+fn sites_in_another_script_only_meaning_finds_are_left_out() {
+    let mut records = vec![
+        site(
+            "oeis.example",
+            Some("The On-Line Encyclopedia of Integer Sequences"),
+            Some("Catalan numbers and other integer sequences"),
+            &[],
+            &[],
+            obscure(60_000, 200),
+        ),
+        // Titled in another script, near niche searches in meaning only,
+        // and better linked than the encyclopedia.
+        site(
+            "gambling.example",
+            Some("和记娱乐 和记娱乐官网"),
+            None,
+            &[],
+            &[],
+            obscure(20_000, 400),
+        ),
+        site(
+            "anime.example",
+            Some("ANIMG - 二次エロ画像"),
+            None,
+            &[],
+            &[],
+            obscure(20_000, 400),
+        ),
+        // Described by Wikidata, so a person can tell what it is.
+        site(
+            "tabelog.example",
+            Some("食べログ グルメ・レストラン予約サイト"),
+            None,
+            &[],
+            &[],
+            obscure(20_000, 400),
+        ),
+    ];
+    records[1].language = Some("en".into());
+    records[3].about = Some("Japanese restaurant review website".into());
+    let (_dir, searcher) = build(&records);
+    let meaning = FixedMeaning(vec![
+        ("gambling.example", 0.9),
+        ("anime.example", 0.9),
+        ("tabelog.example", 0.8),
+        ("oeis.example", 0.7),
+    ]);
+    let found = |query: &str| -> Vec<String> {
+        let results = searcher
+            .search_meaning(
+                query,
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap();
+        results.hits.into_iter().map(|hit| hit.domain).collect()
+    };
+    assert_eq!(
+        found("oeis catalan numbers"),
+        ["oeis.example", "tabelog.example"]
+    );
+    // Searched in its own script, or by name, such a site is found.
+    assert_eq!(found("和记娱乐")[0], "gambling.example");
+    assert!(found("animg").contains(&"anime.example".to_string()));
+}

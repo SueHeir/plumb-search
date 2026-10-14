@@ -1439,6 +1439,27 @@ pub fn written_outside(language: &str, query: &str) -> bool {
     })
 }
 
+/// Whether at least half of `text`'s letters, and [`MIN_SCRIPT_LETTERS`]
+/// or more, are in scripts `query` has no letter of: a title in Chinese or
+/// Thai for a search typed in Latin letters, mixed with Latin words or not
+/// ("ANIMG - 二次エロ画像"). A reader of the query is unlikely to read it.
+/// Kana and kanji count as one, since Japanese mixes them.
+pub fn written_apart(text: &str, query: &str) -> bool {
+    let scripts = |text: &str| {
+        text.chars()
+            .filter_map(char_script)
+            .map(|(script, _)| if script == "Kana" { "Hani" } else { script })
+            .collect::<Vec<_>>()
+    };
+    let typed = scripts(query);
+    let (mut apart, mut letters) = (0, 0);
+    for script in scripts(text) {
+        letters += 1;
+        apart += usize::from(!typed.contains(&script));
+    }
+    letters >= MIN_SCRIPT_LETTERS && apart * 2 >= letters
+}
+
 /// Keep valid declared language metadata authoritative. Only missing or
 /// invalid declarations fall back to dominant title/description script.
 /// Short excerpts and multilingual names do not reliably contradict an
@@ -1683,6 +1704,28 @@ mod tests {
         // Kana is Japanese, not Chinese; Han alone fits either.
         assert!(written_outside("zh", "東京タワー"));
         assert!(!written_outside("zh", "天气预报"));
+    }
+
+    #[test]
+    fn text_in_scripts_the_query_has_none_of() {
+        for (text, query) in [
+            ("和记娱乐 和记娱乐官网", "catalan numbers"),
+            ("ANIMG - 二次エロ画像", "oeis a051023"),
+            ("Vast MM | เครื่องจักร/ เครื่องมือช่าง", "rydberg constant"),
+            ("Информационный портал района", "zara"),
+        ] {
+            assert!(written_apart(text, query), "{text}");
+        }
+        for (text, query) in [
+            ("Tokyo Hotel 東京", "tokyo hotel"),
+            ("Café de Flore", "cafe"),
+            ("和记", "catalan numbers"),
+            ("東京新聞のニュースサイト", "東京 ニュース"),
+            ("東京拉麺店の公式サイト", "ラーメン"),
+            ("", "news"),
+        ] {
+            assert!(!written_apart(text, query), "{text}");
+        }
     }
 
     #[test]
