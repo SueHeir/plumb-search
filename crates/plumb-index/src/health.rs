@@ -826,7 +826,7 @@ fn sources_named(query: &str, later: bool) -> Vec<String> {
 
 /// The sources `query` asks for: in a medical search all it names
 /// ([`named_sources`]); in any other, a health source named after its
-/// first word ("sprained ankle NHS", "vapes FDA regulation"). One named
+/// first word ("pension scheme NHS", "vapes FDA regulation"). One named
 /// first is the search's own name, which ranking lists already ("nhs
 /// jobs" may want jobs.nhs.uk), and the learned order no longer lifts
 /// one named later only for being popular.
@@ -1666,7 +1666,7 @@ mod tests {
                 .to_vec()
         };
         for (query, source) in [
-            ("sprained ankle NHS", "www.nhs.uk"),
+            ("pension scheme NHS", "www.nhs.uk"),
             ("vapes FDA regulation nicotine", "fda.gov"),
             ("seafood during pregnancy FDA advice", "fda.gov"),
             ("air quality guidelines WHO", "who.int"),
