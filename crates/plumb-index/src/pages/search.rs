@@ -417,6 +417,21 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" diagram", Hint::Aspect),
 ];
 
+/// Words before a name that ask what is usual or wise for it, not what it
+/// is: "normal" of "normal blood pressure".
+const JUDGING_WORDS: &[&str] = &[
+    "normal", "good", "bad", "healthy", "average", "ideal", "typical", "safe",
+];
+
+/// `name` without a word in front that judges it ([`JUDGING_WORDS`]):
+/// "blood pressure" of "normal blood pressure". `None` without one, or
+/// when a single word is left, which is as often initials: "healthy bmi"
+/// would name BMI, a research firm.
+fn judged_name(name: &str) -> Option<&str> {
+    let (first, rest) = name.split_once(' ')?;
+    (JUDGING_WORDS.contains(&first) && rest.contains(' ')).then_some(rest)
+}
+
 /// What a search asks of a thing of science, which the thing's article
 /// says, before its name with "of" or after it: "melting point of iron",
 /// "iron melting point". Longer first: "glucose chemical formula" is not
@@ -1419,6 +1434,7 @@ impl PageSearcher {
             .clone()
             .unwrap_or_else(|| (query.to_lowercase(), Hint::Any));
         let moved = year_moved(&name).map(|name| (name, hint));
+        let judged = hinted.is_some().then(|| judged_name(&name)).flatten();
         let searches: Vec<(String, Hint)> = hinted.into_iter().chain(moved).collect();
         if searches.is_empty() {
             return Ok(false);
@@ -1438,6 +1454,12 @@ impl PageSearcher {
             let mut found = self.search_once(bare, limit, scope)?;
             found.retain(|hit| hit.named && holds(hit));
             keep_found(hits, found);
+        }
+        // "what is a normal blood pressure" asks what is normal for blood
+        // pressure: when no page is called that, the pages "blood
+        // pressure" names are found too. "Normal distribution" is.
+        if let Some(judged) = judged.filter(|_| !hits.iter().any(|hit| hit.named)) {
+            self.add_found(hits, judged, Hint::Named, limit, scope)?;
         }
         Ok(true)
     }
