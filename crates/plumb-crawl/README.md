@@ -125,6 +125,8 @@ The crawler connects to sites directly and ignores `HTTP_PROXY` and the like, si
 > [!IMPORTANT]
 > A server-side fetch of any URL that a caller, a page or a plugin chose must go through this resolver: build its client with `build_client` from a `CrawlConfig`, or use `PageReader`. A plain reqwest client connects wherever DNS says.
 
+A node's plugins fetch from the hosts their `plugin.json` names, which may be the owner's own machines, so their clients use `Resolver::for_named_hosts`: a local name (one label such as `nas`, a suffix the public suffix list doesn't know such as `media.lan`, or `home.arpa`) resolves wherever it points, and a name on the web only to public addresses, so its DNS can't point it at the owner's network.
+
 `Resolver` also lets only `dns_lookups` (32) lookups run at once, since a burst of hundreds makes home routers fail many of them, and tries a lookup that failed for the time being once more after a second.
 
 ### Crawl versions

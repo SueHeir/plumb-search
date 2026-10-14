@@ -2367,6 +2367,10 @@ impl StatusSource for Inner {
         Inner::denies(self, url)
     }
 
+    fn allows_record(&self, record: &mut plumb_core::SiteRecord) -> bool {
+        Inner::allows_record(self, record)
+    }
+
     fn searched(&self, query: &str, results: &SearchResults) {
         // Pages found are shown next to the page sets' only.
         if self.config.wanted_pages && self.pages.read_locked().is_some() {
