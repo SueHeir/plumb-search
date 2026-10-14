@@ -66,6 +66,61 @@ fn words_that_say_what_is_wanted_keep_the_name() {
 }
 
 #[test]
+fn a_search_for_one_part_of_a_thing_finds_the_thing() {
+    let (_dir, s) = searcher(&[
+        page("Ibuprofen", 200_000, &[]),
+        page("Shingles", 150_000, &["Herpes zoster"]),
+        page("Volcano", 120_000, &[]),
+        page("Iron", 110_000, &[]),
+        page("Sun", 180_000, &[]),
+        page("Glucose", 90_000, &[]),
+        page("Sphere", 80_000, &[]),
+        page("Side Effects (2013 film)", 300_000, &["Side Effects"]),
+        page("Plaster", 90_000, &[]),
+        page("Plaster cast", 20_000, &[]),
+        dated_paper("A loss function for metric learning", None, Some(2022), 10),
+        dated_paper("Loss aversion in markets", None, Some(2022), 10),
+    ]);
+    let first = |q: &str| {
+        let hits = s.search(q, 5).unwrap();
+        hits.first().map(|h| (h.page.title.clone(), h.named))
+    };
+    for (query, title) in [
+        ("ibuprofen side effects", "Ibuprofen"),
+        ("side effects of ibuprofen", "Ibuprofen"),
+        ("shingles symptoms", "Shingles"),
+        ("volcano facts", "Volcano"),
+        ("melting point of iron", "Iron"),
+        ("iron melting point", "Iron"),
+        ("what is the melting point of iron", "Iron"),
+        ("mass of the sun", "Sun"),
+        ("glucose chemical formula", "Glucose"),
+        ("volume of a sphere", "Sphere"),
+    ] {
+        assert_eq!(first(query), Some((title.into(), true)), "{query}");
+    }
+    // A page called the whole query is what it asks for: "plaster cast"
+    // is not about plaster.
+    assert_eq!(first("plaster cast"), Some(("Plaster cast".into(), true)));
+    let hits = s.search("plaster cast", 5).unwrap();
+    assert!(
+        hits.iter().all(|h| h.page.title != "Plaster" || !h.named),
+        "{hits:?}"
+    );
+    // An everyday thing's temperature is a setting, not its article's.
+    assert_eq!(hinted_name("oven temperature"), None);
+    // Papers keep those words.
+    assert_eq!(
+        hinted_name("loss function"),
+        Some(("loss".into(), Hint::Aspect))
+    );
+    let papers = s
+        .search_papers(&PaperQuery::parse("loss function after:2020").unwrap(), 5)
+        .unwrap();
+    assert_eq!(titles(&papers), ["A loss function for metric learning"]);
+}
+
+#[test]
 fn repository_words_find_the_repository() {
     let mut tokio = Page::from_repo(Article {
         title: "tokio-rs/tokio".into(),

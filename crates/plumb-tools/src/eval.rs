@@ -846,6 +846,7 @@ fn evaluate(
                         &mut placed,
                     );
                 }
+                pages.list_typed_page(&searched, &options, &mut placed)?;
                 match &route {
                     Some(route) => {
                         plumb_node::sources::lead_with(&mut lifted, &mut placed, route, |domain| {

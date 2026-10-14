@@ -392,15 +392,15 @@ fn unsupported(hit: &Hit, placed: &[PlacedPage]) -> bool {
             .any(|p| p.hit.named && p.under.as_deref() == Some(hit.domain.as_str()))
 }
 
-/// The site rows `sites`, in the model's order, with each one `bare` says
-/// only popularity speaks for moved down until every other site above it
-/// in the hand-made order (a lower row) is listed. The others keep their
-/// order.
-fn after_supported(sites: Vec<usize>, bare: impl Fn(usize) -> bool) -> Vec<usize> {
-    let supported: Vec<usize> = sites.iter().copied().filter(|&row| !bare(row)).collect();
-    let mut listed = Vec::with_capacity(sites.len());
+/// The site rows or page rows `rows`, in the model's order, with each one
+/// `bare` says only popularity speaks for moved down until every other row
+/// above it in the hand-made order (a lower row) is listed. The others
+/// keep their order.
+fn after_supported(rows: Vec<usize>, bare: impl Fn(usize) -> bool) -> Vec<usize> {
+    let supported: Vec<usize> = rows.iter().copied().filter(|&row| !bare(row)).collect();
+    let mut listed = Vec::with_capacity(rows.len());
     let mut waiting = Vec::new();
-    for row in sites {
+    for row in rows {
         waiting.push(row);
         while let Some(at) = waiting
             .iter()
@@ -457,7 +457,7 @@ fn reorder_rows(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Ve
     // A named page's corroborated official-site identity is also query
     // evidence. Account for it without rewriting the original site-query
     // diagnostics or adding learned input features.
-    // Pages keep their model positions; only the site slots change.
+    // Sites and pages keep their model slots; only who fills them changes.
     let page_site = crate::pages::named_page_site(hits, placed.iter().map(|page| &page.hit));
     let mut sites: Vec<_> = order
         .iter()
@@ -485,10 +485,29 @@ fn reorder_rows(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Ve
         Listed::Page(_) => false,
     };
     let mut sites = after_supported(sites, bare).into_iter();
-    for row in &mut order {
-        if matches!(rows[*row], Listed::Site(_)) {
-            *row = sites.next().expect("site slot");
+    // Nor can popularity alone lift a site's inner page the query does not
+    // name past a page listed above it: such a page's popularity is its
+    // site's weight, which the model reads as the page being much read. "wolfram code" put MathWorld's
+    // "Barker Code" before the article Wolfram code, "cellular automaton"
+    // its "Additive Cellular Automaton" before Cellular automaton.
+    let inner = |row: usize| match rows[row] {
+        Listed::Page(i) => {
+            let hit = &placed[i].hit;
+            hit.page.is_site_page() && !hit.named && !hit.whole
         }
+        Listed::Site(_) => false,
+    };
+    let pages = order
+        .iter()
+        .copied()
+        .filter(|&row| matches!(rows[row], Listed::Page(_)))
+        .collect();
+    let mut pages = after_supported(pages, inner).into_iter();
+    for row in &mut order {
+        *row = match rows[*row] {
+            Listed::Site(_) => sites.next().expect("site slot"),
+            Listed::Page(_) => pages.next().expect("page slot"),
+        };
     }
     let mut new_hits: Vec<Hit> = Vec::with_capacity(hits.len());
     let mut alone: Vec<PlacedPage> = Vec::new();
@@ -766,6 +785,88 @@ mod tests {
         let first = Some(popular(0.014, Some(0.0)));
         let order = order_of(first, site("x.com", 0.0, false), Vec::new());
         assert_eq!(order[0], "thenation.com");
+    }
+
+    #[test]
+    fn popularity_alone_lifts_no_inner_page_past_a_page_above_it() {
+        // Lists much-read pages first, then much-linked sites, as the
+        // built-in model did with MathWorld's "Barker Code" for "wolfram
+        // code", whose popularity is MathWorld's weight.
+        let feature = |name| FEATURES.iter().position(|f| *f == name).unwrap();
+        let leaf = |value| Box::new(Node::Leaf { value });
+        let linked = Node::Split {
+            feature: feature("s_link"),
+            threshold: 0.4,
+            left: leaf(0.0),
+            right: leaf(1.0),
+        };
+        let tree = Node::Split {
+            feature: feature("p_pop"),
+            threshold: 0.5,
+            left: Box::new(linked),
+            right: leaf(2.0),
+        };
+        let model = Model::new(vec![tree], None);
+        let mut code = article("Wolfram code", true);
+        (code.score, code.popularity) = (0.65, 0.3);
+        code.page.item = Some("Q8030198".into());
+        let inner = |title: &str, named: bool, whole: bool| PageHit {
+            page: Page::from_set(
+                crate::pages::SUBPAGES_SET,
+                Article {
+                    title: title.into(),
+                    item: Some("https://mathworld.wolfram.com/BarkerCode.html".into()),
+                    views: 4_000,
+                    ..Article::default()
+                },
+            )
+            .unwrap(),
+            score: 0.59,
+            named,
+            popularity: 0.968,
+            whole,
+            learned: None,
+        };
+        let order_of = |pages: Vec<PageHit>| {
+            let mut hits = vec![
+                site("wolfram.com", 0.76, false),
+                site("wolframalpha.com", 0.67, false),
+            ];
+            let mut placed: Vec<PlacedPage> = pages
+                .into_iter()
+                .map(|hit| PlacedPage {
+                    at: 0,
+                    under: None,
+                    hit,
+                })
+                .collect();
+            reorder(&model, "wolfram code", &mut hits, &mut placed);
+            listed(&hits, &placed)
+                .into_iter()
+                .map(|row| match row {
+                    Listed::Site(i) => hits[i].domain.clone(),
+                    Listed::Page(i) => placed[i].hit.page.title.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let barker = "Barker Code -- from Wolfram MathWorld";
+        // The article listed above it takes its place.
+        assert_eq!(
+            order_of(vec![code.clone(), inner(barker, false, false)]),
+            ["Wolfram code", "wolfram.com", "wolframalpha.com", barker]
+        );
+        // Already above the article, named by the query or asked for
+        // whole, it is left to the model.
+        for (pages, first) in [
+            (vec![inner(barker, false, false), code.clone()], barker),
+            (
+                vec![code.clone(), inner("Wolfram Code", true, false)],
+                "Wolfram Code",
+            ),
+            (vec![code.clone(), inner(barker, false, true)], barker),
+        ] {
+            assert_eq!(order_of(pages)[0], first);
+        }
     }
 
     #[test]

@@ -965,6 +965,62 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
 }
 
 #[test]
+fn a_question_of_only_asking_words_and_code_names_nothing() {
+    let question = |title: &str, alias: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some("command-line".into()),
+            item: Some(item.into()),
+            views: 300_000,
+            aliases: vec![alias.into()],
+            ..Article::default()
+        })
+    };
+    let pages = [
+        question(
+            "Why did the command \":(){ : : & };:\" make my system lag?",
+            "What does :(){ : :& };: do?",
+            "1",
+        ),
+        question(
+            "Why do we use \"./\" (dot slash) to execute a file?",
+            "What does ./ mean?",
+            "2",
+        ),
+        question("What is a monad?", "Monads explained", "3"),
+        question("What does ~$ stand for?", "Tilde before the prompt", "4"),
+    ];
+    // Pages that make the query's other words known, not typos.
+    let known = [
+        "Liver",
+        "Liver disease",
+        "Liver transplantation",
+        "Kidney",
+        "Kidney stone",
+        "Kidney failure",
+        "NASA",
+        "NASA TV",
+        "NASA Astronaut Corps",
+    ]
+    .map(|title| page(title, 1_000, &[]));
+    let (_dir, s) = searcher(&[&pages[..], &known[..]].concat());
+    let questions = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.is_question())
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert!(questions("what does the liver do").is_empty());
+    assert!(questions("what does a kidney do").is_empty());
+    assert!(questions("what does yeet mean").is_empty());
+    assert!(questions("what does nasa stand for").is_empty());
+    // A question that asks about something is still found.
+    assert_eq!(questions("what is a monad"), ["What is a monad?"]);
+}
+
+#[test]
 fn the_and_a_name_names_what_the_name_alone_does_when_far_more_read() {
     let (_dir, s) = searcher(&[
         page("Titanic (1997 film)", 150_000, &[]),
