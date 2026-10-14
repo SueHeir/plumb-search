@@ -52,7 +52,7 @@ const WORKS: &[(&str, &[&str])] = &[
 /// unless the word before "by" is a work's kind ([`WORKS`]) and nothing
 /// before it ties the article to another one's work: "Protagonist of 1949
 /// novel by George Orwell" is a character, not the novel.
-fn made_by(description: &str) -> Option<(&str, &'static [&'static str])> {
+pub fn made_by(description: &str) -> Option<(&str, &'static [&'static str])> {
     let (what, by) = description.rsplit_once(" by ")?;
     let what: Vec<String> = what.split_whitespace().map(str::to_lowercase).collect();
     let (kind, before) = what.split_last()?;
