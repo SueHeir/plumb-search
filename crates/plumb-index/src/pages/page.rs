@@ -29,7 +29,7 @@ const DESCRIPTION_HEAD_ENDS: &[&str] = &[
 impl Page {
     /// The Wikipedia article `article` of Wikipedia in `lang`.
     pub fn from_article(lang: &str, article: Article) -> Self {
-        Page {
+        let mut page = Page {
             paper: None,
             set: format!("wikipedia-{lang}"),
             url: article_url(lang, &article.title),
@@ -51,6 +51,23 @@ impl Page {
                 .language
                 .as_deref()
                 .and_then(plumb_core::language_code),
+        };
+        page.drop_borrowed_site();
+        page
+    }
+
+    /// Leaves out the site of a person whose official website is a page
+    /// or subdomain of a bigger site, which is not theirs: sanders.senate.gov
+    /// is a senator's, senate.gov the Senate's, and a president's page on
+    /// whitehouse.gov or a chief executive's on apple.com make neither site
+    /// the person's. Their article is then not listed under it, nor the
+    /// site added, lifted or boxed as theirs. The website stays. A
+    /// company's subdomain is still its site (music.youtube.com is
+    /// YouTube's). Pages are read through this too, as indexes built
+    /// before hold the site.
+    pub(crate) fn drop_borrowed_site(&mut self) {
+        if self.website.is_some() && self.is_person() {
+            self.site = None;
         }
     }
 

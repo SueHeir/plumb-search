@@ -1293,7 +1293,7 @@ impl PageSearcher {
                 else {
                     continue;
                 };
-                let page: Page = serde_json::from_str(stored)?;
+                let mut page: Page = serde_json::from_str(stored)?;
                 if !page.is_article() || !page.item.as_deref().is_some_and(is_item_id) {
                     continue;
                 }
@@ -1302,6 +1302,7 @@ impl PageSearcher {
                 if name <= 0.0 && covered <= 0.0 {
                     continue;
                 }
+                page.drop_borrowed_site();
                 let popularity = document
                     .get_first(self.fields.popularity)
                     .and_then(|v| v.as_u64())
