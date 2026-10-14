@@ -59,6 +59,24 @@ const COMMON_WORDS: &[(&str, &str)] = &[
         "id",
         "yang untuk dengan ini dari pada dalam kami anda atau adalah",
     ),
+    ("vi", "và các có trong nhà"),
+    ("cs", "jsou jsme který která které také nebo však naše vaše"),
+    ("hu", "és egy hogy vagy rólunk kapcsolat oldal"),
+    ("ro", "pentru în sunt despre acasă şi"),
+];
+
+/// Letters only one listed language writes, so a word holding one counts
+/// as one of that language's common words: "Việt", "Bankası", "Wrocław",
+/// "pořídíte", "főoldal", "Constanța". A name or two ("Bogusław Kaczyński,
+/// Polish journalist") is still too few. Not "ş", which Romanian sites
+/// write for "ș" too, nor "ć", which Croatian writes.
+const LETTERS: &[(&str, &str)] = &[
+    ("vi", "ơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ"),
+    ("tr", "ığ"),
+    ("pl", "łśźżąęń"),
+    ("cs", "řůě"),
+    ("hu", "őű"),
+    ("ro", "șțţ"),
 ];
 
 /// Fewest common words of a language that tell it.
@@ -76,30 +94,48 @@ fn common_words() -> &'static HashMap<&'static str, usize> {
     })
 }
 
+/// Each of [`LETTERS`] with the index of its language in [`COMMON_WORDS`].
+fn letters() -> &'static HashMap<char, usize> {
+    static LETTERS_OF: OnceLock<HashMap<char, usize>> = OnceLock::new();
+    LETTERS_OF.get_or_init(|| {
+        LETTERS
+            .iter()
+            .flat_map(|&(language, letters)| {
+                let i = COMMON_WORDS.iter().position(|&(code, _)| code == language);
+                letters.chars().filter_map(move |letter| Some((letter, i?)))
+            })
+            .collect()
+    })
+}
+
 /// Whether [`language_by_words`] can tell `language`: a site it takes for
 /// German may be Danish, so it says nothing about languages not listed.
 pub(crate) fn tells(language: &str) -> bool {
     COMMON_WORDS.iter().any(|(code, _)| *code == language)
 }
 
-/// The language `text` is in, when its [`COMMON_WORDS`] say so clearly:
-/// [`MIN_WORDS`] or more different words of one language's, and more than
-/// twice as many as of any other. `None` for a short text, a name or a mix
-/// ("Hotel Casa del Mar | Beachfront rooms"), which say too little. A word
-/// keeps its apostrophe, so "we've" is not the Turkish "ve", and one in
-/// capitals ("IL", "ET", "AU") is an abbreviation, not counted.
+/// The language `text` is in, when its [`COMMON_WORDS`] and words with its
+/// [`LETTERS`] say so clearly: [`MIN_WORDS`] or more different words of one
+/// language's, and more than twice as many as of any other. `None` for a
+/// short text, a name or a mix ("Hotel Casa del Mar | Beachfront rooms"),
+/// which say too little. A word keeps its apostrophe, so "we've" is not the
+/// Turkish "ve", and one in capitals ("IL", "ET", "AU") is an abbreviation,
+/// not counted.
 pub(crate) fn language_by_words(text: &str) -> Option<&'static str> {
-    let words = common_words();
-    let found: HashSet<(&str, usize)> = text
+    let found: HashSet<String> = text
         .split(|c: char| !(c.is_alphabetic() || is_apostrophe(c)))
         .map(|word| word.trim_matches(is_apostrophe))
         .filter(|word| word.chars().nth(1).is_none() || word.chars().any(char::is_lowercase))
-        .filter_map(|word| words.get_key_value(word.to_lowercase().as_str()))
-        .map(|(&word, &i)| (word, i))
+        .map(str::to_lowercase)
         .collect();
     let mut counts = [0; COMMON_WORDS.len()];
-    for (_, i) in found {
-        counts[i] += 1;
+    for word in &found {
+        let language = common_words()
+            .get(word.as_str())
+            .or_else(|| word.chars().find_map(|letter| letters().get(&letter)));
+        if let Some(&i) = language {
+            counts[i] += 1;
+        }
     }
     let (best, &most) = counts.iter().enumerate().max_by_key(|&(_, n)| n)?;
     let next = counts
@@ -121,12 +157,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_word_is_common_to_two_languages() {
+    fn no_word_or_letter_is_common_to_two_languages() {
         let listed: usize = COMMON_WORDS
             .iter()
             .map(|(_, words)| words.split_whitespace().count())
             .sum();
         assert_eq!(common_words().len(), listed);
+        let letters_listed: usize = LETTERS
+            .iter()
+            .map(|(_, letters)| letters.chars().count())
+            .sum();
+        assert_eq!(letters().len(), letters_listed);
     }
 
     #[test]
@@ -162,6 +203,30 @@ mod tests {
                  dijital bankası ile bir çok hizmet için",
                 "tr",
             ),
+            // Told by their letters.
+            ("Báo VnExpress - Báo tiếng Việt nhiều người xem nhất", "vi"),
+            (
+                "Türk Ekonomi Bankası TEB ile ihtiyaçlarınıza uygun kredi, kredi kartı",
+                "tr",
+            ),
+            (
+                "Vítejte na stránkách města Brna. Najdete zde aktuality, úřední desku a \
+                 služby, které město nabízí",
+                "cs",
+            ),
+            (
+                "Főoldal - Az Országgyűlés honlapja, hírek és információk egy helyen",
+                "hu",
+            ),
+            (
+                "Primăria Municipiului București - Știri și informații pentru cetățeni",
+                "ro",
+            ),
+            (
+                "Domena.pl | Domeny, hosting, rejestracja domen. Firma świadczy usługi \
+                 rejestracji domen, hostingu i poczty, które są tanie",
+                "pl",
+            ),
         ] {
             assert_eq!(language_by_words(text), Some(language), "{text}");
         }
@@ -183,6 +248,11 @@ mod tests {
             "Pour House Bar & Grill | Est. 2005 | Live Music Fri 9 PM ET",
             "Bar Pas Mal | Wine Bar Est. 2015 | Chez Nous Bistro",
             "Taqueria Siempre Muy Bueno | Nuevo Tacos",
+            // A name or two with their own letters, in English.
+            "Bogusław Kaczyński Polish classical music journalist (1942–2016)",
+            "Săvinești commune in Neamț County, Romania",
+            "Phở Bắc | Vietnamese Restaurant in Seattle",
+            "Erdoğan visits Kadıköy and Beşiktaş",
         ] {
             assert_eq!(language_by_words(text), None, "{text}");
         }
