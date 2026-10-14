@@ -439,3 +439,65 @@ fn packages_are_found_only_when_asked_for() {
     let hit = searcher.search("serde crate", 10).unwrap().remove(0);
     assert!(hit.named && hit.page.set_name() == "crates.io");
 }
+
+#[test]
+fn a_well_known_package_searched_by_its_name_alone_leads() {
+    let (_dir, searcher) = searcher(&[
+        page("JSON", 5_000_000, &[]),
+        package("crates", "serde", 1_000_000_000),
+        package("crates", "serde_json", 900_000_000),
+        package("npm", "react-dom", 800_000_000),
+        package("npm", "@types/node", 800_000_000),
+        package("npm", "is-thirteen", 2_000),
+        page("Media type", 50_000, &["Content-Type"]),
+        package("npm", "content-type", 900_000_000),
+        Page::from_repo(plumb_core::article::Article {
+            title: "left-pad/left-pad".into(),
+            aliases: vec!["left-pad".into()],
+            views: 1_000,
+            ..Default::default()
+        }),
+        package("npm", "left-pad", 500_000_000),
+    ]);
+    let found = |query: &str| -> Vec<PageHit> {
+        searcher
+            .search(query, 10)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.package.is_some())
+            .collect()
+    };
+    for (query, url) in [
+        ("serde_json", "https://crates.io/crates/serde_json"),
+        ("react-dom", "https://www.npmjs.com/package/react-dom"),
+        ("@types/node", "https://www.npmjs.com/package/@types/node"),
+    ] {
+        let hits = found(query);
+        assert_eq!(hits.len(), 1, "{query}: {hits:?}");
+        assert!(
+            hits[0].page.url == url && hits[0].named && hits[0].whole,
+            "{query}"
+        );
+        // Asked for as a whole, it comes before a site sharing a word.
+        let sites = [site("json.org", false), site("serde.rs", false)];
+        let placed = place_pages(query, &sites, searcher.search(query, 10).unwrap());
+        let package = placed.iter().find(|p| p.hit.page.url == url).unwrap();
+        assert_eq!(package.at, 0, "{query}");
+    }
+    // A name that may be a word still asks for nothing, a little-used
+    // package is no answer to its bare name, and nor is a package called
+    // what something else is: the header and the repository come first.
+    for query in ["serde", "is-thirteen", "content-type", "left-pad"] {
+        assert!(found(query).is_empty(), "{query}");
+    }
+    let hits = searcher.search("content-type", 10).unwrap();
+    assert!(hits[0].page.title == "Media type" && hits[0].named);
+    // With a registry's word, the package is named but not the whole search.
+    for query in ["serde_json crate", "content-type npm"] {
+        let hits = found(query);
+        assert!(
+            hits.len() == 1 && hits[0].named && !hits[0].whole,
+            "{query}"
+        );
+    }
+}

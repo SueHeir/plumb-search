@@ -115,6 +115,42 @@ fn repository_words_find_the_repository() {
 }
 
 #[test]
+fn a_search_for_a_list_finds_the_list_article() {
+    let (_dir, s) = searcher(&[
+        page("List of popes", 90_000, &[]),
+        page("Pope John numbering", 5_000, &[]),
+        page("Order of St. Sylvester", 2_000, &[]),
+        page(
+            "List of presidents of the United States",
+            300_000,
+            &["List of US presidents"],
+        ),
+        page("Linked list", 80_000, &[]),
+    ]);
+    for (query, list) in [
+        ("popes in order", "List of popes"),
+        ("list of popes in order", "List of popes"),
+        (
+            "us presidents list",
+            "List of presidents of the United States",
+        ),
+        (
+            "US presidents list in order",
+            "List of presidents of the United States",
+        ),
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(hits[0].page.title, list, "{query}");
+        assert!(hits[0].named, "{query}");
+    }
+    // Nothing is called "list of linked".
+    assert_eq!(
+        titles(&s.search("linked list", 5).unwrap()),
+        ["Linked list"]
+    );
+}
+
+#[test]
 fn fact_questions_find_the_article_they_ask_about() {
     let described = |title: &str, views: u64, description: &str| {
         let mut page = page(title, views, &[]);
@@ -587,6 +623,12 @@ fn words_are_only_looked_up() {
         word("free", "(adjective) Unconstrained.", 900),
         word("Free", "(noun) A surname.", 5),
         word("AWOL", "(adjective) Absent without leave.", 50),
+        word(
+            "aka",
+            "(noun) The New Zealand vine Metrosideros fulgens.",
+            1,
+        ),
+        word("AKA", "(preposition) Initialism of also known as.", 12),
     ]);
     // Never a result.
     assert_eq!(titles(&s.search("free", 5).unwrap()), ["Free (album)"]);
@@ -597,19 +639,14 @@ fn words_are_only_looked_up() {
     );
     assert_eq!(free.url, "https://en.wiktionary.org/wiki/free");
     assert_eq!(s.definition("awol").unwrap().unwrap().title, "AWOL");
+    // Lower case says nothing of capitals: the best-known form.
+    assert_eq!(s.definition("aka").unwrap().unwrap().title, "AKA");
+    assert_eq!(s.definition("Free").unwrap().unwrap().title, "Free");
     assert_eq!(s.definition("freedom").unwrap(), None);
 }
 
 #[test]
 fn what_is_asked_about_a_person_finds_their_article() {
-    let person = |title: &str, views: u64, aliases: &[&str]| {
-        let mut page = page(title, views, aliases);
-        page.facts = vec![plumb_core::facts::Fact {
-            kind: plumb_core::facts::FactKind::Born,
-            value: "1961-08-04".into(),
-        }];
-        page
-    };
     let (_dir, s) = searcher(&[
         person("Barack Obama", 900_000, &["Obama"]),
         person("Pablo Picasso", 400_000, &["Picasso"]),
@@ -619,13 +656,7 @@ fn what_is_asked_about_a_person_finds_their_article() {
         page("Black Death", 300_000, &[]),
         page("Christmas", 500_000, &[]),
     ]);
-    let named = |q: &str| -> Vec<String> {
-        let hits = s.search(q, 5).unwrap();
-        hits.iter()
-            .filter(|hit| hit.named)
-            .map(|hit| hit.page.title.clone())
-            .collect()
-    };
+    let named = |q: &str| named_titles(&s, q);
     assert_eq!(named("obama daughters"), ["Barack Obama"]);
     assert_eq!(named("picasso paintings"), ["Pablo Picasso"]);
     assert_eq!(named("steve jobs cause of death"), ["Steve Jobs"]);
@@ -720,4 +751,43 @@ fn a_plural_that_names_only_namesakes_asks_about_its_singular() {
     assert!(!python.contains(&"Pythonidae".to_string()), "{python:?}");
     let pythons = named("what is a ball python");
     assert!(!pythons.contains(&"Pythonidae".to_string()), "{pythons:?}");
+}
+
+#[test]
+fn a_monarch_typed_with_a_number_is_named() {
+    let mut book = page("Henry the Eighth", 3, &[]);
+    book.set = BOOKS_SET.into();
+    let (_dir, s) = searcher(&[
+        person("Henry VIII", 85_702, &["Henry 8"]),
+        page("Henry VIII (play)", 1_900, &[]),
+        person("Henry Percy, 8th Earl of Northumberland", 300, &[]),
+        book,
+        person("Louis XIV", 39_618, &[]),
+        person("Charles III", 120_000, &["King Charles III"]),
+        person("Pope Benedict XVI", 30_000, &[]),
+        page("Queen Elizabeth 2", 6_000, &["QE2"]),
+        person("Elizabeth II", 200_000, &["Queen Elizabeth II"]),
+        page("Epistle of James", 2_302, &["James 1"]),
+        page("Windows 11", 50_000, &[]),
+    ]);
+    let named = |q: &str| named_titles(&s, q);
+    for q in ["henry 8th", "henry the 8th", "henry the eighth", "henry 8"] {
+        assert_eq!(named(q)[0], "Henry VIII", "{q}");
+    }
+    assert_eq!(named("louis the 14th"), ["Louis XIV"]);
+    assert_eq!(named("charles 3"), ["Charles III"]);
+    assert_eq!(named("king charles 3"), ["Charles III"]);
+    assert_eq!(named("pope benedict 16"), ["Pope Benedict XVI"]);
+    assert_eq!(named("elizabeth the 2nd"), ["Elizabeth II"]);
+    // Not when an article is called the query as typed.
+    assert_eq!(named("queen elizabeth 2"), ["Queen Elizabeth 2"]);
+    assert_eq!(named("james 1"), ["Epistle of James"]);
+    assert_eq!(
+        regnal_name("Louis the Fourteenth"),
+        Some("louis xiv".into())
+    );
+    assert_eq!(regnal_name("pope pius 12"), Some("pope pius xii".into()));
+    assert_eq!(regnal_name("windows 11 pro"), None);
+    assert_eq!(regnal_name("the 8th"), None);
+    assert_eq!(regnal_name("covid-19"), None);
 }
