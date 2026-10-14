@@ -156,11 +156,47 @@ impl Page {
         self.set.starts_with("wikipedia-")
     }
 
-    /// Whether the page is about a person: it has a birth date.
+    /// Whether the page is about a person: Wikidata gives their birth or
+    /// death, or the lead opens with their dates, since Wikidata's are
+    /// missing for many less-read people ("Terry LaVerne Stafford
+    /// (November 22, 1941 – March 17, 1996) was"). The lead's opening
+    /// brackets count when they say "born" or hold the years the
+    /// description's brackets end it with: a band's or a country's years
+    /// end its description too ("American rock & roll band (1962–1966)"),
+    /// but its lead does not open with them.
     pub fn is_person(&self) -> bool {
-        self.facts
+        use plumb_core::facts::FactKind::{Born, Died};
+        if self
+            .facts
             .iter()
-            .any(|fact| fact.kind == plumb_core::facts::FactKind::Born)
+            .any(|fact| matches!(fact.kind, Born | Died))
+        {
+            return true;
+        }
+        let Some(dates) = self.lead.as_deref().and_then(opening_brackets) else {
+            return false;
+        };
+        let words = |text: &str| -> Vec<String> {
+            text.split(|c: char| !c.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_lowercase)
+                .collect()
+        };
+        let said = words(dates);
+        if said.iter().any(|word| word == "born") {
+            return true;
+        }
+        let years: Vec<String> = self
+            .description
+            .as_deref()
+            .and_then(|description| description.trim_end().strip_suffix(')'))
+            .and_then(|described| described.rsplit_once('('))
+            .map(|(_, years)| words(years))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|word| word.bytes().all(|b| b.is_ascii_digit()))
+            .collect();
+        !years.is_empty() && years.iter().all(|year| said.contains(year))
     }
 
     /// Whether the page is a question, of Stack Overflow or another Stack
@@ -806,6 +842,29 @@ impl Page {
 /// subpages sets ([`Page::is_site_page`]).
 pub(crate) fn is_site_page_set(set: &str) -> bool {
     set == REFERENCE_SET || set == REFERENCE2_SET || set == SUBPAGES_SET
+}
+
+/// What the brackets `lead` opens with hold, before it says what its
+/// subject is: "November 22, 1941 – March 17, 1996" of "Terry LaVerne
+/// Stafford (November 22, 1941 – March 17, 1996) was an American singer".
+fn opening_brackets(lead: &str) -> Option<&str> {
+    let open = lead.find('(')?;
+    if [" is ", " was "]
+        .iter()
+        .any(|verb| lead[..open].contains(verb))
+    {
+        return None;
+    }
+    let mut depth = 0;
+    for (at, c) in lead[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 1 => return Some(&lead[open + 1..open + at]),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Whether `id` is a Wikidata item's: `Q25188`.
