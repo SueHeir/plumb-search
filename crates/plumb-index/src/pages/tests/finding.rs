@@ -577,6 +577,64 @@ fn sites_called_like_organizations_stay_first() {
 }
 
 #[test]
+fn a_name_and_what_the_person_is_name_them() {
+    let person = |title: &str, views: u64, aliases: &[&str], description: &str| {
+        let mut page = page(title, views, aliases);
+        page.description = Some(description.into());
+        page.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1956-07-09".into(),
+        }];
+        page
+    };
+    let (_dir, s) = searcher(&[
+        person(
+            "Tom Hanks",
+            300_000,
+            &[],
+            "American actor and filmmaker (born 1956)",
+        ),
+        person(
+            "Chet Hanks",
+            20_000,
+            &[],
+            "American actor and musician (born 1990)",
+        ),
+        person(
+            "Wolfgang Amadeus Mozart",
+            400_000,
+            &[],
+            "Composer and musician (1756–1791)",
+        ),
+        person("Leopold Mozart", 60_000, &[], "German composer (1719–1787)"),
+        person(
+            "Chris Smith (footballer, born 1981)",
+            2_000,
+            &[],
+            "English footballer",
+        ),
+        person(
+            "Chris Smith (footballer, born 1977)",
+            1_500,
+            &[],
+            "Welsh footballer",
+        ),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("tom hanks actor"), ["Tom Hanks"]);
+    assert_eq!(named("mozart composer"), ["Wolfgang Amadeus Mozart"]);
+    // Not what the description does not say, nor one of several who fit.
+    assert!(named("tom hanks singer").is_empty());
+    assert!(named("chris smith footballer").is_empty());
+}
+
+#[test]
 fn namesakes_are_weighed_by_how_much_their_articles_are_read() {
     let mut planet = page("Mars", 2_000_000, &[]);
     planet.description = Some("Fourth planet from the Sun".into());
@@ -747,7 +805,7 @@ fn words_of_things_are_corrected_from_page_names() {
         pages.push(page(&format!("Anubis statue {i}"), 10, &[]));
         pages.push(page(&format!("Budapest hotels {i}"), 10, &[]));
     }
-    pages.push(page("Anubas (beetle)", 1, &[]));
+    pages.push(page("Anubas tomb", 1, &[]));
     for i in 0..5 {
         pages.push(page(&format!("Perfi album {i}"), 10, &[]));
     }
@@ -762,7 +820,8 @@ fn words_of_things_are_corrected_from_page_names() {
             .unwrap()
             .map(|s| s.query)
     };
-    // Even a word one page has is taken for a slip of a far commoner one.
+    // Even a word one page's name has is taken for a slip of a far
+    // commoner one.
     assert_eq!(suggest("anubas").as_deref(), Some("anubis"));
     assert_eq!(
         suggest("budafest hotels").as_deref(),
@@ -785,6 +844,144 @@ fn words_of_things_are_corrected_from_page_names() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn slips_people_make_are_corrected_though_pages_name_them() {
+    let mut pages = Vec::new();
+    let mut add = |title: &str, count: usize| {
+        for i in 0..count {
+            pages.push(page(&format!("{title} {i}"), 10, &[]));
+        }
+    };
+    // Everyday words are rare in pages' names, and their slips are there
+    // too: song titles, misspelled redirects.
+    add("Receive", 200);
+    add("Recieve", 4);
+    add("Definitely", 40);
+    add("Definately", 1);
+    add("Pace", 200);
+    add("PKCE flow", 3);
+    add("Judgment", 40);
+    add("Judgement", 30);
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(
+        &[("ei", "ie", 0.001), ("i", "a", 0.001), ("g", "ge", 0.01)],
+        1e-6,
+    );
+    let nothing_known = |_: &str| false;
+    let suggest = |query: &str, model| {
+        searcher
+            .suggest_spelling(query, model, &nothing_known)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    assert_eq!(suggest("recieve", Some(&model)).as_deref(), Some("receive"));
+    assert_eq!(
+        suggest("definately", Some(&model)).as_deref(),
+        Some("definitely")
+    );
+    // An edit people are not seen to make leaves a word the pages know.
+    assert_eq!(suggest("pkce", Some(&model)), None);
+    // So does a word nearly as common as the near one.
+    assert_eq!(suggest("judgement", Some(&model)), None);
+    // Without the model, a word the pages know stays.
+    assert_eq!(suggest("recieve", None), None);
+}
+
+#[test]
+fn names_are_not_taken_for_slips() {
+    let mut pages = Vec::new();
+    let mut add = |title: &str, count: usize| {
+        for i in 0..count {
+            pages.push(page(&format!("{title} {i}"), 10, &[]));
+        }
+    };
+    add("Meets", 200);
+    add("Jean Meeus", 3);
+    add("Elias", 200);
+    add("ETIAS", 3);
+    add("Http", 200);
+    add("Htop", 3);
+    add("Sauce", 200);
+    add("Saute", 3);
+    add("Argument", 200);
+    add("Arguement", 3);
+    add("Scale", 200);
+    add("Scald", 3);
+    add("Magick", 200);
+    add("Bake", 200);
+    add("Clothes", 200);
+    add("Cloths", 3);
+    // Only one page has each: no more than "anubas" has.
+    pages.push(page("Magicka", 10, &[]));
+    pages.push(page("Baidu Baike", 10, &[]));
+    pages.push(page("Htop", 10, &[]));
+    pages.push(Page::from_word(Article {
+        title: "saute".into(),
+        description: Some("(verb) To fry quickly in a little fat.".into()),
+        ..Article::default()
+    }));
+    pages.push(Page::from_word(Article {
+        title: "cloth".into(),
+        ..Article::default()
+    }));
+    let article = |title: &str, name: &str| {
+        Page::from_article(
+            "en",
+            Article {
+                title: title.into(),
+                names: vec![name.into()],
+                ..Article::default()
+            },
+        )
+    };
+    pages.push(article("Burn", "Scald"));
+    // Wikipedia redirects the misspelling to the article.
+    pages.push(article("Argument", "Arguement"));
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(
+        &[
+            ("t", "u", 0.001),
+            ("l", "t", 0.001),
+            ("t", "o", 0.001),
+            ("c", "t", 0.001),
+            ("u", "ue", 0.01),
+            ("e", "d", 0.001),
+            ("k", "ka", 0.01),
+            ("a", "ai", 0.01),
+            ("es", "s", 0.01),
+        ],
+        1e-6,
+    );
+    let suggest = |query: &str| {
+        searcher
+            .suggest_spelling(query, Some(&model), &|_| false)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    // Alone, each is a likely slip of a commoner word.
+    assert_eq!(suggest("meeus").as_deref(), Some("meets"));
+    assert_eq!(suggest("etias").as_deref(), Some("elias"));
+    // A page names it with another word typed.
+    assert_eq!(suggest("jean meeus"), None);
+    assert_eq!(suggest("astronomical algorithms jean meeus"), None);
+    // Typed in capitals, an abbreviation.
+    assert_eq!(suggest("ETIAS"), None);
+    // In a web address, or typed with letters English does not use.
+    assert_eq!(suggest("etias.eu visa"), None);
+    assert_eq!(suggest("étias"), None);
+    // An article is named by it.
+    assert_eq!(suggest("htop"), None);
+    assert_eq!(suggest("scald"), None);
+    // Wiktionary has it, or its singular.
+    assert_eq!(suggest("saute"), None);
+    assert_eq!(suggest("cloths"), None);
+    // It is a near spelling of the article's title.
+    assert_eq!(suggest("arguement").as_deref(), Some("argument"));
+    // However few pages have it, a name is no slip.
+    assert_eq!(suggest("trifling glyph of magicka"), None);
+    assert_eq!(suggest("great wall baidu baike"), None);
 }
 
 #[test]
@@ -1185,6 +1382,67 @@ fn a_question_of_only_asking_words_and_code_names_nothing() {
     assert!(questions("what does nasa stand for").is_empty());
     // A question that asks about something is still found.
     assert_eq!(questions("what is a monad"), ["What is a monad?"]);
+}
+
+#[test]
+fn a_question_found_by_its_tags_alone_is_not_about_the_query() {
+    let question = |title: &str, tags: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some(tags.into()),
+            item: Some(item.into()),
+            views: 100_000,
+            ..Article::default()
+        })
+    };
+    let pages = [
+        question(
+            "What is the tax status of assets recovered via bankruptcy proceedings?",
+            "united-states, taxes, capital-gains-tax, australia",
+            "1",
+        ),
+        question(
+            "How long does cooked pasta last in the fridge?",
+            "pasta, storage-lifetime, refrigerator",
+            "2",
+        ),
+        question(
+            "Pandas Merging 101",
+            "python, pandas, merge, dataframe",
+            "3",
+        ),
+        question(
+            "What is the capital gains tax rate in Australia?",
+            "taxes, capital-gains-tax, australia",
+            "4",
+        ),
+    ];
+    // Pages that make the query's other words known, not typos.
+    let known = [
+        "Capital city",
+        "Capital punishment",
+        "Australia",
+        "Refrigerator",
+        "Pandas (software)",
+        "Merge",
+    ]
+    .map(|title| page(title, 1_000, &[]));
+    let (_dir, s) = searcher(&[&pages[..], &known[..]].concat());
+    let questions = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.is_question())
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(
+        questions("what is the capital of australia"),
+        ["What is the capital gains tax rate in Australia?"]
+    );
+    assert!(questions("how does a refrigerator work").is_empty());
+    // Tags still count toward a title that has some of the query.
+    assert_eq!(questions("pandas merge dataframes"), ["Pandas Merging 101"]);
 }
 
 #[test]

@@ -21,7 +21,7 @@ use super::{
     PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
     REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
-    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
+    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WANTED_SET, WELL_KNOWN_PACKAGE,
 };
 use crate::analysis;
 
@@ -195,7 +195,7 @@ impl PageSearcher {
         }
         if crowded {
             let mut apart: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, Box::new(every_word))];
-            for set in [SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET] {
+            for set in [SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET, WANTED_SET] {
                 apart.push((Occur::MustNot, self.scope_term(&format!("set:{set}"))));
             }
             for (_, address) in searcher.search(
@@ -587,6 +587,9 @@ impl PageSearcher {
                 self.name_without_the(rest, &mut hits);
             }
         }
+        if let [name @ .., what] = words.as_slice() {
+            self.name_by_description(name, what, &mut hits);
+        }
         let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
@@ -916,7 +919,8 @@ impl PageSearcher {
     /// And whether the query asks the question as a whole: it has all of
     /// the query's words, and the query at least [`QUESTION_TITLE_SHARE`]
     /// of its title's. A question without `topic_word`, the query's rarest
-    /// word, matches not at all. The question's words are its title and
+    /// word, or whose title has none of `sure`, matches not at all. The
+    /// question's words are its title and
     /// tags, or the title of a duplicate of it and its tags, whichever
     /// covers the query best ([`Page::asked_as`]).
     pub(crate) fn question_match(
@@ -964,6 +968,16 @@ impl PageSearcher {
             }
             let title: HashSet<String> =
                 analysis::tokens(&self.stemmed, title).into_iter().collect();
+            // Its tags alone do not make a question about the query: "What
+            // is the tax status of assets recovered via bankruptcy
+            // proceedings?", tagged capital-gains-tax and australia, does
+            // not ask "what is the capital of australia".
+            if page.is_question()
+                && !sure.is_empty()
+                && !sure.iter().any(|stem| title.contains(stem))
+            {
+                continue;
+            }
             let asked = share >= 1.0
                 && !title.is_empty()
                 && title.iter().filter(|word| stems.contains(word)).count() as f32
@@ -1333,6 +1347,53 @@ impl PageSearcher {
         name_by_alias(&mut hits[best]);
     }
 
+    /// Names the person the query calls by their `name` and then says
+    /// `what` they are, as their description does, when nothing is named:
+    /// "tom hanks actor" is Tom Hanks, "American actor and filmmaker", and
+    /// "mozart composer" Wolfgang Amadeus Mozart. The name is their title
+    /// without its qualifier, another name or, alone, the title's last
+    /// word. Only when they are read
+    /// [`super::SURNAME_MARGIN`] times as much as every other person who
+    /// fits: "chris smith footballer" is several.
+    fn name_by_description(&self, name: &[String], what: &str, hits: &mut [PageHit]) {
+        if name.is_empty() || hits.iter().any(|hit| hit.named) {
+            return;
+        }
+        let key = |text: &str| analysis::tokens(&self.joined, text).pop();
+        let Some(called) = key(&name.join(" ")) else {
+            return;
+        };
+        let surname = |page: &Page| match name {
+            [word] => analysis::tokens(&self.words, base_title(&page.title)).last() == Some(word),
+            _ => false,
+        };
+        let fits = |page: &Page| {
+            page.is_person()
+                && (std::iter::once(base_title(&page.title))
+                    .chain(page.aliases.iter().map(String::as_str))
+                    .any(|text| key(text).as_ref() == Some(&called))
+                    || surname(page))
+                && analysis::tokens(&self.words, page.description.as_deref().unwrap_or(""))
+                    .iter()
+                    .any(|word| word == what)
+        };
+        let Some((best, views)) = hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| fits(&hit.page))
+            .max_by_key(|(_, hit)| hit.page.views)
+            .map(|(at, hit)| (at, hit.page.views))
+        else {
+            return;
+        };
+        if hits.iter().enumerate().any(|(at, hit)| {
+            at != best && hit.page.views * super::SURNAME_MARGIN > views && fits(&hit.page)
+        }) {
+            return;
+        }
+        name_by_alias(&mut hits[best]);
+    }
+
     /// Names the articles a query of "the" and a name calls without its
     /// "the" (`rest`): "the pope" is Pope, not the book The Pope, and "the
     /// titanic" the ship before the song. Only when they are read
@@ -1455,7 +1516,7 @@ const BELOW_NAMED_ARTICLE: f32 = 0.99;
 /// page at chessprogramming.org for "napoleon", loc.gov's for "abraham
 /// lincoln". A page on the article's own website keeps its score: nps.gov's
 /// "Yosemite National Park" is the park's own page.
-pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
+pub fn site_pages_after_named_article(hits: &mut [PageHit]) {
     let Some(article) = hits
         .iter()
         .filter(|hit| {
@@ -1481,7 +1542,13 @@ pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
 /// words of "javascript array sort" are more read than MDN's page on it,
 /// and would crowd it out.
 pub(crate) fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
-    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET];
+    let kept = [
+        DOCS_SET,
+        SUBPAGES_SET,
+        REFERENCE_SET,
+        REFERENCE2_SET,
+        WANTED_SET,
+    ];
     for set in kept {
         if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
             continue;

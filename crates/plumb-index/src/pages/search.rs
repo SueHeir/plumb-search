@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use plumb_core::paper_query::PaperQuery;
 use plumb_core::{registrable_domain, Operators};
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
@@ -20,8 +20,8 @@ use super::scoring::truncate_keeping_inner_pages;
 use super::sites::base_title;
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
-    GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAPERS_SET,
-    POPULARITY_SCALE, POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
+    GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAGE_SLIP_WEIGHT,
+    PAPERS_SET, POPULARITY_SCALE, POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
 };
 use crate::analysis;
 
@@ -249,6 +249,36 @@ pub(crate) fn compared(query: &str) -> Option<[String; 2]> {
     })?;
     let side = |text: &str| asked_name(text.trim()).map(str::to_string);
     Some([side(a)?, side(b)?])
+}
+
+/// Words before a name that ask for one side of it: "benefits of
+/// meditation", "uses of graphene". Unlike [`HINT_LEADS`], they also start
+/// the names of articles on that side ("Causes of the French Revolution"),
+/// so the name is looked up only when nothing is called the whole query.
+const ASPECT_LEADS: &[&str] = &[
+    "benefits of ",
+    "health benefits of ",
+    "uses of ",
+    "importance of ",
+    "characteristics of ",
+    "advantages and disadvantages of ",
+    "advantages of ",
+    "disadvantages of ",
+    "pros and cons of ",
+    "effects of ",
+    "side effects of ",
+    "examples of ",
+    "types of ",
+    "causes of ",
+    "symptoms of ",
+    "history of ",
+];
+
+/// The name an [`ASPECT_LEADS`] query asks about: "meditation" of
+/// "benefits of meditation".
+pub(crate) fn aspect_asked(query: &str) -> Option<String> {
+    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?')).to_lowercase();
+    asked_name(ASPECT_LEADS.iter().find_map(|lead| q.strip_prefix(lead))?).map(str::to_string)
 }
 
 /// Words after a name that say what about it is wanted.
@@ -579,6 +609,19 @@ pub const KNOWN_SONG_MARGIN: u64 = 5;
 /// How many of the first sites [`PageSearcher::note_demand`] notes.
 pub const DEMAND_NOTED: usize = 3;
 
+/// Least popularity of an article whose name a query's first words are
+/// taken for a slip of ([`PageSearcher::fix_page_name`]): about 6,000
+/// reads in the days Wikipedia's counts cover. Stephen Hawking has seven
+/// times that; Stephen Hawkins, a name of its own, has 48.
+const WELL_READ_NAME: f32 = 0.55;
+
+/// Most of a query's first words read as one name
+/// ([`PageSearcher::fix_page_name`]).
+const MAX_NAME_WORDS: usize = 4;
+
+/// Most read pages looked at for an article with a name's key.
+const NAME_PAGES: usize = 5;
+
 impl PageSearcher {
     pub fn open(dir: &Path) -> Result<Self> {
         let index = Index::open_in_dir(dir)
@@ -851,8 +894,15 @@ impl PageSearcher {
     /// [`MIN_PAGE_FIX_PAGES`], or with the spelling model, the likeliest by
     /// the noisy channel ([`crate::spell_model`]). With the model, a word
     /// is kept unless the slip is likelier than the word, a word no page
-    /// has counting as if one did ("perft" is not "perf"). `None` when no
-    /// word changes.
+    /// has counting as if one did ("perft" is not "perf"), or the slip is
+    /// one the model learned and is likelier than the word with how much
+    /// commoner the near word is weighed by [`PAGE_SLIP_WEIGHT`]; that
+    /// holds for a word the pages know too ("recieve", "definately").
+    /// A word typed in capitals, with letters English does not use, or in
+    /// a web address is kept, and so is a word that names something
+    /// ([`PageSearcher::names_something`]), however few pages have it:
+    /// "magicka" is not "magick", nor "baidu baike" "baidu bake".
+    /// `None` when no word changes.
     pub fn suggest_spelling(
         &self,
         query: &str,
@@ -869,15 +919,36 @@ impl PageSearcher {
             Ok(searcher.doc_freq(&Term::from_field_text(self.fields.words, word))?)
         };
         let typed = analysis::tokens(&self.words, query);
+        // Names, abbreviations and addresses: "ETIAS" is not "elias", "OLED"
+        // not "old", nor "ratp.info" "rate info". Nor is a word typed with
+        // letters English does not use a slip of one without them: "Edlén"
+        // is not "ellen", nor the mojibake "mÃ©xico" "ma xiao".
+        let mut kept: HashSet<String> = HashSet::new();
+        for part in query.split_whitespace() {
+            let whole = part.contains('.') && registrable_domain(part).is_some()
+                || part.chars().any(|c| c.is_alphabetic() && !c.is_ascii());
+            for piece in part.split(|c: char| !c.is_alphanumeric()) {
+                let capitals = piece.chars().filter(|c| c.is_alphabetic()).count() > 1
+                    && !piece.chars().any(char::is_lowercase);
+                if whole || capitals {
+                    kept.extend(analysis::tokens(&self.words, piece));
+                }
+            }
+        }
         let mut fixed = typed.clone();
-        for word in &mut fixed {
+        let named = self.fix_page_name(&mut fixed, model)?;
+        for word in fixed.iter_mut().skip(named) {
             let chars = word.chars().count();
             let edits = crate::spell::max_edits(chars);
             if edits == 0
                 || !word.chars().all(char::is_alphabetic)
-                || self.knows_word(word)?
                 || site_known(word)
+                || kept.contains(word.as_str())
             {
+                continue;
+            }
+            let known = self.knows_word(word)?;
+            if known && model.is_none() {
                 continue;
             }
             let typed_docs = docs(word)?;
@@ -900,17 +971,25 @@ impl PageSearcher {
                     None => -7.0 * f64::from(distance),
                 };
                 let likelihood = cost + (term_docs as f64).ln();
-                // As likely as the word typed, a word no page has counting
-                // as if one did: "perft" is not "perf".
-                if model.is_some() && likelihood < (typed_docs.max(1) as f64).ln() {
-                    continue;
+                if let Some(model) = model {
+                    let commoner = (term_docs as f64 / typed_docs.max(1) as f64).ln();
+                    // As likely as the word typed, a word no page has
+                    // counting as if one did: "perft" is not "perf".
+                    let rare = !known && cost + commoner >= 0.0;
+                    let slip =
+                        model.learned(word, &term) && cost + PAGE_SLIP_WEIGHT * commoner >= 0.0;
+                    if !rare && !slip {
+                        continue;
+                    }
                 }
                 if best.as_ref().is_none_or(|(b, _)| likelihood > *b) {
                     best = Some((likelihood, term));
                 }
             }
             if let Some((_, term)) = best {
-                *word = term;
+                if !self.names_something(word, &typed)? {
+                    *word = term;
+                }
             }
         }
         Ok((fixed != typed).then(|| crate::Spelling {
@@ -918,6 +997,148 @@ impl PageSearcher {
             site: None,
             applied: false,
         }))
+    }
+
+    /// Corrects the first words of `words`, two or more, when they are a
+    /// slip of a well-read article's name ([`WELL_READ_NAME`]): "jeff bezoz"
+    /// is Jeff Bezos, "leonardo da vinchi net worth" Leonardo da Vinci's. As
+    /// the sites' speller corrects a site's name: the joined words are within
+    /// [`crate::spell::max_edits`] of the name's, and each word changed is
+    /// within its own, keeps its first letter and has no digits ("iphone 15"
+    /// is not iPhone 16). Fewest edits first, then the likeliest slip by
+    /// `model`. How many words it corrected: none when they name a page as
+    /// typed.
+    fn fix_page_name(
+        &self,
+        words: &mut [String],
+        model: Option<&crate::spell_model::Model>,
+    ) -> Result<usize> {
+        let searcher = self.reader.searcher();
+        for covers in (2..=words.len().min(MAX_NAME_WORDS)).rev() {
+            let key = words[..covers].concat();
+            if searcher.doc_freq(&Term::from_field_text(self.fields.keys, &key))? > 0 {
+                return Ok(0);
+            }
+            let edits = crate::spell::max_edits(key.chars().count());
+            let mut near = crate::spell::near_terms(&searcher, self.fields.keys, &key, edits)?;
+            let cost = |name: &str| model.map_or(0.0, |model| model.ln_channel(&key, name));
+            near.sort_by(|a, b| a.1.cmp(&b.1).then(cost(&b.0).total_cmp(&cost(&a.0))));
+            for (name, _) in near {
+                if let Some(fixed) = self.well_read_name(&name, &words[..covers])? {
+                    words[..covers].clone_from_slice(&fixed);
+                    return Ok(covers);
+                }
+            }
+        }
+        Ok(0)
+    }
+
+    /// The words of the name keyed `key` of the most read article that has
+    /// it, when that article is read at least [`WELL_READ_NAME`] and each of
+    /// its words is `typed`'s or a slip of it ([`PageSearcher::fix_page_name`]).
+    fn well_read_name(&self, key: &str, typed: &[String]) -> Result<Option<Vec<String>>> {
+        let searcher = self.reader.searcher();
+        let named = TermQuery::new(
+            Term::from_field_text(self.fields.keys, key),
+            IndexRecordOption::Basic,
+        );
+        let top = TopDocs::with_limit(NAME_PAGES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        let slip = |word: &String, fix: &String| {
+            word == fix
+                || word.chars().chain(fix.chars()).all(char::is_alphabetic)
+                    && crate::spell::within_edits(word, fix)
+                    && crate::spell::plausible_word_fix(word, fix)
+        };
+        for (popularity, address) in searcher.search(self.language_query(&named).as_ref(), &top)? {
+            if (popularity.unwrap_or(0) as f32 / POPULARITY_SCALE) < WELL_READ_NAME {
+                break;
+            }
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if !page.is_article() {
+                continue;
+            }
+            let names = [page.title.as_str(), base_title(&page.title)]
+                .into_iter()
+                .chain(page.names.iter().map(String::as_str));
+            for name in names {
+                if analysis::tokens(&self.joined, name).pop().as_deref() != Some(key) {
+                    continue;
+                }
+                let fixed = analysis::tokens(&self.words, name);
+                if fixed.len() == typed.len() && typed.iter().zip(&fixed).all(|(w, f)| slip(w, f)) {
+                    return Ok(Some(fixed));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether `word`, typed among `words`, is the name of something rather
+    /// than a slip, however near a commoner word it is: Wiktionary has it as
+    /// a word ("saute", "renter") or has its singular ("cloths": the set
+    /// leaves out forms of other words), a page is named by it ("Everlong",
+    /// "htop", "Scald" for Burn), or a page's name has it with another word
+    /// typed ("Jean Meeus", "Baidu Baike"). A near spelling of an article's
+    /// title is not its name but the redirect Wikipedia keeps for a
+    /// misspelling ("Arguement" for Argument).
+    fn names_something(&self, word: &str, words: &[String]) -> Result<bool> {
+        let searcher = self.reader.searcher();
+        let term = |field, text: &str| -> Box<dyn Query> {
+            Box::new(TermQuery::new(
+                Term::from_field_text(field, text),
+                IndexRecordOption::Basic,
+            ))
+        };
+        let found = |clauses: Vec<Box<dyn Query>>| -> Result<bool> {
+            let query = BooleanQuery::new(clauses.into_iter().map(|q| (Occur::Must, q)).collect());
+            Ok(searcher.search(&query, &Count)? > 0)
+        };
+        let plural = word.strip_suffix('s').filter(|one| !one.ends_with('s'));
+        for word in std::iter::once(word).chain(plural) {
+            if searcher.doc_freq(&Term::from_field_text(self.fields.word, word))? > 0 {
+                return Ok(true);
+            }
+        }
+        let top = TopDocs::with_limit(TITLE_CANDIDATES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        for (_, address) in searcher.search(term(self.fields.keys, word).as_ref(), &top)? {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            let title = analysis::tokens(&self.joined, base_title(&page.title))
+                .pop()
+                .unwrap_or_default();
+            // An article is also keyed by the names that lead to it, some
+            // of them misspellings of its title.
+            if title == word || page.is_article() && !crate::spell::within_edits(word, &title) {
+                return Ok(true);
+            }
+        }
+        for other in words {
+            if other != word
+                && !plumb_core::is_function_word(other)
+                && found(vec![
+                    term(self.fields.words, word),
+                    term(self.fields.words, other),
+                ])?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Named entity candidates before site blending or learned placement.
@@ -1069,14 +1290,15 @@ impl PageSearcher {
         // name, so the name is searched for too. So is what a fact question
         // asks about, or "when was isaac newton born" lists Newton's mother
         // and namesakes, whose descriptions hold its words, and not him;
-        // but not when the query is itself a name ("age of empires"). So is
-        // the list a search for one asks for: "popes in order" finds Pope
-        // John numbering and not List of popes, which "list of popes"
-        // names. A monarch or pope typed with a number is searched in Roman
-        // numerals when no article is named as typed: "charles 3", "henry
-        // the 8th". A hinted name is not searched when a page is called
-        // the whole query: "plaster cast", "ice age" and "horror film" are
-        // not about plaster, ice or horror.
+        // but not when the query is itself a name ("age of empires"), and
+        // so is what "benefits of meditation" asks about. So is the list a
+        // search for one asks for: "popes in order" finds Pope John
+        // numbering and not List of popes, which "list of popes" names. A
+        // monarch or pope typed with a number is searched in Roman numerals
+        // when no article is named as typed: "charles 3", "henry the 8th".
+        // A hinted name is not searched when a page is called the whole
+        // query: "plaster cast", "ice age" and "horror film" are not about
+        // plaster, ice or horror.
         let called = hits.iter().any(|hit| hit.named && !hit.whole);
         let hinted = hinted_name(query)
             .filter(|_| !called)
@@ -1084,8 +1306,9 @@ impl PageSearcher {
                 list_asked(query)
                     .or_else(|| {
                         plumb_core::facts::fact_asked(query)
-                            .filter(|_| !hits.iter().any(|hit| hit.named))
                             .map(|asked| asked.subject)
+                            .or_else(|| aspect_asked(query))
+                            .filter(|_| !hits.iter().any(|hit| hit.named))
                     })
                     .map(|name| (name, Hint::Named))
             })

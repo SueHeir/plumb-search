@@ -583,3 +583,54 @@ fn a_well_known_package_searched_by_its_name_alone_leads() {
         );
     }
 }
+
+#[test]
+fn another_sites_page_titled_what_has_a_site_waits_for_that_site() {
+    let subpage = |url: &str| PageHit {
+        page: Page::from_set(
+            SUBPAGES_SET,
+            Article {
+                title: "Boston Marathon".into(),
+                item: Some(url.into()),
+                views: 5_000,
+                ..Article::default()
+            },
+        )
+        .unwrap(),
+        score: 0.9,
+        named: true,
+        popularity: 0.9,
+        whole: false,
+        learned: None,
+    };
+    let mut race = found("Boston Marathon", Some("baa.org"), true, 0.8);
+    race.page.item = Some("Q826288".into());
+    let staff = subpage("https://www.lanl.gov/media/our-people/boston-marathon");
+    let own = subpage("https://www.baa.org/races/boston-marathon");
+    let sites =
+        |domains: &[&str]| -> Vec<crate::Hit> { domains.iter().map(|d| site(d, false)).collect() };
+    let listed = |sites: &[crate::Hit], pages: Vec<PageHit>| -> Vec<String> {
+        place_pages("boston marathon", sites, pages)
+            .into_iter()
+            .map(|p| p.hit.page.url)
+            .collect()
+    };
+    let results = sites(&["baa.org", "boston.com", "boston.gov"]);
+    let pages = vec![race.clone(), staff.clone(), own.clone()];
+    let urls = listed(&results, pages);
+    // The race's own page and its article stay; the lab's story goes.
+    assert!(!urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
+    assert!(urls.iter().any(|url| url.contains("baa.org")), "{urls:?}");
+    assert!(urls.iter().any(|url| url.contains("wikipedia")), "{urls:?}");
+    // On one of the best sites, or without the race's site listed or
+    // its article named, it stays.
+    let urls = listed(
+        &sites(&["lanl.gov", "baa.org"]),
+        vec![race.clone(), staff.clone()],
+    );
+    assert!(urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
+    let urls = listed(&sites(&["boston.com"]), vec![race, staff.clone()]);
+    assert!(urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
+    let urls = listed(&results, vec![staff]);
+    assert!(urls.iter().any(|url| url.contains("lanl.gov")), "{urls:?}");
+}

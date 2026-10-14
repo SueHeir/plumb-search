@@ -131,6 +131,9 @@ impl Mcp {
         sites_only: bool,
     ) -> Result<Value> {
         let mut results = self.lookup(query, limit.unwrap_or(DEFAULT_SEARCH_LIMIT), options)?;
+        if let Some(node) = &self.node {
+            node.searched(query, &results);
+        }
         if sites_only {
             results.pages.clear();
         }
