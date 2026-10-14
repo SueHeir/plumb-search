@@ -86,6 +86,49 @@ pub(crate) fn pieces(word: &str) -> Vec<String> {
     pieces
 }
 
+/// `letter` as it is written without its marks, as Arabic, Greek and
+/// Russian often are: an alef without hamza or madda, a final yeh with
+/// dots, Arabic yeh and kaf for the Persian ones, no tatweel, a Greek
+/// vowel without its accent, σ for ς (a capital Σ lowercases to σ) and е
+/// for ё.
+fn bare_letter(letter: char) -> Option<char> {
+    match letter {
+        'أ' | 'إ' | 'آ' | 'ٱ' => Some('ا'),
+        'ى' | 'ی' => Some('ي'),
+        'ک' => Some('ك'),
+        'ـ' => None,
+        'ά' => Some('α'),
+        'έ' => Some('ε'),
+        'ή' => Some('η'),
+        'ί' | 'ϊ' | 'ΐ' => Some('ι'),
+        'ό' => Some('ο'),
+        'ύ' | 'ϋ' | 'ΰ' => Some('υ'),
+        'ώ' => Some('ω'),
+        'ς' => Some('σ'),
+        'ё' => Some('е'),
+        _ => Some(letter),
+    }
+}
+
+/// A word of Arabic or Greek script, or of Cyrillic with an е or ё, with
+/// each [`bare_letter`], so the ways it is written are one. `None` for
+/// other words.
+pub(crate) fn folded(word: &str) -> Option<String> {
+    let folds =
+        |c: char| matches!(c, '\u{0600}'..='\u{06FF}' | '\u{0370}'..='\u{03FF}' | 'е' | 'ё');
+    if !word.chars().any(folds) {
+        return None;
+    }
+    Some(word.chars().filter_map(bare_letter).collect())
+}
+
+/// Whether `word` is typed without the marks [`bare_letter`] leaves off.
+/// A final ς is the way a word is typed, so it counts as bare.
+pub(crate) fn typed_bare(word: &str) -> bool {
+    word.chars()
+        .all(|letter| letter == 'ς' || bare_letter(letter) == Some(letter))
+}
+
 /// The analyzer registered as [`STEMMED_ANALYZER`].
 pub(crate) fn stemmed_analyzer() -> TextAnalyzer {
     stemmed_in(Language::English)
@@ -155,6 +198,14 @@ pub(crate) fn joined_analyzer() -> TextAnalyzer {
         .filter(LowerCaser)
         .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
         .build()
+}
+
+/// Whether `a` and `b` are the same words, whatever their case, accents
+/// and punctuation, as the index matches them: "beyonce" is "Beyoncé",
+/// "motley crue" "Mötley Crüe".
+pub fn same_words(a: &str, b: &str) -> bool {
+    let analyzer = words_analyzer();
+    tokens(&analyzer, a) == tokens(&analyzer, b)
 }
 
 /// The tokens `analyzer` produces for `text`.

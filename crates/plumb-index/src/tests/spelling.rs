@@ -302,6 +302,81 @@ fn misspelled_words_are_not_taken_for_a_site_s_name() {
 }
 
 #[test]
+fn well_known_names_one_slip_away_are_meant() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "shein.com",
+        Some("SHEIN"),
+        None,
+        &["SHEIN"],
+        &[],
+        popular(300, 30_000),
+    ));
+    for i in 0..30 {
+        records.push(site(
+            &format!("shine{i}.com"),
+            Some(&format!("Shine bright {i}")),
+            None,
+            &[],
+            &[],
+            obscure(5_000_000 + i, 10),
+        ));
+    }
+    let (_dir, searcher) = build(&records);
+    // "shine" is the commoner word, one swap from "shien" too, but
+    // shein.com is well known.
+    let results = search_spelled(&searcher, "shien");
+    assert_eq!(suggestion(&results), suggested("shein"));
+    assert!(domains(&results.hits).contains(&"shein.com"));
+}
+
+#[test]
+fn a_likelier_slip_beats_a_well_known_name() {
+    let mut records = typo_corpus();
+    for (domain, name) in [("wired.com", "WIRED"), ("trier.de", "Trier")] {
+        records.push(site(
+            domain,
+            Some(name),
+            None,
+            &[name],
+            &[],
+            popular(300, 30_000),
+        ));
+    }
+    // The sites teach that "ei" is often typed "ie".
+    for i in 0..30 {
+        records.push(site(
+            &format!("weird{i}.com"),
+            Some(&format!(
+                "Weird facts: their receive, deceive and ceiling {i}"
+            )),
+            None,
+            &[],
+            &[],
+            obscure(5_000_000 + i, 10),
+        ));
+    }
+    for (i, slip) in ["recieve", "decieve", "cieling"].into_iter().enumerate() {
+        records.push(site(
+            &format!("{slip}.net"),
+            Some(&format!("How to {slip}")),
+            None,
+            &[],
+            &[],
+            obscure(6_000_000 + i as u64, 10),
+        ));
+    }
+    let (_dir, searcher) = build(&records);
+    // "wired" is one swap from "wierd" too, and wired.com well known, but
+    // "ei" typed "ie" is the likelier slip.
+    let results = search_spelled(&searcher, "wierd");
+    assert_ne!(suggestion(&results), suggested("wired"));
+    // Nor is "thier" Trier: a letter changed is a rarer slip.
+    let results = search_spelled(&searcher, "thier");
+    assert_ne!(suggestion(&results), suggested("trier"));
+}
+
+#[test]
 fn exact_names_are_not_corrected() {
     let (_dir, searcher) = build(&typo_corpus());
     for query in [
@@ -484,6 +559,68 @@ fn spelled_right_words_get_no_suggestion() {
     assert_eq!(
         suggestion(&search_spelled(&searcher, "amazom")),
         suggested("amazon")
+    );
+}
+
+#[test]
+fn a_site_s_name_typed_stays_unless_a_far_better_known_one_is_meant() {
+    let mut records = typo_corpus();
+    records.extend([
+        site(
+            "plagiarisma.net",
+            Some("Plagiarisma"),
+            Some("Free plagiarism checker online"),
+            &[],
+            &[],
+            ranked(200_000, 300),
+        ),
+        site(
+            "plagiarismcheck.org",
+            Some("Plagiarism Checker"),
+            None,
+            &["Plagiarism Checker"],
+            &[],
+            ranked(60_000, 1_500),
+        ),
+    ]);
+    let (_dir, searcher) = build(&records);
+    let score = |domain: &str| searcher.site(domain).unwrap().unwrap().link_score;
+    let (typed, meant) = (score("plagiarisma.net"), score("plagiarismcheck.org"));
+    assert!(
+        typed < meant && meant < typed + crate::search::TYPO_POPULARITY_MARGIN,
+        "{typed} {meant}"
+    );
+    let results = search_spelled(&searcher, "plagiarisma checker");
+    assert_eq!(results.spelling, None);
+    assert_eq!(domains(&results.hits)[0], "plagiarisma.net");
+    // A slip of the better-known name is still one.
+    assert_eq!(
+        suggestion(&search_spelled(&searcher, "plagiarism chekcer")),
+        suggested("plagiarism checker")
+    );
+}
+
+#[test]
+fn a_known_word_that_names_a_site_is_still_a_slip_of_a_better_known_name() {
+    let mut records = typo_corpus();
+    records.push(site(
+        "capitol.example",
+        Some("Capitol"),
+        None,
+        &[],
+        &[],
+        ranked(2_000, 5_000),
+    ));
+    let (_dir, searcher) = build(&records);
+    let score = |domain: &str| searcher.site(domain).unwrap().unwrap().link_score;
+    let (typed, meant) = (score("capitol.example"), score("capitalone.com"));
+    assert!(
+        typed < meant && meant < typed + crate::search::TYPO_POPULARITY_MARGIN,
+        "{typed} {meant}"
+    );
+    assert_eq!(
+        suggestion(&search_spelled(&searcher, "capitol one")),
+        suggested("capital one")
     );
 }
 

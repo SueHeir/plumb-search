@@ -28,8 +28,9 @@ pub struct Operators {
 
 impl Operators {
     /// Reads the operators of `query`. Words that only look like operators
-    /// stay words: a lone `-`, `spider-man`, `site:` with nothing after it.
-    /// An unclosed quote runs to the end of the query.
+    /// stay words: a lone `-`, `spider-man`, `site:` with nothing after it,
+    /// and a command's options, `--save-dev` and `-b`, which the pages
+    /// about them name. An unclosed quote runs to the end of the query.
     pub fn parse(query: &str) -> Self {
         let mut ops = Operators::default();
         let mut words: Vec<String> = Vec::new();
@@ -37,8 +38,10 @@ impl Operators {
         let mut rest = query.trim_start();
         while !rest.is_empty() {
             let start = rest;
-            let negated =
-                rest.starts_with('-') && rest[1..].starts_with(|c: char| !c.is_whitespace());
+            let negated = rest.strip_prefix('-').is_some_and(|after| {
+                let word = after.split(char::is_whitespace).next().unwrap_or("");
+                !word.starts_with('-') && word.chars().nth(1).is_some()
+            });
             let body = if negated { &rest[1..] } else { rest };
             if let Some(quoted) = body.strip_prefix(['"', '\u{201C}', '\u{201D}']) {
                 let close = quoted
@@ -98,6 +101,14 @@ impl Operators {
             && self.not_sites.is_empty()
             && self.phrases.is_empty()
             && self.excluded.is_empty())
+    }
+
+    /// Whether the query used an operator other than a quoted phrase.
+    /// `site:`, `-site:` and `-word` change what a query is about; a
+    /// phrase only how its words are found: "the godfather" in quotes is
+    /// still about the film.
+    pub fn any_but_phrases(&self) -> bool {
+        !(self.sites.is_empty() && self.not_sites.is_empty() && self.excluded.is_empty())
     }
 
     /// The words to look sites up by: [`Operators::words`], or else the
@@ -202,6 +213,9 @@ mod tests {
             "site:",
             "10:30 - 11",
             "re:invent",
+            "npm install --save-dev",
+            "git checkout -b",
+            "--",
         ] {
             let ops = Operators::parse(query);
             assert!(!ops.any(), "{query}: {ops:?}");
@@ -224,6 +238,16 @@ mod tests {
         assert_eq!(ops.excluded, ["actix", "hello world"]);
         assert_eq!(ops.site_terms, r#"rust "web server" -actix -"hello world""#);
         assert!(ops.any());
+        assert!(ops.any_but_phrases());
+        let ops = Operators::parse(r#""the godfather""#);
+        assert!(ops.any() && !ops.any_but_phrases());
+        for query in [
+            "jaguar -car",
+            "site:imdb.com godfather",
+            "-site:imdb.com godfather",
+        ] {
+            assert!(Operators::parse(query).any_but_phrases(), "{query}");
+        }
     }
 
     #[test]
