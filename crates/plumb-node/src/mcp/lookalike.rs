@@ -26,9 +26,14 @@ impl Mcp {
 
         // What its names spell: the label ("paypal-login" -> "paypal
         // login"), then each word of it and of any subdomain
-        // ("paypal.com.secure-check.io" -> "paypal").
-        let mut imitated: Option<Hit> = None;
+        // ("paypal.com.secure-check.io" -> "paypal"). Of the sites they
+        // find, one with the host's own name on another ending comes
+        // first (shop.paypal.de is paypal.com's namesake, not shop.app's),
+        // then the one whose name comes first in the host: bbc-news-live.com
+        // is the BBC's, not live.com's.
+        let mut imitated: Option<((bool, usize), Hit)> = None;
         let squashed_host = squash(&host);
+        let label = squash(&domain_label(&domain));
         let mut queries: std::collections::VecDeque<String> =
             name_queries(&host, &domain).into_iter().collect();
         while let Some(query) = queries.pop_front() {
@@ -48,16 +53,19 @@ impl Mcp {
             if top.domain == domain || !(top.official || top.link_score >= WELL_KNOWN_LINK_SCORE) {
                 continue;
             }
-            if !resembles(&squashed_host, &squash(&domain_label(&domain)), &top.domain) {
+            let Some(at) = borrowed_at(&squashed_host, &label, &top.domain, top.title.as_deref())
+            else {
                 continue;
-            }
+            };
+            let rank = (!same_name(&domain, &top.domain), at);
             if imitated
                 .as_ref()
-                .is_none_or(|best| top.link_score > best.link_score)
+                .is_none_or(|(best, hit)| (rank, -top.link_score) < (*best, -hit.link_score))
             {
-                imitated = Some(top);
+                imitated = Some((rank, top));
             }
         }
+        let imitated = imitated.map(|(_, hit)| hit);
 
         let mut reasons = Vec::new();
         if host != domain {
@@ -83,7 +91,7 @@ impl Mcp {
                 // An exact brand label on another suffix or hosting tenant
                 // can also be a legitimate regional/product/service host.
                 // Service words do not prove affiliation or impersonation.
-                if domain_label(&domain) == domain_label(&other.domain) {
+                if same_name(&domain, &other.domain) {
                     reasons.push(format!(
                         "Its name resembles {}, but Plumb has no owner reference establishing \
                          affiliation or evidence confirming impersonation.",
@@ -198,20 +206,51 @@ pub(super) fn squash(text: &str) -> String {
     plain.replace("rn", "m").replace("vv", "w")
 }
 
-/// Whether a host whose letters are `host` and whose registrable label's
-/// are `label` borrows the name of the site `real`: it spells the real
-/// site's label out (paypal-login.us, paypal.com.example.io) or its label
-/// is a typo of it (twiter.com, paypa1.com).
-pub(super) fn resembles(host: &str, label: &str, real: &str) -> bool {
-    let real = squash(&domain_label(real));
-    if real.len() < 3 {
-        return false;
-    }
-    if host.contains(&real) {
-        return true;
-    }
+/// Where a host whose letters are `host` and whose registrable label's
+/// are `label` borrows the name of the site `real`, titled `title`, if it
+/// does: where it spells out the real site's label (paypal-login.us,
+/// paypal.com.example.io) or, for a site on another's domain that its
+/// title calls by its first name in capitals, that name (AWS of
+/// aws.amazon.com in aws-console-login.com, but not Maps of
+/// maps.google.com), or where its label sits when that is a typo of it
+/// (twiter.com, paypa1.com).
+pub(super) fn borrowed_at(
+    host: &str,
+    label: &str,
+    real: &str,
+    title: Option<&str>,
+) -> Option<usize> {
+    let real_label = domain_label(real);
+    let acronym = real_label
+        .split_once('.')
+        .map(|(first, _)| first)
+        .filter(|first| {
+            let first = first.to_ascii_uppercase();
+            title.is_some_and(|title| {
+                title
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|word| word == first)
+            })
+        });
+    let real = squash(&real_label);
+    let spelled = std::iter::once(real.clone())
+        .chain(acronym.map(squash))
+        .filter(|name| name.len() >= 3)
+        .filter_map(|name| host.find(name.as_str()))
+        .min();
     let allowed = if real.len() >= 8 { 2 } else { 1 };
-    real.len() >= 4 && edit_distance(label, &real) <= allowed
+    let typo = real.len() >= 4 && edit_distance(label, &real) <= allowed;
+    spelled.or(typo.then(|| host.rfind(label).unwrap_or(0)))
+}
+
+/// Whether `domain` has the name of `other` on another ending: paypal.de
+/// and paypal.com, or aws.dev and aws.amazon.com.
+fn same_name(domain: &str, other: &str) -> bool {
+    let (label, other) = (domain_label(domain), domain_label(other));
+    label == other
+        || other
+            .split_once('.')
+            .is_some_and(|(first, _)| first == label)
 }
 
 /// Levenshtein distance, counting a swap of neighbours as one edit.

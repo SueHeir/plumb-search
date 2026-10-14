@@ -392,6 +392,38 @@ fn exact_domain_names_keep_the_native_language_exception() {
 }
 
 #[test]
+fn a_site_an_alias_names_in_full_keeps_its_language_too() {
+    // Written in Vietnamese, which the index tells by its letters.
+    let mut railways = site(
+        "vr.example",
+        "Tổng Công Ty Đường Sắt Việt Nam",
+        Some(1),
+        90_000,
+    );
+    railways.aliases = vec!["Vietnam Railways".into()];
+    let records = [
+        railways,
+        site("nimbus.example", "Vietnam travel guide", None, 0),
+    ];
+    let private_options = Options {
+        language: Some("en".into()),
+        ..Options::default()
+    };
+    let index_options = SearchOptions {
+        language: Some("en".into()),
+        ..SearchOptions::default()
+    };
+    assert_eq!(
+        private_top(&records, "vietnam railways", &private_options, 1),
+        ["vr.example"]
+    );
+    assert_eq!(
+        private_top(&records, "vietnam railways", &private_options, 1),
+        index_top(&records, "vietnam railways", &index_options, 1)
+    );
+}
+
+#[test]
 fn a_shared_named_subject_is_required_even_when_task_words_dominate() {
     let mut owner = site(
         "aster.example",
