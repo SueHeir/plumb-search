@@ -134,7 +134,7 @@ plumb-tools fetch-pages --set stackoverflow --work /big/disk/dumps --data /path/
 
 `--posts PATH` reads a downloaded posts 7z instead; `--min-score` and `--max-questions` change what is kept.
 
-Questions are also found by their words, since nobody types a question's title exactly: a query of three or more words (common words like "the" left out, "commits" counted as "commit") finds a question whose title and tags have at least three quarters of them. Such questions come after the best site. A question with every word of the query, which in turn has at least half of the question title's, is what was asked ("delete a git branch locally and remotely") and comes first, unless the first site is named by the whole query.
+Questions are also found by their words, since nobody types a question's title exactly: a query of three or more words (common words like "the" left out, "commits" counted as "commit") finds a question whose title and tags have at least three quarters of them. Such questions come after the best site. A question with every word of the query, which in turn has at least half of the question title's, is what was asked ("delete a git branch locally and remotely") and comes first, unless the first site is named by the whole query. The titles of questions closed as its duplicates find a question the same way, but a word only a duplicate's title has counts half, since it may be that asker's own detail: "python list sort" does not find "Remove all whitespace in a string" through its duplicate "How to sort a list of string ignoring whitespace in python?". A duplicate asked as a whole still finds it.
 
 ## Other Stack Exchange questions
 

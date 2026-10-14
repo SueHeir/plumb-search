@@ -117,6 +117,11 @@ pub const QUESTION_SHARE: f32 = 0.75;
 /// as little: "how to undo git comit" still finds the question.
 const UNSURE_WORD_SHARE: f32 = 0.5;
 
+/// How much a word only the title of a question's duplicate has counts
+/// toward its [`QUESTION_SHARE`]: the words it shares with the question are
+/// what the two ask, the rest may be its asker's own detail.
+const DUPLICATE_WORD_SHARE: f32 = 0.5;
+
 /// Least number of pages whose names have a word for the word to be
 /// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
 /// sites say them.

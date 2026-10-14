@@ -413,6 +413,43 @@ fn questions_are_found_in_their_duplicates_words() {
 }
 
 #[test]
+fn words_only_a_duplicates_title_has_count_half() {
+    let whitespace = Page::from_question(Article {
+        title: "Remove all whitespace in a string".into(),
+        description: Some("python, string, trim, removing-whitespace".into()),
+        item: Some("8270092".into()),
+        views: 2_800_000,
+        aliases: vec![
+            "Why doesn't .strip() remove whitespaces?".into(),
+            "How to sort a list of string ignoring whitespace in python?".into(),
+        ],
+        ..Article::default()
+    });
+    let (_dir, s) = searcher(&[whitespace]);
+    // Only the duplicate sorts a list: the question is not about that, and
+    // is not listed.
+    let found = s.search("python list sort", 5).unwrap();
+    assert!(place_pages("python list sort", &[], found).is_empty());
+    // With the question's own words, a duplicate's title still finds it,
+    // and a duplicate asked as a whole is still the question asked.
+    for query in [
+        "python strip whitespace",
+        "sort list of strings ignoring whitespace python",
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(
+            titles(&hits),
+            ["Remove all whitespace in a string"],
+            "{query}"
+        );
+    }
+    let hits = s
+        .search("sort list of strings ignoring whitespace python", 5)
+        .unwrap();
+    assert!(hits[0].whole);
+}
+
+#[test]
 fn whole_questions_lead() {
     let question = Page::from_question(Article {
         title: "How do I delete a Git branch locally and remotely?".into(),
