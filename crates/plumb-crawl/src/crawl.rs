@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use futures::stream::{self, FuturesUnordered, StreamExt};
-use plumb_core::{is_bot_check_page, now_unix, registrable_domain};
+use plumb_core::{is_stand_in_homepage, now_unix, registrable_domain};
 use reqwest::header::{
     ACCEPT, CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION,
 };
@@ -892,7 +892,7 @@ impl<'a> Visit<'a> {
         .await;
         match parsed {
             Ok(meta)
-                if is_bot_check_page(
+                if is_stand_in_homepage(
                     domain,
                     meta.title.as_deref(),
                     meta.description.as_deref(),
@@ -2467,6 +2467,35 @@ mod tests {
         .await;
         let page = expect_fetched(crawl_one(target(port, "/"), &config()).await);
         assert_eq!(page.meta.title.as_deref(), Some("Gzipped page"));
+    }
+
+    /// Some servers send brotli to a client that asked only for gzip:
+    /// berkshirehathaway.com's front, behind Sucuri.
+    #[tokio::test]
+    async fn brotli_bodies_are_decoded() {
+        /// `<html><head><title>Brotli page</title></head></html>`,
+        /// compressed with `brotli -q 11`.
+        const BROTLI: &[u8] = &[
+            0x1b, 0x33, 0x00, 0x80, 0x9c, 0x07, 0x76, 0x2c, 0x7a, 0x40, 0xe1, 0xb5, 0x85, 0x2f,
+            0xe9, 0x78, 0x40, 0xf2, 0x45, 0x08, 0xad, 0xde, 0xe4, 0xda, 0x27, 0x8d, 0xad, 0x0d,
+            0x38, 0xe4, 0xc0, 0xe5, 0xf6, 0x8c, 0xda, 0xf2, 0x5a, 0xb3, 0x11, 0xad, 0xcc, 0x3b,
+            0x9a, 0x40, 0xea, 0x92, 0xd9, 0x77, 0x0e, 0x04, 0x20, 0x1a,
+        ];
+        let (port, _) = serve(|_| {
+            Router::new().route(
+                "/",
+                get(|| async {
+                    let headers = [
+                        (header::CONTENT_TYPE, "text/html"),
+                        (header::CONTENT_ENCODING, "br"),
+                    ];
+                    (headers, BROTLI)
+                }),
+            )
+        })
+        .await;
+        let page = expect_fetched(crawl_one(target(port, "/"), &config()).await);
+        assert_eq!(page.meta.title.as_deref(), Some("Brotli page"));
     }
 
     #[tokio::test]

@@ -257,7 +257,7 @@ fn short_docs_preserve_operators_ecosystems_and_navigation() {
 }
 
 #[test]
-fn staged_reference_gate_rejects_partial_topics_and_keeps_practical_pages() {
+fn reference_pages_are_listed_only_when_asked_for() {
     let allowed = |set: &str, query: &str, title: &str| {
         let hit = PageHit {
             page: Page::from_set(
@@ -278,43 +278,90 @@ fn staged_reference_gate_rejects_partial_topics_and_keeps_practical_pages() {
         };
         subpage_asked(query, &[], &hit)
     };
-    for (query, title) in [
-        ("celiac disease", "Celiac disease"),
-        (
-            "how to renew a green card",
-            "How to renew or replace your green card",
-        ),
-        (
-            "symptoms of type 2 diabetes",
-            "Type 2 diabetes: Symptoms, diagnosis and treatment",
-        ),
-        ("define prioritize", "Prioritize Definition & Meaning"),
-        ("stool smell", "Foul-Smelling Stool: Causes and Treatment"),
-        ("how to fix a leaking faucet", "Fixing a leaking faucet"),
-    ] {
-        assert!(allowed(REFERENCE2_SET, query, title), "{query}: {title}");
+    for set in [REFERENCE_SET, REFERENCE2_SET] {
+        for (query, title) in [
+            ("celiac disease", "Celiac disease"),
+            (
+                "how to renew a green card",
+                "How to renew or replace your green card",
+            ),
+            (
+                "symptoms of type 2 diabetes",
+                "Type 2 diabetes: Symptoms, diagnosis and treatment",
+            ),
+            ("define prioritize", "Prioritize Definition & Meaning"),
+            ("stool smell", "Foul-Smelling Stool: Causes and Treatment"),
+            ("how to fix a leaking faucet", "Fixing a leaking faucet"),
+            // Long titles with all of the query's words.
+            (
+                "pain with ovarian cyst",
+                "Will an ovarian cyst cause back pain? What to know",
+            ),
+            (
+                "toilet leaks at base",
+                "How to Fix a Toilet That Leaks Around the Base",
+            ),
+            (
+                "epley's maneuver",
+                "Epley Maneuver (Canalith Repositioning Procedure)",
+            ),
+            ("ribeye steak", "Charcoal-Grilled Ribeye Steak Recipe"),
+            // A short title with all but the query's last word.
+            ("lemon drop cocktail", "Lemon drop martini recipe"),
+            ("time zone converter", "Time Zone Calculator"),
+        ] {
+            assert!(allowed(set, query, title), "{set} {query}: {title}");
+        }
+        for (query, title) in [
+            ("seven summits", "The Seven Second Summits of the World"),
+            (
+                "time in st john's",
+                "The Best Time to Visit the US Virgin Islands",
+            ),
+            (
+                "nobel prize in physics 2025",
+                "John F. Clauser: Nobel Prize-winning physicist",
+            ),
+            (
+                "the great gatsby f scott fitzgerald",
+                "The Great Gatsby Questions for Study and Discussion",
+            ),
+            ("leaking faucet repair", "Faucet installation cost"),
+            (
+                "fifa world cup schedule",
+                "FIFA World Cup 2026 travel guide",
+            ),
+            // From the 1,000-search review on hpc, where each was first.
+            (
+                "work australia",
+                "There's a 2nd El Niño — and scientists just figured out how it works",
+            ),
+            (
+                "crater lakes",
+                "NASA's Perseverance rover confirms presence of ancient lake on Mars",
+            ),
+            (
+                "google flights",
+                "Some Very Smart Money Can't Agree On What to Do With Alphabet's Soaring Stock",
+            ),
+            (
+                "lack of friends",
+                "Indoor Grilling: Leeks with Asian Vinaigrette Recipe",
+            ),
+            // News on what a two-word query names, listed under its site.
+            ("hulk hogan", "Hulk Hogan's Daughter Brooke Welcomes Twins"),
+            (
+                "taco bell",
+                "Taco Bell Has a New Version of the Menu Item That Sold Out in Days",
+            ),
+        ] {
+            assert!(!allowed(set, query, title), "{set} {query}: {title}");
+        }
     }
-    for (query, title) in [
-        ("seven summits", "The Seven Second Summits of the World"),
-        (
-            "time in st john's",
-            "The Best Time to Visit the US Virgin Islands",
-        ),
-        (
-            "nobel prize in physics 2025",
-            "John F. Clauser: Nobel Prize-winning physicist",
-        ),
-        (
-            "the great gatsby f scott fitzgerald",
-            "The Great Gatsby Questions for Study and Discussion",
-        ),
-        ("leaking faucet repair", "Faucet installation cost"),
-    ] {
-        // Legacy coverage stays available until the new generation
-        // has passed the combined evaluation and is explicitly chosen.
-        assert!(allowed(REFERENCE_SET, query, title));
-        assert!(!allowed(REFERENCE2_SET, query, title), "{query}: {title}");
-    }
+    // A subpage needs most of its title in the query, however much of the
+    // query its title has.
+    let cyst = "Will an ovarian cyst cause back pain? What to know";
+    assert!(!allowed(SUBPAGES_SET, "pain with ovarian cyst", cyst));
     let page = Page::from_set(
         REFERENCE2_SET,
         Article {
@@ -810,4 +857,190 @@ fn docs_pages_named_then_more_words_and_crowded_by_questions_are_listed() {
             .map(|p| p.at),
         Some(1)
     );
+}
+
+#[test]
+fn docs_pages_of_an_api_named_as_code_lead() {
+    let mdn = "https://developer.mozilla.org/en-US/docs";
+    let pages = [
+        docs_page(
+            "https://react.dev/reference/react/useState",
+            "useState",
+            &[],
+            "useState is a React Hook that lets you add a state variable to your component.",
+        ),
+        docs_page(
+            &format!("{mdn}/Web/JavaScript/Reference/Global_Objects/Object/keys"),
+            "Object.keys() — JavaScript",
+            &[],
+            "The Object.keys() static method returns an array of a given object's own property names.",
+        ),
+        docs_page(
+            "https://en.cppreference.com/cpp/container/vector",
+            "std::vector",
+            &[],
+            "A sequence container that encapsulates dynamic size arrays.",
+        ),
+        docs_page(
+            "https://en.cppreference.com/cpp/memory/c/malloc",
+            "std::malloc",
+            &[],
+            "Allocates size bytes of uninitialized storage.",
+        ),
+        docs_page(
+            &format!("{mdn}/Glossary/jQuery"),
+            "jQuery — Glossary",
+            &[],
+            "jQuery is a JavaScript Library that focuses on simplifying DOM manipulation.",
+        ),
+        docs_page(
+            "https://doc.rust-lang.org/std/os/macos/index.html",
+            "std::os::macos",
+            &[],
+            "Platform-specific definitions for macOS.",
+        ),
+    ];
+    let (_dir, searcher) = searcher(&pages);
+    // The pages listed on their own, in order, with a question placed
+    // first and a site sharing a word with the query as the best.
+    let placed = |query: &str, best: &str| {
+        let sites = [site(best, true), site("other.com", false)];
+        let mut placed = vec![PlacedPage {
+            at: 0,
+            under: None,
+            hit: found("A question", None, false, 0.5),
+        }];
+        placed.extend(place_pages(
+            query,
+            &sites,
+            searcher.search(query, 10).unwrap(),
+        ));
+        keep_page_rules(query, &sites, &mut placed);
+        placed
+            .iter()
+            .map(|p| (p.hit.page.title.clone(), p.at))
+            .collect::<Vec<_>>()
+    };
+    let docs_after_best = |query: &str, best: &str| {
+        placed(query, best)
+            .iter()
+            .all(|(title, at)| title == "A question" || *at > 0)
+    };
+    for (query, best, title) in [
+        ("useState", "senate.gov", "useState"),
+        ("Object.keys", "keys.so", "Object.keys() — JavaScript"),
+        ("Object.keys()", "keys.so", "Object.keys() — JavaScript"),
+        ("std::vector", "vector.dev", "std::vector"),
+    ] {
+        assert_eq!(placed(query, best)[0], (title.to_string(), 0), "{query}");
+    }
+    // A word written plainly may mean the word, and a site called what
+    // the query names is what it is for.
+    assert!(docs_after_best("malloc", "mallocprivacy.com"));
+    assert!(docs_after_best("jQuery", "jquery.com"));
+    // Only the whole name counts: "macOS" is not Rust's std::os::macos.
+    assert!(docs_after_best("macOS", "apple.com"));
+}
+
+#[test]
+fn docs_pages_are_named_by_what_their_title_and_address_share() {
+    let mdn = "https://developer.mozilla.org/en-US/docs/Web";
+    let page = |path: &str, title: &str| docs_page(&format!("{mdn}/{path}"), title, &[], "");
+    let pages = [
+        page(
+            "API/Document/querySelectorAll",
+            "Document: querySelectorAll() method — Web APIs",
+        ),
+        page(
+            "CSS/Reference/Properties/border-radius",
+            "border-radius CSS property — CSS",
+        ),
+        page(
+            "CSS/Reference/Properties/border-bottom-left-radius",
+            "border-bottom-left-radius CSS property — CSS",
+        ),
+        page(
+            "CSS/Guides/Backgrounds_and_borders/Border-radius_generator",
+            "Border-radius generator — CSS",
+        ),
+        page(
+            "HTTP/Reference/Headers/Content-Type",
+            "Content-Type header — HTTP",
+        ),
+        docs_page(
+            "https://docs.python.org/3/library/functions.html",
+            "Built-in Functions — Python 3.14.0 documentation",
+            &[],
+            "",
+        ),
+        page("API/Window/open", "Window: open() method — Web APIs"),
+    ];
+    assert!(crate::pages::docs::docs_symbols(&pages[0]).contains(&"queryselectorall".to_string()));
+    assert!(crate::pages::docs::docs_symbols(&pages[1]).contains(&"border-radius".to_string()));
+    // A guide that starts with the name, and a title in words, name nothing.
+    assert!(crate::pages::docs::docs_symbols(&pages[3]).is_empty());
+    assert!(crate::pages::docs::docs_symbols(&pages[5]).is_empty());
+    assert!(crate::pages::docs::docs_symbols(&pages[6]).is_empty());
+    let (_dir, searcher) = searcher(&pages);
+    for (query, best, title) in [
+        ("querySelectorAll", "ixquick.com", &pages[0].title),
+        ("border-radius", "homeaffairs.gov.au", &pages[1].title),
+        ("css border-radius", "css-tricks.com", &pages[1].title),
+        ("Content-Type", "pubmed.ncbi.nlm.nih.gov", &pages[4].title),
+    ] {
+        let sites = [site(best, false), site("other.com", false)];
+        let placed = place_pages(query, &sites, searcher.search(query, 10).unwrap());
+        let first = placed.iter().find(|p| p.at == 0 && p.under.is_none());
+        assert_eq!(
+            first.map(|p| &p.hit.page.title),
+            Some(title),
+            "{query}: {placed:?}"
+        );
+    }
+    // A word is still not a symbol.
+    assert!(searcher.search("functions", 10).unwrap().is_empty());
+    assert!(searcher.search("open", 10).unwrap().is_empty());
+}
+
+#[test]
+fn manual_pages_are_named_without_their_section() {
+    let man = |name: &str, section: &str| {
+        docs_page(
+            &format!(
+                "https://man7.org/linux/man-pages/man{}/{name}.{section}.html",
+                &section[..1]
+            ),
+            &format!("{name}({section})"),
+            &[],
+            "man7.org > Linux > man-pages",
+        )
+    };
+    let pages = [
+        man("ls", "1"),
+        man("flatpak-remote-ls", "1"),
+        man("ls", "1p"),
+        man("tar", "1"),
+        man("git-get-tar-commit-id", "1"),
+    ];
+    let (_dir, searcher) = searcher(&pages);
+    for (query, title) in [
+        ("man ls", "ls(1)"),
+        ("man tar", "tar(1)"),
+        ("linux tar", "tar(1)"),
+    ] {
+        let hits = searcher.search(query, 10).unwrap();
+        assert_eq!(hits[0].page.title, title, "{query}: {hits:?}");
+        assert!(hits[0].named, "{query}");
+        // It comes before a site called "man" something.
+        let sites = [site("manchester.ac.uk", false), site("other.com", false)];
+        let placed = place_pages(query, &sites, hits);
+        let first = placed.iter().find(|p| p.at == 0 && p.under.is_none());
+        assert_eq!(
+            first.map(|p| p.hit.page.title.as_str()),
+            Some(title),
+            "{query}"
+        );
+    }
+    // A bare name may be anything.
+    assert!(searcher.search("ls", 10).unwrap().is_empty());
 }

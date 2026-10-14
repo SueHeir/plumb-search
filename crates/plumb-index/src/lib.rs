@@ -74,6 +74,7 @@ pub mod health;
 mod hits;
 mod indexing;
 pub mod items;
+mod language;
 pub mod learned;
 mod names;
 pub mod pages;
@@ -86,6 +87,7 @@ mod schema;
 mod search;
 mod spell;
 pub mod spell_model;
+mod states;
 mod storage;
 mod topics;
 
@@ -105,6 +107,7 @@ pub use crate::names::without_intent_words;
 pub use crate::query_evidence::CandidateEvidence;
 pub use crate::replace::remove_build_leftovers;
 use crate::schema::Fields;
+pub use crate::states::asked_state_first;
 
 // Function words ("pizza in denver", "bank of america") name no site in a
 // longer query: between two other words they never match a domain label or
@@ -270,7 +273,9 @@ pub struct RankConfig {
     /// rid of aphids") names no site by its words: none of them matches a
     /// domain label or joined name on its own, and its first words are no
     /// leading name. Questions describe what they want; rid.it and get.gov
-    /// are not it.
+    /// are not it. Only a text most links to a site use still names it
+    /// inside a question ([`RankConfig::link_names`]), so it is kept where
+    /// it ranks: netflix.com in "how to cancel netflix".
     pub questions_name_nothing: bool,
     /// Add the official site of the article the query names when no site
     /// found is it ([`pages::add_named_site`]).
@@ -484,15 +489,6 @@ impl SearchOptions {
         self.language
             .as_deref()
             .filter(|wanted| !plumb_core::written_outside(wanted, query))
-    }
-
-    /// These options with [`SearchOptions::language_for`] `query` as the
-    /// language.
-    pub fn for_query(&self, query: &str) -> Self {
-        Self {
-            language: self.language_for(query).map(str::to_string),
-            ..self.clone()
-        }
     }
 }
 

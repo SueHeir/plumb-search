@@ -67,6 +67,12 @@ pub trait SearchBackend: Send + Sync {
         let _ = domain;
         None
     }
+    /// Whether many sites' titles have `word`
+    /// ([`Searcher::is_common_word`]). By default every word is.
+    fn common_word(&self, word: &str) -> bool {
+        let _ = word;
+        true
+    }
 
     /// The town (or else other place) `text` names, for a weather answer;
     /// see [`plumb_index::places::PlaceSearcher::locate`]. By default none.
@@ -276,6 +282,10 @@ impl SearchBackend for IndexBackend {
         self.map.as_ref()?.get()
     }
 
+    fn common_word(&self, word: &str) -> bool {
+        self.searcher.is_common_word(word)
+    }
+
     fn site(&self, domain: &str) -> Option<Hit> {
         if !self.searcher.has_domain(domain) {
             return None;
@@ -351,9 +361,14 @@ pub trait StatusSource: Send + Sync {
     }
 
     /// The "Recent" block for `query`, whose best result is `top` (its
-    /// domain, and whether the query names it); see
-    /// [`crate::news::NewsStore::recent`].
-    fn recent(&self, _query: &str, _top: Option<(&str, bool)>) -> Option<crate::news::Recent> {
+    /// domain, and whether the query names it), searched in `language`;
+    /// see [`crate::news::NewsStore::recent`].
+    fn recent(
+        &self,
+        _query: &str,
+        _top: Option<(&str, bool)>,
+        _language: Option<&str>,
+    ) -> Option<crate::news::Recent> {
         None
     }
 

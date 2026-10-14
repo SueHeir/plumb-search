@@ -209,11 +209,17 @@ pub fn features(query: &str, rows: &[RowSignals]) -> Vec<[f64; FEATURES.len()]> 
                 f[23] = flag(row.official);
                 f[24] = row.demand.map_or(-1.0, f64::from);
                 f[25] = flag(row.country.is_some());
-                f[26] = row.under.len() as f64;
-                f[27] = flag(row.under.iter().any(|p| p.named));
-                f[28] = row
-                    .under
-                    .iter()
+                // The site's own page a query names under it
+                // ([`crate::pages::PageSearcher::add_named_site_page`]) is
+                // not read: the model learned from sites with articles.
+                let under = || {
+                    row.under
+                        .iter()
+                        .filter(|p| !crate::pages::is_site_page_set(&p.set))
+                };
+                f[26] = under().count() as f64;
+                f[27] = flag(under().any(|p| p.named));
+                f[28] = under()
                     .map(|p| f64::from(p.popularity))
                     .fold(-1.0, f64::max);
                 let titled = row.title.as_deref().is_some_and(|t| !t.trim().is_empty());
@@ -359,6 +365,53 @@ fn listed(hits: &[Hit], placed: &[PlacedPage]) -> Vec<Listed> {
     rows
 }
 
+/// How close in meaning a site must be to speak for it when its words
+/// do not, as [`crate::RankConfig::meaning_only_relevance`] is by default.
+const NEAR_IN_MEANING: f32 = 0.35;
+
+/// The text match under which the hand-made ranking gives a site the
+/// query does not name only part of its popularity, as
+/// [`crate::RankConfig::described_relevance`] does by default.
+const WEAK_TEXT: f32 = 0.04;
+
+/// Whether only popularity speaks for `hit`, the popularity the model
+/// reads whole: the query names neither the site nor a page listed under
+/// it, matches its text under [`WEAK_TEXT`] (often only in link text on
+/// its homepage) and is not near it in meaning. A site with no evidence
+/// noted, one the ranking did not find, is not such a site.
+fn unsupported(hit: &Hit, placed: &[PlacedPage]) -> bool {
+    !hit.named
+        && hit.text_score < WEAK_TEXT
+        && hit.query_evidence.as_ref().is_some_and(|e| {
+            !e.full_name
+                && !e.typed_domain
+                && e.semantic_closeness.is_none_or(|s| s < NEAR_IN_MEANING)
+        })
+        && !placed
+            .iter()
+            .any(|p| p.hit.named && p.under.as_deref() == Some(hit.domain.as_str()))
+}
+
+/// The site rows `sites`, in the model's order, with each one `bare` says
+/// only popularity speaks for moved down until every other site above it
+/// in the hand-made order (a lower row) is listed. The others keep their
+/// order.
+fn after_supported(sites: Vec<usize>, bare: impl Fn(usize) -> bool) -> Vec<usize> {
+    let supported: Vec<usize> = sites.iter().copied().filter(|&row| !bare(row)).collect();
+    let mut listed = Vec::with_capacity(sites.len());
+    let mut waiting = Vec::new();
+    for row in sites {
+        waiting.push(row);
+        while let Some(at) = waiting
+            .iter()
+            .position(|&row| !bare(row) || supported.iter().all(|s| *s > row || listed.contains(s)))
+        {
+            listed.push(waiting.remove(at));
+        }
+    }
+    listed
+}
+
 /// Puts the first rows of `query`'s results in the order `model` gives:
 /// reorders `hits` and moves the pages listed on their own in `placed`.
 /// Pages under a site stay under it.
@@ -412,7 +465,15 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
             Listed::Page(_) => unreachable!(),
         })
     });
-    let mut sites = sites.into_iter();
+    // Nor can popularity alone lift a site past one the hand-made ranking
+    // put above it, which with tiers off (the default) is all that stops
+    // it: "tom holland" put thenation.com, which has the name only in its
+    // homepage's link text, before tom-holland.org.
+    let bare = |row: usize| match rows[row] {
+        Listed::Site(i) => page_site != Some(i) && unsupported(&hits[i], placed),
+        Listed::Page(_) => false,
+    };
+    let mut sites = after_supported(sites, bare).into_iter();
     for row in &mut order {
         if matches!(rows[*row], Listed::Site(_)) {
             *row = sites.next().expect("site slot");
@@ -431,11 +492,13 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
         }
     }
     // A docs page found by its words, or another site's page while the
-    // query names the best site's owner, never comes before the best site
-    // but its own, whatever the model says: "python package index" wants
-    // pypi.org first, "minecraft" minecraft.net.
-    let names_best =
-        crate::pages::named_page_site(&new_hits, placed.iter().map(|p| &p.hit)) == Some(0);
+    // query names the best site's owner, or the best site with one of its
+    // pages, never comes before the best site but its own, whatever the
+    // model says: "python package index" wants pypi.org first, "minecraft"
+    // minecraft.net.
+    let names_best = crate::pages::named_page_site(&new_hits, placed.iter().map(|p| &p.hit))
+        == Some(0)
+        || crate::pages::names_best_site_page(&new_hits, placed);
     for page in alone
         .iter_mut()
         .filter(|p| p.at == 0 && crate::pages::kept_below(&p.hit, &new_hits, names_best))
@@ -627,6 +690,73 @@ mod tests {
         }
     }
 
+    /// Puts the most linked-to site first, whatever its text match, as
+    /// the built-in model did with thenation.com for "tom holland".
+    fn popular_first_model() -> Model {
+        let tree = Node::Split {
+            feature: FEATURES.iter().position(|f| *f == "s_link").unwrap(),
+            threshold: 0.55,
+            left: Box::new(Node::Leaf { value: 0.0 }),
+            right: Box::new(Node::Leaf { value: 1.0 }),
+        };
+        Model::new(vec![tree], None)
+    }
+
+    #[test]
+    fn popularity_alone_lifts_no_site_past_one_ranked_above_it() {
+        let query = "tom holland";
+        let popular = |text_score: f32, closeness: Option<f32>| {
+            let mut hit = site("thenation.com", 0.07, false);
+            hit.text_score = text_score;
+            hit.link_score = 0.6;
+            hit.query_evidence = Some(crate::CandidateEvidence {
+                semantic_closeness: closeness,
+                ..evidence(&hit.domain, 0)
+            });
+            hit
+        };
+        let order_of = |first: Option<Hit>, popular: Hit, pages: Vec<PageHit>| {
+            let mut namesake = site("tom-holland.org", 0.96, true);
+            namesake.link_score = 0.2;
+            let mut words = site("tomhollandbooks.com", 0.3, false);
+            words.text_score = 0.5;
+            let mut hits: Vec<Hit> = first.into_iter().collect();
+            hits.extend([namesake, words, popular, site("other.com", 0.05, false)]);
+            for hit in hits.iter_mut().filter(|hit| hit.query_evidence.is_none()) {
+                hit.query_evidence = Some(evidence(&hit.domain, 0));
+            }
+            let mut placed = place_pages(query, &hits, pages);
+            reorder(&popular_first_model(), query, &mut hits, &mut placed);
+            hits.into_iter().map(|hit| hit.domain).collect::<Vec<_>>()
+        };
+        // Found by a link with the name on its homepage, or by too little
+        // of its text ("gauss" in stonybrook.edu's), with or without a
+        // vector, it stays below the sites ranked above it.
+        for (text, closeness) in [(0.014, Some(0.0)), (0.03, Some(0.2)), (0.022, None)] {
+            let order = order_of(None, popular(text, closeness), Vec::new());
+            assert_eq!(
+                order[..3],
+                ["tom-holland.org", "tomhollandbooks.com", "thenation.com"],
+                "{text} {closeness:?}"
+            );
+        }
+        // Its text matching, being near in meaning or holding the page
+        // the query names lifts it.
+        let mut article = article("Tom Holland", true);
+        article.page.site = Some("thenation.com".into());
+        for (hit, pages) in [
+            (popular(0.3, Some(0.0)), Vec::new()),
+            (popular(0.014, Some(0.8)), Vec::new()),
+            (popular(0.014, Some(0.0)), vec![article]),
+        ] {
+            assert_eq!(order_of(None, hit, pages)[0], "thenation.com");
+        }
+        // Already above the others, it keeps its place.
+        let first = Some(popular(0.014, Some(0.0)));
+        let order = order_of(first, site("x.com", 0.0, false), Vec::new());
+        assert_eq!(order[0], "thenation.com");
+    }
+
     #[test]
     fn a_model_for_other_features_is_refused() {
         assert!(Model::from_json(r#"{"features":["pos"],"trees":[]}"#).is_err());
@@ -736,7 +866,7 @@ mod tests {
         // A museum's page on Minecraft, or a news site's, comes after
         // minecraft.net.
         assert!(!led(named(crate::pages::SUBPAGES_SET, museum), true));
-        let news = "https://www.cnet.com/tags/minecraft/";
+        let news = "https://www.cnet.com/tech/gaming/minecraft/";
         assert!(!led(named(crate::pages::REFERENCE_SET, news), true));
         // The official site's own page, one named while the best site is
         // not an official one, and the article are left to the model.

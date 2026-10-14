@@ -246,7 +246,7 @@ async fn collect(
     };
     let mut recent = crate::assembly::recent(
         query,
-        state.recent(query, &results),
+        state.recent(query, &results, options),
         options,
         limit,
         |domain| {
@@ -268,7 +268,7 @@ async fn collect(
         entries.push(Entry {
             url: profile.url.clone(),
             title: format!("{} on {}", profile.of, profile.service),
-            content: "Official profile, from Wikidata".to_string(),
+            content: profile.note(),
             category: "general",
             published: None,
             engine: "plumb".into(),

@@ -3,7 +3,7 @@
 //! untitled sites moved down).
 
 use anyhow::Result;
-use plumb_core::{normalize_text, registrable_domain};
+use plumb_core::{is_function_word, normalize_text, registrable_domain};
 use tantivy::schema::Value;
 use tantivy::TantivyDocument;
 
@@ -40,36 +40,79 @@ impl Searcher {
     /// either, nor is one with another name to show for a title
     /// (cars.com for "used cars"): vanguard.com for "vanguard". Nor is a site that scores
     /// within [`UNTITLED_CLOSE_SHARE`] of the first.
+    ///
+    /// A bare site the query does not name is left out, first or not, when
+    /// only meaning found it: no word of `query` is in its text or its
+    /// address. Nothing a person sees then ties it to the search, and the
+    /// vectors of sites with little text are near many queries the model
+    /// barely knows ("pyenv" found five expired domains). emmys.com for
+    /// "emmy awards" shows its word in its address, so it stays. So is a
+    /// site only meaning found whose title and description are in another
+    /// script than the query ([`plumb_core::written_apart`]), unless well
+    /// known or described by Wikidata: an English model reads little of
+    /// such text, and its vector sits near niche searches ("OEIS A000108
+    /// Catalan numbers" found a Chinese gambling site).
     pub(crate) fn untitled_last(
         &self,
         searcher: &tantivy::Searcher,
         mut ranked: Vec<Ranked>,
+        query: &str,
         limit: usize,
     ) -> Result<Vec<Ranked>> {
         let window = limit.saturating_add(UNTITLED_LOOKAHEAD).min(ranked.len());
-        if window < 2 {
-            return Ok(ranked);
-        }
         let rest = ranked.split_off(window);
-        let close = ranked[0].score * UNTITLED_CLOSE_SHARE;
-        let mut titled = Vec::with_capacity(rest.len() + window);
-        let mut bare = Vec::new();
-        for (i, site) in ranked.into_iter().enumerate() {
-            let untitled = i > 0
-                && !site.label_names_query
+        let words = normalize_text(query);
+        let words: Vec<&str> = words
+            .split(' ')
+            .filter(|word| word.chars().count() >= 3 && !is_function_word(word))
+            .collect();
+        let mut kept = Vec::with_capacity(window);
+        for site in ranked {
+            let bare = !site.label_names_query
                 && site.link_score < WELL_KNOWN_LINK_SCORE
-                && site.score < close
                 && !self.says_what_it_is(searcher, site.addr)?
                 && !self.has_aliases(searcher, site.addr)?;
-            if untitled {
-                bare.push(site);
+            let alone = !site.named && found_by_meaning_alone(&site, &words);
+            let apart = alone
+                && !bare
+                && site.link_score < WELL_KNOWN_LINK_SCORE
+                && !self.is_official(searcher, site.addr)?
+                && self.written_apart(searcher, site.addr, query)?;
+            if !(alone && bare || apart) {
+                kept.push((site, bare));
+            }
+        }
+        let close = kept
+            .first()
+            .map_or(0.0, |(first, _)| first.score * UNTITLED_CLOSE_SHARE);
+        let mut titled = Vec::with_capacity(rest.len() + kept.len());
+        let mut untitled = Vec::new();
+        for (i, (site, bare)) in kept.into_iter().enumerate() {
+            if i > 0 && bare && site.score < close {
+                untitled.push(site);
             } else {
                 titled.push(site);
             }
         }
-        titled.extend(bare);
+        titled.extend(untitled);
         titled.extend(rest);
         Ok(titled)
+    }
+
+    /// Whether the site's title and description are in another script
+    /// than `query` ([`plumb_core::written_apart`]).
+    fn written_apart(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: tantivy::DocAddress,
+        query: &str,
+    ) -> Result<bool> {
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let text: Vec<&str> = [self.fields.title, self.fields.description]
+            .into_iter()
+            .filter_map(|field| doc.get_first(field).and_then(|value| value.as_str()))
+            .collect();
+        Ok(plumb_core::written_apart(&text.join(" "), query))
     }
 
     /// Reads the stored fields of a ranked document, with the
@@ -139,6 +182,19 @@ impl Searcher {
         }
         Ok((hit, fingerprint))
     }
+}
+
+/// Whether no word of a site's text matched the query and its address,
+/// without its ending, holds none of `words` ([`Searcher::untitled_last`]).
+fn found_by_meaning_alone(site: &Ranked, words: &[&str]) -> bool {
+    site.query_evidence.as_ref().is_some_and(|evidence| {
+        let address = evidence
+            .domain
+            .rsplit_once('.')
+            .map_or(evidence.domain.as_str(), |(name, _)| name)
+            .to_lowercase();
+        evidence.lexical_score <= 0.0 && !words.iter().any(|word| address.contains(word))
+    })
 }
 
 /// Whether `url`, a site's homepage address, is on another site than

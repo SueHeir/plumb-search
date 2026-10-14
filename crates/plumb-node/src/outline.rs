@@ -701,9 +701,9 @@ pub struct Built {
     pub docs: usize,
     /// Whether the buckets were written where asked.
     pub buckets: bool,
-    /// The domain and homepage of the best-ranked sites whose feeds to
-    /// watch ([`wants_feed`]), as many as asked for.
-    pub feeds: Vec<(String, String)>,
+    /// The best-ranked sites whose feeds to watch ([`wants_feed`]), as many
+    /// as asked for.
+    pub feeds: Vec<crate::news::Watched>,
 }
 
 /// Records read between calls of [`build_index`]'s `step`.
@@ -811,13 +811,18 @@ pub(crate) fn wants_feed(record: &SiteRecord) -> bool {
     record.redirect.is_none() && record.crawl_failures == 0
 }
 
-/// The domain and homepage of `record`, for [`crate::news`].
-pub(crate) fn feed_of(record: &SiteRecord) -> (String, String) {
-    let homepage = record
-        .url
-        .clone()
-        .unwrap_or_else(|| format!("https://{}/", record.domain));
-    (record.domain.clone(), homepage)
+/// The site of `record` to watch the feed of ([`crate::news`]): its domain,
+/// homepage and language.
+pub(crate) fn feed_of(record: &SiteRecord) -> crate::news::Watched {
+    crate::news::Watched {
+        domain: record.domain.clone(),
+        homepage: record
+            .url
+            .clone()
+            .unwrap_or_else(|| format!("https://{}/", record.domain)),
+        language: record.language.clone(),
+        ..Default::default()
+    }
 }
 
 /// A records file being written, with an outline of each record when

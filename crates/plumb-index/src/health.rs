@@ -12,6 +12,16 @@ use crate::{Hit, WELL_KNOWN_LINK_SCORE};
 /// How many health authorities go first.
 const AUTHORITIES: usize = 3;
 
+/// What a drug offer says, after [`normalize_text`], to sell without a
+/// prescription: "Buy Generic Viagra ✓ ED Drugs Online No Rx".
+const NO_PRESCRIPTION: &[&str] = &[
+    "no prescription",
+    "without prescription",
+    "without a prescription",
+    "prescription not required",
+    "no rx",
+];
+
 /// The reason for a source-quality decision. The legacy domain heuristic
 /// is explicitly distinct from an observed prescription-free sales offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +84,21 @@ pub fn source_quality(
         });
     }
     let offer = title.into_iter().chain(description).any(|text| {
+        // A part of its own: "Online-drug-store | Big Discounts | Without a
+        // Prescription | Free Shipping".
+        if text
+            .split(['|', '-', '–', '—', ':'])
+            .map(normalize_text)
+            .any(|part| {
+                let part = part
+                    .strip_suffix(" required")
+                    .or_else(|| part.strip_suffix(" needed"))
+                    .unwrap_or(&part);
+                NO_PRESCRIPTION.contains(&part)
+            })
+        {
+            return true;
+        }
         let text = normalize_text(text);
         let words: Vec<_> = text.split_whitespace().collect();
         // An article quoting or warning about an offer is not an offer.
@@ -89,14 +114,9 @@ pub fn source_quality(
                     .is_some_and(|word| PILL_SHOP_DRUGS.contains(word));
         selling
             && drug
-            && [
-                " no prescription ",
-                " without prescription ",
-                " without a prescription ",
-                " prescription not required ",
-            ]
-            .iter()
-            .any(|phrase| format!(" {text} ").contains(phrase))
+            && NO_PRESCRIPTION
+                .iter()
+                .any(|phrase| format!(" {text} ").contains(&format!(" {phrase} ")))
     });
     let reason = if offer {
         SourceQualityReason::UnprescribedDrugOffer
@@ -187,6 +207,101 @@ const MEDICAL_WORDS: &[&str] = &[
     "endometriosis",
     "uti",
     "adhd",
+    "tuberculosis",
+    "sclerosis",
+    "glaucoma",
+    "cataracts",
+    "osteoporosis",
+    "cirrhosis",
+    "fibrosis",
+    "scoliosis",
+    "epilepsy",
+    "autism",
+    "parkinsons",
+    "tinnitus",
+    "apnea",
+    "sepsis",
+    "leukemia",
+    "anaemia",
+    "malaria",
+    "cholera",
+    "dengue",
+    "rabies",
+    "tetanus",
+    "mumps",
+    "rubella",
+    "norovirus",
+    "rsv",
+    "mpox",
+    "acne",
+    "rosacea",
+    "hemorrhoids",
+    "ptsd",
+    "ocd",
+    "ibs",
+    "copd",
+    "hpv",
+    "mrsa",
+    "pcos",
+    "ebola",
+    "zika",
+    "polio",
+    "monkeypox",
+    "croup",
+    "chlamydia",
+    "gonorrhea",
+    "syphilis",
+    "scabies",
+    "ringworm",
+    "impetigo",
+    "pinworms",
+    "celiac",
+    "crohns",
+    "gallstones",
+    "thyroid",
+    "hypothyroidism",
+    "hyperthyroidism",
+    "menopause",
+    "miscarriage",
+    "preeclampsia",
+    "schizophrenia",
+    "anorexia",
+    "bulimia",
+    "narcolepsy",
+    "palsy",
+    "lymphoma",
+    "melanoma",
+    "hypothermia",
+    // Symptoms.
+    "headache",
+    "headaches",
+    "nausea",
+    "dizziness",
+    "vomiting",
+    "diarrhea",
+    "diarrhoea",
+    "constipation",
+    "heartburn",
+    "indigestion",
+    "toothache",
+    "earache",
+    "nosebleed",
+    "nosebleeds",
+    "sunburn",
+    "sciatica",
+    "palpitations",
+    "bloating",
+    "dandruff",
+    "snoring",
+    "ingrown",
+    "wart",
+    "warts",
+    "cyst",
+    "cysts",
+    "hernia",
+    "bunion",
+    "bunions",
+    "lice",
     // Common drugs (the pill-shop names count too, see `is_medical`).
     "ibuprofen",
     "acetaminophen",
@@ -205,6 +320,54 @@ const MEDICAL_WORDS: &[&str] = &[
     "insulin",
     "benadryl",
     "melatonin",
+    "ozempic",
+    "wegovy",
+    "semaglutide",
+    "mounjaro",
+    "tirzepatide",
+    "warfarin",
+    "eliquis",
+    "statin",
+    "statins",
+    "losartan",
+    "cetirizine",
+    "zyrtec",
+    "loratadine",
+    "claritin",
+    "fluoxetine",
+    "escitalopram",
+    "trazodone",
+    "bupropion",
+    "adderall",
+    "naloxone",
+    "fentanyl",
+    "heroin",
+    "epipen",
+    "antibiotic",
+    "antibiotics",
+];
+
+/// Words that say a longer search is about an illness, whatever the
+/// illness is called: "lyme disease", "bipolar disorder", "down
+/// syndrome", "vitamin d deficiency", or a symptom of one: "dry cough",
+/// "rash on arms". Alone they may be a film or a band.
+const ILLNESS_WORDS: &[&str] = &[
+    "disease",
+    "diseases",
+    "disorder",
+    "disorders",
+    "syndrome",
+    "infection",
+    "infections",
+    "deficiency",
+    "allergy",
+    "allergies",
+    "vaccine",
+    "vaccines",
+    "vaccination",
+    "cough",
+    "coughing",
+    "rash",
 ];
 
 /// Phrases that make a search a medical one.
@@ -212,21 +375,342 @@ const MEDICAL_PHRASES: &[&str] = &[
     "side effects",
     "blood pressure",
     "heart attack",
+    "kidney stone",
     "kidney stones",
-    "sore throat",
     "pink eye",
     "panic attack",
     "panic attacks",
     "treatment for",
     "how to treat",
     "signs of",
+    "acid reflux",
+    "food poisoning",
+    "back pain",
+    "pain relief",
+    "upset stomach",
+    "frozen shoulder",
+    "shin splints",
+    "carpal tunnel",
+    "cold sore",
+    "cold sores",
+    "canker sore",
+    "canker sores",
+    "black eye",
+    "head injury",
+    "hair loss",
+    "shortness of breath",
+    "blood in urine",
+    "blood in stool",
+    "common cold",
+    "head cold",
+    "morning sickness",
+    "ectopic pregnancy",
+    "heat stroke",
+    "heat exhaustion",
+    "sleep paralysis",
+    "lactose intolerance",
+    "gluten intolerance",
+    "athletes foot",
+    "jock itch",
+    "nail fungus",
+    "toenail fungus",
+    "bee sting",
+    "tick bite",
+    "spider bite",
+    // Not "dry" alone: "dry rub ribs".
+    "dry skin",
+    "dry eye",
+    "dry eyes",
+    "dry mouth",
+    "dry scalp",
+    "blood clot",
+    // A fever, not a film or a drink: "saturday night fever", "fever-tree".
+    "fever in",
+    "high fever",
+    "low grade fever",
+    "hay fever",
+    "scarlet fever",
+    "yellow fever",
+];
+
+/// What a lab test measures, as its results name it. Many are something
+/// else too (PSA is a squash body, ALT a key, a blood sugar an album), so
+/// a search is about the test only when it also reads the result or asks
+/// for it ([`LAB_READINGS`]): "high TSH", "low MCHC causes", "A1C levels".
+const LAB_TESTS: &[&str] = &[
+    "tsh",
+    "psa",
+    "alt",
+    "ast",
+    "alp",
+    "ggt",
+    "crp",
+    "esr",
+    "inr",
+    "mcv",
+    "mch",
+    "mchc",
+    "rdw",
+    "gfr",
+    "egfr",
+    "a1c",
+    "hba1c",
+    "ldl",
+    "hdl",
+    "creatinine",
+    "bilirubin",
+    "ferritin",
+    "hemoglobin",
+    "haemoglobin",
+    "hematocrit",
+    "platelet",
+    "platelets",
+    "triglycerides",
+    "troponin",
+    "blood sugar",
+    "white blood cell",
+    "white blood cells",
+    "red blood cell",
+    "red blood cells",
+    "liver enzymes",
+    "vitamin d",
+];
+
+/// Words that read a lab result or ask for one ([`LAB_TESTS`]).
+const LAB_READINGS: &[&str] = &[
+    "high", "low", "elevated", "raised", "level", "levels", "normal", "count", "results", "test",
 ];
 
 /// Searches with these are about something else: the economy, a film, a
 /// band.
-const NOT_MEDICAL: &[&str] = &["great depression", "flu game", "shot of", "cancer zodiac"];
+const NOT_MEDICAL: &[&str] = &[
+    "great depression",
+    "flu game",
+    "shot of",
+    "cancer zodiac",
+    "china syndrome",
+    "rash guard",
+    "rash decision",
+    "sight for sore eyes",
+    "stiff upper lip",
+    "miscarriage of justice",
+];
 
-/// Whether `query` asks about an illness, a symptom or a drug.
+/// Words that say the patient is a pet: "parvo symptoms in dogs", "cat
+/// vomiting" ask a vet, not MedlinePlus. Not "canine" ("canine tooth
+/// pain") or "horse" ("charley horse").
+const PET_WORDS: &[&str] = &[
+    "dog",
+    "dogs",
+    "puppy",
+    "puppies",
+    "cat",
+    "cats",
+    "kitten",
+    "kittens",
+    "feline",
+    "pet",
+    "pets",
+    "veterinary",
+    "kennel",
+    "parvo",
+];
+
+/// Words that say a pet is how a person was hurt or examined: "dog bite",
+/// "cat allergy", "pet scan".
+const FROM_PETS: &[&str] = &[
+    "bite",
+    "bites",
+    "bitten",
+    "scratch",
+    "scratches",
+    "allergy",
+    "allergies",
+    "allergic",
+    "scan",
+];
+
+/// What hurts or is wrong in a part of the body. Beside a body part it
+/// makes a search medical: "knee pain", "swollen ankles", "numbness on
+/// top of foot". Alone or about a thing it doesn't: "broken arrow",
+/// "pulled pork shoulder".
+const COMPLAINTS: &[&str] = &[
+    "pain",
+    "painful",
+    "ache",
+    "aches",
+    "aching",
+    "sore",
+    "swollen",
+    "swelling",
+    "itch",
+    "itchy",
+    "itching",
+    "numb",
+    "numbness",
+    "tingling",
+    "cramp",
+    "cramps",
+    "cramping",
+    "spasm",
+    "spasms",
+    "twitching",
+    "stiff",
+    "stiffness",
+    "tightness",
+    "weakness",
+    "broken",
+    "fracture",
+    "fractured",
+    "cracked",
+    "sprain",
+    "sprained",
+    "torn",
+    "pulled",
+    "dislocated",
+    "bruise",
+    "bruised",
+    "bruising",
+    "injury",
+    "injuries",
+    "injured",
+    "infected",
+    "bleeding",
+    "burning",
+    "ringing",
+    "lump",
+    "lumps",
+    "bump",
+    "bumps",
+    "blister",
+    "blisters",
+    "chapped",
+    "runny",
+    "stuffy",
+    "blocked",
+    "blurry",
+    "blurred",
+];
+
+/// Parts of the body a complaint is felt in. Not "head", "back" or
+/// "heart", which go with too much else: "cracked head gasket", "pulled
+/// back hair", "broken heart". "Back pain" is a phrase.
+const BODY_PARTS: &[&str] = &[
+    "ear",
+    "ears",
+    "eye",
+    "eyes",
+    "eyelid",
+    "vision",
+    "nose",
+    "sinus",
+    "sinuses",
+    "mouth",
+    "lip",
+    "lips",
+    "tongue",
+    "tooth",
+    "teeth",
+    "gums",
+    "jaw",
+    "throat",
+    "neck",
+    "lymph",
+    "gland",
+    "glands",
+    "shoulder",
+    "shoulders",
+    "arm",
+    "arms",
+    "armpit",
+    "elbow",
+    "elbows",
+    "wrist",
+    "wrists",
+    "hand",
+    "hands",
+    "finger",
+    "fingers",
+    "thumb",
+    "knuckles",
+    "chest",
+    "breast",
+    "breasts",
+    "rib",
+    "ribs",
+    "spine",
+    "tailbone",
+    "stomach",
+    "abdomen",
+    "abdominal",
+    "belly",
+    "liver",
+    "kidney",
+    "kidneys",
+    "bladder",
+    "pelvis",
+    "pelvic",
+    "groin",
+    "testicle",
+    "testicles",
+    "hip",
+    "hips",
+    "leg",
+    "legs",
+    "thigh",
+    "thighs",
+    "hamstring",
+    "knee",
+    "knees",
+    "acl",
+    "meniscus",
+    "shin",
+    "shins",
+    "calf",
+    "calves",
+    "ankle",
+    "ankles",
+    "achilles",
+    "foot",
+    "feet",
+    "heel",
+    "heels",
+    "toe",
+    "toes",
+    "toenail",
+    "skin",
+    "scalp",
+    "joint",
+    "joints",
+    "muscle",
+    "muscles",
+    "tendon",
+    "ligament",
+];
+
+/// Words that say where in a body part: "pain in left arm", "numbness on
+/// top of foot". Only these may come between a complaint and its body
+/// part, so "pulled pork shoulder" and "dry rub ribs" are about food.
+const PLACE_WORDS: &[&str] = &[
+    "in", "on", "of", "the", "my", "a", "an", "both", "left", "right", "top", "bottom", "side",
+    "front", "inner", "outer", "inside", "outside", "upper", "lower", "under", "behind", "around",
+    "between",
+];
+
+/// Whether `words` say something is wrong in a part of the body: a
+/// complaint with a body part next to it, or with only place words
+/// between them.
+fn complaint_in_body(words: &[&str]) -> bool {
+    let not_place = |word: &&&str| !PLACE_WORDS.contains(*word);
+    let body = |word: Option<&&str>| word.is_some_and(|word| BODY_PARTS.contains(word));
+    words.iter().enumerate().any(|(i, word)| {
+        COMPLAINTS.contains(word)
+            && (body(words[..i].iter().rev().find(not_place))
+                || body(words[i + 1..].iter().find(not_place)))
+    })
+}
+
+/// Whether `query` asks about a person's illness, symptom or drug.
 pub(crate) fn is_medical(query: &str) -> bool {
     let query = normalize_text(query);
     let padded = format!(" {query} ");
@@ -237,13 +721,26 @@ pub(crate) fn is_medical(query: &str) -> bool {
         return false;
     }
     let words: Vec<&str> = query.split(' ').collect();
+    let has = |list: &[&str]| words.iter().any(|word| list.contains(word));
+    if has(PET_WORDS) && !has(FROM_PETS) {
+        return false;
+    }
     words.iter().any(|word| {
-        MEDICAL_WORDS.contains(word) || PILL_SHOP_DRUGS.contains(word)
+        MEDICAL_WORDS.contains(word)
+            || PILL_SHOP_DRUGS.contains(word)
+            || words.len() > 1 && ILLNESS_WORDS.contains(word)
+            // An inflammation: hepatitis, meningitis, colitis.
+            || word.len() > 5 && word.ends_with("itis")
     }) || MEDICAL_PHRASES
         .iter()
         .any(|phrase| padded.contains(&format!(" {phrase} ")))
         // "depression" alone or with "symptoms"/"help": not "depression era".
         || words.iter().any(|w| ["depression", "anxiety"].contains(w)) && words.len() <= 3
+        || LAB_TESTS
+            .iter()
+            .any(|test| padded.contains(&format!(" {test} ")))
+            && words.iter().any(|word| LAB_READINGS.contains(word))
+        || complaint_in_body(&words)
 }
 
 /// Health sources searchers ask for by name, by the domain the index has
@@ -251,7 +748,7 @@ pub(crate) fn is_medical(query: &str) -> bool {
 /// MedlinePlus". Lowercase names match the folded query; a name with
 /// capitals matches only as written, so "who" in a question is not WHO.
 const SOURCES: &[(&str, &[&str])] = &[
-    ("cdc.gov", &["cdc"]),
+    ("cdc.gov", &["cdc", "centers for disease control"]),
     ("www.nhs.uk", &["nhs"]),
     ("medlineplus.gov", &["medlineplus", "medline plus"]),
     ("mayoclinic.org", &["mayoclinic", "mayo clinic"]),
@@ -263,14 +760,18 @@ const SOURCES: &[(&str, &[&str])] = &[
     ("webmd.com", &["webmd"]),
     ("healthline.com", &["healthline"]),
     ("healthychildren.org", &["healthychildren"]),
-    ("nih.gov", &["NIH"]),
-    ("fda.gov", &["FDA"]),
-    ("ecdc.europa.eu", &["ecdc"]),
+    ("nih.gov", &["NIH", "national institutes of health"]),
+    ("fda.gov", &["FDA", "food and drug administration"]),
+    (
+        "ecdc.europa.eu",
+        &["ecdc", "european centre for disease prevention and control"],
+    ),
 ];
 
 /// The sites `query` asks for as its source, by domain: a health source
 /// it names ([`SOURCES`]) or an address typed in it ("acetaminophen dose
-/// healthychildren.org"). Doses and abbreviations ("0.5mg", "e.g.") are
+/// healthychildren.org", "cetirizine (site:drugs.com)", which is not an
+/// operator). Doses and abbreviations ("0.5mg", "e.g.") are
 /// not addresses. A typed address keeps its own host unless it only adds
 /// "www.": ecdc.europa.eu is not europa.eu, whose homepage is the EU's.
 fn named_sources(query: &str) -> Vec<String> {
@@ -294,6 +795,7 @@ fn named_sources(query: &str) -> Vec<String> {
         .collect();
     for word in query.split_whitespace() {
         let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+        let word = word.strip_prefix("site:").unwrap_or(word);
         let ends_in_letters = word
             .rsplit_once('.')
             .is_some_and(|(_, end)| end.len() > 1 && end.chars().all(|c| c.is_ascii_alphabetic()));
@@ -314,17 +816,42 @@ fn same_site(a: &str, b: &str) -> bool {
     a.trim_start_matches("www.") == b.trim_start_matches("www.")
 }
 
+/// Whether a word of `query` is the name of `hit`'s site and neither
+/// medical nor `common` (in many sites' titles): "medscape" for
+/// medscape.com, "hellopharmacist" for hellopharmacist.com. Such a search
+/// asks that site, not the authorities. An illness, a drug, a lab test or
+/// a part of the body that is also a site's name is what the search is
+/// about: diabetes.org for "diabetes symptoms", rdw.nl for "high RDW",
+/// hands.net for "tingling in hands". And first.org is not asked for by
+/// "first dose".
+fn names_site(query: &str, hit: &Hit, common: &dyn Fn(&str) -> bool) -> bool {
+    let Some(domain) = plumb_core::registrable_domain(&hit.domain) else {
+        return false;
+    };
+    let label = domain.split('.').next().unwrap_or_default();
+    normalize_text(query)
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| word == label)
+        && !is_medical(label)
+        && !LAB_TESTS.contains(&label)
+        && !BODY_PARTS.contains(&label)
+        && !common(label)
+}
+
 /// `hits` for a medical `query` with the health authorities first, under
 /// a well-known site the query names (diabetes.org for "diabetes"):
 /// those already listed move up, the others come from `site`. A source
 /// the query asks for ([`named_sources`]) goes above them, from `site`
-/// too when it isn't listed. At most `limit` hits stay.
+/// too when it isn't listed, and so does a listed site it names by a word
+/// that is neither medical nor `common` ([`names_site`]). At most `limit`
+/// hits stay.
 pub(crate) fn authorities_first(
     query: &str,
     country: Option<&str>,
     hits: &mut Vec<Hit>,
     limit: usize,
     site: &dyn Fn(&str) -> Option<Hit>,
+    common: &dyn Fn(&str) -> bool,
 ) {
     if limit == 0 || crate::names::typed_domain(query).is_some() || !is_medical(query) {
         return;
@@ -341,6 +868,11 @@ pub(crate) fn authorities_first(
             }
         }
     }
+    let (named, rest) = std::mem::take(hits)
+        .into_iter()
+        .partition::<Vec<Hit>, _>(|hit| names_site(query, hit, common));
+    *hits = rest;
+    sources.extend(named);
     let mut first = Vec::new();
     for domain in authorities(country).iter().take(AUTHORITIES) {
         if sources
@@ -377,14 +909,20 @@ pub(crate) fn authorities_first(
     hits.truncate(limit);
 }
 
-/// The sources a medical `query` asks for ([`named_sources`]) first among
-/// the sites again, once the learned ranking has had its say: it lists a
-/// homepage [`authorities_first`] put in under the authorities ("NHS
-/// paracetamol for children dose" had nhs.uk fourth). Pages listed on
+/// The sources a medical `query` asks for ([`named_sources`]) and the
+/// sites it names by a word neither medical nor `common` ([`names_site`])
+/// first among the sites again, once the learned ranking has had its say:
+/// it lists a homepage [`authorities_first`] put in under the authorities
+/// ("NHS paracetamol for children dose" had nhs.uk fourth). Pages listed on
 /// their own keep their places, and the moved sites trade scores so that
 /// scores still go down the list, as [`crate::learned::reorder`] leaves
 /// them.
-pub fn sources_lead(query: &str, hits: &mut Vec<Hit>, placed: &mut [PlacedPage]) {
+pub fn sources_lead(
+    query: &str,
+    hits: &mut Vec<Hit>,
+    placed: &mut [PlacedPage],
+    common: &dyn Fn(&str) -> bool,
+) {
     if plumb_core::Operators::parse(query).any()
         || crate::names::typed_domain(query).is_some()
         || !is_medical(query)
@@ -397,6 +935,11 @@ pub fn sources_lead(query: &str, hits: &mut Vec<Hit>, placed: &mut [PlacedPage])
             if !lead.contains(&at) {
                 lead.push(at);
             }
+        }
+    }
+    for (at, hit) in hits.iter().enumerate() {
+        if !lead.contains(&at) && names_site(query, hit, common) {
+            lead.push(at);
         }
     }
     let mut new_hits: Vec<Hit> = lead.iter().map(|&at| hits[at].clone()).collect();
@@ -529,6 +1072,55 @@ mod tests {
             "Migraine",
             "tramadol",
             "signs of a concussion",
+            "lyme disease",
+            "bipolar disorder",
+            "down syndrome",
+            "vitamin d deficiency",
+            "hepatitis b",
+            "multiple sclerosis",
+            "tuberculosis",
+            "parkinson's disease",
+            "sleep apnea",
+            "acid reflux",
+            "ozempic",
+            "bridging fibrosis",
+            "what does heroin do",
+            "headache behind eyes",
+            "nausea after eating",
+            "dizziness when standing up",
+            "diarrhea remedies",
+            "heartburn",
+            "dry cough",
+            "rash on arms",
+            "fever in toddlers",
+            "high TSH",
+            "low MCHC causes",
+            "low eGFR",
+            "A1C levels",
+            "PSA test",
+            "low platelet count",
+            "high white blood cell count",
+            "low blood sugar",
+            "knee pain",
+            "swollen ankles",
+            "broken toe",
+            "ringing in ears",
+            "numbness on top of foot",
+            "pain in left arm",
+            "pain with ovarian cyst",
+            "sunburn relief",
+            "dry eyes",
+            "blood in urine",
+            "sore throat",
+            "common cold 7 to 10 days",
+            "dog bite infection",
+            "cat allergy symptoms",
+            "pet scan for cancer",
+            "ptsd",
+            "crohn's disease diet",
+            "bell's palsy",
+            "athlete's foot",
+            "tick bite",
         ] {
             assert!(is_medical(query), "{query}");
         }
@@ -538,6 +1130,31 @@ mod tests {
             "side quest",
             "pizza in seattle",
             "depression era glass prices in ohio",
+            "disorder",
+            "the china syndrome",
+            "academia",
+            "mitosis vs meiosis",
+            "rash",
+            "rash guard",
+            "saturday night fever",
+            "fever-tree tonic",
+            "psa squash rankings",
+            "alt key",
+            "blood sugar sex magik",
+            "high school",
+            "broken arrow",
+            "broken heart",
+            "growing pains",
+            "pulled pork shoulder",
+            "dry rub ribs",
+            "cracked head gasket",
+            "quick dry nail polish",
+            "a sight for sore eyes",
+            "parvo symptoms in dogs",
+            "dog diarrhea",
+            "cat vomiting",
+            "kennel cough symptoms",
+            "miscarriage of justice",
         ] {
             assert!(!is_medical(query), "{query}");
         }
@@ -571,11 +1188,31 @@ mod tests {
         .unwrap();
         assert_eq!(offer.reason, SourceQualityReason::UnprescribedDrugOffer);
         assert!(offer.informational_penalty());
+        for (title, description) in [
+            ("Buy Generic Viagra [$0,99] ✓ ED Drugs Online No Rx", None),
+            (
+                "Online-drug-store | Big Discounts | Save up to 90% | Without a Prescription",
+                None,
+            ),
+            (
+                "Certified Canadian Pharmacies Online - No Prescription Required",
+                Some("Explore our medications."),
+            ),
+        ] {
+            let offer = source_quality("small-source.pics", Some(title), description, Some(0.2));
+            assert_eq!(
+                offer.map(|offer| offer.reason),
+                Some(SourceQualityReason::UnprescribedDrugOffer),
+                "{title}"
+            );
+        }
         for title in [
             "Viagra side effects and prescription safety",
             "Why you should never buy Viagra without a prescription",
             "Buy amoxicillin with a prescription",
             "Buy books about Viagra without a prescription", // the subject is books
+            "Is no prescription needed for ibuprofen?",
+            "Pocketpills | Telehealth Online Pharmacy | Free Prescription Delivery",
         ] {
             // Only direct drug offers qualify, not a quoted phrase in an
             // informational article or an unrelated transaction.
@@ -590,9 +1227,14 @@ mod tests {
     #[test]
     fn typed_medical_hosts_and_jurisdiction_keep_their_intent() {
         let mut hits = vec![hit("viagra.com", true, 0.6)];
-        authorities_first("viagra.com", Some("GB"), &mut hits, 5, &|domain| {
-            Some(hit(domain, false, 0.6))
-        });
+        authorities_first(
+            "viagra.com",
+            Some("GB"),
+            &mut hits,
+            5,
+            &|domain| Some(hit(domain, false, 0.6)),
+            &|_| true,
+        );
         assert_eq!(domains(&hits), ["viagra.com"]);
         assert_eq!(authorities(Some("GB"))[0], "www.nhs.uk");
         assert!(!authorities(Some("IE")).contains(&"www.nhs.uk"));
@@ -603,9 +1245,14 @@ mod tests {
         let mut guidance = hit("mayoclinic.org", false, 0.7);
         guidance.url = "https://www.mayoclinic.org/drugs-supplements/lisinopril/".to_string();
         let mut hits = vec![guidance];
-        authorities_first("lisinopril side effects", None, &mut hits, 3, &|domain| {
-            Some(hit(domain, false, 0.6))
-        });
+        authorities_first(
+            "lisinopril side effects",
+            None,
+            &mut hits,
+            3,
+            &|domain| Some(hit(domain, false, 0.6)),
+            &|_| true,
+        );
         assert_eq!(domains(&hits)[0], "mayoclinic.org");
         assert!(hits[0].url.contains("lisinopril"));
         assert!(hits[1..].iter().all(|hit| hit.missing_words));
@@ -672,7 +1319,9 @@ mod tests {
             homepage,
             hit("sildemedx.com", false, 0.05),
         ];
-        authorities_first("ibuprofen dosage", Some("US"), &mut hits, 5, &site);
+        authorities_first("ibuprofen dosage", Some("US"), &mut hits, 5, &site, &|_| {
+            true
+        });
         assert_eq!(
             domains(&hits),
             [
@@ -689,7 +1338,7 @@ mod tests {
             hit("diabetes.org", true, 0.7),
             hit("diabetes-m.com", false, 0.2),
         ];
-        authorities_first("diabetes", Some("GB"), &mut hits, 3, &site);
+        authorities_first("diabetes", Some("GB"), &mut hits, 3, &site, &|_| true);
         assert_eq!(
             domains(&hits),
             ["diabetes.org", "www.nhs.uk", "medlineplus.gov"]
@@ -708,7 +1357,7 @@ mod tests {
                 if listed {
                     hits.push(hit("cdc.gov", false, 0.8));
                 }
-                authorities_first(query, None, &mut hits, 5, &site);
+                authorities_first(query, None, &mut hits, 5, &site, &|_| true);
                 assert_eq!(
                     domains(&hits),
                     [
@@ -739,7 +1388,7 @@ mod tests {
                 hit("lisinoprilgo7.com", false, 0.1),
                 hit(source, false, 0.6),
             ];
-            authorities_first(query, Some("US"), &mut hits, 5, &|_| None);
+            authorities_first(query, Some("US"), &mut hits, 5, &|_| None, &|_| true);
             let listed = domains(&hits);
             assert_eq!(listed[0], source, "{query}");
             assert_eq!(listed.last(), Some(&"lisinoprilgo7.com"), "{query}");
@@ -752,6 +1401,7 @@ mod tests {
             &mut hits,
             4,
             &|domain| (domain != "healthychildren.org").then(|| hit(domain, false, 0.6)),
+            &|_| true,
         );
         assert_eq!(
             domains(&hits),
@@ -769,6 +1419,11 @@ mod tests {
             ["ecdc.europa.eu"]
         );
         assert_eq!(named_sources("lisinopril www.drugs.com"), ["drugs.com"]);
+        // Or its whole name.
+        assert_eq!(
+            named_sources("European Centre for Disease Prevention and Control"),
+            ["ecdc.europa.eu"]
+        );
         let mut hits = vec![hit("flu.example", false, 0.3)];
         authorities_first(
             "ecdc.europa.eu seasonal influenza",
@@ -776,6 +1431,7 @@ mod tests {
             &mut hits,
             4,
             &|domain| (domain != "ecdc.europa.eu").then(|| hit(domain, false, 0.6)),
+            &|_| true,
         );
         assert_eq!(
             domains(&hits),
@@ -803,7 +1459,7 @@ mod tests {
                 hit("first.org", false, 0.7),
                 hit("who.int", false, 0.7),
             ];
-            authorities_first(query, None, &mut hits, 3, &site);
+            authorities_first(query, None, &mut hits, 3, &site, &|_| true);
             assert_eq!(
                 domains(&hits),
                 ["medlineplus.gov", "mayoclinic.org", "clevelandclinic.org"],
@@ -813,11 +1469,89 @@ mod tests {
 
         // Not medical, or no authority in the index: unchanged.
         let mut hits = vec![hit("pizzahut.com", true, 0.7)];
-        authorities_first("pizza", None, &mut hits, 5, &site);
+        authorities_first("pizza", None, &mut hits, 5, &site, &|_| true);
         assert_eq!(domains(&hits), ["pizzahut.com"]);
-        authorities_first("flu symptoms", None, &mut hits, 5, &|_| None);
+        authorities_first("flu symptoms", None, &mut hits, 5, &|_| None, &|_| true);
         assert_eq!(domains(&hits), ["pizzahut.com"]);
     }
+    #[test]
+    fn a_site_the_search_names_goes_above_the_authorities() {
+        let site = |domain: &str| Some(hit(domain, false, 0.6));
+        let common = |word: &str| ["first", "health"].contains(&word);
+        let authorities = ["medlineplus.gov", "mayoclinic.org", "clevelandclinic.org"];
+        // An address after "site:" that is not an operator, in brackets.
+        assert_eq!(
+            named_sources("mucinex zyrtec (site:drugs.com)"),
+            ["drugs.com"]
+        );
+        for (query, listed, named) in [
+            (
+                "cetirizine (site:drugs.com)",
+                vec!["cetirizine.example", "drugs.com"],
+                vec!["drugs.com"],
+            ),
+            (
+                "zyrtec mucinex hellopharmacist",
+                vec!["hellopharmacist.com", "www.mucinex.com", "novopharma.tn"],
+                vec!["hellopharmacist.com", "www.mucinex.com"],
+            ),
+            (
+                "cetirizine medscape interactions",
+                vec!["covid19-druginteractions.org", "www.medscape.com"],
+                vec!["www.medscape.com"],
+            ),
+            (
+                "can you take zyrtec and mucinex together",
+                vec!["www.mucinex.com", "www.csaci.ca"],
+                vec!["www.mucinex.com"],
+            ),
+            // Named by the illness the search is about, or by a word many
+            // sites have: below the authorities.
+            (
+                "diabetes symptoms",
+                vec!["diabetes.org", "diabetes.example"],
+                vec![],
+            ),
+            (
+                "measles vaccine first dose",
+                vec!["first.org", "measles.example"],
+                vec![],
+            ),
+            // Or by the lab test it asks about: rdw.nl is the Dutch
+            // vehicle authority.
+            ("high RDW", vec!["rdw.nl", "rdw.example"], vec![]),
+            // Or by the body part.
+            (
+                "tingling in hands",
+                vec!["hands.net", "hands.example"],
+                vec![],
+            ),
+        ] {
+            let mut hits = listed
+                .iter()
+                .map(|domain| hit(domain, false, 0.3))
+                .collect();
+            authorities_first(query, None, &mut hits, 8, &site, &common);
+            let found = domains(&hits);
+            assert_eq!(found[..named.len()], named, "{query}");
+            assert_eq!(found[named.len()..named.len() + 3], authorities, "{query}");
+        }
+        // And again once the learned ranking has had its say.
+        let mut hits = ["medlineplus.gov", "first.org", "hellopharmacist.com"]
+            .map(|domain| hit(domain, false, 0.3))
+            .to_vec();
+        sources_lead(
+            "zyrtec hellopharmacist first dose",
+            &mut hits,
+            &mut [],
+            &common,
+        );
+        assert_eq!(
+            domains(&hits),
+            ["hellopharmacist.com", "medlineplus.gov", "first.org"]
+        );
+    }
+
     #[test]
     fn named_sources_lead_again_after_the_learned_order() {
         use crate::pages::{Page, PageHit};
@@ -858,6 +1592,7 @@ mod tests {
             "NHS paracetamol for children dose age weight",
             &mut hits,
             &mut placed,
+            &|_| true,
         );
         assert_eq!(
             domains(&hits),
@@ -886,7 +1621,7 @@ mod tests {
         ] {
             let mut hits = listed();
             let mut placed = vec![page.clone()];
-            sources_lead(query, &mut hits, &mut placed);
+            sources_lead(query, &mut hits, &mut placed, &|_| true);
             assert_eq!(domains(&hits), domains(&listed()), "{query}");
             assert_eq!(placed, vec![page.clone()], "{query}");
         }

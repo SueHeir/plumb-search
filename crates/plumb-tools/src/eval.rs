@@ -20,8 +20,8 @@ use plumb_core::registrable_domain;
 use std::path::Path;
 
 use plumb_index::pages::{
-    add_named_site, drop_namesakes_of_words, lift_named_sites, place_pages, Page, PageSearcher,
-    PlacedPage,
+    add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, place_pages,
+    Page, PageSearcher, PlacedPage,
 };
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
@@ -755,10 +755,9 @@ fn evaluate(
         let applied = results.spelling.as_ref().is_some_and(|s| s.applied);
         if !args.exact && !applied {
             if let Some(pages) = pages.as_ref() {
-                let spelled_right = pages
-                    .search(&q.query, 10)?
-                    .iter()
-                    .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+                let found = pages.search(&q.query, 10)?;
+                let spelled_right =
+                    pages.spelled_right(&q.query, &found, results.spelling.as_ref());
                 results.spelling = match results.spelling.take() {
                     Some(spelling) if !spelled_right => pages.check_spelling(&q.query, spelling)?,
                     _ => None,
@@ -796,7 +795,9 @@ fn evaluate(
                         searcher.site(domain).ok().flatten()
                     })
                 }
-                None => plumb_index::health::sources_lead(&searched, &mut hits, &mut []),
+                None => plumb_index::health::sources_lead(&searched, &mut hits, &mut [], &|word| {
+                    searcher.is_common_word(word)
+                }),
             }
         }
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
@@ -827,10 +828,12 @@ fn evaluate(
                         searcher.site(domain).ok().flatten()
                     });
                 }
+                drop_far_namesakes(&mut lifted, &found, cfg.meaning_only_relevance);
                 if cfg.drop_namesakes {
                     drop_namesakes_of_words(&mut lifted, &found);
                 }
                 lift_named_sites(&mut lifted, &found);
+                pages.add_named_site_page(&searched, &lifted, &mut found)?;
                 pages.note_demand(&mut lifted)?;
                 let mut placed = place_pages(&searched, &lifted, found);
                 // --features-out writes the hand-made order the learned
@@ -849,7 +852,12 @@ fn evaluate(
                             searcher.site(domain).ok().flatten()
                         })
                     }
-                    None => plumb_index::health::sources_lead(&searched, &mut lifted, &mut placed),
+                    None => plumb_index::health::sources_lead(
+                        &searched,
+                        &mut lifted,
+                        &mut placed,
+                        &|word| searcher.is_common_word(word),
+                    ),
                 }
                 if let Some(features) = features.as_deref_mut() {
                     let closeness = |domain: &str| {

@@ -145,10 +145,7 @@ impl Mcp {
             // "fastapi docs" is not "fastai docs".
             results.spelling = None;
         }
-        let places = if sites_only
-            || plumb_core::Operators::parse(query).any()
-            || plumb_index::places::parse_place_query(query).is_none()
-        {
+        let places = if sites_only || plumb_core::Operators::parse(query).any() {
             None
         } else {
             crate::assembly::places(
@@ -192,7 +189,12 @@ impl Mcp {
             query,
             i64::try_from(now).unwrap_or(i64::MAX),
             self.rates.as_ref(),
-        );
+        )
+        .or_else(|| {
+            let town = plumb_answer::asked_town(query)?;
+            let place = self.backend.locate(&town, options.country.as_deref())?;
+            crate::web::answers::time_in_place(&place)
+        });
         crate::assembly::route_sources(
             query,
             answer.as_ref().map(|a| a.kind),
@@ -200,6 +202,7 @@ impl Mcp {
             &mut results,
             limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
             |domain| self.backend.site(domain),
+            |word| self.backend.common_word(word),
         );
         // Placed as the results page places them, which the info box needs.
         let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
@@ -343,7 +346,7 @@ impl Mcp {
                     .map(|hit| (hit.domain.as_str(), hit.named));
                 crate::assembly::recent(
                     query,
-                    node.recent(query, top),
+                    node.recent(query, top, options.language.as_deref()),
                     options,
                     limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
                     |domain| node.blocks_adult(domain),
@@ -424,23 +427,27 @@ impl Mcp {
                 )),
             }
         }
-        let ordered_results: Vec<_> = assembled
-            .rows
-            .iter()
-            .map(|row| match row {
-                crate::assembly::Row::Site { site, .. } => json!({"kind": "site", "url": site.url}),
-                crate::assembly::Row::Page { page } => {
-                    let url = pages
-                        .iter()
-                        .find(|entry| {
-                            entry["page_url"].as_str().or_else(|| entry["url"].as_str())
-                                == Some(page.hit.page.url.as_str())
-                        })
-                        .and_then(|entry| entry["url"].as_str())
-                        .unwrap_or(&page.hit.page.url);
-                    json!({"kind": "page", "url": url})
-                }
-            })
+        // The profile asked for comes first, as the results page shows it:
+        // "superstition lyrics" is for the song's page on Genius.
+        let profile_url = profile.as_ref().map(|profile| profile.url.as_str());
+        let rows = assembled.rows.iter().map(|row| match row {
+            crate::assembly::Row::Site { site, .. } => json!({"kind": "site", "url": site.url}),
+            crate::assembly::Row::Page { page } => {
+                let url = pages
+                    .iter()
+                    .find(|entry| {
+                        entry["page_url"].as_str().or_else(|| entry["url"].as_str())
+                            == Some(page.hit.page.url.as_str())
+                    })
+                    .and_then(|entry| entry["url"].as_str())
+                    .unwrap_or(&page.hit.page.url);
+                json!({"kind": "page", "url": url})
+            }
+        });
+        let ordered_results: Vec<_> = profile_url
+            .map(|url| json!({"kind": "profile", "url": url}))
+            .into_iter()
+            .chain(rows.filter(|row| row["url"].as_str() != profile_url))
             .collect();
         let mut answer_json = json!({
             "query": query,

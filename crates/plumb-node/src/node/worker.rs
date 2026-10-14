@@ -39,8 +39,8 @@ use plumb_core::{now_unix, parent_domain, RecordSet, SiteRecord, SUBDOMAIN_SITE_
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_index::build_index_with_budget;
 use plumb_ingest::{
-    attach_facts, attach_intros, download, facts, intros, kind_sites, load_cc_domain_ranks,
-    load_intros, load_misread_official_sites, load_site_facts, load_tranco,
+    attach_facts, attach_intros, crowded_front_pages, download, facts, intros, kind_sites,
+    load_cc_domain_ranks, load_intros, load_misread_official_sites, load_site_facts, load_tranco,
     load_wikidata_official_sites, Builder, OfficialSite,
 };
 use tokio::runtime::Handle;
@@ -99,6 +99,13 @@ const FIRST_FETCH_CATCH_UP_PER_ROUND: usize = 500;
 /// Link score a site needs for [`first_fetch_catch_up`]: about the top
 /// 60,000 of the Tranco list, or any official site.
 const FIRST_FETCH_MIN_SCORE: f32 = 0.3;
+
+/// Most of the node's local sites ([`super::places::local_sites`]) crawled
+/// in a round, out of the round's budget like the catch-ups above. A
+/// desktop (1,000 homepages every 12 hours) goes through its 5,000 in 25
+/// days, about as often as they come due, and keeps most of its rounds
+/// for the sites the network gives it.
+const LOCAL_SITES_PER_ROUND: usize = 100;
 
 /// Sites without an icon here that a crawl round fetches just the icon of,
 /// most linked first: crawls that came from the network before nodes shared
@@ -564,16 +571,23 @@ async fn complete_seed_from_network(inner: &Arc<Inner>) -> Result<bool> {
 /// other site rules ([`crate::site_rules`]), up to date from the seed
 /// files already on disk, without downloading anything: sites such as
 /// scholar.google.com, which were part of their parent domain, get records
-/// of their own with their official names, and claims misread from email
-/// addresses are taken back. Only the few records that change are read
-/// from the seed files; the changes go into the records' journal
-/// ([`subdomain_changes`]) and the index is rebuilt as after a crawl, so
-/// this needs no more memory than a rebuild. A node stopped part way does
-/// it again on its next start: the changes come out the same.
+/// of their own with their official names, claims misread from email
+/// addresses are taken back, and a front page an organization shares with
+/// its seasons or ceremonies (nba.com) is its official site again. Only
+/// the few records that change are taken from the seed files; the changes
+/// go into the records' journal ([`subdomain_changes`]) and the index is
+/// rebuilt as after a crawl. Finding them reads the Wikidata claims files
+/// whole and then the facts file whole, several hundred MB on a seed of
+/// items with 3 sitelinks or more, so it holds [`Inner::one_big_job`]. A
+/// node stopped part way does it again on its next start: the changes come
+/// out the same.
 async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
     info!("the lists of sites changed: updating the records from the seed data");
     blocking(inner, |inner| {
-        let changes = subdomain_changes(&inner.paths.seed)?;
+        let changes = {
+            let _big = inner.one_big_job();
+            subdomain_changes(&inner.paths.seed)?
+        };
         let n = changes.len();
         inner.check_stop()?;
         {
@@ -600,7 +614,9 @@ async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
 /// same, taking it back off the site the built-in lists gave it, and its
 /// record; for each subdomain site with a claim or a built-in name
 /// ([`SUBDOMAIN_SITE_NAMES`]), its record, made where its parent domain
-/// has one ([`Change::SubdomainSite`]).
+/// has one ([`Change::SubdomainSite`]); for each front page more items
+/// claim than one site carries ([`crowded_front_pages`]), the record of the
+/// item that owns it, if one does.
 ///
 /// A site that earlier rules made but the rules in use do not keeps its
 /// record until the seed is folded in whole again.
@@ -635,18 +651,19 @@ fn subdomain_changes(seed: &Path) -> Result<Vec<Change>> {
         .map(|site| site.domain.as_str())
         .chain(moved.iter().map(|(_, from)| from.as_str()))
         .collect();
+    // Both files at once, as a full fold reads them: a front page's claims
+    // can come from either.
     let mut sites = Vec::new();
     for path in &files {
-        sites.extend(
-            load_wikidata_official_sites(path)?
-                .into_iter()
-                .filter(|site| {
-                    parent_domain(&site.domain).is_some()
-                        || retaken.contains(site.domain.as_str())
-                        || moved_from(site).is_some()
-                }),
-        );
+        sites.extend(load_wikidata_official_sites(path)?);
     }
+    let crowded = crowded_front_pages(&sites);
+    sites.retain(|site| {
+        parent_domain(&site.domain).is_some()
+            || retaken.contains(site.domain.as_str())
+            || moved_from(site).is_some()
+            || site.is_root_homepage() && crowded.contains(&site.domain)
+    });
     taken_back.extend(moved.into_iter().map(|(mut site, from)| {
         site.domain = from;
         site
@@ -1186,6 +1203,8 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
         store.save(std::slice::from_ref(&change))?;
         set.apply(change);
     }
+    let local = super::places::local_sites(inner);
+    add_local_sites(&mut set, &mut store, &local)?;
 
     let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
     let net = network::handle(inner).cloned();
@@ -1242,6 +1261,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     for record in key_page_catch_up(&set)
         .into_iter()
         .chain(first_fetch_catch_up(&set, now, window))
+        .chain(local_catch_up(&set, &local, now, window))
     {
         if !rechecks
             .iter()
@@ -1483,6 +1503,43 @@ fn first_fetch_catch_up(set: &RoundSites, now: u64, window: u64) -> Vec<&RoundSi
     });
     due.truncate(FIRST_FETCH_CATCH_UP_PER_ROUND);
     due
+}
+
+/// Adds the node's local sites that the records lack, so they are
+/// crawled and kept like any other site.
+fn add_local_sites(set: &mut RoundSites, store: &mut RecordStore, local: &[String]) -> Result<()> {
+    let changes: Vec<Change> = local
+        .iter()
+        .filter(|domain| set.get(domain).is_none())
+        .map(|domain| Change::Merge {
+            record: SiteRecord::new(domain.as_str()),
+        })
+        .collect();
+    if changes.is_empty() {
+        return Ok(());
+    }
+    store.save(&changes)?;
+    info!("added {} local sites to crawl", changes.len());
+    for change in changes {
+        set.apply(change);
+    }
+    Ok(())
+}
+
+/// The node's local sites due for a crawl, nearest first, at most
+/// [`LOCAL_SITES_PER_ROUND`].
+fn local_catch_up<'a>(
+    set: &'a RoundSites,
+    local: &[String],
+    now: u64,
+    window: u64,
+) -> Vec<&'a RoundSite> {
+    local
+        .iter()
+        .filter_map(|domain| set.get(domain))
+        .filter(|record| due_at(*record, window).is_none_or(|due| due <= now))
+        .take(LOCAL_SITES_PER_ROUND)
+        .collect()
 }
 
 /// Whether a site was last read by a crawler older than
@@ -2080,6 +2137,41 @@ mod tests {
     }
 
     #[test]
+    fn refolding_gives_a_crowded_front_page_to_the_item_that_owns_it() {
+        let seed = tempfile::tempdir().unwrap();
+        let mut claims = String::from("item\tlabel\twebsite\n");
+        claims.push_str("Q1\tNational Basketball Association\thttps://www.nba.com/\n");
+        let mut facts = String::from(facts::FACTS_HEADER);
+        facts.push_str("Q1\t\t\tNBA\t\t\nQ1\t\t\t\t\t114\n");
+        for season in 11..17 {
+            claims.push_str(&format!(
+                "Q{season}\t20{season}-{} NBA season\thttps://www.nba.com/\n",
+                season + 1
+            ));
+            facts.push_str(&format!("Q{season}\t\t\t\t\t40\n"));
+        }
+        claims.push_str("Q20\tExample\thttps://www.example.com/\n");
+        std::fs::write(seed.path().join(download::WIKIDATA_FILE_NAME), claims).unwrap();
+        std::fs::write(seed.path().join(facts::FACTS_FILE_NAME), facts).unwrap();
+        let changes = subdomain_changes(seed.path()).unwrap();
+        let merged: Vec<&SiteRecord> = changes
+            .iter()
+            .filter_map(|change| match change {
+                Change::Merge { record } => Some(record),
+                _ => None,
+            })
+            .collect();
+        // nba.com is the NBA's, not its seasons'; example.com did not change.
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].domain, "nba.com");
+        assert!(merged[0].signals.official_site);
+        assert_eq!(
+            merged[0].aliases,
+            ["National Basketball Association", "NBA"]
+        );
+    }
+
+    #[test]
     fn slow_builds_wait_longer_for_the_next() {
         let gap = NETWORK_REBUILD_GAP.as_secs();
         assert_eq!(network_rebuild_gap(0), gap, "none built yet");
@@ -2263,6 +2355,31 @@ mod tests {
                 "official.com"
             ]
         );
+    }
+
+    #[test]
+    fn local_sites_are_added_once_and_crawled_nearest_first_when_due() {
+        const NOW: u64 = 100 * SECONDS_PER_DAY;
+        const WINDOW: u64 = 30 * SECONDS_PER_DAY;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let mut store = RecordStore::open(&path);
+        let mut crawled = SiteRecord::new("crawled.com");
+        crawled.crawled_at = Some(NOW - SECONDS_PER_DAY);
+        let mut set = RoundSites::of([crawled, SiteRecord::new("known.com")]);
+        let local = ["near.com", "crawled.com", "known.com", "far.com"].map(String::from);
+        add_local_sites(&mut set, &mut store, &local).unwrap();
+        add_local_sites(&mut set, &mut store, &local).unwrap();
+        let domains: Vec<&str> = local_catch_up(&set, &local, NOW, WINDOW)
+            .iter()
+            .map(|r| r.domain())
+            .collect();
+        assert_eq!(domains, ["near.com", "known.com", "far.com"]);
+        drop(store);
+        let saved = load_records(&path).unwrap();
+        assert!(saved.get("near.com").is_some() && saved.get("far.com").is_some());
+        assert!(saved.get("known.com").is_none(), "only the sites it lacked");
     }
 
     #[test]

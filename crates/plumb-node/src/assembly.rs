@@ -1,6 +1,6 @@
 //! Small, pure assembly rules shared by MCP and web adapters.
 
-use plumb_core::place::{Place, OSM_COPYRIGHT_URL};
+use plumb_core::place::{is_kind_word, Place, OSM_COPYRIGHT_URL};
 use plumb_core::{normalize_text, SafeSearch};
 use plumb_index::pages::PlacedPage;
 use plumb_index::places::{parse_place_query, LocationStatus, Near, PlaceResults};
@@ -41,14 +41,18 @@ pub(crate) fn places(
     if plumb_core::Operators::parse(query).any() {
         return None;
     }
-    let asked = parse_place_query(query)?;
     let had_results = found.is_some();
     let found = not_a_name(found, hits);
     if had_results && found.is_none() {
         return None;
     }
+    // When the place index finds nothing, only a kind of place said where,
+    // or anything near me, is still a place search: "pizza in denver" and
+    // "starbucks near me", not "sort a list in python".
     let mut found = found.or_else(|| {
-        asked.said_where.then(|| PlaceResults {
+        let asked = parse_place_query(query)?;
+        let kind = asked.what.rsplit(' ').next().is_some_and(is_kind_word);
+        (asked.said_where && (kind || asked.near == Near::Me)).then(|| PlaceResults {
             what: asked.what,
             center: None,
             near_me: asked.near == Near::Me,
@@ -174,6 +178,7 @@ pub(crate) fn route_sources(
     results: &mut plumb_index::SearchResults,
     limit: usize,
     site: impl Fn(&str) -> Option<Hit>,
+    common: impl Fn(&str) -> bool,
 ) {
     if plumb_core::Operators::parse(query).any() {
         return;
@@ -181,7 +186,7 @@ pub(crate) fn route_sources(
     let Some(route) = crate::sources::route(query, answer, country) else {
         // The source a health search names, first whatever the learned
         // order did.
-        plumb_index::health::sources_lead(query, &mut results.hits, &mut results.pages);
+        plumb_index::health::sources_lead(query, &mut results.hits, &mut results.pages, &common);
         return;
     };
     let keep = results.hits.len().max(limit);
@@ -335,7 +340,11 @@ pub(crate) fn local_first(
     local: Vec<Hit>,
     limit: usize,
 ) {
-    if found.center.is_none() || found.near_me {
+    // A business named with its town ("starbucks denver") adds its places
+    // but leaves the results as they are: the name may also be a word for
+    // something else ("subway new york").
+    let business = found.guessed && !found.what.rsplit(' ').next().is_some_and(is_kind_word);
+    if found.center.is_none() || found.near_me || business {
         return;
     }
     let roots: Vec<String> = normalize_text(&found.what)
@@ -484,6 +493,16 @@ mod tests {
         assert_eq!(shown.found.hits[0].place.website, None);
         assert_eq!(shown.osm_urls[0], "https://www.openstreetmap.org/node/3");
         assert_eq!(shown.found.center.unwrap().name, "Denver");
+    }
+
+    #[test]
+    fn without_places_found_only_a_place_search_gets_a_block() {
+        let options = SearchOptions::default();
+        let status = |query| places(query, None, &[], &options, |_| false).map(|p| p.status);
+        assert_eq!(status("pizza in gotham"), Some("location_unavailable"));
+        assert_eq!(status("starbucks near me"), Some("missing_location"));
+        assert_eq!(status("sort a list in python"), None);
+        assert_eq!(status("calories in a shot"), None);
     }
 
     #[test]
