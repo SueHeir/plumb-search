@@ -11,7 +11,9 @@
 //! - the time in a place: `time in tokyo`, `what time is it in paris`, and
 //!   a time from one place in another: `3pm est to pst` (with the `zones`
 //!   feature, on by default). For a town not in its own list, a caller
-//!   that can look up towns asks [`asked_town`] and [`time_in_town`].
+//!   that can look up towns asks [`asked_town`] and [`time_in_town`];
+//! - the date of a holiday or another day kept every year: `when is
+//!   thanksgiving 2026`, `easter 2027`, `how many days until christmas`.
 //!
 //! Nothing here reads the network, the clock or the computer's settings:
 //! the caller passes the current time and the rates it has, so the same
@@ -24,6 +26,7 @@ mod calc;
 mod currency;
 mod format;
 mod help;
+mod holidays;
 #[cfg(feature = "zones")]
 mod places;
 #[cfg(feature = "zones")]
@@ -58,6 +61,8 @@ pub enum Kind {
     /// What something is, from the first sentence of its Wikipedia
     /// article ("what is a manatee"); worked out by the node too.
     Definition,
+    /// The date of a day kept every year ("when is thanksgiving").
+    Date,
 }
 
 /// An answer to the query, as shown: the question as understood, the
@@ -95,8 +100,9 @@ pub fn answer(query: &str, now: i64, rates: Option<&Rates>) -> Option<Answer> {
     if let Some(answer) = time::answer(query, now) {
         return Some(answer);
     }
-    #[cfg(not(feature = "zones"))]
-    let _ = now;
+    if let Some(answer) = holidays::answer(query, now) {
+        return Some(answer);
+    }
     units::answer(query)
         .or_else(|| rates.and_then(|rates| currency::answer(query, rates)))
         .or_else(|| calc::answer(query))

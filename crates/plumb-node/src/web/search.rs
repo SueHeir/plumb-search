@@ -680,9 +680,15 @@ pub(crate) fn route_sources(
     results: &mut SearchResults,
     limit: usize,
 ) {
-    crate::assembly::route_sources(query, answer, country, results, limit, |domain| {
-        state.backend.site(domain)
-    });
+    crate::assembly::route_sources(
+        query,
+        answer,
+        country,
+        results,
+        limit,
+        |domain| state.backend.site(domain),
+        |word| state.backend.common_word(word),
+    );
 }
 
 /// Results asked for when looking up whose profile a query asks for.
