@@ -42,8 +42,10 @@ pub(crate) enum Hint {
     /// clubs it describes would push Madrid out.
     Named,
     /// The thing's own article, when the name names one, and not its
-    /// namesakes: "how to get rid of heartburn" is not after Heartburn
-    /// (film).
+    /// namesakes: what a question asks of a thing ([`asked_how`]) is not
+    /// asked of them, so "how to get rid of heartburn" is not after
+    /// Heartburn (film), nor "what do giraffes eat" after Giraffe, the
+    /// chess engine.
     Own,
 }
 
@@ -102,13 +104,14 @@ const MEASURES: &[&str] = &[
 /// metabolism works", "meiosis" of "where does meiosis occur", "coffee" of
 /// "is coffee bad for you", "penicillin" of "who discovered penicillin",
 /// "liver" of "what does the liver do", "taylor swift" of "where is taylor
-/// swift from". The first pair a question has decides.
+/// swift from", "giraffes" of "what do giraffes eat", "cheetah" of "how
+/// fast can a cheetah run". The first pair a question has decides.
 const ASKED_BETWEEN: &[(&[&str], &[&str])] = &[
     (&["how does ", "how do "], &[" work"]),
     (&["how "], &[" works", " work"]),
     (
         &["where does ", "where do "],
-        &[" take place", " occur", " happen", " come from"],
+        &[" take place", " occur", " happen", " come from", " live"],
     ),
     (&["where is ", "where are "], &[" from"]),
     (
@@ -125,7 +128,21 @@ const ASKED_BETWEEN: &[(&[&str], &[&str])] = &[
         ],
     ),
     (&["does ", "do "], &[" really work", " work"]),
-    (&["what does ", "what do "], &[" do"]),
+    (&["what does ", "what do "], &[" do", " eat"]),
+    (&["how long does ", "how long do "], &[" live"]),
+    (
+        &["how fast can ", "how fast does ", "how fast do "],
+        &[" run", " fly", " swim"],
+    ),
+    (
+        &[
+            "how big does ",
+            "how big do ",
+            "how tall does ",
+            "how tall do ",
+        ],
+        &[" get", " grow"],
+    ),
     (&["who invented ", "who discovered "], &[""]),
     (&["when was ", "when were "], &[" invented", " discovered"]),
 ];
@@ -156,9 +173,10 @@ const MAX_ASKED_WORDS: usize = 4;
 /// What a question of how something works, how big it is, where it
 /// happens or whether it is good for you asks about: "refrigerator" of
 /// "how does a refrigerator work", "eiffel tower" of "how tall is the
-/// eiffel tower". `None` for other questions ("how do i make pancakes",
-/// where "how do" starts any question), and when what it names is not a
-/// name ([`asked_name`]): "it", or a clause.
+/// eiffel tower", "spider" of "how many legs does a spider have". `None`
+/// for other questions ("how do i make pancakes", where "how do" starts
+/// any question), and when what it names is not a name ([`asked_name`]):
+/// "it", or a clause.
 fn asked_how(q: &str) -> Option<&str> {
     let between = ASKED_BETWEEN.iter().find_map(|(leads, tails)| {
         let rest = leads.iter().find_map(|lead| q.strip_prefix(lead))?;
@@ -171,7 +189,14 @@ fn asked_how(q: &str) -> Option<&str> {
             .find_map(|verb| rest.strip_prefix(verb))?;
         MEASURES.contains(&measure).then_some(rest)
     };
-    asked_name(between.or_else(measured)?)
+    let counted = || {
+        let rest = q.strip_prefix("how many ")?;
+        let (_, rest) = rest
+            .split_once(" does ")
+            .or_else(|| rest.split_once(" do "))?;
+        rest.strip_suffix(" have")
+    };
+    asked_name(between.or_else(measured).or_else(counted)?)
 }
 
 /// `text` as the name a question asks about, without a leading "a", "an"
@@ -293,18 +318,17 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
         .map(|rest| format!("what is {rest}"));
     let mut name = asked.as_deref().unwrap_or(&q);
     let mut hint = None;
-    if let Some(rest) =
-        asked_how(name).or_else(|| HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)))
-    {
-        name = rest;
-        hint = Some(Hint::Any);
-    } else if let Some(rest) = REMEDY_LEADS
-        .iter()
-        .find_map(|lead| name.strip_prefix(lead))
-        .and_then(asked_name)
-    {
+    if let Some(rest) = asked_how(name).or_else(|| {
+        REMEDY_LEADS
+            .iter()
+            .find_map(|lead| name.strip_prefix(lead))
+            .and_then(asked_name)
+    }) {
         name = rest;
         hint = Some(Hint::Own);
+    } else if let Some(rest) = HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)) {
+        name = rest;
+        hint = Some(Hint::Any);
     }
     if let Some((rest, tail_hint)) = HINT_TAILS
         .iter()
