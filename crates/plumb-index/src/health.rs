@@ -359,7 +359,7 @@ pub(crate) fn is_medical(query: &str) -> bool {
 /// MedlinePlus". Lowercase names match the folded query; a name with
 /// capitals matches only as written, so "who" in a question is not WHO.
 const SOURCES: &[(&str, &[&str])] = &[
-    ("cdc.gov", &["cdc"]),
+    ("cdc.gov", &["cdc", "centers for disease control"]),
     ("www.nhs.uk", &["nhs"]),
     ("medlineplus.gov", &["medlineplus", "medline plus"]),
     ("mayoclinic.org", &["mayoclinic", "mayo clinic"]),
@@ -371,9 +371,12 @@ const SOURCES: &[(&str, &[&str])] = &[
     ("webmd.com", &["webmd"]),
     ("healthline.com", &["healthline"]),
     ("healthychildren.org", &["healthychildren"]),
-    ("nih.gov", &["NIH"]),
-    ("fda.gov", &["FDA"]),
-    ("ecdc.europa.eu", &["ecdc"]),
+    ("nih.gov", &["NIH", "national institutes of health"]),
+    ("fda.gov", &["FDA", "food and drug administration"]),
+    (
+        "ecdc.europa.eu",
+        &["ecdc", "european centre for disease prevention and control"],
+    ),
 ];
 
 /// The sites `query` asks for as its source, by domain: a health source
@@ -996,6 +999,11 @@ mod tests {
             ["ecdc.europa.eu"]
         );
         assert_eq!(named_sources("lisinopril www.drugs.com"), ["drugs.com"]);
+        // Or its whole name.
+        assert_eq!(
+            named_sources("European Centre for Disease Prevention and Control"),
+            ["ecdc.europa.eu"]
+        );
         let mut hits = vec![hit("flu.example", false, 0.3)];
         authorities_first(
             "ecdc.europa.eu seasonal influenza",
