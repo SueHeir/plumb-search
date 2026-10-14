@@ -107,12 +107,12 @@ flowchart LR
 
 - **The window** shows the node's search page, private search, history, your search profile and the panel. Result links and other sites open in your usual browser. The window has its own search profile; [Your profile on other computers](searching.md#your-profile-on-other-computers) says how to share one with a browser. The app defines no commands and grants no capabilities, so no page in the window can call into the app.
 - **The node** listens on `127.0.0.1:7586`, so other computers cannot reach it. When another program has that port, the app takes a free one and says so; a browser search engine set up with 7586 then gets no answer until the port is free and the app starts again.
-- **Closing the window** keeps the app running, so your browser's searches keep working. It stays in the menu bar on macOS and in the notification area on Windows and Linux. The icon's menu has **Open Plumb Search**, **Start at login** and **Quit Plumb Search**. With **Start at login** checked, the app starts in the background when you log in, without opening its window. Starting the app again while it runs brings its window back, and so does clicking its Dock icon on macOS.
+- **Closing the window** keeps the app running, so your browser's searches keep working. It stays in the menu bar on macOS and in the notification area on Windows and Linux (if the system refuses the icon, closing the window quits the app). The icon's menu has **Open Plumb Search**, **Start at login** and **Quit Plumb Search**. With **Start at login** checked, the app starts in the background when you log in, without opening its window. Starting the app again while it runs brings its window back, and so does clicking its Dock icon on macOS.
 - **The network.** The app joins the Plumb network through plumbsearch.org, on ports the system picks, with no port to forward. The panel's Network & privacy section turns it off.
 
 ## First launch
 
-The window shows "Starting..." and then the search page. **The first launch needs an internet connection.** The node sets up from the network: it takes the 50,000 best-known sites from a node it trusts (plumbsearch.org's by default), with their names, ranks and Wikidata facts, and search is ready within minutes. The panel's overview then offers **Set up my node**, which asks how much more of the network's crawls to keep on this computer:
+The window shows "Starting..." and then the search page. **The first launch needs an internet connection.** The node sets up from the network: it takes the 50,000 best-ranked sites from a node it trusts (plumbsearch.org's by default), builds an index from them, and search is ready within minutes. The panel's overview then offers **Set up my node**, which asks how much more of the network's crawls to keep on this computer:
 
 | Choice | Storage limit | Holds about |
 | --- | --- | --- |

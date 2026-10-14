@@ -181,8 +181,8 @@ The token can read the node's status and change its settings, features and refre
 
 A few things are kept to the computer Plumb runs on: changing settings on the panel, plugin buttons, and the MCP tools that fetch or keep things for your AI apps (`read_page`, findings, and sharing findings with other nodes). Plumb counts a request as local only when all three hold:
 
-- it connects from the machine itself (`127.0.0.1` or `::1`),
-- it was sent to a local name (`localhost`, a `127.x.x.x` address or `[::1]`), and
+- it connects from the machine itself (a loopback address such as `127.0.0.1` or `::1`),
+- it was sent to a local name (`localhost` or a name under it, a `127.x.x.x` address or `[::1]`), and
 - it has no `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header.
 
 A proxy or tunnel on the same machine passes the first test for everyone it lets in, so it must fail one of the other two:
@@ -273,7 +273,7 @@ docker run -d --name plumb ...   # the same command as before
 
 These come from the estimates the node itself plans with ([node/fill.rs](../crates/plumb-node/src/node/fill.rs), [web/setup.rs](../crates/plumb-node/src/web/setup.rs)).
 
-- **Memory.** Memory peaks while the node builds an index, at about 2.5 KB a site (`BUILD_BYTES_PER_SITE`): about 2.2 GB for a million sites. Taking in sites from the network stops before a build would need more than half the machine's memory, or the container's memory limit when that is lower (`BUILD_MEMORY_PERCENT`): about 800,000 sites on a 4 GB server. With less memory, use a smaller `--sites` or `--profile desktop`. A `--crawl-only` node builds no index and needs about 500 bytes a site during a crawl round.
+- **Memory.** Memory peaks while the node builds an index: a build of a million sites peaks at about 2.2 GB, and the node plans with 2.5 KB a site (`BUILD_BYTES_PER_SITE`) to leave room. Taking in sites from the network stops before a build would need more than half the machine's memory, or the container's memory limit when that is lower (`BUILD_MEMORY_PERCENT`): about 800,000 sites on a 4 GB server. With less memory, use a smaller `--sites` or `--profile desktop`. A `--crawl-only` node builds no index and needs about 500 bytes a site during a crawl round.
 - **Disk.** A site takes about 5 KB of disk with its index entry and its vector for search by meaning, so a million sites take about 5 GB. The node writes a new index and a new `records.jsonl` before it deletes the old ones, so leave room for a second copy. A node in the network also keeps the crawl batches it sees for 35 days in `/data/net` (`--keep-batches-days`). A server has no storage limit by default; set `storage_limit_mb` (see [Settings](#settings)) to keep less.
 - **CPU and bandwidth.** Index builds and crawls are bursts, and the node is idle between refreshes. `--refresh-hours` and `--crawl-per-refresh` set how much it crawls, and `download_limit_mb_per_day` in `settings.json` caps a day's downloads.
 

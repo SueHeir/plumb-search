@@ -112,7 +112,7 @@ The crawl fetches nothing else. Feeds are checked by a separate node job through
 | `feed` | The first `<link rel="alternate">` to an RSS or Atom feed | The node's news watcher |
 | `icons` | `<link rel="icon">` and Apple touch icons, best first, at most 3, no SVG | The icon fetch |
 
-Text is decoded as UTF-8 when it is valid UTF-8, whatever the server says; otherwise in the charset the byte order mark, the `Content-Type` header or the first 1,024 bytes of the page declare. Boilerplate is judged a block at a time (the text between two elements that start a new line), after the rules used to clean the C4 corpus, kept conservative so brief facts stay.
+A byte order mark decides the charset. Without one, a page that is valid UTF-8 is read as UTF-8 whatever the server says, and any other page in the charset its `Content-Type` header or its first 1,024 bytes declare. Boilerplate is judged a block at a time (the text between two elements that start a new line), after the rules used to clean the C4 corpus, kept conservative so brief facts stay.
 
 `to_records` turns results into records: one per fetched homepage, stamped with `crawled_at` and `crawl_version`, and one per linked domain, carrying the texts of links to its front page and `signals.linking_domains`. Link text counts once per linking site, only on links to a front page (text on a deeper link names that page), and never when generic ("click here", "official website"). A domain seen only as a link target gets a record of its own, which is how a node discovers new sites. An `OffsiteRedirect` marks the domain with a `Redirect` and adds an empty record for where it points.
 

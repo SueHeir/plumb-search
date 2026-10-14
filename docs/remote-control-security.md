@@ -28,7 +28,7 @@ On the node's own computer, either open the panel's **Remote control** section a
 | `plumb remote-control on` | Makes a new token, prints it once with the HTTPS certificate's fingerprint, and replaces any earlier token |
 | `plumb remote-control on --allow-public` | The same, and also takes requests from public addresses and through reverse proxies |
 | `plumb remote-control off` | Turns it off: no token works any more |
-| `plumb remote-control status` | Says whether it is on and from where, and prints the fingerprint |
+| `plumb remote-control status` | Says whether it is on and from where, and prints the fingerprint once there is a certificate |
 
 Each takes `--data DIR`, the node's data folder (default: the current folder, which is `/data` in the Docker image). A token is `plumb_` and 64 hex digits. The node keeps only its SHA-256, in `remote-control.json` in the data folder, and compares hashes in constant time. It reads that file on every request, so each change takes effect at once, without a restart.
 

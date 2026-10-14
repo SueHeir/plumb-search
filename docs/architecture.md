@@ -47,7 +47,7 @@ flowchart LR
 
 Three ideas shape the design:
 
-- **Sites, not every page.** For each site a node keeps its names, homepage title and description, key terms, the words other sites link to it with, and its Wikidata facts: about 1 KB a site. Single pages come from open **page sets** (Wikipedia, GitHub, Stack Exchange, packages, books, papers and more), from inner pages a node's own searches asked for, and places from OpenStreetMap. That is what lets an ordinary computer hold a useful index. See [search.md](search.md).
+- **Sites, not every page.** For each site a node keeps its names, homepage title and description, key terms, the words other sites link to it with, and its Wikidata facts. Single pages come from open **page sets** (Wikipedia, GitHub, Stack Exchange, packages, books, papers and more), from inner pages a node's own searches asked for, and places from OpenStreetMap. That is what lets an ordinary computer hold a useful index. See [search.md](search.md).
 - **Shared crawling, checked.** Each node crawls a random daily share of all sites, signs what it saw, and passes it on. Other nodes take a crawl in only when they can check it: a trusted crawler, or two crawlers that agree. See [network.md](network.md).
 - **The searcher's data stays on the node.** History, About you and what clicks teach stay on the node that serves the browser. Network searches send hashed buckets, never the query, and pages load nothing from other servers. See [searching.md](searching.md#privacy) and [private-search.md](private-search.md).
 
@@ -137,12 +137,13 @@ flowchart LR
 **The worker** ([`node/worker.rs`](../crates/plumb-node/src/node/worker.rs)) looks at what is on disk each turn and does the next piece of work, so a restart simply resumes:
 
 1. No records: set up from a trusted node's sites, or else the Tranco list, and serve a quick first index.
-2. No index, or one older than the records: build one.
-3. Seed data missing (Wikidata's official websites, Common Crawl ranks): fetch it and fold it in.
-4. Homepages left in a crawl round: crawl them, then rebuild.
-5. A refresh due: start a round. Otherwise wait.
-
-A node in the network also folds in the records other nodes sent, and rebuilds once 2,000 have come in (`REBUILD_AFTER_RECORDS`), at most every 30 minutes.
+2. Records other nodes sent waiting in `net/inbox.jsonl`: fold them in.
+3. Over the storage limit, or topics changed: drop the least useful sites and rebuild.
+4. No index, an index older than the records with no crawl round under way, or 2,000 records from other nodes since the last build (`REBUILD_AFTER_RECORDS`, at most every 30 minutes): build one.
+5. Wikidata's official websites not fetched yet: fetch them and fold them in. After a quick start the first crawl goes first, so the node has something to share sooner.
+6. Background updates off, outside the crawl hours, or a limit reached: wait.
+7. Homepages left in a crawl round: crawl them, then rebuild.
+8. A refresh due or asked for: start a round. Otherwise wait.
 
 **Jobs** start through `supervise`, which starts a job again after it panics, waiting a minute at first and up to an hour as panics repeat. Each job checks `stopping()` in its loops. Jobs that can take a gigabyte or so of memory (page and place index builds, embedding rounds, taking another node's vectors) hold `one_big_job()` while they run, so a small server never runs two at once.
 

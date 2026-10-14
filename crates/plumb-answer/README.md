@@ -64,7 +64,7 @@ The node fetches the data that answers need and this crate does not; the request
 | Data | From | When | Set in |
 | --- | --- | --- | --- |
 | Currency rates | `ECB_RATES_URL` (the ECB's `eurofxref-daily.xml`) | When `may_need_rates` says a query may need them; fetched again after 6 hours, or 10 minutes after a failed fetch, when older rates are used meanwhile; a page waits at most 4 seconds | plumb-node [web/answers.rs](../plumb-node/src/web/answers.rs) |
-| Forecasts | Open-Meteo (`api.open-meteo.com/v1/forecast`), sent only the town's coordinates rounded to about a kilometre | When a query asks for the weather; fetched again after 30 minutes, or 5 minutes after a failed fetch; up to 2,000 places kept; a page waits at most 3 seconds | plumb-node [web/weather.rs](../plumb-node/src/web/weather.rs) |
+| Forecasts | Open-Meteo (`api.open-meteo.com/v1/forecast`), sent only the town's coordinates rounded to about a kilometer | When a query asks for the weather; fetched again after 30 minutes, or 5 minutes after a failed fetch; up to 2,000 places kept; a page waits at most 3 seconds | plumb-node [web/weather.rs](../plumb-node/src/web/weather.rs) |
 
 For weather, `weather::asked` reads the question, the node finds the place in its own places (or the town the searcher gave on the About you page) and fetches the forecast, and `weather::answer` words it, crediting `weather::SOURCE` ("Open-Meteo.com (CC BY 4.0)").
 

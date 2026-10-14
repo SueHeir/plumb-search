@@ -132,7 +132,7 @@ The page index is searched next to the sites: a page is found by name only, and 
 ### Invariants
 
 - **Scores go down the list.** Callers sort by score after this crate (a browser's own likes, network results merged in), so every step that moves a hit (the learned order, a suggested site moved second, health sources) trades scores so the order survives a sort.
-- **The model matches the features.** `learned_model.json` names the 45 features it was trained on (`FEATURES`), and `Model::from_json` refuses any other list. Changing a feature means training the model again.
+- **The model matches the features.** `learned_model.json` names the features it was trained on, and `Model::from_json` refuses a model whose features are not the first of `FEATURES`, in order. Add a feature at the end; renaming, reordering or removing one means training the model again.
 - **The browser ranks alike.** [plumb-private's rank.rs](../plumb-private/src/rank.rs) copies the formula and constants. A change to either needs the same change there; its tests compare the two.
 - **Ranking refactors change nothing.** A refactor must leave eval results identical on the same index. A change that moves results goes through the evals in [eval/](../../eval/README.md).
 - **The page index version.** Change `pages::PAGE_INDEX_VERSION` when the page index's fields or analysis change. A node names its page index by a key that includes it, so a new version makes nodes build the page index again.
@@ -173,7 +173,7 @@ plumb-tools index --records records.jsonl --index DIR   # build a site index
 plumb-tools search --index DIR us bank                   # search it
 plumb-tools spelling --index DIR                         # what the spelling model learned
 plumb-tools eval --index DIR --queries eval/brand_queries.tsv
-plumb serve --index DIR                                  # a search page over an index
+plumb serve --index DIR                                  # the search page and JSON API over an index
 ```
 
 ## Tests

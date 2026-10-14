@@ -182,9 +182,11 @@ The storage limit (MB the data folder may take) and the download limit (MB of cr
 Under a storage limit:
 
 - Crawling pauses while the data folder is over the limit; search keeps working.
-- Filling from trusted nodes stops at 90% of the limit, and before an index build would need more than half the machine's memory (at 2,500 bytes a site, a 4 GB server stops at about 800,000 sites).
+- Filling from trusted nodes stops at 90% of the limit. Past that, a site another node shares is taken in only when it is about one of the node's topics or an official website.
 - After half an hour over the limit, the node drops the sites with the lowest link score until it is back at 85%, and builds the index without them. It never drops the best 100,000 sites, official websites, sites about its topics, sites a searcher opened or put first on About you, or the network's own site. Dropped sites leave only this node's index.
-- It keeps crawl batches 14 days instead of 35, and other crawlers' batches take at most 20% of the limit.
+- In the network, it keeps crawl batches 14 days instead of 35, and other crawlers' batches take at most 20% of the limit.
+
+With or without a limit, filling stops before an index build would need more than half the machine's memory (at 2,500 bytes a site, a 4 GB server stops at about 800,000 sites).
 
 **Focus topics** (`--focus games`, repeatable, or the panel's Focus topics; the two add up) make the node crawl sites about those topics first, up to half of each round, and twice as often. With a storage limit, filling keeps a quarter of the limit for sites about its topics and, with search history on, the interests on its browsers' About you pages. Focus topics are public in effect, since other nodes can tell from what this node crawls. Filling asks for the same pages whatever the topics, so the node it asks learns nothing from that.
 
@@ -310,7 +312,8 @@ plumb ingest --tranco data/tranco-top-1m.csv.zip \
 #    Optional: add --wat with Common Crawl WAT files, listed in each crawl's
 #    https://data.commoncrawl.org/crawl-data/<CC-MAIN-YYYY-WW>/wat.paths.gz.
 
-# 3. Crawl homepages: half sites never tried, half sites due again, best first.
+# 3. Crawl homepages: half sites never tried, half sites due again,
+#    best link score first.
 #    Each batch goes to data/records.jsonl.journal at once, so an interrupted
 #    crawl keeps what it fetched.
 plumb-tools crawl --records data/records.jsonl --top 10000
