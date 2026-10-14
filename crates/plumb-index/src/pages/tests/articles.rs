@@ -680,6 +680,35 @@ fn articles_are_found_by_what_they_say_of_themselves() {
 }
 
 #[test]
+fn who_played_a_role_names_the_character() {
+    let (_dir, s) = searcher(&[
+        page("Joker (character)", 500_000, &[]),
+        page("The People's Joker", 40_000, &[]),
+        page("Joker (playing card)", 50_000, &[]),
+        page("Woody (Toy Story)", 100_000, &[]),
+        page("Woodie King Jr.", 5_000, &[]),
+    ]);
+    let first = |q: &str| {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .find(|hit| hit.named)
+            .map(|hit| hit.page.title)
+    };
+    assert_eq!(
+        first("who played the joker").as_deref(),
+        Some("Joker (character)")
+    );
+    assert_eq!(
+        first("who voiced woody").as_deref(),
+        Some("Woody (Toy Story)")
+    );
+    assert_eq!(
+        hinted_name("who plays spiderman"),
+        Some(("spiderman".into(), Hint::Any))
+    );
+}
+
+#[test]
 fn a_bands_members_name_the_band() {
     let (_dir, s) = searcher(&[
         page("BTS", 900_000, &[]),
@@ -1010,6 +1039,9 @@ fn comparisons_find_the_articles_on_both_sides() {
             "weather",
             "climate",
         ),
+        ("is a tomato a fruit", "tomato", "fruit"),
+        ("is the sun a star", "sun", "star"),
+        ("is pluto a planet", "pluto", "planet"),
     ] {
         assert_eq!(compared(query), Some([a.into(), b.into()]), "{query:?}");
     }
@@ -1019,6 +1051,11 @@ fn comparisons_find_the_articles_on_both_sides() {
         "batman v superman",
         "how to choose a roth ira vs a traditional ira",
         "difference between",
+        "is it a good idea",
+        "is there a god",
+        "is a virus alive",
+        "is bitcoin a good investment",
+        "is it safe to eat a raw egg",
     ] {
         assert_eq!(compared(query), None, "{query:?}");
     }
@@ -1044,6 +1081,15 @@ fn comparisons_find_the_articles_on_both_sides() {
     let hits = s.search("crocodile vs alligator", 5).unwrap();
     assert_eq!(hits[0].page.title, "Crocodiles vs. Alligators", "{hits:?}");
     assert!(hits.iter().all(|hit| !hit.named), "{hits:?}");
+    let (_dir, s) = searcher(&[page("Tomato", 300_000, &[]), page("Fruit", 250_000, &[])]);
+    let hits = s.search("is a tomato a fruit", 5).unwrap();
+    let mut named: Vec<_> = hits
+        .iter()
+        .filter(|hit| hit.named)
+        .map(|hit| hit.page.title.as_str())
+        .collect();
+    named.sort();
+    assert_eq!(named, ["Fruit", "Tomato"], "{hits:?}");
 }
 
 #[test]

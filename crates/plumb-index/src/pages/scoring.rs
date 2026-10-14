@@ -1333,6 +1333,7 @@ impl PageSearcher {
         if !office && !super::HONORIFICS.contains(&title) {
             return;
         }
+        let elected = super::ELECTED.contains(&title);
         let words = |text: &str| analysis::tokens(&self.words, text);
         let fits = |page: &Page| {
             let names: HashSet<String> = std::iter::once(&page.title)
@@ -1343,7 +1344,7 @@ impl PageSearcher {
                 words(&page.title)
                     .into_iter()
                     .chain(words(page.description.as_deref().unwrap_or("")))
-                    .any(|word| word == title)
+                    .any(|word| word == title || elected && word == "politician")
             };
             page.is_article() && name.iter().all(|word| names.contains(word)) && (!office || said())
         };

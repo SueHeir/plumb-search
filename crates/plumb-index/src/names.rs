@@ -9,6 +9,7 @@ use tantivy::postings::Postings;
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{DocAddress, DocSet, TantivyDocument, Term, TERMINATED};
 
+use crate::hits::{is_garbled, is_unfilled};
 use crate::query::{matching_docs, ParsedQuery, COMPARISON_WORDS};
 use crate::rank::{domain_of, link_scores};
 use crate::{
@@ -58,25 +59,33 @@ const MAX_LINK_NAME_DOCS: u32 = 1_000;
 
 impl Searcher {
     /// Whether anything of the site's own says what it is: a title, a
-    /// description or Wikidata's words.
+    /// description or Wikidata's words. A description in the wrong
+    /// encoding or a template's placeholder ([`is_garbled`],
+    /// [`is_unfilled`]) says nothing, as it is not shown.
     pub(crate) fn says_what_it_is(
         &self,
         searcher: &tantivy::Searcher,
         addr: DocAddress,
     ) -> Result<bool> {
         let segment = searcher.segment_reader(addr.segment_ord);
-        for field in [
-            self.fields.title,
-            self.fields.description,
-            self.fields.about,
-        ] {
-            if let Some(norms) = segment.fieldnorms_readers().get_field(field)? {
-                if norms.fieldnorm(addr.doc_id) > 0 {
-                    return Ok(true);
-                }
-            }
+        let has = |field| -> Result<bool> {
+            Ok(segment
+                .fieldnorms_readers()
+                .get_field(field)?
+                .is_some_and(|norms| norms.fieldnorm(addr.doc_id) > 0))
+        };
+        if has(self.fields.title)? || has(self.fields.about)? {
+            return Ok(true);
         }
-        Ok(false)
+        if !has(self.fields.description)? {
+            return Ok(false);
+        }
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let says = doc
+            .get_all(self.fields.description)
+            .filter_map(|value| value.as_str())
+            .any(|text| !is_unfilled(text) && !is_garbled(text));
+        Ok(says)
     }
 
     /// Whether the site is the official site of a Wikidata item.
@@ -512,6 +521,28 @@ pub(crate) fn typed_domain(query: &str) -> Option<String> {
         return None;
     }
     registrable_domain(query)
+}
+
+/// `query` without the "www" an address starts with, which names no site:
+/// "www.ikea" is searched as "ikea", not also for the sites whose domain
+/// label is "www" (www.gov.uk, on a public suffix) or that links call
+/// "www". An address whose site needs it ("www.gov.uk") keeps it.
+pub(crate) fn without_www(query: &str) -> &str {
+    let query = query.trim();
+    let rest = match query.get(..4) {
+        Some(www) if www.eq_ignore_ascii_case("www.") || www.eq_ignore_ascii_case("www ") => {
+            query[4..].trim_start()
+        }
+        _ => return query,
+    };
+    // "www.gov.uk" needs it, as gov.uk is no site's address. "www.ikea"
+    // is a site's address on IKEA's own ending, but it means ikea.com.
+    let needs_it = rest.contains('.') && typed_domain(rest) != typed_domain(query);
+    if rest.contains(char::is_alphanumeric) && !needs_it {
+        rest
+    } else {
+        query
+    }
 }
 
 /// Whether `text` holds `words` consecutive words whose [`kind_key`] is

@@ -266,6 +266,46 @@ fn operators_pick_and_list_pages() {
 }
 
 #[test]
+fn a_commands_options_find_the_questions_about_them() {
+    let question = |title: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some("git, npm".into()),
+            item: Some(item.into()),
+            views: 500_000,
+            ..Article::default()
+        })
+    };
+    let (_dir, s) = searcher(&[
+        question(
+            "What does --save-dev mean in npm install grunt --save-dev?",
+            "1",
+        ),
+        question(
+            "What is the difference between git checkout -b and git branch?",
+            "2",
+        ),
+    ]);
+    for (query, asked) in [
+        ("npm install --save-dev", "What does --save-dev"),
+        (
+            "git checkout -b",
+            "What is the difference between git checkout -b",
+        ),
+    ] {
+        let ops = Operators::parse(query);
+        let found = s.search(&ops.words, 5).unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|hit| hit.page.title.starts_with(asked) && operators_allow(&ops, &hit.page)),
+            "{query}: {:?}",
+            titles(&found)
+        );
+    }
+}
+
+#[test]
 fn questions_without_the_word_asked_about_are_not_found() {
     let question = |title: &str, tags: &str, item: &str| {
         Page::from_question(Article {
@@ -1144,12 +1184,16 @@ fn untitled_sites_take_their_article_s_title() {
     // A domain of the initials: nba.com.
     let mut nba = page("National Basketball Association", 4_000, &[]);
     nba.site = Some("nba.com".into());
-    let (_dir, searcher) = searcher(&[notion, show, cbc, nba]);
+    // Some words in full, some by their initials.
+    let mut times = page("The New York Times", 6_000, &[]);
+    times.site = Some("nytimes.com".into());
+    let (_dir, searcher) = searcher(&[notion, show, cbc, nba, times]);
     let mut sites = vec![
         site("notion.so", true),
         site("other.com", false),
         site("cbc.ca", true),
         site("nba.com", true),
+        site("nytimes.com", true),
     ];
     sites[1].title = Some("Other".into());
     searcher.title_untitled(&mut sites).unwrap();
@@ -1160,6 +1204,7 @@ fn untitled_sites_take_their_article_s_title() {
         sites[3].title.as_deref(),
         Some("National Basketball Association")
     );
+    assert_eq!(sites[4].title.as_deref(), Some("The New York Times"));
 }
 
 #[test]
@@ -1170,7 +1215,11 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
     valve.site = Some("steampowered.com".into());
     let mut steam = page("Steam (service)", 4_000, &[]);
     steam.site = Some("steampowered.com".into());
-    let (_dir, searcher) = searcher(&[post, valve, steam]);
+    // Twitter's own article has x.com now; this one only names twitter.com
+    // as its website.
+    let mut snowflake = page("Snowflake ID", 2_000, &[]);
+    snowflake.site = Some("twitter.com".into());
+    let (_dir, searcher) = searcher(&[post, valve, steam, snowflake]);
     let titled = |domain: &str, title: &str, official: bool| crate::Hit {
         title: Some(title.into()),
         official,
@@ -1185,11 +1234,59 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
         titled("steampowered.com", "Welcome to Steam", true),
         // Not official: nothing says which name is its own.
         titled("nypost.com", "California Post", false),
+        titled("twitter.com", "X. It’s what’s happening / X", true),
     ];
     searcher.title_untitled(&mut sites).unwrap();
     assert_eq!(sites[0].title.as_deref(), Some("New York Post"));
     assert_eq!(sites[1].title.as_deref(), Some("Welcome to Steam"));
     assert_eq!(sites[2].title.as_deref(), Some("California Post"));
+    // No article its domain spells: it keeps its own title.
+    assert_eq!(
+        sites[3].title.as_deref(),
+        Some("X. It’s what’s happening / X")
+    );
+}
+
+#[test]
+fn a_web_address_names_the_article_about_its_site() {
+    let mut bank = page("X.com (bank)", 3_000, &[]);
+    bank.site = Some("x.com".into());
+    let mut social = page("X (social network)", 90_000, &["Twitter"]);
+    social.site = Some("x.com".into());
+    let mut snowflake = page("Snowflake ID", 2_000, &[]);
+    snowflake.site = Some("twitter.com".into());
+    let mut website = page("nytimes.com", 2_000, &[]);
+    website.site = Some("nytimes.com".into());
+    let mut paper = page("The New York Times", 50_000, &[]);
+    paper.site = Some("nytimes.com".into());
+    let (_dir, searcher) = searcher(&[bank, social, snowflake, website, paper]);
+    let first = |query: &str| {
+        searcher
+            .search(query, 10)
+            .unwrap()
+            .into_iter()
+            .next()
+            .map(|hit| (hit.page.title, hit.named))
+    };
+    let social = Some(("X (social network)".to_string(), true));
+    assert_eq!(first("x.com"), social);
+    assert_eq!(first("WWW.X.COM"), social);
+    let found = searcher.search("x.com", 10).unwrap();
+    let placed = place_pages("x.com", &[site("x.com", true)], found);
+    assert_eq!(placed[0].under.as_deref(), Some("x.com"));
+    assert_eq!(placed[0].hit.page.title, "X (social network)");
+    // The article called by the address alone is what it names.
+    assert_eq!(
+        first("nytimes.com"),
+        Some(("nytimes.com".to_string(), true))
+    );
+    // Its domain spells no article's name, nor is an inner site's address
+    // X's.
+    assert_ne!(
+        first("twitter.com").map(|(title, _)| title),
+        Some("Snowflake ID".into())
+    );
+    assert_ne!(first("mail.x.com"), social);
 }
 
 #[test]
@@ -1277,6 +1374,13 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
             "President of the United States",
         ),
         page("General Motors", 30_000, &[]),
+        described(
+            "Bernie Sanders",
+            60_000,
+            &[],
+            "American politician and activist (born 1941)",
+        ),
+        described("Colonel Sanders", 20_000, &[], "American businessman"),
     ]);
     let named = |q: &str| named_titles(&s, q);
     assert_eq!(named("president kennedy"), ["John F. Kennedy"]);
@@ -1287,6 +1391,8 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
     assert!(named("president bush").is_empty());
     assert_eq!(named("president lincoln"), ["Abraham Lincoln"]);
     assert_eq!(named("general motors"), ["General Motors"]);
+    // A senator's description often says only "politician".
+    assert_eq!(named("senator bernie sanders"), ["Bernie Sanders"]);
 }
 
 #[test]

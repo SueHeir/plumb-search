@@ -128,6 +128,15 @@ const HINT_LEADS: &[&str] = &[
     "winner of ",
     "winners of the ",
     "winners of ",
+    // "who played the joker" asks about the Joker.
+    "who played the ",
+    "who played ",
+    "who plays the ",
+    "who plays ",
+    "who voiced the ",
+    "who voiced ",
+    "who voices the ",
+    "who voices ",
     "what does ",
     "define ",
     "definition of ",
@@ -197,7 +206,7 @@ const ASKED_BETWEEN: &[(&[&str], &[&str])] = &[
 /// name: "how do i make it work", "how many hours do nurses work".
 const NOT_NAMES: &[&str] = &[
     "it", "this", "that", "they", "these", "those", "you", "i", "we", "he", "she", "to", "do",
-    "does", "did", "is", "are", "can", "should", "many", "much", "long", "often",
+    "does", "did", "is", "are", "can", "should", "many", "much", "long", "often", "there", "today",
 ];
 
 /// The most words a question's name has: more are a clause.
@@ -261,8 +270,9 @@ const COMPARING_WORDS: &[&str] = &[
 
 /// The two things a comparison sets side by side, each looked up as a
 /// name: "mitosis" and "meiosis" of "mitosis vs meiosis" or "difference
-/// between mitosis and meiosis". `None` for other queries, and when a
-/// side is not a name ([`asked_name`]).
+/// between mitosis and meiosis", and "tomato" and "fruit" of "is a tomato
+/// a fruit". `None` for other queries, and when a side is not a name
+/// ([`asked_name`]).
 pub(crate) fn compared(query: &str) -> Option<[String; 2]> {
     let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?'))
         .to_lowercase()
@@ -278,6 +288,17 @@ pub(crate) fn compared(query: &str) -> Option<[String; 2]> {
         [" vs. ", " vs ", " versus "]
             .iter()
             .find_map(|word| q.split_once(word))
+    })
+    .or_else(|| {
+        // Whether one is a kind of the other, unless it asks whether it
+        // is a good one: "is bitcoin a good investment".
+        let rest = ["is ", "are "]
+            .iter()
+            .find_map(|lead| q.strip_prefix(lead))?;
+        [" a ", " an "]
+            .iter()
+            .find_map(|article| rest.split_once(article))
+            .filter(|(_, kind)| !kind.starts_with("good ") && !kind.starts_with("bad "))
     })?;
     let side = |text: &str| asked_name(text.trim()).map(str::to_string);
     Some([side(a)?, side(b)?])
@@ -1413,7 +1434,10 @@ impl PageSearcher {
         let mut hits = if paper.constrained {
             self.search_papers(&paper, limit)?
         } else {
-            self.search_naming_docs(query, &Operators::default(), false, limit)?
+            let mut hits = self.search_naming_docs(query, &Operators::default(), false, limit)?;
+            self.name_typed_site(query, &mut hits)?;
+            hits.truncate(limit);
+            hits
         };
         let mut records = records_named(query);
         hits.retain(|hit| !records.iter().any(|record| record.page.url == hit.page.url));

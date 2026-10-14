@@ -1,5 +1,6 @@
 //! Words of other scripts: Japanese, Chinese and Thai, written without
-//! spaces, and Arabic, written with or without some of its marks.
+//! spaces, and Arabic, Greek and Russian, written with or without some of
+//! their marks.
 
 use super::*;
 
@@ -93,6 +94,29 @@ fn arabic_typed_bare_finds_its_marked_spelling_too() {
         ("ايران", &["iran.example"]),
         ("مصري", &["masry.example"]),
         ("مصرى", &["masry.example"]),
+    ] {
+        assert_eq!(found(&searcher, query), expected, "{query}");
+    }
+}
+
+#[test]
+fn greek_and_russian_typed_bare_find_their_accented_spelling_too() {
+    let site_titled =
+        |domain: &str, title: &str| site(domain, Some(title), None, &[], &[], ranked(900, 5_000));
+    let (_dir, searcher) = build(&[
+        site_titled("thess.example", "Δήμος Θεσσαλονίκη"),
+        site_titled("blog.example", "ΘΕΣΣΑΛΟΝΙΚΗ ΣΗΜΕΡΑ"),
+        site_titled("athens.example", "ΑΘΗΝΑΣ news"),
+        site_titled("korolev.example", "Королёв наукоград"),
+        site_titled("orel.example", "Королев и Орел"),
+    ]);
+    for (query, expected) in [
+        ("θεσσαλονικη", &["blog.example", "thess.example"][..]),
+        ("королев", &["orel.example", "korolev.example"]),
+        ("θεσσαλονίκη", &["thess.example"]),
+        ("королёв", &["korolev.example"]),
+        // A capital Σ lowercases to σ, not the final ς typed.
+        ("αθηνας", &["athens.example"]),
     ] {
         assert_eq!(found(&searcher, query), expected, "{query}");
     }
