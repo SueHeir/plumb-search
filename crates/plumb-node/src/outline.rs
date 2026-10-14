@@ -43,9 +43,9 @@ pub struct Outline {
     pub(crate) score: f32,
     /// The canonical domain.
     pub(crate) domain: Box<str>,
-    /// The canonical domain the homepage redirects to; empty when it
-    /// redirects to no valid domain, as [`plumb_index::redirect_targets`]
-    /// takes it.
+    /// The canonical domain of the site it is under another name
+    /// ([`Redirect::folds_into`]); empty when it redirects to no valid
+    /// domain, as [`plumb_index::redirect_targets`] takes it.
     pub(crate) redirect_to: Option<Box<str>>,
     /// Judged dead ([`SiteRecord::gone_at`]).
     pub(crate) gone: bool,
@@ -61,14 +61,11 @@ impl Outline {
             redirect_to: record
                 .redirect
                 .as_ref()
-                .map(|redirect| redirect_target(redirect).into()),
+                .and_then(|redirect| redirect.folds_into(&record.domain))
+                .map(Into::into),
             gone: record.gone_at.is_some(),
         }
     }
-}
-
-fn redirect_target(redirect: &Redirect) -> String {
-    canonical_domain(&redirect.to).unwrap_or_default()
 }
 
 /// The fields of a record [`outline`] reads when it has no journal to fold
@@ -469,7 +466,8 @@ fn scan(path: &Path) -> Result<Option<Vec<Outline>>> {
             redirect_to: head
                 .redirect
                 .as_ref()
-                .map(|redirect| redirect_target(redirect).into()),
+                .and_then(|redirect| redirect.folds_into(&head.domain))
+                .map(Into::into),
             domain: head.domain.into(),
             gone: head.gone_at.is_some(),
         });
@@ -812,7 +810,9 @@ pub(crate) fn wants_feed(record: &SiteRecord) -> bool {
 }
 
 /// The site of `record` to watch the feed of ([`crate::news`]): its domain,
-/// homepage and language.
+/// homepage and language, as the index has it, so a search in English
+/// leaves out the headlines of a site written in Cyrillic that declares
+/// nothing as it leaves out the site.
 pub(crate) fn feed_of(record: &SiteRecord) -> crate::news::Watched {
     crate::news::Watched {
         domain: record.domain.clone(),
@@ -820,7 +820,7 @@ pub(crate) fn feed_of(record: &SiteRecord) -> crate::news::Watched {
             .url
             .clone()
             .unwrap_or_else(|| format!("https://{}/", record.domain)),
-        language: record.language.clone(),
+        language: record.written_language(),
         ..Default::default()
     }
 }
@@ -940,6 +940,17 @@ mod tests {
         r
     }
 
+    #[test]
+    fn a_feed_is_in_the_language_its_site_is_written_in() {
+        let mut news = crawled("lenta.example", "Лента новостей России и мира сегодня", 1);
+        assert_eq!(feed_of(&news).language.as_deref(), Some("Cyrl"));
+        // A declaration still wins.
+        news.language = Some("en".into());
+        assert_eq!(feed_of(&news).language.as_deref(), Some("en"));
+        let english = crawled("news.example", "World news", 1);
+        assert_eq!(feed_of(&english).language, None);
+    }
+
     /// Every site in the records file at `path`, read a record at a time.
     fn read_all(path: &Path, outlines: &[Outline]) -> Vec<SiteRecord> {
         let mut reader = RecordReader::open(path).unwrap();
@@ -957,6 +968,7 @@ mod tests {
         redirecting.redirect = Some(Redirect {
             to: "pnc.com".into(),
             at: 40,
+            inner: false,
         });
         write_jsonl(
             path,

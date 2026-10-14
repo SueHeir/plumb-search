@@ -58,7 +58,7 @@ use crate::cli::McpArgs;
 use crate::findings::{Finding, Findings};
 use crate::rank_config;
 use crate::web::answers;
-use crate::web::{IndexBackend, SearchBackend, StatusSource, MAX_QUERY_CHARS};
+use crate::web::{query_text, IndexBackend, SearchBackend, StatusSource, MAX_QUERY_CHARS};
 
 mod findings;
 mod identity;
@@ -243,7 +243,7 @@ impl Mcp {
             return None;
         }
         let query = params.get("arguments")?.get("query")?.as_str()?;
-        let query = truncate_chars(&plumb_core::collapse_whitespace(query), MAX_QUERY_CHARS);
+        let query = query_text(query);
         (!query.is_empty()).then_some(query)
     }
 

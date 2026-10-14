@@ -1,7 +1,7 @@
 //! A query parsed into the index's terms, and the Tantivy query built from
 //! them with each field's weight.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 use plumb_core::{is_function_word, kind_key, other_number, truncate_chars, MAX_TEXT_CHARS};
@@ -12,9 +12,10 @@ use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{DocAddress, Term};
 
 use crate::names::typed_domain;
+use crate::pages::is_year;
 use crate::rank::bm25_of;
 use crate::schema::Fields;
-use crate::{analysis, FILLER_WORDS, MAX_QUERY_WORDS};
+use crate::{analysis, spell, FILLER_WORDS, MAX_QUERY_WORDS};
 
 /// BM25 boost of a query word matching the domain label.
 const LABEL_BOOST: f32 = 4.0;
@@ -104,7 +105,9 @@ pub(crate) struct ParsedQuery {
     /// [`COMPARISON_WORDS`] entry between two others is left out.
     pub(crate) words: Vec<String>,
     /// Each word in its other number ([`plumb_core::other_number`]), if it
-    /// has one: `videos` -> `video`.
+    /// has one: `videos` -> `video`. A word of Arabic, Greek or Russian
+    /// typed bare has the spelling [`ParsedQuery::add_marked_spellings`]
+    /// finds instead.
     pub(crate) others: Vec<Option<String>>,
     /// The whole query as one joined token: `U.S. Bank` -> `usbank`.
     pub(crate) joined: Option<String>,
@@ -186,6 +189,40 @@ impl ParsedQuery {
         })
     }
 
+    /// Gives a word of Arabic, Greek or Russian typed bare, as it often is
+    /// (`اخبار`, `مصري`, `θεσσαλονικη`, `королев`), the spelling most sites
+    /// have of it one letter away (`أخبار`, `مصرى`, `θεσσαλονίκη`,
+    /// `королёв`) as its other form, found the same way, a little weaker.
+    /// A word typed with its marks keeps to them and is ranked as before.
+    pub(crate) fn add_marked_spellings(
+        &mut self,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+    ) -> Result<()> {
+        for (word, other) in self.words.iter().zip(&mut self.others) {
+            let Some(key) = analysis::folded(word) else {
+                continue;
+            };
+            if other.is_some() || !analysis::typed_bare(word) {
+                continue;
+            }
+            let mut docs: BTreeMap<String, u64> = BTreeMap::new();
+            for field in spell::word_fields(f) {
+                for (term, _) in spell::near_terms(searcher, field, word, 1)? {
+                    if analysis::folded(&term).as_ref() == Some(&key) {
+                        let found = searcher.doc_freq(&Term::from_field_text(field, &term))?;
+                        *docs.entry(term).or_default() += found;
+                    }
+                }
+            }
+            *other = docs
+                .into_iter()
+                .max_by_key(|&(_, found)| found)
+                .map(|(term, _)| term);
+        }
+        Ok(())
+    }
+
     /// Whether `word` is a [`FILLER_WORDS`] entry and they are taken as
     /// such.
     pub(crate) fn is_filler(&self, word: &str) -> bool {
@@ -217,7 +254,10 @@ impl ParsedQuery {
 
     /// The clauses for the `i`th query word: the word in every field, and
     /// its other number in the fields of free text, a little weaker, so
-    /// "videos" finds a site about "video" but names stay exact.
+    /// "videos" finds a site about "video" but names stay exact. A word
+    /// typed bare is taken the same way: `اخبار` finds `أخبار` and
+    /// `θεσσαλονικη` finds `Θεσσαλονίκη`, a little below what is written as
+    /// typed.
     ///
     /// The other number never counts for more than the word as typed: when
     /// "videos" is common and "video" rare, BM25 would make the rare form
@@ -356,7 +396,9 @@ impl ParsedQuery {
 
     /// Which of `docs` lack one of the query's main words: those other
     /// than [`FILLER_WORDS`] and [`plumb_core::FUNCTION_WORDS`]. None for a
-    /// query of one main word or fewer.
+    /// query of one main word or fewer. A year is not asked of a site: it
+    /// says which one, and wimbledon.com is what "wimbledon tickets 2026"
+    /// wants without the year on its homepage.
     pub(crate) fn missing_main_words(
         &self,
         searcher: &tantivy::Searcher,
@@ -368,7 +410,7 @@ impl ParsedQuery {
         if main.len() < 2 || docs.is_empty() {
             return Ok(missing);
         }
-        for i in main {
+        for i in main.into_iter().filter(|&i| !is_year(&self.words[i])) {
             let mut clauses = Clauses::default();
             self.word_clauses(i, searcher, f, &mut clauses)?;
             for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs.to_vec())? {

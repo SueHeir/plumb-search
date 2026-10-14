@@ -1,4 +1,6 @@
-//! Words of scripts written without spaces: Japanese, Chinese and Thai.
+//! Words of other scripts: Japanese, Chinese and Thai, written without
+//! spaces, and Arabic, Greek and Russian, written with or without some of
+//! their marks.
 
 use super::*;
 
@@ -70,4 +72,52 @@ fn a_word_is_found_inside_a_title_without_spaces() {
     // 東京タワー, and 予報天気 has the pieces' characters but not them.
     assert!(!found(&searcher, "東京タワー").contains(&"dome.example".to_string()));
     assert!(found(&searcher, "予報天気").is_empty());
+}
+
+#[test]
+fn arabic_typed_bare_finds_its_marked_spelling_too() {
+    let site_titled =
+        |domain: &str, title: &str| site(domain, Some(title), None, &[], &[], ranked(900, 5_000));
+    let (_dir, searcher) = build(&[
+        site_titled("ahly.example", "أخبار النادي الأهلي"),
+        site_titled("bank.example", "البنك الاهلي"),
+        site_titled("iran.example", "اخبار ایران"),
+        site_titled("masry.example", "مصرى سات"),
+    ]);
+    // Typed bare, a word finds the spelling with its marks after its own;
+    // typed with them, it keeps to them.
+    for (query, expected) in [
+        ("الاهلي", &["bank.example", "ahly.example"][..]),
+        ("اخبار", &["iran.example", "ahly.example"]),
+        ("الأهلي", &["ahly.example"]),
+        ("أخبار", &["ahly.example"]),
+        ("ايران", &["iran.example"]),
+        ("مصري", &["masry.example"]),
+        ("مصرى", &["masry.example"]),
+    ] {
+        assert_eq!(found(&searcher, query), expected, "{query}");
+    }
+}
+
+#[test]
+fn greek_and_russian_typed_bare_find_their_accented_spelling_too() {
+    let site_titled =
+        |domain: &str, title: &str| site(domain, Some(title), None, &[], &[], ranked(900, 5_000));
+    let (_dir, searcher) = build(&[
+        site_titled("thess.example", "Δήμος Θεσσαλονίκη"),
+        site_titled("blog.example", "ΘΕΣΣΑΛΟΝΙΚΗ ΣΗΜΕΡΑ"),
+        site_titled("athens.example", "ΑΘΗΝΑΣ news"),
+        site_titled("korolev.example", "Королёв наукоград"),
+        site_titled("orel.example", "Королев и Орел"),
+    ]);
+    for (query, expected) in [
+        ("θεσσαλονικη", &["blog.example", "thess.example"][..]),
+        ("королев", &["orel.example", "korolev.example"]),
+        ("θεσσαλονίκη", &["thess.example"]),
+        ("королёв", &["korolev.example"]),
+        // A capital Σ lowercases to σ, not the final ς typed.
+        ("αθηνας", &["athens.example"]),
+    ] {
+        assert_eq!(found(&searcher, query), expected, "{query}");
+    }
 }
