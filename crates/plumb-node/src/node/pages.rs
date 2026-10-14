@@ -17,10 +17,11 @@ use std::time::{Duration, Instant};
 use std::io::Write;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, Operators};
+use plumb_core::{adult_level, now_unix, registrable_domain, Operators, SafeSearch};
 use plumb_index::pages::{
     add_named_site, drop_far_namesakes, drop_namesakes_of_words, lift_named_sites, operators_allow,
-    options_allow, place_operator_pages, place_pages, PageHit, OPERATOR_PAGES,
+    options_allow, place_operator_pages, place_pages, site_pages_after_named_article, PageHit,
+    PageSearcher, OPERATOR_PAGES, WANTED_SET,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -1211,8 +1212,12 @@ pub(super) fn add_pages(
     let Some(searcher) = inner.pages.read_locked().as_ref().map(|(_, s)| s.clone()) else {
         return;
     };
+    let wanted = (inner.config.wanted_pages)
+        .then(|| inner.wanted_pages.searcher())
+        .flatten();
     let options = &for_query(inner, options, query);
     let searcher = searcher.in_language(options.language.as_deref());
+    let wanted = wanted.map(|wanted| wanted.in_language(options.language.as_deref()));
     let ops = Operators::parse(query);
     if ops.any() {
         if ops.words.is_empty() {
@@ -1242,6 +1247,9 @@ pub(super) fn add_pages(
             {
                 warn!("searching pages in the other number: {err:#}");
             }
+            if let Some(wanted) = &wanted {
+                add_wanted(wanted, query, &mut found);
+            }
             found.retain(|hit| options_allow(options, &hit.page));
             if let Some(index) = inner.current().filter(|_| inner.rank.add_named_site) {
                 add_named_site(&mut results.hits, &found, |domain| {
@@ -1253,10 +1261,25 @@ pub(super) fn add_pages(
                 drop_namesakes_of_words(&mut results.hits, &found);
             }
             lift_named_sites(&mut results.hits, &found);
-            if let Err(err) = searcher.add_named_site_page(query, &results.hits, &mut found) {
-                warn!("searching the pages of a site the query names: {err:#}");
-            }
-            found.retain(|hit| options_allow(options, &hit.page));
+            add_named_site_page(&searcher, wanted.as_ref(), query, &results.hits, &mut found);
+            // Pages found for this node's searches come from anywhere on
+            // the web, not from sites picked by hand: they are checked as
+            // sites are, and against the adult blocklist as it is now.
+            let list = inner
+                .adult_list()
+                .filter(|_| options.safe != SafeSearch::Off);
+            let adult = |hit: &PageHit| {
+                if hit.page.set != WANTED_SET {
+                    return false;
+                }
+                let domain = registrable_domain(&hit.page.url).unwrap_or_default();
+                let texts = [hit.page.title.as_str()]
+                    .into_iter()
+                    .chain(hit.page.description.as_deref());
+                options.safe.hides(adult_level(&domain, texts))
+                    || list.as_ref().is_some_and(|list| list.contains(&domain))
+            };
+            found.retain(|hit| options_allow(options, &hit.page) && !adult(hit));
             if let Err(err) = searcher.note_demand(&mut results.hits) {
                 warn!("reading what sites' articles are read: {err:#}");
             }
@@ -1317,9 +1340,16 @@ pub(super) fn add_pages(
             };
             plumb_index::namesakes_last(query, &mut results.hits, &town);
             // The learned order knows nothing of spelling: the site a
-            // suggestion names stays second.
-            if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.clone()) {
-                plumb_index::suggested_site_second(&mut results.hits, &site);
+            // suggestion names stays second, and so does the page.
+            if let Some(spelling) = &results.spelling {
+                if let Some(site) = &spelling.site {
+                    plumb_index::suggested_site_second(&mut results.hits, site);
+                }
+                if let Err(err) =
+                    searcher.list_suggested_page(spelling, options, &mut results.pages)
+                {
+                    warn!("listing the page a spelling names: {err:#}");
+                }
             }
             // Only shown, after the ranking, which weighs a site's own
             // title.
@@ -1333,6 +1363,54 @@ pub(super) fn add_pages(
             }
         }
         Err(err) => warn!("searching pages: {err:#}"),
+    }
+}
+
+/// Puts first in `found` the page of a site `query` names
+/// ([`PageSearcher::add_named_site_page`]): the page sets' when they have
+/// one, else one found for this node's searches.
+fn add_named_site_page(
+    searcher: &PageSearcher,
+    wanted: Option<&PageSearcher>,
+    query: &str,
+    sites: &[plumb_index::Hit],
+    found: &mut Vec<PageHit>,
+) {
+    let first = found.first().map(|hit| hit.page.url.clone());
+    if let Err(err) = searcher.add_named_site_page(query, sites, found) {
+        warn!("searching the pages of a site the query names: {err:#}");
+    }
+    let added = found.first().map(|hit| &hit.page.url) != first.as_ref();
+    if let Some(wanted) = wanted.filter(|_| !added) {
+        if let Err(err) = wanted.add_named_site_page(query, sites, found) {
+            warn!("searching the wanted pages of a site the query names: {err:#}");
+        }
+    }
+}
+
+/// Most pages found for this node's searches ([`crate::wanted_pages`])
+/// that one search takes in.
+const WANTED_PER_SEARCH: usize = 3;
+
+/// Adds to `found` the pages found for this node's searches that `query`
+/// finds, best first among the page sets' by score: both are scored the
+/// same way, each set's popularity against its own most viewed page, and
+/// none goes above the article the query names.
+fn add_wanted(wanted: &PageSearcher, query: &str, found: &mut Vec<PageHit>) {
+    match wanted.search(query, WANTED_PER_SEARCH) {
+        Ok(more) => {
+            let before = found.len();
+            for hit in more {
+                if !found.iter().any(|known| known.page.url == hit.page.url) {
+                    found.push(hit);
+                }
+            }
+            if found.len() > before {
+                site_pages_after_named_article(found);
+                found.sort_by(|a, b| b.score.total_cmp(&a.score));
+            }
+        }
+        Err(err) => warn!("searching the wanted pages: {err:#}"),
     }
 }
 

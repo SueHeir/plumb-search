@@ -10,8 +10,9 @@
 //!
 //! The same goes for other pages that stand in for a homepage: an error or
 //! maintenance page ("FedEx | System Down"), an identity check ("Verifica
-//! tu identidad", "Client Challenge") or a parked domain's "this domain is
-//! for sale" or bare "Hello!".
+//! tu identidad", "Client Challenge"), a refusal of the crawler's browser
+//! ("Unsupported client – Canva") or a parked domain's "this domain is for
+//! sale" or bare "Hello!".
 
 use crate::{
     canonical_domain, normalize_text, parent_domain, registrable_domain, Redirect, SiteRecord,
@@ -61,7 +62,8 @@ const CHECK_TITLES: &[&str] = &[
 
 /// Title parts, after [`normalize_text`], of a page standing in for the
 /// homepage, wherever they are in a title split at its separators: "FedEx |
-/// System Down", "Walmart: Verifica tu identidad".
+/// System Down", "Walmart: Verifica tu identidad", "Unsupported Browser |
+/// Microsoft Teams".
 const STAND_IN_TITLE_PARTS: &[&str] = &[
     "404 not found",
     "500 internal server error",
@@ -69,6 +71,7 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
     "503 service unavailable",
     "access denied",
     "bad gateway",
+    "browser not supported",
     "client challenge",
     "domain for sale",
     "domain parked",
@@ -83,9 +86,15 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
     "system down",
     "temporarily unavailable",
     "under maintenance",
+    "unsupported browser",
+    // Canva's answer to a browser it does not know: "Unsupported client –
+    // Canva" on canva.com.
+    "unsupported client",
     "verifica tu identidad",
     "verify your identity",
+    "website suspended",
     "website unavailable",
+    "your browser is not supported",
 ];
 
 /// Whole titles, after [`normalize_text`], of a placeholder where a
@@ -131,9 +140,10 @@ const GREETING_WORDS: &[&str] = &["hello", "hi", "hey", "hallo", "hola", "welcom
 /// What a page title is split at into parts for [`STAND_IN_TITLE_PARTS`].
 const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»', '«', '/', '\\'];
 
-/// Title beginnings, after [`normalize_text`], that only a bot check has
-/// ("Just a moment...", "Checking your browser before accessing example.com",
-/// "Bot Verification | Example Council").
+/// Title beginnings, after [`normalize_text`], that only a bot check or a
+/// page standing in for the homepage has ("Just a moment...", "Checking
+/// your browser before accessing example.com", "Bot Verification | Example
+/// Council", "Redirecting Request. Please wait.").
 const CHECK_TITLE_STARTS: &[&str] = &[
     "attention required",
     "bot verification",
@@ -142,6 +152,7 @@ const CHECK_TITLE_STARTS: &[&str] = &[
     "just a moment",
     "one moment please",
     "please wait",
+    "redirecting request",
     "security check",
 ];
 
@@ -282,7 +293,8 @@ fn not_built_yet(part: &str) -> bool {
 }
 
 /// Whether a crawled homepage stands in for the site: a bot check or
-/// placeholder ([`is_bot_check_page`]), or a page that only greets
+/// placeholder ([`is_bot_check_page`]), a defaced or bare "Checking..."
+/// one ([`defaced_or_checking`]), or a page that only greets
 /// ([`only_greets`]). A page someone asks to read is what it is, so the
 /// page reader asks [`is_bot_check_page`] alone.
 pub fn is_stand_in_homepage(
@@ -293,7 +305,17 @@ pub fn is_stand_in_homepage(
     body_text: Option<&str>,
 ) -> bool {
     is_bot_check_page(domain, title, description, headings, body_text)
+        || defaced_or_checking(title)
         || only_greets(title, description, headings, body_text)
+}
+
+/// Whether a homepage's title is a defacer's ("Hacked By Peyman Siyahi")
+/// or a bare "Checking...". Homepages only: a story titled "Hacked by
+/// North Korea" or a bank's page titled "Checking" is what it is.
+fn defaced_or_checking(title: Option<&str>) -> bool {
+    title
+        .map(normalize_text)
+        .is_some_and(|title| title == "checking" || title.starts_with("hacked by "))
 }
 
 /// Whether a homepage's whole text greets and says nothing else
@@ -542,6 +564,27 @@ mod tests {
     }
 
     #[test]
+    fn defaced_and_checking_homepages_stand_in_but_read_pages_do_not() {
+        for (domain, title) in [
+            ("kireie.com", "Checking..."),
+            (
+                "the-brooklyn-star.com",
+                "Hacked By Peyman Siyahi & M@raz Ali",
+            ),
+        ] {
+            assert!(
+                is_stand_in_homepage(domain, Some(title), None, &[], None),
+                "{title}"
+            );
+            assert!(!check(domain, title), "{title}");
+        }
+        assert!(!check(
+            "example.com",
+            "Hacked by North Korea: inside the Sony breach"
+        ));
+    }
+
+    #[test]
     fn error_identity_and_parked_pages_are_not_homepages() {
         for (domain, title) in [
             ("fedex.com", "FedEx | System Down"),
@@ -551,6 +594,14 @@ mod tests {
             ("example.com", "503 Service Unavailable"),
             ("example.com", "Error"),
             ("amazon.com.au", "Server Busy"),
+            ("canva.com", "Unsupported client – Canva"),
+            ("oilpatchsurplus.com", "Website Suspended"),
+            ("grsaccess.com", "Redirecting Request. Please wait."),
+            (
+                "teams.microsoft.com",
+                "Unsupported Browser | Microsoft Teams",
+            ),
+            ("example.com", "Your browser is not supported"),
             ("labubu.st", "Domain Parked"),
             (
                 "charlotterampling.net",
@@ -579,6 +630,10 @@ mod tests {
             "Downdetector",
             "Errors in Medicine Journal",
             "Not Found Records",
+            "Checking Accounts | Example Bank",
+            "Hacked: a podcast about hackers",
+            "Website suspended for a week: what we learned",
+            "Unsupported: a podcast",
         ] {
             assert!(!check("example.com", title), "{title}");
         }

@@ -9,6 +9,8 @@
 //! Token offsets point into the normalized text, not the original, so they
 //! must not be used for highlighting.
 
+use std::borrow::Cow;
+
 use plumb_core::{joined, normalize_text};
 use tantivy::tokenizer::{
     AsciiFoldingFilter, Language, LowerCaser, PreTokenizedString, RemoveLongFilter, Stemmer,
@@ -56,6 +58,59 @@ pub(crate) fn register_sites(manager: &TokenizerManager) {
     );
 }
 
+/// [`register`] for the pages' index, whose names are keyed with a sharp
+/// sign after a letter read out ([`page_joined_analyzer`]). The page index
+/// is rebuilt whenever [`crate::pages::PAGE_INDEX_VERSION`] changes; a
+/// sites' index is not, and would still hold "C# Corner" as "ccorner".
+pub(crate) fn register_pages(manager: &TokenizerManager) {
+    register(manager);
+    manager.register(JOINED_ANALYZER, page_joined_analyzer());
+}
+
+/// `text` with a sharp sign after a lone letter read out, as English writes
+/// it where the sign cannot go (Wikipedia's "C Sharp", "C-sharp minor"):
+/// `C# 12` -> `C sharp 12`. [`normalize_text`] drops the sign, and "c#"
+/// would name C.
+fn read_sharps(text: &str) -> Cow<'_, str> {
+    if !text.contains(['#', '\u{266F}']) {
+        return Cow::Borrowed(text);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 8);
+    for (i, c) in chars.iter().enumerate() {
+        if sharp_at(&chars, i) {
+            out.push_str(" sharp");
+        } else {
+            out.push(*c);
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// The letters `text` writes a sharp after ([`read_sharps`]), in lower
+/// case: `["c"]` for "C# in Depth". The query's words drop the sign, so a
+/// part of a query keyed from them gets it back
+/// ([`crate::pages::PageSearcher::span_key`]).
+pub(crate) fn sharp_letters(text: &str) -> Vec<String> {
+    if !text.contains(['#', '\u{266F}']) {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    (1..chars.len())
+        .filter(|&i| sharp_at(&chars, i))
+        .map(|i| chars[i - 1].to_lowercase().collect())
+        .collect()
+}
+
+/// Whether `chars[i]` is a sharp sign after a lone letter at a word's end.
+fn sharp_at(chars: &[char], i: usize) -> bool {
+    matches!(chars[i], '#' | '\u{266F}')
+        && i > 0
+        && chars[i - 1].is_alphabetic()
+        && (i < 2 || !chars[i - 2].is_alphanumeric())
+        && chars.get(i + 1).is_none_or(|next| !next.is_alphanumeric())
+}
+
 /// Whether `c` belongs to a script written without spaces between words:
 /// Chinese and Japanese, Thai, Lao, Khmer and Burmese.
 fn unspaced(c: char) -> bool {
@@ -84,6 +139,49 @@ pub(crate) fn pieces(word: &str) -> Vec<String> {
         }
     }
     pieces
+}
+
+/// `letter` as it is written without its marks, as Arabic, Greek and
+/// Russian often are: an alef without hamza or madda, a final yeh with
+/// dots, Arabic yeh and kaf for the Persian ones, no tatweel, a Greek
+/// vowel without its accent, σ for ς (a capital Σ lowercases to σ) and е
+/// for ё.
+fn bare_letter(letter: char) -> Option<char> {
+    match letter {
+        'أ' | 'إ' | 'آ' | 'ٱ' => Some('ا'),
+        'ى' | 'ی' => Some('ي'),
+        'ک' => Some('ك'),
+        'ـ' => None,
+        'ά' => Some('α'),
+        'έ' => Some('ε'),
+        'ή' => Some('η'),
+        'ί' | 'ϊ' | 'ΐ' => Some('ι'),
+        'ό' => Some('ο'),
+        'ύ' | 'ϋ' | 'ΰ' => Some('υ'),
+        'ώ' => Some('ω'),
+        'ς' => Some('σ'),
+        'ё' => Some('е'),
+        _ => Some(letter),
+    }
+}
+
+/// A word of Arabic or Greek script, or of Cyrillic with an е or ё, with
+/// each [`bare_letter`], so the ways it is written are one. `None` for
+/// other words.
+pub(crate) fn folded(word: &str) -> Option<String> {
+    let folds =
+        |c: char| matches!(c, '\u{0600}'..='\u{06FF}' | '\u{0370}'..='\u{03FF}' | 'е' | 'ё');
+    if !word.chars().any(folds) {
+        return None;
+    }
+    Some(word.chars().filter_map(bare_letter).collect())
+}
+
+/// Whether `word` is typed without the marks [`bare_letter`] leaves off.
+/// A final ς is the way a word is typed, so it counts as bare.
+pub(crate) fn typed_bare(word: &str) -> bool {
+    word.chars()
+        .all(|letter| letter == 'ς' || bare_letter(letter) == Some(letter))
 }
 
 /// The analyzer registered as [`STEMMED_ANALYZER`].
@@ -150,11 +248,24 @@ pub(crate) fn words_analyzer() -> TextAnalyzer {
 
 /// The analyzer registered as [`JOINED_ANALYZER`].
 pub(crate) fn joined_analyzer() -> TextAnalyzer {
-    TextAnalyzer::builder(JoinedTokenizer::default())
-        .filter(AsciiFoldingFilter)
-        .filter(LowerCaser)
-        .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
-        .build()
+    joined_reading(false)
+}
+
+/// [`joined_analyzer`] reading a sharp sign after a letter
+/// ([`read_sharps`]): `C#` -> `csharp`, as "C Sharp" is keyed.
+pub(crate) fn page_joined_analyzer() -> TextAnalyzer {
+    joined_reading(true)
+}
+
+fn joined_reading(sharps: bool) -> TextAnalyzer {
+    TextAnalyzer::builder(JoinedTokenizer {
+        sharps,
+        ..JoinedTokenizer::default()
+    })
+    .filter(AsciiFoldingFilter)
+    .filter(LowerCaser)
+    .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
+    .build()
 }
 
 /// Whether `a` and `b` are the same words, whatever their case, accents
@@ -256,6 +367,8 @@ impl TokenStream for WordStream<'_> {
 /// the text has no letters or digits.
 #[derive(Clone, Default)]
 struct JoinedTokenizer {
+    /// Whether a sharp after a letter is read out ([`read_sharps`]).
+    sharps: bool,
     token: Token,
 }
 
@@ -268,10 +381,15 @@ impl Tokenizer for JoinedTokenizer {
     type TokenStream<'a> = SingleTokenStream<'a>;
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> SingleTokenStream<'a> {
+        let text = if self.sharps {
+            read_sharps(text)
+        } else {
+            text.into()
+        };
         self.token.reset();
         self.token
             .text
-            .extend(joined(text).chars().filter(|c| c.is_alphanumeric()));
+            .extend(joined(&text).chars().filter(|c| c.is_alphanumeric()));
         self.token.position = 0;
         self.token.offset_to = self.token.text.len();
         let pending = !self.token.text.is_empty();
@@ -320,6 +438,21 @@ mod tests {
         assert_eq!(words("STRASSE straße"), ["strasse", "strasse"]);
         assert!(words("  --- ... !!! ").is_empty());
         assert!(words("").is_empty());
+    }
+
+    #[test]
+    fn the_page_index_keys_a_sharp_after_a_letter_read_out() {
+        let page_key = |text| tokens(&page_joined_analyzer(), text);
+        assert_eq!(page_key("C#"), ["csharp"]);
+        assert_eq!(page_key("C Sharp"), ["csharp"]);
+        assert_eq!(page_key("F\u{266F} minor"), ["fsharpminor"]);
+        // Only after a lone letter at a word's end.
+        assert_eq!(page_key("#metoo issue #5"), ["metooissue5"]);
+        assert_eq!(page_key("abc# c#d"), ["abccd"]);
+        assert_eq!(sharp_letters("C# in Depth, F\u{266F} abc# #5"), ["c", "f"]);
+        // Words, and the sites' index, keep dropping it.
+        assert_eq!(words("C# Corner"), ["c", "corner"]);
+        assert_eq!(joined_token("C#"), ["c"]);
     }
 
     #[test]

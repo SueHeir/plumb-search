@@ -846,6 +846,9 @@ fn evaluate(
                         &mut placed,
                     );
                 }
+                if let Some(spelling) = &results.spelling {
+                    pages.list_suggested_page(spelling, &options, &mut placed)?;
+                }
                 pages.list_typed_page(&searched, &options, &mut placed)?;
                 match &route {
                     Some(route) => {

@@ -266,6 +266,46 @@ fn operators_pick_and_list_pages() {
 }
 
 #[test]
+fn a_commands_options_find_the_questions_about_them() {
+    let question = |title: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some("git, npm".into()),
+            item: Some(item.into()),
+            views: 500_000,
+            ..Article::default()
+        })
+    };
+    let (_dir, s) = searcher(&[
+        question(
+            "What does --save-dev mean in npm install grunt --save-dev?",
+            "1",
+        ),
+        question(
+            "What is the difference between git checkout -b and git branch?",
+            "2",
+        ),
+    ]);
+    for (query, asked) in [
+        ("npm install --save-dev", "What does --save-dev"),
+        (
+            "git checkout -b",
+            "What is the difference between git checkout -b",
+        ),
+    ] {
+        let ops = Operators::parse(query);
+        let found = s.search(&ops.words, 5).unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|hit| hit.page.title.starts_with(asked) && operators_allow(&ops, &hit.page)),
+            "{query}: {:?}",
+            titles(&found)
+        );
+    }
+}
+
+#[test]
 fn questions_without_the_word_asked_about_are_not_found() {
     let question = |title: &str, tags: &str, item: &str| {
         Page::from_question(Article {
@@ -442,6 +482,43 @@ fn questions_are_found_in_their_duplicates_words() {
 }
 
 #[test]
+fn words_only_a_duplicates_title_has_count_half() {
+    let whitespace = Page::from_question(Article {
+        title: "Remove all whitespace in a string".into(),
+        description: Some("python, string, trim, removing-whitespace".into()),
+        item: Some("8270092".into()),
+        views: 2_800_000,
+        aliases: vec![
+            "Why doesn't .strip() remove whitespaces?".into(),
+            "How to sort a list of string ignoring whitespace in python?".into(),
+        ],
+        ..Article::default()
+    });
+    let (_dir, s) = searcher(&[whitespace]);
+    // Only the duplicate sorts a list: the question is not about that, and
+    // is not listed.
+    let found = s.search("python list sort", 5).unwrap();
+    assert!(place_pages("python list sort", &[], found).is_empty());
+    // With the question's own words, a duplicate's title still finds it,
+    // and a duplicate asked as a whole is still the question asked.
+    for query in [
+        "python strip whitespace",
+        "sort list of strings ignoring whitespace python",
+    ] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(
+            titles(&hits),
+            ["Remove all whitespace in a string"],
+            "{query}"
+        );
+    }
+    let hits = s
+        .search("sort list of strings ignoring whitespace python", 5)
+        .unwrap();
+    assert!(hits[0].whole);
+}
+
+#[test]
 fn a_title_and_a_name_name_the_living_holder_over_past_ones() {
     use plumb_core::facts::{Fact, FactKind};
     let holder = |title: &str, views: u64, description: &str, died: Option<&str>| {
@@ -574,6 +651,64 @@ fn sites_called_like_organizations_stay_first() {
         }],
     );
     assert_eq!(placed[0].at, 0);
+}
+
+#[test]
+fn a_name_and_what_the_person_is_name_them() {
+    let person = |title: &str, views: u64, aliases: &[&str], description: &str| {
+        let mut page = page(title, views, aliases);
+        page.description = Some(description.into());
+        page.facts = vec![plumb_core::facts::Fact {
+            kind: plumb_core::facts::FactKind::Born,
+            value: "1956-07-09".into(),
+        }];
+        page
+    };
+    let (_dir, s) = searcher(&[
+        person(
+            "Tom Hanks",
+            300_000,
+            &[],
+            "American actor and filmmaker (born 1956)",
+        ),
+        person(
+            "Chet Hanks",
+            20_000,
+            &[],
+            "American actor and musician (born 1990)",
+        ),
+        person(
+            "Wolfgang Amadeus Mozart",
+            400_000,
+            &[],
+            "Composer and musician (1756–1791)",
+        ),
+        person("Leopold Mozart", 60_000, &[], "German composer (1719–1787)"),
+        person(
+            "Chris Smith (footballer, born 1981)",
+            2_000,
+            &[],
+            "English footballer",
+        ),
+        person(
+            "Chris Smith (footballer, born 1977)",
+            1_500,
+            &[],
+            "Welsh footballer",
+        ),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("tom hanks actor"), ["Tom Hanks"]);
+    assert_eq!(named("mozart composer"), ["Wolfgang Amadeus Mozart"]);
+    // Not what the description does not say, nor one of several who fit.
+    assert!(named("tom hanks singer").is_empty());
+    assert!(named("chris smith footballer").is_empty());
 }
 
 #[test]
@@ -747,7 +882,7 @@ fn words_of_things_are_corrected_from_page_names() {
         pages.push(page(&format!("Anubis statue {i}"), 10, &[]));
         pages.push(page(&format!("Budapest hotels {i}"), 10, &[]));
     }
-    pages.push(page("Anubas (beetle)", 1, &[]));
+    pages.push(page("Anubas tomb", 1, &[]));
     for i in 0..5 {
         pages.push(page(&format!("Perfi album {i}"), 10, &[]));
     }
@@ -762,7 +897,8 @@ fn words_of_things_are_corrected_from_page_names() {
             .unwrap()
             .map(|s| s.query)
     };
-    // Even a word one page has is taken for a slip of a far commoner one.
+    // Even a word one page's name has is taken for a slip of a far
+    // commoner one.
     assert_eq!(suggest("anubas").as_deref(), Some("anubis"));
     assert_eq!(
         suggest("budafest hotels").as_deref(),
@@ -785,6 +921,144 @@ fn words_of_things_are_corrected_from_page_names() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn slips_people_make_are_corrected_though_pages_name_them() {
+    let mut pages = Vec::new();
+    let mut add = |title: &str, count: usize| {
+        for i in 0..count {
+            pages.push(page(&format!("{title} {i}"), 10, &[]));
+        }
+    };
+    // Everyday words are rare in pages' names, and their slips are there
+    // too: song titles, misspelled redirects.
+    add("Receive", 200);
+    add("Recieve", 4);
+    add("Definitely", 40);
+    add("Definately", 1);
+    add("Pace", 200);
+    add("PKCE flow", 3);
+    add("Judgment", 40);
+    add("Judgement", 30);
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(
+        &[("ei", "ie", 0.001), ("i", "a", 0.001), ("g", "ge", 0.01)],
+        1e-6,
+    );
+    let nothing_known = |_: &str| false;
+    let suggest = |query: &str, model| {
+        searcher
+            .suggest_spelling(query, model, &nothing_known)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    assert_eq!(suggest("recieve", Some(&model)).as_deref(), Some("receive"));
+    assert_eq!(
+        suggest("definately", Some(&model)).as_deref(),
+        Some("definitely")
+    );
+    // An edit people are not seen to make leaves a word the pages know.
+    assert_eq!(suggest("pkce", Some(&model)), None);
+    // So does a word nearly as common as the near one.
+    assert_eq!(suggest("judgement", Some(&model)), None);
+    // Without the model, a word the pages know stays.
+    assert_eq!(suggest("recieve", None), None);
+}
+
+#[test]
+fn names_are_not_taken_for_slips() {
+    let mut pages = Vec::new();
+    let mut add = |title: &str, count: usize| {
+        for i in 0..count {
+            pages.push(page(&format!("{title} {i}"), 10, &[]));
+        }
+    };
+    add("Meets", 200);
+    add("Jean Meeus", 3);
+    add("Elias", 200);
+    add("ETIAS", 3);
+    add("Http", 200);
+    add("Htop", 3);
+    add("Sauce", 200);
+    add("Saute", 3);
+    add("Argument", 200);
+    add("Arguement", 3);
+    add("Scale", 200);
+    add("Scald", 3);
+    add("Magick", 200);
+    add("Bake", 200);
+    add("Clothes", 200);
+    add("Cloths", 3);
+    // Only one page has each: no more than "anubas" has.
+    pages.push(page("Magicka", 10, &[]));
+    pages.push(page("Baidu Baike", 10, &[]));
+    pages.push(page("Htop", 10, &[]));
+    pages.push(Page::from_word(Article {
+        title: "saute".into(),
+        description: Some("(verb) To fry quickly in a little fat.".into()),
+        ..Article::default()
+    }));
+    pages.push(Page::from_word(Article {
+        title: "cloth".into(),
+        ..Article::default()
+    }));
+    let article = |title: &str, name: &str| {
+        Page::from_article(
+            "en",
+            Article {
+                title: title.into(),
+                names: vec![name.into()],
+                ..Article::default()
+            },
+        )
+    };
+    pages.push(article("Burn", "Scald"));
+    // Wikipedia redirects the misspelling to the article.
+    pages.push(article("Argument", "Arguement"));
+    let (_dir, searcher) = searcher(&pages);
+    let model = crate::spell_model::Model::with_rules(
+        &[
+            ("t", "u", 0.001),
+            ("l", "t", 0.001),
+            ("t", "o", 0.001),
+            ("c", "t", 0.001),
+            ("u", "ue", 0.01),
+            ("e", "d", 0.001),
+            ("k", "ka", 0.01),
+            ("a", "ai", 0.01),
+            ("es", "s", 0.01),
+        ],
+        1e-6,
+    );
+    let suggest = |query: &str| {
+        searcher
+            .suggest_spelling(query, Some(&model), &|_| false)
+            .unwrap()
+            .map(|s| s.query)
+    };
+    // Alone, each is a likely slip of a commoner word.
+    assert_eq!(suggest("meeus").as_deref(), Some("meets"));
+    assert_eq!(suggest("etias").as_deref(), Some("elias"));
+    // A page names it with another word typed.
+    assert_eq!(suggest("jean meeus"), None);
+    assert_eq!(suggest("astronomical algorithms jean meeus"), None);
+    // Typed in capitals, an abbreviation.
+    assert_eq!(suggest("ETIAS"), None);
+    // In a web address, or typed with letters English does not use.
+    assert_eq!(suggest("etias.eu visa"), None);
+    assert_eq!(suggest("étias"), None);
+    // An article is named by it.
+    assert_eq!(suggest("htop"), None);
+    assert_eq!(suggest("scald"), None);
+    // Wiktionary has it, or its singular.
+    assert_eq!(suggest("saute"), None);
+    assert_eq!(suggest("cloths"), None);
+    // It is a near spelling of the article's title.
+    assert_eq!(suggest("arguement").as_deref(), Some("argument"));
+    // However few pages have it, a name is no slip.
+    assert_eq!(suggest("trifling glyph of magicka"), None);
+    assert_eq!(suggest("great wall baidu baike"), None);
 }
 
 #[test]
@@ -910,12 +1184,16 @@ fn untitled_sites_take_their_article_s_title() {
     // A domain of the initials: nba.com.
     let mut nba = page("National Basketball Association", 4_000, &[]);
     nba.site = Some("nba.com".into());
-    let (_dir, searcher) = searcher(&[notion, show, cbc, nba]);
+    // Some words in full, some by their initials.
+    let mut times = page("The New York Times", 6_000, &[]);
+    times.site = Some("nytimes.com".into());
+    let (_dir, searcher) = searcher(&[notion, show, cbc, nba, times]);
     let mut sites = vec![
         site("notion.so", true),
         site("other.com", false),
         site("cbc.ca", true),
         site("nba.com", true),
+        site("nytimes.com", true),
     ];
     sites[1].title = Some("Other".into());
     searcher.title_untitled(&mut sites).unwrap();
@@ -926,6 +1204,7 @@ fn untitled_sites_take_their_article_s_title() {
         sites[3].title.as_deref(),
         Some("National Basketball Association")
     );
+    assert_eq!(sites[4].title.as_deref(), Some("The New York Times"));
 }
 
 #[test]
@@ -936,7 +1215,11 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
     valve.site = Some("steampowered.com".into());
     let mut steam = page("Steam (service)", 4_000, &[]);
     steam.site = Some("steampowered.com".into());
-    let (_dir, searcher) = searcher(&[post, valve, steam]);
+    // Twitter's own article has x.com now; this one only names twitter.com
+    // as its website.
+    let mut snowflake = page("Snowflake ID", 2_000, &[]);
+    snowflake.site = Some("twitter.com".into());
+    let (_dir, searcher) = searcher(&[post, valve, steam, snowflake]);
     let titled = |domain: &str, title: &str, official: bool| crate::Hit {
         title: Some(title.into()),
         official,
@@ -951,11 +1234,59 @@ fn official_sites_with_another_page_s_title_take_their_article_s() {
         titled("steampowered.com", "Welcome to Steam", true),
         // Not official: nothing says which name is its own.
         titled("nypost.com", "California Post", false),
+        titled("twitter.com", "X. It’s what’s happening / X", true),
     ];
     searcher.title_untitled(&mut sites).unwrap();
     assert_eq!(sites[0].title.as_deref(), Some("New York Post"));
     assert_eq!(sites[1].title.as_deref(), Some("Welcome to Steam"));
     assert_eq!(sites[2].title.as_deref(), Some("California Post"));
+    // No article its domain spells: it keeps its own title.
+    assert_eq!(
+        sites[3].title.as_deref(),
+        Some("X. It’s what’s happening / X")
+    );
+}
+
+#[test]
+fn a_web_address_names_the_article_about_its_site() {
+    let mut bank = page("X.com (bank)", 3_000, &[]);
+    bank.site = Some("x.com".into());
+    let mut social = page("X (social network)", 90_000, &["Twitter"]);
+    social.site = Some("x.com".into());
+    let mut snowflake = page("Snowflake ID", 2_000, &[]);
+    snowflake.site = Some("twitter.com".into());
+    let mut website = page("nytimes.com", 2_000, &[]);
+    website.site = Some("nytimes.com".into());
+    let mut paper = page("The New York Times", 50_000, &[]);
+    paper.site = Some("nytimes.com".into());
+    let (_dir, searcher) = searcher(&[bank, social, snowflake, website, paper]);
+    let first = |query: &str| {
+        searcher
+            .search(query, 10)
+            .unwrap()
+            .into_iter()
+            .next()
+            .map(|hit| (hit.page.title, hit.named))
+    };
+    let social = Some(("X (social network)".to_string(), true));
+    assert_eq!(first("x.com"), social);
+    assert_eq!(first("WWW.X.COM"), social);
+    let found = searcher.search("x.com", 10).unwrap();
+    let placed = place_pages("x.com", &[site("x.com", true)], found);
+    assert_eq!(placed[0].under.as_deref(), Some("x.com"));
+    assert_eq!(placed[0].hit.page.title, "X (social network)");
+    // The article called by the address alone is what it names.
+    assert_eq!(
+        first("nytimes.com"),
+        Some(("nytimes.com".to_string(), true))
+    );
+    // Its domain spells no article's name, nor is an inner site's address
+    // X's.
+    assert_ne!(
+        first("twitter.com").map(|(title, _)| title),
+        Some("Snowflake ID".into())
+    );
+    assert_ne!(first("mail.x.com"), social);
 }
 
 #[test]
@@ -1043,6 +1374,13 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
             "President of the United States",
         ),
         page("General Motors", 30_000, &[]),
+        described(
+            "Bernie Sanders",
+            60_000,
+            &[],
+            "American politician and activist (born 1941)",
+        ),
+        described("Colonel Sanders", 20_000, &[], "American businessman"),
     ]);
     let named = |q: &str| named_titles(&s, q);
     assert_eq!(named("president kennedy"), ["John F. Kennedy"]);
@@ -1053,6 +1391,66 @@ fn a_title_and_a_name_name_the_person_who_held_it() {
     assert!(named("president bush").is_empty());
     assert_eq!(named("president lincoln"), ["Abraham Lincoln"]);
     assert_eq!(named("general motors"), ["General Motors"]);
+    // A senator's description often says only "politician".
+    assert_eq!(named("senator bernie sanders"), ["Bernie Sanders"]);
+}
+
+#[test]
+fn a_sharp_after_a_letter_names_what_is_named_so() {
+    let (_dir, s) = searcher(&[
+        page("C (programming language)", 600_000, &[]),
+        page("C Sharp (programming language)", 400_000, &["C#"]),
+        page("C minor", 6_000, &[]),
+        page("C-sharp minor", 3_000, &[]),
+        page("Q Sharp", 200, &["Q\u{266F}"]),
+        page("J", 20_000, &[]),
+        page("Sharp Corporation", 90_000, &["Sharp"]),
+    ]);
+    let first = |query: &str| s.search(query, 5).unwrap().remove(0);
+    let hit = first("c#");
+    assert_eq!(hit.page.title, "C Sharp (programming language)");
+    assert!(hit.named);
+    assert_eq!(first("C# minor").page.title, "C-sharp minor");
+    assert_eq!(first("q#").page.title, "Q Sharp");
+    // Nothing is named J Sharp: "j#" is J, as before, and not a page
+    // called Sharp.
+    let found = s.search("j#", 5).unwrap();
+    assert_eq!(found[0].page.title, "J");
+    assert!(found[0].named);
+    assert!(found
+        .iter()
+        .all(|hit| hit.page.title != "Sharp Corporation"));
+    // Without the sign, still C, and C Sharp's other name is not "c".
+    let hit = first("c");
+    assert_eq!(hit.page.title, "C (programming language)");
+    assert!(hit.named);
+    assert!(s
+        .search("c", 5)
+        .unwrap()
+        .iter()
+        .all(|hit| !hit.named || hit.page.title != "C Sharp (programming language)"));
+    assert_eq!(first("c minor").page.title, "C minor");
+}
+
+#[test]
+fn a_sharp_in_part_of_a_query_names_what_is_named_so() {
+    let book = Page::from_book(Article {
+        title: "C# in Depth".into(),
+        description: Some("Book by Jon Skeet".into()),
+        item: Some("OL17055567W".into()),
+        views: 5_000,
+        ..Article::default()
+    });
+    let (_dir, s) = searcher(&[
+        book,
+        page("C (programming language)", 600_000, &[]),
+        page("Jon Skeet", 2_000, &[]),
+    ]);
+    // Its title then its author, the title keyed with the sign read out.
+    for query in ["c# in depth jon skeet", "c# in depth skeet"] {
+        let hits = s.search(query, 5).unwrap();
+        assert_eq!(hits[0].page.title, "C# in Depth", "{query}: {hits:?}");
+    }
 }
 
 #[test]
@@ -1185,6 +1583,67 @@ fn a_question_of_only_asking_words_and_code_names_nothing() {
     assert!(questions("what does nasa stand for").is_empty());
     // A question that asks about something is still found.
     assert_eq!(questions("what is a monad"), ["What is a monad?"]);
+}
+
+#[test]
+fn a_question_found_by_its_tags_alone_is_not_about_the_query() {
+    let question = |title: &str, tags: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some(tags.into()),
+            item: Some(item.into()),
+            views: 100_000,
+            ..Article::default()
+        })
+    };
+    let pages = [
+        question(
+            "What is the tax status of assets recovered via bankruptcy proceedings?",
+            "united-states, taxes, capital-gains-tax, australia",
+            "1",
+        ),
+        question(
+            "How long does cooked pasta last in the fridge?",
+            "pasta, storage-lifetime, refrigerator",
+            "2",
+        ),
+        question(
+            "Pandas Merging 101",
+            "python, pandas, merge, dataframe",
+            "3",
+        ),
+        question(
+            "What is the capital gains tax rate in Australia?",
+            "taxes, capital-gains-tax, australia",
+            "4",
+        ),
+    ];
+    // Pages that make the query's other words known, not typos.
+    let known = [
+        "Capital city",
+        "Capital punishment",
+        "Australia",
+        "Refrigerator",
+        "Pandas (software)",
+        "Merge",
+    ]
+    .map(|title| page(title, 1_000, &[]));
+    let (_dir, s) = searcher(&[&pages[..], &known[..]].concat());
+    let questions = |query: &str| -> Vec<String> {
+        s.search(query, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.page.is_question())
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(
+        questions("what is the capital of australia"),
+        ["What is the capital gains tax rate in Australia?"]
+    );
+    assert!(questions("how does a refrigerator work").is_empty());
+    // Tags still count toward a title that has some of the query.
+    assert_eq!(questions("pandas merge dataframes"), ["Pandas Merging 101"]);
 }
 
 #[test]

@@ -16,12 +16,12 @@ use super::page::is_item_id;
 use super::sites::{base_title, short_titles};
 use super::{
     Page, PageHit, PageSearcher, ALIAS_MATCH, ASKING_WORDS, BOOKS_SET, CANDIDATES,
-    DESCRIBED_MISSING_FROM, DESCRIBED_QUERY_WORDS, DESCRIBED_WORD, DOCS_SET, FILMS_SET, GITHUB_SET,
-    LEAD_CANDIDATES, LEAD_MATCH, MUSIC_SET, OTHER_NAME_MATCH, PACKAGES_SET, PAPERS_SET,
-    PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
+    DESCRIBED_MISSING_FROM, DESCRIBED_QUERY_WORDS, DESCRIBED_WORD, DOCS_SET, DUPLICATE_WORD_SHARE,
+    FILMS_SET, GITHUB_SET, LEAD_CANDIDATES, LEAD_MATCH, MUSIC_SET, OTHER_NAME_MATCH, PACKAGES_SET,
+    PAPERS_SET, PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
     REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
-    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
+    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WANTED_SET, WELL_KNOWN_PACKAGE,
 };
 use crate::analysis;
 
@@ -97,7 +97,8 @@ impl PageSearcher {
         scope: Option<&dyn Query>,
     ) -> Result<Vec<PageHit>> {
         let words = analysis::tokens(&self.words, query);
-        let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
+        let sharped = analysis::sharp_letters(query);
+        let Some(joined) = self.query_key(query)? else {
             return Ok(Vec::new());
         };
         if words.is_empty() {
@@ -195,7 +196,7 @@ impl PageSearcher {
         }
         if crowded {
             let mut apart: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, Box::new(every_word))];
-            for set in [SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET] {
+            for set in [SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET, WANTED_SET] {
                 apart.push((Occur::MustNot, self.scope_term(&format!("set:{set}"))));
             }
             for (_, address) in searcher.search(
@@ -218,7 +219,7 @@ impl PageSearcher {
         // for so: "1989 by taylor swift".
         let mut film_title_first = HashSet::new();
         for end in 1..words.len() {
-            let Some(key) = analysis::tokens(&self.joined, &words[..end].join(" ")).pop() else {
+            let Some(key) = self.span_key(&words[..end], &sharped)? else {
                 continue;
             };
             let named = TermQuery::new(
@@ -441,7 +442,7 @@ impl PageSearcher {
             .filter(|stem| !unknown.contains(stem))
             .cloned()
             .collect();
-        let inside = self.named_inside(&searcher, &words, scope, &mut addresses)?;
+        let inside = self.named_inside(&searcher, &words, &sharped, scope, &mut addresses)?;
         let mut hits = Vec::new();
         let mut described_repos = super::repos::DescribedRepos::default();
         for address in addresses {
@@ -452,7 +453,8 @@ impl PageSearcher {
             else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
+            let mut page: Page = serde_json::from_str(stored)?;
+            page.drop_borrowed_site();
             let popularity = document
                 .get_first(self.fields.popularity)
                 .and_then(|v| v.as_u64())
@@ -587,6 +589,9 @@ impl PageSearcher {
                 self.name_without_the(rest, &mut hits);
             }
         }
+        if let [name @ .., what] = words.as_slice() {
+            self.name_by_description(name, what, &mut hits);
+        }
         let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         truncate_keeping_inner_pages(&mut hits, limit);
@@ -600,11 +605,13 @@ impl PageSearcher {
     /// ("frp reverse proxy", [`PageSearcher::repo_described`]) and docs
     /// pages by their product and title ("python asyncio tutorial"). They lack the query's other words, so nothing
     /// else finds them. A part is any run of the query's `words` but the
-    /// whole query, as long as it is not only function or asking words.
+    /// whole query, as long as it is not only function or asking words,
+    /// keyed with the sharps it was typed with (`sharped`).
     fn named_inside(
         &self,
         searcher: &tantivy::Searcher,
         words: &[String],
+        sharped: &[String],
         scope: Option<&dyn Query>,
         addresses: &mut Vec<tantivy::DocAddress>,
     ) -> Result<Inside> {
@@ -629,7 +636,7 @@ impl PageSearcher {
                 {
                     continue;
                 }
-                let Some(key) = analysis::tokens(&self.joined, &span.join(" ")).pop() else {
+                let Some(key) = self.span_key(span, sharped)? else {
                     continue;
                 };
                 let mut lanes: Vec<Box<dyn Query>> = vec![Box::new(TermQuery::new(
@@ -916,9 +923,12 @@ impl PageSearcher {
     /// And whether the query asks the question as a whole: it has all of
     /// the query's words, and the query at least [`QUESTION_TITLE_SHARE`]
     /// of its title's. A question without `topic_word`, the query's rarest
-    /// word, matches not at all. The question's words are its title and
+    /// word, or whose title has none of `sure`, matches not at all. The
+    /// question's words are its title and
     /// tags, or the title of a duplicate of it and its tags, whichever
-    /// covers the query best ([`Page::asked_as`]).
+    /// covers the query best ([`Page::asked_as`]). A word only the
+    /// duplicate's title has counts [`DUPLICATE_WORD_SHARE`], unless the
+    /// query asks the duplicate as a whole.
     pub(crate) fn question_match(
         &self,
         page: &Page,
@@ -942,32 +952,70 @@ impl PageSearcher {
             }
         };
         let all: f32 = stems.iter().map(weight).sum();
+        let stemmed = |text: &str| -> HashSet<String> {
+            analysis::tokens(&self.stemmed, text).into_iter().collect()
+        };
+        let asked_as = page.asked_as();
+        let own = asked_as
+            .first()
+            .map(|(_, topic)| stemmed(topic))
+            .unwrap_or_default();
         let mut best = (0.0f32, false);
-        for (title, topic) in page.asked_as() {
+        for (title, topic) in &asked_as {
             if page.is_question() && self.only_asks(title) {
                 continue;
             }
-            let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
-                .into_iter()
-                .collect();
+            let words = stemmed(topic);
             if topic_word.is_some_and(|word| !words.contains(word)) {
                 continue;
             }
-            let share = stems
-                .iter()
-                .filter(|stem| words.contains(*stem))
-                .map(weight)
-                .sum::<f32>()
-                / all;
+            let covered = |duplicate_word: f32| {
+                stems
+                    .iter()
+                    .filter(|stem| words.contains(*stem))
+                    .map(|stem| {
+                        weight(stem)
+                            * if own.contains(stem) {
+                                1.0
+                            } else {
+                                duplicate_word
+                            }
+                    })
+                    .sum::<f32>()
+                    / all
+            };
+            let share = covered(1.0);
             if share < QUESTION_SHARE {
                 continue;
             }
-            let title: HashSet<String> =
-                analysis::tokens(&self.stemmed, title).into_iter().collect();
+            let title = stemmed(title);
+            // Its tags alone do not make a question about the query: "What
+            // is the tax status of assets recovered via bankruptcy
+            // proceedings?", tagged capital-gains-tax and australia, does
+            // not ask "what is the capital of australia".
+            if page.is_question()
+                && !sure.is_empty()
+                && !sure.iter().any(|stem| title.contains(stem))
+            {
+                continue;
+            }
             let asked = share >= 1.0
                 && !title.is_empty()
                 && title.iter().filter(|word| stems.contains(word)).count() as f32
                     >= QUESTION_TITLE_SHARE * title.len() as f32;
+            // A duplicate's own words may be its asker's detail, not what
+            // the question answers: "python list sort" asks nothing of
+            // "Remove all whitespace in a string", though its duplicate "How
+            // to sort a list of string ignoring whitespace in python?" has
+            // every word.
+            let share = if asked {
+                share
+            } else {
+                covered(DUPLICATE_WORD_SHARE)
+            };
+            if share < QUESTION_SHARE {
+                continue;
+            }
             let found = (PARTIAL_MATCH * share, asked);
             if found.0 > best.0 || found.0 == best.0 && found.1 && !best.1 {
                 best = found;
@@ -1187,6 +1235,11 @@ impl PageSearcher {
                 best = best.max(PARTIAL_MATCH * share);
             }
         }
+        // "lincoln assassination" is about the Assassination of Abraham
+        // Lincoln, which no redirect may call so.
+        if page.is_article() && super::sites::event_of(&page.title, raw_query) {
+            return (ALIAS_MATCH, true);
+        }
         (best, false)
     }
 
@@ -1280,6 +1333,7 @@ impl PageSearcher {
         if !office && !super::HONORIFICS.contains(&title) {
             return;
         }
+        let elected = super::ELECTED.contains(&title);
         let words = |text: &str| analysis::tokens(&self.words, text);
         let fits = |page: &Page| {
             let names: HashSet<String> = std::iter::once(&page.title)
@@ -1290,7 +1344,7 @@ impl PageSearcher {
                 words(&page.title)
                     .into_iter()
                     .chain(words(page.description.as_deref().unwrap_or("")))
-                    .any(|word| word == title)
+                    .any(|word| word == title || elected && word == "politician")
             };
             page.is_article() && name.iter().all(|word| names.contains(word)) && (!office || said())
         };
@@ -1327,6 +1381,53 @@ impl PageSearcher {
                 && hit.page.views * super::SURNAME_MARGIN > views
                 && fits(&hit.page)
                 && !(living && died(&hit.page))
+        }) {
+            return;
+        }
+        name_by_alias(&mut hits[best]);
+    }
+
+    /// Names the person the query calls by their `name` and then says
+    /// `what` they are, as their description does, when nothing is named:
+    /// "tom hanks actor" is Tom Hanks, "American actor and filmmaker", and
+    /// "mozart composer" Wolfgang Amadeus Mozart. The name is their title
+    /// without its qualifier, another name or, alone, the title's last
+    /// word. Only when they are read
+    /// [`super::SURNAME_MARGIN`] times as much as every other person who
+    /// fits: "chris smith footballer" is several.
+    fn name_by_description(&self, name: &[String], what: &str, hits: &mut [PageHit]) {
+        if name.is_empty() || hits.iter().any(|hit| hit.named) {
+            return;
+        }
+        let key = |text: &str| analysis::tokens(&self.joined, text).pop();
+        let Some(called) = key(&name.join(" ")) else {
+            return;
+        };
+        let surname = |page: &Page| match name {
+            [word] => analysis::tokens(&self.words, base_title(&page.title)).last() == Some(word),
+            _ => false,
+        };
+        let fits = |page: &Page| {
+            page.is_person()
+                && (std::iter::once(base_title(&page.title))
+                    .chain(page.aliases.iter().map(String::as_str))
+                    .any(|text| key(text).as_ref() == Some(&called))
+                    || surname(page))
+                && analysis::tokens(&self.words, page.description.as_deref().unwrap_or(""))
+                    .iter()
+                    .any(|word| word == what)
+        };
+        let Some((best, views)) = hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| fits(&hit.page))
+            .max_by_key(|(_, hit)| hit.page.views)
+            .map(|(at, hit)| (at, hit.page.views))
+        else {
+            return;
+        };
+        if hits.iter().enumerate().any(|(at, hit)| {
+            at != best && hit.page.views * super::SURNAME_MARGIN > views && fits(&hit.page)
         }) {
             return;
         }
@@ -1404,7 +1505,7 @@ const REPO_NAME_PAGES: u64 = 100_000;
 /// The parts of a query that may name a page ([`PageSearcher::named_inside`]).
 #[derive(Default)]
 struct Inside {
-    /// Each part's key ([`analysis::joined_analyzer`]) and words, the
+    /// Each part's key ([`PageSearcher::span_key`]) and words, the
     /// longest part of a key.
     keys: HashMap<String, Vec<String>>,
     /// Pages found only by a part, left out unless it names them.
@@ -1455,7 +1556,7 @@ const BELOW_NAMED_ARTICLE: f32 = 0.99;
 /// page at chessprogramming.org for "napoleon", loc.gov's for "abraham
 /// lincoln". A page on the article's own website keeps its score: nps.gov's
 /// "Yosemite National Park" is the park's own page.
-pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
+pub fn site_pages_after_named_article(hits: &mut [PageHit]) {
     let Some(article) = hits
         .iter()
         .filter(|hit| {
@@ -1481,7 +1582,13 @@ pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
 /// words of "javascript array sort" are more read than MDN's page on it,
 /// and would crowd it out.
 pub(crate) fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
-    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET];
+    let kept = [
+        DOCS_SET,
+        SUBPAGES_SET,
+        REFERENCE_SET,
+        REFERENCE2_SET,
+        WANTED_SET,
+    ];
     for set in kept {
         if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
             continue;

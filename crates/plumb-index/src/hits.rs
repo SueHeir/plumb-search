@@ -160,9 +160,10 @@ impl Searcher {
             title: own(self.fields.title).filter(|title| !title.contains('\u{FFFD}')),
             official: about.is_some(),
             // The site's own description, unless its template left it
-            // unfilled, else Wikipedia's, else what Wikidata says it is.
+            // unfilled or it is in the wrong encoding, else Wikipedia's,
+            // else what Wikidata says it is.
             description: own(self.fields.description)
-                .filter(|description| !is_unfilled(description))
+                .filter(|description| !is_unfilled(description) && !is_garbled(description))
                 .or(about),
             domain,
             score: ranked.score,
@@ -253,6 +254,24 @@ pub(crate) fn is_unfilled(description: &str) -> bool {
             .is_some_and(|(_, last)| last == "desc")
 }
 
+/// Whether `text` was read in the wrong encoding, so it says nothing: a
+/// quarter or more of its characters are `�` ("���¾�γ�����…" for the
+/// Chinese of jwview.com), or it is one long run of base64
+/// ("JTNDZGl2JTIwY2xhc3Mi…" for motorsportweek.com's markup). One
+/// accent lost ("D�couvrez et explorez") leaves the rest readable.
+pub(crate) fn is_garbled(text: &str) -> bool {
+    let text = text.trim();
+    let chars = text.chars().filter(|c| !c.is_whitespace()).count();
+    let lost = text.chars().filter(|&c| c == '\u{FFFD}').count();
+    let base64 = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=');
+    lost * 4 >= chars.max(1)
+        || (chars >= 24
+            && text.chars().all(base64)
+            && text.chars().any(|c| c.is_ascii_digit())
+            && text.chars().any(|c| c.is_ascii_uppercase())
+            && text.chars().any(|c| c.is_ascii_lowercase()))
+}
+
 /// The text of `hit` that search operators look at, besides its domain.
 pub(crate) fn hit_texts(hit: &Hit) -> impl Iterator<Item = &str> {
     [
@@ -340,6 +359,14 @@ pub fn suggested_site_second(hits: &mut Vec<Hit>, site: &str) {
 ///   it is (google.fr's "Google Search" for "google maps").
 /// - A site nobody links to whose title is that of a site listed above it
 ///   (a copy of Coinbase's title on elephant-blue.org).
+/// - A little-known site whose title is that of a site listed with it,
+///   is no name of its own ([`is_own_name`]) and has no description
+///   other than that site's: a network of spam sites under one title
+///   ("INFORMATION40" on bountystory.site and three more of its endings,
+///   "Big-B" on five gambling sites, "MailUp Tracking Service" for "ups
+///   tracking"), or a copy of CNN's whole homepage on mos-scripts.com.
+///   The first of them stays. Two dentists both titled "Family
+///   Dentistry" say different things of themselves, and both stay.
 ///
 /// `typed` is the domain the query is, which always stays, and so do the
 /// sites of `home`, the searcher's country (bbc.co.uk in Britain). The
@@ -389,7 +416,11 @@ pub(crate) fn without_copies(
         if typed == Some(hit.domain.as_str()) {
             continue;
         }
-        let title = hit.title.as_deref().map(normalize_text);
+        let title = hit
+            .title
+            .as_deref()
+            .map(normalize_text)
+            .filter(|title| !title.is_empty());
         let same_title =
             |other: &Hit| title.is_some() && other.title.as_deref().map(normalize_text) == title;
         // The brand's site for another country, when the query is the
@@ -427,11 +458,20 @@ pub(crate) fn without_copies(
                 label.len() >= 4 && names_brand(other, label) && !hit.domain.contains(label)
             })
         };
-        if hits.iter().any(|other| {
-            other.link_score > hit.link_score
-                && same_title(other)
-                && (hit.link_score < COPYCAT_LINK_SCORE
-                    || (hit.link_score < WELL_KNOWN_LINK_SCORE && names_other(other)))
+        let someone_elses = hit.link_score < WELL_KNOWN_LINK_SCORE && !is_own_name(hit);
+        let description = hit.description.as_deref().map(normalize_text);
+        let says_nothing_else = |other: &Hit| {
+            description.is_none() || other.description.as_deref().map(normalize_text) == description
+        };
+        if hits.iter().enumerate().any(|(j, other)| {
+            let better = other.link_score > hit.link_score;
+            same_title(other)
+                && ((better
+                    && (hit.link_score < COPYCAT_LINK_SCORE
+                        || (hit.link_score < WELL_KNOWN_LINK_SCORE && names_other(other))))
+                    || ((better || (other.link_score == hit.link_score && j < i))
+                        && someone_elses
+                        && says_nothing_else(other)))
         }) {
             copies[i] = true;
             continue;
@@ -535,6 +575,10 @@ pub(crate) fn look_alikes(hits: &[Hit], query: &str, typed: Option<&str>) -> Vec
 /// ([`plumb_core::simhash::near_copies`] of their `fingerprints`, one per
 /// hit): a scraped copy, a parked page on a template, a mirror under a
 /// title of its own, which [`without_copies`] cannot tell by its title.
+/// A little-known site goes too when its title is no name of its own
+/// ([`is_own_name`]) and a site listed above it, as well linked, has its
+/// text: one of a spam network's sites ("Beginner's Guide to Coding in
+/// Python | Crest Center" and "| Harbor Workshop" on made-up names).
 /// Official sites, the domain the query is (`typed`) and the searcher's
 /// country's sites (`home`) always stay.
 pub(crate) fn without_near_copies(
@@ -549,20 +593,44 @@ pub(crate) fn without_near_copies(
             return false;
         };
         if hit.official
-            || hit.link_score >= COPYCAT_LINK_SCORE
+            || hit.link_score >= WELL_KNOWN_LINK_SCORE
             || typed == Some(hit.domain.as_str())
             || (home.is_some() && hit.country.as_deref() == home)
         {
             return false;
         }
-        hits.iter().zip(fingerprints).any(|(other, other_print)| {
-            other.link_score > hit.link_score
-                && other_print.is_some_and(|other| plumb_core::simhash::near_copies(*print, other))
-        })
+        let someone_elses = !is_own_name(hit);
+        hits.iter()
+            .zip(fingerprints)
+            .enumerate()
+            .any(|(j, (other, other_print))| {
+                let better = other.link_score > hit.link_score;
+                (better && hit.link_score < COPYCAT_LINK_SCORE
+                    || (better || (other.link_score == hit.link_score && j < i)) && someone_elses)
+                    && other_print
+                        .is_some_and(|other| plumb_core::simhash::near_copies(*print, other))
+            })
     };
     let copies: Vec<bool> = (0..hits.len()).map(copy).collect();
     hits.into_iter()
         .zip(copies)
         .filter_map(|(hit, copy)| (!copy).then_some(hit))
         .collect()
+}
+
+/// Whether the title of `hit` is a name of its own: its address's label
+/// is in the title, or the title is in the label ("Joe's Pizza" on
+/// joespizzanyc.com, "XX88" on xx88s.com, "München" on münchen.de).
+/// Spam sites under one title are mostly not ("INFORMATION40" on
+/// bountystory.site), and namesakes titled alike are.
+fn is_own_name(hit: &Hit) -> bool {
+    let Some(title) = &hit.title else {
+        return false;
+    };
+    let joined = |text: &str| normalize_text(text).replace(' ', "");
+    let (title, label) = (
+        joined(title),
+        joined(&crate::schema::label_text(&hit.domain)),
+    );
+    !title.is_empty() && (title.contains(&label) || label.contains(&title))
 }

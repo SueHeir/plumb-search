@@ -166,7 +166,12 @@ impl Builder {
         let mut named_inner: HashMap<String, Vec<&OfficialSite>> = HashMap::new();
         let mut inner = 0u64;
         let mut invalid = 0u64;
+        let mut nothing = 0u64;
         for site in sites {
+            if site.claims_nothing() {
+                nothing += 1;
+                continue;
+            }
             let front_page = site.is_root_homepage();
             if !front_page && !site.is_named_inner_page() {
                 inner += 1;
@@ -272,7 +277,7 @@ impl Builder {
         }
         warn_invalid("Wikidata official sites", invalid);
         info!(
-            "marked {official} official sites ({by_inner_page} by an inner page naming the site); skipped {shared} front pages claimed by more than {MAX_ITEMS_PER_HOMEPAGE} Wikidata items, and {inner} claims on a subdomain or an inner page"
+            "marked {official} official sites ({by_inner_page} by an inner page naming the site); skipped {shared} front pages claimed by more than {MAX_ITEMS_PER_HOMEPAGE} Wikidata items, {inner} claims on a subdomain or an inner page, and {nothing} claims by a disambiguation page, category, template or domain ending"
         );
     }
 
@@ -752,6 +757,75 @@ mod tests {
         let records = builder.finish(None);
         assert!(records[0].kinds.is_empty());
         assert_eq!(records[0].about, None);
+    }
+
+    #[test]
+    fn wiki_pages_and_domain_endings_claim_nothing() {
+        let claim = |item: &str, label: &str, domain: &str, kind: &str, about: &str| {
+            let mut site = site(item, label, domain);
+            site.kinds = vec![kind.to_string()];
+            site.about = Some(about.to_string());
+            site
+        };
+        let disambiguation = "Wikimedia disambiguation page";
+        let mut builder = Builder::new();
+        builder.add_official_sites(&[
+            claim(
+                "Q6840254",
+                "Microsoft Web Services",
+                "outlook.com",
+                disambiguation,
+                disambiguation,
+            ),
+            claim(
+                "Q227055",
+                "Mayenne",
+                "mayen.de",
+                disambiguation,
+                disambiguation,
+            ),
+            claim(
+                "Q516611",
+                "Mayen",
+                "mayen.de",
+                "town",
+                "town in Rhineland-Palatinate",
+            ),
+            claim(
+                "Q14407990",
+                "Template:Hall of Fame",
+                "hoophall.com",
+                "Wikimedia template",
+                "",
+            ),
+            claim(
+                "Q19870599",
+                ".microsoft",
+                "nic.microsoft",
+                "generic top-level domain",
+                "top-level Internet domain",
+            ),
+            claim(
+                "Q1",
+                ".NET Foundation",
+                "dotnetfoundation.org",
+                "foundation",
+                "non-profit organization",
+            ),
+            claim("Q2", ".KTW", "ktw.com.pl", "magazine", "Polish magazine"),
+        ]);
+        let mut records = builder.finish(None);
+        records.sort_by(|a, b| a.domain.cmp(&b.domain));
+        let domains: Vec<&str> = records
+            .iter()
+            .map(|record| record.domain.as_str())
+            .collect();
+        assert_eq!(domains, ["dotnetfoundation.org", "ktw.com.pl", "mayen.de"]);
+        assert_eq!(records[2].aliases, ["Mayen"]);
+        assert_eq!(
+            records[2].about.as_deref(),
+            Some("town in Rhineland-Palatinate")
+        );
     }
 
     #[test]

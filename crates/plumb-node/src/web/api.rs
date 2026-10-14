@@ -72,6 +72,9 @@ pub(crate) async fn api_search(
     }
     let options = params.options(&state.settings, &headers);
     let found = run_search(&state, &query, params.limit(), &options).await;
+    if let (Ok(results), Some(node)) = (&found, &state.node) {
+        node.searched(&query, results);
+    }
     match found {
         Ok(mut results) if full => {
             let places = crate::assembly::places(
@@ -90,7 +93,8 @@ pub(crate) async fn api_search(
                 let local = place_sites(&state, &found.found, &options).await;
                 places::local_first(&found.found, &mut results.hits, local, params.limit());
             }
-            let extras = extras(&state, &query, &options, None).await;
+            let spelling = results.spelling.as_ref().map(|s| s.query.as_str());
+            let extras = extras(&state, &query, spelling, &options, None).await;
             route_sources(
                 &state,
                 &query,

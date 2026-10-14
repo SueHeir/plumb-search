@@ -122,6 +122,16 @@ fn canonical_url(address: &str) -> Option<String> {
         return None;
     }
     url.set_fragment(None);
+    // pkg.go.dev links name the Go release: "context@go1.27.2".
+    let path = url.path().to_string();
+    if let Some((page, version)) = path.rsplit_once('@') {
+        if version.strip_prefix("go").is_some_and(|v| {
+            v.starts_with(|c: char| c.is_ascii_digit())
+                && v.chars().all(|c| c.is_ascii_digit() || c == '.')
+        }) {
+            url.set_path(page);
+        }
+    }
     Some(url.into())
 }
 
@@ -292,10 +302,19 @@ fn article_of(site: &DocsSite, doc: &FetchedDoc, shared: &Shared) -> Option<Arti
 fn aliases(site: &DocsSite, title: &str) -> Vec<String> {
     let mut parts = title.split(" — ");
     let first = parts.next().unwrap_or(title).trim();
-    let mut aliases = vec![
-        format!("{} {first}", site.product),
-        format!("{first} {}", site.product),
-    ];
+    // "PEP 8" and "RFC 9110" name their product already.
+    let numbered = first
+        .to_lowercase()
+        .strip_prefix(&format!("{} ", site.product.to_lowercase()))
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    let mut aliases = if numbered {
+        Vec::new()
+    } else {
+        vec![
+            format!("{} {first}", site.product),
+            format!("{first} {}", site.product),
+        ]
+    };
     if let Some(section) = parts
         .next()
         .map(str::trim)
@@ -345,6 +364,9 @@ fn aliases(site: &DocsSite, title: &str) -> Vec<String> {
         }
     }
     aliases.retain(|alias| alias.to_lowercase() != lower);
+    if numbered {
+        aliases.insert(0, first.to_string());
+    }
     aliases.dedup();
     aliases.truncate(MAX_ALIASES);
     aliases
@@ -406,6 +428,26 @@ mod tests {
             search: None,
             language: None,
         }
+    }
+
+    #[test]
+    fn numbered_documents_are_named_by_number_and_go_pages_by_no_release() {
+        let pep = site("pep").unwrap();
+        assert_eq!(
+            aliases(pep, "PEP 8 — Style Guide for Python Code")[0],
+            "PEP 8"
+        );
+        assert!(!aliases(pep, "PEP 8 — Style Guide for Python Code")
+            .iter()
+            .any(|alias| alias.contains("PEP PEP")));
+        assert_eq!(
+            canonical_url("https://pkg.go.dev/context@go1.27.2").as_deref(),
+            Some("https://pkg.go.dev/context")
+        );
+        assert_eq!(
+            canonical_url("https://pkg.go.dev/github.com/x/y@v1.2.3").as_deref(),
+            Some("https://pkg.go.dev/github.com/x/y@v1.2.3")
+        );
     }
 
     #[test]

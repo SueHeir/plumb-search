@@ -42,6 +42,11 @@ pub const FILL_IN_TOP: usize = 100_000;
 /// by offset without an order can skip statements (France's area).
 pub const FILL_IN_ALWAYS: usize = 20_000;
 
+/// The smallest share (P1107) that makes a holder an owner. Wikidata
+/// gives a listed company's big investors as "owned by" with their share:
+/// Larry Ellison's 1.7% of Tesla, BlackRock's 7% of Microsoft.
+const OWNER_SHARE: f64 = 0.1;
+
 /// Facts by Wikidata item (`Q408`).
 pub type FactsByItem = HashMap<String, Vec<Fact>>;
 
@@ -152,8 +157,8 @@ const PREFIXES: &str = "PREFIX wd: <http://www.wikidata.org/entity/> \
 pub const DEEP_SPARQL_URL: &str = "https://qlever.dev/api/wikidata";
 
 /// The query for a page of `kind`'s best-ranked statements: `?item` and
-/// `?v`, and the precision `?p` of a date or the year `?t` a population
-/// was counted.
+/// `?v`, the precision `?p` of a date or the year `?t` a population was
+/// counted, and an owner's share `?share`.
 fn page_query(kind: FactKind, offset: usize) -> String {
     let p = kind.property();
     let value = match kind.value_type() {
@@ -163,7 +168,7 @@ fn page_query(kind: FactKind, offset: usize) -> String {
         // Africa's three capitals) counts only when there is no other. A
         // CEO's start `?t` keeps the latest.
         ValueType::Item => format!(
-            "ps:{p} ?v . {}OPTIONAL {{ ?s pq:P518 ?part . }}{}",
+            "ps:{p} ?v . {}OPTIONAL {{ ?s pq:P518 ?part . }}{}{}",
             if kind.current() {
                 "FILTER NOT EXISTS { ?s pq:P582 [] } "
             } else {
@@ -178,6 +183,11 @@ fn page_query(kind: FactKind, offset: usize) -> String {
                 )
             } else {
                 String::new()
+            },
+            if kind == FactKind::Owner {
+                " OPTIONAL { ?s pq:P1107 ?share . }"
+            } else {
+                ""
             }
         ),
         // A count has no unit to normalize.
@@ -198,7 +208,7 @@ fn page_query(kind: FactKind, offset: usize) -> String {
         }
     };
     format!(
-        "{PREFIXES}SELECT ?item ?v ?p ?t ?part ?dated WHERE {{ ?item p:{p} ?s . ?s a wikibase:BestRank ; {value} }} \
+        "{PREFIXES}SELECT ?item ?v ?p ?t ?part ?dated ?share WHERE {{ ?item p:{p} ?s . ?s a wikibase:BestRank ; {value} }} \
          LIMIT {FACTS_PAGE} OFFSET {offset}"
     )
 }
@@ -251,6 +261,16 @@ impl RawFacts {
                 ValueType::Item => {
                     let id = entity_id(&v.value);
                     if !is_item_id(id) {
+                        continue;
+                    }
+                    // A holder of less than [`OWNER_SHARE`] is an investor,
+                    // not the owner. A share over 1 is a percentage
+                    // (Nvidia's 7.43).
+                    let share = row
+                        .get("share")
+                        .and_then(|share| share.value.trim_start_matches('+').parse::<f64>().ok())
+                        .map(|share| if share > 1.0 { share / 100.0 } else { share });
+                    if share.is_some_and(|share| share < OWNER_SHARE) {
                         continue;
                     }
                     if row.contains_key("part") {
@@ -1490,6 +1510,8 @@ mod tests {
         );
         assert!(q.contains("FILTER NOT EXISTS { ?s pq:P582 [] }"), "{q}");
         assert!(!page_query(FactKind::Founder, 0).contains("FILTER"));
+        assert!(page_query(FactKind::Owner, 0).contains("OPTIONAL { ?s pq:P1107 ?share . }"));
+        assert!(!page_query(FactKind::Founder, 0).contains("P1107"));
         let q = page_query(FactKind::AtomicNumber, 0);
         assert!(q.contains("psv:P1086/wikibase:quantityAmount ?v"), "{q}");
         assert!(!q.contains("P585"), "{q}");
@@ -1500,7 +1522,7 @@ mod tests {
         let q = items_query(FactKind::Population, &items);
         assert!(
             q.strip_prefix(PREFIXES).is_some_and(|q| q.starts_with(
-                "SELECT ?item ?v ?p ?t ?part ?dated WHERE { VALUES ?item { wd:Q30 wd:Q668 } ?item p:P1082 ?s ."
+                "SELECT ?item ?v ?p ?t ?part ?dated ?share WHERE { VALUES ?item { wd:Q30 wd:Q668 } ?item p:P1082 ?s ."
             )),
             "{q}"
         );
@@ -1913,6 +1935,36 @@ mod tests {
             facts
         };
         assert_eq!(read(2), read(1));
+    }
+
+    #[test]
+    fn owners_hold_a_tenth_or_more() {
+        let wanted: HashSet<String> = ["Q478214", "Q182477", "Q483551", "Q866"]
+            .map(String::from)
+            .into();
+        let e = |id: &str| format!("{E}{id}");
+        let (tesla, ellison, musk, capital) =
+            (e("Q478214"), e("Q92759"), e("Q317521"), e("Q505275"));
+        let (nvidia, huang, blackrock) = (e("Q182477"), e("Q305177"), e("Q219635"));
+        let (walmart, walton) = (e("Q483551"), e("Q17343056"));
+        let (youtube, google) = (e("Q866"), e("Q95"));
+        let page = answer(&[
+            &[("item", &tesla), ("v", &ellison), ("share", "0.017")],
+            &[("item", &tesla), ("v", &musk), ("share", "0.208")],
+            &[("item", &tesla), ("v", &capital), ("share", "0.059")],
+            // Percentages.
+            &[("item", &nvidia), ("v", &huang), ("share", "3.58")],
+            &[("item", &nvidia), ("v", &blackrock), ("share", "7.43")],
+            &[("item", &walmart), ("v", &walton), ("share", "+0.4795")],
+            // No share given.
+            &[("item", &youtube), ("v", &google)],
+        ]);
+        let mut raw = RawFacts::default();
+        raw.add_page(FactKind::Owner, &wanted, &page).unwrap();
+        assert_eq!(raw.facts["Q478214"], [fact(FactKind::Owner, "Q317521")]);
+        assert!(!raw.facts.contains_key("Q182477"));
+        assert_eq!(raw.facts["Q483551"], [fact(FactKind::Owner, "Q17343056")]);
+        assert_eq!(raw.facts["Q866"], [fact(FactKind::Owner, "Q95")]);
     }
 
     #[test]

@@ -195,6 +195,10 @@ const ABOUT_TOWN: &[&str] = &[
     "crime",
     "jobs",
 ];
+/// First words of a question of how or why, which asks for no places
+/// whatever words follow: "how to merge cells in excel" wants no phone
+/// stores in Excel, Alabama.
+const ASKS_HOW: &[&str] = &["how", "why"];
 /// Words left out of what is looked for: "best pizza", "places to eat".
 const FILLER: &[&str] = &[
     "best", "good", "great", "cheap", "top", "nice", "nearest", "closest", "open", "the", "a",
@@ -266,7 +270,7 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         .iter()
         .map(String::as_str)
         .find(|w| !FILLER.contains(w))
-        .is_some_and(|w| ABOUT_TOWN.contains(&w))
+        .is_some_and(|w| ABOUT_TOWN.contains(&w) || ASKS_HOW.contains(&w))
     {
         return Vec::new();
     }
@@ -280,9 +284,6 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         let what = what.join(" ");
         (!what.is_empty() && what != "to").then_some(what)
     };
-    let ends_with = |suffix: &[&str]| {
-        words.len() > suffix.len() && words[words.len() - suffix.len()..] == *suffix
-    };
     let near_me = |what: Option<String>| -> Vec<PlaceQuery> {
         what.map(|what| PlaceQuery {
             what,
@@ -292,10 +293,8 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         .into_iter()
         .collect()
     };
-    for suffix in NEAR_ME {
-        if ends_with(suffix) {
-            return near_me(what_of(&words[..words.len() - suffix.len()]));
-        }
+    if let Some((at, _)) = near_me_at(&words) {
+        return near_me(what_of(&words[..at]));
     }
     if words.first().is_some_and(|w| w == "nearby") && words.len() > 1 {
         return near_me(what_of(&words[1..]));
@@ -376,33 +375,61 @@ pub fn place_query_readings(query: &str) -> Vec<PlaceQuery> {
         }
     }
     // "coffee open now", "pharmacy open late": a kind of place asked for
-    // at a time, with no town, is near the searcher. A time alone says
-    // that only of words that are all kinds of place: "pizza tonight",
-    // not "stock market today".
+    // at a time, with no town, is near the searcher, and so is the
+    // "nearest pharmacy". A time alone says that only of words that are
+    // all kinds of place: "pizza tonight", not "stock market today".
     let kinds = |words: &[String]| {
         words
             .iter()
             .all(|w| FILLER.contains(&w.as_str()) || is_kind_word(w))
     };
-    if said_when && words.last().is_some_and(|w| is_kind_word(w)) && (said_hours || kinds(&words)) {
+    let said_nearest = words.iter().any(|w| w == "nearest" || w == "closest");
+    if words.last().is_some_and(|w| is_kind_word(w))
+        && (said_nearest || (said_when && (said_hours || kinds(&words))))
+    {
         readings.extend(near_me(what_of(&words)));
     }
     readings
 }
 
-/// `query` without the "near me" that ends it ("safeway near me" ->
-/// "safeway"), for searching sites: "me" names no site (domain.me,
+/// Where `words` say "near me" or the like, and in how many words: at
+/// their end ("safeway near me"), or after the first word with more after
+/// it ("dentist near me that takes medicaid", "car wash near me open
+/// sunday"), which say no more of where. "nearby" only at the end: "hotels
+/// nearby disney world" is near Disney World.
+fn near_me_at(words: &[String]) -> Option<(usize, usize)> {
+    let said = |at: usize, near: &[&str]| {
+        words
+            .get(at..at + near.len())
+            .is_some_and(|words| words == near)
+    };
+    NEAR_ME
+        .iter()
+        .find(|near| words.len() > near.len() && said(words.len() - near.len(), near))
+        .map(|near| (words.len() - near.len(), near.len()))
+        .or_else(|| {
+            (1..words.len()).find_map(|at| {
+                NEAR_ME
+                    .iter()
+                    .find(|near| near.iter().any(|w| *w == "me" || *w == "my") && said(at, near))
+                    .map(|near| (at, near.len()))
+            })
+        })
+}
+
+/// `query` without the "near me" in it ("safeway near me" -> "safeway",
+/// "dentist near me that takes medicaid" -> "dentist that takes
+/// medicaid"), for searching sites: "me" names no site (domain.me,
 /// maine.gov). `None` when it has none.
 pub fn without_near_me(query: &str) -> Option<String> {
-    let words: Vec<String> = normalize_text(query)
+    let mut words: Vec<String> = normalize_text(query)
         .split(' ')
         .filter(|w| !w.is_empty())
         .map(str::to_string)
         .collect();
-    NEAR_ME.iter().find_map(|suffix| {
-        (words.len() > suffix.len() && words[words.len() - suffix.len()..] == **suffix)
-            .then(|| words[..words.len() - suffix.len()].join(" "))
-    })
+    let (at, length) = near_me_at(&words)?;
+    words.drain(at..at + length);
+    Some(words.join(" "))
 }
 
 /// A place found, and how far it is from where the search looked.
@@ -845,7 +872,10 @@ impl PlaceSearcher {
     ) -> Result<Option<PlaceQuery>> {
         let normalized = normalize_text(query);
         let words: Vec<&str> = normalized.split_whitespace().collect();
-        if !(2..=6).contains(&words.len()) || ABOUT_TOWN.contains(&words[0]) {
+        if !(2..=6).contains(&words.len())
+            || ABOUT_TOWN.contains(&words[0])
+            || ASKS_HOW.contains(&words[0])
+        {
             return Ok(None);
         }
         for count in (1..=3.min(words.len() - 1)).rev() {
@@ -870,11 +900,19 @@ impl PlaceSearcher {
             // Only a place called that, as far out as places are listed,
             // is a business named: "bible reading" asks for no Bible
             // church in Reading, Pennsylvania, and "boulder denver" for no
-            // town near Denver.
+            // town near Denver. So is a branch called that and the town:
+            // "sheraton charlotte" is the Sheraton Charlotte Hotel, though
+            // nothing is called just Sheraton. "university of denver" is
+            // one place's name, not a University of in Denver.
+            let joined = what
+                .last()
+                .is_some_and(|word| ["of", "de", "di", "du"].contains(word));
             let what = what.join(" ");
             let km = 3.0 * town_size(&town.kind).unwrap_or(LANDMARK_KM);
             let named = self.named_within(&what, Some((town, km)))?;
-            if named.iter().any(|place| !place.is_town()) {
+            if named.iter().any(|place| !place.is_town())
+                || (!joined && self.branch_within(&normalized, town, km, required_country)?)
+            {
                 return Ok(Some(PlaceQuery {
                     what,
                     near: Near::Named(name),
@@ -883,6 +921,28 @@ impl PlaceSearcher {
             }
         }
         Ok(None)
+    }
+
+    /// Whether a place within `km` of `town`, other than a town, has every
+    /// word of `query` in its name: "Sheraton Charlotte Hotel" for
+    /// "sheraton charlotte".
+    fn branch_within(
+        &self,
+        query: &str,
+        town: &Place,
+        km: f64,
+        required_country: Option<&str>,
+    ) -> Result<bool> {
+        let stems = analysis::tokens(&self.stemmed, query);
+        let hits = self.around(query, town, km, required_country, CANDIDATES)?;
+        Ok(hits.iter().any(|hit| {
+            std::iter::once(&hit.place.name)
+                .chain(&hit.place.aliases)
+                .any(|name| {
+                    let named = analysis::tokens(&self.stemmed, name);
+                    stems.iter().all(|stem| named.contains(stem))
+                })
+        }))
     }
 
     /// The places matching `what` within `radius` km of `center`, or three
@@ -1746,6 +1806,19 @@ mod tests {
             Some(("coffee".into(), Near::Me))
         );
         assert_eq!(query("Coffee nearby"), Some(("coffee".into(), Near::Me)));
+        // Words after "near me" say no more of where.
+        for (asked, what) in [
+            ("dentist near me that takes medicaid", "dentist"),
+            ("restaurants near me with outdoor seating", "restaurants"),
+            ("urgent care near me open saturday", "urgent care"),
+            ("car wash in my area open sunday", "car wash"),
+        ] {
+            assert_eq!(query(asked), Some((what.into(), Near::Me)), "{asked}");
+        }
+        assert!(!matches!(
+            query("hotels nearby disney world"),
+            Some((_, Near::Me))
+        ));
         assert_eq!(
             query("hotels near the eiffel tower"),
             Some(("hotels".into(), Near::Named("eiffel tower".into())))
@@ -1794,6 +1867,23 @@ mod tests {
             Some(("pharmacy".into(), Near::Me))
         );
         assert_eq!(query("pizza tonight"), Some(("pizza".into(), Near::Me)));
+        // After any town the words may name ("gas" is none).
+        for (nearest, what) in [
+            ("nearest gas station", "gas station"),
+            ("where is the closest hospital", "hospital"),
+        ] {
+            let near_me = PlaceQuery {
+                what: what.into(),
+                near: Near::Me,
+                said_where: true,
+            };
+            assert_eq!(place_query_readings(nearest).last(), Some(&near_me));
+        }
+        // A town still says where.
+        assert_eq!(
+            query("nearest pharmacy in denver"),
+            Some(("pharmacy".into(), Near::Named("denver".into())))
+        );
         assert_eq!(
             query("restaurants open at night"),
             Some(("restaurants".into(), Near::Me))
@@ -1807,6 +1897,8 @@ mod tests {
         }
         // Not for words that are no kind of place.
         assert_eq!(query("chrome open now"), None);
+        assert_eq!(query("nearest neighbor search"), None);
+        assert_eq!(query("closest pair of points"), None);
         assert_eq!(query("news today"), None);
         // Only "in", "near" and "near me" say where for sure.
         assert!(parse_place_query("pizza in denver").unwrap().said_where);
@@ -1870,6 +1962,20 @@ mod tests {
                 40.35,
                 -75.92,
             ),
+            city("Charlotte", 875_000, "NC", "US", 35.227, -80.843),
+            at(
+                "Sheraton Charlotte Airport Hotel",
+                "tourism=hotel",
+                35.21,
+                -80.94,
+            ),
+            at("Sheraton Charlotte Hotel", "tourism=hotel", 35.223, -80.846),
+            at(
+                "University of Denver",
+                "amenity=university",
+                39.676,
+                -104.962,
+            ),
         ]);
         let (_dir, searcher) = index(fixtures);
         // Denver, Colorado, though a village is called Denver too.
@@ -1885,6 +1991,23 @@ mod tests {
         // Nothing in Reading is called Bible.
         let bible = searcher.search("bible reading", None, Some("US"), 5);
         assert!(bible.unwrap().is_none());
+        // Nothing is called just Sheraton, but a branch is called that and
+        // the town.
+        let branch = searcher
+            .search("sheraton charlotte", None, Some("US"), 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(branch.what, "sheraton");
+        let names: Vec<&str> = branch.hits.iter().map(|h| h.place.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Sheraton Charlotte Hotel",
+                "Sheraton Charlotte Airport Hotel"
+            ]
+        );
+        let university = searcher.search("university of denver", None, Some("US"), 5);
+        assert!(university.unwrap().is_none());
         // A town by Denver is no business, and an IKEA 46 km out is
         // farther than places are listed.
         for query in ["aurora denver", "ikea denver"] {
@@ -2086,6 +2209,11 @@ mod tests {
             Some("safeway")
         );
         assert_eq!(without_near_me("safeway"), None);
+        assert_eq!(
+            without_near_me("dentist near me that takes medicaid").as_deref(),
+            Some("dentist that takes medicaid")
+        );
+        assert_eq!(without_near_me("hotels nearby disney world"), None);
         // No town of that name, or nothing of that kind there.
         let missing = searcher
             .search("pizza in gotham", None, None, 5)
@@ -2149,6 +2277,17 @@ mod tests {
                 ..at("English", "place=village", 38.33, -86.46)
             },
             at("Keel", "amenity=pub", 53.97, -10.08),
+            // Villages called Excel and Chrome.
+            Place {
+                rank: place_rank("place=village", 500, false, false, 3),
+                region: Some("AL".into()),
+                ..at("Excel", "place=village", 31.43, -87.34)
+            },
+            Place {
+                rank: place_rank("place=hamlet", 0, false, false, 3),
+                region: Some("NJ".into()),
+                ..at("Chrome", "place=hamlet", 40.57, -74.22)
+            },
         ]);
         let (_dir, searcher) = index(fixtures);
         for query in [
@@ -2159,6 +2298,10 @@ mod tests {
             "keel in english",
             "blue pan in python",
             "blue pan in gotham",
+            // "cells" is a word for phone stores, but a question of how
+            // asks for none.
+            "how to merge cells in excel",
+            "how to clear cache in chrome",
         ] {
             let found = searcher.search(query, None, None, 5).unwrap();
             assert!(found.is_none(), "{query}: {found:?}");

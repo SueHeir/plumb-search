@@ -213,6 +213,9 @@ pub(crate) async fn search_page(
         _ => None,
     };
     let local = run_search_ranked(&state, &query, limit, &settings.options, rank).await;
+    if let (Ok(results), Some(node)) = (&local, &state.node) {
+        node.searched(&query, results);
+    }
     // "Near me", "weather" and "what time is it" go by the town the
     // searcher gave.
     let town = match &visitor {
@@ -220,7 +223,10 @@ pub(crate) async fn search_page(
         None => settings.browser_about.as_ref().and_then(About::town),
     };
     let mut extras = match &local {
-        Ok(_) => extras(&state, &query, &settings.options, town).await,
+        Ok(results) => {
+            let spelling = results.spelling.as_ref().map(|s| s.query.as_str());
+            extras(&state, &query, spelling, &settings.options, town).await
+        }
         Err(_) => answers::Extras::default(),
     };
     // Plugins run once the node knows what the search is about, so that
@@ -581,19 +587,21 @@ pub(crate) async fn paper_response(
 /// The instant answer and the official profile asked for, for `query`
 /// by resolving the subject's stable entity before inspecting its facts
 /// or profiles. Displayed results cannot select a different namesake.
+/// `spelling` is the spelling suggested for `query`: an ask misspelled
+/// ("weather in sacremento") gets the answer to it.
 pub(crate) async fn extras(
     state: &AppState,
     query: &str,
+    spelling: Option<&str>,
     options: &SearchOptions,
     town: Option<&str>,
 ) -> answers::Extras {
-    let country = options.country.as_deref();
-    let answer = match instant_answer(state, query, town).await {
-        Some(answer) => Some(answer),
-        None => match answers::town_time(state, query, country).await {
-            Some(answer) => Some(answer),
-            None => weather::answer(state, query, town, country).await,
+    let answer = match short_answer(state, query, options, town).await {
+        None => match spelling {
+            Some(spelling) => short_answer(state, spelling, options, town).await,
+            None => None,
         },
+        answer => answer,
     };
     let mut profile = None;
     for name in answers::profile_lookups(query) {
@@ -625,6 +633,29 @@ pub(crate) async fn extras(
             break;
         }
     }
+    answers::Extras {
+        answer,
+        profile,
+        ..answers::Extras::default()
+    }
+}
+
+/// What `query` asks that has a short answer: a sum, a conversion, the
+/// time or the weather, a fact, or what something is.
+async fn short_answer(
+    state: &AppState,
+    query: &str,
+    options: &SearchOptions,
+    town: Option<&str>,
+) -> Option<plumb_answer::Answer> {
+    let country = options.country.as_deref();
+    let answer = match instant_answer(state, query, town).await {
+        Some(answer) => Some(answer),
+        None => match answers::town_time(state, query, country).await {
+            Some(answer) => Some(answer),
+            None => weather::answer(state, query, town, country).await,
+        },
+    };
     // A fact the query asks about something ("capital of australia"),
     // looked up by searching for that something.
     let answer = match (answer, plumb_core::facts::fact_asked(query)) {
@@ -643,8 +674,8 @@ pub(crate) async fn extras(
     };
     // What something is ("what is a manatee"): the first sentence of the
     // article it names, or what the word means ("define anadromous").
-    let answer = match (answer, answers::definition_asked(query)) {
-        (None, Some(name)) => {
+    match (answer, answers::definition_asked(query)) {
+        (None, Some((name, field))) => {
             let backend = Arc::clone(&state.backend);
             let word = {
                 let name = name.clone();
@@ -660,16 +691,11 @@ pub(crate) async fn extras(
                 run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
                     .await
                     .ok()
-                    .and_then(|found| answers::definition_answer(&found.pages))
+                    .and_then(|found| answers::definition_answer(&found.pages, field))
                     .or(word)
             }
         }
         (answer, _) => answer,
-    };
-    answers::Extras {
-        answer,
-        profile,
-        ..answers::Extras::default()
     }
 }
 

@@ -153,8 +153,11 @@ impl FrozenBackend {
                 .filter(plumb_core::place::Place::is_town)
         };
         plumb_index::namesakes_last(query, &mut results.hits, &town);
-        if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.as_deref()) {
-            plumb_index::suggested_site_second(&mut results.hits, site);
+        if let Some(spelling) = &results.spelling {
+            if let Some(site) = &spelling.site {
+                plumb_index::suggested_site_second(&mut results.hits, site);
+            }
+            pages.list_suggested_page(spelling, options, &mut results.pages)?;
         }
         pages.title_untitled(&mut results.hits)?;
         pages.list_typed_page(query, options, &mut results.pages)?;
