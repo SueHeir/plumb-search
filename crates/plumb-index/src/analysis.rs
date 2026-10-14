@@ -37,16 +37,16 @@ pub(crate) fn register(manager: &TokenizerManager) {
 }
 
 /// [`register`] for the sites' index, whose word fields hold a run of
-/// [`unspaced`] script as its [`pieces`], and a word of Arabic, Greek or
-/// Cyrillic script also [`folded`]. Queries are read with [`words_analyzer`] still, and a word
-/// is looked for by its pieces ([`crate::query::Clauses::add_word`]), so
-/// the names a query is matched to stay whole.
+/// [`unspaced`] script as its [`pieces`]. Queries are read with
+/// [`words_analyzer`] still, and a word is looked for by its pieces
+/// ([`crate::query::Clauses::add_word`]), so the names a query is matched
+/// to stay whole.
 pub(crate) fn register_sites(manager: &TokenizerManager) {
     register(manager);
     manager.register(
         WORDS_ANALYZER,
         TextAnalyzer::builder(WordTokenizer {
-            for_sites: true,
+            in_pieces: true,
             ..WordTokenizer::default()
         })
         .filter(AsciiFoldingFilter)
@@ -86,29 +86,13 @@ pub(crate) fn pieces(word: &str) -> Vec<String> {
     pieces
 }
 
-/// Starts a [`folded`] word, which no word as typed can: words hold only
-/// letters and digits.
-pub(crate) const FOLDED: char = '~';
-
-/// A word of Arabic or Greek script, or of Cyrillic with an е or ё, with
-/// the letters it is written either way made one, after [`FOLDED`]. Arabic
-/// is often typed without the hamza or madda over an alef (`اخبار` for
-/// `أخبار`), with a dotless yeh for a final yeh (`مصرى` for `مصري`) and
-/// with Persian yeh and kaf for the Arabic ones, and the tatweel only
-/// stretches a word (`اخـبـار`). Greek is often typed without its accents,
-/// and capitals are written without them (`ΗΡΑΚΛΕΙΟ`), lowercasing to a
-/// σ where a word ends in ς. Russian is mostly written with е for ё
-/// (`Королев` for `Королёв`). The sites' word fields hold each such word
-/// folded too, and a query looks for the folded form a little weaker than
-/// the word as typed, so either spelling finds the other but the one typed
-/// comes first. `None` for other words.
-pub(crate) fn folded(word: &str) -> Option<String> {
-    let folds =
-        |c: char| matches!(c, '\u{0600}'..='\u{06FF}' | '\u{0370}'..='\u{03FF}' | 'е' | 'ё');
-    if !word.chars().any(folds) {
-        return None;
-    }
-    let letters = word.chars().filter_map(|letter| match letter {
+/// `letter` as it is written without its marks, as Arabic, Greek and
+/// Russian often are: an alef without hamza or madda, a final yeh with
+/// dots, Arabic yeh and kaf for the Persian ones, no tatweel, a Greek
+/// vowel without its accent, σ for ς (a capital Σ lowercases to σ) and е
+/// for ё.
+fn bare_letter(letter: char) -> Option<char> {
+    match letter {
         'أ' | 'إ' | 'آ' | 'ٱ' => Some('ا'),
         'ى' | 'ی' => Some('ي'),
         'ک' => Some('ك'),
@@ -123,8 +107,26 @@ pub(crate) fn folded(word: &str) -> Option<String> {
         'ς' => Some('σ'),
         'ё' => Some('е'),
         _ => Some(letter),
-    });
-    Some(std::iter::once(FOLDED).chain(letters).collect())
+    }
+}
+
+/// A word of Arabic or Greek script, or of Cyrillic with an е or ё, with
+/// each [`bare_letter`], so the ways it is written are one. `None` for
+/// other words.
+pub(crate) fn folded(word: &str) -> Option<String> {
+    let folds =
+        |c: char| matches!(c, '\u{0600}'..='\u{06FF}' | '\u{0370}'..='\u{03FF}' | 'е' | 'ё');
+    if !word.chars().any(folds) {
+        return None;
+    }
+    Some(word.chars().filter_map(bare_letter).collect())
+}
+
+/// Whether `word` is typed without the marks [`bare_letter`] leaves off.
+/// A final ς is the way a word is typed, so it counts as bare.
+pub(crate) fn typed_bare(word: &str) -> bool {
+    word.chars()
+        .all(|letter| letter == 'ς' || bare_letter(letter) == Some(letter))
 }
 
 /// The analyzer registered as [`STEMMED_ANALYZER`].
@@ -198,6 +200,14 @@ pub(crate) fn joined_analyzer() -> TextAnalyzer {
         .build()
 }
 
+/// Whether `a` and `b` are the same words, whatever their case, accents
+/// and punctuation, as the index matches them: "beyonce" is "Beyoncé",
+/// "motley crue" "Mötley Crüe".
+pub fn same_words(a: &str, b: &str) -> bool {
+    let analyzer = words_analyzer();
+    tokens(&analyzer, a) == tokens(&analyzer, b)
+}
+
 /// The tokens `analyzer` produces for `text`.
 pub(crate) fn tokens(analyzer: &TextAnalyzer, text: &str) -> Vec<String> {
     let mut analyzer = analyzer.clone();
@@ -216,20 +226,17 @@ pub(crate) fn tokens(analyzer: &TextAnalyzer, text: &str) -> Vec<String> {
 struct WordTokenizer {
     normalized: String,
     token: Token,
-    /// Each word as the sites' index holds it: as its [`pieces`], or with
-    /// its [`folded`] form at the same position.
-    for_sites: bool,
+    /// Each word as its [`pieces`].
+    in_pieces: bool,
 }
 
 struct WordStream<'a> {
     words: std::str::Split<'a, char>,
     offset: usize,
     token: &'a mut Token,
-    for_sites: bool,
+    in_pieces: bool,
     /// The pieces of the current word still to come, last first.
     pending: Vec<String>,
-    /// The current word folded, still to come.
-    folded: Option<String>,
 }
 
 impl Tokenizer for WordTokenizer {
@@ -242,19 +249,14 @@ impl Tokenizer for WordTokenizer {
             words: self.normalized.split(' '),
             offset: 0,
             token: &mut self.token,
-            for_sites: self.for_sites,
+            in_pieces: self.in_pieces,
             pending: Vec::new(),
-            folded: None,
         }
     }
 }
 
 impl TokenStream for WordStream<'_> {
     fn advance(&mut self) -> bool {
-        if let Some(folded) = self.folded.take() {
-            self.token.text = folded;
-            return true;
-        }
         if let Some(piece) = self.pending.pop() {
             self.token.text = piece;
             self.token.position = self.token.position.wrapping_add(1);
@@ -273,13 +275,10 @@ impl TokenStream for WordStream<'_> {
             }
             self.token.offset_from = from;
             self.token.offset_to = from + word.len();
-            if self.for_sites && self.token.text.chars().any(unspaced) {
+            if self.in_pieces && self.token.text.chars().any(unspaced) {
                 self.pending = pieces(&self.token.text);
                 self.pending.reverse();
                 return self.advance();
-            }
-            if self.for_sites {
-                self.folded = folded(&self.token.text);
             }
             self.token.position = self.token.position.wrapping_add(1);
             return true;
@@ -416,28 +415,6 @@ mod tests {
             positions.push(token.position);
         }
         assert_eq!(positions, [0, 1, 2, 3]);
-    }
-
-    #[test]
-    fn arabic_is_indexed_folded_too() {
-        assert_eq!(folded("أخبار").as_deref(), Some("~اخبار"));
-        assert_eq!(folded("اخـبـار").as_deref(), Some("~اخبار"));
-        assert_eq!(folded("مصرى").as_deref(), Some("~مصري"));
-        assert_eq!(folded("ایران").as_deref(), Some("~ايران"));
-        assert_eq!(folded("اخبار").as_deref(), Some("~اخبار"));
-        assert_eq!(folded("news"), None);
-        let manager = TokenizerManager::default();
-        register_sites(&manager);
-        let mut sites = manager.get(WORDS_ANALYZER).unwrap();
-        let mut stream = sites.token_stream("أخبار news");
-        let mut indexed = Vec::new();
-        while let Some(token) = stream.next() {
-            indexed.push((token.text.clone(), token.position));
-        }
-        let expected = [("أخبار", 0), ("~اخبار", 0), ("news", 1)];
-        assert_eq!(indexed, expected.map(|(text, at)| (text.to_string(), at)));
-        // Queries keep the spelling typed.
-        assert_eq!(words("أخبار"), ["أخبار"]);
     }
 
     #[test]

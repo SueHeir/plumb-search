@@ -75,7 +75,7 @@ fn a_word_is_found_inside_a_title_without_spaces() {
 }
 
 #[test]
-fn arabic_is_found_however_its_alefs_and_yehs_are_written() {
+fn arabic_typed_bare_finds_its_marked_spelling_too() {
     let site_titled =
         |domain: &str, title: &str| site(domain, Some(title), None, &[], &[], ranked(900, 5_000));
     let (_dir, searcher) = build(&[
@@ -84,26 +84,23 @@ fn arabic_is_found_however_its_alefs_and_yehs_are_written() {
         site_titled("iran.example", "اخبار ایران"),
         site_titled("masry.example", "مصرى سات"),
     ]);
-    // Each spelling finds the other, the one typed first.
-    for (query, first, then) in [
-        ("الأهلي", "ahly.example", "bank.example"),
-        ("الاهلي", "bank.example", "ahly.example"),
-        ("أخبار", "ahly.example", "iran.example"),
-        ("اخبار", "iran.example", "ahly.example"),
+    // Typed bare, a word finds the spelling with its marks after its own;
+    // typed with them, it keeps to them.
+    for (query, expected) in [
+        ("الاهلي", &["bank.example", "ahly.example"][..]),
+        ("اخبار", &["iran.example", "ahly.example"]),
+        ("الأهلي", &["ahly.example"]),
+        ("أخبار", &["ahly.example"]),
+        ("ايران", &["iran.example"]),
+        ("مصري", &["masry.example"]),
+        ("مصرى", &["masry.example"]),
     ] {
-        assert_eq!(found(&searcher, query), [first, then], "{query}");
-    }
-    let mut stretched = found(&searcher, "اخـبـار");
-    stretched.sort();
-    assert_eq!(stretched, ["ahly.example", "iran.example"]);
-    assert_eq!(found(&searcher, "ايران"), ["iran.example"]);
-    for query in ["مصري", "مصرى"] {
-        assert_eq!(found(&searcher, query), ["masry.example"], "{query}");
+        assert_eq!(found(&searcher, query), expected, "{query}");
     }
 }
 
 #[test]
-fn greek_and_russian_are_found_with_or_without_their_accents() {
+fn greek_and_russian_typed_bare_find_their_accented_spelling_too() {
     let site_titled =
         |domain: &str, title: &str| site(domain, Some(title), None, &[], &[], ranked(900, 5_000));
     let (_dir, searcher) = build(&[
@@ -113,15 +110,14 @@ fn greek_and_russian_are_found_with_or_without_their_accents() {
         site_titled("korolev.example", "Королёв наукоград"),
         site_titled("orel.example", "Королев и Орел"),
     ]);
-    // Each spelling finds the other, the one typed first.
-    for (query, first, then) in [
-        ("θεσσαλονίκη", "thess.example", "blog.example"),
-        ("θεσσαλονικη", "blog.example", "thess.example"),
-        ("королёв", "korolev.example", "orel.example"),
-        ("королев", "orel.example", "korolev.example"),
+    for (query, expected) in [
+        ("θεσσαλονικη", &["blog.example", "thess.example"][..]),
+        ("королев", &["orel.example", "korolev.example"]),
+        ("θεσσαλονίκη", &["thess.example"]),
+        ("королёв", &["korolev.example"]),
+        // A capital Σ lowercases to σ, not the final ς typed.
+        ("αθηνας", &["athens.example"]),
     ] {
-        assert_eq!(found(&searcher, query), [first, then], "{query}");
+        assert_eq!(found(&searcher, query), expected, "{query}");
     }
-    // A capital sigma lowercases to σ, not the final ς typed.
-    assert_eq!(found(&searcher, "αθήνας"), ["athens.example"]);
 }

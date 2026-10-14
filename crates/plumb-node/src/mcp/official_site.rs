@@ -29,22 +29,33 @@ impl Mcp {
         options: &SearchOptions,
         prefixes: bool,
     ) -> Result<Value> {
-        let intent = identity::Intent::of(name);
-        let country_conflict = intent.country.filter(|country| {
-            options.country.as_deref().is_some_and(|preference| preference != *country)
-        }).map(|country| json!({
-            "query": country,
-            "preference": options.country,
-            "resolution": "The jurisdiction named in the query takes precedence over the country preference.",
-        }));
+        let mut intent = identity::Intent::of(name);
+        let asked = options;
         let options = &SearchOptions {
             country: intent
                 .country
                 .map(str::to_string)
-                .or_else(|| options.country.clone()),
-            ..options.clone()
+                .or_else(|| asked.country.clone()),
+            ..asked.clone()
         };
         let mut results = self.lookup(name, 1 + ALTERNATIVES, options)?;
+        // A country's name can end a place's own: New Mexico is not "new"
+        // in Mexico, nor New South Wales "new south" in Wales.
+        let whole = identity::Intent::whole(name);
+        let options = if intent.country.is_some() && whole.is_known_name(&results) {
+            intent = whole;
+            results = self.lookup(name, 1 + ALTERNATIVES, asked)?;
+            asked
+        } else {
+            options
+        };
+        let country_conflict = intent.country.filter(|country| {
+            asked.country.as_deref().is_some_and(|preference| preference != *country)
+        }).map(|country| json!({
+            "query": country,
+            "preference": asked.country,
+            "resolution": "The jurisdiction named in the query takes precedence over the country preference.",
+        }));
         // Keep ranking within the requested entity. A popular spelling
         // suggestion or a task-word domain cannot validate another entity.
         if let Some(at) = results
@@ -76,10 +87,10 @@ impl Mcp {
         // as its item's: LifeWiki is conwaylife.com, not life-wiki.com.
         let about = answers::page_about(&results.hits, &pages)
             .filter(|page| is_article(page) && intent.matches_article(page));
-        let about_site = about.and_then(|page| Some((page, page.site.as_deref()?)));
+        let about_site = about.and_then(|page| Some((page, website_domain(page)?)));
         let Some(top) = results.hits.first() else {
             if let Some((page, site)) = about_site {
-                let (domain, url) = article_website(page, site);
+                let (domain, url) = article_website(page, &site);
                 return Ok(json!({
                     "name": name,
                     "found": true,
@@ -171,7 +182,7 @@ impl Mcp {
                 ));
                 named_article = true;
                 // MathWorld is mathworld.wolfram.com, not wolfram.com.
-                let (site_domain, site_url) = article_website(page, site);
+                let (site_domain, site_url) = article_website(page, &site);
                 if site_domain != top.domain {
                     domain = site_domain;
                     url = site_url;
@@ -192,7 +203,7 @@ impl Mcp {
                      names.",
                     page.title
                 ));
-                let (site_domain, site_url) = article_website(page, site);
+                let (site_domain, site_url) = article_website(page, &site);
                 match results.hits.iter().find(|hit| hit.domain == site) {
                     Some(hit) => {
                         pick = hit;
@@ -819,7 +830,7 @@ impl Mcp {
 
 /// Whether `page` is about one thing Wikidata describes: a Wikipedia
 /// article or a Wikidata item.
-fn is_article(page: &Page) -> bool {
+pub(super) fn is_article(page: &Page) -> bool {
     page.set.starts_with("wikipedia-") || page.set == WIKIDATA_SET
 }
 
@@ -869,13 +880,23 @@ const REGISTRY_HOSTS: &[&str] = &[
 
 /// The site Wikidata gives the best article among `pages` the name names,
 /// with the article.
-fn named_article_site(pages: &[PlacedPage]) -> Option<(&Page, &str)> {
+fn named_article_site(pages: &[PlacedPage]) -> Option<(&Page, String)> {
     pages
         .iter()
         .filter(|placed| placed.hit.named && is_article(&placed.hit.page))
         .filter(|placed| !placed.hit.page.title.ends_with("(disambiguation)"))
         .max_by(|a, b| a.hit.score.total_cmp(&b.hit.score))
-        .and_then(|placed| Some((&placed.hit.page, placed.hit.page.site.as_deref()?)))
+        .and_then(|placed| Some((&placed.hit.page, website_domain(&placed.hit.page)?)))
+}
+
+/// The registrable domain of the official website Wikidata gives `page`'s
+/// item: its site, or for a person whose website is a page of a bigger
+/// site, which [`Page::site`] leaves out as not theirs, that site
+/// (senate.gov for sanders.senate.gov).
+pub(super) fn website_domain(page: &Page) -> Option<String> {
+    page.site
+        .clone()
+        .or_else(|| registrable_domain(page.website.as_deref()?))
 }
 
 /// Documentation navigation is separate from identity. Technical resource
