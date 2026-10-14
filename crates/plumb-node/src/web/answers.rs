@@ -468,20 +468,6 @@ const HOLDER_FACTS: &[plumb_core::facts::FactKind] = &[
     plumb_core::facts::FactKind::Headquarters,
 ];
 
-/// Where a description stops saying what its page is and goes on to who
-/// made it or what it is part of.
-const DESCRIPTION_HEAD_ENDS: &[&str] = &[
-    " by ",
-    " directed ",
-    " created ",
-    " starring ",
-    " based ",
-    " of ",
-    " from ",
-    " (",
-    ",",
-];
-
 /// The kinds of work [`KIND_LISTINGS`] has for the listing among
 /// `services`, if one is.
 fn listed_kinds(services: &[&plumb_core::profiles::Service]) -> Option<&'static [&'static str]> {
@@ -552,26 +538,7 @@ pub fn profile_candidates(
     }
     let films = kinds.contains(&"film");
     let of_kind = |hit: &plumb_index::pages::PageHit| {
-        let qualifier = hit
-            .page
-            .title
-            .strip_suffix(')')
-            .and_then(|title| title.rsplit_once(" ("));
-        let description = hit.page.description.as_deref().unwrap_or("").to_lowercase();
-        let head_end = DESCRIPTION_HEAD_ENDS
-            .iter()
-            .filter_map(|end| description.find(end))
-            .min()
-            .unwrap_or(description.len());
-        films && hit.page.set == FILMS_SET
-            || qualifier.is_some_and(|(_, what)| {
-                what.split_whitespace()
-                    .any(|word| kinds.contains(&word.to_lowercase().as_str()))
-            })
-            || description[..head_end]
-                .split_whitespace()
-                .last()
-                .is_some_and(|word| kinds.contains(&word))
+        films && hit.page.set == FILMS_SET || hit.page.is_work_of(kinds)
     };
     if candidates.iter().any(of_kind) {
         candidates.retain(of_kind);
@@ -606,11 +573,71 @@ pub fn searches_songs(query: &str, resolution: &EntityResolution) -> bool {
     })
 }
 
+/// The searches for the songs a lookup `name` may be ([`songs_profile`]),
+/// once the article it names resolved as `resolution`: first a song's
+/// title and maker, when the article is on a song ("africa toto" for
+/// "1982 single by Toto"), as other songs of its title can fill a search
+/// of the name ("africa song"), then the name.
+pub fn song_lookups(name: &str, resolution: &EntityResolution) -> Vec<String> {
+    let mut lookups = Vec::new();
+    if let EntityResolution::Resolved(page) = resolution {
+        if let Some(by) = song_by(page) {
+            let title = plumb_index::pages::base_title(&page.title);
+            lookups.push(format!("{title} {by}"));
+        }
+    }
+    lookups.push(name.to_string());
+    lookups
+}
+
+/// Who made the song `page` is on, as its description says, the main
+/// artist alone: "Toto" of Wikipedia's "1982 single by Toto" and of
+/// MusicBrainz's "Song by Toto, 1982", "Beyoncé" of "Song by Beyoncé
+/// feat. JAY-Z". `None` for anything but a song.
+fn song_by(page: &Page) -> Option<&str> {
+    let description = page.description.as_deref()?;
+    let by = if page.set == MUSIC_SET {
+        description.strip_prefix("Song by ")?
+    } else {
+        let (by, asked) = plumb_index::pages::made_by(description)?;
+        if !asked.contains(&"song") {
+            return None;
+        }
+        by
+    };
+    let by = by
+        .rsplit_once(", ")
+        .filter(|(_, year)| year.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(by, |(name, _)| name);
+    let by = [" feat. ", " ft. ", " featuring "]
+        .iter()
+        .find_map(|joiner| by.split_once(joiner))
+        .map_or(by, |(main, _)| main);
+    Some(by.trim())
+}
+
+/// Whether two songs' makers ([`song_by`]) are the same, or one is the
+/// other with more said, whatever "the" and "and" they are said with:
+/// "the Beatles" and "The Beatles", "Bruce Springsteen" and "Bruce
+/// Springsteen and the E Street Band".
+fn same_maker(one: &str, other: &str) -> bool {
+    let words = |name: &str| -> Vec<String> {
+        plumb_core::normalize_text(name)
+            .split(' ')
+            .filter(|word| !matches!(*word, "the" | "and"))
+            .map(str::to_string)
+            .collect()
+    };
+    let (one, other) = (words(one), words(other));
+    !one.is_empty() && !other.is_empty() && (one.starts_with(&other) || other.starts_with(&one))
+}
+
 /// The profile `query` asks for of a song or album among `found`, what a
 /// search for a lookup found ([`searches_songs`]). When the lookup's
-/// article resolved as `resolution`, the song must have its title: a
-/// search for "pyramid song", Radiohead's "Pyramid Song", finds
-/// Wolfmother's "Pyramid" as a song too.
+/// article resolved as `resolution`, the song must have its title, and
+/// its maker when the article says who that is: a search for "pyramid
+/// song", Radiohead's "Pyramid Song", finds Wolfmother's "Pyramid" as a
+/// song too, and one for Adele's "Hello" finds Oasis's.
 pub fn songs_profile(
     query: &str,
     resolution: &EntityResolution,
@@ -620,10 +647,14 @@ pub fn songs_profile(
     let songs: Vec<PlacedPage> = found
         .into_iter()
         .filter(|placed| {
-            placed.hit.page.set == MUSIC_SET
+            let song = &placed.hit.page;
+            song.set == MUSIC_SET
                 && match resolution {
                     EntityResolution::Resolved(page) => {
-                        title(&placed.hit.page.title) == title(&page.title)
+                        title(&song.title) == title(&page.title)
+                            && song_by(page).is_none_or(|by| {
+                                song_by(song).is_some_and(|other| same_maker(by, other))
+                            })
                     }
                     _ => true,
                 }
@@ -853,6 +884,10 @@ pub fn resolve_entity<'a>(
     // CEO/headquarters requests supply an organization type, independently
     // of imported property availability. Founding properties do not:
     // settlements and other entities can have a founder or inception too.
+    // A page is an organization when its description says so or when it
+    // has a CEO or headquarters, which nothing else has: "American
+    // multinational technology conglomerate" (Amazon) and "coffeehouse
+    // chain" (Starbucks) say no word of the list.
     let company = kinds.is_some_and(|kinds| {
         kinds
             .iter()
@@ -865,7 +900,11 @@ pub fn resolve_entity<'a>(
             .filter(|hit| {
                 let description = key(hit.page.description.as_deref().unwrap_or(""));
                 let words: Vec<_> = description.split(|c: char| !c.is_alphabetic()).collect();
-                description.contains("record label")
+                hit.page
+                    .facts
+                    .iter()
+                    .any(|fact| matches!(fact.kind, FactKind::Ceo | FactKind::Headquarters))
+                    || description.contains("record label")
                     || [
                         "company",
                         "corporation",
@@ -1326,12 +1365,16 @@ pub(crate) fn fact_text(
                     } else {
                         2
                     };
+                    // A person's height in whole feet says little: 1.7 m
+                    // is 5 ft 7 in, not 6 ft.
+                    let imperial = if amount < 3.0 {
+                        let inches = (amount / 0.0254).round() as u64;
+                        format!("{} ft {} in", inches / 12, inches % 12)
+                    } else {
+                        format!("{} ft", group_digits(amount * 3.280_84, 0))
+                    };
                     (
-                        format!(
-                            "{} m ({} ft)",
-                            group_digits(amount, digits),
-                            group_digits(amount * 3.280_84, 0)
-                        ),
+                        format!("{} m ({imperial})", group_digits(amount, digits)),
                         None,
                     )
                 }
@@ -1694,6 +1737,77 @@ mod tests {
     }
 
     #[test]
+    fn a_company_with_a_ceo_is_an_organization_whatever_it_is_called() {
+        use plumb_core::facts::{fact_asked, FactKind, FactKind::*};
+        let page =
+            |title: &str, item: &str, named: bool, about: &str, facts: &[(FactKind, &str)]| {
+                let mut hit = with_facts(article(title, about, None), facts);
+                hit.page.item = Some(item.into());
+                hit.named = named;
+                hit
+            };
+        let ask = |q: &str, candidates: &[PageHit]| {
+            let asked = fact_asked(q).unwrap();
+            match resolve_entity(&asked.subject, candidates, Some(&asked.kinds)) {
+                EntityResolution::Resolved(page) => {
+                    fact_answer_from_page(&asked, page, 0).map(|answer| answer.answer)
+                }
+                _ => None,
+            }
+        };
+        // Another company the name finds must not leave the one it names out.
+        let amazon = [
+            page(
+                "Amazon (company)",
+                "Q3884",
+                true,
+                "American multinational technology conglomerate",
+                &[(Ceo, "Andy Jassy"), (Headquarters, "Seattle")],
+            ),
+            page(
+                "Amazon Web Services",
+                "Q456157",
+                false,
+                "American cloud computing company",
+                &[(Ceo, "Matt Garman")],
+            ),
+            page(
+                "Amazons",
+                "Q131183",
+                true,
+                "Women warriors in Greek mythology",
+                &[],
+            ),
+        ];
+        assert_eq!(ask("ceo of amazon", &amazon).as_deref(), Some("Andy Jassy"));
+        assert_eq!(
+            ask("amazon headquarters", &amazon).as_deref(),
+            Some("Seattle")
+        );
+        let starbucks = [
+            page(
+                "Starbucks",
+                "Q37158",
+                true,
+                "American multinational coffeehouse chain",
+                &[(Ceo, "Brian Niccol")],
+            ),
+            page("Starbucks (song)", "Q910013", true, "2002 single by A", &[]),
+            page(
+                "Seattle's Best Coffee",
+                "Q910014",
+                false,
+                "American coffee company",
+                &[(Ceo, "Someone")],
+            ),
+        ];
+        assert_eq!(
+            ask("who is the ceo of starbucks", &starbucks).as_deref(),
+            Some("Brian Niccol")
+        );
+    }
+
+    #[test]
     fn founding_questions_resolve_unique_and_qualified_settlements_and_organizations() {
         use plumb_core::facts::{fact_asked, FactKind::Founded};
         let mut city = with_facts(article("Ravelin", "city", None), &[(Founded, "1801")]);
@@ -2014,6 +2128,11 @@ mod tests {
         );
         let age = ask("how old is albert einstein", &einstein).unwrap();
         assert_eq!(age.answer, "Died at 76");
+        // Whether someone lives is answered by how old they are or were.
+        let alive = ask("is albert einstein still alive", &einstein).unwrap();
+        assert_eq!(alive.answer, "Died at 76");
+        let died = ask("how old was albert einstein when he died", &einstein).unwrap();
+        assert_eq!(died.answer, "Died at 76");
         // 2026-10-06 is when the test's "now" is.
         let musk = [placed(
             with_facts(
@@ -2025,6 +2144,10 @@ mod tests {
         )];
         assert_eq!(
             ask("how old is elon musk", &musk).unwrap().answer,
+            "55 years old"
+        );
+        assert_eq!(
+            ask("is elon musk dead", &musk).unwrap().answer,
             "55 years old"
         );
 
@@ -2067,6 +2190,11 @@ mod tests {
         );
         assert_eq!(text(FactKind::Radius, "6371000"), "6,371 km (3,959 mi)");
         assert_eq!(text(FactKind::Radius, "250"), "250 m (820 ft)");
+        // People's heights in feet and inches.
+        assert_eq!(text(FactKind::Height, "1.7"), "1.7 m (5 ft 7 in)");
+        assert_eq!(text(FactKind::Height, "2.06"), "2.06 m (6 ft 9 in)");
+        assert_eq!(text(FactKind::Height, "1.47"), "1.47 m (4 ft 10 in)");
+        assert_eq!(text(FactKind::Height, "46"), "46 m (151 ft)");
     }
 
     #[test]
@@ -2582,5 +2710,28 @@ mod tests {
             },
         );
         assert!(html.contains("&lt;i&gt;") && html.contains("&amp;"));
+    }
+
+    #[test]
+    fn song_makers_are_read_from_descriptions() {
+        let by = |set: &str, description: &str| {
+            let mut page = article("Song", description, None).page;
+            page.set = set.to_string();
+            song_by(&page).map(str::to_string)
+        };
+        assert_eq!(by("wikipedia-en", "1982 single by Toto").unwrap(), "Toto");
+        assert_eq!(by(MUSIC_SET, "Song by Toto, 1982").unwrap(), "Toto");
+        assert_eq!(
+            by(MUSIC_SET, "Song by Beyoncé feat. JAY-Z").unwrap(),
+            "Beyoncé"
+        );
+        assert!(by("wikipedia-en", "1997 studio album by Radiohead").is_none());
+        assert!(by(MUSIC_SET, "Album by Radiohead, 1997").is_none());
+        assert!(same_maker("the Beatles", "The Beatles"));
+        assert!(same_maker(
+            "Bruce Springsteen",
+            "Bruce Springsteen and the E Street Band"
+        ));
+        assert!(!same_maker("Adele", "Oasis"));
     }
 }

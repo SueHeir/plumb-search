@@ -216,13 +216,26 @@ fn copies_of_the_named_site_on_other_domains_are_left_out() {
     let hits = searcher.search_with("gmail", 10, &keep_all()).unwrap();
     let order = domains(&hits);
     assert_eq!(order[0], "gmail.com", "{order:?}");
-    let at = |d: &str| order.iter().position(|o| *o == d).unwrap();
-    // Copies with nothing to say are left out; a crawled one keeps its
-    // place.
+    // Copies with nothing to say are left out, and so is a crawled one
+    // for another country, but for a searcher there or a search for it.
     assert!(!order.contains(&"gmail.ru"), "{order:?}");
     assert!(!order.contains(&"gmail.hu"), "{order:?}");
-    assert!(at("gmail.jp") > 0, "{order:?}");
+    assert!(!order.contains(&"gmail.jp"), "{order:?}");
     assert!(order.contains(&"gmailtips.net"), "{order:?}");
+    let options = SearchOptions {
+        country: Some("JP".into()),
+        ..SearchOptions::default()
+    };
+    let in_japan = searcher
+        .search_full("gmail", 10, &keep_all(), &options)
+        .unwrap()
+        .hits;
+    let japan = searcher
+        .search_with("gmail japan", 10, &keep_all())
+        .unwrap();
+    for hits in [in_japan, japan] {
+        assert!(domains(&hits).contains(&"gmail.jp"), "{:?}", domains(&hits));
+    }
     // Typed, the copy is what was asked for.
     let hits = searcher.search("gmail.ru", 10).unwrap();
     assert_eq!(hits[0].domain, "gmail.ru", "{:?}", domains(&hits));
@@ -335,7 +348,7 @@ fn copies_and_copycats_are_left_out() {
         query_evidence: None,
     };
     let kept = |hits: Vec<Hit>, typed: Option<&str>| -> Vec<String> {
-        without_copies(hits, typed, None)
+        without_copies(hits, typed, None, &[])
             .into_iter()
             .map(|h| h.domain)
             .collect()
@@ -433,26 +446,15 @@ fn copies_and_copycats_are_left_out() {
             0.4,
         ),
     ];
-    let cases = cases.into_iter().chain([
-        (
-            "abc.com",
-            Some("ABC Network - ABC.com"),
-            0.67,
-            true,
-            "abc.net.au",
-            None,
-            0.6,
-        ),
-        (
-            "weather.gov",
-            Some("National Weather Service"),
-            0.67,
-            true,
-            "weather.com",
-            None,
-            0.55,
-        ),
-    ]);
+    let cases = cases.into_iter().chain([(
+        "weather.gov",
+        Some("National Weather Service"),
+        0.67,
+        true,
+        "weather.com",
+        None,
+        0.55,
+    )]);
     for (a, a_title, a_link, a_official, b, b_title, b_link) in cases {
         let both = vec![
             hit(a, a_title, a_link, a_official),
@@ -460,6 +462,94 @@ fn copies_and_copycats_are_left_out() {
         ];
         assert_eq!(kept(both, None), [a, b]);
     }
+    // A brand's site for another country goes under its better-known site
+    // on a generic ending, official or not, in whatever language; but for
+    // a searcher there or a search naming the country, and an official
+    // one only under an official one.
+    let mcdonalds = vec![
+        hit("mcdonalds.com", Some("McDonald's"), 0.64, true),
+        hit(
+            "mcdonalds.co.jp",
+            Some("マクドナルド公式サイト"),
+            0.56,
+            true,
+        ),
+        hit("mcdonalds.co.kr", Some("맥도날드"), 0.21, false),
+        hit("mcdonalds.ca", Some("McDonald's Canada"), 0.43, true),
+        hit("mcdonaldsfans.com", Some("McDonald's fans"), 0.1, false),
+    ];
+    let kept_for = |home: Option<&str>, asked: &[&str]| -> Vec<String> {
+        without_copies(mcdonalds.clone(), None, home, asked)
+            .into_iter()
+            .map(|h| h.domain)
+            .collect()
+    };
+    assert_eq!(kept_for(None, &[]), ["mcdonalds.com", "mcdonaldsfans.com"]);
+    assert_eq!(
+        kept_for(Some("US"), &[]),
+        ["mcdonalds.com", "mcdonaldsfans.com"]
+    );
+    assert!(kept_for(Some("JP"), &[]).contains(&"mcdonalds.co.jp".to_string()));
+    assert!(kept_for(None, &["KR"]).contains(&"mcdonalds.co.kr".to_string()));
+    // Nor is a site titled with the brand a copy on the ending of a
+    // country the search names, though a copycat there still is.
+    let amazon = vec![
+        hit("amazon.com", Some("Amazon.com"), 0.9, true),
+        hit("amazon.co.uk", Some("Amazon.co.uk"), 0.55, false),
+        hit("amazon.de", None, 0.4, false),
+        hit("amaz0n.co.uk", Some("Amazon.com"), 0.0, false),
+    ];
+    let kept_for = |asked: &[&str]| -> Vec<String> {
+        without_copies(amazon.clone(), None, None, asked)
+            .into_iter()
+            .map(|h| h.domain)
+            .collect()
+    };
+    assert_eq!(kept_for(&[]), ["amazon.com"]);
+    assert_eq!(kept_for(&["GB"]), ["amazon.com", "amazon.co.uk"]);
+    assert_eq!(kept_for(&["DE"]), ["amazon.com", "amazon.de"]);
+    let abc = vec![
+        hit("abc.com", Some("ABC Network - ABC.com"), 0.67, true),
+        hit("abc.net.au", None, 0.6, false),
+    ];
+    assert_eq!(kept(abc.clone(), None), ["abc.com"]);
+    let in_australia = without_copies(abc, None, Some("AU"), &[]);
+    assert_eq!(domains(&in_australia), ["abc.com", "abc.net.au"]);
+    let paris = vec![
+        hit("paris.com", Some("Paris travel guide"), 0.6, false),
+        hit("paris.fr", Some("Paris.fr"), 0.5, true),
+    ];
+    assert_eq!(kept(paris, None), ["paris.com", "paris.fr"]);
+    // Not named by the query, a country's site stays (stjohns.ca for "time
+    // in st john's newfoundland", next to stjohns.edu), unless one of the
+    // brand's official sites titled and described alike: Google Search's
+    // country addresses are one site, whose best known stays.
+    let mut city = hit("stjohns.ca", Some("City of St. John's"), 0.5, true);
+    city.named = false;
+    let stjohns = vec![
+        hit("stjohns.edu", Some("St. John's University"), 0.6, true),
+        city,
+    ];
+    assert_eq!(kept(stjohns, None), ["stjohns.edu", "stjohns.ca"]);
+    let copy = |domain: &str, link_score: f32| Hit {
+        named: false,
+        description: Some("search engine by Google LLC".into()),
+        ..hit(domain, Some("Google Search"), link_score, true)
+    };
+    let google = vec![
+        Hit {
+            named: false,
+            ..hit("google.com", Some("Google"), 1.0, true)
+        },
+        copy("google.fr", 0.73),
+        copy("google.co.uk", 0.75),
+        copy("google.it", 0.67),
+        hit("amazon.de", Some("Amazon.de"), 0.72, true),
+    ];
+    assert_eq!(
+        kept(google, None),
+        ["google.com", "google.co.uk", "amazon.de"]
+    );
     // A site nobody links to with a listed site's title.
     let coin = vec![
         hit(
@@ -801,4 +891,31 @@ fn scores_blend_text_and_popularity() {
         cfg.alpha * hit.link_score
             + trust * ((1.0 - cfg.alpha) * hit.text_score + label_bonus(hit, 2.0 / 3.0))
     });
+}
+
+#[test]
+fn a_brand_site_for_the_country_searched_for_is_listed() {
+    let shop = |domain: &str, title: &str, rank: u32| {
+        site(
+            domain,
+            Some(title),
+            Some("Free shipping on millions of items."),
+            &[],
+            &[],
+            popular(rank, 1_000),
+        )
+    };
+    let mut amazon = shop("amazon.com", "Amazon.com", 5);
+    amazon.about = Some("American online retailer".into());
+    let records = [
+        amazon,
+        shop("amazon.co.uk", "Amazon.co.uk", 200),
+        shop("amazon.de", "Amazon.de", 220),
+    ];
+    let (_dir, searcher) = build(&records);
+    assert_eq!(top(&searcher, "amazon uk"), "amazon.co.uk");
+    let hits = searcher.search("amazon germany", 10).unwrap();
+    assert_eq!(domains(&hits), ["amazon.com", "amazon.de"]);
+    let hits = searcher.search("amazon", 10).unwrap();
+    assert_eq!(domains(&hits), ["amazon.com"]);
 }

@@ -33,6 +33,13 @@ pub(crate) enum Hint {
     Repo,
     /// A paper of that title: "batch normalization paper".
     Paper,
+    /// A work of one of these kinds of that name, of which something is
+    /// asked: "titanic trailer", "let it be chords".
+    Work(&'static [&'static str]),
+    /// A film, show or game of that name when there is one, else
+    /// whatever is named so: "titanic movie" for the 1997 film, not the
+    /// ship, but "tom hanks movie" still for Tom Hanks.
+    Screen,
     /// A person of that name, of whom something is asked: "obama
     /// daughters", "picasso paintings".
     Person,
@@ -41,12 +48,45 @@ pub(crate) enum Hint {
     Regnal,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
+    /// The thing, of which one part is asked about: "ibuprofen side
+    /// effects", "volcano facts". A search for papers keeps those words
+    /// ("loss function").
+    Aspect,
     /// Only pages the name names: what a fact question asks about, or the
     /// list a search for one asks for ("list of popes" of "popes in
     /// order"). "madrid spanish" (of "madrid spanish capital city") names
     /// nothing, and the clubs it describes would push Madrid out.
     Named,
 }
+
+/// What a song is called in its title or description ([`Page::is_work_of`]).
+const SONG: &[&str] = &["song", "single"];
+
+/// What a film, show or game is called so.
+const SCREEN: &[&str] = &[
+    "film",
+    "movie",
+    "series",
+    "miniseries",
+    "sitcom",
+    "show",
+    "game",
+];
+
+/// Words before a name that ask who sang a song, where to see a film or
+/// show, or how long one is. Longer leads come first.
+const WORK_LEADS: &[(&str, &[&str])] = &[
+    ("who sings the song ", SONG),
+    ("who sang the song ", SONG),
+    ("who sings ", SONG),
+    ("who sang ", SONG),
+    ("where to watch ", SCREEN),
+    ("where can i watch ", SCREEN),
+    ("where to stream ", SCREEN),
+    ("where can i stream ", SCREEN),
+    ("how many seasons of ", SCREEN),
+    ("how many episodes of ", SCREEN),
+];
 
 /// Words before a name that ask about it. "What's" is read as "what is";
 /// "whats" is not, since "whats app" is a misspelled name.
@@ -79,6 +119,15 @@ const HINT_LEADS: &[&str] = &[
     "define ",
     "definition of ",
     "meaning of ",
+    "symptoms of ",
+    "side effects of ",
+    "benefits of ",
+    "health benefits of ",
+    "causes of ",
+    "treatment for ",
+    "treatment of ",
+    "uses of ",
+    "examples of ",
     "info about ",
     "information about ",
     "facts about ",
@@ -255,9 +304,33 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" albums", Hint::Person),
     (" paintings", Hint::Person),
     (" inventions", Hint::Person),
+    // What people ask of a song or a film, show or game, whose article is
+    // not called by these words. Longer tails first: "hey jude piano
+    // chords" is not about a song "hey jude piano".
+    (" song lyrics", Hint::Work(SONG)),
+    (" lyrics", Hint::Work(SONG)),
+    (" guitar chords", Hint::Work(SONG)),
+    (" piano chords", Hint::Work(SONG)),
+    (" ukulele chords", Hint::Work(SONG)),
+    (" chords", Hint::Work(SONG)),
+    (" guitar tabs", Hint::Work(SONG)),
+    (" guitar tab", Hint::Work(SONG)),
+    (" karaoke", Hint::Work(SONG)),
+    (" music video", Hint::Work(SONG)),
+    (" official trailer", Hint::Work(SCREEN)),
+    (" trailer", Hint::Work(SCREEN)),
+    (" box office", Hint::Work(SCREEN)),
+    (" reviews", Hint::Work(SCREEN)),
+    (" review", Hint::Work(SCREEN)),
+    (" release date", Hint::Work(SCREEN)),
+    (" ending explained", Hint::Work(SCREEN)),
+    (" ending", Hint::Work(SCREEN)),
+    (" finale", Hint::Work(SCREEN)),
+    (" characters", Hint::Work(SCREEN)),
+    (" actors", Hint::Work(SCREEN)),
     (" cast", Hint::Any),
     (" author", Hint::Any),
-    (" movie", Hint::Any),
+    (" movie", Hint::Screen),
     (" film", Hint::Any),
     (" meaning", Hint::Any),
     (" mean", Hint::Any),
@@ -267,7 +340,78 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" stands for", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
+    // The article on a drug, an illness or a thing of science says what
+    // these ask, and none of the words: "melatonin dosage", "shingles
+    // symptoms", "photosynthesis equation".
+    (" side effects", Hint::Aspect),
+    (" symptoms", Hint::Aspect),
+    (" dosage", Hint::Aspect),
+    (" dose", Hint::Aspect),
+    (" health benefits", Hint::Aspect),
+    (" benefits", Hint::Aspect),
+    (" treatment", Hint::Aspect),
+    (" causes", Hint::Aspect),
+    (" facts", Hint::Aspect),
+    (" uses", Hint::Aspect),
+    (" diagram", Hint::Aspect),
 ];
+
+/// What a search asks of a thing of science, which the thing's article
+/// says, before its name with "of" or after it: "melting point of iron",
+/// "iron melting point". Longer first: "glucose chemical formula" is not
+/// about a "glucose chemical". Those a fact question asks ("atomic number
+/// of gold", "area of france", "radius of mars") are left to
+/// [`plumb_core::facts::fact_asked`].
+const PROPERTIES: &[&str] = &[
+    "melting point",
+    "boiling point",
+    "freezing point",
+    "chemical formula",
+    "formula",
+    "equation",
+    "structure",
+    "function",
+    "molar mass",
+    "atomic mass",
+    "atomic weight",
+    "density",
+    "half life",
+    "half-life",
+];
+
+/// Properties asked only before the name: "temperature of the sun",
+/// "volume of a sphere", but "oven temperature" is about an oven's
+/// setting and "sound volume" about a knob.
+const PROPERTIES_OF: &[&str] = &[
+    "mass",
+    "diameter",
+    "temperature",
+    "ph",
+    "volume",
+    "surface area",
+    "perimeter",
+    "circumference",
+];
+
+/// The thing `q` asks a property of ([`PROPERTIES`]): "iron" of "melting
+/// point of iron" and of "iron melting point", "sun" of "mass of the sun".
+fn property_of(q: &str) -> Option<&str> {
+    let before = PROPERTIES
+        .iter()
+        .chain(PROPERTIES_OF)
+        .find_map(|property| q.strip_prefix(property)?.strip_prefix(" of "));
+    let thing = before.or_else(|| {
+        PROPERTIES
+            .iter()
+            .find_map(|property| q.strip_suffix(property)?.strip_suffix(' '))
+    })?;
+    Some(
+        ["the ", "a ", "an "]
+            .iter()
+            .find_map(|article| thing.strip_prefix(article))
+            .unwrap_or(thing),
+    )
+}
 
 /// The list article a search for a list asks for without saying "list
 /// of": "list of popes" of "popes in order", "list of us presidents" of
@@ -299,10 +443,17 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
     {
         name = rest;
         hint = Some(Hint::Any);
+    } else if let Some((rest, kinds)) = WORK_LEADS
+        .iter()
+        .find_map(|(lead, kinds)| Some((name.strip_prefix(lead)?, *kinds)))
+    {
+        name = rest;
+        hint = Some(Hint::Work(kinds));
     }
     if let Some((rest, tail_hint)) = HINT_TAILS
         .iter()
         .find_map(|(tail, h)| Some((name.strip_suffix(tail)?, *h)))
+        .or_else(|| Some((property_of(name)?, Hint::Aspect)))
     {
         name = rest;
         hint = Some(tail_hint);
@@ -878,8 +1029,12 @@ impl PageSearcher {
         // John numbering and not List of popes, which "list of popes"
         // names. A monarch or pope typed with a number is searched in Roman
         // numerals when no article is named as typed: "charles 3", "henry
-        // the 8th".
+        // the 8th". A hinted name is not searched when a page is called
+        // the whole query: "plaster cast", "ice age" and "horror film" are
+        // not about plaster, ice or horror.
+        let called = hits.iter().any(|hit| hit.named && !hit.whole);
         let hinted = hinted_name(query)
+            .filter(|_| !called)
             .or_else(|| {
                 list_asked(query)
                     .or_else(|| {
@@ -951,6 +1106,24 @@ impl PageSearcher {
                                 * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity),
                         );
                     }
+                }
+            }
+            // Only the thing's article: "python examples" asks for code,
+            // not the repositories called Python.
+            Hint::Aspect => found.retain(|hit| hit.named && hit.page.is_article()),
+            // Only a work of the kinds asked for, and not when a page is
+            // called the whole query: "power chords" is not about the song
+            // "Power".
+            Hint::Work(kinds) => {
+                let called = hits.iter().any(|hit| hit.named);
+                found.retain(|hit| !called && hit.named && hit.page.is_work_of(kinds));
+            }
+            // Only a film, show or game the name names, when it names
+            // one: "titanic movie" is not about the ship.
+            Hint::Screen => {
+                let screen = |hit: &PageHit| hit.named && hit.page.is_work_of(SCREEN);
+                if found.iter().any(screen) {
+                    found.retain(|hit| !hit.named || screen(hit));
                 }
             }
             // A plural that names no article but namesakes with a

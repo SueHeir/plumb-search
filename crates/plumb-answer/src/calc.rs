@@ -4,9 +4,10 @@
 //! decimal" and "5/8 as a percent" ask for a sum's value.
 //!
 //! A query is a sum only when all of it reads as one, with at least one
-//! operation in it, so "2024" and "f1" stay searches. Two numbers joined by
-//! `/` or `-` with no spaces ("9/11", "24/7", "1-800") are left alone too:
-//! they are more often names and dates than sums.
+//! operation in it, so "2024" and "f1" stay searches. Numbers joined by `/`
+//! or `-` with no spaces ("9/11", "24/7", "1-800", "1-800-273-8255",
+//! "2024-10-13") are left alone too: they are more often names, phone
+//! numbers and dates than sums.
 
 use crate::format::format_number;
 use crate::{Answer, Kind};
@@ -456,14 +457,14 @@ fn without_ending<'a>(text: &'a str, endings: &[&str]) -> Option<&'a str> {
     })
 }
 
-/// Whether `text` is two whole numbers joined by `/` or `-` with nothing
-/// around them: "9/11", "24/7", "1-800".
+/// Whether `text` is whole numbers joined by `/` or by `-` with nothing
+/// around them: "9/11", "24/7", "1-800", a phone number ("1-800-273-8255"),
+/// a date ("2024-10-13", "10/13/2024") or an ISBN ("978-0-13-468599-1").
 fn is_name_like(text: &str) -> bool {
-    let Some((left, right)) = text.split_once(['/', '-']) else {
-        return false;
-    };
     let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-    digits(left) && digits(right)
+    ['/', '-']
+        .into_iter()
+        .any(|joint| text.contains(joint) && text.split(joint).all(digits))
 }
 
 pub(crate) fn answer(query: &str) -> Option<Answer> {
@@ -683,5 +684,21 @@ mod tests {
         ] {
             assert_eq!(answer(query), None, "{query:?}");
         }
+        // Phone numbers, dates and an ISBN.
+        for query in [
+            "1-800-273-8255",
+            "800-275-8777",
+            "2024-10-13",
+            "10/13/2024",
+            "978-0-13-468599-1",
+            "3-2-1",
+        ] {
+            assert_eq!(answer(query), None, "{query:?}");
+        }
+        // Spaced, or with other signs, they are sums.
+        assert_eq!(calc("10 - 3 - 2").unwrap(), "5");
+        assert_eq!(calc("8 / 4 / 2").unwrap(), "1");
+        assert_eq!(calc("10-3*2").unwrap(), "4");
+        assert_eq!(calc("1-2/4").unwrap(), "0.5");
     }
 }

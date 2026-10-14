@@ -1044,3 +1044,59 @@ fn manual_pages_are_named_without_their_section() {
     // A bare name may be anything.
     assert!(searcher.search("ls", 10).unwrap().is_empty());
 }
+
+#[test]
+fn docs_pages_asked_for_as_a_tutorial_or_examples_are_named() {
+    let asyncio = docs_page(
+        "https://docs.python.org/3/library/asyncio.html",
+        "asyncio — Asynchronous I/O",
+        &["Python asyncio", "asyncio Python"],
+        "asyncio is a library to write concurrent code using the async/await syntax.",
+    );
+    let tutorial = docs_page(
+        "https://docs.python.org/3/tutorial/index.html",
+        "The Python Tutorial",
+        &["Python The Python Tutorial"],
+        "Python is an easy to learn, powerful programming language.",
+    );
+    let (_dir, searcher) = searcher(&[asyncio, tutorial]);
+    for query in [
+        "python asyncio tutorial",
+        "asyncio python examples",
+        "python asyncio guide",
+    ] {
+        let hits = searcher.search(query, 10).unwrap();
+        assert_eq!(hits[0].page.title, "asyncio — Asynchronous I/O", "{query}");
+        assert!(hits[0].named, "{query}: {hits:?}");
+    }
+    // The word alone is still the topic: the tutorial, not asyncio.
+    let hits = searcher.search("python tutorial", 10).unwrap();
+    assert!(
+        hits.iter()
+            .all(|hit| hit.page.title != "asyncio — Asynchronous I/O"),
+        "{hits:?}"
+    );
+    // A page titled so keeps its place first: the argparse tutorial.
+    let argparse = docs_page(
+        "https://docs.python.org/3/library/argparse.html",
+        "argparse — Parser for command-line options, arguments and subcommands",
+        &["Python argparse", "argparse Python"],
+        "The argparse module makes it easy to write user-friendly command-line interfaces.",
+    );
+    let howto = docs_page(
+        "https://docs.python.org/3/howto/argparse.html",
+        "Argparse Tutorial",
+        &["Python Argparse Tutorial", "Argparse Tutorial Python"],
+        "This tutorial is intended to be a gentle introduction to argparse.",
+    );
+    let (_dir2, searcher) = super::searcher(&[argparse, howto]);
+    let hits = searcher.search("python argparse tutorial", 10).unwrap();
+    assert_eq!(hits[0].page.title, "Argparse Tutorial", "{hits:?}");
+    let sites = [site("python.org", true), site("other.com", false)];
+    let placed = place_pages("python argparse tutorial", &sites, hits);
+    let first = placed.iter().find(|p| p.under.is_none());
+    assert_eq!(
+        first.map(|p| p.hit.page.title.as_str()),
+        Some("Argparse Tutorial")
+    );
+}
