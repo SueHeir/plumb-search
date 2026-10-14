@@ -433,6 +433,54 @@ const MEDICAL_PHRASES: &[&str] = &[
     "yellow fever",
 ];
 
+/// What a lab test measures, as its results name it. Many are something
+/// else too (PSA is a squash body, ALT a key, a blood sugar an album), so
+/// a search is about the test only when it also reads the result or asks
+/// for it ([`LAB_READINGS`]): "high TSH", "low MCHC causes", "A1C levels".
+const LAB_TESTS: &[&str] = &[
+    "tsh",
+    "psa",
+    "alt",
+    "ast",
+    "alp",
+    "ggt",
+    "crp",
+    "esr",
+    "inr",
+    "mcv",
+    "mch",
+    "mchc",
+    "rdw",
+    "gfr",
+    "egfr",
+    "a1c",
+    "hba1c",
+    "ldl",
+    "hdl",
+    "creatinine",
+    "bilirubin",
+    "ferritin",
+    "hemoglobin",
+    "haemoglobin",
+    "hematocrit",
+    "platelet",
+    "platelets",
+    "triglycerides",
+    "troponin",
+    "blood sugar",
+    "white blood cell",
+    "white blood cells",
+    "red blood cell",
+    "red blood cells",
+    "liver enzymes",
+    "vitamin d",
+];
+
+/// Words that read a lab result or ask for one ([`LAB_TESTS`]).
+const LAB_READINGS: &[&str] = &[
+    "high", "low", "elevated", "raised", "level", "levels", "normal", "count", "results", "test",
+];
+
 /// Searches with these are about something else: the economy, a film, a
 /// band.
 const NOT_MEDICAL: &[&str] = &[
@@ -688,6 +736,10 @@ pub(crate) fn is_medical(query: &str) -> bool {
         .any(|phrase| padded.contains(&format!(" {phrase} ")))
         // "depression" alone or with "symptoms"/"help": not "depression era".
         || words.iter().any(|w| ["depression", "anxiety"].contains(w)) && words.len() <= 3
+        || LAB_TESTS
+            .iter()
+            .any(|test| padded.contains(&format!(" {test} ")))
+            && words.iter().any(|word| LAB_READINGS.contains(word))
         || complaint_in_body(&words)
 }
 
@@ -767,10 +819,11 @@ fn same_site(a: &str, b: &str) -> bool {
 /// Whether a word of `query` is the name of `hit`'s site and neither
 /// medical nor `common` (in many sites' titles): "medscape" for
 /// medscape.com, "hellopharmacist" for hellopharmacist.com. Such a search
-/// asks that site, not the authorities. An illness, a drug or a part of
-/// the body that is also a site's name is what the search is about:
-/// diabetes.org for "diabetes symptoms", hands.net for "tingling in
-/// hands". And first.org is not asked for by "first dose".
+/// asks that site, not the authorities. An illness, a drug, a lab test or
+/// a part of the body that is also a site's name is what the search is
+/// about: diabetes.org for "diabetes symptoms", rdw.nl for "high RDW",
+/// hands.net for "tingling in hands". And first.org is not asked for by
+/// "first dose".
 fn names_site(query: &str, hit: &Hit, common: &dyn Fn(&str) -> bool) -> bool {
     let Some(domain) = plumb_core::registrable_domain(&hit.domain) else {
         return false;
@@ -780,6 +833,7 @@ fn names_site(query: &str, hit: &Hit, common: &dyn Fn(&str) -> bool) -> bool {
         .split(|c: char| !c.is_alphanumeric())
         .any(|word| word == label)
         && !is_medical(label)
+        && !LAB_TESTS.contains(&label)
         && !BODY_PARTS.contains(&label)
         && !common(label)
 }
@@ -1039,6 +1093,14 @@ mod tests {
             "dry cough",
             "rash on arms",
             "fever in toddlers",
+            "high TSH",
+            "low MCHC causes",
+            "low eGFR",
+            "A1C levels",
+            "PSA test",
+            "low platelet count",
+            "high white blood cell count",
+            "low blood sugar",
             "knee pain",
             "swollen ankles",
             "broken toe",
@@ -1076,6 +1138,10 @@ mod tests {
             "rash guard",
             "saturday night fever",
             "fever-tree tonic",
+            "psa squash rankings",
+            "alt key",
+            "blood sugar sex magik",
+            "high school",
             "broken arrow",
             "broken heart",
             "growing pains",
@@ -1451,6 +1517,10 @@ mod tests {
                 vec!["first.org", "measles.example"],
                 vec![],
             ),
+            // Or by the lab test it asks about: rdw.nl is the Dutch
+            // vehicle authority.
+            ("high RDW", vec!["rdw.nl", "rdw.example"], vec![]),
+            // Or by the body part.
             (
                 "tingling in hands",
                 vec!["hands.net", "hands.example"],
