@@ -13,7 +13,9 @@
 //! tu identidad", "Client Challenge") or a parked domain's "this domain is
 //! for sale" or bare "Hello!".
 
-use crate::{canonical_domain, normalize_text, registrable_domain, SiteRecord};
+use crate::{
+    canonical_domain, normalize_text, parent_domain, registrable_domain, Redirect, SiteRecord,
+};
 
 /// Whole titles, after [`normalize_text`], that only a bot check has.
 const CHECK_TITLES: &[&str] = &[
@@ -402,6 +404,52 @@ fn shows_the_user_agent(text: &str) -> bool {
     text.to_ascii_lowercase().contains("plumbsearch/")
 }
 
+/// Sites a domain that is not in use redirects to: marketplaces selling
+/// it, and MarkMonitor's "coming soon" for a brand that holds it
+/// (`excite.com`). Such a domain is no longer the site it was.
+const PARKING_SITES: &[&str] = &[
+    "afternic.com",
+    "atom.com",
+    "brandbucket.com",
+    "buydomains.com",
+    "dan.com",
+    "dynadot.com",
+    "expireddomains.com",
+    "expiredwixdomain.com",
+    "hugedomains.com",
+    "markmonitor.com",
+    "nicsell.com",
+    "sedo.com",
+];
+
+/// Bot checks and sign-ins that answer for sites they do not run:
+/// Radware's `validate.perfdrive.com` (`esteri.it`), Cloudflare Access.
+const GATE_SITES: &[&str] = &["cloudflareaccess.com", "perfdrive.com"];
+
+impl Redirect {
+    /// The canonical domain of the site that a site at `domain`, whose
+    /// homepage redirects this way, is under another name: `pnc.com` for
+    /// `pncbank.com`. The index folds it into that one, which it names.
+    /// Empty when it redirects to no valid domain.
+    ///
+    /// `None`, keeping it a site of its own, when the redirect went to an
+    /// inner page ([`Redirect::inner`]) or a gate ([`GATE_SITES`]), or when
+    /// a site on a subdomain sent its visitor to the domain it is on: Gmail
+    /// (`mail.google.com`) to Google's sign-in, Yahoo News to Yahoo. A
+    /// parked domain ([`PARKING_SITES`]) is folded into where it went,
+    /// whatever the page, which leaves it out of the index.
+    pub fn folds_into(&self, domain: &str) -> Option<String> {
+        let to = canonical_domain(&self.to).unwrap_or_default();
+        if PARKING_SITES.contains(&to.as_str()) {
+            return Some(to);
+        }
+        let kept = self.inner
+            || GATE_SITES.contains(&to.as_str())
+            || parent_domain(domain) == Some(to.as_str());
+        (!kept).then_some(to)
+    }
+}
+
 impl SiteRecord {
     /// Whether the record's page fields came from a bot check or another
     /// page standing in for the site's homepage ([`is_stand_in_homepage`]).
@@ -724,6 +772,40 @@ mod tests {
             ("squareup.com", "https://squareup.com/us/en"),
         ] {
             assert!(!record(domain, url).is_bot_check(), "{url}");
+        }
+    }
+
+    #[test]
+    fn only_a_site_sent_elsewhere_for_good_is_folded() {
+        let folds = |domain: &str, to: &str, inner: bool| {
+            let redirect = Redirect {
+                to: to.into(),
+                at: 1,
+                inner,
+            };
+            redirect.folds_into(domain)
+        };
+        assert_eq!(
+            folds("pncbank.com", "pnc.com", false).as_deref(),
+            Some("pnc.com")
+        );
+        assert_eq!(folds("x.com", "Not A Domain", false).as_deref(), Some(""));
+        // Sent to an inner page, a gate, or the domain a subdomain is on.
+        assert_eq!(folds("destinythegame.com", "bungie.net", true), None);
+        assert_eq!(folds("esteri.it", "perfdrive.com", false), None);
+        assert_eq!(folds("mail.google.com", "google.com", false), None);
+        assert_eq!(folds("news.yahoo.com", "yahoo.com", true), None);
+        // A subdomain moved to another domain still is that one.
+        assert_eq!(
+            folds("pypi.python.org", "pypi.org", false).as_deref(),
+            Some("pypi.org")
+        );
+        // Parked, whatever the page.
+        for (domain, to) in [
+            ("excite.com", "markmonitor.com"),
+            ("cygnus.com", "brandbucket.com"),
+        ] {
+            assert_eq!(folds(domain, to, true).as_deref(), Some(to));
         }
     }
 
