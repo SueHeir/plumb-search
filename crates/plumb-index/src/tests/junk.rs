@@ -1,8 +1,11 @@
-//! Sign-in pages, gambling spam and app installers of sites a search
-//! does not name are left out, and so are domains only held.
+//! Sign-in pages, gambling spam, app installers and fake help lines of
+//! sites a search does not name are left out, and so are domains only
+//! held.
 
 use super::*;
-use crate::junk::{is_gambling, is_gambling_address, is_holding_page, offers_apk};
+use crate::junk::{
+    is_gambling, is_gambling_address, is_holding_page, offers_apk, offers_help_line,
+};
 
 /// A site found only by meaning, whose homepage is at `url`.
 fn at(domain: &str, url: &str, title: Option<&str>) -> SiteRecord {
@@ -379,5 +382,67 @@ fn app_installers_are_left_out_unless_asked_for() {
         "Android app development",
     ] {
         assert!(!offers_apk([Some(text)]), "{text:?}");
+    }
+}
+
+#[test]
+fn help_lines_of_strangers_are_left_out() {
+    let records = [
+        site(
+            "epson.com",
+            Some("Epson"),
+            Some("Printers, projectors and scanners."),
+            &["Epson"],
+            &[("epson", 300)],
+            popular(400, 9_000),
+        ),
+        // A tech-support scam, named for the searches it waits for.
+        site(
+            "epsonprintersupportpro.example",
+            Some("Epson Printer Support Number +1-844-932-1846 - Epson Support"),
+            Some("Epson printer support phone number +1-844-932-1846 for Epson help."),
+            &[],
+            &[("epson printer support", 20)],
+            obscure(200_000, 3),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let found =
+        |query: &str| domains(&searcher.search_with(query, 10, &keep_all()).unwrap()).join(" ");
+    let support = found("epson printer support");
+    assert!(support.starts_with("epson.com"), "{support}");
+    assert!(!support.contains("epsonprintersupportpro"), "{support}");
+    // Spelled, the site is found.
+    assert!(found("epsonprintersupportpro").contains("epsonprintersupportpro.example"));
+}
+
+#[test]
+fn help_lines_are_told_by_their_titles() {
+    for (title, description) in [
+        (
+            "Epson Printer Support Number +1-844-932-1846 - Epson Support",
+            None,
+        ),
+        (
+            "QuickBooks Customer Service Phone Number",
+            Some("Call 1 (800) 555-0199 for help."),
+        ),
+    ] {
+        assert!(offers_help_line(Some(title), description), "{title}");
+    }
+    for (title, description) in [
+        // No number to call.
+        ("Customer Service Numbers for 10,000 Companies", None),
+        // A shop's own number, with no help line offered.
+        (
+            "Mac Repair Shop",
+            Some("Phone 954-726-9525 for a free consultation."),
+        ),
+        (
+            "Support Number Theory Seminar",
+            Some("Talks on 12 May 2026."),
+        ),
+    ] {
+        assert!(!offers_help_line(Some(title), description), "{title}");
     }
 }
