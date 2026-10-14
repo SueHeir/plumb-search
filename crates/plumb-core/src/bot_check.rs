@@ -11,7 +11,7 @@
 //! The same goes for other pages that stand in for a homepage: an error or
 //! maintenance page ("FedEx | System Down"), an identity check ("Verifica
 //! tu identidad", "Client Challenge") or a parked domain's "this domain is
-//! for sale".
+//! for sale" or bare "Hello!".
 
 use crate::{canonical_domain, normalize_text, registrable_domain, SiteRecord};
 
@@ -28,6 +28,7 @@ const CHECK_TITLES: &[&str] = &[
     "error",
     "browser check",
     "captcha",
+    "captcha check",
     "captcha verification",
     "checking your browser",
     "ddos protection",
@@ -67,9 +68,13 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
     "access denied",
     "bad gateway",
     "client challenge",
+    "domain for sale",
+    "domain parked",
     "down for maintenance",
     "internal server error",
     "page not found",
+    "parked domain",
+    "server busy",
     "service unavailable",
     "site maintenance",
     "site unavailable",
@@ -82,9 +87,10 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
 ];
 
 /// Whole titles, after [`normalize_text`], of a placeholder where a
-/// homepage should be: a web server's default page, a site not built yet,
-/// a suspended hosting account.
+/// homepage should be: a web server's default page or a suspended hosting
+/// account. A site not built yet is [`NOT_BUILT_ENDS`].
 const PLACEHOLDER_TITLES: &[&str] = &[
+    "caddy works",
     "welcome to nginx",
     "welcome to nginx on debian",
     "welcome to centos",
@@ -93,18 +99,32 @@ const PLACEHOLDER_TITLES: &[&str] = &[
     "test page for the apache http server",
     "iis windows server",
     "it works",
-    "coming soon",
-    "website coming soon",
-    "site coming soon",
-    "under construction",
-    "website under construction",
-    "site under construction",
     "account suspended",
     "this account has been suspended",
     "suspended domain",
     "default web site page",
     "web server s default page",
 ];
+
+/// Title endings, after [`normalize_text`], of a blog host's page for a
+/// domain no one has a blog on yet: "anime-japan.net | 忍者ブログ - 忍者ツールズ".
+const UNUSED_DOMAIN_TITLE_ENDS: &[&str] = &["忍者ブログ 忍者ツールズ"];
+
+/// How a title part, after [`normalize_text`], of a site not built yet
+/// ends, after nothing but [`NOT_BUILT_WORDS`]: "Coming Soon", "This Web
+/// site coming soon", "Nobel — New website coming soon".
+const NOT_BUILT_ENDS: &[&str] = &["coming soon", "under construction"];
+
+/// Words that may come before a [`NOT_BUILT_ENDS`] in a title part.
+const NOT_BUILT_WORDS: &[&str] = &[
+    "new", "our", "page", "site", "the", "this", "web", "website",
+];
+
+/// Words, after [`normalize_text`], of a homepage that only greets: "Hello!",
+/// "hello hello", ":: HELLO ::", "Hello world". Parked domains show such
+/// pages by the thousand, and a query with "hello" in it found them by
+/// their one word and by meaning.
+const GREETING_WORDS: &[&str] = &["hello", "hi", "hey", "hallo", "hola", "welcome", "world"];
 
 /// What a page title is split at into parts for [`STAND_IN_TITLE_PARTS`].
 const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»', '«', '/', '\\'];
@@ -213,14 +233,23 @@ pub fn is_bot_check_page(
                 .strip_prefix(start)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
         };
+        let ends = |end: &&str| {
+            title
+                .strip_suffix(end)
+                .is_some_and(|rest| rest.is_empty() || rest.ends_with(' '))
+        };
         if CHECK_TITLES.contains(&title.as_str())
             || PLACEHOLDER_TITLES.contains(&title.as_str())
             || CHECK_TITLE_STARTS.iter().any(starts)
+            || UNUSED_DOMAIN_TITLE_ENDS.iter().any(ends)
         {
             return true;
         }
     }
-    let stand_in = |part: &str| STAND_IN_TITLE_PARTS.contains(&normalize_text(part).as_str());
+    let stand_in = |part: &str| {
+        let part = normalize_text(part);
+        STAND_IN_TITLE_PARTS.contains(&part.as_str()) || not_built_yet(&part)
+    };
     if title.is_some_and(|title| {
         title
             .split(TITLE_SEPARATORS)
@@ -235,6 +264,64 @@ pub fn is_bot_check_page(
             .iter()
             .any(|phrase| text.contains(&format!(" {phrase} ")))
     })
+}
+
+/// Whether a normalized title part says the site is not built yet
+/// ([`NOT_BUILT_ENDS`]).
+fn not_built_yet(part: &str) -> bool {
+    NOT_BUILT_ENDS.iter().any(|end| {
+        part.strip_suffix(end).is_some_and(|rest| {
+            (rest.is_empty() || rest.ends_with(' '))
+                && rest
+                    .split_whitespace()
+                    .all(|word| NOT_BUILT_WORDS.contains(&word))
+        })
+    })
+}
+
+/// Whether a crawled homepage stands in for the site: a bot check or
+/// placeholder ([`is_bot_check_page`]), or a page that only greets
+/// ([`only_greets`]). A page someone asks to read is what it is, so the
+/// page reader asks [`is_bot_check_page`] alone.
+pub fn is_stand_in_homepage(
+    domain: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    headings: &[String],
+    body_text: Option<&str>,
+) -> bool {
+    is_bot_check_page(domain, title, description, headings, body_text)
+        || only_greets(title, description, headings, body_text)
+}
+
+/// Whether a homepage's whole text greets and says nothing else
+/// ([`GREETING_WORDS`]). Judged only with the page's text to hand: a crawl
+/// passed on as facts has its title alone, and a band's site titled
+/// "Hello" says more below it. "World" alone is not a greeting.
+fn only_greets(
+    title: Option<&str>,
+    description: Option<&str>,
+    headings: &[String],
+    body_text: Option<&str>,
+) -> bool {
+    if headings.is_empty() && body_text.is_none_or(|text| text.trim().is_empty()) {
+        return false;
+    }
+    let texts = title
+        .into_iter()
+        .chain(description)
+        .chain(headings.iter().map(String::as_str))
+        .chain(body_text);
+    let mut greets = false;
+    for text in texts {
+        for word in normalize_text(text).split_whitespace() {
+            if !GREETING_WORDS.contains(&word) {
+                return false;
+            }
+            greets |= word != "world";
+        }
+    }
+    greets
 }
 
 /// Whole titles, after [`normalize_text`], of sign-in pages that
@@ -316,8 +403,8 @@ fn shows_the_user_agent(text: &str) -> bool {
 }
 
 impl SiteRecord {
-    /// Whether the record's page fields came from a bot check
-    /// ([`is_bot_check_page`]) rather than the site's homepage.
+    /// Whether the record's page fields came from a bot check or another
+    /// page standing in for the site's homepage ([`is_stand_in_homepage`]).
     ///
     /// So is a homepage read on another site's host: prevention.nih.gov's
     /// "NIH Office of Disease Prevention" kept for nih.gov, or
@@ -338,7 +425,7 @@ impl SiteRecord {
                 return true;
             }
         }
-        is_bot_check_page(
+        is_stand_in_homepage(
             &self.domain,
             self.title.as_deref(),
             self.description.as_deref(),
@@ -397,6 +484,7 @@ mod tests {
             "Bot Verification | North Lincolnshire Council",
             "One moment, please...",
             "Captcha",
+            "Captcha Check",
             "Link11 - CAPTCHA",
             "Access Denied",
             "Verification",
@@ -414,6 +502,12 @@ mod tests {
             ("example.com", "Example: Under Maintenance"),
             ("example.com", "503 Service Unavailable"),
             ("example.com", "Error"),
+            ("amazon.com.au", "Server Busy"),
+            ("labubu.st", "Domain Parked"),
+            (
+                "charlotterampling.net",
+                "Domain for Sale – charlotterampling.net | Brandable & Ready to Use",
+            ),
         ] {
             assert!(check(domain, title), "{title}");
         }
@@ -556,20 +650,53 @@ mod tests {
         for title in [
             "Welcome to nginx!",
             "Coming Soon",
+            "endgame.info — Coming Soon",
+            "This Web site coming soon",
+            "Nobel — New website coming soon",
             "Under Construction",
             "Account Suspended",
             "Index of /",
             "Apache2 Ubuntu Default Page: It works",
+            "Caddy works!",
+            "anime-japan.net | 忍者ブログ - 忍者ツールズ",
         ] {
             assert!(check("example.com", title), "{title}");
         }
         for title in [
             "Gladiator II | Coming Soon to Theaters",
+            "Odeon | Films Now Showing and Coming Soon",
+            "Caddy - The Ultimate Server with Automatic HTTPS",
+            "忍者ツールズ｜ホームページ ブログ アクセス解析 カウンター メールフォーム",
+            "アニメ日記 | 忍者ブログ",
             "Nginx: Advanced Load Balancer",
             "Index Ventures",
         ] {
             assert!(!check("example.com", title), "{title}");
         }
+        // Parked pages that only greet, whatever field the greeting is in.
+        let page = |title: Option<&str>, description: Option<&str>, body: Option<&str>| {
+            is_stand_in_homepage("example.com", title, description, &[], body)
+        };
+        assert!(page(None, None, Some("hello")));
+        assert!(page(None, None, Some("hello hello")));
+        assert!(page(Some(":: HELLO ::"), None, Some(":: HELLO ::")));
+        assert!(page(Some("Hello!"), Some("Hello!"), Some("Hello")));
+        assert!(page(Some("Hello World"), None, Some("Hello, world!")));
+        // A greeting with anything more is a homepage.
+        assert!(!page(Some("Hello"), Some("English band"), Some("Hello")));
+        assert!(!page(Some("Hello"), None, Some("Hello, we sell bikes")));
+        assert!(!page(Some("Hello Kitty"), None, Some("Hello")));
+        assert!(!page(None, None, Some("World")));
+        // A title alone, as a crawl passed on as facts has it, is not enough.
+        assert!(!page(Some("Hello!"), None, None));
+        // Nor is it a bot check for a page someone asks to read.
+        assert!(!is_bot_check_page(
+            "example.com",
+            Some("Hello World"),
+            None,
+            &[],
+            Some("Hello, world!")
+        ));
     }
 
     #[test]
