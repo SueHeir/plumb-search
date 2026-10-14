@@ -31,7 +31,7 @@ plumb-node runs the swarm and answers other nodes from its index through `Bucket
 | --- | --- |
 | [node.rs](src/node.rs) | `start`, `NetConfig` and its defaults, `NetStatus`, the serving and fetching limits, the background round loop |
 | [node/task.rs](src/node/task.rs) | The swarm task: commands from handles, `Answer`s from blocking work, swarm events, the one-minute maintenance tick |
-| [node/swarm.rs](src/node/swarm.rs) | Building the swarm: transports, behaviours, per-protocol size caps, connection and relay limits |
+| [node/swarm.rs](src/node/swarm.rs) | Building the swarm: transports, behaviors, per-protocol size caps, connection and relay limits |
 | [node/handle.rs](src/node/handle.rs) | The `NetHandle` methods the rest of the program calls |
 | [node/batches.rs](src/node/batches.rs) | Publishing, hearing of, fetching and holding batches; `RecordDelivery` of agreed records |
 | [node/answering.rs](src/node/answering.rs) | Answering bucket and sealed requests, relaying, and who may search this node |
