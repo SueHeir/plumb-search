@@ -701,6 +701,79 @@ fn an_official_site_is_named_inside_by_its_wikidata_name_only() {
 }
 
 #[test]
+fn a_question_names_a_site_by_what_links_call_it() {
+    // Official, though not well known.
+    let mut wikihow = site(
+        "wikihow.com",
+        Some("wikiHow"),
+        None,
+        &["wikiHow"],
+        &[("wikiHow", 900)],
+        obscure(300_000, 40),
+    );
+    wikihow.about = Some("how-to website".to_string());
+    let records = vec![
+        wikihow,
+        site(
+            "netflix.com",
+            Some("Netflix"),
+            None,
+            &["Netflix"],
+            &[("Netflix", 5_000)],
+            popular(30, 200_000),
+        ),
+        site("rid.it", Some("RID"), None, &[], &[], popular(5_000, 900)),
+        site(
+            "tie.org",
+            Some("TiE Global"),
+            None,
+            &["TiE"],
+            &[("TiE", 2_000)],
+            popular(9_000, 5_000),
+        ),
+        site(
+            "helpguides.net",
+            Some("Help guides"),
+            Some("How to cancel a subscription, tie a tie or get rid of aphids."),
+            &[],
+            &[],
+            ranked(300_000, 10),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let options = SearchOptions::default();
+    let meaning = near_and_far(
+        &[("helpguides.net", 1.0)],
+        &[
+            ("netflix.com", 0.2),
+            ("wikihow.com", 0.2),
+            ("rid.it", 0.2),
+            ("tie.org", 0.0),
+        ],
+    );
+    let found = |query: &str| {
+        let hits = searcher
+            .search_meaning(query, 10, &RankConfig::default(), &options, Some(&meaning))
+            .unwrap()
+            .hits;
+        domains(&hits)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let netflix = found("how to cancel netflix");
+    assert!(netflix.contains(&"netflix.com".to_string()), "{netflix:?}");
+    let tie = found("how to tie a tie wikihow");
+    assert!(tie.contains(&"wikihow.com".to_string()), "{tie:?}");
+    // A name nowhere near the question in meaning is a namesake of its
+    // word, as in any other search.
+    assert!(!tie.contains(&"tie.org".to_string()), "{tie:?}");
+    // Only its domain calls rid.it "rid": the question names nothing.
+    let aphids = found("how to get rid of aphids");
+    assert!(!aphids.contains(&"rid.it".to_string()), "{aphids:?}");
+}
+
+#[test]
 fn a_misspelled_name_keeps_the_site_meaning_finds_for_it() {
     let records = vec![
         site(
