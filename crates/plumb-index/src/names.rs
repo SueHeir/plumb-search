@@ -187,8 +187,7 @@ impl Searcher {
             doc.get_all(field)
                 .filter_map(|value| value.as_str())
                 .any(|text| {
-                    let normalized = normalize_text(text);
-                    let words: Vec<&str> = normalized.split_whitespace().collect();
+                    let words = analysis::tokens(&self.words, text);
                     (0..words.len()).any(|start| {
                         let mut run = String::new();
                         for word in &words[start..] {

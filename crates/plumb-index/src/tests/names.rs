@@ -151,6 +151,20 @@ fn a_name_a_site_borrows_does_not_name_it() {
             "American faucet maker",
             popular(20_000, 5_000),
         ),
+        official(
+            "nestle.com",
+            "Nestlé Global",
+            &["Nestlé"],
+            "Swiss food company",
+            popular(300, 200_000),
+        ),
+        official(
+            "nestle-cereals.com",
+            "Nestlé Cereals",
+            &["Nestlé Cereals", "Nestlé"],
+            "breakfast cereal brand",
+            popular(40_000, 2_000),
+        ),
     ];
     let (_dir, searcher) = build(&records);
     let hits = searcher.search("facebook", 10).unwrap();
@@ -187,6 +201,13 @@ fn a_name_a_site_borrows_does_not_name_it() {
     assert!(hits
         .iter()
         .any(|hit| hit.domain == "deltafaucet.com" && hit.named));
+    // So does one whose title spells it with an accent the query lacks.
+    let hits = searcher.search_with("nestle", 10, &keep_all()).unwrap();
+    assert!(
+        hits.iter()
+            .any(|hit| hit.domain == "nestle-cereals.com" && hit.named),
+        "{hits:?}"
+    );
 }
 
 #[test]
