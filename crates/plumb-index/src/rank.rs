@@ -869,6 +869,18 @@ impl Searcher {
             ranked.retain(|r| !missing.contains(&r.addr));
         }
 
+        // A number shared with a query of other words is no match, however
+        // near in meaning: the year of "glastonbury 2026" says which one,
+        // not what (a rugby championship's or a lottery's "2026"). A site
+        // the query starts by naming keeps its place (163.com).
+        let unnamed: Vec<DocAddress> = ranked
+            .iter()
+            .filter(|r| !r.named && names.get(&r.addr).is_none_or(|name| name.words() == 0))
+            .map(|r| r.addr)
+            .collect();
+        let numbers_only = query.only_numbers(&searcher, &self.fields, &unnamed)?;
+        ranked.retain(|r| !numbers_only.contains(&r.addr));
+
         // Far below a site the query names: filler.
         if let (Some(share), Some(top)) = (cfg.named_share, ranked.first()) {
             // Only a site people know by that name: vacationrentals.com

@@ -579,21 +579,21 @@ impl PageSearcher {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let stems = self.described_words(query);
+        let described = self.described_words(query);
         let words = analysis::tokens(&self.words, query);
         let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
             return Ok(Vec::new());
         };
         let query_words: HashSet<&str> = words.iter().map(String::as_str).collect();
         let mut hits = Vec::new();
-        if !stems.is_empty() {
-            let clauses = stems
+        if !described.is_empty() {
+            let clauses = described
                 .iter()
-                .map(|stem| {
+                .map(|word| {
                     (
                         Occur::Must,
                         Box::new(TermQuery::new(
-                            Term::from_field_text(self.fields.about, stem),
+                            Term::from_field_text(self.fields.about, &word.stem),
                             IndexRecordOption::Basic,
                         )) as Box<dyn Query>,
                     )
@@ -618,8 +618,8 @@ impl PageSearcher {
                     continue;
                 }
                 let (name, named) = self.name_match(&page, query, &joined, &query_words);
-                let described = self.described_match(&page, &stems);
-                if name <= 0.0 && described <= 0.0 {
+                let covered = self.described_match(&page, &described);
+                if name <= 0.0 && covered <= 0.0 {
                     continue;
                 }
                 let popularity = document
@@ -630,8 +630,8 @@ impl PageSearcher {
                 hits.push(PageHit {
                     page,
                     named,
-                    whole: described > 0.0,
-                    score: name.max(described)
+                    whole: covered > 0.0,
+                    score: name.max(covered)
                         * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
                     popularity,
                     learned: None,

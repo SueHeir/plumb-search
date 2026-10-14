@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use plumb_core::registrable_domain;
+use plumb_core::singular;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
@@ -62,6 +63,30 @@ fn made_by(description: &str) -> Option<(&str, &'static [&'static str])> {
         .iter()
         .find(|(work, _)| work == kind)
         .map(|(_, asked)| (by.trim(), *asked))
+}
+
+/// A word of a query matched against what articles say of themselves
+/// ([`PageSearcher::described_words`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Described {
+    /// Its stem, which finds the articles and matches their names.
+    pub(crate) stem: String,
+    /// The word in the singular. An article that only says another word
+    /// with the same stem does not say it: "scheduled" is not "schedule".
+    pub(crate) form: String,
+}
+
+/// The stems and the singular words of what a Wikipedia article says of
+/// itself ([`PageSearcher::said`]).
+struct Said {
+    stems: HashSet<String>,
+    forms: HashSet<String>,
+}
+
+impl Said {
+    fn says(&self, word: &Described) -> bool {
+        self.stems.contains(&word.stem) && self.forms.contains(&word.form)
+    }
 }
 
 impl PageSearcher {
@@ -310,11 +335,11 @@ impl PageSearcher {
                 let most_words = BooleanQuery::with_minimum_required_clauses(
                     described
                         .iter()
-                        .map(|stem| {
+                        .map(|word| {
                             (
                                 Occur::Should,
                                 Box::new(TermQuery::new(
-                                    Term::from_field_text(self.fields.about, stem),
+                                    Term::from_field_text(self.fields.about, &word.stem),
                                     IndexRecordOption::Basic,
                                 )) as Box<dyn Query>,
                             )
@@ -342,7 +367,7 @@ impl PageSearcher {
             let every_word = BooleanQuery::new(
                 described
                     .iter()
-                    .map(|stem| {
+                    .map(|word| {
                         let either: Vec<(Occur, Box<dyn Query>)> = [
                             (self.fields.lead, IndexRecordOption::WithFreqs),
                             (self.fields.about, IndexRecordOption::Basic),
@@ -351,8 +376,10 @@ impl PageSearcher {
                         .map(|(field, option)| {
                             (
                                 Occur::Should,
-                                Box::new(TermQuery::new(Term::from_field_text(field, stem), option))
-                                    as Box<dyn Query>,
+                                Box::new(TermQuery::new(
+                                    Term::from_field_text(field, &word.stem),
+                                    option,
+                                )) as Box<dyn Query>,
                             )
                         })
                         .collect();
@@ -368,6 +395,18 @@ impl PageSearcher {
                     .as_ref(),
                 &TopDocs::with_limit(LEAD_CANDIDATES).order_by_score(),
             )? {
+                // The stems are not enough: "liverpool schedule" is not
+                // said by a "scheduled monument in Liverpool".
+                let document: TantivyDocument = searcher.doc(address)?;
+                let page: Option<Page> = document
+                    .get_first(self.fields.page)
+                    .and_then(|v| v.as_str())
+                    .map(serde_json::from_str)
+                    .transpose()?;
+                let said = page.as_ref().and_then(|page| self.said(page));
+                if said.is_some_and(|said| !described.iter().all(|word| said.says(word))) {
+                    continue;
+                }
                 lead_scores.insert(address, score);
                 if !addresses.contains(&address) {
                     addresses.push(address);
@@ -388,7 +427,7 @@ impl PageSearcher {
                 let found = searcher.doc_freq(&Term::from_field_text(self.fields.topic, stem))?;
                 if found == 0 && !self.knows_stem(query, stem)? {
                     unknown.insert(stem);
-                } else if described.contains(stem)
+                } else if described.iter().any(|word| &word.stem == stem)
                     && topic_word.is_none_or(|(least, _)| found < least)
                 {
                     topic_word = Some((found, stem));
@@ -398,6 +437,7 @@ impl PageSearcher {
         let topic_word = topic_word.map(|(_, stem)| stem.as_str());
         let sure: Vec<String> = described
             .iter()
+            .map(|word| &word.stem)
             .filter(|stem| !unknown.contains(stem))
             .cloned()
             .collect();
@@ -602,16 +642,16 @@ impl PageSearcher {
     }
 
     /// How well the article or docs page `page`, named by `span`, part of
-    /// the query, matches the whole of it, whose words are `stems`
-    /// ([`PageSearcher::described_words`]): [`ALIAS_MATCH`] times the share
-    /// of them its name has, a word only what it says of itself has
-    /// counting [`DESCRIBED_WORD`]. Nothing when that is half or less:
+    /// the query, matches the whole of it, whose words are `described`
+    /// ([`PageSearcher::described_words`]), by stem: [`ALIAS_MATCH`] times
+    /// the share of them its name has, a word only what it says of itself
+    /// has counting [`DESCRIBED_WORD`]. Nothing when that is half or less:
     /// such a name leaves most of the query unsaid. "terry stafford death"
     /// is the singer, but "london hotels" is not the article London. An
     /// article's qualifier is part of its name, so "the chemical element
     /// mercury" is closer to Mercury (element) than to Chemical element.
-    fn inside_match(&self, page: &Page, span: &[String], stems: &[String]) -> f32 {
-        if stems.is_empty() {
+    fn inside_match(&self, page: &Page, span: &[String], described: &[Described]) -> f32 {
+        if described.is_empty() {
             return 0.0;
         }
         let qualifier = super::sites::title_qualifier(&page.title).filter(|_| page.is_article());
@@ -636,12 +676,15 @@ impl PageSearcher {
             said.push_str(lead);
         }
         let said: HashSet<String> = self.question_words(&said).into_iter().collect();
-        let in_name = stems.iter().filter(|stem| named.contains(*stem)).count();
-        let only_said = stems
+        let in_name = described
             .iter()
-            .filter(|stem| !named.contains(*stem) && said.contains(*stem))
+            .filter(|word| named.contains(&word.stem))
             .count();
-        let share = (in_name as f32 + DESCRIBED_WORD * only_said as f32) / stems.len() as f32;
+        let only_said = described
+            .iter()
+            .filter(|word| !named.contains(&word.stem) && said.contains(&word.stem))
+            .count();
+        let share = (in_name as f32 + DESCRIBED_WORD * only_said as f32) / described.len() as f32;
         if share > 0.5 {
             ALIAS_MATCH * share
         } else {
@@ -718,58 +761,91 @@ impl PageSearcher {
         Ok(false)
     }
 
-    /// The different stemmed words of `query` without the words that only
-    /// ask ([`ASKING_WORDS`]), as articles are matched on what they say of
-    /// themselves: "resin" of "what does resin mean".
-    pub(crate) fn described_words(&self, query: &str) -> Vec<String> {
-        let asked: Vec<String> = analysis::tokens(&self.words, query)
-            .into_iter()
-            .filter(|word| !ASKING_WORDS.contains(&word.as_str()))
-            .collect();
-        self.question_words(&asked.join(" "))
+    /// The words of `query` with different stems, without the words that
+    /// only ask ([`ASKING_WORDS`]), as articles are matched on what they
+    /// say of themselves: "resin" of "what does resin mean".
+    pub(crate) fn described_words(&self, query: &str) -> Vec<Described> {
+        let mut seen = HashSet::new();
+        let mut described = Vec::new();
+        for word in analysis::tokens(&self.words, query) {
+            if ASKING_WORDS.contains(&word.as_str()) {
+                continue;
+            }
+            for stem in analysis::tokens(&self.stemmed, &word) {
+                if seen.insert(stem.clone()) {
+                    let form = singular(&word);
+                    described.push(Described { stem, form });
+                }
+            }
+        }
+        described
     }
 
-    /// How well a Wikipedia article covers the query's words `stems`
-    /// ([`PageSearcher::described_words`]) with one of its names and what it
-    /// says of itself ([`Page::about`], and its lead): 0 unless a name has some of them
-    /// and the article all of them, or all but one when the name is whole
-    /// in the query and the query has [`DESCRIBED_MISSING_FROM`] words.
+    /// What a Wikipedia article says of itself ([`Page::about`], and its
+    /// lead); `None` for other pages.
+    fn said(&self, page: &Page) -> Option<Said> {
+        let mut text = page.about()?;
+        if let Some(lead) = &page.lead {
+            text.push(' ');
+            text.push_str(lead);
+        }
+        Some(Said {
+            stems: analysis::tokens(&self.stemmed, &text).into_iter().collect(),
+            forms: analysis::tokens(&self.words, &text)
+                .iter()
+                .map(|word| singular(word))
+                .collect(),
+        })
+    }
+
+    /// How well a Wikipedia article covers the query's `words`
+    /// ([`PageSearcher::described_words`]) with one of its names, matched by
+    /// stem, and what it says of itself ([`PageSearcher::said`]): 0 unless
+    /// a name has some of them and the article all of them, or all but one
+    /// when the name is whole in the query and the query has
+    /// [`DESCRIBED_MISSING_FROM`] words.
     /// Otherwise [`PARTIAL_MATCH`] times the share of the query in the
     /// name, a word the article only says counting [`DESCRIBED_WORD`], and
     /// halfway down by the share of the name the query lacks: "queen
     /// album" covers Queen (album) by 0.45.
-    pub(crate) fn described_match(&self, page: &Page, stems: &[String]) -> f32 {
-        if stems.len() < DESCRIBED_QUERY_WORDS {
+    pub(crate) fn described_match(&self, page: &Page, words: &[Described]) -> f32 {
+        if words.len() < DESCRIBED_QUERY_WORDS {
             return 0.0;
         }
-        let Some(about) = page.about() else {
+        let Some(said) = self.said(page) else {
             return 0.0;
         };
-        let mut about: HashSet<String> = analysis::tokens(&self.stemmed, &about)
-            .into_iter()
-            .collect();
-        if let Some(lead) = &page.lead {
-            about.extend(analysis::tokens(&self.stemmed, lead));
-        }
-        let missing = stems.iter().filter(|stem| !about.contains(*stem)).count();
         let mut best = 0.0f32;
         for name in
             std::iter::once(base_title(&page.title)).chain(page.aliases.iter().map(String::as_str))
         {
             let name: HashSet<String> = analysis::tokens(&self.stemmed, name).into_iter().collect();
-            let in_name = stems.iter().filter(|stem| name.contains(*stem)).count();
+            let in_name = words
+                .iter()
+                .filter(|word| name.contains(&word.stem))
+                .count();
             if in_name == 0 {
                 continue;
             }
-            let whole_name = name.iter().all(|word| stems.contains(word));
-            if missing > 1 || missing == 1 && !(whole_name && stems.len() >= DESCRIBED_MISSING_FROM)
+            let missing = words
+                .iter()
+                .filter(|word| !name.contains(&word.stem) && !said.says(word))
+                .count();
+            let whole_name = name
+                .iter()
+                .all(|stem| words.iter().any(|word| &word.stem == stem));
+            if missing > 1 || missing == 1 && !(whole_name && words.len() >= DESCRIBED_MISSING_FROM)
             {
                 continue;
             }
-            let said = stems.len() - in_name - missing;
-            let query_share = (in_name as f32 + DESCRIBED_WORD * said as f32) / stems.len() as f32;
-            let name_share =
-                name.iter().filter(|word| stems.contains(*word)).count() as f32 / name.len() as f32;
+            let only_said = words.len() - in_name - missing;
+            let query_share =
+                (in_name as f32 + DESCRIBED_WORD * only_said as f32) / words.len() as f32;
+            let name_share = name
+                .iter()
+                .filter(|stem| words.iter().any(|word| &word.stem == *stem))
+                .count() as f32
+                / name.len() as f32;
             best = best.max(PARTIAL_MATCH * query_share * (0.5 + 0.5 * name_share));
         }
         best
