@@ -1,7 +1,7 @@
 //! A query parsed into the index's terms, and the Tantivy query built from
 //! them with each field's weight.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 use plumb_core::{is_function_word, kind_key, other_number, truncate_chars, MAX_TEXT_CHARS};
@@ -15,7 +15,7 @@ use crate::names::typed_domain;
 use crate::pages::is_year;
 use crate::rank::bm25_of;
 use crate::schema::Fields;
-use crate::{analysis, FILLER_WORDS, MAX_QUERY_WORDS};
+use crate::{analysis, spell, FILLER_WORDS, MAX_QUERY_WORDS};
 
 /// BM25 boost of a query word matching the domain label.
 const LABEL_BOOST: f32 = 4.0;
@@ -105,7 +105,8 @@ pub(crate) struct ParsedQuery {
     /// [`COMPARISON_WORDS`] entry between two others is left out.
     pub(crate) words: Vec<String>,
     /// Each word in its other number ([`plumb_core::other_number`]), if it
-    /// has one: `videos` -> `video`.
+    /// has one: `videos` -> `video`. A word of Arabic script typed bare
+    /// has the spelling [`ParsedQuery::add_arabic_spellings`] finds instead.
     pub(crate) others: Vec<Option<String>>,
     /// The whole query as one joined token: `U.S. Bank` -> `usbank`.
     pub(crate) joined: Option<String>,
@@ -187,6 +188,37 @@ impl ParsedQuery {
         })
     }
 
+    /// Gives a word of Arabic script typed bare, as it often is (`اخبار`,
+    /// `الاهلي`, `مصري`), the spelling most sites have of it one letter
+    /// away (`أخبار`, `مصرى`) as its other form, found the same way, a
+    /// little weaker. A word typed with its hamza or madda keeps to it and
+    /// is ranked as before.
+    pub(crate) fn add_arabic_spellings(
+        &mut self,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+    ) -> Result<()> {
+        for (word, other) in self.words.iter().zip(&mut self.others) {
+            if other.is_some() || analysis::folded(word).as_deref() != Some(word.as_str()) {
+                continue;
+            }
+            let mut docs: BTreeMap<String, u64> = BTreeMap::new();
+            for field in spell::word_fields(f) {
+                for (term, _) in spell::near_terms(searcher, field, word, 1)? {
+                    if analysis::folded(&term).as_deref() == Some(word.as_str()) {
+                        let found = searcher.doc_freq(&Term::from_field_text(field, &term))?;
+                        *docs.entry(term).or_default() += found;
+                    }
+                }
+            }
+            *other = docs
+                .into_iter()
+                .max_by_key(|&(_, found)| found)
+                .map(|(term, _)| term);
+        }
+        Ok(())
+    }
+
     /// Whether `word` is a [`FILLER_WORDS`] entry and they are taken as
     /// such.
     pub(crate) fn is_filler(&self, word: &str) -> bool {
@@ -218,7 +250,9 @@ impl ParsedQuery {
 
     /// The clauses for the `i`th query word: the word in every field, and
     /// its other number in the fields of free text, a little weaker, so
-    /// "videos" finds a site about "video" but names stay exact.
+    /// "videos" finds a site about "video" but names stay exact. An Arabic
+    /// word typed bare is taken the same way: `اخبار` finds `أخبار`, a
+    /// little below what is written `اخبار`.
     ///
     /// The other number never counts for more than the word as typed: when
     /// "videos" is common and "video" rare, BM25 would make the rare form
