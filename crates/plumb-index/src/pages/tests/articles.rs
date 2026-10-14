@@ -808,6 +808,44 @@ fn comparisons_find_the_articles_on_both_sides() {
 }
 
 #[test]
+fn one_side_of_a_thing_finds_its_article_unless_one_is_called_so() {
+    for (query, name) in [
+        ("benefits of meditation", "meditation"),
+        ("uses of graphene", "graphene"),
+        ("Causes of the French Revolution?", "french revolution"),
+        (
+            "advantages and disadvantages of nuclear energy",
+            "nuclear energy",
+        ),
+    ] {
+        assert_eq!(aspect_asked(query).as_deref(), Some(name), "{query:?}");
+    }
+    assert_eq!(aspect_asked("meditation"), None);
+    assert_eq!(aspect_asked("benefits of it"), None);
+    let (_dir, s) = searcher(&[
+        page("Meditation", 300_000, &[]),
+        page("Meditation (album)", 2_000, &[]),
+        page("French Revolution", 900_000, &[]),
+        page("Causes of the French Revolution", 30_000, &[]),
+    ]);
+    let hits = s.search("benefits of meditation", 5).unwrap();
+    assert_eq!(hits[0].page.title, "Meditation", "{hits:?}");
+    assert!(hits[0].named, "{hits:?}");
+    // The article on that side is called the whole query, and the more
+    // read article on the whole thing is not looked up to come before it.
+    let hits = s.search("causes of the french revolution", 5).unwrap();
+    assert_eq!(
+        hits[0].page.title, "Causes of the French Revolution",
+        "{hits:?}"
+    );
+    assert!(
+        hits.iter()
+            .all(|hit| !hit.named || hit.page.title != "French Revolution"),
+        "{hits:?}"
+    );
+}
+
+#[test]
 fn a_plural_that_names_only_namesakes_asks_about_its_singular() {
     let (_dir, s) = searcher(&[
         page("Cloud", 300_000, &[]),
