@@ -963,6 +963,15 @@ impl<'a> Page<'a> {
             .take(MAX_PAGE_TEXT_WORDS)
             .collect();
         let body = &words[..words.len().min(MAX_BODY_WORDS)];
+        let key_pages = match &self.own_domain {
+            Some(domain) => pick_key_pages(
+                self.base_url.as_str(),
+                domain,
+                &self.own_links,
+                self.password_field,
+            ),
+            None => Vec::new(),
+        };
         PageMeta {
             body_text: (!body.is_empty()).then(|| body.join(" ")),
             page_text: words.join(" "),
@@ -977,15 +986,8 @@ impl<'a> Page<'a> {
             search_url: self.search_url,
             language: self.language.or(self.meta_language).or(self.og_language),
             icons: best_icons(self.icons),
-            key_pages: match &self.own_domain {
-                Some(domain) => pick_key_pages(
-                    self.base_url.as_str(),
-                    domain,
-                    &self.own_links,
-                    self.password_field,
-                ),
-                None => Vec::new(),
-            },
+            key_pages,
+            own_links: self.own_links,
             headings: self.headings,
             sections: self.sections,
             search: self.rich.and_then(RichText::finish),

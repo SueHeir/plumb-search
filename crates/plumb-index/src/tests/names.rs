@@ -91,6 +91,175 @@ fn little_known_sites_without_a_title_come_after_titled_ones() {
 }
 
 #[test]
+fn a_name_a_site_borrows_does_not_name_it() {
+    let official = |domain, title, aliases: &[&str], about: &str, signals| {
+        let mut record = site(domain, Some(title), None, aliases, &[], signals);
+        record.about = Some(about.to_string());
+        record
+    };
+    let records = [
+        official(
+            "facebook.com",
+            "Facebook - log in or sign up",
+            &["Facebook"],
+            "social networking service",
+            popular(5, 900_000),
+        ),
+        // Its homepage gives "Facebook" as its og:site_name.
+        official(
+            "holden.com.au",
+            "Holden Australia: Service & Ownership Information",
+            &["Holden", "Facebook"],
+            "Australian automobile manufacturer",
+            popular(30_000, 4_000),
+        ),
+        // Wikipedia's words for it say it was Facebook.
+        {
+            let mut meta = official(
+                "meta.com",
+                "Meta",
+                &["Meta Platforms", "Facebook"],
+                "American technology company",
+                popular(400, 300_000),
+            );
+            meta.intro = Some(
+                "Meta Platforms, Inc., formerly Facebook, Inc., is an American technology company."
+                    .to_string(),
+            );
+            meta
+        },
+        // Not official, and its description names the brand in passing.
+        site(
+            "proyectoianua.com",
+            Some("Proyecto Ianua"),
+            Some("Follow us on Facebook for updates"),
+            &["Facebook"],
+            &[],
+            obscure(900_000, 3),
+        ),
+        official(
+            "delta.com",
+            "Delta Air Lines | Flights & Plane Tickets",
+            &["Delta Air Lines"],
+            "American airline",
+            popular(800, 60_000),
+        ),
+        official(
+            "deltafaucet.com",
+            "Delta Faucet | Kitchen and Bathroom Faucets",
+            &["Delta"],
+            "American faucet maker",
+            popular(20_000, 5_000),
+        ),
+        official(
+            "nestle.com",
+            "Nestlé Global",
+            &["Nestlé"],
+            "Swiss food company",
+            popular(300, 200_000),
+        ),
+        official(
+            "nestle-cereals.com",
+            "Nestlé Cereals",
+            &["Nestlé Cereals", "Nestlé"],
+            "breakfast cereal brand",
+            popular(40_000, 2_000),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let hits = searcher.search("facebook", 10).unwrap();
+    assert_eq!(domains(&hits)[0], "facebook.com");
+    for borrower in ["holden.com.au", "proyectoianua.com"] {
+        assert!(!domains(&hits).contains(&borrower), "{hits:?}");
+    }
+    let hits = searcher.search_with("facebook", 10, &keep_all()).unwrap();
+    let named: Vec<&str> = hits
+        .iter()
+        .filter(|hit| hit.named)
+        .map(|hit| hit.domain.as_str())
+        .collect();
+    assert_eq!(named, ["facebook.com", "meta.com"]);
+    // The same goes for a name the query starts with.
+    let hits = searcher
+        .search_with("facebook marketplace", 10, &keep_all())
+        .unwrap();
+    let named_first = |domain: &str| {
+        hits.iter().any(|hit| {
+            hit.domain == domain
+                && hit
+                    .query_evidence
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.partial_name_words > 0)
+        })
+    };
+    assert!(named_first("facebook.com"), "{hits:?}");
+    assert!(!named_first("holden.com.au"), "{hits:?}");
+    // Its own name still names it.
+    assert_eq!(top(&searcher, "holden"), "holden.com.au");
+    // A site whose title has the name keeps it.
+    let hits = searcher.search_with("delta", 10, &keep_all()).unwrap();
+    assert!(hits
+        .iter()
+        .any(|hit| hit.domain == "deltafaucet.com" && hit.named));
+    // So does one whose title spells it with an accent the query lacks.
+    let hits = searcher.search_with("nestle", 10, &keep_all()).unwrap();
+    assert!(
+        hits.iter()
+            .any(|hit| hit.domain == "nestle-cereals.com" && hit.named),
+        "{hits:?}"
+    );
+}
+
+#[test]
+fn a_leading_www_names_no_site() {
+    let records = [
+        site(
+            "ikea.com",
+            Some("IKEA"),
+            None,
+            &["IKEA"],
+            &[],
+            popular(300, 20_000),
+        ),
+        // On a public suffix, so its domain label is "www".
+        site(
+            "www.gov.uk",
+            Some("Welcome to GOV.UK"),
+            None,
+            &[],
+            &[],
+            popular(100, 90_000),
+        ),
+        site(
+            "www.nhs.uk",
+            Some("NHS website for England"),
+            None,
+            &[],
+            &[],
+            popular(400, 40_000),
+        ),
+        site(
+            "prsa.org",
+            Some("Public Relations Society of America"),
+            None,
+            &[],
+            &[("www", 50)],
+            popular(20_000, 3_000),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    for query in ["www.ikea", "www ikea", "WWW.IKEA.COM"] {
+        let hits = searcher.search_with(query, 10, &keep_all()).unwrap();
+        assert_eq!(domains(&hits), ["ikea.com"], "{query}");
+    }
+    // An address whose site needs its "www" keeps it.
+    assert_eq!(top(&searcher, "www.gov.uk"), "www.gov.uk");
+    assert_eq!(crate::names::without_www("www.gov.uk"), "www.gov.uk");
+    assert_eq!(crate::names::without_www("www"), "www");
+    assert_eq!(crate::names::without_www("wwwikea.com"), "wwwikea.com");
+}
+
+#[test]
 fn a_little_known_namesake_of_the_words_leaves_the_rest_listed() {
     let records = [
         site(
@@ -563,26 +732,62 @@ fn sites_that_redirect_name_the_site_they_redirect_to() {
     lookalike.redirect = Some(plumb_core::Redirect {
         to: "pnc.com".into(),
         at: 1,
+        inner: false,
     });
     // A redirect to a site not in the index changes nothing.
     let mut elsewhere = site("fb.example", None, None, &[], &[], ranked(50_000, 10));
     elsewhere.redirect = Some(plumb_core::Redirect {
         to: "facebook.example".into(),
         at: 1,
+        inner: false,
+    });
+    // Sent to a page about it, or to the sign-in of the domain it is on,
+    // a site stays one of its own.
+    let mut section = site(
+        "destinythegame.com",
+        Some("Destiny 2"),
+        None,
+        &[],
+        &[],
+        ranked(9_000, 50),
+    );
+    section.redirect = Some(plumb_core::Redirect {
+        to: "bungie.net".into(),
+        at: 1,
+        inner: true,
+    });
+    let mut gmail = site(
+        "mail.google.com",
+        Some("Gmail"),
+        None,
+        &[],
+        &[],
+        ranked(1, 900),
+    );
+    gmail.redirect = Some(plumb_core::Redirect {
+        to: "google.com".into(),
+        at: 1,
+        inner: false,
     });
     let records = vec![
         site("pnc.com", None, None, &[], &[], ranked(2_000, 900)),
         lookalike,
         elsewhere,
         site("bank.com", None, None, &[], &[], ranked(3_000, 900)),
+        site("bungie.net", None, None, &[], &[], ranked(9_000, 400)),
+        section,
+        site("google.com", None, None, &[], &[], ranked(1, 900)),
+        gmail,
     ];
     let dir = TempDir::new().unwrap();
     let stats = build_index(dir.path(), &records).unwrap();
-    assert_eq!((stats.docs, stats.redirected), (3, 1));
+    assert_eq!((stats.docs, stats.redirected), (7, 1));
     let searcher = Searcher::open(dir.path()).unwrap();
     let hits = searcher.search("pnc bank", 10).unwrap();
     assert_eq!(hits[0].domain, "pnc.com", "{hits:?}");
     assert!(domains(&hits).iter().all(|d| *d != "pncbank.com"));
     assert_eq!(top(&searcher, "pncbank"), "pnc.com");
     assert_eq!(top(&searcher, "fb example"), "fb.example");
+    assert_eq!(top(&searcher, "destiny 2"), "destinythegame.com");
+    assert_eq!(top(&searcher, "gmail"), "mail.google.com");
 }
