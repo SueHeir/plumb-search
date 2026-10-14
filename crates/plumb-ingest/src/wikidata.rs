@@ -12,6 +12,15 @@ use url::Url;
 
 use crate::{open_maybe_gz, snippet, too_long_note, Line, LineReader, MAX_LINE_BYTES};
 
+/// What Wikidata calls an item that is a page of the wikis
+/// ([`OfficialSite::claims_nothing`]).
+const WIKI_PAGE_KINDS: [&str; 4] = [
+    "Wikimedia disambiguation page",
+    "Wikimedia human name disambiguation page",
+    "Wikimedia category",
+    "Wikimedia template",
+];
+
 /// One "official website" statement: an item, its label and the URL it
 /// claims. Build it with [`OfficialSite::new`], which derives the other fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +145,30 @@ impl OfficialSite {
     /// front page.
     pub fn is_named_inner_page(&self) -> bool {
         self.is_root_inner_page() && self.domain_name_share() * 3.0 >= 2.0
+    }
+
+    /// True when the item's claim names no site: the item is a page of the
+    /// wikis rather than a thing (a disambiguation page, a category or a
+    /// template, [`OfficialSite::kinds`]) or a domain ending, labelled a dot
+    /// and one word. Some claim a website anyway: the disambiguation page
+    /// "Radioactive" a guitarist's site, "Microsoft Web Services"
+    /// outlook.com, and ".microsoft" its registry's nic.microsoft, which
+    /// "microsoft" would then name as an official site. Things whose name
+    /// starts with a dot (".NET Foundation", ".hack//The Movie", the
+    /// magazine ".KTW") keep their sites.
+    pub fn claims_nothing(&self) -> bool {
+        let ending = self.label.strip_prefix('.').is_some_and(|word| {
+            !word.is_empty() && word.chars().all(|c| c.is_alphanumeric() || c == '-')
+        }) && (self.kinds.is_empty()
+            || self
+                .kinds
+                .iter()
+                .any(|kind| kind.ends_with("top-level domain")));
+        ending
+            || self
+                .kinds
+                .iter()
+                .any(|kind| WIKI_PAGE_KINDS.contains(&kind.as_str()))
     }
 
     /// True when the item's label or one of its other names contains the
