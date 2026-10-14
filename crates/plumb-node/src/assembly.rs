@@ -258,9 +258,18 @@ pub(crate) fn linked_sites(
     site: impl Fn(&str) -> Option<Hit>,
     search: impl Fn(&str) -> Vec<Hit>,
 ) -> Vec<Hit> {
+    // A place that links a page within a bigger site (its Facebook page,
+    // its Tripadvisor listing) is listed with that page, not the site's
+    // homepage.
     let mut sites: Vec<Hit> = local_sites(found)
         .into_iter()
-        .map(|hit| site(&hit.domain).unwrap_or(hit))
+        .map(|hit| {
+            if front_page(&hit) {
+                site(&hit.domain).unwrap_or(hit)
+            } else {
+                hit
+            }
+        })
         .collect();
     for place in places_without_sites(found) {
         if let Some(mut hit) = site_named_for(&place, search(&place.name)) {
@@ -274,6 +283,16 @@ pub(crate) fn linked_sites(
         }
     }
     sites
+}
+
+/// Whether `hit` links the front page of its site, not a page in it.
+fn front_page(hit: &Hit) -> bool {
+    url::Url::parse(&hit.url).is_ok_and(|url| {
+        url.host_str()
+            .is_some_and(|host| host.strip_prefix("www.").unwrap_or(host) == hit.domain)
+            && url.path() == "/"
+            && url.query().is_none()
+    })
 }
 
 /// The places of `found` that give no website, at most

@@ -1,6 +1,6 @@
 # Places: "pizza in denver" and "coffee near me"
 
-A search that says where, such as "pizza in denver", "coffee shop in boulder", "hotels near red rocks amphitheatre", "denver brewery" or "coffee near me", lists matching places above the sites: their name, kind, distance, street address, website and a link to them on OpenStreetMap, with a small map of where they are.
+A search that says where, such as "pizza in denver", "coffee shop in boulder", "hotels near red rocks amphitheatre", "denver brewery" or "coffee near me", lists matching places above the sites: their name, kind, distance, street address, website and a link to them on OpenStreetMap, with a small map of where they are. Their websites lead the sites below. A place that links a page within a bigger site, such as its Facebook page or its Tripadvisor listing, is listed with that page under its own name, not with the bigger site's homepage.
 
 The map is drawn by the node as numbered pins with a scale bar, on streets, water, parks and a few town and neighbourhood names from a map file the node keeps (see "The map" below). The search page loads nothing from any other server: map tiles fetched by the browser would tell a tile server where every searcher is looking. A node without a map file draws the pins alone. "Open this area in OpenStreetMap" links to the full map.
 

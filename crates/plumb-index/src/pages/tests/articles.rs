@@ -3,6 +3,49 @@
 use super::*;
 
 #[test]
+fn a_judged_name_finds_what_it_judges() {
+    let (_dir, s) = searcher(&[
+        page("Blood pressure", 90_000, &[]),
+        page("Normal distribution", 80_000, &[]),
+        page("Distribution (economics)", 20_000, &[]),
+        page("BMI (company)", 5_000, &["BMI"]),
+    ]);
+    let named = |query: &str| -> Vec<String> {
+        let hits = s.search(query, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("what is a normal blood pressure"), ["Blood pressure"]);
+    // A page called the whole name keeps its namesakes away.
+    assert_eq!(
+        named("what is a normal distribution"),
+        ["Normal distribution"]
+    );
+    assert!(named("what is a healthy bmi").is_empty());
+}
+
+#[test]
+fn a_field_after_the_name_keeps_that_sense() {
+    let mut film = page("Cell (film)", 90_000, &[]);
+    film.description = Some("2016 film by Tod Williams".into());
+    let mut biology = page("Cell (biology)", 80_000, &[]);
+    biology.description = Some("Basic unit of all life".into());
+    let (_dir, s) = searcher(&[film, biology, page("Cell biology", 40_000, &[])]);
+    let named = |query: &str| -> Vec<String> {
+        let hits = s.search(query, 5).unwrap();
+        hits.into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert_eq!(named("what is a cell in biology"), ["Cell (biology)"]);
+    // With no page on the field's sense, the name's pages are all kept.
+    assert_eq!(named("what is a cell in poetry").len(), 2);
+}
+
+#[test]
 fn words_that_say_what_is_wanted_keep_the_name() {
     let (_dir, s) = searcher(&[
         page("Lululemon", 50_000, &[]),
@@ -314,6 +357,48 @@ fn fact_questions_find_the_article_they_ask_about() {
     assert!(!hits
         .iter()
         .any(|h| h.page.title == "Empires (film)" && h.named));
+}
+
+#[test]
+fn a_question_about_a_works_maker_finds_the_work_without_its_the() {
+    use plumb_core::facts::{Fact, FactKind};
+    let work = |title: &str, views: u64, maker: Option<(FactKind, &str)>| {
+        let mut page = page(title, views, &[]);
+        page.facts = maker
+            .map(|(kind, value)| Fact {
+                kind,
+                value: value.into(),
+            })
+            .into_iter()
+            .collect();
+        page
+    };
+    let (_dir, s) = searcher(&[
+        work(
+            "Mona Lisa",
+            34_216,
+            Some((FactKind::Creator, "Leonardo da Vinci")),
+        ),
+        work("The Mona Lisa (song)", 24, None),
+        work(
+            "The Hobbit",
+            30_000,
+            Some((FactKind::Author, "J. R. R. Tolkien")),
+        ),
+        work("Hobbit", 10_000, None),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        s.search(q, 5)
+            .unwrap()
+            .into_iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title)
+            .collect()
+    };
+    assert!(named("who painted the mona lisa").contains(&"Mona Lisa".to_string()));
+    // Named without "the" only when it holds what is asked: the hobbits
+    // have no author.
+    assert_eq!(named("who wrote the hobbit"), ["The Hobbit"]);
 }
 
 #[test]
@@ -1000,4 +1085,61 @@ fn a_monarch_typed_with_a_number_is_named() {
     assert_eq!(regnal_name("windows 11 pro"), None);
     assert_eq!(regnal_name("the 8th"), None);
     assert_eq!(regnal_name("covid-19"), None);
+}
+
+#[test]
+fn what_is_asked_about_an_event_finds_its_article() {
+    let described = |title: &str, aliases: &[&str], description: &str| {
+        let mut page = page(title, 50_000, aliases);
+        page.description = Some(description.into());
+        page
+    };
+    let (_dir, s) = searcher(&[
+        described(
+            "UEFA Champions League",
+            &["Champions League"],
+            "European association football tournament",
+        ),
+        described(
+            "Los Angeles Lakers",
+            &["Lakers"],
+            "National Basketball Association team",
+        ),
+        described(
+            "Coachella Valley Music and Arts Festival",
+            &["Coachella"],
+            "Annual music and arts festival in Indio, California",
+        ),
+        described(
+            "2026 FIFA World Cup",
+            &["2026 World Cup"],
+            "Football tournament in North America",
+        ),
+        described("Glastonbury", &[], "Town in Somerset, England"),
+        described("Bus", &[], "Large road vehicle for carrying passengers"),
+        described("Truth", &[], "Being in accord with fact or reality"),
+        described("Truth table", &[], "Mathematical table used in logic"),
+    ]);
+    let named = |q: &str| -> Vec<String> {
+        let hits = s.search(q, 5).unwrap();
+        hits.iter()
+            .filter(|hit| hit.named)
+            .map(|hit| hit.page.title.clone())
+            .collect()
+    };
+    assert_eq!(
+        named("champions league schedule"),
+        ["UEFA Champions League"]
+    );
+    assert_eq!(named("lakers live scores"), ["Los Angeles Lakers"]);
+    assert_eq!(
+        named("coachella lineup"),
+        ["Coachella Valley Music and Arts Festival"]
+    );
+    assert_eq!(named("world cup 2026 tickets"), ["2026 FIFA World Cup"]);
+    // Only an event, team or venue, and not when a page is called the
+    // whole query.
+    assert!(named("glastonbury lineup").is_empty());
+    assert!(named("bus schedule").is_empty());
+    assert_eq!(named("truth table"), ["Truth table"]);
 }

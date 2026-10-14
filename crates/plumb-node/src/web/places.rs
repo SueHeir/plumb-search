@@ -507,6 +507,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_place_that_links_a_page_in_a_bigger_site_keeps_its_page() {
+        let link = |name: &str, website: &str| PlaceHit {
+            place: Place {
+                website: Some(website.into()),
+                ..place(name, "amenity=cafe", 39.75, -104.98)
+            },
+            km: 1.0,
+        };
+        let found = PlaceResults {
+            hits: vec![
+                link("Monkey Cave", "https://www.facebook.com/monkeycave"),
+                link("Canti Warung", "https://canti-warung.business.site/"),
+                link("Kiraku", "https://tabelog.com/tokyo/A1303/13001705/"),
+                link("Blue Pan", "https://www.bluepan.com/"),
+            ],
+            ..found()
+        };
+        // Every site is in the index, titled as its homepage is.
+        let homepage = |domain: &str| {
+            Some(Hit {
+                domain: domain.into(),
+                url: format!("https://{domain}/"),
+                title: Some(format!("{domain} homepage")),
+                description: None,
+                score: 1.0,
+                text_score: 1.0,
+                link_score: 0.9,
+                placing_text_score: None,
+                country: None,
+                named: false,
+                official: false,
+                key_pages: Vec::new(),
+                demand: None,
+                missing_words: false,
+                query_evidence: None,
+            })
+        };
+        let sites = crate::assembly::linked_sites(&found, homepage, |_| Vec::new());
+        let listed: Vec<(&str, &str)> = sites
+            .iter()
+            .map(|hit| (hit.url.as_str(), hit.title.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("https://www.facebook.com/monkeycave", "Monkey Cave"),
+                ("https://canti-warung.business.site/", "Canti Warung"),
+                ("https://tabelog.com/tokyo/A1303/13001705/", "Kiraku"),
+                ("https://bluepan.com/", "bluepan.com homepage"),
+            ]
+        );
+    }
+
     fn search(query: &str) -> String {
         format!("/search?q={query}")
     }

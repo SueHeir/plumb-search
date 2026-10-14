@@ -194,7 +194,7 @@ pub(crate) fn named_page_site<'a>(
 ) -> Option<usize> {
     let shown = sites.len().min(LIFTED_FROM);
     let lifted = |hit: &PageHit| {
-        let site = hit.page.site.as_deref()?;
+        let site = page_site(&hit.page, &sites[..shown])?;
         let at = sites[..shown].iter().position(|s| s.domain == site)?;
         let ok = if hit.page.item.is_some() {
             sites[at].official
@@ -208,6 +208,20 @@ pub(crate) fn named_page_site<'a>(
         .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET);
     let repo = pages.find(|hit| hit.named && hit.page.set == GITHUB_SET);
     article.and_then(lifted).or_else(|| repo.and_then(lifted))
+}
+
+/// The site among `sites` that `page` is about: its item's own website
+/// when that is a site of its own there (mail.yahoo.com for the article
+/// Yahoo Mail, whose [`Page::site`] is yahoo.com, when both are listed),
+/// else its site. A page with no site has none: a paper's website is where
+/// a free copy of it is (PMC, arXiv), which it is not about.
+fn page_site(page: &Page, sites: &[crate::Hit]) -> Option<String> {
+    let site = page.site.clone()?;
+    page.website
+        .as_deref()
+        .and_then(registrable_domain)
+        .filter(|own| sites.iter().any(|site| site.domain == *own))
+        .or(Some(site))
 }
 
 /// Where `pages` (best first) go among the site results `sites`:
@@ -767,7 +781,7 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
                     && page_key(base_title(&p.hit.page.title))
                         == page_key(base_title(&hit.page.title))
             });
-        if let Some(site) = hit.page.site.as_deref() {
+        if let Some(site) = page_site(&hit.page, sites) {
             if sites.iter().any(|s| s.domain == site) {
                 // The best page about the site goes under it, unless a
                 // later one is named by the query: "google maps" carries
@@ -776,10 +790,10 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
                 // "census population clock" carries the Population Clock.
                 let inner = hit.page.is_site_page();
                 match placed.iter_mut().find(|p| {
-                    p.under.as_deref() == Some(site) && p.hit.page.is_site_page() == inner
+                    p.under.as_deref() == Some(site.as_str()) && p.hit.page.is_site_page() == inner
                 }) {
                     None => placed.push(PlacedPage {
-                        under: Some(site.to_string()),
+                        under: Some(site),
                         at: 0,
                         hit,
                     }),
@@ -788,6 +802,9 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
                 }
                 continue;
             }
+        }
+        if obscure_namesake(&hit, &placed) {
+            continue;
         }
         // An item without an article is only told apart from its
         // namesakes by its website.
@@ -865,6 +882,31 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         });
     }
     placed
+}
+
+/// How many times as read as a namesake an article that has the name to
+/// itself is when the namesake is not listed ([`obscure_namesake`]).
+const OBSCURE_NAMESAKE: u64 = 50;
+
+/// Whether `hit` is an article the query names only by its title before a
+/// qualifier, read less than a fiftieth as much as an article of its set
+/// already placed that has the name to itself: "Prince William (1788
+/// ship)" and "Prince William (TV series)" for "prince william", "Lady Gaga
+/// (song)" for "lady gaga". Named so, it scored nearly as high as the
+/// article, popularity being only half a page's score, and took a place
+/// among the first results. "Cleopatra (1963 film)" and "Julius Caesar
+/// (play)" are read enough to stay.
+fn obscure_namesake(hit: &PageHit, placed: &[PlacedPage]) -> bool {
+    let unqualified = |page: &Page| base_title(&page.title) == page.title;
+    hit.named
+        && hit.page.is_article()
+        && !unqualified(&hit.page)
+        && placed.iter().any(|p| {
+            p.hit.named
+                && p.hit.page.set == hit.page.set
+                && unqualified(&p.hit.page)
+                && hit.page.views.saturating_mul(OBSCURE_NAMESAKE) < p.hit.page.views
+        })
 }
 
 /// Words a search asked as a question starts with.

@@ -51,7 +51,7 @@ pub use self::placing::{
     WEAK_SITE_MATCH,
 };
 pub(crate) use self::placing::{
-    asked_as_question, is_record, kept_below, named_page_site, names_best_site_page,
+    asked_as_question, is_record, is_year, kept_below, named_page_site, names_best_site_page,
 };
 pub use self::scoring::{made_by, site_pages_after_named_article};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};

@@ -22,7 +22,7 @@ use super::placing::subpage_asked;
 use super::search::{
     aspect_asked, compared, hinted_name, last_word_in_other_number, regnal_name, year_moved, Hint,
 };
-use super::sites::{base_title, describes_an_organization, site_is_titled};
+use super::sites::{base_title, describes_an_event, describes_an_organization, site_is_titled};
 use super::*;
 
 fn page(title: &str, views: u64, aliases: &[&str]) -> Page {

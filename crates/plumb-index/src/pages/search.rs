@@ -14,14 +14,15 @@ use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
 
 use super::building::schema;
 use super::page::is_item_id;
-use super::placing::is_year;
+use super::placing::{is_year, options_allow};
 use super::records::records_named;
 use super::scoring::truncate_keeping_inner_pages;
-use super::sites::base_title;
+use super::sites::{base_title, describes_an_event};
 use super::{
-    Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, ALIAS_MATCH, CANDIDATES, FILMS_SET,
-    GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET, PAGE_FIX_RATIO, PAGE_SLIP_WEIGHT,
-    PAPERS_SET, POPULARITY_SCALE, POPULARITY_SHARE, TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
+    Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, PlacedPage, ALIAS_MATCH,
+    CANDIDATES, FILMS_SET, GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES, MUSIC_SET,
+    PAGE_FIX_RATIO, PAGE_SLIP_WEIGHT, PAPERS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
+    TITLE_CANDIDATES, WIKIDATA_SET, WIKTIONARY_SET,
 };
 use crate::analysis;
 
@@ -47,6 +48,9 @@ pub(crate) enum Hint {
     /// A monarch or pope of that name and number: "henry viii" of "henry
     /// the 8th" ([`regnal_name`]).
     Regnal,
+    /// An event, competition, team or venue of that name, of which
+    /// something is asked: "lakers schedule", "coachella lineup".
+    Event,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
     /// The thing, of which one part is asked about: "ibuprofen side
@@ -58,6 +62,10 @@ pub(crate) enum Hint {
     /// order"). "madrid spanish" (of "madrid spanish capital city") names
     /// nothing, and the clubs it describes would push Madrid out.
     Named,
+    /// Of the pages the name names, those on a field's sense of it, when
+    /// there are any ([`plumb_core::article::field_asked`]): "what is a
+    /// cell in biology" asks about the cell of biology.
+    Field(&'static [&'static str]),
 }
 
 /// What a song is called in its title or description ([`Page::is_work_of`]).
@@ -359,6 +367,28 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" finale", Hint::Work(SCREEN)),
     (" characters", Hint::Work(SCREEN)),
     (" actors", Hint::Work(SCREEN)),
+    // What people ask of an event, competition, team or venue, whose
+    // article is not called by these words. Longer tails first.
+    (" schedule", Hint::Event),
+    (" fixtures", Hint::Event),
+    (" standings", Hint::Event),
+    (" table", Hint::Event),
+    (" live scores", Hint::Event),
+    (" live score", Hint::Event),
+    (" scores", Hint::Event),
+    (" score", Hint::Event),
+    (" results", Hint::Event),
+    (" bracket", Hint::Event),
+    (" tickets", Hint::Event),
+    (" lineup", Hint::Event),
+    (" roster", Hint::Event),
+    (" squad", Hint::Event),
+    (" highlights", Hint::Event),
+    (" live stream", Hint::Event),
+    (" odds", Hint::Event),
+    (" draw", Hint::Event),
+    (" predictions", Hint::Event),
+    (" start time", Hint::Event),
     (" cast", Hint::Any),
     (" author", Hint::Any),
     (" movie", Hint::Screen),
@@ -386,6 +416,21 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" uses", Hint::Aspect),
     (" diagram", Hint::Aspect),
 ];
+
+/// Words before a name that ask what is usual or wise for it, not what it
+/// is: "normal" of "normal blood pressure".
+const JUDGING_WORDS: &[&str] = &[
+    "normal", "good", "bad", "healthy", "average", "ideal", "typical", "safe",
+];
+
+/// `name` without a word in front that judges it ([`JUDGING_WORDS`]):
+/// "blood pressure" of "normal blood pressure". `None` without one, or
+/// when a single word is left, which is as often initials: "healthy bmi"
+/// would name BMI, a research firm.
+fn judged_name(name: &str) -> Option<&str> {
+    let (first, rest) = name.split_once(' ')?;
+    (JUDGING_WORDS.contains(&first) && rest.contains(' ')).then_some(rest)
+}
 
 /// What a search asks of a thing of science, which the thing's article
 /// says, before its name with "of" or after it: "melting point of iron",
@@ -529,6 +574,10 @@ pub(crate) fn hinted_name(query: &str) -> Option<(String, Hint)> {
         _ => name,
     };
     let hint = hint?;
+    let (name, hint) = match (hint, plumb_core::article::field_asked(name)) {
+        (Hint::Any, Some((rest, marks))) => (rest, Hint::Field(marks)),
+        _ => (name, hint),
+    };
     (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
 }
 
@@ -597,6 +646,21 @@ pub(crate) fn work_lists(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Adds `found` to `hits`. Found both ways, a page keeps its better score
+/// and whatever either way says of it.
+fn keep_found(hits: &mut Vec<PageHit>, found: Vec<PageHit>) {
+    for hit in found {
+        match hits.iter_mut().find(|h| h.page == hit.page) {
+            Some(kept) => {
+                kept.named |= hit.named;
+                kept.whole |= hit.whole;
+                kept.score = kept.score.max(hit.score);
+            }
+            None => hits.push(hit),
+        }
+    }
+}
+
 /// Least listeners of a song or album that [`PageSearcher::known_song`]
 /// takes a search of its title alone to be for: about the 7,000 most
 /// listened.
@@ -608,6 +672,10 @@ pub const KNOWN_SONG_MARGIN: u64 = 5;
 
 /// How many of the first sites [`PageSearcher::note_demand`] notes.
 pub const DEMAND_NOTED: usize = 3;
+
+/// Pages looked at for one a suggested spelling names
+/// ([`PageSearcher::list_suggested_page`]).
+const SUGGESTED_PAGES: usize = 10;
 
 /// Least popularity of an article whose name a query's first words are
 /// taken for a slip of ([`PageSearcher::fix_page_name`]): about 6,000
@@ -999,6 +1067,48 @@ impl PageSearcher {
         }))
     }
 
+    /// Lists second among `placed` the page `spelling` names, as the site a
+    /// suggestion names is ([`crate::suggested_site_second`]): "isaac
+    /// newtonn" lists Isaac Newton under what has the letters typed rather
+    /// than a click away. Not when the results are for the spelling
+    /// already, the page is listed, or `options` leave it out. It counts
+    /// as named by the spelling, not the query, so it gets no info box.
+    pub fn list_suggested_page(
+        &self,
+        spelling: &crate::Spelling,
+        options: &crate::SearchOptions,
+        placed: &mut Vec<PlacedPage>,
+    ) -> Result<()> {
+        if spelling.applied {
+            return Ok(());
+        }
+        let found = self.search(&spelling.query, SUGGESTED_PAGES)?;
+        let Some(mut hit) = found.into_iter().find(|hit| {
+            hit.named
+                && options_allow(options, &hit.page)
+                && crate::health::page_allowed(&spelling.query, &hit.page)
+        }) else {
+            return Ok(());
+        };
+        if placed.iter().any(|p| p.hit.page.url == hit.page.url) {
+            return Ok(());
+        }
+        hit.named = false;
+        let at = placed
+            .iter()
+            .position(|p| p.under.is_none() && p.at >= 1)
+            .unwrap_or(placed.len());
+        placed.insert(
+            at,
+            PlacedPage {
+                hit,
+                under: None,
+                at: 1,
+            },
+        );
+        Ok(())
+    }
+
     /// Corrects the first words of `words`, two or more, when they are a
     /// slip of a well-read article's name ([`WELL_READ_NAME`]): "jeff bezoz"
     /// is Jeff Bezos, "leonardo da vinchi net worth" Leonardo da Vinci's. As
@@ -1324,12 +1434,32 @@ impl PageSearcher {
             .clone()
             .unwrap_or_else(|| (query.to_lowercase(), Hint::Any));
         let moved = year_moved(&name).map(|name| (name, hint));
+        let judged = hinted.is_some().then(|| judged_name(&name)).flatten();
         let searches: Vec<(String, Hint)> = hinted.into_iter().chain(moved).collect();
         if searches.is_empty() {
             return Ok(false);
         }
         for (name, hint) in searches {
             self.add_found(hits, &name, hint, limit, scope)?;
+        }
+        // A work keeps its "the" for "The Hobbit", but "who painted the
+        // mona lisa" asks about Mona Lisa, not the song The Mona Lisa: what
+        // the name names without it counts too when it holds the fact asked.
+        let asked = plumb_core::facts::fact_asked(query).filter(|_| hint == Hint::Named);
+        if let (Some(bare), Some(asked)) = (name.strip_prefix("the "), asked) {
+            let holds = |hit: &PageHit| {
+                let facts = &hit.page.facts;
+                facts.iter().any(|fact| asked.kinds.contains(&fact.kind))
+            };
+            let mut found = self.search_once(bare, limit, scope)?;
+            found.retain(|hit| hit.named && holds(hit));
+            keep_found(hits, found);
+        }
+        // "what is a normal blood pressure" asks what is normal for blood
+        // pressure: when no page is called that, the pages "blood
+        // pressure" names are found too. "Normal distribution" is.
+        if let Some(judged) = judged.filter(|_| !hits.iter().any(|hit| hit.named)) {
+            self.add_found(hits, judged, Hint::Named, limit, scope)?;
         }
         Ok(true)
     }
@@ -1354,6 +1484,15 @@ impl PageSearcher {
             }
             // Only a person: "henry v" also names Shakespeare's play.
             Hint::Regnal => found.retain(|hit| hit.named && hit.page.is_person()),
+            // Only an event, competition, team or venue, and not when a
+            // page is called the whole query: "truth table" is not about
+            // a truth, nor "tax bracket" about a tax.
+            Hint::Event => {
+                let called = hits.iter().any(|hit| hit.named);
+                found.retain(|hit| {
+                    !called && hit.named && describes_an_event(hit.page.description.as_deref())
+                });
+            }
             Hint::Named => found.retain(|hit| hit.named),
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             // Only a repository called so: "reverse repo" is finance.
@@ -1374,6 +1513,21 @@ impl PageSearcher {
                                 * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity),
                         );
                     }
+                }
+            }
+            Hint::Field(marks) => {
+                let in_field = |hit: &PageHit| {
+                    let page = &hit.page;
+                    hit.named
+                        && plumb_core::article::in_field(
+                            marks,
+                            &page.title,
+                            page.description.as_deref(),
+                            page.lead.as_deref(),
+                        )
+                };
+                if found.iter().any(in_field) {
+                    found.retain(|hit| !hit.named || in_field(hit));
                 }
             }
             // Only the thing's article: "python examples" asks for code,
@@ -1416,18 +1570,7 @@ impl PageSearcher {
                 }
             }
         }
-        for hit in found {
-            // Found both ways, a page keeps its better score and whatever
-            // either way says of it.
-            match hits.iter_mut().find(|h| h.page == hit.page) {
-                Some(kept) => {
-                    kept.named |= hit.named;
-                    kept.whole |= hit.whole;
-                    kept.score = kept.score.max(hit.score);
-                }
-                None => hits.push(hit),
-            }
-        }
+        keep_found(hits, found);
         Ok(())
     }
 

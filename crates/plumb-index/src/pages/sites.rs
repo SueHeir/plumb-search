@@ -182,16 +182,69 @@ const ORGANIZATION_WORDS: &[&str] = &[
     "website",
 ];
 
+/// Words of a short description saying a page is about an event, a
+/// competition, a team or league that plays in one, or a venue: what has
+/// a schedule, results or tickets.
+const EVENT_WORDS: &[&str] = &[
+    "arena",
+    "award",
+    "bowl",
+    "carnival",
+    "ceremony",
+    "championship",
+    "club",
+    "competition",
+    "conference",
+    "contest",
+    "convention",
+    "cup",
+    "election",
+    "event",
+    "expo",
+    "fair",
+    "festival",
+    "franchise",
+    "gala",
+    "league",
+    "marathon",
+    "pageant",
+    "parade",
+    "playoff",
+    "promotion",
+    "race",
+    "rally",
+    "referendum",
+    "regatta",
+    "season",
+    "stadium",
+    "team",
+    "tour",
+    "tournament",
+];
+
 /// Whether Wikipedia's short description of a page says it is about an
 /// organization, product or service ("American auto insurance company",
 /// "Open-source software framework"), see [`ORGANIZATION_WORDS`].
 pub(crate) fn describes_an_organization(description: Option<&str>) -> bool {
+    describes_as(description, ORGANIZATION_WORDS)
+}
+
+/// Whether Wikipedia's short description of a page says it is about an
+/// event, competition, team or venue ("European association football
+/// tournament", "National Basketball Association team"), see
+/// [`EVENT_WORDS`].
+pub(crate) fn describes_an_event(description: Option<&str>) -> bool {
+    describes_as(description, EVENT_WORDS)
+}
+
+/// Whether `description` has one of `words`, or its plural.
+fn describes_as(description: Option<&str>, words: &[&str]) -> bool {
     description.is_some_and(|text| {
         text.split(|c: char| !c.is_alphanumeric())
             .map(str::to_lowercase)
             .any(|word| {
                 let one = word.strip_suffix('s').unwrap_or(&word);
-                ORGANIZATION_WORDS.contains(&word.as_str()) || ORGANIZATION_WORDS.contains(&one)
+                words.contains(&word.as_str()) || words.contains(&one)
             })
     })
 }

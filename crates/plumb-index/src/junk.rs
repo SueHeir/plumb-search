@@ -31,6 +31,18 @@
 //!   and paypallogin.com), reserved, parked or for sale. However well
 //!   linked or official they were, there is nothing there; only typing
 //!   the address finds one.
+//! - Little-known sites handing out Android apps' installers (APKs),
+//!   most of them changed to unlock what the app charges for
+//!   ("Kinemaster MOD APK Download", "GB WhatsApp APK Download"), for a
+//!   search that does not ask for one ([`offers_apk`]). Such copies are
+//!   how malware reaches phones, and an app's own site or store is well
+//!   known or official, or is named by the search ("snaptube").
+//! - Little-known sites offering a help line's number in their title
+//!   ([`offers_help_line`]): "Epson Printer Support Number
+//!   +1-844-932-1846" on epsonprintersupportpro.us came first for "epson
+//!   printer support" and "canon printer support number". A company's own
+//!   line is on its own site; tech-support scams wait for callers on sites
+//!   like these. Only a search spelling the whole name finds one.
 
 use plumb_core::{
     asks_to_sign_in, is_sign_in_page, names_label, normalize_text, registrable_domain, spells_label,
@@ -71,6 +83,20 @@ const HOLDING_STARTS: &[&str] = &["domain registered", "domain reserved"];
 const HOLDING_OPENINGS: &[&str] = &[
     "this domain name has been registered",
     "this domain has been registered",
+];
+
+/// What a help line's number is called, after [`normalize_text`] and
+/// before "number" or "phone number": "Epson Printer Support Number",
+/// "QuickBooks Customer Service Phone Number".
+const HELP_LINES: &[&str] = &[
+    "support",
+    "customer service",
+    "customer care",
+    "helpline",
+    "help line",
+    "help desk",
+    "helpdesk",
+    "toll free",
 ];
 
 /// Words, after [`normalize_text`], that only online gambling sites use.
@@ -169,6 +195,12 @@ const GAMBLING_QUERY_WORDS: &[&str] = &[
     "wager",
 ];
 
+/// Words of a search that asks for an app's installer or a changed copy
+/// of it: "minecraft apk", "kinemaster mod".
+const APK_QUERY_WORDS: &[&str] = &[
+    "apk", "apks", "mod", "mods", "modded", "hack", "hacked", "crack", "cracked",
+];
+
 /// Whether `hit` stays out of the results of `query`, which `named` says
 /// names it in full.
 pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
@@ -181,11 +213,27 @@ pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
         return true;
     }
     let little_known = hit.link_score < WELL_KNOWN_LINK_SCORE && !hit.official;
+    let texts = [hit.title.as_deref(), hit.description.as_deref()];
+    let gambling = || {
+        (is_gambling(texts) || (hit.description.is_none() && is_gambling_address(&hit.domain)))
+            && !asks_about_gambling(query)
+            && !named_by(query, hit)
+    };
+    // Not `named_by`: "kinemaster" names kinemastermodapk.com, titled
+    // "Kinemaster MOD APK".
+    let apk = || {
+        offers_apk(texts)
+            && !normalize_text(query)
+                .split(' ')
+                .any(|word| APK_QUERY_WORDS.contains(&word))
+            && !spells_label(query, &hit.domain)
+    };
+    if little_known && (gambling() || apk()) {
+        return true;
+    }
     if little_known
-        && (is_gambling([hit.title.as_deref(), hit.description.as_deref()])
-            || (hit.description.is_none() && is_gambling_address(&hit.domain)))
-        && !asks_about_gambling(query)
-        && !named_by(query, hit)
+        && offers_help_line(hit.title.as_deref(), hit.description.as_deref())
+        && !spells_label(query, &hit.domain)
     {
         return true;
     }
@@ -223,6 +271,39 @@ pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
             && !names_label(query, &hit.domain))
 }
 
+/// Whether `title` offers a help line's number to call: it calls it one
+/// of [`HELP_LINES`] ("Epson Printer Support Number +1-844-932-1846"),
+/// and it or `description` gives the number.
+pub(crate) fn offers_help_line(title: Option<&str>, description: Option<&str>) -> bool {
+    let calls_it = |title: &str| {
+        let title = format!(" {} ", normalize_text(title));
+        HELP_LINES.iter().any(|line| {
+            title.contains(&format!(" {line} number "))
+                || title.contains(&format!(" {line} phone number "))
+        })
+    };
+    title.is_some_and(calls_it)
+        && [title, description]
+            .into_iter()
+            .flatten()
+            .any(has_phone_number)
+}
+
+/// Whether `text` holds a phone number: ten digits or more with only
+/// spaces, dashes, dots, brackets or a plus between them
+/// ("+1-844-932-1846", "(954) 726-9525").
+fn has_phone_number(text: &str) -> bool {
+    let mut digits = 0;
+    text.chars().any(|ch| {
+        if ch.is_ascii_digit() {
+            digits += 1;
+        } else if !matches!(ch, ' ' | '-' | '.' | '(' | ')' | '+') {
+            digits = 0;
+        }
+        digits >= 10
+    })
+}
+
 /// Whether `query` names `hit`'s site: spells a whole label of it
 /// ("mataram toto" and mataramtoto.com), or the start of one that its title
 /// says as words ("lazybar" and lazybaraustralia.com, "Lazybar Casino").
@@ -253,6 +334,17 @@ pub(crate) fn is_gambling<'a>(texts: impl IntoIterator<Item = Option<&'a str>>) 
                     && ((word.len() >= 6 && word.ends_with("toto"))
                         || (word.len() >= 5 && word.ends_with("qq")))
             })
+    })
+}
+
+/// Whether `texts` offer an Android app's installer, an APK: "Kinemaster
+/// MOD APK Download Latest Version", "Download the Snaptube APK for
+/// Android". APKPure, a store, is one word.
+pub(crate) fn offers_apk<'a>(texts: impl IntoIterator<Item = Option<&'a str>>) -> bool {
+    texts.into_iter().flatten().any(|text| {
+        normalize_text(text)
+            .split(' ')
+            .any(|word| word == "apk" || word == "apks")
     })
 }
 
