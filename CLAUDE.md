@@ -26,7 +26,7 @@ CONTRIBUTING.md lists the extra checks for the WebAssembly crates and the deskto
 **Locks.**
 - Take std locks with `plumb_core::locks::{Locked, RwLocked}` (`.locked()`, `.read_locked()`, `.write_locked()`), never `.lock().unwrap()`.
 - Never hold a std lock across `.await`.
-- Don't hold a lock that async code or the network loop needs while doing file I/O, an fsync or a fold. Async code waiting on such a lock blocks a tokio worker, and the droplet has two.
+- Don't hold a lock that async code or the network loop needs while doing file I/O, an fsync or a fold. Async code waiting on such a lock blocks a tokio worker, and plumbsearch.org's server has two.
 
 **Blocking work.**
 - Disk I/O, parsing whole files and heavy CPU go in `spawn_blocking` (`blocking()` in the node's worker), never on async threads.
@@ -65,6 +65,12 @@ CONTRIBUTING.md lists the extra checks for the WebAssembly crates and the deskto
 - A change that can move results (ranking, defaults, page or site data, fetching) doesn't merge on its own green CI. It goes through the Batch evals, as the project instructions describe.
 - A refactor of ranking code has to leave the frozen eval results identical.
 - The node and the evals should run the same results pipeline. Where they don't yet, change both, or the evals measure something the node doesn't serve.
+
+## Docs
+
+- Each crate has a README with its design, modules and tests, [docs/architecture.md](docs/architecture.md) is the map, and [docs/README.md](docs/README.md) lists every page. A change that makes one of them wrong fixes it in the same change.
+- [docs/search-quality.md](docs/search-quality.md) reports the 1,000-search review. After a run, add its row to `docs/search-quality/runs.tsv`, run `python3 docs/search-quality/charts.py` and update the numbers in the text. Only runs of builds on main go in.
+- Public docs name no private servers, sessions or people, and quote search-quality numbers only there and in the README, so one update keeps them true.
 
 ## Review
 
