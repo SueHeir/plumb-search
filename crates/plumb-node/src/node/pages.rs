@@ -1307,6 +1307,15 @@ pub(super) fn add_pages(
                     &mut results.pages,
                 );
             }
+            // A county search that ends in its state lists that state's
+            // county before its namesakes elsewhere.
+            plumb_index::asked_state_first(query, &mut results.hits);
+            // And a search about a town lists the sites of its namesakes
+            // elsewhere last: "berlin wall memorial" is not Berlin, NH.
+            let town = |name: &str| {
+                super::places::locate(inner, name, None).filter(plumb_core::place::Place::is_town)
+            };
+            plumb_index::namesakes_last(query, &mut results.hits, &town);
             // The learned order knows nothing of spelling: the site a
             // suggestion names stays second.
             if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.clone()) {
@@ -1316,6 +1325,11 @@ pub(super) fn add_pages(
             // title.
             if let Err(err) = searcher.title_untitled(&mut results.hits) {
                 warn!("titling sites from their articles: {err:#}");
+            }
+            // A pasted address is the page at it, whatever the ranking
+            // says.
+            if let Err(err) = searcher.list_typed_page(query, options, &mut results.pages) {
+                warn!("listing the page at a typed address: {err:#}");
             }
         }
         Err(err) => warn!("searching pages: {err:#}"),
