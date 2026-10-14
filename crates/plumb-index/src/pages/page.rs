@@ -6,7 +6,7 @@ use plumb_core::article::{article_url, Article, SearchContent};
 use super::{
     Page, BOOKS_SET, DOCS_SET, ENGLISH_WIKIPEDIA, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET,
     PAPERS_SET, PODCASTS_SET, RECORDS_SET, REFERENCE2_SET, REFERENCE_SET, STACKEXCHANGE_SET,
-    STACKOVERFLOW_SET, SUBPAGES_SET, WIKIDATA_SET, WIKTIONARY_SET,
+    STACKOVERFLOW_SET, SUBPAGES_SET, WANTED_SET, WIKIDATA_SET, WIKTIONARY_SET,
 };
 
 /// Where a description stops saying what its page is and goes on to who
@@ -627,6 +627,7 @@ impl Page {
             || set == REFERENCE_SET
             || set == REFERENCE2_SET
             || set == SUBPAGES_SET
+            || set == WANTED_SET
             || Page::from_set(set, Article::default()).is_some()
     }
 
@@ -650,6 +651,7 @@ impl Page {
             REFERENCE_SET => Page::from_reference(article)?,
             REFERENCE2_SET => Page::from_site_page(REFERENCE2_SET, article)?,
             SUBPAGES_SET => Page::from_site_page(SUBPAGES_SET, article)?,
+            WANTED_SET => Page::from_site_page(WANTED_SET, article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
@@ -838,10 +840,10 @@ impl Page {
     }
 }
 
-/// Whether `set` holds inner pages of sites, of the reference or
-/// subpages sets ([`Page::is_site_page`]).
+/// Whether `set` holds inner pages of sites, of the reference, subpages
+/// or wanted sets ([`Page::is_site_page`]).
 pub(crate) fn is_site_page_set(set: &str) -> bool {
-    set == REFERENCE_SET || set == REFERENCE2_SET || set == SUBPAGES_SET
+    set == REFERENCE_SET || set == REFERENCE2_SET || set == SUBPAGES_SET || set == WANTED_SET
 }
 
 /// What the brackets `lead` opens with hold, before it says what its

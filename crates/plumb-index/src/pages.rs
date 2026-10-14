@@ -53,7 +53,7 @@ pub use self::placing::{
 pub(crate) use self::placing::{
     asked_as_question, is_record, kept_below, named_page_site, names_best_site_page,
 };
-pub use self::scoring::made_by;
+pub use self::scoring::{made_by, site_pages_after_named_article};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
 pub use self::sites::base_title;
 
@@ -327,6 +327,11 @@ pub const REFERENCE2_SET: &str = "reference2";
 /// "subpages" set with no such check, so it is never offered under that
 /// name again, and they never ask for this one, which they do not know.
 pub const SUBPAGES_SET: &str = "subpages2";
+
+/// Inner pages a node fetched itself because its own searches wanted them
+/// (`plumb_crawl::follow_links`), found and listed like subpages. They
+/// are never shared: each node holds its own.
+pub const WANTED_SET: &str = "wanted";
 
 /// The name [`SUBPAGES_SET`] had before v0.2.1, which a node's settings
 /// may still use.

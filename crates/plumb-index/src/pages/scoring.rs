@@ -21,7 +21,7 @@ use super::{
     PAPER_TITLE_WORDS, PARTIAL_MATCH, PODCASTS_SET, POPULARITY_SCALE, POPULARITY_SHARE,
     QUESTION_QUERY_WORDS, QUESTION_SHARE, QUESTION_TITLE_SHARE, REFERENCE2_SET,
     REFERENCE_QUERY_WORDS, REFERENCE_SET, REPO_WEIGHT, SHELF_WEIGHT, SUBPAGES_SET,
-    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WELL_KNOWN_PACKAGE,
+    TITLE_INSIDE_CANDIDATES, UNSURE_WORD_SHARE, WANTED_SET, WELL_KNOWN_PACKAGE,
 };
 use crate::analysis;
 
@@ -195,7 +195,7 @@ impl PageSearcher {
         }
         if crowded {
             let mut apart: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, Box::new(every_word))];
-            for set in [SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET] {
+            for set in [SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET, WANTED_SET] {
                 apart.push((Occur::MustNot, self.scope_term(&format!("set:{set}"))));
             }
             for (_, address) in searcher.search(
@@ -1455,7 +1455,7 @@ const BELOW_NAMED_ARTICLE: f32 = 0.99;
 /// page at chessprogramming.org for "napoleon", loc.gov's for "abraham
 /// lincoln". A page on the article's own website keeps its score: nps.gov's
 /// "Yosemite National Park" is the park's own page.
-pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
+pub fn site_pages_after_named_article(hits: &mut [PageHit]) {
     let Some(article) = hits
         .iter()
         .filter(|hit| {
@@ -1481,7 +1481,13 @@ pub(crate) fn site_pages_after_named_article(hits: &mut [PageHit]) {
 /// words of "javascript array sort" are more read than MDN's page on it,
 /// and would crowd it out.
 pub(crate) fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
-    let kept = [DOCS_SET, SUBPAGES_SET, REFERENCE_SET, REFERENCE2_SET];
+    let kept = [
+        DOCS_SET,
+        SUBPAGES_SET,
+        REFERENCE_SET,
+        REFERENCE2_SET,
+        WANTED_SET,
+    ];
     for set in kept {
         if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
             continue;
