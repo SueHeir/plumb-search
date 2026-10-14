@@ -237,6 +237,46 @@ fn operators_pick_and_list_pages() {
 }
 
 #[test]
+fn a_commands_options_find_the_questions_about_them() {
+    let question = |title: &str, item: &str| {
+        Page::from_question(Article {
+            title: title.into(),
+            description: Some("git, npm".into()),
+            item: Some(item.into()),
+            views: 500_000,
+            ..Article::default()
+        })
+    };
+    let (_dir, s) = searcher(&[
+        question(
+            "What does --save-dev mean in npm install grunt --save-dev?",
+            "1",
+        ),
+        question(
+            "What is the difference between git checkout -b and git branch?",
+            "2",
+        ),
+    ]);
+    for (query, asked) in [
+        ("npm install --save-dev", "What does --save-dev"),
+        (
+            "git checkout -b",
+            "What is the difference between git checkout -b",
+        ),
+    ] {
+        let ops = Operators::parse(query);
+        let found = s.search(&ops.words, 5).unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|hit| hit.page.title.starts_with(asked) && operators_allow(&ops, &hit.page)),
+            "{query}: {:?}",
+            titles(&found)
+        );
+    }
+}
+
+#[test]
 fn questions_without_the_word_asked_about_are_not_found() {
     let question = |title: &str, tags: &str, item: &str| {
         Page::from_question(Article {

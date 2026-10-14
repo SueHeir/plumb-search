@@ -28,8 +28,9 @@ pub struct Operators {
 
 impl Operators {
     /// Reads the operators of `query`. Words that only look like operators
-    /// stay words: a lone `-`, `spider-man`, `site:` with nothing after it.
-    /// An unclosed quote runs to the end of the query.
+    /// stay words: a lone `-`, `spider-man`, `site:` with nothing after it,
+    /// and a command's options, `--save-dev` and `-b`, which the pages
+    /// about them name. An unclosed quote runs to the end of the query.
     pub fn parse(query: &str) -> Self {
         let mut ops = Operators::default();
         let mut words: Vec<String> = Vec::new();
@@ -37,8 +38,10 @@ impl Operators {
         let mut rest = query.trim_start();
         while !rest.is_empty() {
             let start = rest;
-            let negated =
-                rest.starts_with('-') && rest[1..].starts_with(|c: char| !c.is_whitespace());
+            let negated = rest.strip_prefix('-').is_some_and(|after| {
+                let word = after.split(char::is_whitespace).next().unwrap_or("");
+                !word.starts_with('-') && word.chars().nth(1).is_some()
+            });
             let body = if negated { &rest[1..] } else { rest };
             if let Some(quoted) = body.strip_prefix(['"', '\u{201C}', '\u{201D}']) {
                 let close = quoted
@@ -202,6 +205,9 @@ mod tests {
             "site:",
             "10:30 - 11",
             "re:invent",
+            "npm install --save-dev",
+            "git checkout -b",
+            "--",
         ] {
             let ops = Operators::parse(query);
             assert!(!ops.any(), "{query}: {ops:?}");

@@ -526,7 +526,8 @@ pub fn package_query(query: &str) -> Option<PackageQuery> {
         } else if PACKAGE_WORDS.contains(&lower) {
             asked = true;
             surely |= lower.starts_with("package");
-        } else if !FILLER_WORDS.contains(&lower) {
+        } else if !FILLER_WORDS.contains(&lower) && !word.starts_with('-') {
+            // An option ("--save-dev", "-g") names no package.
             rest.push(word);
         }
     }
@@ -651,7 +652,20 @@ mod tests {
             "@tanstack/react-query"
         );
         assert_eq!(package_query("gin go framework docs").unwrap().name, "gin");
-        for query in ["react", "react docs", "python", "latest version", "crate"] {
+        assert_eq!(
+            package_query("pip install --upgrade requests")
+                .unwrap()
+                .name,
+            "requests"
+        );
+        for query in [
+            "react",
+            "react docs",
+            "python",
+            "latest version",
+            "crate",
+            "npm install --save-dev",
+        ] {
             assert_eq!(package_query(query), None, "{query}");
         }
     }
