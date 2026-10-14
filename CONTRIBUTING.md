@@ -6,7 +6,7 @@ To report a security problem, don't open an issue: see [SECURITY.md](SECURITY.md
 
 ## Rules
 
-- All code is Rust. The browser side of private search and plugins are Rust compiled to WebAssembly. HTML, CSS and Markdown are fine; no JavaScript is added to pages.
+- All code is Rust. The browser side of private search and plugins are Rust compiled to WebAssembly. HTML, CSS and Markdown are fine; no JavaScript is added to pages. The one exception is the Zotero plugin in `zotero/`, which is JavaScript because Zotero runs plugins in no other language.
 - Pages load nothing from other servers, and nodes log no searches. Keep it that way.
 - Keep docs in step with the code, in the same plain style: short sentences, what it does and how to use it.
 
@@ -45,6 +45,13 @@ PLUMB_PRIVATE_DIR=../../target/private cargo test -p plumb-node private
 ```sh
 cargo clippy -p plumb-desktop --all-targets -- -D warnings
 cargo test -p plumb-desktop
+```
+
+**Zotero plugin** (`zotero/`), with Node.js 18 or newer:
+
+```sh
+node --test zotero/test/plumb.test.js
+zotero/build.sh
 ```
 
 **PIR probe** (`tools/pir-probe`), a research tool outside the workspace:
