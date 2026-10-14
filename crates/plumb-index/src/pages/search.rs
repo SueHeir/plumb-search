@@ -167,6 +167,19 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" quotes", Hint::Any),
 ];
 
+/// The list article a search for a list asks for without saying "list
+/// of": "list of popes" of "popes in order", "list of us presidents" of
+/// "us presidents list". `None` for other searches.
+fn list_asked(query: &str) -> Option<String> {
+    let q = plumb_core::collapse_whitespace(query.trim()).to_lowercase();
+    let name = [" list in order", " in order", " list"]
+        .iter()
+        .find_map(|tail| q.strip_suffix(tail))?
+        .trim();
+    let name = name.strip_prefix("list of ").unwrap_or(name);
+    (!name.is_empty()).then(|| format!("list of {name}"))
+}
+
 /// The name in `query` without the words around it that only say what is
 /// wanted, and what kind of page they ask for: "lululemon" of "lululemon
 /// wikipedia". `None` when there are none, or nothing else.
@@ -583,16 +596,22 @@ impl PageSearcher {
         // name, so the name is searched for too. So is what a fact question
         // asks about, or "when was isaac newton born" lists Newton's mother
         // and namesakes, whose descriptions hold its words, and not him;
-        // but not when the query is itself a name ("age of empires"). Of
-        // that search only the pages the subject names are kept: "madrid
-        // spanish" (of "madrid spanish capital city") names nothing, and
-        // the clubs it describes would push Madrid out.
+        // but not when the query is itself a name ("age of empires"). So is
+        // the list a search for one asks for: "popes in order" finds Pope
+        // John numbering and not List of popes, which "list of popes"
+        // names. Of those searches only the pages the subject names are
+        // kept: "madrid spanish" (of "madrid spanish capital city") names
+        // nothing, and the clubs it describes would push Madrid out.
         let hinted = hinted_name(query);
         let asked = hinted.is_none();
         let Some((name, hint)) = hinted.or_else(|| {
-            plumb_core::facts::fact_asked(query)
-                .filter(|_| !hits.iter().any(|hit| hit.named))
-                .map(|asked| (asked.subject, Hint::Any))
+            list_asked(query)
+                .or_else(|| {
+                    plumb_core::facts::fact_asked(query)
+                        .filter(|_| !hits.iter().any(|hit| hit.named))
+                        .map(|asked| asked.subject)
+                })
+                .map(|name| (name, Hint::Any))
         }) else {
             return Ok(hits);
         };
