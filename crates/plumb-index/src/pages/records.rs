@@ -280,6 +280,7 @@ pub(crate) fn records_named(query: &str) -> Vec<PageHit> {
                     popularity: 0.0,
                     whole: false,
                     learned: None,
+                    meant: false,
                 },
             ));
         }

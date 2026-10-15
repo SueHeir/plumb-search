@@ -785,6 +785,7 @@ fn keep_found(hits: &mut Vec<PageHit>, found: Vec<PageHit>) {
             Some(kept) => {
                 kept.named |= hit.named;
                 kept.whole |= hit.whole;
+                kept.meant &= hit.meant;
                 kept.score = kept.score.max(hit.score);
             }
             None => hits.push(hit),
@@ -1488,6 +1489,7 @@ impl PageSearcher {
                         * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
                     popularity,
                     learned: None,
+                    meant: false,
                 });
             }
         }
@@ -1957,6 +1959,7 @@ impl PageSearcher {
                     score: 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity,
                     popularity,
                     learned: None,
+                    meant: false,
                 }));
             }
         }

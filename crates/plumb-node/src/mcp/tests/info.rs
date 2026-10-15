@@ -57,6 +57,7 @@ impl SearchBackend for Australia {
                     popularity: 1.0,
                     whole: true,
                     learned: None,
+                    meant: false,
                 },
                 under: None,
                 at: 0,

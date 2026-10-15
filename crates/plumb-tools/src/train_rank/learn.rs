@@ -491,6 +491,7 @@ mod tests {
             popularity: 0.9,
             whole: false,
             learned: None,
+            meant: false,
         }
     }
 

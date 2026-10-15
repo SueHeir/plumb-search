@@ -307,6 +307,7 @@ impl PageSearcher {
                 popularity,
                 whole: true,
                 learned: None,
+                meant: false,
             };
             best = Some((at.len(), hit));
         }
@@ -424,6 +425,7 @@ impl PageSearcher {
                     popularity,
                     whole: false,
                     learned: None,
+                    meant: false,
                 };
                 // One placing would leave out is no use: one in another
                 // language, or a drug offered without a prescription.

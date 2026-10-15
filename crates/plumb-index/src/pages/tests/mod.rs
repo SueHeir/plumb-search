@@ -4,6 +4,7 @@
 mod articles;
 mod docs;
 mod finding;
+mod linking;
 mod media;
 mod named_site;
 mod papers_and_entities;
@@ -142,6 +143,7 @@ fn found(title: &str, site: Option<&str>, named: bool, score: f32) -> PageHit {
         popularity: score,
         whole: false,
         learned: None,
+        meant: false,
     }
 }
 
