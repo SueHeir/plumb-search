@@ -274,6 +274,7 @@ impl PageSearcher {
                 popularity,
                 whole,
                 learned: None,
+                meant: false,
             });
         }
         self.unname_covered_parts(&mut hits, &parts, query);

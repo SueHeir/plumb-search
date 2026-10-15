@@ -182,6 +182,7 @@ impl PageSearcher {
                 popularity,
                 whole: false,
                 learned: None,
+                meant: false,
             },
         );
         Ok(())

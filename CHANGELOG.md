@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.0
+
+Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.4.0), and the Docker image is `ghcr.io/sueheir/plumb-search:0.4.0` (also `:0.4` and `:latest`). This release changes what nodes send each other: crawl batches and the answers to network searches now carry each site in Plumb's data format, the `site` item that signed sets already hold. A 0.4.0 node shares crawls and network searches only with other 0.4.0 nodes, so every node should move to it. The release also reads pages in their real character set, links a part of a search to the article it usually means, and trims a node's sites without holding them all in memory.
+
+### Upgrading from 0.3.1
+
+- Docker: `docker compose pull`, then `docker compose up -d`. Desktop: install the new version over the old one. Plugins built for 0.3 work unchanged.
+- A 0.3 node and a 0.4.0 node still search their own sites, fill from each other and take signed sets from each other, but they no longer share crawls or answer each other's network searches. Crawl batches are signed and sent under new names (`plumb-batch-v2`, `/plumb/batch/2`, `plumb/batches/2`, `/plumb/bucket/2` and `/plumb/oblivious/2`).
+- On its first start the node removes the crawl batches it holds that were signed before 0.4.0, with their delivery notes, and the network search answers it cached; it logs how many batches it removed. The sites in them are already in its records, and no 0.4.0 node takes such a batch.
+- It also builds its page index again, and searches the old one meanwhile, since articles now have a field for their other names (see Search). Its site records are put in a clean form the next time it folds them in, and sites an older crawler read in the wrong character set are crawled again ahead of their turn (13,151 of 2.84 million on one of the project's nodes).
+- A node can go back to 0.3.1: 0.4.0 keeps its records in the same form. Back on 0.3.1 it shares no crawls with 0.4.0 nodes, and the batches 0.4.0 removed stay gone.
+- A node still on 0.2.0 should go through 0.3.0 first, as for 0.3.1.
+
+### Search
+
+- A part of a search links to the article it usually means when no article is named by the whole of it: "how did napoleon become emperor" lists Napoleon, "hamstring insertion point" Hamstring and "trephining skull" Trepanning. The part has to name the article by its title or another of its names, the article has to be read three times as much as any other the part names, and the article has to say another word of the search or the part has to hold its rarest word, so "aws lambda" is not about Lambda and "chase login" is not about Login. Such an article is listed after the first three sites. A part with a small word such as "a" or "to" at its edge never links ("do i need a passport to go to canada" is not about The Mikado, also called "Go to"), and "how to remove a lien" means Lien, not Alien.
+- "memantine abuse", "gabapentin abuse" and other searches for a drug's abuse or withdrawal list the drug's article when no page is called by the whole search. "what is child abuse" and "opioid withdrawal symptoms" keep the articles they name. Name servers' homepages that only say where to report abuse, and pages titled only "Abuse" or "Report Abuse", are no longer listed for such searches.
+- Text is read in one Unicode form (NFC), so a page matches a search however its accents and joined letters were typed (Hindi with and without nukta forms).
+- The results page has a "More results" link under the list, which shows the same search ten results longer, up to 100, and lands on the first one the shorter page did not have. The page it came from stays as it was at the top. It is a plain link, as the page runs no script.
+
+### Crawling
+
+- Pages are read in the character set they use: one that declares it late in its head (smbc.co.jp's Shift_JIS), or not at all, or wrongly says UTF-8 (budget.gov.hk's Big5, etomato.com's EUC-KR), no longer shows its title and description as boxes. A page that declares nothing is read as UTF-8 when most of it is, otherwise in the character set Firefox's detector guesses from its bytes and domain.
+- Links to a host under no real top-level domain (`//index_.shtml`, `foxfirestudioinc.comprivacy_policy`) are no longer taken for sites.
+- A homepage of 30 words or fewer that only gives an abuse mailbox stands in for its site, as a server's default page does, so the site keeps none of its words.
+
+### Running a node
+
+- Trimming a node to its storage limit and making room for new topics read its records file a site at a time, holding about 90 bytes for each site rather than the whole record (about 3.7 KB). A node of 2.8 million sites needs up to 10 GB less memory for either. Every index build also reads the file a site at a time.
+- Network search results now go through the node's denylist before they are kept, ranked or shown, and every index build leaves out the sites it denies, with the buckets other nodes ask for. Before, only some builds did. A site the list left out comes back at the next build once its entry goes or the list is turned off.
+- A plugin's fetch of a name on the web is looked up through the crawler's resolver and goes only to a public address, so a name in a plugin's hosts can no longer point it at the node's own machine or network. Local names (`localhost`, `nas`, `media.lan`, names under `home.arpa`) and addresses written as numbers still reach what they name, so the Zotero plugin still works. Plugin requests no longer go through a system proxy.
+- With `--set-updates` off, or with a list that leaves a page set out, a node no longer takes the project's signed version of a page set it holds no file of.
+- A node that takes the project's sets can set up and fill from the signed set `plumb/sites`, the project's node's sites, best first, in parts of 50,000 and then 200,000 that any node passes on, in place of asking a trusted node for its list. Until the project publishes that set, nodes set up and fill as before.
+- rustls is updated to 0.23.46 for four RustSec advisories (RUSTSEC-2026-0346 to -0349).
+
+### Tools and docs
+
+- `plumb-tools set sites` writes a node's records as the `plumb/sites` set, and `plumb-tools site-items` reports what a node's sites would lose or change as items, field by field (`--diffs` shows each example).
+- The README and docs are rewritten, with an architecture page, diagrams, a search-quality page with charts from the 1,000-search runs, and a README for each crate.
+
 ## 0.3.1
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.3.1), and the Docker image is `ghcr.io/sueheir/plumb-search:0.3.1` (also `:0.3` and `:latest`). Most of this release is search: fixes for problems found by running thousands of searches across many topics, and a learned ranking retrained on graded results. On a review of 1,000 searches whose first results an LLM (Claude Haiku) graded from 0 to 3, the mean grade went from 1.86 on a build just after 0.3.0 to 2.06.

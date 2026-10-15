@@ -702,7 +702,7 @@ fn reorder_rows(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pages::{place_pages, Page, PlacedPage};
+    use crate::pages::{place_pages, Page, PlacedPage, PARTIAL_AFTER};
     use plumb_core::article::Article;
 
     fn site(domain: &str, score: f32, named: bool) -> Hit {
@@ -740,6 +740,7 @@ mod tests {
             popularity: 0.9,
             whole: false,
             learned: None,
+            meant: false,
         }
     }
 
@@ -1031,6 +1032,7 @@ mod tests {
             popularity: 0.968,
             whole,
             learned: None,
+            meant: false,
         };
         let order_of = |pages: Vec<PageHit>| {
             let mut hits = vec![
@@ -1114,6 +1116,45 @@ mod tests {
     }
 
     #[test]
+    fn a_page_only_meant_by_part_of_the_query_stays_after_three_sites() {
+        let feature = |name| FEATURES.iter().position(|f| *f == name).unwrap();
+        let pages_first = Model::new(
+            vec![Node::Split {
+                feature: feature("is_page"),
+                threshold: 0.5,
+                left: Box::new(Node::Leaf { value: 0.0 }),
+                right: Box::new(Node::Leaf { value: 1.0 }),
+            }],
+            None,
+        );
+        // Named by another reading of the query too, it is not held.
+        for (meant, named) in [(false, false), (true, false), (true, true)] {
+            let mut hits: Vec<Hit> = ["a.com", "b.com", "c.com", "d.com"]
+                .into_iter()
+                .map(|domain| site(domain, 0.5, false))
+                .collect();
+            let found = PageHit {
+                meant,
+                ..article("Cons", named)
+            };
+            let mut placed = place_pages("cons of drinking coffee", &hits, vec![found]);
+            reorder(
+                &pages_first,
+                "cons of drinking coffee",
+                &mut hits,
+                &mut placed,
+            );
+            let again = place_pages(
+                "cons of drinking coffee",
+                &hits,
+                placed.iter().map(|p| p.hit.clone()).collect(),
+            );
+            let at = if meant && !named { PARTIAL_AFTER } else { 0 };
+            assert_eq!((placed[0].at, again[0].at), (at, at), "{meant} {named}");
+        }
+    }
+
+    #[test]
     fn a_docs_page_found_by_its_words_never_leads() {
         let model = named_first_model();
         let mut hits = vec![site("pypi.org", 1.0, false), site("python.org", 0.9, false)];
@@ -1130,6 +1171,7 @@ mod tests {
             popularity: 1.0,
             whole: true,
             learned: None,
+            meant: false,
         };
         let mut placed = vec![PlacedPage {
             at: 0,
@@ -1164,6 +1206,7 @@ mod tests {
             popularity: 0.92,
             whole: false,
             learned: None,
+            meant: false,
         };
         let led = |page: PageHit, official: bool| {
             let mut best = site("minecraft.net", 1.3, true);
@@ -1229,6 +1272,7 @@ mod tests {
             popularity: 0.87,
             whole: true,
             learned: None,
+            meant: false,
         };
         let mut game = article("Red Dead Redemption 2", true);
         game.page.item = Some("Q20981587".into());
