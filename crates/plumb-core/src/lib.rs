@@ -35,6 +35,7 @@ pub mod profiles;
 pub mod safe;
 mod sign_in;
 pub mod simhash;
+pub mod site_item;
 mod site_search;
 pub mod stack_exchange;
 pub mod storage;
@@ -56,7 +57,8 @@ pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
 pub use sign_in::{asks_to_sign_in, is_sign_in_page, names_label, spells_label};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
 pub use subsites::{
-    parent_domain, subdomain_sites, use_site_list, SiteList, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
+    built_in_rules, parent_domain, subdomain_sites, use_site_rules, SITES_VERSION,
+    SUBDOMAIN_SITE_NAMES,
 };
 
 use anyhow::{Context, Result};
@@ -1019,25 +1021,16 @@ pub fn is_valid_host(host: &str) -> bool {
 /// `https://news.ycombinator.com/item` -> `news.ycombinator.com`. Returns
 /// `None` for IP addresses, bare public suffixes like `co.uk`, single-label
 /// hosts like `localhost`, and everything [`host_of`] rejects. A node
-/// may use other lists ([`use_site_list`]).
+/// may use other rules ([`use_site_rules`]).
 pub fn registrable_domain(input: &str) -> Option<String> {
-    let host = host_of(input)?;
-    match subsites::site_list() {
-        Some(list) => list.site_of(&host),
-        None => built_in_site_of(&host),
-    }
+    subsites::rules().site_of(&host_of(input)?)
 }
 
-/// The site of a URL or hostname by the built-in lists, as
-/// [`registrable_domain`] gives it while a node uses no other lists
-/// ([`use_site_list`]). For telling which sites other lists move.
+/// The site of a URL or hostname by the built-in rules, as
+/// [`registrable_domain`] gives it while a node uses no other rules
+/// ([`use_site_rules`]). For telling which sites other rules move.
 pub fn built_in_site(input: &str) -> Option<String> {
-    built_in_site_of(&host_of(input)?)
-}
-
-fn built_in_site_of(host: &str) -> Option<String> {
-    let domain = psl::domain_str(host)?;
-    Some(subsites::site_of(host, domain))
+    subsites::built_in().site_of(&host_of(input)?)
 }
 
 /// `links` made fit for [`SiteRecord::links_to`] of `domain`: each made a
@@ -1205,7 +1198,7 @@ pub fn reverse_host(reversed: &str) -> String {
 pub fn domain_label(domain: &str) -> String {
     let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
     match subsites::suffix_of(&domain) {
-        Some(suffix) if domain.len() > suffix.len() + 1 && domain.ends_with(suffix) => {
+        suffix if domain.len() > suffix.len() + 1 && domain.ends_with(suffix) => {
             domain[..domain.len() - suffix.len() - 1].to_string()
         }
         _ => domain,

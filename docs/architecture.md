@@ -82,6 +82,7 @@ flowchart TD
     node --> plugin["plumb-plugin"]
     node --> format["plumb-format"]
     index --> format
+    core --> format
     index --> core["plumb-core"]
     net --> core
     crawl --> core
