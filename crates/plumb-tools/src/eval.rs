@@ -29,6 +29,7 @@ use tracing::info;
 use crate::cli::{EvalArgs, Half};
 use plumb_node::meaning::MeaningIndex;
 
+mod candidates;
 pub mod contracts;
 mod rerank;
 
@@ -257,6 +258,9 @@ pub fn run(args: EvalArgs) -> Result<()> {
         None => Vec::new(),
     };
     let setup = open_setup(&args)?;
+    if let Some(path) = &args.candidates_out {
+        return candidates::write(&args, &setup, &suites, &cfg, path);
+    }
     if args.recall {
         for suite in &suites {
             if suites.len() > 1 {

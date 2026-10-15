@@ -121,6 +121,7 @@ It prints `ok` with each expected page's title (to see it is the page the search
 | `--profiles` | Count the profile or listing shown above the results ("mrbeast youtube") as the first result |
 | `--explain` | For each miss, show how the first result and the expected one scored |
 | `--recall` | Find where each missed answer was lost before ranking: not indexed, how far down the word or meaning candidates, or never looked at |
+| `--candidates-out FILE` | Write each query's deep site candidates as JSON lines, with the raw signals a first stage could score them by: which query words each field has, field lengths, how rare each word is per field, link score and closeness. `--candidates-depth N` (500) sets how far down today's first stage, the sites with every main word and the sites nearest in meaning it goes. Only queries that expect a site |
 | `--show N` | Print the first N results of every query |
 | `--half tune\|held-out` | Measure one half only |
 

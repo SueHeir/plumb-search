@@ -54,6 +54,7 @@ About 43,000 lines, tests included.
 | [names.rs](src/names.rs) | which site a query names: label, official and linked names, typed host name, kind |
 | [rank.rs](src/rank.rs) | gathering candidates and scoring them with the blended formula |
 | [query_evidence.rs](src/query_evidence.rs) | `CandidateEvidence`: how a site matched, kept apart from its score |
+| [candidates.rs](src/candidates.rs) | `Searcher::candidate_signals`: a query's deep candidates with each field's word counts and lengths, for `plumb-tools eval --candidates-out`; nodes never call it |
 | [hits.rs](src/hits.rs) | tidying the list: copies and look-alikes out, a suggested or docs site moved up, untitled sites down |
 | [junk.rs](src/junk.rs) | sites left out unless the query names them: pill shops, sign-in pages, gambling spam, parked domains, abuse contacts |
 | [language.rs](src/language.rs) | whether a query is written in another language than the one chosen |
@@ -158,6 +159,7 @@ for hit in &results.hits {
 | `Searcher::open`, `search`, `search_full` | search the site index |
 | `Searcher::search_meaning` | search with closeness in meaning from a `Meaning` (plumb-node's `meaning.rs` implements it) |
 | `Searcher::candidate_pool` | the candidates a query ranks, by source |
+| `Searcher::candidate_signals` | a query's deep candidates and their raw match signals, for designing the first stage offline |
 | `RankConfig` | every ranking knob; plumb-node's experiments and `plumb-tools eval --rank` take it as JSON |
 | `pages::build_page_index`, `pages::PageSearcher` | build and search the page index |
 | `pages::place_pages`, `place_operator_pages`, `add_named_site`, `lift_named_sites` | list pages among the sites |
@@ -184,7 +186,7 @@ cargo test -p plumb-index
 
 | Where | What |
 | --- | --- |
-| [src/tests/](src/tests/mod.rs) | the site ranking, one file per part: brands and copies, building, junk, kinds and filters, link names, meaning, names, ranking, semantic retention, spelling, subject evidence, unspaced queries |
+| [src/tests/](src/tests/mod.rs) | the site ranking, one file per part: brands and copies, building, candidates, junk, kinds and filters, link names, meaning, names, ranking, semantic retention, spelling, subject evidence, unspaced queries |
 | [src/pages/tests/](src/pages/tests/mod.rs) | the page index: articles, docs, finding, media, named sites, papers and entities, placing, records, repositories, subpages and packages |
 | [src/places/tests.rs](src/places/tests.rs) | the places index and place queries |
 | [learned.rs](src/learned.rs), [health.rs](src/health.rs) | tests in the module |
