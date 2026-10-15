@@ -19,12 +19,15 @@
 //! seed records are built, as the rank lists only know registrable domains
 //! (see [`subdomain_sites`]).
 //!
-//! These lists and the Public Suffix List are built in. A node may use a
-//! [`SiteList`] in their place instead, such as a site rules set the
-//! project signs ([`use_site_list`]), so that they change without a
-//! release.
+//! These lists and the Public Suffix List are built in, as site rules
+//! ([`built_in_rules`]), the same kinds of rule a site rules set the
+//! project signs holds. A node may use such a set in their place
+//! ([`use_site_rules`]), so that they change without a release.
 
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
+
+use plumb_format::sites::{read_suffix_list, Rule};
+use plumb_format::SiteRules;
 
 /// The version of [`SUBDOMAIN_SITES`], [`SUBDOMAIN_SITE_NAMES`],
 /// [`UMBRELLA_DOMAINS`] and of how seed data is read: bump it when they
@@ -163,42 +166,68 @@ pub const UMBRELLA_DOMAINS: &[&str] = &[
 /// Subdomains that are never a site of their own under an umbrella domain.
 pub const NOT_SITES: &[&str] = &["www", "m", "www2", "mobile"];
 
-/// The site of `host` (lowercase, no trailing dot), whose registrable
-/// domain is `domain`: a [`SUBDOMAIN_SITES`] entry it is or is under, the
-/// direct subdomain of an [`UMBRELLA_DOMAINS`] entry it is or is under,
-/// else `domain`.
-pub(crate) fn site_of(host: &str, domain: &str) -> String {
-    if host.len() == domain.len() {
-        return domain.to_string();
-    }
-    let under = |site: &str| {
-        host == site
-            || host
-                .strip_suffix(site)
-                .is_some_and(|rest| rest.ends_with('.'))
-    };
-    if let Some(site) = SUBDOMAIN_SITES
-        .iter()
-        .filter(|site| under(site))
-        .max_by_key(|site| site.len())
-    {
-        return (*site).to_string();
-    }
-    if UMBRELLA_DOMAINS.contains(&domain) {
-        let rest = &host[..host.len() - domain.len() - 1];
-        let label = rest.rsplit('.').next().unwrap_or(rest);
-        if !label.is_empty() && !NOT_SITES.contains(&label) {
-            return format!("{label}.{domain}");
-        }
-    }
-    domain.to_string()
+/// The Public Suffix List, as the `psl` crate 2.1.238 holds it.
+const SUFFIX_LIST: &str = include_str!("../data/public_suffix_list.dat");
+
+/// The built-in lists as site rules ([`plumb_format::sites`]): the Public
+/// Suffix List and [`list_rules`]. A site rules set the project signs
+/// holds rules of the same kinds.
+pub fn built_in_rules() -> Vec<Rule> {
+    let mut rules = read_suffix_list(SUFFIX_LIST).expect("the built-in Public Suffix List reads");
+    rules.extend(list_rules());
+    rules
 }
 
-/// Each of the [`SUBDOMAIN_SITES`] with its registrable domain, whose
+/// [`SUBDOMAIN_SITES`], [`UMBRELLA_DOMAINS`] and [`NOT_SITES`] as site
+/// rules: the built-in lists but the Public Suffix List.
+pub fn list_rules() -> Vec<Rule> {
+    let subsites = SUBDOMAIN_SITES
+        .iter()
+        .map(|site| Rule::Subsite(site.to_string()));
+    let umbrellas = UMBRELLA_DOMAINS
+        .iter()
+        .map(|domain| Rule::Umbrella(domain.to_string()));
+    let not_sites = NOT_SITES
+        .iter()
+        .map(|label| Rule::NotSite(label.to_string()));
+    subsites.chain(umbrellas).chain(not_sites).collect()
+}
+
+static BUILT_IN: LazyLock<SiteRules> = LazyLock::new(|| built_in_rules().into_iter().collect());
+
+static IN_USE: OnceLock<SiteRules> = OnceLock::new();
+
+/// Makes `rules` say which site every host is from now on, in place of the
+/// built-in ones, such as a site rules set the project signs, so that the
+/// lists change without a release. Once only, at start, before any site is
+/// worked out: false, leaving the rules in use, when others already are.
+pub fn use_site_rules(rules: SiteRules) -> bool {
+    IN_USE.set(rules).is_ok()
+}
+
+/// The rules in use: those [`use_site_rules`] put in place, else the
+/// built-in ones.
+pub(crate) fn rules() -> &'static SiteRules {
+    // Not `unwrap_or`, which would read the built-in list for nothing.
+    IN_USE.get().unwrap_or_else(|| &BUILT_IN)
+}
+
+/// The built-in rules, whatever [`use_site_rules`] put in their place.
+pub(crate) fn built_in() -> &'static SiteRules {
+    &BUILT_IN
+}
+
+/// Each of the sites on a subdomain with its registrable domain, whose
 /// popularity ranks it gets: rank lists only name registrable domains.
+/// In [`SUBDOMAIN_SITES`]' order while the built-in rules are in use, else
+/// by name.
 pub fn subdomain_sites() -> impl Iterator<Item = (&'static str, &'static str)> {
-    let sites: Vec<&'static str> = match site_list() {
-        Some(list) => list.subsites(),
+    let sites: Vec<&'static str> = match IN_USE.get() {
+        Some(rules) => {
+            let mut sites: Vec<&'static str> = rules.subsites().collect();
+            sites.sort_unstable();
+            sites
+        }
         None => SUBDOMAIN_SITES.to_vec(),
     };
     sites
@@ -212,52 +241,16 @@ pub fn parent_domain(site: &str) -> Option<&str> {
     domain_of(site).filter(|domain| *domain != site)
 }
 
-/// Site rules a node uses in place of the built-in ones: the Public Suffix
-/// List, [`SUBDOMAIN_SITES`], [`UMBRELLA_DOMAINS`] and [`NOT_SITES`].
-/// Hosts are lowercase ASCII with no trailing dot.
-pub trait SiteList: Send + Sync {
-    /// The public suffix of `host`: `co.uk` for `news.bbc.co.uk`, and all
-    /// of it when it is one.
-    fn suffix<'h>(&self, host: &'h str) -> &'h str;
-    /// The site of `host`, or `None` when it is a public suffix.
-    fn site_of(&self, host: &str) -> Option<String>;
-    /// The hosts that are sites of their own although they are
-    /// subdomains, as [`SUBDOMAIN_SITES`].
-    fn subsites(&self) -> Vec<&str>;
-}
-
-static SITE_LIST: OnceLock<Box<dyn SiteList>> = OnceLock::new();
-
-/// Makes `list` say which site every host is from now on, in place of the
-/// built-in lists. Once only, at start, before any site is worked out:
-/// false, leaving the list in use, when one already is.
-pub fn use_site_list(list: Box<dyn SiteList>) -> bool {
-    SITE_LIST.set(list).is_ok()
-}
-
-/// The list [`use_site_list`] put in place of the built-in ones.
-pub(crate) fn site_list() -> Option<&'static dyn SiteList> {
-    SITE_LIST.get().map(|list| list.as_ref())
-}
-
-/// The public suffix of `host`, as [`SiteList::suffix`].
-pub(crate) fn suffix_of(host: &str) -> Option<&str> {
-    match site_list() {
-        Some(list) => Some(list.suffix(host)),
-        None => psl::suffix_str(host),
-    }
+/// The public suffix of `host` by the rules in use: `co.uk` for
+/// `news.bbc.co.uk`, and all of it when it is one.
+pub(crate) fn suffix_of(host: &str) -> &str {
+    rules().suffix(host)
 }
 
 /// The registrable domain of `host`: its public suffix and one label more,
 /// or `None` when it is a public suffix.
 pub(crate) fn domain_of(host: &str) -> Option<&str> {
-    let Some(list) = site_list() else {
-        return psl::domain_str(host);
-    };
-    let suffix = list.suffix(host);
-    let rest = host.strip_suffix(suffix)?.strip_suffix('.')?;
-    let start = rest.rfind('.').map_or(0, |dot| dot + 1);
-    Some(&host[start..])
+    rules().registrable_domain(host)
 }
 
 #[cfg(test)]
@@ -319,17 +312,91 @@ mod tests {
     }
 
     #[test]
+    fn the_built_in_rules_read_back_as_rules() {
+        for rule in built_in_rules() {
+            assert_eq!(Rule::parse(&rule.to_string()).unwrap(), Some(rule));
+        }
+    }
+
+    #[test]
     fn the_lists_hold_valid_hosts() {
         for site in SUBDOMAIN_SITES {
-            let domain = psl::domain_str(site).unwrap();
+            let domain = built_in().registrable_domain(site).unwrap();
             assert_ne!(*site, domain, "{site} is not a subdomain");
-            assert_eq!(site_of(site, domain), *site);
+            assert_eq!(built_in().site_of(site).as_deref(), Some(*site));
         }
         for (site, _) in SUBDOMAIN_SITE_NAMES {
             assert!(SUBDOMAIN_SITES.contains(site), "{site}");
         }
         for domain in UMBRELLA_DOMAINS {
-            assert_eq!(psl::domain_str(domain), Some(*domain), "{domain}");
+            assert_eq!(
+                built_in().registrable_domain(domain),
+                Some(*domain),
+                "{domain}"
+            );
         }
+    }
+
+    /// The built-in list gives every host the registrable domain the `psl`
+    /// crate it was taken from does, but where the crate departs from the
+    /// list's own algorithm: a name a wildcard covers is a public suffix
+    /// even when other rules name names under it (`*.run.app` makes
+    /// `mtls.run.app` one, and `*.mtls.run.app` doesn't undo that), which
+    /// the crate misses.
+    #[test]
+    fn the_built_in_list_is_the_psl_crates() {
+        let rules = read_suffix_list(SUFFIX_LIST).unwrap();
+        assert!(rules.len() > 9_000, "{} rules", rules.len());
+        let named = |wanted: fn(&Rule) -> Option<&str>| -> std::collections::HashSet<&str> {
+            rules.iter().filter_map(wanted).collect()
+        };
+        let wildcards = named(|rule| match rule {
+            Rule::Wildcard(name) => Some(name.as_str()),
+            _ => None,
+        });
+        let suffixes = named(|rule| match rule {
+            Rule::Suffix(name) => Some(name.as_str()),
+            _ => None,
+        });
+        let mut hosts = Vec::new();
+        for rule in &rules {
+            let (Rule::Suffix(name) | Rule::Wildcard(name) | Rule::Exception(name)) = rule else {
+                continue;
+            };
+            for host in [name.clone(), format!("a.{name}"), format!("b.a.{name}")] {
+                hosts.push(host);
+            }
+        }
+        let (mut checked, mut excused) = (0, 0);
+        for host in &hosts {
+            let ours = built_in().registrable_domain(host);
+            let theirs = psl::domain_str(host);
+            if ours == theirs {
+                checked += 1;
+                continue;
+            }
+            // The crate's miss: the host is, or is under, a suffix that a
+            // wildcard covers and a rule of its own names too
+            // (`*.mtls.run.app` beside `*.run.app`). The list's rules say
+            // such a suffix has no registrable domain; the crate gives it
+            // one.
+            let mut name = host.as_str();
+            let mut missed = false;
+            loop {
+                let parent = name.split_once('.').map(|(_, parent)| parent);
+                let own_rule = suffixes.contains(name) || wildcards.contains(name);
+                if own_rule && parent.is_some_and(|p| wildcards.contains(p)) {
+                    missed = true;
+                    break;
+                }
+                let Some(parent) = parent else { break };
+                name = parent;
+            }
+            assert!(missed, "{host}: {ours:?}, the psl crate {theirs:?}");
+            excused += 1;
+        }
+        // 21 in the list as vendored.
+        assert!(excused < 30, "{excused} hosts differ");
+        assert!(checked > 30_000, "{checked} of {} hosts", hosts.len());
     }
 }

@@ -159,11 +159,10 @@ pub fn moved_sites<'a>(rules: &SiteRules, hosts: impl IntoIterator<Item = &'a st
 mod tests {
     use super::*;
     use plumb_format::sites::read_suffix_list;
-    use plumb_node::site_rules::built_in_rules;
 
     fn rules_of(text: &str) -> (Vec<Rule>, SiteRules) {
         let mut rules = read_suffix_list(text).unwrap();
-        rules.extend(built_in_rules());
+        rules.extend(plumb_core::subsites::list_rules());
         let set = rules.iter().cloned().collect();
         (rules, set)
     }

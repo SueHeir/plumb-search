@@ -32,7 +32,6 @@ use plumb_format::{FieldSpec, Item, Manifest, Note, PublicKey, SiteRules, Vector
 use plumb_index::items::page_of_item;
 use plumb_index::pages::Page;
 use plumb_node::sets::{check_parts, check_set, id_hash, measure, now, Checked, MANIFEST};
-use plumb_node::site_rules::built_in_rules;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -976,7 +975,7 @@ pub fn site_rules(args: &SiteRulesArgs) -> Result<(Written, usize, Vec<Moved>)> 
     let text =
         fs::read_to_string(&args.psl).with_context(|| format!("reading {}", args.psl.display()))?;
     let mut rules = read_suffix_list(&text).with_context(|| args.psl.display().to_string())?;
-    rules.extend(built_in_rules());
+    rules.extend(plumb_core::subsites::list_rules());
     if let Some(path) = &args.host_ranks {
         let set: SiteRules = rules.iter().cloned().collect();
         let ranks = plumb_ingest::open_maybe_gz(path)?;

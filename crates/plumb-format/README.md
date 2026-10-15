@@ -21,6 +21,7 @@ flowchart LR
   tools["plumb-tools<br/>set: build, sign, check"] --> format["plumb-format"]
   node["plumb-node<br/>sets.rs, signed_sets.rs, denylist, site rules"] --> format
   index["plumb-index<br/>items.rs: items read as pages"] --> format
+  core["plumb-core<br/>subsites.rs: the built-in site rules"] --> format
   format --> ed["ed25519-dalek"]
   format --> json["serde_json"]
 ```
@@ -146,7 +147,7 @@ A denylist is a set whose only kind is `deny`, and each entry is one of its item
 
 ### Site rules
 
-A set whose only kind is `site-rule` says which site a host is on, so the lists can change without a release. Each rule is an item whose id is the rule: `suffix:co.uk`, `suffix:*.ck`, `suffix:!www.ck`, `subsite:news.ycombinator.com`, `umbrella:ca.gov`, `not-site:www`. The longest matching suffix wins, an exception beats any other rule, and a name no rule covers has its last label as its suffix, as the Public Suffix List's own algorithm says. `SiteRules::site_of` applies them; plumb-node installs them in place of [plumb-core](../plumb-core/README.md)'s built-in lists.
+A set whose only kind is `site-rule` says which site a host is on, so the lists can change without a release. Each rule is an item whose id is the rule: `suffix:co.uk`, `suffix:*.ck`, `suffix:!www.ck`, `subsite:news.ycombinator.com`, `umbrella:ca.gov`, `not-site:www`. The longest matching suffix wins, an exception beats any other rule, and a name no rule covers has its last label as its suffix, as the Public Suffix List's own algorithm says. `SiteRules::site_of` applies them, to [plumb-core](../plumb-core/README.md)'s built-in rules too, and plumb-node installs a signed set's in their place.
 
 ## Keeping it compatible
 

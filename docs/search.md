@@ -161,7 +161,7 @@ flowchart LR
 - A site matching only a word or two of a longer query, named by nothing and not close to it in meaning (`partial_closeness`, 0.5), goes: hbo.com is no answer to "paschen series".
 - A number shared with a query of other words is no match ("glastonbury 2026").
 - When the first site is a well-known site the query names, sites the query does not name that score under 0.4 of it are filler (`named_share`).
-- [junk.rs](../crates/plumb-index/src/junk.rs) leaves out sites unless the query names them: test domains, pill shops, little-known sign-in pages, gambling spam, parked or held domains, APK download sites and fake help lines.
+- [junk.rs](../crates/plumb-index/src/junk.rs) leaves out sites unless the query names them: test domains, pill shops, little-known sign-in pages, gambling spam, parked or held domains, APK download sites, fake help lines and name servers' abuse contacts ("Abuse" on nspmanaged.com).
 - `look_alikes` ([hits.rs](../crates/plumb-index/src/hits.rs)) drops sites built to pass for one listed with them (gmail.co, yout-ube.com, paypal-login.us). `without_near_copies` and `without_copies` drop scraped copies and spam networks that share a listed site's homepage text (by its simhash fingerprint) or title.
 
 [search.rs](../crates/plumb-index/src/search.rs) then finishes the site list in `Searcher::search_meaning`:
