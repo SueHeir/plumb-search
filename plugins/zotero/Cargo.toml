@@ -11,7 +11,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-plumb-plugin = { version = "0.3.1", path = "../../crates/plumb-plugin" }
+plumb-plugin = { version = "0.4.0", path = "../../crates/plumb-plugin" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 unicode-normalization = "0.1.24"

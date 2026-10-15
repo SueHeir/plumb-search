@@ -5923,7 +5923,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-answer"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "jiff",
  "serde",
@@ -5931,7 +5931,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cbor4ii",
@@ -5951,7 +5951,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-crawl"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -5977,7 +5977,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-desktop"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "plumb-net",
@@ -5996,7 +5996,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-e2e"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "plumb-core",
  "plumb-private",
@@ -6005,7 +6005,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-embed"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -6024,7 +6024,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-format"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6038,7 +6038,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-index"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6056,7 +6056,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-ingest"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -6074,7 +6074,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-net"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cbor4ii",
@@ -6099,7 +6099,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-node"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -6143,7 +6143,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-plugin"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6151,7 +6151,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-plugin-github"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "plumb-plugin",
  "serde",
@@ -6160,7 +6160,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-plugin-hacker-news"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "plumb-plugin",
  "serde",
@@ -6169,7 +6169,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-plugin-reddit"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "plumb-plugin",
  "serde",
@@ -6178,7 +6178,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-plugin-steam"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "plumb-plugin",
  "serde",
@@ -6187,7 +6187,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-plugin-youtube-music"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "plumb-plugin",
  "serde",
@@ -6196,7 +6196,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-plugin-zotero"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "plumb-plugin",
  "serde",
@@ -6206,7 +6206,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-private"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "getrandom 0.4.3",
  "idna",
@@ -6227,7 +6227,7 @@ dependencies = [
 
 [[package]]
 name = "plumb-tools"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
