@@ -89,10 +89,11 @@ impl SiteGrades {
 }
 
 /// Takes `percent` (0 to 100) of each graded hit's penalty off its score
-/// and moves the hit down past the later hits that now score above it.
-/// Nothing else moves, so the sites placed by rule rather than score (the
-/// health authorities first, a docs site, the site a `site:` query names)
-/// keep their places.
+/// and moves the hit down to where its new score breaks the order least:
+/// past the later hits that score above it, but not past more that score
+/// below. Nothing else moves, and the hits placed by rule rather than
+/// score (health authorities first, untitled sites last) neither hold a
+/// graded hit up nor pull it down past the rest.
 ///
 /// A site whose address is the query keeps its score, as does a
 /// `low_value` site the query names: someone searching for a little-known
@@ -131,12 +132,25 @@ pub fn demote_by<T>(
     // The last first, so each moves past hits already in their places.
     for at in demoted.into_iter().rev() {
         let score = hit(&mut results[at]).score;
-        let past = results[at + 1..]
+        let later: Vec<f32> = results[at + 1..]
             .iter_mut()
-            .rposition(|result| hit(result).score > score);
-        if let Some(past) = past {
-            results[at..=at + 1 + past].rotate_left(1);
+            .map(|result| hit(result).score)
+            .collect();
+        // How many later hits are out of order with it, where it is and
+        // after each it could move past.
+        let mut wrong = later.iter().filter(|&&other| other > score).count();
+        let (mut past, mut least) = (0, wrong);
+        for (i, &other) in later.iter().enumerate() {
+            if other > score {
+                wrong -= 1;
+            } else if other < score {
+                wrong += 1;
+            }
+            if wrong < least {
+                (past, least) = (i + 1, wrong);
+            }
         }
+        results[at..=at + past].rotate_left(1);
     }
 }
 
@@ -247,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn only_graded_sites_move_and_not_when_the_query_is_their_address() {
+    fn only_graded_sites_move_rule_placed_ones_hold_no_place_and_addresses_none() {
         let grades = SiteGrades::new([("rxpills.top".to_string(), Grade::Spam)]);
         // An authority the ranking put first by rule, with a lower score.
         let ranked = || {
@@ -268,5 +282,32 @@ mod tests {
         let mut hits = ranked();
         demote(&grades, 100, "www.rxpills.top", &mut hits);
         assert_eq!(hits, ranked());
+
+        // Nor is a graded hit pulled down past lower ones by a site put
+        // last by rule, here one with no title.
+        let grades = SiteGrades::new([("thin.example".to_string(), Grade::LowValue)]);
+        let mut hits = vec![
+            hit("first.example", 1.0, false),
+            hit("thin.example", 0.95, false),
+            hit("a.example", 0.6, false),
+            hit("b.example", 0.1, false),
+            hit("untitled.example", 0.8, false),
+        ];
+        demote(&grades, 100, "thin", &mut hits);
+        assert_eq!(order(&hits)[1], "thin.example");
+
+        // Nor held up by a hit put second with no score, as a spelling's.
+        let grades = SiteGrades::new([("rxpills.top".to_string(), Grade::Spam)]);
+        let mut hits = vec![
+            hit("rxpills.top", 0.9, false),
+            hit("spelled.example", 0.0, false),
+            hit("a.example", 0.8, false),
+            hit("b.example", 0.6, false),
+        ];
+        demote(&grades, 100, "rx pills", &mut hits);
+        assert_eq!(
+            order(&hits),
+            ["spelled.example", "a.example", "b.example", "rxpills.top"]
+        );
     }
 }

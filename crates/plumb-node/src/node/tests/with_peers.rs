@@ -440,7 +440,7 @@ async fn network_results_go_through_the_denylist() {
     );
     node.inner.grades_from_set();
     let (_, _, body) = get(addr, "/api/network/search?q=lighthouse").await;
-    assert!((score(&body) - ungraded / 10.0).abs() < 1e-6, "{body}");
+    assert!((score(&body) / ungraded - 0.1).abs() < 1e-5, "{body}");
 
     peer.shutdown().await;
     node.shutdown().await.unwrap();

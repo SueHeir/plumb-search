@@ -37,7 +37,6 @@ const HARM_WORDS: &[&str] = &[
     "attorney",
     "bail",
     "bitcoin",
-    "credit",
     "crisis",
     "crypto",
     "debt",
@@ -51,7 +50,6 @@ const HARM_WORDS: &[&str] = &[
     "invest",
     "investing",
     "lawyer",
-    "legal",
     "loan",
     "loans",
     "mortgage",
@@ -62,7 +60,6 @@ const HARM_WORDS: &[&str] = &[
     "rehab",
     "sober",
     "suicide",
-    "visa",
 ];
 
 #[derive(Debug, Args)]

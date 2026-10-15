@@ -1063,8 +1063,9 @@ pub fn adult_sites(args: &AdultSitesArgs) -> Result<Written> {
 /// Writes the spam and low-value sites of the grades in `args.grades` as a
 /// layer on those sites, each labelled `machine-written` with its `grade`.
 /// A site's last line decides, so a later `ok` takes back a wrong grade.
-/// Lines that name no site are left out, as is a line cut short by a
-/// grading run that was stopped.
+/// A last line that is not JSON, cut short by a grading run that was
+/// stopped, is left out; any other line that is not a grade of a site is
+/// an error, so a mistyped correction is not signed unseen.
 pub fn site_grades(args: &SiteGradesArgs) -> Result<Written> {
     use plumb_index::grades::Grade;
     use plumb_node::node::grades::GRADE_FIELD;
@@ -1074,21 +1075,32 @@ pub fn site_grades(args: &SiteGradesArgs) -> Result<Written> {
         "{:?} is not <scope>/<name>",
         args.name
     );
-    let file =
-        File::open(&args.grades).with_context(|| format!("opening {}", args.grades.display()))?;
+    let path = args.grades.display();
+    let file = File::open(&args.grades).with_context(|| format!("opening {path}"))?;
     let mut graded = BTreeMap::new();
-    for line in std::io::BufReader::new(file).lines() {
-        let Ok(line) = serde_json::from_str::<Value>(&line?) else {
+    let mut lines = std::io::BufReader::new(file)
+        .split(b'\n')
+        .enumerate()
+        .peekable();
+    while let Some((at, line)) = lines.next() {
+        let line = line?;
+        if line.trim_ascii().is_empty() {
             continue;
+        }
+        let line: Value = match serde_json::from_slice(&line) {
+            Ok(line) => line,
+            Err(_) if lines.peek().is_none() => continue,
+            Err(err) => return Err(err).with_context(|| format!("line {} of {path}", at + 1)),
         };
         let domain = line["domain"].as_str().unwrap_or("").to_ascii_lowercase();
-        let known = |name: &&str| *name == "ok" || Grade::parse(name).is_some();
-        let Some(name) = line["grade"].as_str().filter(known) else {
-            continue;
-        };
-        if plumb_format::refs::is_domain(&domain) {
-            graded.insert(domain, Grade::parse(name));
-        }
+        let name = line["grade"].as_str().unwrap_or("");
+        let grade = Grade::parse(name);
+        ensure!(
+            plumb_format::refs::is_domain(&domain) && (grade.is_some() || name == "ok"),
+            "line {} of {path} is not a site's address and ok, low_value or spam",
+            at + 1
+        );
+        graded.insert(domain, grade);
     }
     let graded: BTreeMap<String, Grade> = graded
         .into_iter()
@@ -1841,7 +1853,6 @@ mod tests {
                 r#"{"domain": "status.example.com", "grade": "low_value"}"#,
                 r#"{"domain": "espn.com", "grade": "spam"}"#,
                 r#"{"domain": "espn.com", "grade": "ok"}"#,
-                r#"{"domain": "not a domain", "grade": "spam"}"#,
                 r#"{"domain": "cut.exam"#,
             ]
             .join("\n"),
@@ -1870,6 +1881,21 @@ mod tests {
         assert_eq!(read.get("espn.com"), None);
         assert_eq!(read.get("example.com"), None);
         assert_eq!(read.get("nba.com"), None);
+
+        // A mistyped correction is an error, not left out unseen.
+        let bad = temp.path().join("bad.jsonl");
+        let lines = [
+            r#"{"domain": "nba.com", "grade": "OK"}"#,
+            r#"{"domain": "nflbox.sx", "grade": "spam"}"#,
+        ];
+        fs::write(&bad, lines.join("\n")).unwrap();
+        let bad = SiteGradesArgs {
+            grades: bad,
+            out: temp.path().join("bad-set"),
+            ..args
+        };
+        let err = site_grades(&bad).unwrap_err();
+        assert!(err.to_string().contains("line 1 of"), "{err:#}");
     }
 
     #[test]
