@@ -1026,10 +1026,11 @@ mod tests {
         use clap::Parser;
         let dir = tempfile::tempdir().unwrap();
         let index = dir.path().join("sites");
-        let mut alpha = plumb_core::SiteRecord::new("alpha.org");
+        let mut alpha = plumb_core::site::new("alpha.org");
         alpha.title = Some("Alpha".into());
-        alpha.aliases.push("Alpha".into());
-        plumb_index::build_index(&index, &[alpha.to_stored_item()]).unwrap();
+        alpha.names.push("Alpha".into());
+        plumb_core::site::clean(&mut alpha);
+        plumb_index::build_index(&index, &[alpha]).unwrap();
         let pages = dir.path().join("wikipedia-fr.tsv");
         let mut file = File::create(&pages).unwrap();
         plumb_core::article::write_article(
