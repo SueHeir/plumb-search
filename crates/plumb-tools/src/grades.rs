@@ -205,7 +205,10 @@ fn run_pick(args: &PickArgs) -> Result<()> {
         let wanted = only
             .as_ref()
             .is_none_or(|only| only.contains(&record.domain));
-        if failed.is_some() || !wanted || !live(&record) {
+        // A record's address can be one no set can name (an email address
+        // or a file name crawled as a site), so no grade of it could go out.
+        let named = plumb_format::refs::is_domain(&record.domain);
+        if failed.is_some() || !wanted || !named || !live(&record) {
             return;
         }
         let pick = pick_of(&record);
@@ -269,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn sites_about_harmful_topics_come_first_and_well_known_ones_not_at_all() {
+    fn sites_about_harmful_topics_come_first_and_well_known_ones_and_non_domains_not_at_all() {
         let temp = tempfile::tempdir().unwrap();
         let (records, out) = (
             temp.path().join("records.jsonl"),
@@ -281,6 +284,7 @@ mod tests {
                 "signals": {"tranco_rank": 1, "linking_domains": 1_000_000}}),
             serde_json::json!({"domain": "help-now.example", "title": "Drug abuse help line"}),
             serde_json::json!({"domain": "pillsrx.example", "title": "Buy tramadol online"}),
+            serde_json::json!({"domain": "dadeece_at_gmail.com", "title": "Drug rehab"}),
         ];
         let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
         std::fs::write(&records, text).unwrap();
