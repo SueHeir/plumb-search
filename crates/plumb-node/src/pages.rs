@@ -213,36 +213,42 @@ impl SetInfo {
 
     /// Reads up to `limit` pages of the set's file `path`, most read first.
     pub fn read(&self, path: &Path, limit: u64) -> Result<impl Iterator<Item = Page>> {
-        // Every set's file is an articles file (see `Page::from_set`).
-        let id = self.id;
-        if !Page::has_reader(id) {
-            bail!("no reader for the page set {id}");
+        read_set(self.id, path, limit)
+    }
+}
+
+/// Reads up to `limit` pages of the file `path` of the set `id`, most read
+/// first, one line at a time: `eval` reads its sets so too.
+pub fn read_set(id: &str, path: &Path, limit: u64) -> Result<impl Iterator<Item = Page>> {
+    // Every set's file is an articles file (see `Page::from_set`).
+    if !Page::has_reader(id) {
+        bail!("no reader for the page set {id}");
+    }
+    let id = id.to_string();
+    let reader = plumb_ingest::open_maybe_gz(path)?;
+    let path = path.to_path_buf();
+    let lines = std::io::BufRead::lines(reader).map_while(move |line| match line {
+        Ok(line) => Some(line),
+        Err(err) => {
+            warn!("reading {}: {err}", path.display());
+            None
         }
-        let reader = plumb_ingest::open_maybe_gz(path)?;
-        let path = path.to_path_buf();
-        let lines = std::io::BufRead::lines(reader).map_while(move |line| match line {
-            Ok(line) => Some(line),
+    });
+    let mut bad = 0u64;
+    Ok(articles_of(lines)
+        .filter_map(move |(n, article)| match article {
+            // Files made before fetch-pages left it out.
+            Ok(article) if article.title == "Main Page" => None,
+            Ok(article) => Page::from_set(&id, article),
             Err(err) => {
-                warn!("reading {}: {err}", path.display());
+                bad += 1;
+                if bad <= 3 {
+                    warn!("page set line {n}: {err:#}");
+                }
                 None
             }
-        });
-        let mut bad = 0u64;
-        Ok(articles_of(lines)
-            .filter_map(move |(n, article)| match article {
-                // Files made before fetch-pages left it out.
-                Ok(article) if article.title == "Main Page" => None,
-                Ok(article) => Page::from_set(id, article),
-                Err(err) => {
-                    bad += 1;
-                    if bad <= 3 {
-                        warn!("page set line {n}: {err:#}");
-                    }
-                    None
-                }
-            })
-            .take(usize::try_from(limit).unwrap_or(usize::MAX)))
-    }
+        })
+        .take(usize::try_from(limit).unwrap_or(usize::MAX)))
 }
 
 impl SetInfo {
