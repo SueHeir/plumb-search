@@ -63,7 +63,9 @@ pub struct EmbedPagesArgs {
 pub fn run_embed_pages(args: EmbedPagesArgs) -> Result<()> {
     block_on(ensure_model(&args.model, MODEL_BASE_URL))??;
     let embedder = load_embedder(&args.model)?;
-    let vectors = RwLock::new(load_vectors_for(&args.vectors, &embedder)?);
+    // Saving writes beside the file, which a bare file name has no folder for.
+    let path = std::path::absolute(&args.vectors)?;
+    let vectors = RwLock::new(load_vectors_for(&path, &embedder)?);
     let threads = args
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
@@ -84,7 +86,7 @@ pub fn run_embed_pages(args: EmbedPagesArgs) -> Result<()> {
         )?;
         embedded += done.done;
         failed += done.failed;
-        Vectors::save_shared(&vectors, &args.vectors)?;
+        Vectors::save_shared(&vectors, &path)?;
         println!(
             "{embedded} pages embedded ({:.0} a second), {} vectors",
             embedded as f64 / started.elapsed().as_secs_f64().max(0.001),
@@ -124,11 +126,11 @@ pub fn run_embed_pages(args: EmbedPagesArgs) -> Result<()> {
     drop(flush);
     // Pages gone from the set, or past --max now, lose their vectors.
     vectors.write_locked().retain(|url| kept.contains(url));
-    Vectors::save_shared(&vectors, &args.vectors)?;
+    Vectors::save_shared(&vectors, &path)?;
     println!(
         "{} page vectors in {} ({seen} pages with a snippet, {embedded} embedded now, {failed} failed, {long} with a URL too long to key)",
         vectors.read_locked().len(),
-        args.vectors.display(),
+        path.display(),
     );
     Ok(())
 }
