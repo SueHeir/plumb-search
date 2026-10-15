@@ -1335,7 +1335,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     let focused_domains: HashSet<&str> = focused.iter().map(|t| t.domain.as_str()).collect();
     // Sites crawled before nodes kept icons or key pages are due again for
     // them, and so are sites read by a much older crawler (see
-    // plumb_crawl::REREAD_BELOW).
+    // plumb_crawl::REREAD_BELOW) or in the wrong charset.
     let icons = IconStore::new(&inner.paths.icons).with_budget(inner.storage.clone());
     let noted = icons.noted();
     let rest = select_targets_with(
@@ -1579,9 +1579,14 @@ fn local_catch_up<'a>(
 }
 
 /// Whether a site was last read by a crawler older than
-/// [`plumb_crawl::REREAD_BELOW`], so it is due again to be read anew.
+/// [`plumb_crawl::REREAD_BELOW`], or misread in the wrong charset by one
+/// older than [`plumb_crawl::CHARSETS_READ_SINCE`], so it is due again to
+/// be read anew.
 fn due_for_rereading(record: &RoundSite) -> bool {
-    last_crawl_answered(record) && record.crawl_version() < plumb_crawl::REREAD_BELOW
+    let version = record.crawl_version();
+    last_crawl_answered(record)
+        && (version < plumb_crawl::REREAD_BELOW
+            || record.misread() && version < plumb_crawl::CHARSETS_READ_SINCE)
 }
 
 /// Counts the sites that look dead ([`crate::dead`]) and, with
@@ -2326,6 +2331,22 @@ mod tests {
                 "not reached on its last try"
             );
         }
+    }
+
+    #[test]
+    fn sites_read_in_the_wrong_charset_are_read_anew() {
+        let mut record = SiteRecord::new("smbc.co.jp");
+        record.crawled_at = Some(10);
+        record.crawl_version = plumb_crawl::CHARSETS_READ_SINCE - 1;
+        assert!(!due_for_rereading(&round(record.clone())));
+        record.description = Some("\u{FFFD}T\u{FFFD}[\u{FFFD}r\u{FFFD}X".into());
+        assert!(due_for_rereading(&round(record.clone())));
+        record.description = None;
+        record.title = Some("\u{1B}$B%3%_%C%/%^!<%1%C%H\u{1B}(B".into());
+        assert!(due_for_rereading(&round(record.clone())));
+        // Read in its charset already: the page itself has the `�`.
+        record.crawl_version = plumb_crawl::CHARSETS_READ_SINCE;
+        assert!(!due_for_rereading(&round(record)));
     }
 
     #[test]

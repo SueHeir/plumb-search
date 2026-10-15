@@ -52,6 +52,9 @@ const FOCUSED: u8 = 2;
 const KEPT: u8 = 4;
 /// The site has a homepage title.
 const TITLED: u8 = 8;
+/// The site's title or description has a `�` or an escape byte: its page
+/// was read in the wrong charset ([`plumb_crawl::CHARSETS_READ_SINCE`]).
+const MISREAD: u8 = 16;
 
 fn seconds(at: Option<u64>) -> u32 {
     at.map_or(0, |at| u32::try_from(at).unwrap_or(u32::MAX).max(1))
@@ -74,6 +77,13 @@ impl RoundSite {
                 crate::dead::looks_dead(record, now_unix()) && keep.keeps(record),
             ),
             (TITLED, record.title.is_some()),
+            (
+                MISREAD,
+                [&record.title, &record.description]
+                    .into_iter()
+                    .flatten()
+                    .any(|text| text.contains(['\u{FFFD}', '\u{1B}'])),
+            ),
         ] {
             if set {
                 flags |= flag;
@@ -114,6 +124,10 @@ impl RoundSite {
 
     pub(super) fn titled(&self) -> bool {
         self.has(TITLED)
+    }
+
+    pub(super) fn misread(&self) -> bool {
+        self.has(MISREAD)
     }
 
     pub(super) fn crawl_version(&self) -> u32 {

@@ -25,8 +25,14 @@ use crate::{CrawlOutcome, CrawlResult};
 /// adds the search terms picked from the whole page
 /// ([`crate::pick_terms`]); 2 leaves boilerplate (cookie notices, menus
 /// made of links, "Learn more" buttons) out of the visible text
-/// (`boilerplate.rs`).
-pub const CRAWL_VERSION: u32 = 2;
+/// (`boilerplate.rs`); 3 reads every page in its charset, declared late
+/// in its head or not at all (`charset.rs`).
+pub const CRAWL_VERSION: u32 = 3;
+
+/// Sites an older crawler read with a `�` or an escape byte in their
+/// title or description, as a page read in the wrong charset comes out,
+/// are read again ahead of their turn by crawlers from this version on.
+pub const CHARSETS_READ_SINCE: u32 = 3;
 
 /// Sites last read by a crawler older than this are read again ahead of
 /// their turn (see [`CRAWL_VERSION`]). It stays at 1, as in 0.2.0, until
