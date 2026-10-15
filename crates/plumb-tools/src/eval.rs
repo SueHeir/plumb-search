@@ -552,33 +552,28 @@ fn format_recall(stages: &[Stage], limit: usize) -> String {
 
 /// The address of every page in the sets of `--pages`.
 fn page_urls(args: &EvalArgs) -> Result<HashSet<String>> {
-    let mut urls = HashSet::new();
-    for file in &args.pages {
-        let reader = plumb_ingest::open_maybe_gz(file)?;
-        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let set = set_of_file(name);
-        for article in plumb_core::article::read_articles(reader, args.pages_top)? {
-            if let Some(page) = Page::from_set(&set, article) {
-                urls.insert(page.url);
-            }
-        }
-    }
-    Ok(urls)
+    Ok(set_pages(args)?.map(|page| page.url).collect())
 }
 
 /// Builds the page index of `--pages` in `dir`.
 fn build_pages(args: &EvalArgs, dir: &Path) -> Result<()> {
-    let mut all: Vec<Page> = Vec::new();
-    for file in &args.pages {
-        let reader = plumb_ingest::open_maybe_gz(file)?;
-        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
-        info!("indexing {} pages of {}", articles.len(), file.display());
-        let set = set_of_file(name);
-        all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
-    }
-    plumb_index::pages::build_page_index(dir, all)?;
+    plumb_index::pages::build_page_index(dir, set_pages(args)?)?;
     Ok(())
+}
+
+/// The pages of the sets of `--pages`, `--pages-top` of each, read a line
+/// at a time as a node reads them ([`plumb_node::pages::read_set`]), so
+/// that none are held: all of hpc's sets at once took more than 14 GB.
+fn set_pages(args: &EvalArgs) -> Result<impl Iterator<Item = Page>> {
+    let mut pages: Box<dyn Iterator<Item = Page>> = Box::new(std::iter::empty());
+    for file in &args.pages {
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let set = set_of_file(name);
+        info!("reading the {set} pages of {}", file.display());
+        let read = plumb_node::pages::read_set(&set, file, args.pages_top as u64)?;
+        pages = Box::new(pages.chain(read));
+    }
+    Ok(pages)
 }
 
 /// `--pages-cache`: page indexes kept between runs, one folder each, named
