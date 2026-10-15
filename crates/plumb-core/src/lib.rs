@@ -726,8 +726,11 @@ impl RecordSet {
     /// subdomain sites ([`parent_domain`]) when those were folded into them:
     /// names, Wikidata's description and the Wikipedia intro. For seed data
     /// read again after the subdomain lists grew ([`SITES_VERSION`]), before
-    /// it is upserted; the parent's own seed record adds its own back.
+    /// it is upserted; the parent's own seed record adds its own back. The
+    /// seed's text is compared cleaned, as the set holds it
+    /// ([`SiteRecord::clean`]).
     pub fn split_subdomain_sites(&mut self, seed: &[SiteRecord]) {
+        let tidy = |text: &Option<String>| text.clone().and_then(site_item::tidy);
         for site in seed {
             let Some(parent) = parent_domain(&site.domain) else {
                 continue;
@@ -735,11 +738,17 @@ impl RecordSet {
             let Some(record) = self.map.get_mut(parent) else {
                 continue;
             };
-            record.aliases.retain(|alias| !site.aliases.contains(alias));
-            if record.about.is_some() && record.about == site.about {
+            let aliases: Vec<String> = site
+                .aliases
+                .iter()
+                .cloned()
+                .filter_map(site_item::tidy)
+                .collect();
+            record.aliases.retain(|alias| !aliases.contains(alias));
+            if record.about.is_some() && record.about == tidy(&site.about) {
                 record.about = None;
             }
-            if record.intro.is_some() && record.intro == site.intro {
+            if record.intro.is_some() && record.intro == tidy(&site.intro) {
                 record.intro = None;
             }
         }
@@ -749,14 +758,17 @@ impl RecordSet {
     /// website) gave the record of `domain`: the item's `names`, and the
     /// facts official websites bring (whether it is one, its sitelinks,
     /// country, kinds, description and intro), which the domain's own seed
-    /// record adds back when it is upserted after.
+    /// record adds back when it is upserted after. `names` are compared
+    /// cleaned, as the set holds them ([`SiteRecord::clean`]).
     pub fn take_back_official_site(&mut self, domain: &str, names: &[&str]) {
         let Some(record) = self.map.get_mut(domain) else {
             return;
         };
-        record
-            .aliases
-            .retain(|alias| !names.contains(&alias.as_str()));
+        let names: Vec<String> = names
+            .iter()
+            .filter_map(|name| site_item::tidy(name.to_string()))
+            .collect();
+        record.aliases.retain(|alias| !names.contains(alias));
         record.signals.official_site = false;
         record.signals.sitelinks = 0;
         record.country = None;
@@ -768,7 +780,8 @@ impl RecordSet {
     /// Inserts a record, merging it into an existing one for the same domain.
     /// The domain is made canonical first ([`canonical_domain`]), so
     /// `Example.COM` and `münchen.de` land on `example.com` and
-    /// `xn--mnchen-3ya.de`, and page fields read off a bot check are dropped
+    /// `xn--mnchen-3ya.de`, the record is cleaned ([`SiteRecord::clean`]),
+    /// and page fields read off a bot check are dropped
     /// ([`SiteRecord::drop_bot_check`]). Returns false, dropping the record, when the
     /// domain is not a valid registrable domain.
     pub fn upsert(&mut self, record: SiteRecord) -> bool {
@@ -790,6 +803,7 @@ impl RecordSet {
             Some(domain) => record.domain = domain,
             None => return false,
         }
+        record.clean();
         // A bot check crawled in place of the homepage, by this node or by
         // one whose crawl it took, before crawlers knew to skip them.
         record.drop_bot_check();
@@ -1210,9 +1224,29 @@ pub fn domain_label(domain: &str) -> String {
 /// other run of characters becomes one space. Apostrophes and combining
 /// marks are dropped (`McDonald's` -> `mcdonalds`, Thai `ข่าว` -> `ขาว`)
 /// and runs of single-character tokens are joined, so `U.S. Bank` ->
-/// `us bank` and `A.T.M.` -> `atm`.
+/// `us bank` and `A.T.M.` -> `atm`. Text is read in Unicode NFC, as clean
+/// records hold it ([`SiteRecord::clean`]), so a letter matches whether it
+/// was typed whole or as a letter and a mark: `cafe\u{301}` is `café`.
 pub fn normalize_text(text: &str) -> String {
     use unicode_categories::UnicodeCategories;
+    use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
+    let nfc: String;
+    let text = if is_nfc_quick(text.chars()) == IsNormalized::Yes {
+        text
+    } else {
+        nfc = text.nfc().collect();
+        &nfc
+    };
+    // Dropping a mark or an apostrophe, lowercasing, or joining tokens can
+    // leave letters that compose: each token is put in NFC again, so a
+    // second pass changes nothing.
+    let composed = |token: String| {
+        if is_nfc_quick(token.chars()) == IsNormalized::Yes {
+            token
+        } else {
+            token.nfc().collect()
+        }
+    };
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
     for ch in text.chars() {
@@ -1225,11 +1259,11 @@ pub fn normalize_text(text: &str) -> String {
             // of its letter: a Thai tone mark or the virama of Hindi's `न्द`
             // is inside a word, not between two.
         } else if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
+            tokens.push(composed(std::mem::take(&mut current)));
         }
     }
     if !current.is_empty() {
-        tokens.push(current);
+        tokens.push(composed(current));
     }
 
     let mut out: Vec<String> = Vec::with_capacity(tokens.len());
@@ -1240,7 +1274,7 @@ pub fn normalize_text(text: &str) -> String {
             j += 1;
         }
         if j - i >= 2 {
-            out.push(tokens[i..j].concat());
+            out.push(composed(tokens[i..j].concat()));
             i = j;
         } else {
             out.push(std::mem::take(&mut tokens[i]));
@@ -1941,11 +1975,27 @@ mod tests {
         // normalizing twice gives the same text.
         assert_eq!(normalize_text("İstanbul Havalimanı"), "istanbul havalimanı");
         // Marks that are not letters stay inside their word: a Thai tone
-        // mark, Hindi's virama, an accent typed as a combining mark.
+        // mark, Hindi's virama.
         assert_eq!(normalize_text("รวมข่าว บันเทิง"), "รวมขาว บันเทิง");
         assert_eq!(normalize_text("हिन्दी समाचार"), "हिनदी समाचार");
-        assert_eq!(normalize_text("cafe\u{301}s"), "cafes");
-        for text in ["İstanbul", "Ǆemal", "ﬁnance", "Straße", "ΣΊΣΥΦΟΣ", "İİ.İ"] {
+        // A letter typed as a letter and a mark is the same letter typed
+        // whole; Hindi's `ज़` is `ज` and a nukta either way.
+        assert_eq!(normalize_text("cafe\u{301}s"), "cafés");
+        assert_eq!(normalize_text("Du\u{31b}\u{323} ba\u{301}o"), "dự báo");
+        assert_eq!(normalize_text("\u{95b}"), normalize_text("\u{91c}\u{93c}"));
+        // Letters that compose only once a mark or an apostrophe between
+        // them is dropped, or two tokens are joined.
+        let composing = [
+            "\u{386}\u{345}",
+            "\u{3b1}'\u{345}",
+            "\u{1100}'\u{1161}",
+            "a \u{1100}'\u{1161} b",
+            "\u{1100} \u{1161}",
+        ];
+        for text in ["İstanbul", "Ǆemal", "ﬁnance", "Straße", "ΣΊΣΥΦΟΣ", "İİ.İ"]
+            .into_iter()
+            .chain(composing)
+        {
             let once = normalize_text(text);
             assert_eq!(normalize_text(&once), once, "{text:?}");
         }
@@ -2597,9 +2647,10 @@ mod tests {
         old.aliases = vec!["Y Combinator".into(), "Hacker News".into()];
         old.about = Some("social news website".into());
         set.upsert(old);
+        // Seed text not yet cleaned, as the set holds it.
         let mut news = SiteRecord::new("news.ycombinator.com");
-        news.aliases = vec!["Hacker News".into()];
-        news.about = Some("social news website".into());
+        news.aliases = vec!["Hacker News ".into()];
+        news.about = Some("social news\twebsite".into());
         let mut yc = SiteRecord::new("ycombinator.com");
         yc.aliases = vec!["Y Combinator".into()];
         yc.about = Some("startup accelerator".into());
