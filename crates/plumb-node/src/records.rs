@@ -46,14 +46,23 @@ pub(crate) const MAX_JOURNAL_BYTES: u64 = 128 << 20;
 #[allow(clippy::large_enum_variant)]
 pub enum Change {
     /// Merges a record into the set, as [`RecordSet::upsert`] does.
-    Merge { record: SiteRecord },
+    Merge {
+        #[serde(with = "plumb_core::stored")]
+        record: SiteRecord,
+    },
     /// Merges a crawl another node shared, as [`RecordSet::upsert_shared`]
     /// does: what it leaves out (search box, page text) is kept, not cleared.
-    MergeShared { record: SiteRecord },
+    MergeShared {
+        #[serde(with = "plumb_core::stored")]
+        record: SiteRecord,
+    },
     /// Merges a crawl another node shared into a site the set already
     /// holds; a site it does not hold is left out. For a node with no room
     /// for more sites (see `crate::node::trim`).
-    RefreshShared { record: SiteRecord },
+    RefreshShared {
+        #[serde(with = "plumb_core::stored")]
+        record: SiteRecord,
+    },
     /// Sets when a site's homepage was last tried and how many tries in a
     /// row failed to reach it ([`SiteRecord::crawl_failures`]).
     Mark {
@@ -71,7 +80,10 @@ pub enum Change {
     /// parent domain has a record: it takes the parent's ranks it lacks,
     /// and its names come off the parent
     /// ([`RecordSet::split_subdomain_sites`]). Ignored without a parent.
-    SubdomainSite { record: SiteRecord },
+    SubdomainSite {
+        #[serde(with = "plumb_core::stored")]
+        record: SiteRecord,
+    },
 }
 
 impl Change {
@@ -172,7 +184,7 @@ pub fn load_records(path: &Path) -> Result<RecordSet> {
         if text.is_empty() {
             continue;
         }
-        let record: SiteRecord = serde_json::from_str(text)
+        let record = plumb_core::stored::read(text.as_bytes())
             .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
         read += 1;
         bot_checks += usize::from(record.is_bot_check());
@@ -393,7 +405,7 @@ impl RecordStore {
                 limit: u64::MAX,
             };
             for record in set.iter() {
-                serde_json::to_writer(&mut size, record)?;
+                plumb_core::stored::write(&mut size, record)?;
                 size.bytes = size.bytes.saturating_add(1);
             }
             self.admitted_rewrite(&budget, size.bytes, || {
@@ -765,7 +777,7 @@ where
         limit: u64::MAX,
     };
     for record in records.clone() {
-        serde_json::to_writer(&mut size, record)?;
+        plumb_core::stored::write(&mut size, record)?;
         size.bytes = size.bytes.saturating_add(1);
     }
     RecordStore::open(path).admitted_rewrite(budget, size.bytes, || replace_records(path, records))

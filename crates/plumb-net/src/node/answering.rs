@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use libp2p::request_response::{self, OutboundRequestId};
 use libp2p::PeerId;
 use plumb_core::locks::Locked;
-use plumb_core::{now_unix, SiteRecord};
+use plumb_core::now_unix;
 use tracing::{debug, warn};
 
 use super::{Answer, Asker, Relayed, Reply, Task, MAX_RELAYING};
@@ -27,7 +27,7 @@ fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> 
         let sites: Vec<(String, String)> = lines
             .iter()
             .filter_map(|line| {
-                let record = serde_json::from_str::<SiteRecord>(line).ok()?;
+                let record = plumb_core::stored::read(line.as_bytes()).ok()?;
                 Some((record.to_line().ok()?, record.domain))
             })
             .collect();

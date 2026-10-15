@@ -40,12 +40,13 @@ pub fn search_buckets(query: &str) -> (Vec<u32>, Vec<String>) {
 
 /// Answers bucket requests from other nodes.
 pub trait BucketSource: Send + Sync + 'static {
-    /// The records of bucket `bucket`, as JSON, or `None` when this node
-    /// has no bucket table (yet).
+    /// The records of bucket `bucket`, as stored lines
+    /// ([`plumb_core::stored`]), or `None` when this node has no bucket
+    /// table (yet).
     fn bucket(&self, bucket: u32) -> Option<Vec<String>>;
 
     /// Records `from..from + count` of all the sites, best-ranked first, as
-    /// JSON, and how many sites there are; `None` when this node has no
+    /// stored lines, and how many sites there are; `None` when this node has no
     /// bucket table (yet). For nodes filling their space (see
     /// [`crate::fill`]).
     fn ranked(&self, from: usize, count: usize) -> Option<(Vec<String>, usize)> {
@@ -120,7 +121,8 @@ pub trait BucketSource: Send + Sync + 'static {
 /// A node's buckets on disk, written next to an index and never changed.
 ///
 /// ```text
-/// records.dat    the records, JSON, one after the other
+/// records.dat    the records, one after the other, as a node stores them
+///                ([`plumb_core::stored`])
 /// records.idx    where each record starts: little-endian u64, one more
 ///                than there are records
 /// buckets.idx    where each bucket's list starts in buckets.dat, counted
@@ -192,7 +194,7 @@ impl BucketTable {
         self.records == 0
     }
 
-    /// The records of `bucket`, as JSON.
+    /// The records of `bucket`, as stored lines.
     pub fn get(&self, bucket: u32) -> Result<Vec<String>> {
         if bucket >= BUCKETS {
             bail!("there is no bucket {bucket}");
@@ -225,7 +227,7 @@ impl BucketTable {
     }
 
     /// Records `from..from + count` (fewer at the end), best-ranked first,
-    /// as JSON: the table keeps them in that order.
+    /// as stored lines: the table keeps them in that order.
     pub fn ranked(&self, from: usize, count: usize) -> Result<Vec<String>> {
         let end = from.saturating_add(count).min(self.records);
         if from >= end {
@@ -342,7 +344,7 @@ impl BucketWriter {
     /// Adds the next record.
     pub fn add(&mut self, record: &SiteRecord) -> Result<()> {
         let n = u32::try_from(self.records).context("too many records for a bucket table")?;
-        let json = serde_json::to_vec(record).context("encoding a record")?;
+        let json = plumb_core::stored::line(record).context("encoding a record")?;
         self.offsets.write_all(&self.at.to_le_bytes())?;
         self.data.write_all(&json)?;
         self.at += json.len() as u64;

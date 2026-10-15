@@ -8,10 +8,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
-use plumb_core::{
-    keys::{slim_record, BUCKETS},
-    SiteRecord,
-};
+use plumb_core::keys::{slim_record, BUCKETS};
 use serde::Serialize;
 
 use crate::cli::StorageArgs;
@@ -415,7 +412,7 @@ fn size_records(path: &Path, source: &Path) -> Result<RecordSizing> {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let record = match serde_json::from_slice::<SiteRecord>(&line) {
+        let record = match plumb_core::stored::read(&line) {
             Ok(record) => record,
             Err(_) => {
                 sizing.invalid_records += 1;
@@ -584,6 +581,8 @@ fn distribution(mut values: Vec<u64>, total: u64) -> Distribution {
 
 #[cfg(test)]
 mod tests {
+    use plumb_core::SiteRecord;
+
     use super::*;
 
     fn put(dir: &Path, name: &str, bytes: &[u8]) {

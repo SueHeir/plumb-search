@@ -104,6 +104,9 @@ pub fn answer(source: &dyn BucketSource, from: u64, count: u32, all: bool) -> Fi
             response.next = (start + i) as u64;
             break;
         }
+        let Ok(line) = plumb_core::stored::record_json(line) else {
+            continue;
+        };
         // Keys are never escaped in a record's JSON and string values
         // always are, so this is only ever the crawl time's key.
         if all {

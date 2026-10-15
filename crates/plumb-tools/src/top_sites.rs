@@ -90,15 +90,17 @@ pub fn run(args: &TopSitesArgs) -> Result<()> {
     };
     let mut seen = Vec::new();
     let mut failed = None;
-    plumb_node::outline::for_each_record(&read_from, |record| match serde_json::to_vec(&record) {
-        Ok(line) => seen.push(Seen {
-            score: record.link_score(),
-            domain: record.domain.as_str().into(),
-            bytes: line.len() as u64 + 1,
-            kind: Kind::of(&record),
-        }),
-        Err(err) => {
-            failed.get_or_insert(err);
+    plumb_node::outline::for_each_record(&read_from, |record| {
+        match plumb_core::stored::line(&record) {
+            Ok(line) => seen.push(Seen {
+                score: record.link_score(),
+                domain: record.domain.as_str().into(),
+                bytes: line.len() as u64 + 1,
+                kind: Kind::of(&record),
+            }),
+            Err(err) => {
+                failed.get_or_insert(err);
+            }
         }
     })?;
     if let Some(err) = failed {
@@ -128,13 +130,11 @@ pub fn run(args: &TopSitesArgs) -> Result<()> {
         if failed.is_some() || !kept.contains(record.domain.as_str()) {
             return;
         }
-        let line = serde_json::to_vec(&record)
-            .map_err(anyhow::Error::from)
-            .and_then(|line| {
-                writer.write_all(&line)?;
-                writer.write_all(b"\n")?;
-                Ok(line.len() as u64 + 1)
-            });
+        let line = plumb_core::stored::line(&record).and_then(|line| {
+            writer.write_all(&line)?;
+            writer.write_all(b"\n")?;
+            Ok(line.len() as u64 + 1)
+        });
         match line {
             Ok(bytes) => written.add(bytes),
             Err(err) => failed = Some(err),

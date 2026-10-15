@@ -339,8 +339,9 @@ pub trait StatusSource: Send + Sync {
     fn bucket_table(&self) -> Option<String> {
         None
     }
-    /// Bucket `bucket` of table `table`, its records as JSON; `None` when
-    /// that table is not the one served (any more).
+    /// Bucket `bucket` of table `table`, its records as stored lines
+    /// ([`plumb_core::stored`]); `None` when that table is not the one
+    /// served (any more).
     fn bucket(&self, _table: &str, _bucket: u32) -> Option<Result<Vec<String>>> {
         None
     }
