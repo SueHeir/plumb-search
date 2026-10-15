@@ -1828,7 +1828,8 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
 
 /// New topics under a storage limit drop the sites kept for the old ones
 /// from the records, read a record at a time, and the index is built
-/// without them; a file that holds a site twice is read whole instead.
+/// without them; a file that holds a site twice is read whole instead,
+/// and written again for the index to be built from it the same way.
 #[test]
 fn new_topics_make_room_in_the_records_file() {
     let site = |domain: &str, tranco: u32, title: &str| {

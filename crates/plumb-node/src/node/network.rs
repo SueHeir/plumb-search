@@ -12,9 +12,10 @@
 //!   [`NETWORK_REBUILD_GAP`] (longer after a slow build), or at the next refresh.
 //! * Other nodes search by bucket (see `plumb_net::bucket`), never sending
 //!   their query. Each index build also writes the index's buckets into
-//!   `indexes/NNNNNN/buckets/` ([`build_buckets`]), and bucket requests are
-//!   answered from the index being served. An index built before the node
-//!   joined has none, and serves no buckets until the next build.
+//!   `indexes/NNNNNN/buckets/` ([`super::worker::build_from_file`]), and
+//!   bucket requests are answered from the index being served. An index
+//!   built before the node joined has none, and serves no buckets until
+//!   the next build.
 //! * Popularity (see `plumb_net::popularity`): every node in the network
 //!   ranks with what the reports it holds say people pick for a query
 //!   ([`apply_popularity`]). A node started with
@@ -59,7 +60,7 @@ use anyhow::{Context, Result};
 use plumb_core::{now_unix, SiteRecord};
 use plumb_index::Hit;
 use plumb_net::popularity::report_epoch;
-use plumb_net::{BucketSource, BucketTable, NetHandle, PickLog, PopularityTable, Report};
+use plumb_net::{BucketSource, NetHandle, PickLog, PopularityTable, Report};
 use tracing::{debug, info, warn};
 
 use super::{Inner, MB};
@@ -232,27 +233,6 @@ pub(super) fn wants_buckets(inner: &Inner) -> bool {
             .network
             .as_ref()
             .is_some_and(|n| n.answer_searches)
-}
-
-/// Writes the buckets of a new index into its directory, for a node that
-/// [`wants_buckets`]. A failure is logged, not raised: the index still
-/// works, it just serves no buckets.
-pub(super) fn build_buckets<R: std::borrow::Borrow<SiteRecord>>(
-    inner: &Inner,
-    index_dir: &Path,
-    records: &[R],
-) {
-    if !wants_buckets(inner) {
-        return;
-    }
-    let dir = index_dir.join(BUCKETS_DIR);
-    if let Err(err) = BucketTable::build_with_budget(&dir, records, inner.storage.clone()) {
-        warn!(
-            "cannot write the buckets of {}: {err:#}",
-            index_dir.display()
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
 }
 
 /// The name browsers know an index's buckets by (see `GET /api/buckets`):

@@ -17,7 +17,14 @@
 //!
 //! A file that two lines hold the same site in, or a domain that is not
 //! canonical, is something only a whole set can merge: [`outline`] returns
-//! `None` for it, and the caller loads the set once instead.
+//! `None` for it, and the caller loads the set once instead. A node then
+//! writes the file again from the set, each site on one line, and outlines
+//! that.
+//!
+//! Every search index a node builds, and the buckets other nodes take with
+//! it, is built from the file this way ([`build_index`]), whatever wrote
+//! the file last: setup, the full seed, a crawl, trimming. What the node's
+//! denylist denies is left out as each record is read.
 //!
 //! The steps that drop sites from the file (trimming to the storage limit,
 //! making room for new topics) work the same way. They pick the sites to
@@ -699,7 +706,7 @@ pub fn outline_copy<'a>(
 /// How far [`build_index`] got, for its caller to show (and to stop it,
 /// by returning an error).
 pub enum Step {
-    /// Reading `sites` records, of which `docs` go in the index.
+    /// Reading `sites` records, of which at most `docs` go in the index.
     Started { docs: usize, sites: usize },
     /// `done` of the `sites` read.
     Read { done: usize, sites: usize },
@@ -729,16 +736,29 @@ const STEP_EVERY: usize = 10_000;
 /// buckets of the same sites there ([`plumb_net::BucketWriter`]); a failure
 /// there is logged and leaves the index without. `step` is called as the
 /// build goes; an error from it stops the build.
+///
+/// `allowed`, when given, says whether a site goes in, and may take parts
+/// off its record first: a node leaves out what its denylist denies. It is
+/// asked of each site by its domain alone (a record that holds nothing
+/// else) before redirects are folded, so that a site left out lends its
+/// name to no other and one that redirects to it goes in on its own, as
+/// when the site was never there; then of each record as it is read, for
+/// the index, the buckets and the feeds alike.
+#[allow(clippy::too_many_arguments)]
 pub fn build_index(
     path: &Path,
     mut outlines: Vec<Outline>,
     index_dir: &Path,
     buckets: Option<&Path>,
     feeds: usize,
+    allowed: Option<&dyn Fn(&mut SiteRecord) -> bool>,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
     step: &mut dyn FnMut(Step) -> Result<()>,
 ) -> Result<Built> {
-    outlines.retain(|outline| !outline.gone);
+    outlines.retain(|outline| {
+        !outline.gone
+            && allowed.is_none_or(|allowed| allowed(&mut SiteRecord::new(&*outline.domain)))
+    });
     outlines.shrink_to_fit();
     sort(&mut outlines);
     let folded_into = plumb_index::redirect_targets(
@@ -771,12 +791,18 @@ pub fn build_index(
         },
     };
     let mut watched = Vec::new();
+    let mut indexed = 0;
     let mut reader = RecordReader::open(path)?;
     for (i, outline) in outlines.iter().enumerate() {
         if i > 0 && i % STEP_EVERY == 0 {
             step(Step::Read { done: i, sites })?;
         }
-        let record = reader.read(outline)?;
+        let mut record = reader.read(outline)?;
+        // Left out by its homepage, which no outline holds, a site takes
+        // the sites folded into it out with it.
+        if allowed.is_some_and(|allowed| !allowed(&mut record)) {
+            continue;
+        }
         if let (Some(bucket_writer), Some(dir)) = (writer.as_mut(), buckets) {
             if let Err(err) = bucket_writer.add(&record) {
                 writer = None;
@@ -789,6 +815,7 @@ pub fn build_index(
         if folded_into[i].is_none() {
             let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
             index.add(&record, names)?;
+            indexed += 1;
         }
     }
     drop((reader, redirect_names, folded_into, outlines));
@@ -802,7 +829,7 @@ pub fn build_index(
         }
     }
     Ok(Built {
-        docs,
+        docs: indexed,
         buckets: wrote_buckets,
         feeds: watched,
     })

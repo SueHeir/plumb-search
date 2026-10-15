@@ -25,9 +25,10 @@
 //! asks for the same pages either way, so the node it asks learns nothing
 //! of the topics. When the topics change, it first drops the sites below
 //! the best ones that are about none of the new topics
-//! ([`prune_outlines_for_topics`], reading the records file a record at a
-//! time, with an index build), so the share is free for the new topics,
-//! then reads on from where the best sites stopped again.
+//! ([`prune_outlines_for_topics`]), reading the records file a record at a
+//! time, and builds the index from the file the same way, so the share is
+//! free for the new topics, then reads on from where the best sites
+//! stopped again.
 //!
 //! # Blackhole
 //!
@@ -1255,8 +1256,9 @@ pub(super) fn prune_outlines_for_topics(
 
 impl Inner {
     /// Drops the sites kept for old topics from `set`, when the topics
-    /// changed ([`FillState::prune`]); the caller saves it and builds the
-    /// index from what is left. Returns how many were dropped.
+    /// changed ([`FillState::prune`]); the caller writes the records file
+    /// again with what is left and builds the index from the file. Returns
+    /// how many were dropped.
     pub(super) fn prune_for_new_topics(&self, set: &mut RecordSet) -> Result<usize> {
         self.prune_with(|keep_best, topics| Ok(prune_for_topics(set, keep_best, topics)))
     }
