@@ -3,68 +3,75 @@
 
 use super::*;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
-    use ed25519_dalek::SigningKey;
-    use plumb_format::PublicKey;
-
-    let peer_dir = tempfile::tempdir().unwrap();
-    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
-        .unwrap()
-        .public()
-        .to_peer_id();
-    let held = peer_dir.path().join("held");
-    let publisher = SigningKey::from_bytes(&[7; 32]);
-    // The books page set as the project's item set, a book a part.
-    let pages: Vec<plumb_index::pages::Page> = ["Lighthouse keeping", "Fresnel lenses", "Foghorns"]
+/// The pages of `set` with these titles as the project's item set, held
+/// in `held` and signed by `publisher`, a page a part.
+fn sign_page_set(
+    held: &Path,
+    publisher: &ed25519_dalek::SigningKey,
+    set: &str,
+    titles: &[&str],
+) -> Vec<plumb_index::pages::Page> {
+    let pages: Vec<plumb_index::pages::Page> = titles
         .iter()
         .zip([30, 20, 10])
         .enumerate()
         .map(|(n, (title, views))| {
             serde_json::from_value(serde_json::json!({
-                "set": "books", "url": format!("https://openlibrary.org/works/OL{n}W"),
+                "set": set, "url": format!("https://openlibrary.org/works/OL{n}W"),
                 "title": title, "description": "A lighthouse keeper", "views": views,
             }))
             .unwrap()
         })
         .collect();
-    let books = crate::node::signed_sets::set_dir(&held, "plumb/books").unwrap();
+    let name = format!("plumb/{set}");
+    let dir = crate::node::signed_sets::set_dir(held, &name).unwrap();
     let serde_json::Value::Object(manifest) = serde_json::json!({"format": plumb_format::FORMAT,
-        "set": "plumb/books", "generation": "2026-10-12T04:00:00Z", "license": "CC0-1.0"})
+        "set": name, "generation": "2026-10-12T04:00:00Z", "license": "CC0-1.0"})
     else {
         unreachable!()
     };
     let items = pages.iter().map(plumb_tools::page_items::page_item);
     let fields = plumb_tools::page_items::page_fields();
-    plumb_tools::set::write_set(items, fields, manifest, &books, &[1, 2], 3).unwrap();
-    plumb_tools::set::sign_set(&books, &publisher, None, None).unwrap();
+    let part_ends: Vec<u64> = (1..pages.len() as u64).collect();
+    plumb_tools::set::write_set(items, fields, manifest, &dir, &part_ends, 3).unwrap();
+    plumb_tools::set::sign_set(&dir, publisher, None, None).unwrap();
+    pages
+}
 
+/// A node serving the signed sets held in `held`, and its address.
+async fn serve_sets(
+    peer_dir: &Path,
+    held: PathBuf,
+) -> (plumb_net::NetHandle, plumb_net::Multiaddr) {
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
     let table = plumb_net::BucketTable::build(
-        &peer_dir.path().join("buckets"),
+        &peer_dir.join("buckets"),
         &[SiteRecord::new("lighthouses.org")],
     )
     .unwrap();
-    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.to_path_buf());
     peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
     peer_config.round_every = None;
-    let (peer, _records) =
-        plumb_net::start(peer_config, Arc::new(WithSignedSets(table, held.clone())))
-            .await
-            .unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(WithSignedSets(table, held)))
+        .await
+        .unwrap();
     let peer_addr: plumb_net::Multiaddr = loop {
         if let Some(addr) = peer.status().listening.first() {
             break addr.parse().unwrap();
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
+    (peer, peer_addr.with_p2p(peer_id).unwrap())
+}
 
-    let dir = seeded_dir();
-    let mut config = test_config(dir.path());
-    config.set_publishers = vec![PublicKey::of(&publisher)];
-    config.settings.page_sets = crate::pages::PageSets::parse("books=2").unwrap();
+/// A node's network settings to take sets from the node at `peer` only.
+fn from_peer(peer: plumb_net::Multiaddr) -> plumb_net::NetConfig {
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
     net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -73,8 +80,27 @@ async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
     net.round_every = None;
     net.fill = false;
     net.trusted_peers = Vec::new();
-    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
-    config.network = Some(net);
+    net.bootstrap = vec![peer];
+    net
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let peer_dir = tempfile::tempdir().unwrap();
+    let held = peer_dir.path().join("held");
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    let titles = ["Lighthouse keeping", "Fresnel lenses", "Foghorns"];
+    let pages = sign_page_set(&held, &publisher, "books", &titles);
+    let (peer, peer_addr) = serve_sets(peer_dir.path(), held).await;
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    config.settings.page_sets = crate::pages::PageSets::parse("books=2").unwrap();
+    config.network = Some(from_peer(peer_addr));
     let node = start(config).await.unwrap();
 
     let taken = crate::node::signed_sets::set_dir(dir.path(), "plumb/books").unwrap();
@@ -145,6 +171,39 @@ async fn a_node_takes_the_project_page_sets_it_keeps_as_items_part_by_part() {
     assert!(!taken.join("items-002.jsonl.zst").exists());
     assert!(!taken.join("items-003.jsonl.zst").exists());
 
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_updates_leaving_a_page_set_out_take_none_of_it() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let peer_dir = tempfile::tempdir().unwrap();
+    let held = peer_dir.path().join("held");
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    sign_page_set(&held, &publisher, "books", &["Lighthouse keeping"]);
+    sign_page_set(&held, &publisher, "films", &["The Lighthouse"]);
+    let (peer, peer_addr) = serve_sets(peer_dir.path(), held).await;
+
+    // Books come before films in a look for sets, so once films are in,
+    // books were looked at and left alone: the node has none of them, and
+    // `--set-updates` names films only.
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    config.settings.page_sets = crate::pages::PageSets::parse("books=all,films=all").unwrap();
+    config.set_updates = "films".parse().unwrap();
+    config.network = Some(from_peer(peer_addr));
+    let node = start(config).await.unwrap();
+    let held = |set: &str| crate::node::signed_sets::set_dir(dir.path(), set).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !held("plumb/films").join("items-001.jsonl.zst").is_file() {
+        assert!(Instant::now() < deadline, "the films never came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!held("plumb/books").exists(), "books taken");
     peer.shutdown().await;
     node.shutdown().await.unwrap();
 }
