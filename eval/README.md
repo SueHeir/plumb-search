@@ -112,7 +112,7 @@ It prints `ok` with each expected page's title (to see it is the page the search
 | `--limit N` | Results fetched per query; an answer further down counts as not found (default 10) |
 | `--rank JSON` | Change ranking knobs (`RankConfig` in [plumb-index](../crates/plumb-index/src/lib.rs)), such as `'{"exact_label_bonus": 0.1}'` |
 | `--alpha A` | Weight of the popularity prior, 0 to 1; wins over an `alpha` in `--rank` |
-| `--site-grades DIR`, `--site-grades-percent N` | Push down the sites a site grades set (`plumb-tools set site-grades`) marks, by N percent of their penalty (100 by default), as a node holding the set does |
+| `--site-grades DIR`, `--site-grades-percent N` | Push down the sites a site grades set (`plumb-tools set site-grades`, signed by any key) marks, by N percent of their penalty (100 by default), as a node holding the set does |
 | `--country CODE`, `--lang CODE` | Search as from a home country, or only sites in a language |
 | `--vectors FILE --model DIR` | Search by meaning too, with vectors from `plumb-tools embed` |
 | `--exact` | Never suggest a spelling |

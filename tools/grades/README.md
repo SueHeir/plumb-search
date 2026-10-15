@@ -32,7 +32,7 @@ plumb-tools set sign site-grades --key KEY
 4. `set site-grades` writes the spam and low-value sites as a layer on them, each labelled `machine-written`.
 5. `set sign` signs it with the project's key, on the computer that holds it.
 
-To see what the grades change before publishing them, give the unsigned set to the evals: `plumb-tools eval --site-grades site-grades ...` ([eval/README.md](../../eval/README.md)).
+To see what the grades change before publishing them, sign the set with a test key (`plumb-tools set new-key`), never the project key, and give it to the evals: `plumb-tools eval --site-grades site-grades ...` ([eval/README.md](../../eval/README.md)). The evals read a set signed by any key; a node reads only one its publishers signed.
 
 ## How the script asks
 

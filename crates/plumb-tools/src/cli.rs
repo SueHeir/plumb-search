@@ -600,8 +600,8 @@ pub struct EvalArgs {
     /// The other knobs keep their defaults; --alpha wins over an alpha here.
     #[arg(long, value_name = "JSON", value_parser = parse_rank_config)]
     pub rank: Option<plumb_index::RankConfig>,
-    /// A site grades set (`plumb-tools set site-grades`, signed or not)
-    /// whose grades push sites down, as on a node that holds it.
+    /// A site grades set (`plumb-tools set site-grades`, signed by any
+    /// key) whose grades push sites down, as on a node that holds it.
     #[arg(long, value_name = "DIR")]
     pub site_grades: Option<PathBuf>,
     /// How much the site grades count, 0 to 100, as a node's setting.

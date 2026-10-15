@@ -344,7 +344,12 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
     let grades = match &args.site_grades {
         Some(dir) => Some(
             plumb_node::node::grades::read(dir)
-                .with_context(|| format!("reading the site grades in {}", dir.display()))?,
+                .with_context(|| {
+                    format!(
+                        "reading the site grades in {} (signed by any key, such as one from `plumb-tools set new-key`)",
+                        dir.display()
+                    )
+                })?,
         ),
         None => None,
     };
