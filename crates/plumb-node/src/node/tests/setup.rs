@@ -735,3 +735,32 @@ async fn a_new_node_that_trusts_no_one_still_sets_up_from_the_seed_downloads() {
     assert!(error.contains("Tranco"), "{error}");
     node.shutdown().await.unwrap();
 }
+
+/// Crawling only, a node sets up from the Tranco list without building an
+/// index, and counts the sites it saved, as filling counts an index's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_that_only_crawls_sets_up_without_an_index() {
+    let tranco = std::fs::read(fixture("tranco.csv")).unwrap();
+    let host = SeedHost::start(move |request, _| match request {
+        "GET /tranco.csv" => http("200 OK", &tranco),
+        _ => http("404 Not Found", b"no such file"),
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.sources = host.sources();
+    config.sites = 50;
+    config.crawl_only = true;
+    let node = start(config).await.unwrap();
+    let status = wait_for(node.addr(), "setup", |s| {
+        s.step == Step::Idle && s.last_refresh.is_some()
+    })
+    .await;
+    assert_eq!(status.last_error, None, "{status:#?}");
+    assert_eq!(status.index, None);
+    assert_eq!(node.inner.held_sites(), 50);
+    node.shutdown().await.unwrap();
+    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    assert_eq!(records.len(), 50);
+    assert!(names(&dir.path().join("indexes")).is_empty());
+}

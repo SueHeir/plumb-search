@@ -25,7 +25,9 @@
 //! node keeps, not their whole records. The file is then written again
 //! without the sites dropped, the other lines copied as they are, and the
 //! index built from it a record at a time. Only a file that holds a site
-//! twice, which a whole set has to merge, is read whole as before.
+//! twice, which a whole set has to merge, is read whole to choose them; it
+//! is written again with each site on one line, and the index is built
+//! from it a record at a time all the same.
 //!
 //! Dropping a site only takes it out of this node's index. The batches this
 //! node signed and published stay in `net/batches/` for as long as they
@@ -244,7 +246,7 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
         Step::Indexing,
         "Over the storage limit: choosing sites to drop",
     );
-    let (drops, set) = drop_sites(
+    let drops = drop_sites(
         &inner.paths.records,
         sites,
         free,
@@ -271,10 +273,7 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
         group_thousands(drops.len() as u64)
     ));
     inner.rest_fill();
-    let built = match set {
-        Some(set) => super::worker::build(inner, &sorted_by_link_score(&set))?,
-        None => super::worker::build_from_file(inner)?,
-    };
+    let built = super::worker::build_from_file(inner)?;
     inner.recount_disk();
     Ok(Some(built))
 }
@@ -283,10 +282,10 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
 /// to free `free` bytes (see [`trim`]), never one `keep` keeps, and writes
 /// the file again without them. Reads the file a record at a time
 /// ([`drop_from_file`]), but for one only a whole set can merge, which is
-/// read whole ([`drop_from_set`]). `check` is called once the file is
-/// read, before anything is dropped. Returns the domains dropped, lowest
-/// link score first, with the sites left when the file was read whole, for
-/// the index to be built from them; otherwise it is built from the file.
+/// read whole ([`drop_from_set`]) and written again with each site on one
+/// line. `check` is called once the file is read, before anything is
+/// dropped. Returns the domains dropped, lowest link score first; the
+/// index is then built from the file ([`super::worker::build_from_file`]).
 fn drop_sites(
     path: &Path,
     sites: u64,
@@ -294,20 +293,18 @@ fn drop_sites(
     keep: &Keep,
     budget: Option<&Arc<StorageBudget>>,
     check: impl Fn() -> Result<()>,
-) -> Result<(Vec<String>, Option<RecordSet>)> {
+) -> Result<Vec<String>> {
     let Some(outlines) = outline::outline_with_budget(path, budget.cloned())? else {
         info!(
             "{} holds a site more than once: reading it whole to merge them",
             path.display()
         );
-        let mut set = load_records(path)?;
+        let set = load_records(path)?;
         check()?;
-        let drops = drop_from_set(&mut set, path, sites, free, keep, budget)?;
-        return Ok((drops, Some(set)));
+        return drop_from_set(set, path, sites, free, keep, budget);
     };
     check()?;
-    let drops = drop_from_file(path, outlines, sites, free, keep, budget)?;
-    Ok((drops, None))
+    drop_from_file(path, outlines, sites, free, keep, budget)
 }
 
 /// [`drop_sites`] of the records file at `path`, whose sites `outlines`
@@ -337,7 +334,7 @@ fn drop_from_file(
 
 /// [`drop_sites`] of `set`, the records file at `path` read whole.
 fn drop_from_set(
-    set: &mut RecordSet,
+    mut set: RecordSet,
     path: &Path,
     sites: u64,
     free: u64,
@@ -345,11 +342,11 @@ fn drop_from_set(
     budget: Option<&Arc<StorageBudget>>,
 ) -> Result<Vec<String>> {
     let per_site = sites / (set.len() as u64).max(1);
-    let drops = pick_drops(set, free, per_site, keep);
+    let drops = pick_drops(&set, free, per_site, keep);
     if !drops.is_empty() {
         let drop: HashSet<&str> = drops.iter().map(String::as_str).collect();
         set.retain(|record| !drop.contains(record.domain.as_str()));
-        replace_records_with_budget(path, sorted_by_link_score(set), budget)?;
+        replace_records_with_budget(path, sorted_by_link_score(&set), budget)?;
     }
     Ok(drops)
 }
@@ -518,12 +515,10 @@ mod tests {
         // 1,000 bytes a site, 4,500 to free: five sites.
         let (sites, free) = (1_000 * (MIN_SITES_KEPT as u64 + 21), 4_500);
 
-        let mut set = load_records(&whole).unwrap();
-        let expected = drop_from_set(&mut set, &whole, sites, free, &keep, None).unwrap();
+        let set = load_records(&whole).unwrap();
+        let expected = drop_from_set(set, &whole, sites, free, &keep, None).unwrap();
         let budget = StorageBudget::open(streamed.parent().unwrap(), u64::MAX).unwrap();
-        let (drops, set) =
-            drop_sites(&streamed, sites, free, &keep, Some(&budget), || Ok(())).unwrap();
-        assert!(set.is_none(), "read a record at a time");
+        let drops = drop_sites(&streamed, sites, free, &keep, Some(&budget), || Ok(())).unwrap();
         assert_eq!(drops, expected);
         // The lowest-ranked, but those the node keeps.
         let n = MIN_SITES_KEPT + 20;
@@ -573,16 +568,16 @@ mod tests {
         assert_eq!(outline::outline(&path).unwrap(), None);
 
         let (sites, free) = (1_000 * n as u64, 2_000);
-        let (drops, set) =
-            drop_sites(&path, sites, free, &keep_nothing(), None, || Ok(())).unwrap();
-        let set = set.expect("read whole");
+        let drops = drop_sites(&path, sites, free, &keep_nothing(), None, || Ok(())).unwrap();
         assert_eq!(
             drops,
             [format!("site{}.com", n - 1), format!("site{}.com", n - 2)]
         );
+        let set = load_records(&path).unwrap();
         assert_eq!(set.len(), n - 2);
         assert_eq!(set.get("site0.com").unwrap().title, again.title);
-        // Written again with each site once, those dropped left out.
+        // Written again with each site once, those dropped left out, for
+        // the index to be built from a record at a time.
         let outlines = outline::outline(&path).unwrap().expect("each site once");
         assert_eq!(outlines.len(), n - 2);
         assert!(outlines

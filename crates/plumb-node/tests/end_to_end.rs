@@ -72,7 +72,7 @@ fn build_fixture_index(dir: &Path) -> (PathBuf, String) {
     let (copy, outlines) = plumb_node::outline::outline_copy(&records, &outlined)
         .unwrap()
         .expect("one record a site");
-    plumb_node::outline::build_index(copy, outlines, &index, None, 0, None, &mut |_| Ok(()))
+    plumb_node::outline::build_index(copy, outlines, &index, None, 0, None, None, &mut |_| Ok(()))
         .unwrap();
     (index, ingest)
 }
