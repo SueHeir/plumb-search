@@ -872,3 +872,55 @@ async fn a_held_denylist_takes_results_off_and_its_csam_entries_stay_when_off() 
     assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
     node.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_pushes_down_the_sites_its_grades_set_marks_as_far_as_its_setting_says() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    let dir = seeded_dir();
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    let domains = |hits: Vec<Hit>| hits.into_iter().map(|hit| hit.domain).collect::<Vec<_>>();
+    let ungraded = domains(search(addr, "bank").await);
+    assert!(ungraded.len() > 1, "{ungraded:?}");
+
+    // The first of them graded spam, in a set the node holds.
+    let grades = dir.path().join("grades.jsonl");
+    let line = serde_json::json!({"domain": ungraded[0], "grade": "spam"});
+    std::fs::write(&grades, format!("{line}\n")).unwrap();
+    let out =
+        crate::node::signed_sets::set_dir(dir.path(), crate::node::grades::SITE_GRADES).unwrap();
+    plumb_tools::set::site_grades(&plumb_tools::set::SiteGradesArgs {
+        grades,
+        name: crate::node::grades::SITE_GRADES.into(),
+        out: out.clone(),
+        license: "CC0-1.0".into(),
+        attribution: "From a test".into(),
+        level: 3,
+    })
+    .unwrap();
+    plumb_tools::set::sign_set(&out, &publisher, None, None).unwrap();
+    node.inner.grades_from_set();
+    assert_eq!(node.inner.site_grades().unwrap().len(), 1);
+
+    let graded = domains(search(addr, "bank").await);
+    assert_eq!(graded[0], ungraded[1]);
+    let others = |list: &[String]| -> Vec<String> {
+        list.iter()
+            .filter(|d| **d != ungraded[0])
+            .cloned()
+            .collect()
+    };
+    assert_eq!(others(&graded), others(&ungraded));
+
+    let mut settings = node.inner.settings();
+    settings.site_grades_percent = 0;
+    node.inner.change_settings(settings).unwrap();
+    assert_eq!(domains(search(addr, "bank").await), ungraded);
+    node.shutdown().await.unwrap();
+}

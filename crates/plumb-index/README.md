@@ -56,6 +56,7 @@ About 43,000 lines, tests included.
 | [query_evidence.rs](src/query_evidence.rs) | `CandidateEvidence`: how a site matched, kept apart from its score |
 | [hits.rs](src/hits.rs) | tidying the list: copies and look-alikes out, a suggested or docs site moved up, untitled sites down |
 | [junk.rs](src/junk.rs) | sites left out unless the query names them: pill shops, sign-in pages, gambling spam, parked domains |
+| [grades.rs](src/grades.rs) | sites a language model graded spam or low value, pushed down by the share a node chooses |
 | [language.rs](src/language.rs) | whether a query is written in another language than the one chosen |
 | [topics.rs](src/topics.rs) | searches for the news itself ("world news") |
 | [health.rs](src/health.rs) | health authorities first for medical searches, and source quality |

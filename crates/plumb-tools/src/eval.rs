@@ -228,6 +228,8 @@ struct Setup {
     searcher: Searcher,
     meaning: Option<MeaningIndex>,
     pages: Option<PageSearcher>,
+    /// With --site-grades, the grades that push sites down.
+    grades: Option<plumb_index::grades::SiteGrades>,
     /// With --recall, the address of every page in the page sets.
     page_urls: HashSet<String>,
     /// Holds the page index while it is searched, when it is not kept in
@@ -339,10 +341,18 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
     } else {
         HashSet::new()
     };
+    let grades = match &args.site_grades {
+        Some(dir) => Some(
+            plumb_node::node::grades::read(dir)
+                .with_context(|| format!("reading the site grades in {}", dir.display()))?,
+        ),
+        None => None,
+    };
     Ok(Setup {
         searcher,
         meaning,
         pages,
+        grades,
         page_urls,
         _pages_dir: pages_dir,
     })
@@ -691,6 +701,30 @@ mod pages_cache {
     }
 }
 
+/// How many more sites a search ranks for the site grades to push out,
+/// as a node does.
+fn grades_margin(args: &EvalArgs, setup: &Setup) -> usize {
+    match &setup.grades {
+        Some(_) if args.site_grades_percent > 0 => plumb_index::grades::MARGIN,
+        _ => 0,
+    }
+}
+
+/// `results` with the site grades applied, as a node applies them, cut to
+/// the first `limit`. Without grades they are as they came.
+fn graded(
+    args: &EvalArgs,
+    setup: &Setup,
+    mut results: plumb_index::SearchResults,
+    limit: usize,
+) -> plumb_index::SearchResults {
+    if let Some(grades) = &setup.grades {
+        plumb_index::grades::demote(grades, args.site_grades_percent, &mut results.hits);
+        results.hits.truncate(limit);
+    }
+    results
+}
+
 /// The rank each query's expected answer was found at, within
 /// `args.limit`. With `verbose`, misses are printed (and `--show`,
 /// `--explain` say more).
@@ -737,7 +771,7 @@ fn evaluate(
             let results = searcher
                 .search_meaning(
                     query,
-                    fetched,
+                    fetched + grades_margin(args, setup),
                     cfg,
                     &options,
                     query_meaning
@@ -745,7 +779,7 @@ fn evaluate(
                         .map(|m| m as &dyn plumb_index::Meaning),
                 )
                 .with_context(|| format!("searching for {query:?}"));
-            results.map(|results| (results, query_meaning))
+            results.map(|results| (graded(args, setup, results, fetched), query_meaning))
         };
         let (mut results, mut query_meaning) = search(&q.query)?;
         // As a node with pages does (`add_pages`): a query that names a

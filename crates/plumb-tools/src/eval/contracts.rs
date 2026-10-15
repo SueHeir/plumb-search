@@ -489,9 +489,14 @@ fn observe(
     let words = if ops.any() { &ops.words } else { &query };
     let meaning = setup.meaning.as_ref().and_then(|m| m.query(words));
     let semantic = meaning.as_ref().map(|m| m as &dyn Meaning);
-    let mut found = setup
-        .searcher
-        .search_meaning(&query, args.limit, cfg, &options, semantic)?;
+    let found = setup.searcher.search_meaning(
+        &query,
+        args.limit + super::grades_margin(args, setup),
+        cfg,
+        &options,
+        semantic,
+    )?;
+    let mut found = super::graded(args, setup, found, args.limit);
     let paper = plumb_core::paper_query::PaperQuery::parse(&query)?;
     let typed = case
         .options

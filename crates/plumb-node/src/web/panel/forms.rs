@@ -64,6 +64,9 @@ pub(in crate::web) fn settings_error(
     if form.focus_shown.is_some() {
         fields.push_str(&format!("<input type=\"hidden\" name=\"focus_shown\" value=\"1\"><label for=\"focus_topics\">Focus topics</label><textarea id=\"focus_topics\" name=\"focus_topics\">{}</textarea>", escape_html(&form.focus_topics)));
     }
+    if let Some(percent) = &form.site_grades_percent {
+        fields.push_str(&format!("<label for=\"site_grades_percent\">Site grades (%)</label><input id=\"site_grades_percent\" name=\"site_grades_percent\" type=\"text\" inputmode=\"numeric\" value=\"{}\"><p class=\"hint\">A whole number from 0 to 100. 0 turns them off.</p>", escape_html(percent)));
+    }
     if form.page_sets_shown.is_some() {
         fields.push_str("<input type=\"hidden\" name=\"page_sets_shown\" value=\"1\">");
         let mut choices: Vec<_> = form

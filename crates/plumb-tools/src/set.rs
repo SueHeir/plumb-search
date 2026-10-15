@@ -90,6 +90,10 @@ pub enum SetCommand {
     /// Project publishes it) as the layer that labels those sites `adult`,
     /// with a manifest still to be signed.
     AdultSites(AdultSitesArgs),
+    /// Write the grades a language model gave sites (`tools/grades/grade.py`)
+    /// as the layer that marks the spam and low-value ones, with a
+    /// manifest still to be signed.
+    SiteGrades(SiteGradesArgs),
     /// Write a map file (`map.pmtiles` from `plumb-tools fetch-map`) as a
     /// set: one item that names the file by its hash, and the file itself
     /// as a blob part, linked rather than copied where it can be. Its
@@ -188,6 +192,27 @@ pub struct AdultSitesArgs {
     #[arg(long, default_value = "Unlicense")]
     pub license: String,
     #[arg(long, default_value = "From the Block List Project")]
+    pub attribution: String,
+    /// The zstd level of the parts.
+    #[arg(long, default_value_t = 19)]
+    pub level: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct SiteGradesArgs {
+    /// The grades, JSON lines of `{"domain": ..., "grade": "ok" |
+    /// "low_value" | "spam"}`.
+    #[arg(long, value_name = "FILE")]
+    pub grades: PathBuf,
+    /// The set's name, `<scope>/<name>`.
+    #[arg(long, default_value = plumb_node::node::grades::SITE_GRADES)]
+    pub name: String,
+    /// The folder to write. It must not exist yet, or be empty.
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    #[arg(long, default_value = "CC0-1.0")]
+    pub license: String,
+    #[arg(long, default_value = "Graded by Claude Haiku for Plumb")]
     pub attribution: String,
     /// The zstd level of the parts.
     #[arg(long, default_value_t = 19)]
@@ -464,6 +489,16 @@ pub fn run(args: SetArgs) -> Result<()> {
                 written.items,
                 written.parts,
                 written.left_out
+            );
+            Ok(())
+        }
+        SetCommand::SiteGrades(args) => {
+            let written = site_grades(&args)?;
+            println!(
+                "{}: {} graded sites in {} parts; sign it with `plumb-tools set sign`",
+                args.out.display(),
+                written.items,
+                written.parts
             );
             Ok(())
         }
@@ -1023,6 +1058,54 @@ pub fn adult_sites(args: &AdultSitesArgs) -> Result<Written> {
         PART_ENDS,
         args.level,
     )
+}
+
+/// Writes the spam and low-value sites of the grades in `args.grades` as a
+/// layer on those sites, each labelled `machine-written` with its `grade`.
+/// Sites graded ok, and lines that name no site, are left out.
+pub fn site_grades(args: &SiteGradesArgs) -> Result<Written> {
+    use plumb_index::grades::Grade;
+    use plumb_node::node::grades::GRADE_FIELD;
+
+    ensure!(
+        is_set_name(&args.name),
+        "{:?} is not <scope>/<name>",
+        args.name
+    );
+    let file =
+        File::open(&args.grades).with_context(|| format!("opening {}", args.grades.display()))?;
+    let mut graded = BTreeMap::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line: Value = serde_json::from_str(&line?)?;
+        let domain = line["domain"].as_str().unwrap_or("").to_ascii_lowercase();
+        let Some(grade) = line["grade"].as_str().and_then(Grade::parse) else {
+            continue;
+        };
+        if plumb_format::refs::is_domain(&domain) {
+            // A site graded twice keeps its worse grade.
+            let worst = graded.entry(domain).or_insert(grade);
+            *worst = (*worst).max(grade);
+        }
+    }
+    let mut manifest = Map::new();
+    manifest.insert("format".into(), json!(FORMAT));
+    manifest.insert("set".into(), json!(args.name));
+    manifest.insert("generation".into(), json!(now()));
+    manifest.insert("license".into(), json!(args.license));
+    manifest.insert("attribution".into(), json!(args.attribution));
+    manifest.insert("extends".into(), json!(["site"]));
+    let items = graded.iter().map(|(domain, grade)| {
+        serde_json::from_value(json!({
+            "id": domain, "extends": format!("site:{domain}"), "labels": ["machine-written"],
+            "fields": {GRADE_FIELD: grade.name()},
+        }))
+        .ok()
+    });
+    let fields = BTreeMap::from([(
+        GRADE_FIELD.to_string(),
+        serde_json::from_value(json!({"type": "keyword"}))?,
+    )]);
+    write_set(items, fields, manifest, &args.out, PART_ENDS, args.level)
 }
 
 /// The kind of the item that names a map file.
@@ -1734,6 +1817,48 @@ mod tests {
         );
         assert_eq!(items[1].id, "other.example");
         assert!(items.iter().all(|item| item.labels == ["adult"]));
+    }
+
+    #[test]
+    fn site_grades_are_a_layer_that_marks_spam_and_low_value_sites() {
+        use plumb_index::grades::Grade;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (grades, dir) = (temp.path().join("grades.jsonl"), temp.path().join("set"));
+        fs::write(
+            &grades,
+            [
+                r#"{"domain": "nflbox.sx", "grade": "spam", "words": []}"#,
+                r#"{"domain": "nba.com", "grade": "ok", "words": ["basketball"]}"#,
+                r#"{"domain": "Status.Example.com", "grade": "low_value"}"#,
+                r#"{"domain": "status.example.com", "grade": "spam"}"#,
+                r#"{"domain": "not a domain", "grade": "spam"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let args = SiteGradesArgs {
+            grades,
+            name: "plumb/site-grades".into(),
+            out: dir.clone(),
+            license: "CC0-1.0".into(),
+            attribution: "From a test".into(),
+            level: 3,
+        };
+        assert_eq!(site_grades(&args).unwrap().items, 2);
+        let key = SigningKey::from_bytes(&[5; 32]);
+        sign_set(&dir, &key, None, None).unwrap();
+        let checked = check_set(&dir, Some(&PublicKey::of(&key)), &[]).unwrap();
+        assert_eq!(checked.items, 2);
+        let (manifest, items) = plumb_node::sets::read_items(&dir).unwrap();
+        assert_eq!(manifest.extends, ["site"]);
+        assert!(items.iter().all(|item| item.labels == ["machine-written"]));
+        let read = plumb_node::node::grades::read(&dir).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read.get("nflbox.sx"), Some(Grade::Spam));
+        assert_eq!(read.get("status.example.com"), Some(Grade::Spam));
+        assert_eq!(read.get("example.com"), None);
+        assert_eq!(read.get("nba.com"), None);
     }
 
     #[test]

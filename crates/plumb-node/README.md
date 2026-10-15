@@ -48,7 +48,7 @@ flowchart LR
 | [node/network.rs](src/node/network.rs) | Joining plumb-net: the records inbox, buckets, popularity, `--publish-records` |
 | [node/fill.rs](src/node/fill.rs), [node/trim.rs](src/node/trim.rs) | Filling free space from trusted nodes (and first setup from one); staying under the storage limit |
 | [node/pages.rs](src/node/pages.rs), [node/places.rs](src/node/places.rs), [node/newer.rs](src/node/newer.rs) | Page set and places files and their indexes; newer files from trusted nodes |
-| [node/signed_sets.rs](src/node/signed_sets.rs), [node/denylist.rs](src/node/denylist.rs), [node/adult.rs](src/node/adult.rs) | Signed sets taken from the network; the project's denylist; the adult blocklist |
+| [node/signed_sets.rs](src/node/signed_sets.rs), [node/denylist.rs](src/node/denylist.rs), [node/adult.rs](src/node/adult.rs), [node/grades.rs](src/node/grades.rs) | Signed sets taken from the network; the project's denylist; the adult blocklist; the site grades searches push spam down by |
 | [node/embedding.rs](src/node/embedding.rs), [node/shared_vectors.rs](src/node/shared_vectors.rs) | Search by meaning: the model, embedding after each build, vectors from other nodes |
 | [node/news.rs](src/node/news.rs), [node/wanted_pages.rs](src/node/wanted_pages.rs) | Feed checks; following links toward the pages searches wanted |
 | [node/features.rs](src/node/features.rs), [node/backup.rs](src/node/backup.rs), [node/control.rs](src/node/control.rs), [node/journal.rs](src/node/journal.rs) | `features.json`; backups; the remote control token; the activity log |

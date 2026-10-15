@@ -12,7 +12,8 @@
 //! one. So a set can come from any node, trusted or not.
 //!
 //! The denylist is put in use at start and as soon as a newer one is
-//! taken ([`super::denylist`]). The site rules are read at start
+//! taken ([`super::denylist`]), and so are the site grades
+//! ([`super::grades`]). The site rules are read at start
 //! ([`use_held_site_rules`]): a set taken while the node runs is used from
 //! its next start.
 //!
@@ -61,7 +62,12 @@ use crate::site_rules::{self, read_site_rules, use_site_rules};
 pub const PROJECT_KEY: &str = "ed25519:MMrfl7-ASNz-h2d2f0ru1EWjAws59Ls3D5TbdfJS98c";
 
 /// The sets every node takes, the denylist first.
-pub(super) const TAKEN_SETS: &[&str] = &[DENYLIST, SITE_RULES, super::adult::ADULT_SITES];
+pub(super) const TAKEN_SETS: &[&str] = &[
+    DENYLIST,
+    SITE_RULES,
+    super::adult::ADULT_SITES,
+    super::grades::SITE_GRADES,
+];
 
 /// The sets a node that only crawls takes: those its crawls keep to.
 const CRAWLING_SETS: &[&str] = &[DENYLIST, SITE_RULES];
@@ -243,6 +249,10 @@ pub(super) enum Looked {
 pub(super) async fn run(inner: Arc<Inner>) {
     let mut stopped = inner.stopped.clone();
     settle_map(&inner);
+    if !inner.config.crawl_only {
+        let held = inner.clone();
+        let _ = tokio::task::spawn_blocking(move || held.grades_from_set()).await;
+    }
     loop {
         let Some(net) = network::handle(&inner).cloned() else {
             return;
@@ -255,13 +265,15 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 Ok(Looked::Current) => {}
                 Ok(Looked::Took(generation)) => {
                     info!("took {set} generation {generation}");
-                    // The denylist and the adult list apply at once; the
-                    // site rules from the next start.
+                    // The denylist, the adult list and the site grades
+                    // apply at once; the site rules from the next start.
                     let inner = inner.clone();
                     if *set == DENYLIST {
                         let _ = tokio::task::spawn_blocking(move || inner.load_denylist()).await;
                     } else if *set == super::adult::ADULT_SITES {
                         let _ = tokio::task::spawn_blocking(move || inner.adult_from_set()).await;
+                    } else if *set == super::grades::SITE_GRADES {
+                        let _ = tokio::task::spawn_blocking(move || inner.grades_from_set()).await;
                     }
                 }
                 Err(err) => {
