@@ -25,11 +25,14 @@
 //! ```
 //!
 //! `linkers` is hex because a 64-bit number does not survive every JSON
-//! reader. A node's own bookkeeping (crawl tries and failures, when it
-//! judged the site gone, redirects) stays out, as filling leaves it out
-//! today, and so do icons and headlines, which travel on their own. So do
-//! links to hosts the format cannot name as a site (with a `_`), and URLs
-//! that do not come out canonical.
+//! reader. A homepage that sent the crawler to another site says where
+//! (`"redirect": {"to": "pnc.com", "at": "2026-10-10T04:12:00Z"}`, with
+//! `"inner": true` when it went to a page other than that site's front
+//! page), so a search can fold the site into that one; filling leaves it
+//! out. A node's own bookkeeping (crawl tries and failures, when it judged
+//! the site gone) stays out, and so do icons and headlines, which travel
+//! on their own. So do links to hosts the format cannot name as a site
+//! (with a `_`), and URLs that do not come out canonical.
 
 use std::collections::BTreeMap;
 
@@ -42,7 +45,7 @@ use plumb_format::{Edge, FieldSpec, Item, Ref};
 use serde_json::{json, Map, Value};
 
 use crate::key_pages::{KeyPage, MAX_KEY_PAGES};
-use crate::{LinkText, SiteRecord, MAX_LINKS_TO};
+use crate::{LinkText, Redirect, SiteRecord, MAX_LINKS_TO};
 
 /// The kind of a site's item.
 pub const SITE: &str = "site";
@@ -66,6 +69,7 @@ pub fn site_fields() -> BTreeMap<String, FieldSpec> {
         "summary": {"type": "text", "roles": ["search:about"]},
         "crawled": {"type": "date"},
         "crawl_version": {"type": "number"},
+        "redirect": {"type": "object"},
     }))
     .expect("the site fields are well formed")
 }
@@ -195,6 +199,17 @@ impl SiteRecord {
                 })
             })
             .collect();
+        record.redirect = field("redirect").and_then(|redirect| {
+            Some(Redirect {
+                to: string(redirect.get("to")).filter(|to| is_domain(to))?,
+                at: redirect
+                    .get("at")
+                    .and_then(Value::as_str)
+                    .and_then(unix_seconds)
+                    .and_then(|unix| u64::try_from(unix).ok())?,
+                inner: redirect.get("inner") == Some(&Value::Bool(true)),
+            })
+        });
         for edge in &item.edges {
             match (edge.rel.as_str(), &edge.to) {
                 ("links_to", Ref::Site(site)) => record.links_to.push(site.clone()),
@@ -301,6 +316,15 @@ impl SiteRecord {
         put("crawled", json!(self.crawled_at.and_then(timestamp)));
         if self.crawl_version > 0 {
             put("crawl_version", json!(self.crawl_version));
+        }
+        if let Some(redirect) = self.redirect.as_ref().filter(|r| is_domain(&r.to)) {
+            if let Some(at) = timestamp(redirect.at) {
+                let mut object = json!({"to": redirect.to, "at": at});
+                if redirect.inner {
+                    object["inner"] = json!(true);
+                }
+                put("redirect", object);
+            }
         }
         fields
     }
@@ -441,7 +465,7 @@ mod tests {
             redirect: Some(Redirect {
                 to: "python.com".into(),
                 at: 1_791_605_520,
-                inner: false,
+                inner: true,
             }),
             icon: Some("iVBORw0KGgo=".into()),
             news: vec![Headline {
@@ -457,7 +481,6 @@ mod tests {
         record.crawl_attempted_at = None;
         record.crawl_failures = 0;
         record.gone_at = None;
-        record.redirect = None;
         record.icon = None;
         record.news = Vec::new();
         record
@@ -490,6 +513,10 @@ mod tests {
             json!({"text": "python", "count": record.link_texts[0].count, "linkers": "00a1b2c3d4e5f607"})
         );
         assert_eq!(item.weight, Some(412.0));
+        assert_eq!(
+            item.fields["redirect"],
+            json!({"to": "python.com", "at": "2026-10-10T04:12:00Z", "inner": true})
+        );
         assert_eq!(SiteRecord::from_item(&item).unwrap(), as_carried(record));
 
         // Through JSON, as a set carries it.
