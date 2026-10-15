@@ -73,7 +73,9 @@ pub fn find_dead<'a, S: CrawlSite + 'a, I: Iterator<Item = &'a S>>(
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{RecordSet, SiteRecord};
+    use plumb_core::sites::Sites;
+    use plumb_core::{site, RecordSet, SiteRecord};
+    use plumb_format::Item;
 
     use super::*;
 
@@ -125,5 +127,43 @@ mod tests {
         // A small node keeps all of them.
         let small: RecordSet = [site("worst.com", 7, None)].into_iter().collect();
         assert!(find_dead(|| small.iter(), NOW, |_: &SiteRecord| false).is_empty());
+    }
+
+    #[test]
+    fn sites_items_look_dead_as_their_records_do() {
+        let mut set: RecordSet = (0..NEVER_DEAD_BEST + 3)
+            .map(|i| {
+                let mut r = site(&format!("s{i}.com"), 0, Some(1));
+                r.signals.linking_domains = (NEVER_DEAD_BEST + 3 - i) as u32 * 10;
+                r
+            })
+            .collect();
+        let mut gone = site("gone.com", 9, None);
+        gone.make_gone(NOW - DAY);
+        let mut kept = site("kept.com", 7, None);
+        kept.signals.official_site = true;
+        set.extend([
+            site("worst.com", 7, None),
+            site("quiet.com", 6, Some(90)),
+            site("lately.com", 8, Some(30)),
+            gone,
+            kept,
+        ]);
+        let sites: Sites = set.iter().map(SiteRecord::to_stored_item).collect();
+        let records: Vec<&str> =
+            find_dead(|| set.iter(), NOW, |r: &SiteRecord| r.signals.official_site)
+                .iter()
+                .map(|r| r.domain.as_str())
+                .collect();
+        let items: Vec<&str> = find_dead(
+            || sites.iter(),
+            NOW,
+            |site: &Item| site::signals(site).official_site,
+        )
+        .iter()
+        .map(|site| site.id.as_str())
+        .collect();
+        assert_eq!(items, records);
+        assert_eq!(items, ["quiet.com", "worst.com"]);
     }
 }

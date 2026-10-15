@@ -181,31 +181,7 @@ impl SiteRecord {
 
     /// [`SiteRecord::to_item`] of a clean record.
     fn clean_to_item(self) -> Result<Item> {
-        let mut item = self.whole_item();
-        item.text = item
-            .text
-            .map(|text| match text.char_indices().nth(MAX_TEXT_CHARS) {
-                Some((cut, _)) => text[..cut].trim_end().to_string(),
-                None => text,
-            });
-        let unnamed = |redirect: &Value| !redirect["to"].as_str().is_some_and(is_domain);
-        if item.fields.get("redirect").is_some_and(unnamed) {
-            item.fields.remove("redirect");
-        }
-        if item.url.is_none() && is_domain(&item.id) {
-            item.site = Some(item.id.clone());
-        }
-        while too_big(&item) {
-            if let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) {
-                item.fields.remove(*field);
-            } else if item.edges.iter().any(|edge| edge.rel == "links_to") {
-                item.edges.retain(|edge| edge.rel != "links_to");
-            } else {
-                bail!("{} is over {MAX_ITEM_BYTES} bytes as an item", item.id);
-            }
-        }
-        item.check()?;
-        Ok(item)
+        sent_item(self.whole_item())
     }
 
     /// This site as a node stores it ([`crate::stored`]): its item with all
@@ -478,6 +454,38 @@ impl SiteRecord {
         }
         fields
     }
+}
+
+/// The item a clean site sends of the item with all it holds and nothing
+/// of the node's own ([`SiteRecord::to_item`], [`crate::site::to_item`]):
+/// its text cut to the format's 1,000 characters, a redirect to a site no
+/// item can name left out, and fields shed until it fits. Errors when it
+/// would not be a valid item.
+pub(crate) fn sent_item(mut item: Item) -> Result<Item> {
+    item.text = item
+        .text
+        .map(|text| match text.char_indices().nth(MAX_TEXT_CHARS) {
+            Some((cut, _)) => text[..cut].trim_end().to_string(),
+            None => text,
+        });
+    let unnamed = |redirect: &Value| !redirect["to"].as_str().is_some_and(is_domain);
+    if item.fields.get("redirect").is_some_and(unnamed) {
+        item.fields.remove("redirect");
+    }
+    if item.url.is_none() && is_domain(&item.id) {
+        item.site = Some(item.id.clone());
+    }
+    while too_big(&item) {
+        if let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) {
+            item.fields.remove(*field);
+        } else if item.edges.iter().any(|edge| edge.rel == "links_to") {
+            item.edges.retain(|edge| edge.rel != "links_to");
+        } else {
+            bail!("{} is over {MAX_ITEM_BYTES} bytes as an item", item.id);
+        }
+    }
+    item.check()?;
+    Ok(item)
 }
 
 pub(crate) fn edge(rel: &str, to: Ref, text: Option<String>) -> Edge {

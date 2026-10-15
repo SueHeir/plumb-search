@@ -2,8 +2,9 @@
 //! ([`crate::stored`]), read and changed a part at a time. Code that works
 //! on sites moves off [`SiteRecord`] onto items (step 4 of the data format
 //! plan), and this is what it uses in its place: each part of a site has a
-//! function that reads it and one that sets it, and merging, cleaning and
-//! scoring a site work on its item as they do on a record.
+//! function that reads it and one that sets it, and merging, cleaning,
+//! scoring and sending a site ([`to_item`]) work on its item as they do on
+//! a record.
 //!
 //! The item's own members hold the homepage's `url`, `title`, description
 //! (`about`), page text (`text`), language (`lang`) and the site's other
@@ -25,6 +26,7 @@
 //! which does with these functions what [`crate::RecordSet`] does with
 //! records.
 
+use anyhow::Result;
 use plumb_format::refs::is_domain;
 use plumb_format::value::{is_language, unix_seconds};
 use plumb_format::{Item, Ref};
@@ -32,7 +34,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::site_item::{
-    canonical_owned, edge, number, once, string, strings, tidy, tidy_all, tidy_keyword,
+    canonical_owned, edge, number, once, sent_item, string, strings, tidy, tidy_all, tidy_keyword,
     tidy_keywords, timestamp, SITE,
 };
 #[cfg(doc)]
@@ -788,6 +790,21 @@ pub fn clean(site: &mut Item) {
     *site = clean;
 }
 
+/// The site as an item to send ([`crate::site_item`]), as
+/// [`SiteRecord::to_item`] makes one of a record: of the site as [`clean`]
+/// makes it, without the node's own fields (its crawl marks, icon and
+/// headlines), with its text cut to the format's 1,000 characters. Errors
+/// when the item would not be a valid one, for a domain that is no id or a
+/// site too big even after shedding.
+pub fn to_item(site: &Item) -> Result<Item> {
+    let mut site = site.clone();
+    clean(&mut site);
+    for name in ["crawl", "icon", "news"] {
+        site.fields.remove(name);
+    }
+    sent_item(site)
+}
+
 fn field_str<'a>(site: &'a Item, name: &str) -> Option<&'a str> {
     site.fields.get(name).and_then(Value::as_str)
 }
@@ -1279,5 +1296,47 @@ pub(crate) mod tests {
         assert_eq!(site.deleted, None);
         assert!(site.labels.is_empty());
         assert_eq!(site.weight, Some(412.0));
+    }
+
+    #[test]
+    fn a_site_is_sent_as_its_record_is() {
+        let mut records = variants();
+        // Not clean yet, with more text than an item holds and a redirect
+        // to a site no item can name.
+        let mut untidy = full_record();
+        untidy.url = Some("HTTPS://WWW.Python.org/index%2ehtml?".into());
+        untidy.title = Some("  Welcome\u{7} to Python ".into());
+        untidy.body_text = Some("word ".repeat(400));
+        untidy.redirect = Some(Redirect {
+            to: "foo_bar.com".into(),
+            at: 1_791_605_520,
+            inner: false,
+        });
+        records.push(untidy);
+        // Too big until its terms are shed, and too big even so.
+        let mut shed = SiteRecord::new("example.com");
+        shed.terms = (0..100)
+            .map(|i| format!("{i} {}", "x".repeat(200)))
+            .collect();
+        records.push(shed.clone());
+        let mut big = SiteRecord::new("big.example");
+        big.aliases = (0..16)
+            .map(|i| format!("{i} {}", "x".repeat(1_100)))
+            .collect();
+        records.push(big);
+        records.push(SiteRecord::new("example.org"));
+        for record in records {
+            let sent = record.to_item();
+            for site in [record.to_stored_item(), record.clone().stored_item_as_is()] {
+                match (&sent, to_item(&site)) {
+                    (Ok(sent), Ok(item)) => assert_eq!(&item, sent, "{}", record.domain),
+                    (Err(_), Err(_)) => {}
+                    (sent, item) => panic!("{}: {sent:?}, {item:?}", record.domain),
+                }
+            }
+        }
+        let shed = to_item(&shed.to_stored_item()).unwrap();
+        assert!(!shed.fields.contains_key("terms"));
+        assert_eq!(shed.site.as_deref(), Some("example.com"));
     }
 }

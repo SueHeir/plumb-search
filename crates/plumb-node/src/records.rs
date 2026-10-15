@@ -17,17 +17,23 @@
 //! the new file is on disk. Replaying a journal into a file that already
 //! holds its changes leaves the file as it is, so a crash between the two
 //! steps loses nothing either.
+//!
+//! Code that works on sites' stored items ([`plumb_core::site`]) rather
+//! than records loads and replaces a file with [`load_sites`] and
+//! [`replace_sites`], which read and write the same lines.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use plumb_core::{RecordSet, SiteRecord};
+use plumb_core::sites::Sites;
+use plumb_core::{site, RecordSet, SiteRecord};
+use plumb_format::Item;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::{sync_parent_dir, write_records_atomically};
+use crate::{sync_parent_dir, write_lines_atomically, write_records_atomically};
 
 /// A journal smaller than this is never folded into its file, however
 /// small the file.
@@ -150,6 +156,66 @@ impl Change {
             }
         }
     }
+
+    /// Makes the change to `sites`, sites' stored items ([`load_sites`]),
+    /// as [`Change::apply`] makes it to a record set: the change's record
+    /// goes in as its stored item.
+    pub(crate) fn apply_to_sites(self, sites: &mut Sites) {
+        match self {
+            Change::Merge { record } => {
+                sites.upsert(record.to_stored_item());
+            }
+            Change::MergeShared { record } => {
+                sites.upsert_shared(record.to_stored_item());
+            }
+            Change::RefreshShared { record } => {
+                let held = plumb_core::canonical_domain(&record.domain)
+                    .is_some_and(|domain| sites.get(&domain).is_some());
+                if held {
+                    sites.upsert_shared(record.to_stored_item());
+                }
+            }
+            Change::Mark {
+                domain,
+                attempted_at,
+                failures,
+            } => {
+                if sites.get(&domain).is_some() {
+                    let site = sites.entry(&domain);
+                    let marks = site::CrawlMarks {
+                        tried: attempted_at,
+                        failures,
+                        ..site::crawl_marks(site)
+                    };
+                    site::set_crawl_marks(site, marks);
+                }
+            }
+            Change::Gone { domain, at } => {
+                if sites.get(&domain).is_some() {
+                    site::make_gone(sites.entry(&domain), at);
+                }
+            }
+            Change::TakeBack { domain, names } => {
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                sites.take_back_official_site(&domain, &names);
+            }
+            Change::SubdomainSite { mut record } => {
+                let Some(parent) = plumb_core::parent_domain(&record.domain)
+                    .and_then(|parent| sites.get(parent))
+                    .map(site::signals)
+                else {
+                    return;
+                };
+                let signals = &mut record.signals;
+                signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
+                signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
+                signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
+                let subsite = record.to_stored_item();
+                sites.split_subdomain_sites(std::slice::from_ref(&subsite));
+                sites.upsert(subsite);
+            }
+        }
+    }
 }
 
 /// `records.jsonl` -> `records.jsonl.journal`.
@@ -165,11 +231,57 @@ pub fn journal_path(records: &Path) -> PathBuf {
 /// crawl may have left next to it. Records for the same domain are merged,
 /// and ones without a valid domain are dropped.
 pub fn load_records(path: &Path) -> Result<RecordSet> {
+    let mut set = RecordSet::new();
+    let loaded = read_lines(path, |line| {
+        let record = plumb_core::stored::read(line)?;
+        Ok((record.is_bot_check(), set.upsert(record)))
+    })?;
+    loaded.log(path, set.len());
+    replay_journal(&journal_path(path), |change| change.apply(&mut set))?;
+    Ok(set)
+}
+
+/// [`load_records`] of the sites' stored items ([`plumb_core::site`]),
+/// for code that works on those: each line is read as its site's stored
+/// item ([`plumb_core::stored::read_item`]), and [`Sites`] merges and
+/// cleans them as a record set does records, then the journal's changes
+/// are made to them ([`Change::apply_to_sites`]). The sites are the stored
+/// items of the records [`load_records`] loads.
+pub fn load_sites(path: &Path) -> Result<Sites> {
+    let mut sites = Sites::new();
+    let loaded = read_lines(path, |line| {
+        let site = plumb_core::stored::read_item(line)?;
+        Ok((site::is_bot_check(&site), sites.upsert(site)))
+    })?;
+    loaded.log(path, sites.len());
+    replay_journal(&journal_path(path), |change| {
+        change.apply_to_sites(&mut sites)
+    })?;
+    Ok(sites)
+}
+
+/// What reading a records file into a set came to.
+struct Loaded {
+    /// Lines read, blank ones not counted.
+    read: usize,
+    /// Lines left out for a domain that is not a valid registrable domain.
+    dropped: usize,
+    /// Lines read off bot checks rather than homepages.
+    bot_checks: usize,
+}
+
+/// Reads each line of the records file at `path`, trimmed and blank ones
+/// skipped, with `add`, which puts the site in a set and says whether its
+/// line was read off a bot check and whether the set kept it.
+fn read_lines(path: &Path, mut add: impl FnMut(&[u8]) -> Result<(bool, bool)>) -> Result<Loaded> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut reader = BufReader::with_capacity(1 << 20, file);
-    let mut set = RecordSet::new();
-    let (mut read, mut dropped, mut line_no) = (0usize, 0usize, 0usize);
-    let mut bot_checks = 0usize;
+    let mut loaded = Loaded {
+        read: 0,
+        dropped: 0,
+        bot_checks: 0,
+    };
+    let mut line_no = 0usize;
     let mut line = String::new();
     loop {
         line.clear();
@@ -184,42 +296,47 @@ pub fn load_records(path: &Path) -> Result<RecordSet> {
         if text.is_empty() {
             continue;
         }
-        let record = plumb_core::stored::read(text.as_bytes())
+        let (bot_check, kept) = add(text.as_bytes())
             .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
-        read += 1;
-        bot_checks += usize::from(record.is_bot_check());
-        if !set.upsert(record) {
-            dropped += 1;
-        }
+        loaded.read += 1;
+        loaded.bot_checks += usize::from(bot_check);
+        loaded.dropped += usize::from(!kept);
     }
-    let merged = read - dropped - set.len();
-    if merged > 0 {
-        info!(
-            "merged {merged} duplicate records for the same domain in {}",
-            path.display()
-        );
-    }
-    if bot_checks > 0 {
-        info!(
-            "left out the page text of {bot_checks} records of {} read off bot checks \
-             rather than homepages",
-            path.display()
-        );
-    }
-    if dropped > 0 {
-        warn!(
-            "left out {dropped} records of {} whose domain is not a valid registrable domain",
-            path.display()
-        );
-    }
-    replay_journal(&journal_path(path), &mut set)?;
-    Ok(set)
+    Ok(loaded)
 }
 
-/// Applies the changes saved in the journal at `path` to `set`. A missing
-/// journal is fine, and damaged lines are skipped: a crash can cut the last
-/// one short.
-fn replay_journal(path: &Path, set: &mut RecordSet) -> Result<()> {
+impl Loaded {
+    /// Logs the sites merged and left out, once the set holds `held`.
+    fn log(&self, path: &Path, held: usize) {
+        let merged = self.read - self.dropped - held;
+        if merged > 0 {
+            info!(
+                "merged {merged} duplicate records for the same domain in {}",
+                path.display()
+            );
+        }
+        if self.bot_checks > 0 {
+            info!(
+                "left out the page text of {} records of {} read off bot checks \
+                 rather than homepages",
+                self.bot_checks,
+                path.display()
+            );
+        }
+        if self.dropped > 0 {
+            warn!(
+                "left out {} records of {} whose domain is not a valid registrable domain",
+                self.dropped,
+                path.display()
+            );
+        }
+    }
+}
+
+/// Applies the changes saved in the journal at `path` with `apply`. A
+/// missing journal is fine, and damaged lines are skipped: a crash can cut
+/// the last one short.
+fn replay_journal(path: &Path, mut apply: impl FnMut(Change)) -> Result<()> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -243,7 +360,7 @@ fn replay_journal(path: &Path, set: &mut RecordSet) -> Result<()> {
         }
         match serde_json::from_slice::<Change>(&line) {
             Ok(change) => {
-                change.apply(set);
+                apply(change);
                 applied += 1;
             }
             Err(err) => {
@@ -753,6 +870,26 @@ where
     Ok(written)
 }
 
+/// [`replace_records`] with sites' stored items ([`plumb_core::site`]),
+/// each written as [`plumb_core::stored::write_item`] writes it: for now
+/// as its record's JSON, the line [`replace_records`] writes of that record.
+pub fn replace_sites<'a, I>(path: &Path, sites: I) -> Result<usize>
+where
+    I: IntoIterator<Item = &'a Item>,
+{
+    let written = write_lines_atomically(path, |out| {
+        let mut written = 0;
+        for site in sites {
+            plumb_core::stored::write_item(&mut *out, site)?;
+            out.write_all(b"\n")?;
+            written += 1;
+        }
+        Ok(written)
+    })?;
+    delete_journal(path)?;
+    Ok(written)
+}
+
 /// Deletes the journal of the records file at `path`, once a new file that
 /// holds its changes is in place. No journal is fine.
 pub(crate) fn delete_journal(path: &Path) -> Result<()> {
@@ -832,6 +969,18 @@ pub fn sorted_by_link_score(set: &RecordSet) -> Vec<&SiteRecord> {
             .then_with(|| a.1.domain.cmp(&b.1.domain))
     });
     scored.into_iter().map(|(_, r)| r).collect()
+}
+
+/// All sites in the order [`Sites::into_sorted_vec`] gives (best
+/// [`site::link_score`] first, ties by domain), without copying them, as
+/// [`sorted_by_link_score`] gives records.
+pub fn sites_by_link_score(sites: &Sites) -> Vec<&Item> {
+    let mut scored: Vec<(f32, &Item)> = sites
+        .iter()
+        .map(|site| (site::link_score(site), site))
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    scored.into_iter().map(|(_, site)| site).collect()
 }
 
 fn shallow_bytes(path: &Path) -> Result<u64> {
@@ -1651,5 +1800,89 @@ mod tests {
             .collect();
         assert_eq!(by_ref, owned);
         assert_eq!(by_ref, ["c.com", "a.com", "b.com", "z.com"]);
+    }
+
+    #[test]
+    fn sites_load_as_the_stored_items_of_the_records_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let changes = crate::outline::tests::file_and_journal(&path);
+        // Besides: a bot check read in place of a homepage, then the
+        // homepage, under a domain not written in its canonical form; a
+        // domain that is none; a line that holds a stored item; blank lines.
+        let mut check = SiteRecord::new("usbank.com");
+        check.url = Some("https://www.google.com/sorry/index".into());
+        check.title = Some("Sorry...".into());
+        check.crawled_at = Some(30);
+        let mut bank = SiteRecord::new("WWW.USBank.com");
+        bank.title = Some(" U.S.\u{7} Bank ".into());
+        bank.aliases = vec![" US Bank".into(), String::new()];
+        bank.crawled_at = Some(40);
+        let mut munich = SiteRecord::new("münchen.de");
+        munich.title = Some("München".into());
+        munich.signals.harmonic_rank = Some(5_000);
+        let mut lines = fs::read(&path).unwrap();
+        for line in [
+            plumb_core::stored::line(&check).unwrap(),
+            plumb_core::stored::line(&bank).unwrap(),
+            plumb_core::stored::line(&SiteRecord::new("not a domain")).unwrap(),
+            plumb_core::stored::item_line(&munich).unwrap(),
+        ] {
+            lines.extend(line);
+            lines.extend(b"\n\n");
+        }
+        fs::write(&path, lines).unwrap();
+
+        let assert_same = |what: &str| {
+            let records = load_records(&path).unwrap();
+            let sites = load_sites(&path).unwrap();
+            assert_eq!(sites.len(), records.len(), "{what}");
+            for record in records.iter() {
+                let domain = &record.domain;
+                let site = sites.get(domain);
+                let site = site.unwrap_or_else(|| panic!("{what}: {domain} is missing"));
+                assert_eq!(site, &record.to_stored_item(), "{what}: {domain}");
+            }
+            (records, sites)
+        };
+        assert_same("the file");
+        // Each change, replayed from the journal.
+        let mut store = RecordStore::open(&path);
+        for (n, change) in changes.into_iter().enumerate() {
+            store.save(&[change]).unwrap();
+            assert_same(&format!("change {n}"));
+        }
+        let (records, sites) = assert_same("all changes");
+        assert!(sites.get("scholar.google.com").is_some());
+        assert!(site::crawl_marks(sites.get("quiet.net").unwrap())
+            .gone
+            .is_some());
+
+        // In the same order, and written back as the same lines.
+        let by_score: Vec<&str> = sites_by_link_score(&sites)
+            .iter()
+            .map(|site| site.id.as_str())
+            .collect();
+        let records_by_score: Vec<&SiteRecord> = sorted_by_link_score(&records);
+        let domains: Vec<&str> = records_by_score.iter().map(|r| r.domain.as_str()).collect();
+        assert_eq!(by_score, domains);
+        let owned: Vec<String> = sites
+            .clone()
+            .into_sorted_vec()
+            .into_iter()
+            .map(|site| site.id)
+            .collect();
+        assert_eq!(by_score, owned);
+        let copy = dir.path().join("copy.jsonl");
+        fs::write(
+            journal_path(&copy),
+            serde_json::to_string(&titled("old.com", "Old")).unwrap() + "\n",
+        )
+        .unwrap();
+        let written = replace_sites(&copy, sites_by_link_score(&sites)).unwrap();
+        assert_eq!(written, sites.len());
+        assert!(!journal_path(&copy).exists());
+        replace_records(&path, records_by_score).unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), fs::read(&path).unwrap());
     }
 }

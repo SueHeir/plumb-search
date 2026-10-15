@@ -53,7 +53,7 @@ flowchart LR
 | [node/news.rs](src/node/news.rs), [node/wanted_pages.rs](src/node/wanted_pages.rs) | Feed checks; following links toward the pages searches wanted |
 | [node/features.rs](src/node/features.rs), [node/backup.rs](src/node/backup.rs), [node/control.rs](src/node/control.rs), [node/journal.rs](src/node/journal.rs) | `features.json`; backups; the remote control token; the activity log |
 | **Records and crawling** | |
-| [records.rs](src/records.rs), [outline.rs](src/outline.rs) | `records.jsonl` and its journal; reading it a site at a time and building an index, buckets and feeds from each site's stored item that way |
+| [records.rs](src/records.rs), [outline.rs](src/outline.rs) | `records.jsonl` and its journal, loaded as records or as sites' stored items; reading it a site at a time and building an index, buckets and feeds from each site's stored item that way |
 | [crawl.rs](src/crawl.rs), [dead.rs](src/dead.rs), [icons.rs](src/icons.rs) | Which homepages a round fetches and how results merge (shared with `plumb-tools crawl`); dead sites; site icons |
 | [sets.rs](src/sets.rs), [site_rules.rs](src/site_rules.rs) | Checking and reading `plumb-format` sets; signed site rules |
 | **Search features** | |

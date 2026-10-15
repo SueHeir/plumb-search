@@ -58,8 +58,9 @@ use std::fmt;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use plumb_core::{now_unix, RecordSet, SiteRecord};
+use plumb_core::{now_unix, site, RecordSet, SiteRecord};
 use plumb_crawl::{to_records, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
+use plumb_format::Item;
 use tracing::{info, warn};
 
 use crate::records::{Change, RecordStore};
@@ -88,8 +89,8 @@ pub(crate) const OFFLINE_MIN_EXPECTED: usize = 20;
 pub(crate) const OFFLINE_FAILED_PERCENT: usize = 90;
 
 /// What choosing homepages to crawl reads of a site: a whole
-/// [`SiteRecord`], or the little a node keeps of each site during a crawl
-/// round (see `crate::node`).
+/// [`SiteRecord`] or its stored item ([`plumb_core::site`]), or the little
+/// a node keeps of each site during a crawl round (see `crate::node`).
 pub trait CrawlSite {
     /// The canonical domain.
     fn domain(&self) -> &str;
@@ -129,6 +130,38 @@ impl CrawlSite for SiteRecord {
 
     fn gone_at(&self) -> Option<u64> {
         self.gone_at
+    }
+}
+
+/// A site's stored item reads as its record does: its crawl marks are the
+/// item's `crawl` field ([`site::crawl_marks`]).
+impl CrawlSite for Item {
+    fn domain(&self) -> &str {
+        &self.id
+    }
+
+    fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    fn link_score(&self) -> f32 {
+        site::link_score(self)
+    }
+
+    fn crawled_at(&self) -> Option<u64> {
+        site::crawled(self)
+    }
+
+    fn crawl_attempted_at(&self) -> Option<u64> {
+        site::crawl_marks(self).tried
+    }
+
+    fn crawl_failures(&self) -> u32 {
+        site::crawl_marks(self).failures
+    }
+
+    fn gone_at(&self) -> Option<u64> {
+        site::crawl_marks(self).gone
     }
 }
 

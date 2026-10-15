@@ -39,6 +39,10 @@
 //! each record once ([`domains_where`]), and write the file again without
 //! them by copying the lines kept as the file holds them
 //! ([`replace_lines`]), never reading those as records.
+//!
+//! The tools that read a file a site at a time read each line as the
+//! site's stored item too ([`for_each_site`]), from a copy with the
+//! journal folded in ([`outline_copy`]) when there is one.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -481,6 +485,24 @@ pub fn for_each_record(path: &Path, mut each: impl FnMut(SiteRecord)) -> Result<
         let record = stored::read(line)
             .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
         each(record);
+    }
+    Ok(())
+}
+
+/// [`for_each_record`] of the sites' stored items: calls `each` with every
+/// site of the records file at `path`, in file order, read as its stored
+/// item ([`stored::read_item`]) as the file holds it, not cleaned, and
+/// without replaying the journal. Written back with
+/// [`stored::write_item`], a site makes the line its record makes, but for
+/// a crawl or redirect time past the year 9999, which no item holds.
+pub fn for_each_site(path: &Path, mut each: impl FnMut(Item)) -> Result<()> {
+    let mut lines = Lines::open(path)?;
+    let mut line_no = 0usize;
+    while let Some((_, line)) = lines.next()? {
+        line_no += 1;
+        let site = stored::read_item(line)
+            .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
+        each(site);
     }
     Ok(())
 }
@@ -1073,7 +1095,7 @@ fn write_lines(path: &Path, outlines: &[Outline]) -> Result<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use plumb_core::{write_jsonl, LinkText, Redirect};
 
     use super::*;
@@ -1138,7 +1160,7 @@ mod tests {
     }
 
     /// A records file and a journal that make every kind of change.
-    fn file_and_journal(path: &Path) -> Vec<Change> {
+    pub(crate) fn file_and_journal(path: &Path) -> Vec<Change> {
         let mut parent = record("google.com", 3);
         parent.add_alias("Google Scholar");
         parent.about = Some("search engine".into());
@@ -1530,6 +1552,48 @@ mod tests {
         let outlines = outline(&path).unwrap().unwrap();
         let read = read_all(&path, &outlines);
         assert_eq!(read, load_records(&path).unwrap().into_sorted_vec());
+    }
+
+    #[test]
+    fn a_site_at_a_time_is_each_line_s_record_as_its_stored_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
+        let item =
+            String::from_utf8(stored::item_line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        // Records not yet clean, under a domain not canonical, twice, and
+        // under one that is none; a stored item; a blank line.
+        let mut untidy = crawled("Cafe.COM", " Cafe\u{301}\u{7} ", 5);
+        untidy.url = Some("HTTPS://WWW.Cafe.com/index%2ehtml?".into());
+        untidy.aliases = vec![" Cafe".into(), String::new()];
+        untidy.crawl_failures = 2;
+        untidy.gone_at = Some(9);
+        let lines = [
+            line(&untidy),
+            line(&record("cafe.com", 1)),
+            String::new(),
+            item,
+            line(&record("not a domain", 2)),
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let mut records = Vec::new();
+        for_each_record(&path, |record| records.push(record)).unwrap();
+        let mut sites = Vec::new();
+        for_each_site(&path, |site| sites.push(site)).unwrap();
+        assert_eq!(sites.len(), 4);
+        for (site, record) in sites.iter().zip(&records) {
+            assert_eq!(site::domain(site), record.domain);
+            assert_eq!(site::link_score(site), record.link_score());
+            assert_eq!(site.title, record.title);
+            assert_eq!(site::crawl_marks(site).gone, record.gone_at);
+            assert_eq!(
+                stored::item_as_line(site).unwrap(),
+                stored::line(record).unwrap()
+            );
+        }
+        fs::write(&path, "{\"domain\":\"a.com\"}\nnot json\n").unwrap();
+        let err = for_each_site(&path, |_| {}).unwrap_err();
+        assert!(format!("{err:#}").contains("records.jsonl:2"), "{err:#}");
     }
 
     #[test]
