@@ -2,25 +2,39 @@
 
 use std::borrow::Cow;
 
+use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 use encoding_rs::{Encoding, UTF_8};
 
-/// How much of a page is searched for the charset it declares: browsers
-/// look in the first 1024 bytes.
+/// How much of a page is searched for the charset it declares. Browsers
+/// look in the first 1024 bytes, then take a `<meta charset>` they meet
+/// later in the `<head>` too: smbc.co.jp declares Shift_JIS at byte 1027,
+/// after a list of updates in comments.
+const HEAD_BYTES: usize = 64 * 1024;
+
+/// The start of a page, where a declaration counts even past the head.
 const PRESCAN_BYTES: usize = 1024;
 
 /// `body` as text. A page that is UTF-8 is read as UTF-8, whatever it
 /// says, so a server's wrong default (`charset=iso-8859-1`) does not
 /// garble it. Any other page is read in the charset its byte order mark,
-/// its `Content-Type` header (`content_type`) or the page itself declares
+/// its `Content-Type` header (`content_type`) or its head declares
 /// (`<meta charset>`, `<meta http-equiv>`, `<?xml encoding?>`), so a
 /// Shift_JIS, EUC-KR, GBK or windows-1252 page reads as written, not as
-/// `�`. Bytes that are not of the charset become `�`.
-pub(crate) fn decode<'a>(body: &'a [u8], content_type: Option<&str>) -> Cow<'a, str> {
+/// `�`; a page that declares none is read in the charset it looks to be
+/// in on its `host` ([`guessed`]). Bytes that are not of the charset
+/// become `�`.
+pub(crate) fn decode<'a>(
+    body: &'a [u8],
+    content_type: Option<&str>,
+    host: Option<&str>,
+) -> Cow<'a, str> {
     if let Some((encoding, bom)) = Encoding::for_bom(body) {
         return encoding.decode_without_bom_handling(&body[bom..]).0;
     }
     let utf8 = match std::str::from_utf8(body) {
-        Ok(_) => true,
+        // ISO-2022-JP is ASCII with escape sequences, so it passes for
+        // UTF-8 (comiket.co.jp).
+        Ok(_) => !(body.is_ascii() && body.contains(&0x1B)),
         // A page cut at the size limit can end inside a character.
         Err(err) => err.error_len().is_none(),
     };
@@ -29,14 +43,14 @@ pub(crate) fn decode<'a>(body: &'a [u8], content_type: Option<&str>) -> Cow<'a, 
     } else {
         content_type
             .and_then(|kind| charset_after(kind.as_bytes(), b"charset"))
-            .or_else(|| declared(&body[..body.len().min(PRESCAN_BYTES)]))
-            .unwrap_or(UTF_8)
+            .or_else(|| declared(&body[..body.len().min(HEAD_BYTES)]))
+            .unwrap_or_else(|| guessed(body, host))
     };
     encoding.decode_without_bom_handling(body).0
 }
 
-/// The charset the start of a page declares in a `<meta>` tag or in its
-/// XML declaration.
+/// The charset the start of a page declares in its XML declaration, or in
+/// a `<meta>` tag in its first 1024 bytes or anywhere in its `<head>`.
 fn declared(head: &[u8]) -> Option<&'static Encoding> {
     let lower = head.to_ascii_lowercase();
     if lower.starts_with(b"<?xml") {
@@ -45,7 +59,14 @@ fn declared(head: &[u8]) -> Option<&'static Encoding> {
             return Some(found);
         }
     }
-    let mut rest = lower.as_slice();
+    // The head ends at `</head>`, or at `<body>` when that is left out.
+    let end = [find(&lower, b"</head"), find(&lower, b"<body")]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(lower.len())
+        .max(lower.len().min(PRESCAN_BYTES));
+    let mut rest = &lower[..end];
     while let Some(at) = find(rest, b"<meta") {
         let tag = &rest[at..];
         let tag = &tag[..find(tag, b">").unwrap_or(tag.len())];
@@ -55,6 +76,31 @@ fn declared(head: &[u8]) -> Option<&'static Encoding> {
         rest = &rest[at + 5..];
     }
     None
+}
+
+/// The charset of a page on `host` that declares none: UTF-8 when more of
+/// its non-ASCII text is UTF-8 than not (a UTF-8 page with a stray byte or
+/// two), else the one Firefox would guess from its bytes and top-level
+/// domain.
+fn guessed(body: &[u8], host: Option<&str>) -> &'static Encoding {
+    let (mut utf8, mut not) = (0, 0);
+    for chunk in body.utf8_chunks() {
+        utf8 += chunk.valid().chars().filter(|c| !c.is_ascii()).count();
+        not += usize::from(!chunk.invalid().is_empty());
+    }
+    if utf8 > not {
+        return UTF_8;
+    }
+    let mut detector = EncodingDetector::new(Iso2022JpDetection::Allow);
+    detector.feed(body, true);
+    // The detector panics on a domain that is not lower-case ASCII.
+    let tld = host
+        .and_then(|host| host.trim_end_matches('.').rsplit('.').next())
+        .filter(|tld| {
+            tld.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        });
+    detector.guess(tld.map(str::as_bytes), Utf8Detection::Deny)
 }
 
 /// The encoding named after `name` and `=` in `text`, quoted or not:
@@ -101,18 +147,21 @@ mod tests {
     fn utf8_pages_stay_utf8_whatever_they_say() {
         let page = "<meta charset=\"iso-8859-1\"><title>Café 東京</title>".as_bytes();
         assert_eq!(
-            decode(page, None),
+            decode(page, None, None),
             "<meta charset=\"iso-8859-1\"><title>Café 東京</title>"
         );
         assert_eq!(
-            decode(page, Some("text/html; charset=ISO-8859-1")),
+            decode(page, Some("text/html; charset=ISO-8859-1"), None),
             "<meta charset=\"iso-8859-1\"><title>Café 東京</title>"
         );
         // Cut inside the last character.
         let cut = "<title>東京".as_bytes();
-        assert_eq!(decode(&cut[..cut.len() - 1], None), "<title>東\u{FFFD}");
         assert_eq!(
-            decode(b"\xEF\xBB\xBF<title>Caf\xC3\xA9</title>", None),
+            decode(&cut[..cut.len() - 1], None, None),
+            "<title>東\u{FFFD}"
+        );
+        assert_eq!(
+            decode(b"\xEF\xBB\xBF<title>Caf\xC3\xA9</title>", None, None),
             "<title>Café</title>"
         );
     }
@@ -125,7 +174,7 @@ mod tests {
             &title,
         ]
         .concat();
-        assert!(decode(&page, None).ends_with("<title>価格.com - 価格比較</title>"));
+        assert!(decode(&page, None, None).ends_with("<title>価格.com - 価格比較</title>"));
 
         let (title, _, _) = encoding_rs::EUC_KR.encode("<title>네이버 날씨</title>");
         let page = [
@@ -133,12 +182,12 @@ mod tests {
             &title,
         ]
         .concat();
-        assert!(decode(&page, None).ends_with("<title>네이버 날씨</title>"));
+        assert!(decode(&page, None, None).ends_with("<title>네이버 날씨</title>"));
 
         // The header comes first, and windows-1252 stands in for Latin-1.
         let page = b"<meta charset=\"gbk\"><title>Caf\xE9 M\xFCnchen</title>";
         assert_eq!(
-            decode(page, Some("text/html; charset=\"ISO-8859-1\"")),
+            decode(page, Some("text/html; charset=\"ISO-8859-1\""), None),
             "<meta charset=\"gbk\"><title>Café München</title>"
         );
 
@@ -148,33 +197,79 @@ mod tests {
             &feed,
         ]
         .concat();
-        assert!(decode(&page, None).ends_with("<rss><title>天气预报</title></rss>"));
+        assert!(decode(&page, None, None).ends_with("<rss><title>天气预报</title></rss>"));
+
+        // Past the first 1024 bytes, but still in the head.
+        let (title, _, _) = encoding_rs::SHIFT_JIS.encode("<title>三井住友銀行</title>");
+        let page = [
+            b"<!DOCTYPE html>".as_slice(),
+            &b"<!-- Updated -->".repeat(70),
+            b"<html><head><meta charset=\"Shift_JIS\">",
+            &title,
+        ]
+        .concat();
+        assert!(decode(&page, None, None).ends_with("<title>三井住友銀行</title>"));
+
+        let (title, _, _) = encoding_rs::ISO_2022_JP.encode("<title>コミックマーケット</title>");
+        assert_eq!(
+            decode(&title, Some("text/html; charset=iso-2022-jp"), None),
+            "<title>コミックマーケット</title>"
+        );
     }
 
     #[test]
-    fn undeclared_or_unusable_charsets_stay_lossy_utf8() {
+    fn undeclared_charsets_are_guessed() {
         assert_eq!(
-            decode(b"<title>Caf\xE9</title>", None),
-            "<title>Caf\u{FFFD}</title>"
+            decode(b"<title>Caf\xE9 M\xFCnchen</title>", None, None),
+            "<title>Café München</title>"
         );
+        let (page, _, _) =
+            encoding_rs::SHIFT_JIS.encode("<title>サービス一覧 | 三井住友銀行</title>");
         assert_eq!(
-            decode(b"<meta charset=utf-16><title>Caf\xE9</title>", None),
-            "<meta charset=utf-16><title>Caf\u{FFFD}</title>"
+            decode(&page, None, None),
+            "<title>サービス一覧 | 三井住友銀行</title>"
         );
+        let (page, _, _) = encoding_rs::ISO_2022_JP.encode("<title>コミックマーケット</title>");
         assert_eq!(
-            decode(b"<meta charset=iso-2022-kr><title>Caf\xE9</title>", None),
-            "<meta charset=iso-2022-kr><title>Caf\u{FFFD}</title>"
+            decode(&page, None, None),
+            "<title>コミックマーケット</title>"
         );
+        // Too little text to tell from, so the site's country decides.
         assert_eq!(
-            decode(b"<meta charset=klingon><title>Caf\xE9</title>", None),
-            "<meta charset=klingon><title>Caf\u{FFFD}</title>"
+            decode(
+                b"<title>\x93]\x91\x97</title>",
+                None,
+                Some("www.broadcasting.co.jp")
+            ),
+            "<title>転送</title>"
         );
-        // Only the start of the page counts, as in browsers.
+        // A charset this cannot read counts as none.
+        for meta in ["utf-16", "iso-2022-kr", "klingon"] {
+            let page = format!("<meta charset={meta}><title>Caf\u{E9}</title>");
+            let (page, _, _) = encoding_rs::WINDOWS_1252.encode(&page);
+            assert!(
+                decode(&page, None, None).ends_with("<title>Café</title>"),
+                "{meta}"
+            );
+        }
+        // A meta tag past the head declares nothing.
+        let (text, _, _) = encoding_rs::SHIFT_JIS.encode("<p>サービス一覧 | 三井住友銀行</p>");
         let late = [
-            vec![b' '; PRESCAN_BYTES],
-            b"<meta charset=\"windows-1252\"><title>Caf\xE9</title>".to_vec(),
+            b"<head></head><body>".as_slice(),
+            &[b' '; PRESCAN_BYTES],
+            b"<meta charset=\"windows-1252\">",
+            &text,
         ]
         .concat();
-        assert!(decode(&late, None).ends_with("Caf\u{FFFD}</title>"));
+        assert!(decode(&late, None, None).ends_with("<p>サービス一覧 | 三井住友銀行</p>"));
+        // A UTF-8 page with a stray byte stays UTF-8.
+        assert_eq!(
+            decode(
+                &["<title>Café 東京</title>".as_bytes(), b"\xE9"].concat(),
+                None,
+                None
+            ),
+            "<title>Café 東京</title>\u{FFFD}"
+        );
     }
 }

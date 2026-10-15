@@ -731,6 +731,11 @@ impl<'a> Page<'a> {
             return;
         };
         let own = self.own_domain.as_deref() == Some(target_domain.as_str());
+        // A host under no top-level domain there is is a broken link, not a
+        // site: `href=//index_.shtml`, `https://example.comprivacy_policy`.
+        if !own && !psl::suffix(target_domain.as_bytes()).is_some_and(|tld| tld.is_known()) {
+            return;
+        }
         let full = if own {
             self.own_links.len() >= MAX_OWN_LINKS
         } else {
@@ -1551,7 +1556,7 @@ mod tests {
                         In </a>
                     <a href="/us/webapps/mpp/account-selection">Sign Up</a></header>
                 <main><a href="/us/cshelp/personal">Help</a>
-                    <a href="https://paypal-login.example/">Log in here</a>
+                    <a href="https://paypal-login.example.com/">Log in here</a>
                     <a href="/story">Read how millions of people pay with PayPal every day</a></main>
                 <footer><a href="/us/smarthelp/contact-us">Contact</a></footer>
             </body></html>"##,
@@ -1838,6 +1843,9 @@ mod tests {
             <a href="http://192.168.1.1/">router</a>
             <a href="http://intranet/">intranet</a>
             <a href="https://xn--bcher-kva.de/">Bücher</a>
+            <a href="https://xn--80aswg.xn--p1ai/">сайт</a>
+            <a href=//index_.shtml>index</a>
+            <a href="https://example.comprivacy_policy">Privacy</a>
             "#,
         );
         assert_eq!(
@@ -1846,6 +1854,11 @@ mod tests {
                 link("https://www.partner.org/Path", "partner.org", "partner"),
                 link("https://news.bbc.co.uk/", "bbc.co.uk", "bbc news"),
                 link("https://xn--bcher-kva.de/", "xn--bcher-kva.de", "bücher"),
+                link(
+                    "https://xn--80aswg.xn--p1ai/",
+                    "xn--80aswg.xn--p1ai",
+                    "сайт"
+                ),
             ]
         );
     }

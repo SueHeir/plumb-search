@@ -200,7 +200,7 @@ impl PageReader {
             }
             body.extend_from_slice(&chunk);
         }
-        let body = crate::charset::decode(&body, content_type.as_deref());
+        let body = crate::charset::decode(&body, content_type.as_deref(), final_url.host_str());
         let mut page = if html {
             page_text(&final_url, &body)
         } else {

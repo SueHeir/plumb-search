@@ -381,7 +381,7 @@ async fn check_feed(client: &Client, cfg: &CrawlConfig, target: &FeedTarget) -> 
         };
         let (domain, base) = (domain.clone(), url.clone());
         let read = tokio::task::spawn_blocking(move || {
-            let text = crate::charset::decode(&body, kind.as_deref());
+            let text = crate::charset::decode(&body, kind.as_deref(), base.host_str());
             crate::read_feed(&domain, &base, &text, now_unix())
         })
         .await;
@@ -895,7 +895,7 @@ impl<'a> Visit<'a> {
         let base_url = final_url.clone();
         let extraction = self.extraction;
         let parsed = tokio::task::spawn_blocking(move || {
-            let text = crate::charset::decode(&body, kind.as_deref());
+            let text = crate::charset::decode(&body, kind.as_deref(), base_url.host_str());
             crate::extract_inner_page_meta(&base_url, &text, extraction)
         })
         .await;
