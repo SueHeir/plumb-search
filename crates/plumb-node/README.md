@@ -242,6 +242,7 @@ cargo test -p plumb-node
 - [src/web/tests/](src/web/tests/mod.rs), [src/mcp/tests/](src/mcp/tests.rs): pages, the JSON API and the MCP tools, driven through the router.
 - [tests/end_to_end.rs](tests/end_to_end.rs): runs the `plumb` binary over [fixtures/](../../fixtures) and drives the router with `tower`.
 - Private search with its script built in: `PLUMB_PRIVATE_DIR=../../target/private cargo test -p plumb-node private`, after building it as [CONTRIBUTING.md](../../CONTRIBUTING.md) says.
+- `a_build_of_the_golden_sites_makes_the_golden_buckets_and_feeds` ([outline.rs](src/outline.rs)) builds plumb-index's golden sites from a records file and checks the buckets and feeds against [outline_golden.txt](src/outline_golden.txt), written once and never to make a test pass.
 - `exact_fold_rename_failure_preserves_inputs_and_charges_leftover_output` ([records.rs](src/records.rs)) fails when run as root.
 - `cargo test -p plumb-tools --test conventions` counts what the rules above ask node code to avoid.
 - `cargo run -p plumb-node --example ui_preview` shows the web pages with made-up results and no crawler.

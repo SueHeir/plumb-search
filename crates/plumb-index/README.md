@@ -189,5 +189,6 @@ cargo test -p plumb-index
 | [src/places/tests.rs](src/places/tests.rs) | the places index and place queries |
 | [learned.rs](src/learned.rs), [health.rs](src/health.rs) | tests in the module |
 | [tests/fixtures/short-docs.tsv](tests/fixtures/short-docs.tsv) | a small docs page set, also used by plumb-node's tests |
+| [src/tests/golden.rs](src/tests/golden.rs), [golden.txt](src/tests/golden.txt) | the golden file: each site's document, spelling texts and bucket keys for a fixed set of sites, written once and checked by every build since; plumb-node checks its build's buckets of the same sites |
 
 Most tests build a small index from records written in the test, search it and check the order. [examples/boilerplate_retrieval.rs](examples/boilerplate_retrieval.rs) compares retrieval on probe pages without embeddings: it takes a queries JSON file as its argument and the probe JSONL on standard input.

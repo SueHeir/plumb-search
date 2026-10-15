@@ -1347,6 +1347,98 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), clean);
     }
 
+    /// Checks `text` against the golden file at `path`, or writes it there
+    /// when `PLUMB_WRITE_GOLDEN` is set, as plumb-index's golden test does.
+    fn check_golden(path: &Path, text: &str) {
+        if std::env::var_os("PLUMB_WRITE_GOLDEN").is_some() {
+            fs::write(path, text).unwrap();
+            return;
+        }
+        let golden = fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        let (mut want, mut got) = (golden.lines(), text.lines());
+        for n in 1.. {
+            match (want.next(), got.next()) {
+                (None, None) => break,
+                (want, got) if want == got => continue,
+                (want, got) => panic!(
+                    "{}:{n} differs\n  golden: {}\n  now:    {}",
+                    path.display(),
+                    want.unwrap_or("(the end)"),
+                    got.unwrap_or("(the end)")
+                ),
+            }
+        }
+    }
+
+    /// What a node's build of the sites of plumb-index's golden file makes
+    /// beside the index, against `outline_golden.txt` next to this file:
+    /// the buckets other nodes take, byte for byte, and the feeds watched;
+    /// and a bucket table of the same sites built in memory
+    /// ([`plumb_net::BucketTable::build`]). Written once by the build that
+    /// read records, before it moved onto items; never written again to
+    /// make a test pass (see plumb-index's `tests/golden.rs`).
+    #[test]
+    fn a_build_of_the_golden_sites_makes_the_golden_buckets_and_feeds() {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write as _;
+
+        let golden = include_str!("../../plumb-index/src/tests/golden.txt");
+        let lines: Vec<&str> = golden
+            .lines()
+            .filter_map(|line| line.strip_prefix("line "))
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let outlines = outline(&path).unwrap().unwrap();
+        assert_eq!(outlines.len(), lines.len());
+        let buckets = dir.path().join("buckets");
+        let built = build_index(
+            &path,
+            outlines,
+            &dir.path().join("index"),
+            Some(&buckets),
+            1_000,
+            None,
+            None,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert!(built.buckets);
+        let table = dir.path().join("table");
+        let records: Vec<SiteRecord> = lines
+            .iter()
+            .map(|line| stored::read(line.as_bytes()).unwrap())
+            .collect();
+        plumb_net::BucketTable::build(&table, &records).unwrap();
+
+        let mut text = String::from(
+            "# What a node's build makes of the sites of plumb-index's golden file\n\
+             # (crates/plumb-index/src/tests/golden.txt) beside the index: the size\n\
+             # and SHA-256 of each file of its buckets and of a bucket table of the\n\
+             # same sites built in memory, and the feeds it watches. Written by\n\
+             # `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-node --lib golden`; see\n\
+             # plumb-index's tests/golden.rs before writing it again.\n",
+        );
+        writeln!(text, "docs {}", built.docs).unwrap();
+        for (name, dir) in [("buckets", &buckets), ("table", &table)] {
+            for file in ["records.dat", "records.idx", "buckets.idx", "buckets.dat"] {
+                let bytes = fs::read(dir.join(file)).unwrap();
+                let hash: String = Sha256::digest(&bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                writeln!(text, "{name} {file} {} bytes {hash}", bytes.len()).unwrap();
+            }
+        }
+        for feed in &built.feeds {
+            writeln!(text, "feed {}", serde_json::to_string(feed).unwrap()).unwrap();
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/outline_golden.txt");
+        check_golden(&path, &text);
+    }
+
     #[test]
     fn a_build_reads_records_clean_as_loading_makes_them() {
         let dir = tempfile::tempdir().unwrap();

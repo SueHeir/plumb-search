@@ -1,0 +1,3672 @@
+# What the site index makes of the sites of golden.rs: for each, the
+# line a records file holds, the names of the sites redirecting to it,
+# its document's values in the order they are added (a value added
+# several times in a row once, with how many times), the texts the
+# spelling model counts and its bucket keys. Written by
+# `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-index golden`; see
+# golden.rs before writing it again.
+
+site usbank.com
+line {"domain":"usbank.com","url":"https://www.usbank.com/","title":"U.S. Bank | Personal Banking, Credit Cards, Home Loans & More","description":"Discover U.S. Bank: checking and savings accounts, credit cards, mortgages, auto loans and investing.","link_texts":[{"text":"us bank","count":1200},{"text":"usbank","count":300},{"text":"us bank login","count":40},{"text":"online banking","count":25}],"aliases":["U.S. Bank","U.S. Bancorp"],"signals":{"tranco_rank":950,"linking_domains":42000,"official_site":true}}
+doc domain "usbank.com"
+doc url "https://www.usbank.com/"
+doc label "usbank"
+doc label_key "usbank"
+doc joined "usbank"
+doc joined "U.S. Bank | Personal Banking, Credit Cards, Home Loans & More"
+doc joined "U.S. Bank"
+doc joined "Personal Banking, Credit Cards, Home Loans & More"
+doc title "U.S. Bank | Personal Banking, Credit Cards, Home Loans & More"
+doc description "Discover U.S. Bank: checking and savings accounts, credit cards, mortgages, auto loans and investing."
+doc aliases "U.S. Bank"
+doc joined "U.S. Bank"
+doc alias_key "U.S. Bank"
+doc label_key "U.S. Bank"
+doc aliases "U.S. Bancorp"
+doc joined "U.S. Bancorp"
+doc alias_key "U.S. Bancorp"
+doc label_key "U.S. Bancorp"
+doc anchors "us bank" x5
+doc joined "us bank"
+doc link_name_key "us bank" x64
+doc anchors "usbank" x5
+doc joined "usbank"
+doc link_name_key "usbank" x64
+doc anchors "us bank login" x5
+doc joined "us bank login"
+doc anchors "online banking" x4
+doc joined "online banking"
+doc link_score 0.8520011901855469
+doc adult 0
+spelling "usbank"
+spelling "U.S. Bank"
+spelling "U.S. Bancorp"
+spelling "U.S. Bank"
+spelling "Personal Banking, Credit Cards, Home Loans & More"
+spelling "us bank"
+spelling "usbank"
+spelling "us bank login"
+spelling "online banking"
+key "bancorp"
+key "bank"
+key "banking"
+key "cards"
+key "credit"
+key "home"
+key "loans"
+key "login"
+key "more"
+key "online"
+key "onlinebanking"
+key "personal"
+key "personalbankingcreditcardshomeloansmore"
+key "us"
+key "usbancorp"
+key "usbank"
+key "usbanklogin"
+key "usbankpersonalbankingcreditcardshomeloansmore"
+
+site usbank-login-help.com
+line {"domain":"usbank-login-help.com","title":"US Bank Login Help","description":"Step by step help with your US Bank login and US Bank online banking.","signals":{}}
+doc domain "usbank-login-help.com"
+doc label "usbank-login-help"
+doc label "usbankloginhelp"
+doc label_key "usbank-login-help"
+doc joined "usbank-login-help"
+doc joined "US Bank Login Help"
+doc title "US Bank Login Help"
+doc description "Step by step help with your US Bank login and US Bank online banking."
+doc link_score 0.0
+doc language "~en"
+doc adult 0
+spelling "usbank-login-help"
+spelling "US Bank Login Help"
+key "bank"
+key "help"
+key "login"
+key "us"
+key "usbank"
+key "usbankloginhelp"
+
+site usbankreviews.net
+line {"domain":"usbankreviews.net","title":"US Bank Reviews - Is US Bank Good?","description":"Customer reviews of US Bank checking, savings and US Bank credit cards.","link_texts":[{"text":"us bank reviews","count":3}],"aliases":["US Bank Reviews"],"signals":{"harmonic_rank":9000000,"linking_domains":3}}
+doc domain "usbankreviews.net"
+doc label "usbankreviews"
+doc label_key "usbankreviews"
+doc joined "usbankreviews"
+doc joined "US Bank Reviews - Is US Bank Good?"
+doc joined "US Bank Reviews"
+doc joined "Is US Bank Good?"
+doc title "US Bank Reviews - Is US Bank Good?"
+doc description "Customer reviews of US Bank checking, savings and US Bank credit cards."
+doc aliases "US Bank Reviews"
+doc joined "US Bank Reviews"
+doc alias_key "US Bank Reviews"
+doc anchors "us bank reviews" x2
+doc joined "us bank reviews"
+doc link_name_key "us bank reviews" x3
+doc link_score 0.12814274430274963
+doc adult 0
+spelling "usbankreviews"
+spelling "US Bank Reviews"
+spelling "US Bank Reviews"
+spelling "Is US Bank Good?"
+spelling "us bank reviews"
+key "bank"
+key "good"
+key "is"
+key "isusbankgood"
+key "reviews"
+key "us"
+key "usbankreviews"
+key "usbankreviewsisusbankgood"
+
+site bankofamerica.com
+line {"domain":"bankofamerica.com","url":"https://www.bankofamerica.com/","title":"Bank of America - Banking, Credit Cards, Loans and Merrill Investing","description":"What would you like the power to do? At Bank of America, our purpose is to help make financial lives better.","link_texts":[{"text":"bank of america","count":2500},{"text":"bofa","count":300},{"text":"bankofamerica com","count":120},{"text":"online banking","count":80}],"aliases":["Bank of America"],"signals":{"tranco_rank":310,"linking_domains":88000,"official_site":true}}
+doc domain "bankofamerica.com"
+doc url "https://www.bankofamerica.com/"
+doc label "bankofamerica"
+doc label_key "bankofamerica"
+doc joined "bankofamerica"
+doc joined "Bank of America - Banking, Credit Cards, Loans and Merrill Investing"
+doc joined "Bank of America"
+doc joined "Banking, Credit Cards, Loans and Merrill Investing"
+doc title "Bank of America - Banking, Credit Cards, Loans and Merrill Investing"
+doc description "What would you like the power to do? At Bank of America, our purpose is to help make financial lives better."
+doc aliases "Bank of America"
+doc joined "Bank of America"
+doc alias_key "Bank of America"
+doc label_key "Bank of America"
+doc anchors "bank of america" x5
+doc joined "bank of america"
+doc link_name_key "bank of america" x64
+doc anchors "bofa" x5
+doc joined "bofa"
+doc link_name_key "bofa" x64
+doc anchors "bankofamerica com" x5
+doc joined "bankofamerica com"
+doc anchors "online banking" x5
+doc joined "online banking"
+doc link_score 0.9136590361595154
+doc language "~en"
+doc adult 0
+spelling "bankofamerica"
+spelling "Bank of America"
+spelling "Bank of America"
+spelling "Banking, Credit Cards, Loans and Merrill Investing"
+spelling "bank of america"
+spelling "bofa"
+spelling "bankofamerica com"
+spelling "online banking"
+key "america"
+key "and"
+key "bank"
+key "banking"
+key "bankingcreditcardsloansandmerrillinvesting"
+key "bankofamerica"
+key "bankofamericabankingcreditcardsloansandmerrillinvesting"
+key "bankofamericacom"
+key "bofa"
+key "cards"
+key "com"
+key "credit"
+key "investing"
+key "loans"
+key "merrill"
+key "of"
+key "online"
+key "onlinebanking"
+
+site americabank.com
+line {"domain":"americabank.com","title":"America Bank | Community Banking in Texas","description":"America Bank offers personal and business banking.","link_texts":[{"text":"america bank","count":6}],"signals":{"harmonic_rank":4500000,"linking_domains":12}}
+doc domain "americabank.com"
+doc label "americabank"
+doc label_key "americabank"
+doc joined "americabank"
+doc joined "America Bank | Community Banking in Texas"
+doc joined "America Bank"
+doc joined "Community Banking in Texas"
+doc title "America Bank | Community Banking in Texas"
+doc description "America Bank offers personal and business banking."
+doc anchors "america bank" x3
+doc joined "america bank"
+doc link_name_key "america bank" x6
+doc link_score 0.18195845186710358
+doc adult 0
+spelling "americabank"
+spelling "America Bank"
+spelling "Community Banking in Texas"
+spelling "america bank"
+key "america"
+key "americabank"
+key "americabankcommunitybankingintexas"
+key "bank"
+key "banking"
+key "community"
+key "communitybankingintexas"
+key "in"
+key "texas"
+
+site bankofamerica-fraud-alerts.com
+line {"domain":"bankofamerica-fraud-alerts.com","title":"Bank of America Fraud Alerts","description":"Report Bank of America phishing and fraud. Bank of America alerts.","signals":{}}
+doc domain "bankofamerica-fraud-alerts.com"
+doc label "bankofamerica-fraud-alerts"
+doc label "bankofamericafraudalerts"
+doc label_key "bankofamerica-fraud-alerts"
+doc joined "bankofamerica-fraud-alerts"
+doc joined "Bank of America Fraud Alerts"
+doc title "Bank of America Fraud Alerts"
+doc description "Report Bank of America phishing and fraud. Bank of America alerts."
+doc link_score 0.0
+doc adult 0
+spelling "bankofamerica-fraud-alerts"
+spelling "Bank of America Fraud Alerts"
+key "alerts"
+key "america"
+key "bank"
+key "bankofamerica"
+key "bankofamericafraudalerts"
+key "fraud"
+key "of"
+
+site chase.com
+line {"domain":"chase.com","title":"Chase Bank - Credit Cards, Mortgages, Commercial Banking, Auto Loans","link_texts":[{"text":"chase","count":3000},{"text":"chase bank","count":900}],"aliases":["Chase"],"signals":{"tranco_rank":120,"linking_domains":120000,"official_site":true}}
+doc domain "chase.com"
+doc label "chase"
+doc label_key "chase"
+doc joined "chase"
+doc joined "Chase Bank - Credit Cards, Mortgages, Commercial Banking, Auto Loans"
+doc joined "Chase Bank"
+doc joined "Credit Cards, Mortgages, Commercial Banking, Auto Loans"
+doc title "Chase Bank - Credit Cards, Mortgages, Commercial Banking, Auto Loans"
+doc aliases "Chase"
+doc joined "Chase"
+doc alias_key "Chase"
+doc label_key "Chase"
+doc anchors "chase" x5
+doc joined "chase"
+doc link_name_key "chase" x64
+doc anchors "chase bank" x5
+doc joined "chase bank"
+doc link_name_key "chase bank" x64
+doc link_score 0.9550767540931702
+doc adult 0
+spelling "chase"
+spelling "Chase"
+spelling "Chase Bank"
+spelling "Credit Cards, Mortgages, Commercial Banking, Auto Loans"
+spelling "chase"
+spelling "chase bank"
+key "auto"
+key "bank"
+key "banking"
+key "cards"
+key "chase"
+key "chasebank"
+key "chasebankcreditcardsmortgagescommercialbankingautoloans"
+key "commercial"
+key "credit"
+key "creditcardsmortgagescommercialbankingautoloans"
+key "loans"
+key "mortgages"
+
+site ally.com
+line {"domain":"ally.com","title":"Ally Bank | Online Banking, Savings, Auto Loans & Investing","link_texts":[{"text":"ally bank","count":600},{"text":"ally","count":400}],"aliases":["Ally Bank","Ally Financial"],"signals":{"tranco_rank":2500,"linking_domains":30000,"official_site":true}}
+doc domain "ally.com"
+doc label "ally"
+doc label_key "ally"
+doc joined "ally"
+doc joined "Ally Bank | Online Banking, Savings, Auto Loans & Investing"
+doc joined "Ally Bank"
+doc joined "Online Banking, Savings, Auto Loans & Investing"
+doc title "Ally Bank | Online Banking, Savings, Auto Loans & Investing"
+doc aliases "Ally Bank"
+doc joined "Ally Bank"
+doc alias_key "Ally Bank"
+doc label_key "Ally Bank"
+doc aliases "Ally Financial"
+doc joined "Ally Financial"
+doc alias_key "Ally Financial"
+doc label_key "Ally Financial"
+doc anchors "ally bank" x5
+doc joined "ally bank"
+doc link_name_key "ally bank" x64
+doc anchors "ally" x5
+doc joined "ally"
+doc link_name_key "ally" x64
+doc link_score 0.805299699306488
+doc adult 0
+spelling "ally"
+spelling "Ally Bank"
+spelling "Ally Financial"
+spelling "Ally Bank"
+spelling "Online Banking, Savings, Auto Loans & Investing"
+spelling "ally bank"
+spelling "ally"
+key "ally"
+key "allybank"
+key "allybankonlinebankingsavingsautoloansinvesting"
+key "allyfinancial"
+key "auto"
+key "bank"
+key "banking"
+key "financial"
+key "investing"
+key "loans"
+key "online"
+key "onlinebankingsavingsautoloansinvesting"
+key "savings"
+
+site allybank.com
+line {"domain":"allybank.com","url":"https://www.ally.com/","signals":{"harmonic_rank":2000000,"linking_domains":4}}
+doc domain "allybank.com"
+doc label "allybank"
+doc label_key "allybank"
+doc joined "allybank"
+doc link_score 0.19422690570354462
+doc adult 0
+spelling "allybank"
+key "allybank"
+
+site nestle.com
+line {"domain":"nestle.com","title":"Nestlé Global","description":"Good food, good life.","link_texts":[{"text":"nestlé","count":400},{"text":"nestle","count":150}],"aliases":["Nestlé"],"signals":{"tranco_rank":4000,"linking_domains":15000,"official_site":true}}
+doc domain "nestle.com"
+doc label "nestle"
+doc label_key "nestle"
+doc joined "nestle"
+doc joined "Nestlé Global"
+doc title "Nestlé Global"
+doc description "Good food, good life."
+doc aliases "Nestlé"
+doc joined "Nestlé"
+doc alias_key "Nestlé"
+doc label_key "Nestlé"
+doc anchors "nestlé" x5
+doc joined "nestlé"
+doc link_name_key "nestlé" x64
+doc anchors "nestle" x5
+doc joined "nestle"
+doc link_name_key "nestle" x64
+doc link_score 0.7711126804351807
+doc adult 0
+spelling "nestle"
+spelling "Nestlé"
+spelling "Nestlé Global"
+spelling "nestlé"
+spelling "nestle"
+key "global"
+key "nestle"
+key "nestlé"
+key "nestléglobal"
+
+site acme.com
+line {"domain":"acme.com","title":"Acme Corporation","signals":{"harmonic_rank":20000,"linking_domains":2000}}
+doc domain "acme.com"
+doc label "acme"
+doc label_key "acme"
+doc joined "acme"
+doc joined "Acme Corporation"
+doc title "Acme Corporation"
+doc link_score 0.5118406414985657
+doc adult 0
+spelling "acme"
+spelling "Acme Corporation"
+key "acme"
+key "acmecorporation"
+key "corporation"
+
+site acme.net
+line {"domain":"acme.net","title":"Acme Corporation","signals":{"harmonic_rank":900000,"linking_domains":20}}
+doc domain "acme.net"
+doc label "acme"
+doc label_key "acme"
+doc joined "acme"
+doc joined "Acme Corporation"
+doc title "Acme Corporation"
+doc link_score 0.2579006850719452
+doc adult 0
+spelling "acme"
+spelling "Acme Corporation"
+key "acme"
+key "acmecorporation"
+key "corporation"
+
+site wikipedia.org
+line {"domain":"wikipedia.org","title":"Wikipedia, the free encyclopedia","link_texts":[{"text":"wikipedia","count":9000}],"aliases":["Wikipedia"],"signals":{"tranco_rank":10,"linking_domains":1000000,"official_site":true}}
+doc domain "wikipedia.org"
+doc label "wikipedia"
+doc label_key "wikipedia"
+doc joined "wikipedia"
+doc joined "Wikipedia, the free encyclopedia"
+doc title "Wikipedia, the free encyclopedia"
+doc aliases "Wikipedia"
+doc joined "Wikipedia"
+doc alias_key "Wikipedia"
+doc label_key "Wikipedia"
+doc anchors "wikipedia" x5
+doc joined "wikipedia"
+doc link_name_key "wikipedia" x64
+doc link_score 1.0
+doc adult 0
+spelling "wikipedia"
+spelling "Wikipedia"
+spelling "Wikipedia, the free encyclopedia"
+spelling "wikipedia"
+key "encyclopedia"
+key "free"
+key "the"
+key "wikipedia"
+key "wikipediathefreeencyclopedia"
+
+site xn--bcher-kva.de
+line {"domain":"xn--bcher-kva.de","title":"Bücher online kaufen","signals":{"harmonic_rank":300000,"linking_domains":40}}
+doc domain "xn--bcher-kva.de"
+doc label "bücher"
+doc label_key "bücher"
+doc joined "bücher"
+doc joined "Bücher online kaufen"
+doc title "Bücher online kaufen"
+doc link_score 0.3171589970588684
+doc country "DE"
+doc adult 0
+spelling "bücher"
+spelling "Bücher online kaufen"
+key "bcher"
+key "bücher"
+key "bücheronlinekaufen"
+key "kaufen"
+key "kva"
+key "online"
+key "xn"
+key "xnbcherkva"
+
+site wsj.com
+line {"domain":"wsj.com","aliases":["The Wall Street Journal"],"signals":{"tranco_rank":300,"linking_domains":40000,"official_site":true}}
+doc domain "wsj.com"
+doc label "wsj"
+doc label_key "wsj"
+doc joined "wsj"
+doc joined "The Wall Street Journal"
+doc title "The Wall Street Journal"
+doc aliases "The Wall Street Journal"
+doc joined "The Wall Street Journal"
+doc alias_key "The Wall Street Journal"
+doc label_key "The Wall Street Journal"
+doc alias_key "wall street journal"
+doc label_key "wall street journal"
+doc joined "wall street journal"
+doc link_score 0.8978732228279114
+doc adult 0
+spelling "wsj"
+spelling "The Wall Street Journal"
+key "journal"
+key "street"
+key "the"
+key "thewallstreetjournal"
+key "wall"
+key "wsj"
+
+site wall.org
+line {"domain":"wall.org","signals":{"tranco_rank":20000,"linking_domains":900}}
+doc domain "wall.org"
+doc label "wall"
+doc label_key "wall"
+doc joined "wall"
+doc link_score 0.4945145547389984
+doc adult 0
+spelling "wall"
+key "wall"
+
+site wallstreet.com
+line {"domain":"wallstreet.com","signals":{"tranco_rank":90000,"linking_domains":200}}
+doc domain "wallstreet.com"
+doc label "wallstreet"
+doc label_key "wallstreet"
+doc joined "wallstreet"
+doc link_score 0.4006994664669037
+doc adult 0
+spelling "wallstreet"
+key "wallstreet"
+
+site nytimes.com
+line {"domain":"nytimes.com","aliases":["The New York Times"],"signals":{"tranco_rank":80,"linking_domains":90000,"official_site":true}}
+doc domain "nytimes.com"
+doc label "nytimes"
+doc label_key "nytimes"
+doc joined "nytimes"
+doc joined "The New York Times"
+doc title "The New York Times"
+doc aliases "The New York Times"
+doc joined "The New York Times"
+doc alias_key "The New York Times"
+doc label_key "The New York Times"
+doc alias_key "new york times"
+doc label_key "new york times"
+doc joined "new york times"
+doc link_score 0.969297468662262
+doc adult 0
+spelling "nytimes"
+spelling "The New York Times"
+key "new"
+key "nytimes"
+key "the"
+key "thenewyorktimes"
+key "times"
+key "york"
+
+site newyorktimes.com
+line {"domain":"newyorktimes.com","title":"New York Times | New York Times News","description":"New York Times news from New York.","signals":{"tranco_rank":197000,"linking_domains":40}}
+doc domain "newyorktimes.com"
+doc label "newyorktimes"
+doc label_key "newyorktimes"
+doc joined "newyorktimes"
+doc joined "New York Times | New York Times News"
+doc joined "New York Times"
+doc joined "New York Times News"
+doc title "New York Times | New York Times News"
+doc description "New York Times news from New York."
+doc link_score 0.33428290486335754
+doc adult 0
+spelling "newyorktimes"
+spelling "New York Times"
+spelling "New York Times News"
+key "new"
+key "news"
+key "newyorktimes"
+key "newyorktimesnews"
+key "newyorktimesnewyorktimesnews"
+key "times"
+key "york"
+
+site aa.com
+line {"domain":"aa.com","aliases":["American Airlines"],"signals":{"tranco_rank":900,"linking_domains":12000,"official_site":true}}
+doc domain "aa.com"
+doc label "aa"
+doc label_key "aa"
+doc joined "aa"
+doc joined "American Airlines"
+doc title "American Airlines"
+doc aliases "American Airlines"
+doc joined "American Airlines"
+doc alias_key "American Airlines"
+doc label_key "American Airlines"
+doc link_score 0.8270004391670227
+doc adult 0
+spelling "aa"
+spelling "American Airlines"
+key "aa"
+key "airlines"
+key "american"
+key "americanairlines"
+
+site americanairlines.com
+line {"domain":"americanairlines.com","title":"American Airlines | American Airlines flights","signals":{"tranco_rank":506000,"linking_domains":20}}
+doc domain "americanairlines.com"
+doc label "americanairlines"
+doc label_key "americanairlines"
+doc joined "americanairlines"
+doc joined "American Airlines | American Airlines flights"
+doc joined "American Airlines"
+doc joined "American Airlines flights"
+doc title "American Airlines | American Airlines flights"
+doc link_score 0.28134679794311523
+doc adult 0
+spelling "americanairlines"
+spelling "American Airlines"
+spelling "American Airlines flights"
+key "airlines"
+key "american"
+key "americanairlines"
+key "americanairlinesamericanairlinesflights"
+key "americanairlinesflights"
+key "flights"
+
+site americanairlines.fr
+line {"domain":"americanairlines.fr","signals":{"tranco_rank":60000,"linking_domains":300}}
+doc domain "americanairlines.fr"
+doc label "americanairlines"
+doc label_key "americanairlines"
+doc joined "americanairlines"
+doc link_score 0.42597654461860657
+doc country "FR"
+doc adult 0
+spelling "americanairlines"
+key "americanairlines"
+
+site irs.gov
+line {"domain":"irs.gov","title":"Internal Revenue Service (IRS) | An official website of the United States government","description":"Find tax forms, check your refund status, make a payment and get answers to your tax questions.","link_texts":[{"text":"irs","count":2}],"aliases":["IRS","Internal Revenue Service"],"signals":{"tranco_rank":410,"linking_domains":3,"official_site":true}}
+doc domain "irs.gov"
+doc label "irs"
+doc label_key "irs"
+doc joined "irs"
+doc joined "Internal Revenue Service (IRS) | An official website of the United States government"
+doc joined "Internal Revenue Service (IRS)"
+doc joined "An official website of the United States government"
+doc title "Internal Revenue Service (IRS) | An official website of the United States government"
+doc description "Find tax forms, check your refund status, make a payment and get answers to your tax questions."
+doc aliases "IRS"
+doc joined "IRS"
+doc alias_key "IRS"
+doc label_key "IRS"
+doc aliases "Internal Revenue Service"
+doc joined "Internal Revenue Service"
+doc alias_key "Internal Revenue Service"
+doc label_key "Internal Revenue Service"
+doc anchors "irs" x2
+doc joined "irs"
+doc link_score 0.6851544976234436
+doc country "US"
+doc language "~en"
+doc adult 0
+spelling "irs"
+spelling "IRS"
+spelling "Internal Revenue Service"
+spelling "Internal Revenue Service (IRS)"
+spelling "An official website of the United States government"
+spelling "irs"
+key "an"
+key "anofficialwebsiteoftheunitedstatesgovernment"
+key "government"
+key "internal"
+key "internalrevenueservice"
+key "internalrevenueserviceirs"
+key "internalrevenueserviceirsanofficialwebsiteoftheunitedstatesgovernment"
+key "irs"
+key "of"
+key "official"
+key "revenue"
+key "service"
+key "states"
+key "the"
+key "united"
+key "website"
+
+site irs-tax-refund-help.com
+line {"domain":"irs-tax-refund-help.com","title":"IRS Tax Refund Help | Check IRS Refund Status | IRS Online","description":"IRS refund status, IRS tax refund help and IRS online account support.","link_texts":[{"text":"irs refund","count":1}],"signals":{"linking_domains":1}}
+doc domain "irs-tax-refund-help.com"
+doc label "irs-tax-refund-help"
+doc label "irstaxrefundhelp"
+doc label_key "irs-tax-refund-help"
+doc joined "irs-tax-refund-help"
+doc joined "IRS Tax Refund Help | Check IRS Refund Status | IRS Online"
+doc joined "IRS Tax Refund Help"
+doc joined "Check IRS Refund Status"
+doc joined "IRS Online"
+doc title "IRS Tax Refund Help | Check IRS Refund Status | IRS Online"
+doc description "IRS refund status, IRS tax refund help and IRS online account support."
+doc anchors "irs refund"
+doc joined "irs refund"
+doc link_score 0.015051486901938915
+doc adult 0
+spelling "irs-tax-refund-help"
+spelling "IRS Tax Refund Help"
+spelling "Check IRS Refund Status"
+spelling "IRS Online"
+spelling "irs refund"
+key "check"
+key "checkirsrefundstatus"
+key "help"
+key "irs"
+key "irsonline"
+key "irsrefund"
+key "irstaxrefundhelp"
+key "irstaxrefundhelpcheckirsrefundstatusirsonline"
+key "online"
+key "refund"
+key "status"
+key "tax"
+
+site amazon.com
+line {"domain":"amazon.com","title":"Amazon.com. Spend less. Smile more.","link_texts":[{"text":"amazon","count":2}],"aliases":["Amazon"],"signals":{"tranco_rank":5,"linking_domains":3,"official_site":true}}
+doc domain "amazon.com"
+doc label "amazon"
+doc label_key "amazon"
+doc joined "amazon"
+doc joined "Amazon.com. Spend less. Smile more."
+doc title "Amazon.com. Spend less. Smile more."
+doc aliases "Amazon"
+doc joined "Amazon"
+doc alias_key "Amazon"
+doc label_key "Amazon"
+doc anchors "amazon" x2
+doc joined "amazon"
+doc link_score 0.8645745515823364
+doc adult 0
+spelling "amazon"
+spelling "Amazon"
+spelling "Amazon.com. Spend less. Smile more."
+spelling "amazon"
+key "amazon"
+key "amazoncomspendlesssmilemore"
+key "com"
+key "less"
+key "more"
+key "smile"
+key "spend"
+
+site amazon-prime-refund.com
+line {"domain":"amazon-prime-refund.com","title":"Amazon Prime Refund | Amazon Account Locked | Amazon Support","description":"Your Amazon Prime refund is ready. Claim your Amazon refund.","signals":{}}
+doc domain "amazon-prime-refund.com"
+doc label "amazon-prime-refund"
+doc label "amazonprimerefund"
+doc label_key "amazon-prime-refund"
+doc joined "amazon-prime-refund"
+doc joined "Amazon Prime Refund | Amazon Account Locked | Amazon Support"
+doc joined "Amazon Prime Refund"
+doc joined "Amazon Account Locked"
+doc joined "Amazon Support"
+doc title "Amazon Prime Refund | Amazon Account Locked | Amazon Support"
+doc description "Your Amazon Prime refund is ready. Claim your Amazon refund."
+doc link_score 0.0
+doc adult 0
+spelling "amazon-prime-refund"
+spelling "Amazon Prime Refund"
+spelling "Amazon Account Locked"
+spelling "Amazon Support"
+key "account"
+key "amazon"
+key "amazonaccountlocked"
+key "amazonprimerefund"
+key "amazonprimerefundamazonaccountlockedamazonsupport"
+key "amazonsupport"
+key "locked"
+key "prime"
+key "refund"
+key "support"
+
+site chasecenter.com
+line {"domain":"chasecenter.com","title":"Chase Center | San Francisco's Home of the Golden State Warriors","link_texts":[{"text":"chase center","count":2}],"aliases":["Chase Center"],"signals":{"tranco_rank":44016,"linking_domains":2,"official_site":true}}
+doc domain "chasecenter.com"
+doc label "chasecenter"
+doc label_key "chasecenter"
+doc joined "chasecenter"
+doc joined "Chase Center | San Francisco's Home of the Golden State Warriors"
+doc joined "Chase Center"
+doc joined "San Francisco's Home of the Golden State Warriors"
+doc title "Chase Center | San Francisco's Home of the Golden State Warriors"
+doc aliases "Chase Center"
+doc joined "Chase Center"
+doc alias_key "Chase Center"
+doc label_key "Chase Center"
+doc anchors "chase center" x2
+doc joined "chase center"
+doc link_score 0.48851755261421204
+doc adult 0
+spelling "chasecenter"
+spelling "Chase Center"
+spelling "Chase Center"
+spelling "San Francisco's Home of the Golden State Warriors"
+spelling "chase center"
+key "center"
+key "chase"
+key "chasecenter"
+key "chasecentersanfranciscoshomeofthegoldenstatewarriors"
+key "franciscos"
+key "golden"
+key "home"
+key "of"
+key "san"
+key "sanfranciscoshomeofthegoldenstatewarriors"
+key "state"
+key "the"
+key "warriors"
+
+site github.com
+line {"domain":"github.com","signals":{"linking_domains":1}}
+doc domain "github.com"
+doc label "github"
+doc label_key "github"
+doc joined "github"
+doc link_score 0.015051486901938915
+doc adult 0
+spelling "github"
+key "github"
+
+site maplestreetbakery.com
+line {"domain":"maplestreetbakery.com","title":"Maple Street Bakery – Fresh Bread Daily","signals":{}}
+doc domain "maplestreetbakery.com"
+doc label "maplestreetbakery"
+doc label_key "maplestreetbakery"
+doc joined "maplestreetbakery"
+doc joined "Maple Street Bakery – Fresh Bread Daily"
+doc joined "Maple Street Bakery"
+doc joined "Fresh Bread Daily"
+doc title "Maple Street Bakery – Fresh Bread Daily"
+doc link_score 0.0
+doc adult 0
+spelling "maplestreetbakery"
+spelling "Maple Street Bakery"
+spelling "Fresh Bread Daily"
+key "bakery"
+key "bread"
+key "daily"
+key "fresh"
+key "freshbreaddaily"
+key "maple"
+key "maplestreetbakery"
+key "maplestreetbakeryfreshbreaddaily"
+key "street"
+
+site panerabread.com
+line {"domain":"panerabread.com","title":"Panera Bread | Bakery-Cafe | Order Online","link_texts":[{"text":"panera","count":2}],"aliases":["Panera Bread"],"signals":{"tranco_rank":2000,"linking_domains":50,"official_site":true}}
+doc domain "panerabread.com"
+doc label "panerabread"
+doc label_key "panerabread"
+doc joined "panerabread"
+doc joined "Panera Bread | Bakery-Cafe | Order Online"
+doc joined "Panera Bread"
+doc joined "Bakery-Cafe"
+doc joined "Order Online"
+doc title "Panera Bread | Bakery-Cafe | Order Online"
+doc aliases "Panera Bread"
+doc joined "Panera Bread"
+doc alias_key "Panera Bread"
+doc label_key "Panera Bread"
+doc anchors "panera" x2
+doc joined "panera"
+doc link_score 0.6759068965911865
+doc adult 0
+spelling "panerabread"
+spelling "Panera Bread"
+spelling "Panera Bread"
+spelling "Bakery-Cafe"
+spelling "Order Online"
+spelling "panera"
+key "bakery"
+key "bakerycafe"
+key "bread"
+key "cafe"
+key "online"
+key "order"
+key "orderonline"
+key "panera"
+key "panerabread"
+key "panerabreadbakerycafeorderonline"
+
+site google.com
+line {"domain":"google.com","title":"Google","signals":{"tranco_rank":1,"linking_domains":90000,"official_site":true}}
+doc domain "google.com"
+doc label "google"
+doc label_key "google"
+doc joined "google"
+doc joined "Google"
+doc title "Google"
+doc link_score 1.0
+doc adult 0
+spelling "google"
+spelling "Google"
+key "google"
+
+site weather.com
+line {"domain":"weather.com","title":"The Weather Channel","link_texts":[{"text":"weather forecast","count":200}],"signals":{"tranco_rank":150,"linking_domains":30000,"official_site":true}}
+doc domain "weather.com"
+doc label "weather"
+doc label_key "weather"
+doc joined "weather"
+doc joined "The Weather Channel"
+doc title "The Weather Channel"
+doc anchors "weather forecast" x5
+doc joined "weather forecast"
+doc link_name_key "weather forecast" x64
+doc link_score 0.9198480248451233
+doc adult 0
+spelling "weather"
+spelling "The Weather Channel"
+spelling "weather forecast"
+key "channel"
+key "forecast"
+key "the"
+key "theweatherchannel"
+key "weather"
+key "weatherforecast"
+
+site piazza.com
+line {"domain":"piazza.com","title":"Piazza: ask questions in class","signals":{"tranco_rank":4000,"linking_domains":3000,"official_site":true}}
+doc domain "piazza.com"
+doc label "piazza"
+doc label_key "piazza"
+doc joined "piazza"
+doc joined "Piazza: ask questions in class"
+doc joined "Piazza"
+doc joined "ask questions in class"
+doc title "Piazza: ask questions in class"
+doc link_score 0.7361700534820557
+doc adult 0
+spelling "piazza"
+spelling "Piazza"
+spelling "ask questions in class"
+key "ask"
+key "askquestionsinclass"
+key "class"
+key "in"
+key "piazza"
+key "piazzaaskquestionsinclass"
+key "questions"
+
+site gogle.com
+line {"domain":"gogle.com","title":"Gogle - free prizes","signals":{"harmonic_rank":40000000,"linking_domains":1}}
+doc domain "gogle.com"
+doc label "gogle"
+doc label_key "gogle"
+doc joined "gogle"
+doc joined "Gogle - free prizes"
+doc joined "Gogle"
+doc joined "free prizes"
+doc title "Gogle - free prizes"
+doc link_score 0.05235836282372475
+doc adult 0
+spelling "gogle"
+spelling "Gogle"
+spelling "free prizes"
+key "free"
+key "freeprizes"
+key "gogle"
+key "goglefreeprizes"
+key "prizes"
+
+site amazen.com
+line {"domain":"amazen.com","title":"Amazen deals","signals":{"harmonic_rank":30000000,"linking_domains":2}}
+doc domain "amazen.com"
+doc label "amazen"
+doc label_key "amazen"
+doc joined "amazen"
+doc joined "Amazen deals"
+doc title "Amazen deals"
+doc link_score 0.07287592440843582
+doc adult 0
+spelling "amazen"
+spelling "Amazen deals"
+key "amazen"
+key "amazendeals"
+key "deals"
+
+site hilton.com
+line {"domain":"hilton.com","title":"Hilton","signals":{"tranco_rank":900,"linking_domains":15000,"official_site":true}}
+doc domain "hilton.com"
+doc label "hilton"
+doc label_key "hilton"
+doc joined "hilton"
+doc joined "Hilton"
+doc title "Hilton"
+doc link_score 0.8318455815315247
+doc adult 0
+spelling "hilton"
+spelling "Hilton"
+key "hilton"
+
+site hilten.com
+line {"domain":"hilten.com","title":"Hilten","signals":{"tranco_rank":40000,"linking_domains":2000}}
+doc domain "hilten.com"
+doc label "hilten"
+doc label_key "hilten"
+doc joined "hilten"
+doc joined "Hilten"
+doc title "Hilten"
+doc link_score 0.4836190938949585
+doc adult 0
+spelling "hilten"
+spelling "Hilten"
+key "hilten"
+
+site capitalone.com
+line {"domain":"capitalone.com","title":"Capital One","aliases":["Capital One"],"signals":{"tranco_rank":200,"linking_domains":20000,"official_site":true}}
+doc domain "capitalone.com"
+doc label "capitalone"
+doc label_key "capitalone"
+doc joined "capitalone"
+doc joined "Capital One"
+doc title "Capital One"
+doc aliases "Capital One"
+doc joined "Capital One"
+doc alias_key "Capital One"
+doc label_key "Capital One"
+doc link_score 0.8993308544158936
+doc adult 0
+spelling "capitalone"
+spelling "Capital One"
+spelling "Capital One"
+key "capital"
+key "capitalone"
+key "one"
+
+site tacobell.com
+line {"domain":"tacobell.com","title":"Taco Bell","aliases":["Taco Bell"],"signals":{"tranco_rank":1500,"linking_domains":10000,"official_site":true}}
+doc domain "tacobell.com"
+doc label "tacobell"
+doc label_key "tacobell"
+doc joined "tacobell"
+doc joined "Taco Bell"
+doc title "Taco Bell"
+doc aliases "Taco Bell"
+doc joined "Taco Bell"
+doc alias_key "Taco Bell"
+doc label_key "Taco Bell"
+doc link_score 0.8022434711456299
+doc adult 0
+spelling "tacobell"
+spelling "Taco Bell"
+spelling "Taco Bell"
+key "bell"
+key "taco"
+key "tacobell"
+
+site fedex.com
+line {"domain":"fedex.com","title":"FedEx","signals":{"tranco_rank":400,"linking_domains":20000,"official_site":true}}
+doc domain "fedex.com"
+doc label "fedex"
+doc label_key "fedex"
+doc joined "fedex"
+doc joined "FedEx"
+doc title "FedEx"
+doc link_score 0.8711092472076416
+doc adult 0
+spelling "fedex"
+spelling "FedEx"
+key "fedex"
+
+site edx.org
+line {"domain":"edx.org","title":"edX","signals":{"tranco_rank":300,"linking_domains":30000,"official_site":true}}
+doc domain "edx.org"
+doc label "edx"
+doc label_key "edx"
+doc joined "edx"
+doc joined "edX"
+doc title "edX"
+doc link_score 0.8916264772415161
+doc adult 0
+spelling "edx"
+spelling "edX"
+key "edx"
+
+site capitol0.gov
+line {"domain":"capitol0.gov","title":"Capitol office 0","signals":{"harmonic_rank":3000000,"linking_domains":10}}
+doc domain "capitol0.gov"
+doc label "capitol0"
+doc label_key "capitol0"
+doc joined "capitol0"
+doc joined "Capitol office 0"
+doc title "Capitol office 0"
+doc link_score 0.1948394775390625
+doc country "US"
+doc adult 0
+spelling "capitol0"
+spelling "Capitol office 0"
+key "capitol"
+key "capitol0"
+key "capitoloffice0"
+key "office"
+
+site capitalnews0.com
+line {"domain":"capitalnews0.com","title":"Capital city news 0","signals":{"harmonic_rank":6000000,"linking_domains":10}}
+doc domain "capitalnews0.com"
+doc label "capitalnews0"
+doc label_key "capitalnews0"
+doc joined "capitalnews0"
+doc joined "Capital city news 0"
+doc title "Capital city news 0"
+doc link_score 0.16661791503429413
+doc adult 0
+spelling "capitalnews0"
+spelling "Capital city news 0"
+key "capital"
+key "capitalcitynews0"
+key "capitalnews0"
+key "city"
+key "news"
+
+site taco0.com
+line {"domain":"taco0.com","title":"Taco stand 0","signals":{"harmonic_rank":4000000,"linking_domains":10}}
+doc domain "taco0.com"
+doc label "taco0"
+doc label_key "taco0"
+doc joined "taco0"
+doc joined "Taco stand 0"
+doc title "Taco stand 0"
+doc link_score 0.18312646448612213
+doc adult 0
+spelling "taco0"
+spelling "Taco stand 0"
+key "stand"
+key "taco"
+key "taco0"
+key "tacostand0"
+
+site capitol1.gov
+line {"domain":"capitol1.gov","title":"Capitol office 1","signals":{"harmonic_rank":3000001,"linking_domains":10}}
+doc domain "capitol1.gov"
+doc label "capitol1"
+doc label_key "capitol1"
+doc joined "capitol1"
+doc joined "Capitol office 1"
+doc title "Capitol office 1"
+doc link_score 0.1948394626379013
+doc country "US"
+doc adult 0
+spelling "capitol1"
+spelling "Capitol office 1"
+key "capitol"
+key "capitol1"
+key "capitoloffice1"
+key "office"
+
+site capitalnews1.com
+line {"domain":"capitalnews1.com","title":"Capital city news 1","signals":{"harmonic_rank":6000001,"linking_domains":10}}
+doc domain "capitalnews1.com"
+doc label "capitalnews1"
+doc label_key "capitalnews1"
+doc joined "capitalnews1"
+doc joined "Capital city news 1"
+doc title "Capital city news 1"
+doc link_score 0.16661790013313293
+doc adult 0
+spelling "capitalnews1"
+spelling "Capital city news 1"
+key "capital"
+key "capitalcitynews1"
+key "capitalnews1"
+key "city"
+key "news"
+
+site taco1.com
+line {"domain":"taco1.com","title":"Taco stand 1","signals":{"harmonic_rank":4000001,"linking_domains":10}}
+doc domain "taco1.com"
+doc label "taco1"
+doc label_key "taco1"
+doc joined "taco1"
+doc joined "Taco stand 1"
+doc title "Taco stand 1"
+doc link_score 0.18312644958496094
+doc adult 0
+spelling "taco1"
+spelling "Taco stand 1"
+key "stand"
+key "taco"
+key "taco1"
+key "tacostand1"
+
+site capitol2.gov
+line {"domain":"capitol2.gov","title":"Capitol office 2","signals":{"harmonic_rank":3000002,"linking_domains":10}}
+doc domain "capitol2.gov"
+doc label "capitol2"
+doc label_key "capitol2"
+doc joined "capitol2"
+doc joined "Capitol office 2"
+doc title "Capitol office 2"
+doc link_score 0.1948394477367401
+doc country "US"
+doc adult 0
+spelling "capitol2"
+spelling "Capitol office 2"
+key "capitol"
+key "capitol2"
+key "capitoloffice2"
+key "office"
+
+site capitalnews2.com
+line {"domain":"capitalnews2.com","title":"Capital city news 2","signals":{"harmonic_rank":6000002,"linking_domains":10}}
+doc domain "capitalnews2.com"
+doc label "capitalnews2"
+doc label_key "capitalnews2"
+doc joined "capitalnews2"
+doc joined "Capital city news 2"
+doc title "Capital city news 2"
+doc link_score 0.16661790013313293
+doc adult 0
+spelling "capitalnews2"
+spelling "Capital city news 2"
+key "capital"
+key "capitalcitynews2"
+key "capitalnews2"
+key "city"
+key "news"
+
+site taco2.com
+line {"domain":"taco2.com","title":"Taco stand 2","signals":{"harmonic_rank":4000002,"linking_domains":10}}
+doc domain "taco2.com"
+doc label "taco2"
+doc label_key "taco2"
+doc joined "taco2"
+doc joined "Taco stand 2"
+doc title "Taco stand 2"
+doc link_score 0.18312644958496094
+doc adult 0
+spelling "taco2"
+spelling "Taco stand 2"
+key "stand"
+key "taco"
+key "taco2"
+key "tacostand2"
+
+site capitol3.gov
+line {"domain":"capitol3.gov","title":"Capitol office 3","signals":{"harmonic_rank":3000003,"linking_domains":10}}
+doc domain "capitol3.gov"
+doc label "capitol3"
+doc label_key "capitol3"
+doc joined "capitol3"
+doc joined "Capitol office 3"
+doc title "Capitol office 3"
+doc link_score 0.19483943283557892
+doc country "US"
+doc adult 0
+spelling "capitol3"
+spelling "Capitol office 3"
+key "capitol"
+key "capitol3"
+key "capitoloffice3"
+key "office"
+
+site capitalnews3.com
+line {"domain":"capitalnews3.com","title":"Capital city news 3","signals":{"harmonic_rank":6000003,"linking_domains":10}}
+doc domain "capitalnews3.com"
+doc label "capitalnews3"
+doc label_key "capitalnews3"
+doc joined "capitalnews3"
+doc joined "Capital city news 3"
+doc title "Capital city news 3"
+doc link_score 0.16661788523197174
+doc adult 0
+spelling "capitalnews3"
+spelling "Capital city news 3"
+key "capital"
+key "capitalcitynews3"
+key "capitalnews3"
+key "city"
+key "news"
+
+site taco3.com
+line {"domain":"taco3.com","title":"Taco stand 3","signals":{"harmonic_rank":4000003,"linking_domains":10}}
+doc domain "taco3.com"
+doc label "taco3"
+doc label_key "taco3"
+doc joined "taco3"
+doc joined "Taco stand 3"
+doc title "Taco stand 3"
+doc link_score 0.18312643468379974
+doc adult 0
+spelling "taco3"
+spelling "Taco stand 3"
+key "stand"
+key "taco"
+key "taco3"
+key "tacostand3"
+
+site capitol4.gov
+line {"domain":"capitol4.gov","title":"Capitol office 4","signals":{"harmonic_rank":3000004,"linking_domains":10}}
+doc domain "capitol4.gov"
+doc label "capitol4"
+doc label_key "capitol4"
+doc joined "capitol4"
+doc joined "Capitol office 4"
+doc title "Capitol office 4"
+doc link_score 0.19483941793441772
+doc country "US"
+doc adult 0
+spelling "capitol4"
+spelling "Capitol office 4"
+key "capitol"
+key "capitol4"
+key "capitoloffice4"
+key "office"
+
+site capitalnews4.com
+line {"domain":"capitalnews4.com","title":"Capital city news 4","signals":{"harmonic_rank":6000004,"linking_domains":10}}
+doc domain "capitalnews4.com"
+doc label "capitalnews4"
+doc label_key "capitalnews4"
+doc joined "capitalnews4"
+doc joined "Capital city news 4"
+doc title "Capital city news 4"
+doc link_score 0.16661788523197174
+doc adult 0
+spelling "capitalnews4"
+spelling "Capital city news 4"
+key "capital"
+key "capitalcitynews4"
+key "capitalnews4"
+key "city"
+key "news"
+
+site taco4.com
+line {"domain":"taco4.com","title":"Taco stand 4","signals":{"harmonic_rank":4000004,"linking_domains":10}}
+doc domain "taco4.com"
+doc label "taco4"
+doc label_key "taco4"
+doc joined "taco4"
+doc joined "Taco stand 4"
+doc title "Taco stand 4"
+doc link_score 0.18312641978263855
+doc adult 0
+spelling "taco4"
+spelling "Taco stand 4"
+key "stand"
+key "taco"
+key "taco4"
+key "tacostand4"
+
+site capitol5.gov
+line {"domain":"capitol5.gov","title":"Capitol office 5","signals":{"harmonic_rank":3000005,"linking_domains":10}}
+doc domain "capitol5.gov"
+doc label "capitol5"
+doc label_key "capitol5"
+doc joined "capitol5"
+doc joined "Capitol office 5"
+doc title "Capitol office 5"
+doc link_score 0.19483940303325653
+doc country "US"
+doc adult 0
+spelling "capitol5"
+spelling "Capitol office 5"
+key "capitol"
+key "capitol5"
+key "capitoloffice5"
+key "office"
+
+site capitalnews5.com
+line {"domain":"capitalnews5.com","title":"Capital city news 5","signals":{"harmonic_rank":6000005,"linking_domains":10}}
+doc domain "capitalnews5.com"
+doc label "capitalnews5"
+doc label_key "capitalnews5"
+doc joined "capitalnews5"
+doc joined "Capital city news 5"
+doc title "Capital city news 5"
+doc link_score 0.16661787033081055
+doc adult 0
+spelling "capitalnews5"
+spelling "Capital city news 5"
+key "capital"
+key "capitalcitynews5"
+key "capitalnews5"
+key "city"
+key "news"
+
+site taco5.com
+line {"domain":"taco5.com","title":"Taco stand 5","signals":{"harmonic_rank":4000005,"linking_domains":10}}
+doc domain "taco5.com"
+doc label "taco5"
+doc label_key "taco5"
+doc joined "taco5"
+doc joined "Taco stand 5"
+doc title "Taco stand 5"
+doc link_score 0.18312641978263855
+doc adult 0
+spelling "taco5"
+spelling "Taco stand 5"
+key "stand"
+key "taco"
+key "taco5"
+key "tacostand5"
+
+site capitol6.gov
+line {"domain":"capitol6.gov","title":"Capitol office 6","signals":{"harmonic_rank":3000006,"linking_domains":10}}
+doc domain "capitol6.gov"
+doc label "capitol6"
+doc label_key "capitol6"
+doc joined "capitol6"
+doc joined "Capitol office 6"
+doc title "Capitol office 6"
+doc link_score 0.19483938813209534
+doc country "US"
+doc adult 0
+spelling "capitol6"
+spelling "Capitol office 6"
+key "capitol"
+key "capitol6"
+key "capitoloffice6"
+key "office"
+
+site capitalnews6.com
+line {"domain":"capitalnews6.com","title":"Capital city news 6","signals":{"harmonic_rank":6000006,"linking_domains":10}}
+doc domain "capitalnews6.com"
+doc label "capitalnews6"
+doc label_key "capitalnews6"
+doc joined "capitalnews6"
+doc joined "Capital city news 6"
+doc title "Capital city news 6"
+doc link_score 0.16661787033081055
+doc adult 0
+spelling "capitalnews6"
+spelling "Capital city news 6"
+key "capital"
+key "capitalcitynews6"
+key "capitalnews6"
+key "city"
+key "news"
+
+site taco6.com
+line {"domain":"taco6.com","title":"Taco stand 6","signals":{"harmonic_rank":4000006,"linking_domains":10}}
+doc domain "taco6.com"
+doc label "taco6"
+doc label_key "taco6"
+doc joined "taco6"
+doc joined "Taco stand 6"
+doc title "Taco stand 6"
+doc link_score 0.18312640488147736
+doc adult 0
+spelling "taco6"
+spelling "Taco stand 6"
+key "stand"
+key "taco"
+key "taco6"
+key "tacostand6"
+
+site capitol7.gov
+line {"domain":"capitol7.gov","title":"Capitol office 7","signals":{"harmonic_rank":3000007,"linking_domains":10}}
+doc domain "capitol7.gov"
+doc label "capitol7"
+doc label_key "capitol7"
+doc joined "capitol7"
+doc joined "Capitol office 7"
+doc title "Capitol office 7"
+doc link_score 0.19483937323093414
+doc country "US"
+doc adult 0
+spelling "capitol7"
+spelling "Capitol office 7"
+key "capitol"
+key "capitol7"
+key "capitoloffice7"
+key "office"
+
+site capitalnews7.com
+line {"domain":"capitalnews7.com","title":"Capital city news 7","signals":{"harmonic_rank":6000007,"linking_domains":10}}
+doc domain "capitalnews7.com"
+doc label "capitalnews7"
+doc label_key "capitalnews7"
+doc joined "capitalnews7"
+doc joined "Capital city news 7"
+doc title "Capital city news 7"
+doc link_score 0.16661785542964935
+doc adult 0
+spelling "capitalnews7"
+spelling "Capital city news 7"
+key "capital"
+key "capitalcitynews7"
+key "capitalnews7"
+key "city"
+key "news"
+
+site taco7.com
+line {"domain":"taco7.com","title":"Taco stand 7","signals":{"harmonic_rank":4000007,"linking_domains":10}}
+doc domain "taco7.com"
+doc label "taco7"
+doc label_key "taco7"
+doc joined "taco7"
+doc joined "Taco stand 7"
+doc title "Taco stand 7"
+doc link_score 0.18312638998031616
+doc adult 0
+spelling "taco7"
+spelling "Taco stand 7"
+key "stand"
+key "taco"
+key "taco7"
+key "tacostand7"
+
+site capitol8.gov
+line {"domain":"capitol8.gov","title":"Capitol office 8","signals":{"harmonic_rank":3000008,"linking_domains":10}}
+doc domain "capitol8.gov"
+doc label "capitol8"
+doc label_key "capitol8"
+doc joined "capitol8"
+doc joined "Capitol office 8"
+doc title "Capitol office 8"
+doc link_score 0.19483935832977295
+doc country "US"
+doc adult 0
+spelling "capitol8"
+spelling "Capitol office 8"
+key "capitol"
+key "capitol8"
+key "capitoloffice8"
+key "office"
+
+site capitalnews8.com
+line {"domain":"capitalnews8.com","title":"Capital city news 8","signals":{"harmonic_rank":6000008,"linking_domains":10}}
+doc domain "capitalnews8.com"
+doc label "capitalnews8"
+doc label_key "capitalnews8"
+doc joined "capitalnews8"
+doc joined "Capital city news 8"
+doc title "Capital city news 8"
+doc link_score 0.16661785542964935
+doc adult 0
+spelling "capitalnews8"
+spelling "Capital city news 8"
+key "capital"
+key "capitalcitynews8"
+key "capitalnews8"
+key "city"
+key "news"
+
+site taco8.com
+line {"domain":"taco8.com","title":"Taco stand 8","signals":{"harmonic_rank":4000008,"linking_domains":10}}
+doc domain "taco8.com"
+doc label "taco8"
+doc label_key "taco8"
+doc joined "taco8"
+doc joined "Taco stand 8"
+doc title "Taco stand 8"
+doc link_score 0.18312638998031616
+doc adult 0
+spelling "taco8"
+spelling "Taco stand 8"
+key "stand"
+key "taco"
+key "taco8"
+key "tacostand8"
+
+site capitol9.gov
+line {"domain":"capitol9.gov","title":"Capitol office 9","signals":{"harmonic_rank":3000009,"linking_domains":10}}
+doc domain "capitol9.gov"
+doc label "capitol9"
+doc label_key "capitol9"
+doc joined "capitol9"
+doc joined "Capitol office 9"
+doc title "Capitol office 9"
+doc link_score 0.19483934342861176
+doc country "US"
+doc adult 0
+spelling "capitol9"
+spelling "Capitol office 9"
+key "capitol"
+key "capitol9"
+key "capitoloffice9"
+key "office"
+
+site capitalnews9.com
+line {"domain":"capitalnews9.com","title":"Capital city news 9","signals":{"harmonic_rank":6000009,"linking_domains":10}}
+doc domain "capitalnews9.com"
+doc label "capitalnews9"
+doc label_key "capitalnews9"
+doc joined "capitalnews9"
+doc joined "Capital city news 9"
+doc title "Capital city news 9"
+doc link_score 0.16661785542964935
+doc adult 0
+spelling "capitalnews9"
+spelling "Capital city news 9"
+key "capital"
+key "capitalcitynews9"
+key "capitalnews9"
+key "city"
+key "news"
+
+site taco9.com
+line {"domain":"taco9.com","title":"Taco stand 9","signals":{"harmonic_rank":4000009,"linking_domains":10}}
+doc domain "taco9.com"
+doc label "taco9"
+doc label_key "taco9"
+doc joined "taco9"
+doc joined "Taco stand 9"
+doc title "Taco stand 9"
+doc link_score 0.18312637507915497
+doc adult 0
+spelling "taco9"
+spelling "Taco stand 9"
+key "stand"
+key "taco"
+key "taco9"
+key "tacostand9"
+
+site capitol10.gov
+line {"domain":"capitol10.gov","title":"Capitol office 10","signals":{"harmonic_rank":3000010,"linking_domains":10}}
+doc domain "capitol10.gov"
+doc label "capitol10"
+doc label_key "capitol10"
+doc joined "capitol10"
+doc joined "Capitol office 10"
+doc title "Capitol office 10"
+doc link_score 0.19483932852745056
+doc country "US"
+doc adult 0
+spelling "capitol10"
+spelling "Capitol office 10"
+key "10"
+key "capitol"
+key "capitol10"
+key "capitoloffice10"
+key "office"
+
+site capitalnews10.com
+line {"domain":"capitalnews10.com","title":"Capital city news 10","signals":{"harmonic_rank":6000010,"linking_domains":10}}
+doc domain "capitalnews10.com"
+doc label "capitalnews10"
+doc label_key "capitalnews10"
+doc joined "capitalnews10"
+doc joined "Capital city news 10"
+doc title "Capital city news 10"
+doc link_score 0.16661784052848816
+doc adult 0
+spelling "capitalnews10"
+spelling "Capital city news 10"
+key "10"
+key "capital"
+key "capitalcitynews10"
+key "capitalnews10"
+key "city"
+key "news"
+
+site taco10.com
+line {"domain":"taco10.com","title":"Taco stand 10","signals":{"harmonic_rank":4000010,"linking_domains":10}}
+doc domain "taco10.com"
+doc label "taco10"
+doc label_key "taco10"
+doc joined "taco10"
+doc joined "Taco stand 10"
+doc title "Taco stand 10"
+doc link_score 0.18312636017799377
+doc adult 0
+spelling "taco10"
+spelling "Taco stand 10"
+key "10"
+key "stand"
+key "taco"
+key "taco10"
+key "tacostand10"
+
+site capitol11.gov
+line {"domain":"capitol11.gov","title":"Capitol office 11","signals":{"harmonic_rank":3000011,"linking_domains":10}}
+doc domain "capitol11.gov"
+doc label "capitol11"
+doc label_key "capitol11"
+doc joined "capitol11"
+doc joined "Capitol office 11"
+doc title "Capitol office 11"
+doc link_score 0.19483932852745056
+doc country "US"
+doc adult 0
+spelling "capitol11"
+spelling "Capitol office 11"
+key "11"
+key "capitol"
+key "capitol11"
+key "capitoloffice11"
+key "office"
+
+site capitalnews11.com
+line {"domain":"capitalnews11.com","title":"Capital city news 11","signals":{"harmonic_rank":6000011,"linking_domains":10}}
+doc domain "capitalnews11.com"
+doc label "capitalnews11"
+doc label_key "capitalnews11"
+doc joined "capitalnews11"
+doc joined "Capital city news 11"
+doc title "Capital city news 11"
+doc link_score 0.16661784052848816
+doc adult 0
+spelling "capitalnews11"
+spelling "Capital city news 11"
+key "11"
+key "capital"
+key "capitalcitynews11"
+key "capitalnews11"
+key "city"
+key "news"
+
+site taco11.com
+line {"domain":"taco11.com","title":"Taco stand 11","signals":{"harmonic_rank":4000011,"linking_domains":10}}
+doc domain "taco11.com"
+doc label "taco11"
+doc label_key "taco11"
+doc joined "taco11"
+doc joined "Taco stand 11"
+doc title "Taco stand 11"
+doc link_score 0.18312636017799377
+doc adult 0
+spelling "taco11"
+spelling "Taco stand 11"
+key "11"
+key "stand"
+key "taco"
+key "taco11"
+key "tacostand11"
+
+site capitol12.gov
+line {"domain":"capitol12.gov","title":"Capitol office 12","signals":{"harmonic_rank":3000012,"linking_domains":10}}
+doc domain "capitol12.gov"
+doc label "capitol12"
+doc label_key "capitol12"
+doc joined "capitol12"
+doc joined "Capitol office 12"
+doc title "Capitol office 12"
+doc link_score 0.19483931362628937
+doc country "US"
+doc adult 0
+spelling "capitol12"
+spelling "Capitol office 12"
+key "12"
+key "capitol"
+key "capitol12"
+key "capitoloffice12"
+key "office"
+
+site capitalnews12.com
+line {"domain":"capitalnews12.com","title":"Capital city news 12","signals":{"harmonic_rank":6000012,"linking_domains":10}}
+doc domain "capitalnews12.com"
+doc label "capitalnews12"
+doc label_key "capitalnews12"
+doc joined "capitalnews12"
+doc joined "Capital city news 12"
+doc title "Capital city news 12"
+doc link_score 0.16661782562732697
+doc adult 0
+spelling "capitalnews12"
+spelling "Capital city news 12"
+key "12"
+key "capital"
+key "capitalcitynews12"
+key "capitalnews12"
+key "city"
+key "news"
+
+site taco12.com
+line {"domain":"taco12.com","title":"Taco stand 12","signals":{"harmonic_rank":4000012,"linking_domains":10}}
+doc domain "taco12.com"
+doc label "taco12"
+doc label_key "taco12"
+doc joined "taco12"
+doc joined "Taco stand 12"
+doc title "Taco stand 12"
+doc link_score 0.18312634527683258
+doc adult 0
+spelling "taco12"
+spelling "Taco stand 12"
+key "12"
+key "stand"
+key "taco"
+key "taco12"
+key "tacostand12"
+
+site capitol13.gov
+line {"domain":"capitol13.gov","title":"Capitol office 13","signals":{"harmonic_rank":3000013,"linking_domains":10}}
+doc domain "capitol13.gov"
+doc label "capitol13"
+doc label_key "capitol13"
+doc joined "capitol13"
+doc joined "Capitol office 13"
+doc title "Capitol office 13"
+doc link_score 0.19483929872512817
+doc country "US"
+doc adult 0
+spelling "capitol13"
+spelling "Capitol office 13"
+key "13"
+key "capitol"
+key "capitol13"
+key "capitoloffice13"
+key "office"
+
+site capitalnews13.com
+line {"domain":"capitalnews13.com","title":"Capital city news 13","signals":{"harmonic_rank":6000013,"linking_domains":10}}
+doc domain "capitalnews13.com"
+doc label "capitalnews13"
+doc label_key "capitalnews13"
+doc joined "capitalnews13"
+doc joined "Capital city news 13"
+doc title "Capital city news 13"
+doc link_score 0.16661782562732697
+doc adult 0
+spelling "capitalnews13"
+spelling "Capital city news 13"
+key "13"
+key "capital"
+key "capitalcitynews13"
+key "capitalnews13"
+key "city"
+key "news"
+
+site taco13.com
+line {"domain":"taco13.com","title":"Taco stand 13","signals":{"harmonic_rank":4000013,"linking_domains":10}}
+doc domain "taco13.com"
+doc label "taco13"
+doc label_key "taco13"
+doc joined "taco13"
+doc joined "Taco stand 13"
+doc title "Taco stand 13"
+doc link_score 0.1831263303756714
+doc adult 0
+spelling "taco13"
+spelling "Taco stand 13"
+key "13"
+key "stand"
+key "taco"
+key "taco13"
+key "tacostand13"
+
+site capitol14.gov
+line {"domain":"capitol14.gov","title":"Capitol office 14","signals":{"harmonic_rank":3000014,"linking_domains":10}}
+doc domain "capitol14.gov"
+doc label "capitol14"
+doc label_key "capitol14"
+doc joined "capitol14"
+doc joined "Capitol office 14"
+doc title "Capitol office 14"
+doc link_score 0.19483928382396698
+doc country "US"
+doc adult 0
+spelling "capitol14"
+spelling "Capitol office 14"
+key "14"
+key "capitol"
+key "capitol14"
+key "capitoloffice14"
+key "office"
+
+site capitalnews14.com
+line {"domain":"capitalnews14.com","title":"Capital city news 14","signals":{"harmonic_rank":6000014,"linking_domains":10}}
+doc domain "capitalnews14.com"
+doc label "capitalnews14"
+doc label_key "capitalnews14"
+doc joined "capitalnews14"
+doc joined "Capital city news 14"
+doc title "Capital city news 14"
+doc link_score 0.16661781072616577
+doc adult 0
+spelling "capitalnews14"
+spelling "Capital city news 14"
+key "14"
+key "capital"
+key "capitalcitynews14"
+key "capitalnews14"
+key "city"
+key "news"
+
+site taco14.com
+line {"domain":"taco14.com","title":"Taco stand 14","signals":{"harmonic_rank":4000014,"linking_domains":10}}
+doc domain "taco14.com"
+doc label "taco14"
+doc label_key "taco14"
+doc joined "taco14"
+doc joined "Taco stand 14"
+doc title "Taco stand 14"
+doc link_score 0.1831263154745102
+doc adult 0
+spelling "taco14"
+spelling "Taco stand 14"
+key "14"
+key "stand"
+key "taco"
+key "taco14"
+key "tacostand14"
+
+site capitol15.gov
+line {"domain":"capitol15.gov","title":"Capitol office 15","signals":{"harmonic_rank":3000015,"linking_domains":10}}
+doc domain "capitol15.gov"
+doc label "capitol15"
+doc label_key "capitol15"
+doc joined "capitol15"
+doc joined "Capitol office 15"
+doc title "Capitol office 15"
+doc link_score 0.1948392689228058
+doc country "US"
+doc adult 0
+spelling "capitol15"
+spelling "Capitol office 15"
+key "15"
+key "capitol"
+key "capitol15"
+key "capitoloffice15"
+key "office"
+
+site capitalnews15.com
+line {"domain":"capitalnews15.com","title":"Capital city news 15","signals":{"harmonic_rank":6000015,"linking_domains":10}}
+doc domain "capitalnews15.com"
+doc label "capitalnews15"
+doc label_key "capitalnews15"
+doc joined "capitalnews15"
+doc joined "Capital city news 15"
+doc title "Capital city news 15"
+doc link_score 0.16661781072616577
+doc adult 0
+spelling "capitalnews15"
+spelling "Capital city news 15"
+key "15"
+key "capital"
+key "capitalcitynews15"
+key "capitalnews15"
+key "city"
+key "news"
+
+site taco15.com
+line {"domain":"taco15.com","title":"Taco stand 15","signals":{"harmonic_rank":4000015,"linking_domains":10}}
+doc domain "taco15.com"
+doc label "taco15"
+doc label_key "taco15"
+doc joined "taco15"
+doc joined "Taco stand 15"
+doc title "Taco stand 15"
+doc link_score 0.1831263154745102
+doc adult 0
+spelling "taco15"
+spelling "Taco stand 15"
+key "15"
+key "stand"
+key "taco"
+key "taco15"
+key "tacostand15"
+
+site capitol16.gov
+line {"domain":"capitol16.gov","title":"Capitol office 16","signals":{"harmonic_rank":3000016,"linking_domains":10}}
+doc domain "capitol16.gov"
+doc label "capitol16"
+doc label_key "capitol16"
+doc joined "capitol16"
+doc joined "Capitol office 16"
+doc title "Capitol office 16"
+doc link_score 0.1948392540216446
+doc country "US"
+doc adult 0
+spelling "capitol16"
+spelling "Capitol office 16"
+key "16"
+key "capitol"
+key "capitol16"
+key "capitoloffice16"
+key "office"
+
+site capitalnews16.com
+line {"domain":"capitalnews16.com","title":"Capital city news 16","signals":{"harmonic_rank":6000016,"linking_domains":10}}
+doc domain "capitalnews16.com"
+doc label "capitalnews16"
+doc label_key "capitalnews16"
+doc joined "capitalnews16"
+doc joined "Capital city news 16"
+doc title "Capital city news 16"
+doc link_score 0.16661779582500458
+doc adult 0
+spelling "capitalnews16"
+spelling "Capital city news 16"
+key "16"
+key "capital"
+key "capitalcitynews16"
+key "capitalnews16"
+key "city"
+key "news"
+
+site taco16.com
+line {"domain":"taco16.com","title":"Taco stand 16","signals":{"harmonic_rank":4000016,"linking_domains":10}}
+doc domain "taco16.com"
+doc label "taco16"
+doc label_key "taco16"
+doc joined "taco16"
+doc joined "Taco stand 16"
+doc title "Taco stand 16"
+doc link_score 0.183126300573349
+doc adult 0
+spelling "taco16"
+spelling "Taco stand 16"
+key "16"
+key "stand"
+key "taco"
+key "taco16"
+key "tacostand16"
+
+site capitol17.gov
+line {"domain":"capitol17.gov","title":"Capitol office 17","signals":{"harmonic_rank":3000017,"linking_domains":10}}
+doc domain "capitol17.gov"
+doc label "capitol17"
+doc label_key "capitol17"
+doc joined "capitol17"
+doc joined "Capitol office 17"
+doc title "Capitol office 17"
+doc link_score 0.1948392391204834
+doc country "US"
+doc adult 0
+spelling "capitol17"
+spelling "Capitol office 17"
+key "17"
+key "capitol"
+key "capitol17"
+key "capitoloffice17"
+key "office"
+
+site capitalnews17.com
+line {"domain":"capitalnews17.com","title":"Capital city news 17","signals":{"harmonic_rank":6000017,"linking_domains":10}}
+doc domain "capitalnews17.com"
+doc label "capitalnews17"
+doc label_key "capitalnews17"
+doc joined "capitalnews17"
+doc joined "Capital city news 17"
+doc title "Capital city news 17"
+doc link_score 0.16661779582500458
+doc adult 0
+spelling "capitalnews17"
+spelling "Capital city news 17"
+key "17"
+key "capital"
+key "capitalcitynews17"
+key "capitalnews17"
+key "city"
+key "news"
+
+site taco17.com
+line {"domain":"taco17.com","title":"Taco stand 17","signals":{"harmonic_rank":4000017,"linking_domains":10}}
+doc domain "taco17.com"
+doc label "taco17"
+doc label_key "taco17"
+doc joined "taco17"
+doc joined "Taco stand 17"
+doc title "Taco stand 17"
+doc link_score 0.1831262856721878
+doc adult 0
+spelling "taco17"
+spelling "Taco stand 17"
+key "17"
+key "stand"
+key "taco"
+key "taco17"
+key "tacostand17"
+
+site capitol18.gov
+line {"domain":"capitol18.gov","title":"Capitol office 18","signals":{"harmonic_rank":3000018,"linking_domains":10}}
+doc domain "capitol18.gov"
+doc label "capitol18"
+doc label_key "capitol18"
+doc joined "capitol18"
+doc joined "Capitol office 18"
+doc title "Capitol office 18"
+doc link_score 0.1948392242193222
+doc country "US"
+doc adult 0
+spelling "capitol18"
+spelling "Capitol office 18"
+key "18"
+key "capitol"
+key "capitol18"
+key "capitoloffice18"
+key "office"
+
+site capitalnews18.com
+line {"domain":"capitalnews18.com","title":"Capital city news 18","signals":{"harmonic_rank":6000018,"linking_domains":10}}
+doc domain "capitalnews18.com"
+doc label "capitalnews18"
+doc label_key "capitalnews18"
+doc joined "capitalnews18"
+doc joined "Capital city news 18"
+doc title "Capital city news 18"
+doc link_score 0.16661778092384338
+doc adult 0
+spelling "capitalnews18"
+spelling "Capital city news 18"
+key "18"
+key "capital"
+key "capitalcitynews18"
+key "capitalnews18"
+key "city"
+key "news"
+
+site taco18.com
+line {"domain":"taco18.com","title":"Taco stand 18","signals":{"harmonic_rank":4000018,"linking_domains":10}}
+doc domain "taco18.com"
+doc label "taco18"
+doc label_key "taco18"
+doc joined "taco18"
+doc joined "Taco stand 18"
+doc title "Taco stand 18"
+doc link_score 0.1831262856721878
+doc adult 0
+spelling "taco18"
+spelling "Taco stand 18"
+key "18"
+key "stand"
+key "taco"
+key "taco18"
+key "tacostand18"
+
+site capitol19.gov
+line {"domain":"capitol19.gov","title":"Capitol office 19","signals":{"harmonic_rank":3000019,"linking_domains":10}}
+doc domain "capitol19.gov"
+doc label "capitol19"
+doc label_key "capitol19"
+doc joined "capitol19"
+doc joined "Capitol office 19"
+doc title "Capitol office 19"
+doc link_score 0.194839209318161
+doc country "US"
+doc adult 0
+spelling "capitol19"
+spelling "Capitol office 19"
+key "19"
+key "capitol"
+key "capitol19"
+key "capitoloffice19"
+key "office"
+
+site capitalnews19.com
+line {"domain":"capitalnews19.com","title":"Capital city news 19","signals":{"harmonic_rank":6000019,"linking_domains":10}}
+doc domain "capitalnews19.com"
+doc label "capitalnews19"
+doc label_key "capitalnews19"
+doc joined "capitalnews19"
+doc joined "Capital city news 19"
+doc title "Capital city news 19"
+doc link_score 0.16661778092384338
+doc adult 0
+spelling "capitalnews19"
+spelling "Capital city news 19"
+key "19"
+key "capital"
+key "capitalcitynews19"
+key "capitalnews19"
+key "city"
+key "news"
+
+site taco19.com
+line {"domain":"taco19.com","title":"Taco stand 19","signals":{"harmonic_rank":4000019,"linking_domains":10}}
+doc domain "taco19.com"
+doc label "taco19"
+doc label_key "taco19"
+doc joined "taco19"
+doc joined "Taco stand 19"
+doc title "Taco stand 19"
+doc link_score 0.1831262707710266
+doc adult 0
+spelling "taco19"
+spelling "Taco stand 19"
+key "19"
+key "stand"
+key "taco"
+key "taco19"
+key "tacostand19"
+
+site capitol20.gov
+line {"domain":"capitol20.gov","title":"Capitol office 20","signals":{"harmonic_rank":3000020,"linking_domains":10}}
+doc domain "capitol20.gov"
+doc label "capitol20"
+doc label_key "capitol20"
+doc joined "capitol20"
+doc joined "Capitol office 20"
+doc title "Capitol office 20"
+doc link_score 0.19483919441699982
+doc country "US"
+doc adult 0
+spelling "capitol20"
+spelling "Capitol office 20"
+key "20"
+key "capitol"
+key "capitol20"
+key "capitoloffice20"
+key "office"
+
+site capitalnews20.com
+line {"domain":"capitalnews20.com","title":"Capital city news 20","signals":{"harmonic_rank":6000020,"linking_domains":10}}
+doc domain "capitalnews20.com"
+doc label "capitalnews20"
+doc label_key "capitalnews20"
+doc joined "capitalnews20"
+doc joined "Capital city news 20"
+doc title "Capital city news 20"
+doc link_score 0.16661778092384338
+doc adult 0
+spelling "capitalnews20"
+spelling "Capital city news 20"
+key "20"
+key "capital"
+key "capitalcitynews20"
+key "capitalnews20"
+key "city"
+key "news"
+
+site taco20.com
+line {"domain":"taco20.com","title":"Taco stand 20","signals":{"harmonic_rank":4000020,"linking_domains":10}}
+doc domain "taco20.com"
+doc label "taco20"
+doc label_key "taco20"
+doc joined "taco20"
+doc joined "Taco stand 20"
+doc title "Taco stand 20"
+doc link_score 0.18312625586986542
+doc adult 0
+spelling "taco20"
+spelling "Taco stand 20"
+key "20"
+key "stand"
+key "taco"
+key "taco20"
+key "tacostand20"
+
+site capitol21.gov
+line {"domain":"capitol21.gov","title":"Capitol office 21","signals":{"harmonic_rank":3000021,"linking_domains":10}}
+doc domain "capitol21.gov"
+doc label "capitol21"
+doc label_key "capitol21"
+doc joined "capitol21"
+doc joined "Capitol office 21"
+doc title "Capitol office 21"
+doc link_score 0.19483917951583862
+doc country "US"
+doc adult 0
+spelling "capitol21"
+spelling "Capitol office 21"
+key "21"
+key "capitol"
+key "capitol21"
+key "capitoloffice21"
+key "office"
+
+site capitalnews21.com
+line {"domain":"capitalnews21.com","title":"Capital city news 21","signals":{"harmonic_rank":6000021,"linking_domains":10}}
+doc domain "capitalnews21.com"
+doc label "capitalnews21"
+doc label_key "capitalnews21"
+doc joined "capitalnews21"
+doc joined "Capital city news 21"
+doc title "Capital city news 21"
+doc link_score 0.1666177660226822
+doc adult 0
+spelling "capitalnews21"
+spelling "Capital city news 21"
+key "21"
+key "capital"
+key "capitalcitynews21"
+key "capitalnews21"
+key "city"
+key "news"
+
+site taco21.com
+line {"domain":"taco21.com","title":"Taco stand 21","signals":{"harmonic_rank":4000021,"linking_domains":10}}
+doc domain "taco21.com"
+doc label "taco21"
+doc label_key "taco21"
+doc joined "taco21"
+doc joined "Taco stand 21"
+doc title "Taco stand 21"
+doc link_score 0.18312625586986542
+doc adult 0
+spelling "taco21"
+spelling "Taco stand 21"
+key "21"
+key "stand"
+key "taco"
+key "taco21"
+key "tacostand21"
+
+site capitol22.gov
+line {"domain":"capitol22.gov","title":"Capitol office 22","signals":{"harmonic_rank":3000022,"linking_domains":10}}
+doc domain "capitol22.gov"
+doc label "capitol22"
+doc label_key "capitol22"
+doc joined "capitol22"
+doc joined "Capitol office 22"
+doc title "Capitol office 22"
+doc link_score 0.19483917951583862
+doc country "US"
+doc adult 0
+spelling "capitol22"
+spelling "Capitol office 22"
+key "22"
+key "capitol"
+key "capitol22"
+key "capitoloffice22"
+key "office"
+
+site capitalnews22.com
+line {"domain":"capitalnews22.com","title":"Capital city news 22","signals":{"harmonic_rank":6000022,"linking_domains":10}}
+doc domain "capitalnews22.com"
+doc label "capitalnews22"
+doc label_key "capitalnews22"
+doc joined "capitalnews22"
+doc joined "Capital city news 22"
+doc title "Capital city news 22"
+doc link_score 0.1666177660226822
+doc adult 0
+spelling "capitalnews22"
+spelling "Capital city news 22"
+key "22"
+key "capital"
+key "capitalcitynews22"
+key "capitalnews22"
+key "city"
+key "news"
+
+site taco22.com
+line {"domain":"taco22.com","title":"Taco stand 22","signals":{"harmonic_rank":4000022,"linking_domains":10}}
+doc domain "taco22.com"
+doc label "taco22"
+doc label_key "taco22"
+doc joined "taco22"
+doc joined "Taco stand 22"
+doc title "Taco stand 22"
+doc link_score 0.18312624096870422
+doc adult 0
+spelling "taco22"
+spelling "Taco stand 22"
+key "22"
+key "stand"
+key "taco"
+key "taco22"
+key "tacostand22"
+
+site capitol23.gov
+line {"domain":"capitol23.gov","title":"Capitol office 23","signals":{"harmonic_rank":3000023,"linking_domains":10}}
+doc domain "capitol23.gov"
+doc label "capitol23"
+doc label_key "capitol23"
+doc joined "capitol23"
+doc joined "Capitol office 23"
+doc title "Capitol office 23"
+doc link_score 0.19483916461467743
+doc country "US"
+doc adult 0
+spelling "capitol23"
+spelling "Capitol office 23"
+key "23"
+key "capitol"
+key "capitol23"
+key "capitoloffice23"
+key "office"
+
+site capitalnews23.com
+line {"domain":"capitalnews23.com","title":"Capital city news 23","signals":{"harmonic_rank":6000023,"linking_domains":10}}
+doc domain "capitalnews23.com"
+doc label "capitalnews23"
+doc label_key "capitalnews23"
+doc joined "capitalnews23"
+doc joined "Capital city news 23"
+doc title "Capital city news 23"
+doc link_score 0.166617751121521
+doc adult 0
+spelling "capitalnews23"
+spelling "Capital city news 23"
+key "23"
+key "capital"
+key "capitalcitynews23"
+key "capitalnews23"
+key "city"
+key "news"
+
+site taco23.com
+line {"domain":"taco23.com","title":"Taco stand 23","signals":{"harmonic_rank":4000023,"linking_domains":10}}
+doc domain "taco23.com"
+doc label "taco23"
+doc label_key "taco23"
+doc joined "taco23"
+doc joined "Taco stand 23"
+doc title "Taco stand 23"
+doc link_score 0.18312622606754303
+doc adult 0
+spelling "taco23"
+spelling "Taco stand 23"
+key "23"
+key "stand"
+key "taco"
+key "taco23"
+key "tacostand23"
+
+site capitol24.gov
+line {"domain":"capitol24.gov","title":"Capitol office 24","signals":{"harmonic_rank":3000024,"linking_domains":10}}
+doc domain "capitol24.gov"
+doc label "capitol24"
+doc label_key "capitol24"
+doc joined "capitol24"
+doc joined "Capitol office 24"
+doc title "Capitol office 24"
+doc link_score 0.19483914971351624
+doc country "US"
+doc adult 0
+spelling "capitol24"
+spelling "Capitol office 24"
+key "24"
+key "capitol"
+key "capitol24"
+key "capitoloffice24"
+key "office"
+
+site capitalnews24.com
+line {"domain":"capitalnews24.com","title":"Capital city news 24","signals":{"harmonic_rank":6000024,"linking_domains":10}}
+doc domain "capitalnews24.com"
+doc label "capitalnews24"
+doc label_key "capitalnews24"
+doc joined "capitalnews24"
+doc joined "Capital city news 24"
+doc title "Capital city news 24"
+doc link_score 0.166617751121521
+doc adult 0
+spelling "capitalnews24"
+spelling "Capital city news 24"
+key "24"
+key "capital"
+key "capitalcitynews24"
+key "capitalnews24"
+key "city"
+key "news"
+
+site taco24.com
+line {"domain":"taco24.com","title":"Taco stand 24","signals":{"harmonic_rank":4000024,"linking_domains":10}}
+doc domain "taco24.com"
+doc label "taco24"
+doc label_key "taco24"
+doc joined "taco24"
+doc joined "Taco stand 24"
+doc title "Taco stand 24"
+doc link_score 0.18312622606754303
+doc adult 0
+spelling "taco24"
+spelling "Taco stand 24"
+key "24"
+key "stand"
+key "taco"
+key "taco24"
+key "tacostand24"
+
+site pizzeria0.com
+line {"domain":"pizzeria0.com","title":"Pizza place number 0","signals":{"harmonic_rank":1000000,"linking_domains":10}}
+doc domain "pizzeria0.com"
+doc label "pizzeria0"
+doc label_key "pizzeria0"
+doc joined "pizzeria0"
+doc joined "Pizza place number 0"
+doc title "Pizza place number 0"
+doc link_score 0.23956958949565887
+doc adult 0
+spelling "pizzeria0"
+spelling "Pizza place number 0"
+key "number"
+key "pizza"
+key "pizzaplacenumber0"
+key "pizzeria0"
+key "place"
+
+site pizzeria1.com
+line {"domain":"pizzeria1.com","title":"Pizza place number 1","signals":{"harmonic_rank":1000001,"linking_domains":10}}
+doc domain "pizzeria1.com"
+doc label "pizzeria1"
+doc label_key "pizzeria1"
+doc joined "pizzeria1"
+doc joined "Pizza place number 1"
+doc title "Pizza place number 1"
+doc link_score 0.2395695447921753
+doc adult 0
+spelling "pizzeria1"
+spelling "Pizza place number 1"
+key "number"
+key "pizza"
+key "pizzaplacenumber1"
+key "pizzeria1"
+key "place"
+
+site pizzeria2.com
+line {"domain":"pizzeria2.com","title":"Pizza place number 2","signals":{"harmonic_rank":1000002,"linking_domains":10}}
+doc domain "pizzeria2.com"
+doc label "pizzeria2"
+doc label_key "pizzeria2"
+doc joined "pizzeria2"
+doc joined "Pizza place number 2"
+doc title "Pizza place number 2"
+doc link_score 0.2395695149898529
+doc adult 0
+spelling "pizzeria2"
+spelling "Pizza place number 2"
+key "number"
+key "pizza"
+key "pizzaplacenumber2"
+key "pizzeria2"
+key "place"
+
+site pizzeria3.com
+line {"domain":"pizzeria3.com","title":"Pizza place number 3","signals":{"harmonic_rank":1000003,"linking_domains":10}}
+doc domain "pizzeria3.com"
+doc label "pizzeria3"
+doc label_key "pizzeria3"
+doc joined "pizzeria3"
+doc joined "Pizza place number 3"
+doc title "Pizza place number 3"
+doc link_score 0.23956947028636932
+doc adult 0
+spelling "pizzeria3"
+spelling "Pizza place number 3"
+key "number"
+key "pizza"
+key "pizzaplacenumber3"
+key "pizzeria3"
+key "place"
+
+site pizzeria4.com
+line {"domain":"pizzeria4.com","title":"Pizza place number 4","signals":{"harmonic_rank":1000004,"linking_domains":10}}
+doc domain "pizzeria4.com"
+doc label "pizzeria4"
+doc label_key "pizzeria4"
+doc joined "pizzeria4"
+doc joined "Pizza place number 4"
+doc title "Pizza place number 4"
+doc link_score 0.23956942558288574
+doc adult 0
+spelling "pizzeria4"
+spelling "Pizza place number 4"
+key "number"
+key "pizza"
+key "pizzaplacenumber4"
+key "pizzeria4"
+key "place"
+
+site pizzeria5.com
+line {"domain":"pizzeria5.com","title":"Pizza place number 5","signals":{"harmonic_rank":1000005,"linking_domains":10}}
+doc domain "pizzeria5.com"
+doc label "pizzeria5"
+doc label_key "pizzeria5"
+doc joined "pizzeria5"
+doc joined "Pizza place number 5"
+doc title "Pizza place number 5"
+doc link_score 0.23956938087940216
+doc adult 0
+spelling "pizzeria5"
+spelling "Pizza place number 5"
+key "number"
+key "pizza"
+key "pizzaplacenumber5"
+key "pizzeria5"
+key "place"
+
+site pizzeria6.com
+line {"domain":"pizzeria6.com","title":"Pizza place number 6","signals":{"harmonic_rank":1000006,"linking_domains":10}}
+doc domain "pizzeria6.com"
+doc label "pizzeria6"
+doc label_key "pizzeria6"
+doc joined "pizzeria6"
+doc joined "Pizza place number 6"
+doc title "Pizza place number 6"
+doc link_score 0.23956935107707977
+doc adult 0
+spelling "pizzeria6"
+spelling "Pizza place number 6"
+key "number"
+key "pizza"
+key "pizzaplacenumber6"
+key "pizzeria6"
+key "place"
+
+site pizzeria7.com
+line {"domain":"pizzeria7.com","title":"Pizza place number 7","signals":{"harmonic_rank":1000007,"linking_domains":10}}
+doc domain "pizzeria7.com"
+doc label "pizzeria7"
+doc label_key "pizzeria7"
+doc joined "pizzeria7"
+doc joined "Pizza place number 7"
+doc title "Pizza place number 7"
+doc link_score 0.2395693063735962
+doc adult 0
+spelling "pizzeria7"
+spelling "Pizza place number 7"
+key "number"
+key "pizza"
+key "pizzaplacenumber7"
+key "pizzeria7"
+key "place"
+
+site pizzeria8.com
+line {"domain":"pizzeria8.com","title":"Pizza place number 8","signals":{"harmonic_rank":1000008,"linking_domains":10}}
+doc domain "pizzeria8.com"
+doc label "pizzeria8"
+doc label_key "pizzeria8"
+doc joined "pizzeria8"
+doc joined "Pizza place number 8"
+doc title "Pizza place number 8"
+doc link_score 0.2395692616701126
+doc adult 0
+spelling "pizzeria8"
+spelling "Pizza place number 8"
+key "number"
+key "pizza"
+key "pizzaplacenumber8"
+key "pizzeria8"
+key "place"
+
+site pizzeria9.com
+line {"domain":"pizzeria9.com","title":"Pizza place number 9","signals":{"harmonic_rank":1000009,"linking_domains":10}}
+doc domain "pizzeria9.com"
+doc label "pizzeria9"
+doc label_key "pizzeria9"
+doc joined "pizzeria9"
+doc joined "Pizza place number 9"
+doc title "Pizza place number 9"
+doc link_score 0.23956921696662903
+doc adult 0
+spelling "pizzeria9"
+spelling "Pizza place number 9"
+key "number"
+key "pizza"
+key "pizzaplacenumber9"
+key "pizzeria9"
+key "place"
+
+site pizzeria10.com
+line {"domain":"pizzeria10.com","title":"Pizza place number 10","signals":{"harmonic_rank":1000010,"linking_domains":10}}
+doc domain "pizzeria10.com"
+doc label "pizzeria10"
+doc label_key "pizzeria10"
+doc joined "pizzeria10"
+doc joined "Pizza place number 10"
+doc title "Pizza place number 10"
+doc link_score 0.23956918716430664
+doc adult 0
+spelling "pizzeria10"
+spelling "Pizza place number 10"
+key "10"
+key "number"
+key "pizza"
+key "pizzaplacenumber10"
+key "pizzeria10"
+key "place"
+
+site pizzeria11.com
+line {"domain":"pizzeria11.com","title":"Pizza place number 11","signals":{"harmonic_rank":1000011,"linking_domains":10}}
+doc domain "pizzeria11.com"
+doc label "pizzeria11"
+doc label_key "pizzeria11"
+doc joined "pizzeria11"
+doc joined "Pizza place number 11"
+doc title "Pizza place number 11"
+doc link_score 0.23956914246082306
+doc adult 0
+spelling "pizzeria11"
+spelling "Pizza place number 11"
+key "11"
+key "number"
+key "pizza"
+key "pizzaplacenumber11"
+key "pizzeria11"
+key "place"
+
+site pizzeria12.com
+line {"domain":"pizzeria12.com","title":"Pizza place number 12","signals":{"harmonic_rank":1000012,"linking_domains":10}}
+doc domain "pizzeria12.com"
+doc label "pizzeria12"
+doc label_key "pizzeria12"
+doc joined "pizzeria12"
+doc joined "Pizza place number 12"
+doc title "Pizza place number 12"
+doc link_score 0.23956909775733948
+doc adult 0
+spelling "pizzeria12"
+spelling "Pizza place number 12"
+key "12"
+key "number"
+key "pizza"
+key "pizzaplacenumber12"
+key "pizzeria12"
+key "place"
+
+site pizzeria13.com
+line {"domain":"pizzeria13.com","title":"Pizza place number 13","signals":{"harmonic_rank":1000013,"linking_domains":10}}
+doc domain "pizzeria13.com"
+doc label "pizzeria13"
+doc label_key "pizzeria13"
+doc joined "pizzeria13"
+doc joined "Pizza place number 13"
+doc title "Pizza place number 13"
+doc link_score 0.2395690530538559
+doc adult 0
+spelling "pizzeria13"
+spelling "Pizza place number 13"
+key "13"
+key "number"
+key "pizza"
+key "pizzaplacenumber13"
+key "pizzeria13"
+key "place"
+
+site pizzeria14.com
+line {"domain":"pizzeria14.com","title":"Pizza place number 14","signals":{"harmonic_rank":1000014,"linking_domains":10}}
+doc domain "pizzeria14.com"
+doc label "pizzeria14"
+doc label_key "pizzeria14"
+doc joined "pizzeria14"
+doc joined "Pizza place number 14"
+doc title "Pizza place number 14"
+doc link_score 0.2395690232515335
+doc adult 0
+spelling "pizzeria14"
+spelling "Pizza place number 14"
+key "14"
+key "number"
+key "pizza"
+key "pizzaplacenumber14"
+key "pizzeria14"
+key "place"
+
+site pizzeria15.com
+line {"domain":"pizzeria15.com","title":"Pizza place number 15","signals":{"harmonic_rank":1000015,"linking_domains":10}}
+doc domain "pizzeria15.com"
+doc label "pizzeria15"
+doc label_key "pizzeria15"
+doc joined "pizzeria15"
+doc joined "Pizza place number 15"
+doc title "Pizza place number 15"
+doc link_score 0.23956897854804993
+doc adult 0
+spelling "pizzeria15"
+spelling "Pizza place number 15"
+key "15"
+key "number"
+key "pizza"
+key "pizzaplacenumber15"
+key "pizzeria15"
+key "place"
+
+site pizzeria16.com
+line {"domain":"pizzeria16.com","title":"Pizza place number 16","signals":{"harmonic_rank":1000016,"linking_domains":10}}
+doc domain "pizzeria16.com"
+doc label "pizzeria16"
+doc label_key "pizzeria16"
+doc joined "pizzeria16"
+doc joined "Pizza place number 16"
+doc title "Pizza place number 16"
+doc link_score 0.23956893384456635
+doc adult 0
+spelling "pizzeria16"
+spelling "Pizza place number 16"
+key "16"
+key "number"
+key "pizza"
+key "pizzaplacenumber16"
+key "pizzeria16"
+key "place"
+
+site pizzeria17.com
+line {"domain":"pizzeria17.com","title":"Pizza place number 17","signals":{"harmonic_rank":1000017,"linking_domains":10}}
+doc domain "pizzeria17.com"
+doc label "pizzeria17"
+doc label_key "pizzeria17"
+doc joined "pizzeria17"
+doc joined "Pizza place number 17"
+doc title "Pizza place number 17"
+doc link_score 0.23956890404224396
+doc adult 0
+spelling "pizzeria17"
+spelling "Pizza place number 17"
+key "17"
+key "number"
+key "pizza"
+key "pizzaplacenumber17"
+key "pizzeria17"
+key "place"
+
+site pizzeria18.com
+line {"domain":"pizzeria18.com","title":"Pizza place number 18","signals":{"harmonic_rank":1000018,"linking_domains":10}}
+doc domain "pizzeria18.com"
+doc label "pizzeria18"
+doc label_key "pizzeria18"
+doc joined "pizzeria18"
+doc joined "Pizza place number 18"
+doc title "Pizza place number 18"
+doc link_score 0.23956885933876038
+doc adult 0
+spelling "pizzeria18"
+spelling "Pizza place number 18"
+key "18"
+key "number"
+key "pizza"
+key "pizzaplacenumber18"
+key "pizzeria18"
+key "place"
+
+site pizzeria19.com
+line {"domain":"pizzeria19.com","title":"Pizza place number 19","signals":{"harmonic_rank":1000019,"linking_domains":10}}
+doc domain "pizzeria19.com"
+doc label "pizzeria19"
+doc label_key "pizzeria19"
+doc joined "pizzeria19"
+doc joined "Pizza place number 19"
+doc title "Pizza place number 19"
+doc link_score 0.2395688146352768
+doc adult 0
+spelling "pizzeria19"
+spelling "Pizza place number 19"
+key "19"
+key "number"
+key "pizza"
+key "pizzaplacenumber19"
+key "pizzeria19"
+key "place"
+
+site pizzeria20.com
+line {"domain":"pizzeria20.com","title":"Pizza place number 20","signals":{"harmonic_rank":1000020,"linking_domains":10}}
+doc domain "pizzeria20.com"
+doc label "pizzeria20"
+doc label_key "pizzeria20"
+doc joined "pizzeria20"
+doc joined "Pizza place number 20"
+doc title "Pizza place number 20"
+doc link_score 0.2395687699317932
+doc adult 0
+spelling "pizzeria20"
+spelling "Pizza place number 20"
+key "20"
+key "number"
+key "pizza"
+key "pizzaplacenumber20"
+key "pizzeria20"
+key "place"
+
+site pizzeria21.com
+line {"domain":"pizzeria21.com","title":"Pizza place number 21","signals":{"harmonic_rank":1000021,"linking_domains":10}}
+doc domain "pizzeria21.com"
+doc label "pizzeria21"
+doc label_key "pizzeria21"
+doc joined "pizzeria21"
+doc joined "Pizza place number 21"
+doc title "Pizza place number 21"
+doc link_score 0.23956874012947083
+doc adult 0
+spelling "pizzeria21"
+spelling "Pizza place number 21"
+key "21"
+key "number"
+key "pizza"
+key "pizzaplacenumber21"
+key "pizzeria21"
+key "place"
+
+site pizzeria22.com
+line {"domain":"pizzeria22.com","title":"Pizza place number 22","signals":{"harmonic_rank":1000022,"linking_domains":10}}
+doc domain "pizzeria22.com"
+doc label "pizzeria22"
+doc label_key "pizzeria22"
+doc joined "pizzeria22"
+doc joined "Pizza place number 22"
+doc title "Pizza place number 22"
+doc link_score 0.23956869542598724
+doc adult 0
+spelling "pizzeria22"
+spelling "Pizza place number 22"
+key "22"
+key "number"
+key "pizza"
+key "pizzaplacenumber22"
+key "pizzeria22"
+key "place"
+
+site pizzeria23.com
+line {"domain":"pizzeria23.com","title":"Pizza place number 23","signals":{"harmonic_rank":1000023,"linking_domains":10}}
+doc domain "pizzeria23.com"
+doc label "pizzeria23"
+doc label_key "pizzeria23"
+doc joined "pizzeria23"
+doc joined "Pizza place number 23"
+doc title "Pizza place number 23"
+doc link_score 0.23956865072250366
+doc adult 0
+spelling "pizzeria23"
+spelling "Pizza place number 23"
+key "23"
+key "number"
+key "pizza"
+key "pizzaplacenumber23"
+key "pizzeria23"
+key "place"
+
+site pizzeria24.com
+line {"domain":"pizzeria24.com","title":"Pizza place number 24","signals":{"harmonic_rank":1000024,"linking_domains":10}}
+doc domain "pizzeria24.com"
+doc label "pizzeria24"
+doc label_key "pizzeria24"
+doc joined "pizzeria24"
+doc joined "Pizza place number 24"
+doc title "Pizza place number 24"
+doc link_score 0.23956860601902008
+doc adult 0
+spelling "pizzeria24"
+spelling "Pizza place number 24"
+key "24"
+key "number"
+key "pizza"
+key "pizzaplacenumber24"
+key "pizzeria24"
+key "place"
+
+site forecaster0.com
+line {"domain":"forecaster0.com","title":"Local forecast","signals":{"harmonic_rank":2000000,"linking_domains":10}}
+doc domain "forecaster0.com"
+doc label "forecaster0"
+doc label_key "forecaster0"
+doc joined "forecaster0"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.2113480269908905
+doc adult 0
+spelling "forecaster0"
+spelling "Local forecast"
+key "forecast"
+key "forecaster0"
+key "local"
+key "localforecast"
+
+site forecaster1.com
+line {"domain":"forecaster1.com","title":"Local forecast","signals":{"harmonic_rank":2000001,"linking_domains":10}}
+doc domain "forecaster1.com"
+doc label "forecaster1"
+doc label_key "forecaster1"
+doc joined "forecaster1"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.2113480120897293
+doc adult 0
+spelling "forecaster1"
+spelling "Local forecast"
+key "forecast"
+key "forecaster1"
+key "local"
+key "localforecast"
+
+site forecaster2.com
+line {"domain":"forecaster2.com","title":"Local forecast","signals":{"harmonic_rank":2000002,"linking_domains":10}}
+doc domain "forecaster2.com"
+doc label "forecaster2"
+doc label_key "forecaster2"
+doc joined "forecaster2"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134798228740692
+doc adult 0
+spelling "forecaster2"
+spelling "Local forecast"
+key "forecast"
+key "forecaster2"
+key "local"
+key "localforecast"
+
+site forecaster3.com
+line {"domain":"forecaster3.com","title":"Local forecast","signals":{"harmonic_rank":2000003,"linking_domains":10}}
+doc domain "forecaster3.com"
+doc label "forecaster3"
+doc label_key "forecaster3"
+doc joined "forecaster3"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134796738624573
+doc adult 0
+spelling "forecaster3"
+spelling "Local forecast"
+key "forecast"
+key "forecaster3"
+key "local"
+key "localforecast"
+
+site forecaster4.com
+line {"domain":"forecaster4.com","title":"Local forecast","signals":{"harmonic_rank":2000004,"linking_domains":10}}
+doc domain "forecaster4.com"
+doc label "forecaster4"
+doc label_key "forecaster4"
+doc joined "forecaster4"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134795248508453
+doc adult 0
+spelling "forecaster4"
+spelling "Local forecast"
+key "forecast"
+key "forecaster4"
+key "local"
+key "localforecast"
+
+site forecaster5.com
+line {"domain":"forecaster5.com","title":"Local forecast","signals":{"harmonic_rank":2000005,"linking_domains":10}}
+doc domain "forecaster5.com"
+doc label "forecaster5"
+doc label_key "forecaster5"
+doc joined "forecaster5"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134792268276215
+doc adult 0
+spelling "forecaster5"
+spelling "Local forecast"
+key "forecast"
+key "forecaster5"
+key "local"
+key "localforecast"
+
+site forecaster6.com
+line {"domain":"forecaster6.com","title":"Local forecast","signals":{"harmonic_rank":2000006,"linking_domains":10}}
+doc domain "forecaster6.com"
+doc label "forecaster6"
+doc label_key "forecaster6"
+doc joined "forecaster6"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134790778160095
+doc adult 0
+spelling "forecaster6"
+spelling "Local forecast"
+key "forecast"
+key "forecaster6"
+key "local"
+key "localforecast"
+
+site forecaster7.com
+line {"domain":"forecaster7.com","title":"Local forecast","signals":{"harmonic_rank":2000007,"linking_domains":10}}
+doc domain "forecaster7.com"
+doc label "forecaster7"
+doc label_key "forecaster7"
+doc joined "forecaster7"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134787797927856
+doc adult 0
+spelling "forecaster7"
+spelling "Local forecast"
+key "forecast"
+key "forecaster7"
+key "local"
+key "localforecast"
+
+site forecaster8.com
+line {"domain":"forecaster8.com","title":"Local forecast","signals":{"harmonic_rank":2000008,"linking_domains":10}}
+doc domain "forecaster8.com"
+doc label "forecaster8"
+doc label_key "forecaster8"
+doc joined "forecaster8"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134786307811737
+doc adult 0
+spelling "forecaster8"
+spelling "Local forecast"
+key "forecast"
+key "forecaster8"
+key "local"
+key "localforecast"
+
+site forecaster9.com
+line {"domain":"forecaster9.com","title":"Local forecast","signals":{"harmonic_rank":2000009,"linking_domains":10}}
+doc domain "forecaster9.com"
+doc label "forecaster9"
+doc label_key "forecaster9"
+doc joined "forecaster9"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134784817695618
+doc adult 0
+spelling "forecaster9"
+spelling "Local forecast"
+key "forecast"
+key "forecaster9"
+key "local"
+key "localforecast"
+
+site forecaster10.com
+line {"domain":"forecaster10.com","title":"Local forecast","signals":{"harmonic_rank":2000010,"linking_domains":10}}
+doc domain "forecaster10.com"
+doc label "forecaster10"
+doc label_key "forecaster10"
+doc joined "forecaster10"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.2113478183746338
+doc adult 0
+spelling "forecaster10"
+spelling "Local forecast"
+key "forecast"
+key "forecaster10"
+key "local"
+key "localforecast"
+
+site forecaster11.com
+line {"domain":"forecaster11.com","title":"Local forecast","signals":{"harmonic_rank":2000011,"linking_domains":10}}
+doc domain "forecaster11.com"
+doc label "forecaster11"
+doc label_key "forecaster11"
+doc joined "forecaster11"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.2113478034734726
+doc adult 0
+spelling "forecaster11"
+spelling "Local forecast"
+key "forecast"
+key "forecaster11"
+key "local"
+key "localforecast"
+
+site forecaster12.com
+line {"domain":"forecaster12.com","title":"Local forecast","signals":{"harmonic_rank":2000012,"linking_domains":10}}
+doc domain "forecaster12.com"
+doc label "forecaster12"
+doc label_key "forecaster12"
+doc joined "forecaster12"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.2113477885723114
+doc adult 0
+spelling "forecaster12"
+spelling "Local forecast"
+key "forecast"
+key "forecaster12"
+key "local"
+key "localforecast"
+
+site forecaster13.com
+line {"domain":"forecaster13.com","title":"Local forecast","signals":{"harmonic_rank":2000013,"linking_domains":10}}
+doc domain "forecaster13.com"
+doc label "forecaster13"
+doc label_key "forecaster13"
+doc joined "forecaster13"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.211347758769989
+doc adult 0
+spelling "forecaster13"
+spelling "Local forecast"
+key "forecast"
+key "forecaster13"
+key "local"
+key "localforecast"
+
+site forecaster14.com
+line {"domain":"forecaster14.com","title":"Local forecast","signals":{"harmonic_rank":2000014,"linking_domains":10}}
+doc domain "forecaster14.com"
+doc label "forecaster14"
+doc label_key "forecaster14"
+doc joined "forecaster14"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134774386882782
+doc adult 0
+spelling "forecaster14"
+spelling "Local forecast"
+key "forecast"
+key "forecaster14"
+key "local"
+key "localforecast"
+
+site forecaster15.com
+line {"domain":"forecaster15.com","title":"Local forecast","signals":{"harmonic_rank":2000015,"linking_domains":10}}
+doc domain "forecaster15.com"
+doc label "forecaster15"
+doc label_key "forecaster15"
+doc joined "forecaster15"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134772896766663
+doc adult 0
+spelling "forecaster15"
+spelling "Local forecast"
+key "forecast"
+key "forecaster15"
+key "local"
+key "localforecast"
+
+site forecaster16.com
+line {"domain":"forecaster16.com","title":"Local forecast","signals":{"harmonic_rank":2000016,"linking_domains":10}}
+doc domain "forecaster16.com"
+doc label "forecaster16"
+doc label_key "forecaster16"
+doc joined "forecaster16"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134769916534424
+doc adult 0
+spelling "forecaster16"
+spelling "Local forecast"
+key "forecast"
+key "forecaster16"
+key "local"
+key "localforecast"
+
+site forecaster17.com
+line {"domain":"forecaster17.com","title":"Local forecast","signals":{"harmonic_rank":2000017,"linking_domains":10}}
+doc domain "forecaster17.com"
+doc label "forecaster17"
+doc label_key "forecaster17"
+doc joined "forecaster17"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134768426418304
+doc adult 0
+spelling "forecaster17"
+spelling "Local forecast"
+key "forecast"
+key "forecaster17"
+key "local"
+key "localforecast"
+
+site forecaster18.com
+line {"domain":"forecaster18.com","title":"Local forecast","signals":{"harmonic_rank":2000018,"linking_domains":10}}
+doc domain "forecaster18.com"
+doc label "forecaster18"
+doc label_key "forecaster18"
+doc joined "forecaster18"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134765446186066
+doc adult 0
+spelling "forecaster18"
+spelling "Local forecast"
+key "forecast"
+key "forecaster18"
+key "local"
+key "localforecast"
+
+site forecaster19.com
+line {"domain":"forecaster19.com","title":"Local forecast","signals":{"harmonic_rank":2000019,"linking_domains":10}}
+doc domain "forecaster19.com"
+doc label "forecaster19"
+doc label_key "forecaster19"
+doc joined "forecaster19"
+doc joined "Local forecast"
+doc title "Local forecast"
+doc link_score 0.21134763956069946
+doc adult 0
+spelling "forecaster19"
+spelling "Local forecast"
+key "forecast"
+key "forecaster19"
+key "local"
+key "localforecast"
+
+site theguardian.com
+line {"domain":"theguardian.com","url":"https://www.theguardian.com/international","title":"News, sport and opinion from the Guardian's global edition | The Guardian","description":"Latest news, sport, business, comment, analysis and reviews from the Guardian, the world's leading liberal voice. More reporting from around the world. More reporting from around the world. More reporting from around the world. More reporting from around the world. More reporting from around the world. More reporting from around the world. More reporting from around the world. More reporting from around the world. More reporting from around the world. More reporting from around the world.","headings":["Headline section 1","Headline section 2","Headline section 3","Headline section 4","Headline section 5","Headline section 6","Headline section 7","Headline section 8","Headline section 9","Headline section 10"],"body_text":"Guardian news every day from reporters around the world with analysis opinion sport culture lifestyle and the stories that matter to readers in every country who want to know what happens next","terms":["guardian","news","opinion"],"link_texts":[{"text":"the guardian","count":500},{"text":"guardian","count":120},{"text":"theguardian com","count":40},{"text":"read the full story on the guardian website today","count":9},{"text":"https www theguardian com","count":6},{"text":"the guardian world news","count":4},{"text":"comment is free","count":2}],"aliases":["The Guardian","Guardian","The Manchester Guardian"],"signals":{"harmonic_rank":150,"pagerank_rank":90,"tranco_rank":120,"linking_domains":95000,"official_site":true,"sitelinks":80,"fact_checks":10,"fact_agrees":9},"crawled_at":1791605520,"country":"gb","kinds":["newspaper","news website","website"],"about":"British daily newspaper","intro":"The Guardian is a British daily newspaper, founded in 1821.","summary":"A British newspaper's website.","search_url":"https://www.theguardian.com/search?q={searchTerms}","language":"en-GB","key_pages":[{"label":"World","url":"https://www.theguardian.com/world"},{"label":"Opinion","url":"https://www.theguardian.com/commentisfree"},{"label":"Shop","url":"https://guardian.example/shop"}],"links_to":["bbc.co.uk"]}
+doc domain "theguardian.com"
+doc url "https://www.theguardian.com/international"
+doc label "theguardian"
+doc label_key "theguardian"
+doc joined "theguardian"
+doc joined "News, sport and opinion from the Guardian's global edition | The Guardian"
+doc joined "News, sport and opinion from the Guardian's global edition"
+doc joined "The Guardian"
+doc title "News, sport and opinion from the Guardian's global edition | The Guardian"
+doc description "Latest news, sport, business, comment, analysis and reviews from the Guardian, the world's leading liberal voice. More reporting from around the world. More reporting from around the world. More reporting from around the world. More reporting from around the world. More reporting from around the wor"
+doc description "The Guardian is a British daily newspaper, founded in 1821."
+doc headings "Headline section 1"
+doc headings "Headline section 2"
+doc headings "Headline section 3"
+doc headings "Headline section 4"
+doc headings "Headline section 5"
+doc headings "Headline section 6"
+doc headings "Headline section 7"
+doc headings "Headline section 8"
+doc terms "guardian news opinion"
+doc about "British daily newspaper"
+doc aliases "The Guardian"
+doc joined "The Guardian"
+doc alias_key "The Guardian"
+doc label_key "The Guardian"
+doc alias_key "guardian"
+doc label_key "guardian"
+doc joined "guardian"
+doc aliases "Guardian"
+doc joined "Guardian"
+doc alias_key "Guardian"
+doc label_key "Guardian"
+doc aliases "The Manchester Guardian"
+doc joined "The Manchester Guardian"
+doc alias_key "The Manchester Guardian"
+doc label_key "The Manchester Guardian"
+doc alias_key "manchester guardian"
+doc label_key "manchester guardian"
+doc joined "manchester guardian"
+doc anchors "the guardian" x5
+doc joined "the guardian"
+doc link_name_key "the guardian" x64
+doc link_name_key "guardian" x64
+doc anchors "guardian" x5
+doc joined "guardian"
+doc link_name_key "guardian" x64
+doc anchors "theguardian com" x5
+doc joined "theguardian com"
+doc link_name_key "theguardian com" x40
+doc anchors "read the full story on the guardian website today" x3
+doc joined "read the full story on the guardian website today"
+doc anchors "https www theguardian com" x3
+doc joined "https www theguardian com"
+doc anchors "the guardian world news" x2
+doc joined "the guardian world news"
+doc anchors "comment is free" x2
+doc joined "comment is free"
+doc link_score 0.9996603727340698
+doc country "GB"
+doc kind_key "newspaper"
+doc kind_key "newwebsite"
+doc kind_key "website"
+doc search_url "https://www.theguardian.com/search?q={searchTerms}"
+doc language "en"
+doc adult 0
+doc fingerprint 10389480852262907963
+doc key_pages "[{\"label\":\"World\",\"url\":\"https://www.theguardian.com/world\"},{\"label\":\"Opinion\",\"url\":\"https://www.theguardian.com/commentisfree\"}]"
+spelling "theguardian"
+spelling "The Guardian"
+spelling "Guardian"
+spelling "The Manchester Guardian"
+spelling "News, sport and opinion from the Guardian's global edition"
+spelling "The Guardian"
+spelling "the guardian"
+spelling "guardian"
+spelling "theguardian com"
+spelling "read the full story on the guardian website today"
+spelling "https www theguardian com"
+spelling "the guardian world news"
+spelling "comment is free"
+spelling "British daily newspaper"
+key "and"
+key "com"
+key "comment"
+key "commentisfree"
+key "edition"
+key "free"
+key "from"
+key "full"
+key "global"
+key "guardian"
+key "guardians"
+key "https"
+key "httpswwwtheguardiancom"
+key "is"
+key "manchester"
+key "news"
+key "newssportandopinionfromtheguardiansglobaledition"
+key "newssportandopinionfromtheguardiansglobaleditiontheguardian"
+key "on"
+key "opinion"
+key "read"
+key "readthefullstoryontheguardianwebsitetoday"
+key "sport"
+key "story"
+key "the"
+key "theguardian"
+key "theguardiancom"
+key "theguardianworldnews"
+key "themanchesterguardian"
+key "today"
+key "website"
+key "world"
+key "www"
+
+site bigbank.example
+line {"domain":"bigbank.example","url":"https://www.bigbankgroup.example/en/","title":"Big Bank Group | Welcome","description":"Big Bank Group, the bank of the group.","headings":["Accounts"],"body_text":"Bank news every day from reporters around the world with analysis opinion sport culture lifestyle and the stories that matter to readers in every country who want to know what happens next","link_texts":[{"text":"big bank","count":12}],"aliases":["Big Bank"],"signals":{"tranco_rank":80000,"linking_domains":300},"summary":"A bank in Example."}
+doc domain "bigbank.example"
+doc label "bigbank"
+doc label_key "bigbank"
+doc joined "bigbank"
+doc joined "Big Bank"
+doc title "Big Bank"
+doc description "A bank in Example."
+doc headings "Accounts"
+doc aliases "Big Bank"
+doc joined "Big Bank"
+doc alias_key "Big Bank"
+doc anchors "big bank" x3
+doc joined "big bank"
+doc link_name_key "big bank" x12
+doc link_score 0.414263516664505
+doc language "~en"
+doc adult 0
+spelling "bigbank"
+spelling "Big Bank"
+spelling "big bank"
+key "bank"
+key "big"
+key "bigbank"
+key "bigbankgroup"
+key "bigbankgroupwelcome"
+key "group"
+key "welcome"
+
+site acmewidgets.example
+line {"domain":"acmewidgets.example","url":"https://acmewidgets.example/","title":"Home","description":"Widgets for every job.","aliases":["Acme Widgets","The Acme Widget Company"],"signals":{"tranco_rank":30000,"linking_domains":500,"official_site":true},"key_pages":[{"label":"Shop","url":"https://www.acmewidgets.example/shop"},{"label":"Log in","url":"https://www.acmewidgets.example/login"}]}
+doc domain "acmewidgets.example"
+doc url "https://acmewidgets.example/"
+doc label "acmewidgets"
+doc label_key "acmewidgets"
+doc joined "acmewidgets"
+doc joined "Acme Widgets"
+doc title "Acme Widgets"
+doc description "Widgets for every job."
+doc aliases "Acme Widgets"
+doc joined "Acme Widgets"
+doc alias_key "Acme Widgets"
+doc label_key "Acme Widgets"
+doc aliases "The Acme Widget Company"
+doc joined "The Acme Widget Company"
+doc alias_key "The Acme Widget Company"
+doc label_key "The Acme Widget Company"
+doc alias_key "acme widget company"
+doc label_key "acme widget company"
+doc joined "acme widget company"
+doc link_score 0.6152616739273071
+doc adult 0
+doc key_pages "[{\"label\":\"Shop\",\"url\":\"https://www.acmewidgets.example/shop\"},{\"label\":\"Log in\",\"url\":\"https://www.acmewidgets.example/login\"}]"
+spelling "acmewidgets"
+spelling "Acme Widgets"
+spelling "The Acme Widget Company"
+key "acme"
+key "acmewidgets"
+key "company"
+key "home"
+key "the"
+key "theacmewidgetcompany"
+key "widget"
+key "widgets"
+
+site cafedumonde.example
+line {"domain":"cafedumonde.example","title":"Caf� du Monde","signals":{"harmonic_rank":700000,"linking_domains":30}}
+doc domain "cafedumonde.example"
+doc label "cafedumonde"
+doc label_key "cafedumonde"
+doc joined "cafedumonde"
+doc link_score 0.2765900790691376
+doc adult 0
+spelling "cafedumonde"
+key "caf"
+key "cafdumonde"
+key "cafedumonde"
+key "du"
+key "monde"
+
+site linkedin.com
+line {"domain":"linkedin.com","url":"https://www.linkedin.com/","title":"LinkedIn: Log In or Sign Up","link_texts":[{"text":"linkedin","count":2000}],"aliases":["LinkedIn"],"signals":{"tranco_rank":20,"linking_domains":400000,"official_site":true}}
+doc domain "linkedin.com"
+doc url "https://www.linkedin.com/"
+doc label "linkedin"
+doc label_key "linkedin"
+doc joined "linkedin"
+doc joined "LinkedIn: Log In or Sign Up"
+doc joined "LinkedIn"
+doc joined "Log In or Sign Up"
+doc title "LinkedIn: Log In or Sign Up"
+doc aliases "LinkedIn"
+doc joined "LinkedIn"
+doc alias_key "LinkedIn"
+doc label_key "LinkedIn"
+doc anchors "linkedin" x5
+doc joined "linkedin"
+doc link_name_key "linkedin" x64
+doc link_score 1.0
+doc adult 0
+doc key_pages "[{\"label\":\"Sign in\",\"url\":\"https://www.linkedin.com/login\"},{\"label\":\"Join now\",\"url\":\"https://www.linkedin.com/signup\"},{\"label\":\"Jobs\",\"url\":\"https://www.linkedin.com/jobs/\"},{\"label\":\"Help\",\"url\":\"https://www.linkedin.com/help/linkedin\"}]"
+spelling "linkedin"
+spelling "LinkedIn"
+spelling "LinkedIn"
+spelling "Log In or Sign Up"
+spelling "linkedin"
+key "in"
+key "linkedin"
+key "linkedinloginorsignup"
+key "log"
+key "loginorsignup"
+key "or"
+key "sign"
+key "up"
+
+site adultvideos.example
+line {"domain":"adultvideos.example","title":"Videos","signals":{"harmonic_rank":900000,"linking_domains":40},"kinds":["adult website"]}
+doc domain "adultvideos.example"
+doc label "adultvideos"
+doc label_key "adultvideos"
+doc joined "adultvideos"
+doc joined "Videos"
+doc title "Videos"
+doc link_score 0.2724289000034332
+doc kind_key "adultwebsite"
+doc adult 2
+spelling "adultvideos"
+spelling "Videos"
+key "adultvideos"
+key "videos"
+
+site lingerieboutique.example
+line {"domain":"lingerieboutique.example","title":"Sexy lingerie boutique","description":"Lingerie for every day.","signals":{"harmonic_rank":950000,"linking_domains":20}}
+doc domain "lingerieboutique.example"
+doc label "lingerieboutique"
+doc label_key "lingerieboutique"
+doc joined "lingerieboutique"
+doc joined "Sexy lingerie boutique"
+doc title "Sexy lingerie boutique"
+doc description "Lingerie for every day."
+doc link_score 0.2556993067264557
+doc adult 1
+spelling "lingerieboutique"
+spelling "Sexy lingerie boutique"
+key "boutique"
+key "lingerie"
+key "lingerieboutique"
+key "sexy"
+key "sexylingerieboutique"
+
+site airfrance.com
+line {"domain":"airfrance.com","title":"Air France - Billets d'avion","description":"Réservez vos billets d'avion.","link_texts":[{"text":"air france","count":300}],"aliases":["Air France"],"signals":{"tranco_rank":3000,"linking_domains":9000,"official_site":true},"country":"fr","kinds":["airline"],"language":"fr"}
+doc domain "airfrance.com"
+doc label "airfrance"
+doc label_key "airfrance"
+doc joined "airfrance"
+doc joined "Air France - Billets d'avion"
+doc joined "Air France"
+doc joined "Billets d'avion"
+doc title "Air France - Billets d'avion"
+doc description "Réservez vos billets d'avion."
+doc aliases "Air France"
+doc joined "Air France"
+doc alias_key "Air France"
+doc label_key "Air France"
+doc anchors "air france" x5
+doc joined "air france"
+doc link_name_key "air france" x64
+doc link_score 0.7717342376708984
+doc country "FR"
+doc kind_key "airline"
+doc language "fr"
+doc adult 0
+spelling "airfrance"
+spelling "Air France"
+spelling "Air France"
+spelling "Billets d'avion"
+spelling "air france"
+key "air"
+key "airfrance"
+key "airfrancebilletsdavion"
+key "billets"
+key "billetsdavion"
+key "davion"
+key "france"
+
+site bundesbank.de
+line {"domain":"bundesbank.de","title":"Deutsche Bundesbank","aliases":["Deutsche Bundesbank","Bundesbank"],"signals":{"tranco_rank":9000,"linking_domains":4000,"official_site":true},"kinds":["central bank","bank"],"language":"de"}
+doc domain "bundesbank.de"
+doc label "bundesbank"
+doc label_key "bundesbank"
+doc joined "bundesbank"
+doc joined "Deutsche Bundesbank"
+doc title "Deutsche Bundesbank"
+doc aliases "Deutsche Bundesbank"
+doc joined "Deutsche Bundesbank"
+doc alias_key "Deutsche Bundesbank"
+doc label_key "Deutsche Bundesbank"
+doc aliases "Bundesbank"
+doc joined "Bundesbank"
+doc alias_key "Bundesbank"
+doc label_key "Bundesbank"
+doc link_score 0.7093980312347412
+doc country "DE"
+doc kind_key "centralbank"
+doc kind_key "bank"
+doc language "de"
+doc adult 0
+spelling "bundesbank"
+spelling "Deutsche Bundesbank"
+spelling "Bundesbank"
+spelling "Deutsche Bundesbank"
+key "bundesbank"
+key "deutsche"
+key "deutschebundesbank"
+
+site lenta.ru
+line {"domain":"lenta.ru","title":"Лента новостей России и мира сегодня","description":"Новости России и мира","link_texts":[{"text":"лента","count":30}],"signals":{"tranco_rank":1500,"linking_domains":20000,"official_site":true}}
+doc domain "lenta.ru"
+doc label "lenta"
+doc label_key "lenta"
+doc joined "lenta"
+doc joined "Лента новостей России и мира сегодня"
+doc title "Лента новостей России и мира сегодня"
+doc description "Новости России и мира"
+doc anchors "лента" x4
+doc joined "лента"
+doc link_name_key "лента" x30
+doc link_score 0.8172938227653503
+doc country "RU"
+doc language "Cyrl"
+doc adult 0
+spelling "lenta"
+spelling "Лента новостей России и мира сегодня"
+spelling "лента"
+key "lenta"
+key "лента"
+key "лентановостейроссииимирасегодня"
+key "мира"
+key "новостей"
+key "россии"
+key "сегодня"
+
+site quietsite.example
+line {"domain":"quietsite.example","signals":{"harmonic_rank":5000000,"linking_domains":3},"summary":"A small site about quiet places."}
+doc domain "quietsite.example"
+doc label "quietsite"
+doc label_key "quietsite"
+doc joined "quietsite"
+doc description "A small site about quiet places."
+doc link_score 0.15207453072071075
+doc adult 0
+spelling "quietsite"
+key "quietsite"
+
+site describedsite.example
+line {"domain":"describedsite.example","title":"Described Site","description":"A site that says what it is.","signals":{"harmonic_rank":5100000,"linking_domains":3},"summary":"Not used: the site describes itself."}
+doc domain "describedsite.example"
+doc label "describedsite"
+doc label_key "describedsite"
+doc joined "describedsite"
+doc joined "Described Site"
+doc title "Described Site"
+doc description "A site that says what it is."
+doc link_score 0.15126827359199524
+doc adult 0
+spelling "describedsite"
+spelling "Described Site"
+key "described"
+key "describedsite"
+key "site"
+
+site pnc.com
+line {"domain":"pnc.com","url":"https://www.pnc.com/en/personal-banking.html","title":"PNC Bank","link_texts":[{"text":"pnc","count":800}],"aliases":["PNC Financial Services"],"signals":{"tranco_rank":1200,"linking_domains":30000,"official_site":true}}
+redirect_names ["pncbank"]
+doc domain "pnc.com"
+doc url "https://www.pnc.com/en/personal-banking.html"
+doc label "pnc"
+doc label_key "pnc"
+doc joined "pnc"
+doc label_key "pncbank"
+doc joined "pncbank"
+doc aliases "pncbank"
+doc joined "PNC Bank"
+doc title "PNC Bank"
+doc aliases "PNC Financial Services"
+doc joined "PNC Financial Services"
+doc alias_key "PNC Financial Services"
+doc label_key "PNC Financial Services"
+doc anchors "pnc" x5
+doc joined "pnc"
+doc link_name_key "pnc" x64
+doc link_score 0.835183322429657
+doc adult 0
+spelling "pnc"
+spelling "pncbank"
+spelling "PNC Financial Services"
+spelling "PNC Bank"
+spelling "pnc"
+key "bank"
+key "financial"
+key "pnc"
+key "pncbank"
+key "pncfinancialservices"
+key "services"
+
+site pncbank.com
+line {"domain":"pncbank.com","link_texts":[{"text":"pnc bank","count":40}],"signals":{"tranco_rank":90000,"linking_domains":200},"redirect":{"to":"pnc.com","at":1791000000}}
+doc domain "pncbank.com"
+doc label "pncbank"
+doc label_key "pncbank"
+doc joined "pncbank"
+doc anchors "pnc bank" x5
+doc joined "pnc bank"
+doc link_name_key "pnc bank" x40
+doc link_score 0.4006994664669037
+doc adult 0
+spelling "pncbank"
+spelling "pnc bank"
+key "bank"
+key "pnc"
+key "pncbank"
+
+site pncinvest.example
+line {"domain":"pncinvest.example","title":"PNC Investments","signals":{"harmonic_rank":2000000,"linking_domains":5},"crawl_failures":2,"redirect":{"to":"pnc.com","at":1791000000,"inner":true}}
+doc domain "pncinvest.example"
+doc label "pncinvest"
+doc label_key "pncinvest"
+doc joined "pncinvest"
+doc joined "PNC Investments"
+doc title "PNC Investments"
+doc link_score 0.1981859654188156
+doc adult 0
+spelling "pncinvest"
+spelling "PNC Investments"
+key "investments"
+key "pnc"
+key "pncinvest"
+key "pncinvestments"
