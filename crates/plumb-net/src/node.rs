@@ -186,7 +186,7 @@ const MAX_ESTABLISHED_INCOMING: u32 = 1024;
 /// Connections with one node at once (TCP, QUIC, through relays).
 const MAX_ESTABLISHED_PER_PEER: u32 = 8;
 
-/// Largest answer taken on `/plumb/batch/1`: a batch of at most
+/// Largest answer taken on `/plumb/batch/2`: a batch of at most
 /// [`crate::batch::MAX_BATCH_BYTES`] of records, or
 /// [`MAX_LISTED_BATCHES`] headers of a few hundred bytes each.
 const MAX_BATCH_RESPONSE: u64 = crate::batch::MAX_BATCH_BYTES as u64 + 4 * 1024 * 1024;
@@ -1071,7 +1071,7 @@ enum Answer {
     Sealed(Reply, ObliviousResponse),
 }
 
-/// Whoever waits for an answer on `/plumb/oblivious/1`: a remote node, or
+/// Whoever waits for an answer on `/plumb/oblivious/2`: a remote node, or
 /// this node's own [`NetHandle`].
 enum Reply {
     Remote(ResponseChannel<ObliviousResponse>),

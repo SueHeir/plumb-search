@@ -27,7 +27,7 @@ fn a_batch_naming_what_the_denylist_takes_off_is_not_relayed() {
         }
     }
     let lines: Vec<String> = [
-        r#"{"domain":"example.com","url":"https://www.example.com/","key_pages":[{"label":"Docs","url":"https://example.com/docs"}]}"#,
+        r#"{"id":"example.com","kind":"site","url":"https://www.example.com/","edges":[{"rel":"key_page","to":"url:https://example.com/docs","text":"Docs"}]}"#,
         r#"{"icon_of":"icons.example","png":"AAAA"}"#,
         r#"{"news_of":"news.example","items":[{"title":"A","url":"https://news.example/a","at":1}]}"#,
         "not a record",
@@ -656,10 +656,10 @@ fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
     let answer = || {
         (0..2)
             .map(|i| {
-                let mut bare: SiteRecord = serde_json::from_str(&batch.records[i]).unwrap();
+                let mut bare = SiteRecord::from_line(&batch.records[i]).unwrap();
                 bare.body_text = None;
                 BucketRecord {
-                    record: serde_json::to_string(&bare).unwrap(),
+                    record: bare.to_line().unwrap(),
                     proof: Some(batch.proof(i)),
                     also: Vec::new(),
                 }

@@ -68,7 +68,7 @@ pub fn open(opener: ClientResponse, answer: &[u8]) -> Result<Vec<SiteRecord>, St
     let records = response.records.ok_or("that node has no buckets")?;
     Ok(records
         .into_iter()
-        .filter_map(|item| serde_json::from_str::<SiteRecord>(&item.record).ok())
+        .filter_map(|item| SiteRecord::from_line(&item.record).ok())
         .filter_map(|mut record| {
             record.domain = canonical_domain(&record.domain)?;
             if record

@@ -565,11 +565,11 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         assert_eq!(batch.records.len(), PER_BATCH);
         if n < 6 {
             // These trusted crawls carry only homepage facts, which replay
-            // preserves. Check each of the six held batches' actual encoding.
-            let bytes = batch
-                .records
+            // preserves. Check each of the six held batches' records as
+            // the receiver writes them.
+            let bytes = records
                 .iter()
-                .map(|line| line.len() as u64 + 1)
+                .map(|record| serde_json::to_vec(record).unwrap().len() as u64 + 1)
                 .sum::<u64>();
             initial_delivery_bytes.push(plumb_core::storage::allocation_for(bytes + 1));
         }
@@ -993,36 +993,43 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
     let trigger_key = plumb_net::node::load_or_create_key(&dir.path().join("trigger.key")).unwrap();
     let trigger_peer = trigger_key.public().to_peer_id();
     let domains: Vec<_> = (0u64..)
-        .map(|n| format!("oversized-facts-{n}.example"))
+        .map(|n| format!("oversized-facts-{n:08}.example"))
         .filter(|domain| is_assigned(epoch, &trigger_peer, domain, MAX_SHARE_PPM))
         .take(SITES)
         .collect();
-    // Each earlier fact is exactly the protocol's 16 KiB record limit,
-    // spread over eight legal 16 MiB batches. Punctuation does not change
-    // agreement's normalized description. The later thin crawl agrees with
-    // the earlier, newer own/trusted facts and releases those actual facts:
-    // 4096 * 16384 bytes plus the receiver's 4096 newlines exceeds 64 MiB.
+    // Each earlier crawl is an item of exactly the protocol's 16 KiB line
+    // limit, spread over eight legal 16 MiB batches, and its site is linked
+    // to, as in the later thin crawls. Signs that are not letters or digits
+    // do not change agreement's normalized description, and other names are
+    // not compared. The thin crawls agree with the earlier, newer own and
+    // trusted facts and release them, each a little under 16 KiB as the
+    // receiver writes it, and with each a mention of the site: over 64 MiB.
+    let earlier = {
+        let symbols = |chars: usize| "\u{1d11e}".repeat(chars);
+        let mut record = SiteRecord::new(&domains[0]);
+        record.crawled_at = Some(now + 1);
+        record.description = Some("same".into());
+        record.signals.linking_domains = 1;
+        for n in 0..plumb_core::MAX_ALIASES {
+            record.add_alias(&format!("{n} {}", symbols(200)));
+        }
+        let room = plumb_net::batch::MAX_RECORD_BYTES - record.to_line().unwrap().len();
+        let pad = format!("{}{}", symbols(room / 4), ".".repeat(room % 4));
+        record.description = Some(format!("same{pad}"));
+        assert_eq!(
+            record.to_line().unwrap().len(),
+            plumb_net::batch::MAX_RECORD_BYTES
+        );
+        record
+    };
     for (key, own) in [(&own_key, true), (&good_key, false)] {
         let peer = key.public().to_peer_id();
         for chunk in domains.chunks(1024) {
             let records: Vec<_> = chunk
                 .iter()
-                .map(|domain| {
-                    let mut record = SiteRecord::new(domain);
-                    record.crawled_at = Some(now + 1);
-                    record.description = Some("same".into());
-                    let extra = plumb_net::batch::MAX_RECORD_BYTES
-                        - serde_json::to_vec(&record).unwrap().len();
-                    record
-                        .description
-                        .as_mut()
-                        .unwrap()
-                        .extend(std::iter::repeat_n('.', extra));
-                    assert_eq!(
-                        serde_json::to_vec(&record).unwrap().len(),
-                        plumb_net::batch::MAX_RECORD_BYTES
-                    );
-                    record
+                .map(|domain| SiteRecord {
+                    domain: domain.clone(),
+                    ..earlier.clone()
                 })
                 .collect();
             let batch = Batch::sign(key, &records, epoch, MAX_SHARE_PPM, made)
@@ -1057,6 +1064,7 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
             let mut record = SiteRecord::new(domain);
             record.crawled_at = Some(now);
             record.description = Some("same".into());
+            record.signals.linking_domains = 1;
             record
         })
         .collect();
@@ -1164,10 +1172,11 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
             serde_json::to_writer(&mut count, record).unwrap();
             std::io::Write::write_all(&mut count, b"\n").unwrap();
         }
-        assert_eq!(records.len(), SITES);
-        assert_eq!(
-            count.bytes,
-            plumb_net::node::MAX_RECORD_DELIVERY_BYTES + SITES as u64
+        assert_eq!(records.len(), 2 * SITES);
+        assert!(
+            count.bytes > plumb_net::node::MAX_RECORD_DELIVERY_BYTES,
+            "{}",
+            count.bytes
         );
         eprintln!("genuine signed replay restart={restart}: input={} final={} receiver_limit={} quota_room=131072", trigger.records.iter().map(String::len).sum::<usize>(), count.bytes, plumb_net::node::MAX_RECORD_DELIVERY_BYTES);
         tokio::time::timeout(

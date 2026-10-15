@@ -1,8 +1,8 @@
 //! A crawled site as an item of the data format ([`plumb_format`]): kind
 //! `site`, its id the registrable domain. [`SiteRecord::to_item`] makes one
 //! and [`SiteRecord::from_item`] reads it back, so sets of sites
-//! (`plumb/sites`) and, later, crawl batches and bucket answers can carry
-//! sites as items.
+//! (`plumb/sites`), crawl batches and bucket answers carry sites as items,
+//! the last two a line of JSON each ([`SiteRecord::to_line`]).
 //!
 //! The item's own members hold what any reader of items understands: the
 //! homepage's URL, title and description (`about`), the start of its text
@@ -25,11 +25,14 @@
 //! ```
 //!
 //! `linkers` is hex because a 64-bit number does not survive every JSON
-//! reader. A node's own bookkeeping (crawl tries and failures, when it
-//! judged the site gone, redirects) stays out, as filling leaves it out
-//! today, and so do icons and headlines, which travel on their own. So do
-//! links to hosts the format cannot name as a site (with a `_`), and URLs
-//! that do not come out canonical.
+//! reader. A homepage that sent the crawler to another site says where
+//! (`"redirect": {"to": "pnc.com", "at": "2026-10-10T04:12:00Z"}`, with
+//! `"inner": true` when it went to a page other than that site's front
+//! page), so a search can fold the site into that one; filling leaves it
+//! out. A node's own bookkeeping (crawl tries and failures, when it judged
+//! the site gone) stays out, and so do icons and headlines, which travel
+//! on their own. So do links to hosts the format cannot name as a site
+//! (with a `_`), and URLs that do not come out canonical.
 
 use std::collections::BTreeMap;
 
@@ -42,7 +45,7 @@ use plumb_format::{Edge, FieldSpec, Item, Ref};
 use serde_json::{json, Map, Value};
 
 use crate::key_pages::{KeyPage, MAX_KEY_PAGES};
-use crate::{LinkText, SiteRecord, MAX_LINKS_TO};
+use crate::{LinkText, Redirect, SiteRecord, MAX_LINKS_TO};
 
 /// The kind of a site's item.
 pub const SITE: &str = "site";
@@ -66,8 +69,29 @@ pub fn site_fields() -> BTreeMap<String, FieldSpec> {
         "summary": {"type": "text", "roles": ["search:about"]},
         "crawled": {"type": "date"},
         "crawl_version": {"type": "number"},
+        "redirect": {"type": "object"},
     }))
     .expect("the site fields are well formed")
+}
+
+/// The site a line [`SiteRecord::to_line`] wrote names, and when it was
+/// crawled, read without checking the rest: enough to note where a crawl
+/// of a site is, for much less work than [`SiteRecord::from_line`].
+pub fn crawl_of_line(line: &str) -> Option<(String, Option<u64>)> {
+    #[derive(serde::Deserialize)]
+    struct Line {
+        id: String,
+        kind: String,
+        #[serde(default)]
+        fields: Fields,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Fields {
+        crawled: Option<String>,
+    }
+    let line: Line = serde_json::from_str(line).ok()?;
+    let crawled = line.fields.crawled.as_deref().and_then(unix_seconds);
+    (line.kind == SITE).then(|| (line.id, crawled.and_then(|at| u64::try_from(at).ok())))
 }
 
 impl SiteRecord {
@@ -175,6 +199,17 @@ impl SiteRecord {
                 })
             })
             .collect();
+        record.redirect = field("redirect").and_then(|redirect| {
+            Some(Redirect {
+                to: string(redirect.get("to")).filter(|to| is_domain(to))?,
+                at: redirect
+                    .get("at")
+                    .and_then(Value::as_str)
+                    .and_then(unix_seconds)
+                    .and_then(|unix| u64::try_from(unix).ok())?,
+                inner: redirect.get("inner") == Some(&Value::Bool(true)),
+            })
+        });
         for edge in &item.edges {
             match (edge.rel.as_str(), &edge.to) {
                 ("links_to", Ref::Site(site)) => record.links_to.push(site.clone()),
@@ -190,6 +225,25 @@ impl SiteRecord {
             }
         }
         Ok(record)
+    }
+
+    /// This site as one line of JSON, the item [`SiteRecord::to_item`]
+    /// makes: how crawl batches and bucket answers carry a site.
+    pub fn to_line(&self) -> Result<String> {
+        Ok(serde_json::to_string(&self.to_item()?)?)
+    }
+
+    /// The site of a line [`SiteRecord::to_line`] wrote, once its item
+    /// keeps the format's rules ([`Item::check`]).
+    pub fn from_line(line: &str) -> Result<SiteRecord> {
+        let item: Item = serde_json::from_str(line)?;
+        item.check()?;
+        ensure!(
+            !item.is_extension() && !item.is_deleted(),
+            "item {:?} is not a whole site",
+            item.id
+        );
+        SiteRecord::from_item(&item)
     }
 
     /// The item's fields ([`site_fields`]), each only when it says
@@ -262,6 +316,15 @@ impl SiteRecord {
         put("crawled", json!(self.crawled_at.and_then(timestamp)));
         if self.crawl_version > 0 {
             put("crawl_version", json!(self.crawl_version));
+        }
+        if let Some(redirect) = self.redirect.as_ref().filter(|r| is_domain(&r.to)) {
+            if let Some(at) = timestamp(redirect.at) {
+                let mut object = json!({"to": redirect.to, "at": at});
+                if redirect.inner {
+                    object["inner"] = json!(true);
+                }
+                put("redirect", object);
+            }
         }
         fields
     }
@@ -402,7 +465,7 @@ mod tests {
             redirect: Some(Redirect {
                 to: "python.com".into(),
                 at: 1_791_605_520,
-                inner: false,
+                inner: true,
             }),
             icon: Some("iVBORw0KGgo=".into()),
             news: vec![Headline {
@@ -418,7 +481,6 @@ mod tests {
         record.crawl_attempted_at = None;
         record.crawl_failures = 0;
         record.gone_at = None;
-        record.redirect = None;
         record.icon = None;
         record.news = Vec::new();
         record
@@ -451,6 +513,10 @@ mod tests {
             json!({"text": "python", "count": record.link_texts[0].count, "linkers": "00a1b2c3d4e5f607"})
         );
         assert_eq!(item.weight, Some(412.0));
+        assert_eq!(
+            item.fields["redirect"],
+            json!({"to": "python.com", "at": "2026-10-10T04:12:00Z", "inner": true})
+        );
         assert_eq!(SiteRecord::from_item(&item).unwrap(), as_carried(record));
 
         // Through JSON, as a set carries it.
@@ -459,6 +525,45 @@ mod tests {
         assert_eq!(
             SiteRecord::from_item(&read).unwrap(),
             as_carried(full_record())
+        );
+        // As a line, as a batch or a bucket answer carries it.
+        let line = full_record().to_line().unwrap();
+        assert_eq!(line, json);
+        assert_eq!(
+            SiteRecord::from_line(&line).unwrap(),
+            as_carried(full_record())
+        );
+    }
+
+    #[test]
+    fn a_line_is_read_only_as_a_whole_site_that_keeps_the_format_s_rules() {
+        let line = |value: Value| SiteRecord::from_line(&value.to_string());
+        assert!(line(json!({"id": "example.com", "kind": "site"})).is_ok());
+        // A site record of its own, as nodes before v0.4.0 sent them.
+        let old = serde_json::to_string(&SiteRecord::new("example.com")).unwrap();
+        assert!(SiteRecord::from_line(&old).is_err());
+        assert!(line(json!({"id": "example.com", "kind": "page"})).is_err());
+        assert!(line(json!({"id": "example.com", "extends": "site:example.com"})).is_err());
+        let not_canonical =
+            json!({"id": "example.com", "kind": "site", "url": "HTTPS://example.com"});
+        assert!(line(not_canonical).is_err());
+        assert!(SiteRecord::from_line("not json").is_err());
+    }
+
+    #[test]
+    fn a_line_says_its_site_and_crawl_time_without_being_read_whole() {
+        let line = full_record().to_line().unwrap();
+        let crawled = full_record().crawled_at;
+        assert_eq!(crawl_of_line(&line), Some(("python.org".into(), crawled)));
+        let never = SiteRecord::new("example.com").to_line().unwrap();
+        assert_eq!(crawl_of_line(&never), Some(("example.com".into(), None)));
+        assert_eq!(
+            crawl_of_line(r#"{"icon_of": "example.com", "png": ""}"#),
+            None
+        );
+        assert_eq!(
+            crawl_of_line(r#"{"id": "example.com", "kind": "page"}"#),
+            None
         );
     }
 
