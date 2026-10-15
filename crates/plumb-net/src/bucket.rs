@@ -7,7 +7,9 @@
 //! the spaces taken out (`U.S. Bank` -> `us`, `bank`, `usbank`). Each key
 //! falls in one of [`BUCKETS`] buckets by its hash. A node with an index
 //! keeps, for every bucket, the best [`KEY_CAP`] sites of every key in it
-//! ([`BucketTable`]).
+//! ([`BucketTable`]). Its index build writes them a site at a time from
+//! each site's stored item ([`BucketWriter`], [`plumb_core::site`]),
+//! filed under [`site_keys`], the keys [`record_keys`] gives its record.
 //!
 //! To search the network, a node works out the keys of its query, and asks
 //! for their buckets, never the query: [`BUCKETS_PER_SEARCH`] buckets every
@@ -24,9 +26,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 pub use plumb_core::keys::{
-    bucket_of, matches, query_keys, record_keys, BUCKETS, BUCKETS_PER_SEARCH, KEY_CAP,
+    bucket_of, matches, query_keys, record_keys, site_keys, BUCKETS, BUCKETS_PER_SEARCH, KEY_CAP,
 };
 use plumb_core::SiteRecord;
+use plumb_format::Item;
 use rand_core::RngCore;
 
 use crate::hash::Hash;
@@ -136,10 +139,12 @@ pub struct BucketTable {
 }
 
 impl BucketTable {
-    /// Writes the table of `records` into `dir`, which must not exist yet.
-    /// Takes about as much disk as the records file, and memory for about
-    /// 12 bytes per key and 4 per bucket entry while it runs. `records` may
-    /// be the records themselves or references to them.
+    /// Writes the table of `records` into `dir`, which must not exist yet,
+    /// each as its stored item ([`SiteRecord::to_stored_item`], which cleans
+    /// it). Takes about as much disk as the
+    /// records file, and memory for about 12 bytes per key and 4 per bucket
+    /// entry while it runs. `records` may be the records themselves or
+    /// references to them.
     pub fn build<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<BucketTable> {
         Self::build_with_budget(dir, records, None)
     }
@@ -159,7 +164,7 @@ impl BucketTable {
         });
         let mut writer = BucketWriter::new_with_budget(dir, budget)?;
         for i in order {
-            writer.add(records[i])?;
+            writer.add(&records[i].to_stored_item())?;
         }
         writer.finish()
     }
@@ -341,16 +346,18 @@ impl BucketWriter {
         })
     }
 
-    /// Adds the next record.
-    pub fn add(&mut self, record: &SiteRecord) -> Result<()> {
+    /// Adds the next site, as its stored item ([`plumb_core::site`]): its
+    /// stored line ([`plumb_core::stored::item_as_line`]), filed under its
+    /// keys ([`site_keys`]).
+    pub fn add(&mut self, site: &Item) -> Result<()> {
         let n = u32::try_from(self.records).context("too many records for a bucket table")?;
-        let json = plumb_core::stored::line(record).context("encoding a record")?;
+        let json = plumb_core::stored::item_as_line(site).context("encoding a site")?;
         self.offsets.write_all(&self.at.to_le_bytes())?;
         self.data.write_all(&json)?;
         self.at += json.len() as u64;
         self.records += 1;
         let mut seen_buckets = Vec::new();
-        for key in record_keys(record) {
+        for key in site_keys(site) {
             let count = self
                 .per_key
                 .entry(Hash::of(&[key.as_bytes()]).prefix_u64())

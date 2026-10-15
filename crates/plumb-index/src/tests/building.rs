@@ -28,7 +28,7 @@ fn hits_carry_the_site_key_pages() {
             url: "https://other.example/".into(),
         },
     ];
-    build_index(&dir, &[site]).unwrap();
+    build_index(&dir, &items(&[site])).unwrap();
     let searcher = Searcher::open(&dir).unwrap();
     let hits = searcher.search("example", 10).unwrap();
     let labels: Vec<&str> = hits[0].key_pages.iter().map(|p| p.label.as_str()).collect();
@@ -55,11 +55,11 @@ impl Drop for FailAt {
 fn rebuilding_replaces_the_old_index() {
     let root = TempDir::new().unwrap();
     let dir = root.path().join("index");
-    build_index(&dir, &corpus()).unwrap();
+    build_index(&dir, &items(&corpus())).unwrap();
     let old = Searcher::open(&dir).unwrap();
     assert_eq!(old.num_docs(), corpus().len() as u64);
 
-    let stats = build_index(&dir, &[example_site()]).unwrap();
+    let stats = build_index(&dir, &items(&[example_site()])).unwrap();
     assert_eq!(stats.docs, 1);
     let new = Searcher::open(&dir).unwrap();
     assert_eq!(new.num_docs(), 1);
@@ -78,11 +78,11 @@ fn rebuilding_replaces_the_old_index() {
 fn failed_builds_keep_the_previous_index() {
     let root = TempDir::new().unwrap();
     let dir = root.path().join("index");
-    build_index(&dir, &corpus()).unwrap();
+    build_index(&dir, &items(&corpus())).unwrap();
 
     // Fails after the new index was committed in its staging directory.
     let failing = FailAt::step("after_commit");
-    let err = build_index(&dir, &[example_site()]).unwrap_err();
+    let err = build_index(&dir, &items(&[example_site()])).unwrap_err();
     drop(failing);
     assert!(format!("{err:#}").contains("injected failure"), "{err:#}");
 
@@ -93,7 +93,7 @@ fn failed_builds_keep_the_previous_index() {
     assert_eq!(entries(root.path()), ["index"]);
 
     // The next build goes through.
-    build_index(&dir, &[example_site()]).unwrap();
+    build_index(&dir, &items(&[example_site()])).unwrap();
     let searcher = Searcher::open(&dir).unwrap();
     assert_eq!(top(&searcher, "example"), "example.com");
     assert_eq!(entries(root.path()), ["index"]);
@@ -105,7 +105,7 @@ fn refuses_to_replace_a_directory_that_is_not_an_index() {
     let data = root.path().join("data");
     fs::create_dir(&data).unwrap();
     fs::write(data.join("notes.txt"), "keep me").unwrap();
-    let err = build_index(&data, &corpus()).unwrap_err();
+    let err = build_index(&data, &items(&corpus())).unwrap_err();
     assert!(err.to_string().contains("refusing"), "{err:#}");
     assert_eq!(
         fs::read_to_string(data.join("notes.txt")).unwrap(),
@@ -115,11 +115,11 @@ fn refuses_to_replace_a_directory_that_is_not_an_index() {
 
     // A missing directory is created, an empty one is used.
     let missing = root.path().join("a/b/index");
-    assert_eq!(build_index(&missing, &[] as &[SiteRecord]).unwrap().docs, 0);
+    assert_eq!(build_index(&missing, &items(&[])).unwrap().docs, 0);
     assert_eq!(Searcher::open(&missing).unwrap().num_docs(), 0);
     let empty = root.path().join("empty");
     fs::create_dir(&empty).unwrap();
-    assert_eq!(build_index(&empty, &corpus()[..2]).unwrap().docs, 2);
+    assert_eq!(build_index(&empty, &items(&corpus()[..2])).unwrap().docs, 2);
     assert_eq!(entries(root.path()), ["a", "data", "empty"]);
 }
 
@@ -130,7 +130,7 @@ fn gone_sites_are_left_out() {
     let mut gone = example_site();
     gone.make_gone(1);
     records.push(gone);
-    let stats = build_index(dir.path(), &records).unwrap();
+    let stats = build_index(dir.path(), &items(&records)).unwrap();
     assert_eq!((stats.docs, stats.skipped), (2, 1));
 }
 
@@ -140,7 +140,7 @@ fn gone_sites_are_left_out() {
 fn keeps_a_project_folder_that_holds_a_meta_json() {
     let root = TempDir::new().unwrap();
     // Even a `meta.json` copied from a real index does not make one.
-    build_index(&root.path().join("real"), &[example_site()]).unwrap();
+    build_index(&root.path().join("real"), &items(&[example_site()])).unwrap();
     let tantivy_meta = fs::read_to_string(root.path().join("real/meta.json")).unwrap();
     fs::remove_dir_all(root.path().join("real")).unwrap();
 
@@ -155,7 +155,10 @@ fn keeps_a_project_folder_that_holds_a_meta_json() {
         fs::write(project.join("notes.txt"), "my notes").unwrap();
         fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
 
-        let err = format!("{:#}", build_index(&project, &corpus()).unwrap_err());
+        let err = format!(
+            "{:#}",
+            build_index(&project, &items(&corpus())).unwrap_err()
+        );
         assert!(err.contains("refusing to replace"), "{err}");
         assert!(err.contains("myproject"), "{err}");
         assert_eq!(entries(&project), ["meta.json", "notes.txt", "src"]);
@@ -177,10 +180,10 @@ fn keeps_a_project_folder_that_holds_a_meta_json() {
 fn indexes_built_before_the_marker_are_replaced() {
     let root = TempDir::new().unwrap();
     let dir = root.path().join("index");
-    build_index(&dir, &corpus()).unwrap();
+    build_index(&dir, &items(&corpus())).unwrap();
     fs::remove_file(dir.join(replace::MARKER)).unwrap();
 
-    build_index(&dir, &[example_site()]).unwrap();
+    build_index(&dir, &items(&[example_site()])).unwrap();
     let searcher = Searcher::open(&dir).unwrap();
     assert_eq!(top(&searcher, "example"), "example.com");
     assert!(entries(&dir).iter().any(|name| name == replace::MARKER));
@@ -188,7 +191,7 @@ fn indexes_built_before_the_marker_are_replaced() {
     // Not when it holds anything besides the index.
     fs::remove_file(dir.join(replace::MARKER)).unwrap();
     fs::write(dir.join("notes.txt"), "keep me").unwrap();
-    let err = format!("{:#}", build_index(&dir, &corpus()).unwrap_err());
+    let err = format!("{:#}", build_index(&dir, &items(&corpus())).unwrap_err());
     assert!(err.contains("it holds notes.txt"), "{err}");
     assert_eq!(Searcher::open(&dir).unwrap().num_docs(), 1);
     assert_eq!(
@@ -209,7 +212,7 @@ fn records_without_a_valid_domain_are_skipped() {
         SiteRecord::new("co.uk"),
         SiteRecord::new("Example.COM"),
     ];
-    let stats = build_index(dir.path(), &records).unwrap();
+    let stats = build_index(dir.path(), &items(&records)).unwrap();
     let expected = IndexStats {
         docs: 1,
         merged: 0,
@@ -260,7 +263,7 @@ fn records_for_the_same_domain_are_merged() {
     );
     let records = [upper.clone(), unicode, lower.clone(), punycode];
     let dir = TempDir::new().unwrap();
-    let stats = build_index(dir.path(), &records).unwrap();
+    let stats = build_index(dir.path(), &items(&records)).unwrap();
     let expected = IndexStats {
         docs: 2,
         merged: 2,
@@ -537,7 +540,7 @@ fn builds_100k_records_in_reasonable_time() {
     let dir = TempDir::new().unwrap();
 
     let start = Instant::now();
-    let stats = build_index(dir.path(), &records).unwrap();
+    let stats = build_index(dir.path(), &items(&records)).unwrap();
     let build_time = start.elapsed();
     assert_eq!(stats.docs, records.len() as u64);
 

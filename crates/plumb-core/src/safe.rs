@@ -168,17 +168,28 @@ pub fn adult_level<'a>(domain: &str, texts: impl IntoIterator<Item = &'a str>) -
 
 /// How adult the site of `record` looks: [`AdultLevel::Explicit`] for
 /// an adult Wikidata kind, else [`adult_level`] of its title, description,
-/// Wikidata description and other names.
+/// Wikidata description and other names. [`crate::site::adult_level`] is
+/// the same of a site's item.
 pub fn record_adult_level(record: &SiteRecord) -> AdultLevel {
-    if record.kinds.iter().any(|kind| is_adult_kind(kind)) {
-        return AdultLevel::Explicit;
-    }
     let texts = [&record.title, &record.description, &record.about]
         .into_iter()
         .flatten()
         .map(String::as_str)
         .chain(record.aliases.iter().map(String::as_str));
-    adult_level(&record.domain, texts)
+    site_adult_level(&record.domain, &record.kinds, texts)
+}
+
+/// [`record_adult_level`] of the site `domain`, of Wikidata's `kinds`, by
+/// its `texts`: title, description, Wikidata description and other names.
+pub(crate) fn site_adult_level<'a>(
+    domain: &str,
+    kinds: &[String],
+    texts: impl IntoIterator<Item = &'a str>,
+) -> AdultLevel {
+    if kinds.iter().any(|kind| is_adult_kind(kind)) {
+        return AdultLevel::Explicit;
+    }
+    adult_level(domain, texts)
 }
 
 /// [`adult_level`] of a text alone.

@@ -1,4 +1,6 @@
-//! The index schema and how a [`SiteRecord`] becomes a document.
+//! The index schema and how a site becomes a document: from its stored
+//! item ([`plumb_core::site`]), as a node's build reads each site of its
+//! records file.
 //!
 //! | field         | holds                                                | used for                    |
 //! |---------------|------------------------------------------------------|-----------------------------|
@@ -16,7 +18,7 @@
 //! | `label_key`   | joined label, labels of sites redirecting here       | exact label match           |
 //! | `alias_key`   | joined aliases                                       | exact alias match           |
 //! | `link_score`  | [`plumb_core::link_score`]                           | stored, fast                |
-//! | `country`     | [`plumb_core::site_country`], untokenized            | stored, fast                |
+//! | `country`     | [`plumb_core::site::site_country`], untokenized      | stored, fast                |
 //! | `kind_key`    | [`plumb_core::kind_key`] of each kind                | kind queries ("banks")      |
 //! | `search_url`  | the site's search address                            | stored, site search links   |
 //! | `language`    | homepage language or fallback script, untokenized            | stored, fast, language filter |
@@ -41,10 +43,10 @@
 use anyhow::{Context, Result};
 use plumb_core::key_pages::{key_pages_or_known, valid_key_pages};
 use plumb_core::{
-    domain_label, joined, kind_key, normalize_text, record_adult_level, site_country,
-    truncate_chars, AdultLevel, LinkText, SiteRecord, MAX_ALIASES, MAX_HEADINGS, MAX_KINDS,
-    MAX_LINK_TEXTS, MAX_TERMS, MAX_TEXT_CHARS,
+    domain_label, joined, kind_key, normalize_text, site, truncate_chars, AdultLevel, LinkText,
+    MAX_ALIASES, MAX_HEADINGS, MAX_KINDS, MAX_LINK_TEXTS, MAX_TERMS, MAX_TEXT_CHARS,
 };
+use plumb_format::Item;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, STORED, STRING,
 };
@@ -289,21 +291,17 @@ fn keys(record: IndexRecordOption) -> TextOptions {
     )
 }
 
-/// The document for `record`, whose domain is canonical
-/// ([`plumb_core::canonical_domain`]). `redirect_names` are the domain
-/// labels of sites that redirect to it, which name it as its own label does.
-pub(crate) fn document(
-    f: &Fields,
-    record: &SiteRecord,
-    redirect_names: &[String],
-) -> TantivyDocument {
-    let domain = record.domain.as_str();
+/// The document for the site of the stored item `site` ([`plumb_core::site`]),
+/// whose domain is canonical ([`plumb_core::canonical_domain`]).
+/// `redirect_names` are the domain labels of sites that redirect to it,
+/// which name it as its own label does.
+pub(crate) fn document(f: &Fields, site: &Item, redirect_names: &[String]) -> TantivyDocument {
+    let domain = site::domain(site);
     let mut doc = TantivyDocument::default();
     doc.add_text(f.domain, domain);
     // A homepage read on another site's host says what that site is.
-    let borrowed =
-        non_empty(&record.url).is_some_and(|url| crate::hits::reads_another_site(url, domain));
-    if let Some(url) = non_empty(&record.url).filter(|_| !borrowed) {
+    let borrowed = is_borrowed(site);
+    if let Some(url) = non_empty(site.url.as_deref()).filter(|_| !borrowed) {
         doc.add_text(f.url, url.trim());
     }
 
@@ -327,15 +325,12 @@ pub(crate) fn document(
     // goes by its first name instead:
     // Wikidata's for an official site ("Gmail"), else its own
     // `og:site_name`. It is shown as the result's title, and matched as one.
-    let title = non_empty(&record.title)
-        .filter(|title| !borrowed && !is_blank_title(title) && !title.contains('\u{FFFD}'))
-        .or_else(|| {
-            record
-                .aliases
-                .iter()
-                .map(String::as_str)
-                .find(|alias| !alias.trim().is_empty())
-        });
+    let title = own_title(site, borrowed).or_else(|| {
+        site.names
+            .iter()
+            .map(String::as_str)
+            .find(|alias| !alias.trim().is_empty())
+    });
     if let Some(title) = title {
         let title = truncate_chars(title, MAX_TEXT_CHARS);
         let parts = title_parts(&title);
@@ -347,40 +342,41 @@ pub(crate) fn document(
         }
         doc.add_text(f.title, &title);
     }
-    if let Some(description) = non_empty(&record.description).filter(|_| !borrowed) {
+    // The item's `about` is the homepage's description.
+    let description = non_empty(site.about.as_deref());
+    if let Some(description) = description.filter(|_| !borrowed) {
         doc.add_text(f.description, truncate_chars(description, MAX_TEXT_CHARS));
     }
     // Wikipedia's words for the site count like its own description, and
     // are shown when it has none.
-    if let Some(intro) = non_empty(&record.intro) {
+    let intro = non_empty(site::intro(site));
+    if let Some(intro) = intro {
         doc.add_text(f.description, truncate_chars(intro, MAX_TEXT_CHARS));
     }
     // A model's sentence for a site with no words of its own stands in
     // for its description.
-    if let Some(summary) = non_empty(&record.summary).filter(|_| {
-        non_empty(&record.intro).is_none() && (borrowed || non_empty(&record.description).is_none())
-    }) {
+    if let Some(summary) = non_empty(site::summary(site))
+        .filter(|_| intro.is_none() && (borrowed || description.is_none()))
+    {
         doc.add_text(f.description, truncate_chars(summary, MAX_TEXT_CHARS));
     }
-    for heading in record.headings.iter().take(MAX_HEADINGS) {
+    for heading in site::headings(site).iter().take(MAX_HEADINGS) {
         doc.add_text(f.headings, truncate_chars(heading, MAX_TEXT_CHARS));
     }
-    if !record.terms.is_empty() {
-        let terms: Vec<&str> = record
-            .terms
-            .iter()
-            .take(MAX_TERMS)
-            .map(String::as_str)
-            .collect();
+    let terms = site::terms(site);
+    if !terms.is_empty() {
+        let terms: Vec<&str> = terms.iter().take(MAX_TERMS).map(String::as_str).collect();
         doc.add_text(f.terms, terms.join(" "));
     }
-    if let Some(about) = non_empty(&record.about) {
+    // Wikidata's description of what the site is about.
+    if let Some(about) = non_empty(site::wikidata_about(site)) {
         doc.add_text(f.about, truncate_chars(about, MAX_TEXT_CHARS));
     }
 
-    let official = record.signals.official_site;
-    for alias in record
-        .aliases
+    let signals = site::signals(site);
+    let official = signals.official_site;
+    for alias in site
+        .names
         .iter()
         .filter(|a| !a.trim().is_empty())
         .take(MAX_ALIASES)
@@ -400,7 +396,8 @@ pub(crate) fn document(
         }
     }
 
-    let link_texts = top_link_texts(&record.link_texts);
+    let link_texts = site::link_texts(site);
+    let link_texts = top_link_texts(&link_texts);
     let links: u64 = link_texts.iter().map(|lt| u64::from(lt.count)).sum();
     for (i, link_text) in link_texts.into_iter().enumerate() {
         let text = truncate_chars(&link_text.text, MAX_TEXT_CHARS);
@@ -426,35 +423,33 @@ pub(crate) fn document(
         }
     }
 
-    doc.add_f64(f.link_score, f64::from(record.link_score()));
-    if let Some(country) = site_country(record) {
+    doc.add_f64(f.link_score, f64::from(plumb_core::link_score(&signals)));
+    if let Some(country) = site::site_country(site) {
         doc.add_text(f.country, country);
     }
-    for kind in record.kinds.iter().take(MAX_KINDS) {
+    for kind in site::kinds(site).iter().take(MAX_KINDS) {
         let key = kind_key(kind);
         if !key.is_empty() {
             doc.add_text(f.kind_key, key);
         }
     }
-    if let Some(search_url) = non_empty(&record.search_url) {
+    if let Some(search_url) = non_empty(site::search_url(site)) {
         doc.add_text(f.search_url, search_url.trim());
     }
-    if let Some(language) = record.written_language() {
+    if let Some(language) = site::written_language(site) {
         doc.add_text(f.language, language);
     }
-    doc.add_u64(f.adult, record_adult_level(record) as u64);
+    doc.add_u64(f.adult, site::adult_level(site) as u64);
+    // The item's `text` is the homepage's page text.
     let fingerprint = f.fingerprint.zip(
-        non_empty(&record.body_text)
+        non_empty(site.text.as_deref())
             .filter(|_| !borrowed)
             .and_then(plumb_core::simhash::fingerprint),
     );
     if let Some((field, print)) = fingerprint {
         doc.add_u64(field, print);
     }
-    let key_pages = valid_key_pages(
-        key_pages_or_known(&record.key_pages, &record.domain),
-        &record.domain,
-    );
+    let key_pages = valid_key_pages(key_pages_or_known(&site::key_pages(site), domain), domain);
     if !key_pages.is_empty() {
         if let Ok(json) = serde_json::to_string(&key_pages) {
             doc.add_text(f.key_pages, json);
@@ -463,26 +458,21 @@ pub(crate) fn document(
     doc
 }
 
-/// The texts of `record` the spelling model counts words in
-/// ([`crate::spell_model`]): what others call the site and what it calls
-/// itself, not its description, which it may stuff with search words.
-pub(crate) fn spelling_texts(record: &SiteRecord, redirect_names: &[String]) -> Vec<String> {
-    let domain = record.domain.as_str();
-    let borrowed =
-        non_empty(&record.url).is_some_and(|url| crate::hits::reads_another_site(url, domain));
-    let mut texts = vec![label_text(domain)];
+/// The texts of the site of the stored item `site` the spelling model
+/// counts words in ([`crate::spell_model`]): what others call the site and
+/// what it calls itself, not its description, which it may stuff with
+/// search words.
+pub(crate) fn spelling_texts(site: &Item, redirect_names: &[String]) -> Vec<String> {
+    let mut texts = vec![label_text(site::domain(site))];
     texts.extend(redirect_names.iter().cloned());
     texts.extend(
-        record
-            .aliases
+        site.names
             .iter()
             .filter(|a| !a.trim().is_empty())
             .take(MAX_ALIASES)
             .map(|alias| truncate_chars(alias, MAX_TEXT_CHARS)),
     );
-    if let Some(title) = non_empty(&record.title)
-        .filter(|title| !borrowed && !is_blank_title(title) && !title.contains('\u{FFFD}'))
-    {
+    if let Some(title) = own_title(site, is_borrowed(site)) {
         texts.extend(
             title_parts(&truncate_chars(title, MAX_TEXT_CHARS))
                 .into_iter()
@@ -490,14 +480,30 @@ pub(crate) fn spelling_texts(record: &SiteRecord, redirect_names: &[String]) -> 
         );
     }
     texts.extend(
-        top_link_texts(&record.link_texts)
+        top_link_texts(&site::link_texts(site))
             .into_iter()
             .map(|link_text| truncate_chars(&link_text.text, MAX_TEXT_CHARS)),
     );
-    if let Some(about) = non_empty(&record.about) {
+    if let Some(about) = non_empty(site::wikidata_about(site)) {
         texts.push(truncate_chars(about, MAX_TEXT_CHARS));
     }
     texts
+}
+
+/// Whether the homepage of `site` was read on another site's host
+/// ([`crate::hits::reads_another_site`]): then its page says what that
+/// site is, not this one.
+fn is_borrowed(site: &Item) -> bool {
+    non_empty(site.url.as_deref())
+        .is_some_and(|url| crate::hits::reads_another_site(url, site::domain(site)))
+}
+
+/// The homepage's title of `site`, unless it says nothing about the site
+/// ([`is_blank_title`]), was spoiled in decoding, or is another site's
+/// (`borrowed`).
+fn own_title(site: &Item, borrowed: bool) -> Option<&str> {
+    non_empty(site.title.as_deref())
+        .filter(|title| !borrowed && !is_blank_title(title) && !title.contains('\u{FFFD}'))
 }
 
 /// A name without a leading "The": `The Wall Street Journal` -> `Wall
@@ -564,8 +570,8 @@ fn anchor_repeats(count: u32) -> usize {
         .round() as usize
 }
 
-fn non_empty(text: &Option<String>) -> Option<&str> {
-    text.as_deref().filter(|t| !t.trim().is_empty())
+fn non_empty(text: Option<&str>) -> Option<&str> {
+    text.filter(|t| !t.trim().is_empty())
 }
 
 #[cfg(test)]

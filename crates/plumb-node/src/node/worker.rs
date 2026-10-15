@@ -1719,17 +1719,17 @@ fn save_icons(icons: &IconStore, results: &[CrawlResult]) {
 }
 
 /// Builds an index of the records file in a new numbered directory and
-/// opens it, reading the file a record at a time ([`crate::outline`]): the
-/// journal is folded into the file first, and no more than an outline of
-/// each site is held at once, where loading the file would hold every
-/// record. Every index the node builds is built this way, from the file
-/// the step before it wrote. A file that only a whole set can merge (a
-/// site on two lines) is loaded once and written again with each site on
-/// one line ([`crate::outline::outline_merged`]), then read a record at a
-/// time like any other. Sites judged dead stay in the records, out of the
-/// index and the buckets other nodes take, and so does what the denylist
-/// denies ([`Inner::allows_record`]): a denied site, and the key pages and
-/// headlines it denies of the rest.
+/// opens it, reading the file a site at a time as its stored item
+/// ([`crate::outline`]): the journal is folded into the file first, and no
+/// more than an outline of each site is held at once, where loading the
+/// file would hold every record. Every index the node builds is built this
+/// way, from the file the step before it wrote. A file that only a whole
+/// set can merge (a site on two lines) is loaded once and written again
+/// with each site on one line ([`crate::outline::outline_merged`]), then
+/// read a site at a time like any other. Sites judged dead stay in the
+/// records, out of the index and the buckets other nodes take, and so does
+/// what the denylist denies ([`super::denylist::allow`]): a denied site,
+/// and the key pages and headlines it denies of the rest.
 /// Call it holding the records ([`Inner::hold_records`]).
 pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
     inner.set_step(Step::Indexing, "Reading the site records");
@@ -1745,10 +1745,10 @@ pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
         .indexes
         .join(format!(".{}-buckets", store::index_name(id)));
     let denylist = inner.denylist();
-    let allowed = |record: &mut SiteRecord| {
+    let allowed = |site: &mut plumb_format::Item| {
         denylist
             .as_deref()
-            .is_none_or(|list| super::denylist::allow(list, record))
+            .is_none_or(|list| super::denylist::allow(list, site))
     };
     let started = Instant::now();
     let built = crate::outline::build_index(

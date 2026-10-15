@@ -780,7 +780,7 @@ fn sites_that_redirect_name_the_site_they_redirect_to() {
         gmail,
     ];
     let dir = TempDir::new().unwrap();
-    let stats = build_index(dir.path(), &records).unwrap();
+    let stats = build_index(dir.path(), &items(&records)).unwrap();
     assert_eq!((stats.docs, stats.redirected), (7, 1));
     let searcher = Searcher::open(dir.path()).unwrap();
     let hits = searcher.search("pnc bank", 10).unwrap();

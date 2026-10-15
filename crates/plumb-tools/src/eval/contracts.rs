@@ -1029,7 +1029,7 @@ mod tests {
         let mut alpha = plumb_core::SiteRecord::new("alpha.org");
         alpha.title = Some("Alpha".into());
         alpha.aliases.push("Alpha".into());
-        plumb_index::build_index(&index, &[alpha]).unwrap();
+        plumb_index::build_index(&index, &[alpha.to_stored_item()]).unwrap();
         let pages = dir.path().join("wikipedia-fr.tsv");
         let mut file = File::create(&pages).unwrap();
         plumb_core::article::write_article(

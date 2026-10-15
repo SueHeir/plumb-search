@@ -284,20 +284,20 @@ mod tests {
         let path = root.path().join("index");
         let mut protected = plumb_core::SiteRecord::new("protected.example");
         protected.title = Some("Protected Search".into());
-        crate::build_index(&path, &[protected]).unwrap();
+        crate::build_index(&path, &[protected.to_stored_item()]).unwrap();
         let old = crate::Searcher::open(&path).unwrap();
         let baseline = directory_bytes(root.path()).unwrap();
         let budget = StorageBudget::open(root.path(), baseline + 64 * 1024).unwrap();
-        let records: Vec<_> = (0..2000)
+        let sites: Vec<_> = (0..2000)
             .map(|i| {
                 let mut record = plumb_core::SiteRecord::new(format!("fresh-{i}.example"));
                 record.title = Some(format!("Fresh Index Content {i}"));
                 record.description = Some(format!("Unique tokens for domain {i} {}", i * 7919));
-                record
+                record.to_stored_item()
             })
             .collect();
         // The limit is a target: the build goes past it, and crawls pause.
-        crate::build_index_with_budget(&path, &records, Some(budget.clone())).unwrap();
+        crate::build_index_with_budget(&path, &sites, Some(budget.clone())).unwrap();
         assert!(budget.status().backpressure);
         assert_eq!(budget.status().rejected_writes, 0);
         assert_eq!(

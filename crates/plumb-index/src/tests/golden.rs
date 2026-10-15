@@ -3,12 +3,14 @@
 //! records file holds of it, its document ([`schema::document`]), the
 //! texts the spelling model counts in it ([`schema::spelling_texts`]) and
 //! the keys it is filed under in the buckets other nodes take
-//! ([`plumb_core::keys::record_keys`]). A node's build of the same lines,
-//! and the buckets it writes, is checked against a golden file of its own
-//! (plumb-node's `outline_golden.txt`).
+//! ([`plumb_core::keys::site_keys`]), each made from the site's stored item
+//! ([`SiteRecord::to_stored_item`]) as the build reads it. A node's build
+//! of the same lines, and the buckets it writes, is checked against a
+//! golden file of its own (plumb-node's `outline_golden.txt`).
 //!
 //! The file was written by the build that read records, before the build
-//! moved onto items, so it says the two make the same index. It is never
+//! moved onto items (and with [`plumb_core::keys::record_keys`]), so it
+//! says the two make the same index. It is never
 //! written again to make a test pass: a difference is a change in what the
 //! index holds, and so in search results. When the index is meant to
 //! change, `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-index golden` writes
@@ -331,7 +333,9 @@ fn golden_text(sites: &[SiteRecord]) -> String {
         if !names.is_empty() {
             writeln!(out, "redirect_names {}", json(names)).unwrap();
         }
-        let doc = schema::document(&fields, record, names);
+        // The index is built from each site's stored item.
+        let site = record.to_stored_item();
+        let doc = schema::document(&fields, &site, names);
         let mut values: Vec<(String, usize)> = Vec::new();
         for (field, value) in doc.field_values() {
             let value = OwnedValue::from(value.as_value());
@@ -348,10 +352,10 @@ fn golden_text(sites: &[SiteRecord]) -> String {
                 writeln!(out, "doc {text} x{times}").unwrap();
             }
         }
-        for text in schema::spelling_texts(record, names) {
+        for text in schema::spelling_texts(&site, names) {
             writeln!(out, "spelling {}", json(&text)).unwrap();
         }
-        for key in plumb_core::keys::record_keys(record) {
+        for key in plumb_core::keys::site_keys(&site) {
             writeln!(out, "key {}", json(&key)).unwrap();
         }
     }
