@@ -138,7 +138,7 @@ plumb-tools eval --index DIR --pages wikipedia-en.tsv.gz \
 | File | Variants |
 | --- | --- |
 | [rank_knobs.tsv](sweeps/rank_knobs.tsv) | Ranking knobs one at a time, a step either side of the default |
-| [learned.tsv](sweeps/learned.tsv) | The learned ranking against the hand-made order (`hand`), and switches it depends on |
+| [learned.tsv](sweeps/learned.tsv) | The learned ranking against the hand-made order (`hand`), the site model (`sites`), and switches it depends on |
 | [meaning.tsv](sweeps/meaning.tsv) | Search-by-meaning knobs, for fitting them to another embedding model (needs `--vectors`, `--model`) |
 | [partial.tsv](sweeps/partial.tsv) | How close in meaning a site lacking some of a longer query's words must be to stay listed (needs `--vectors`, `--model`) |
 

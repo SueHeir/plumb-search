@@ -292,7 +292,7 @@ pub struct RankConfig {
     pub learned: bool,
     /// Put the first [`learned::LEARNED_SITES`] sites in the order the
     /// site model gives ([`learned::reorder_sites`]) before anything else
-    /// moves them. Off until that model is trained.
+    /// moves them. Off until it is measured with pages.
     pub learned_sites: bool,
     /// Rank typo corrections by the spelling model learned from the
     /// index's words ([`spell_model`]): what the edits cost against how

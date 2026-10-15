@@ -84,7 +84,7 @@ About 43,000 lines, tests included.
 | [places.rs](src/places.rs) | the places index: `parse_place_query`, `PlaceSearcher`, `build_place_index` |
 | [learned.rs](src/learned.rs), [learned/net.rs](src/learned/net.rs) | the learned ranking: features, trees or a small net, `reorder` and `reorder_sites` |
 | [learned_model.json](src/learned_model.json) | the built-in model nodes use |
-| [learned_sites_model.json](src/learned_sites_model.json) | the built-in model for the first 100 sites, before pages are placed (empty until trained) |
+| [learned_sites_model.json](src/learned_sites_model.json) | the built-in model for the first 100 sites, before pages are placed, trained on 100 site rows per test search |
 
 ## How it works
 
