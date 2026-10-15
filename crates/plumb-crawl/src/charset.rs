@@ -20,9 +20,9 @@ const PRESCAN_BYTES: usize = 1024;
 /// its `Content-Type` header (`content_type`) or its head declares
 /// (`<meta charset>`, `<meta http-equiv>`, `<?xml encoding?>`), so a
 /// Shift_JIS, EUC-KR, GBK or windows-1252 page reads as written, not as
-/// `�`; a page that declares none is read in the charset it looks to be
-/// in on its `host` ([`guessed`]). Bytes that are not of the charset
-/// become `�`.
+/// `�`; a page that declares none, or says UTF-8 and is not, is read in
+/// the charset it looks to be in on its `host` ([`guessed`]). Bytes that
+/// are not of the charset become `�`.
 pub(crate) fn decode<'a>(
     body: &'a [u8],
     content_type: Option<&str>,
@@ -38,12 +38,16 @@ pub(crate) fn decode<'a>(
         // A page cut at the size limit can end inside a character.
         Err(err) => err.error_len().is_none(),
     };
+    // A page that says UTF-8 and is not says nothing: budget.gov.hk is
+    // Big5 and etomato.com EUC-KR under `<meta charset="utf-8">`.
+    let not_utf8 = |encoding: &&Encoding| *encoding != UTF_8;
     let encoding = if utf8 {
         UTF_8
     } else {
         content_type
             .and_then(|kind| charset_after(kind.as_bytes(), b"charset"))
-            .or_else(|| declared(&body[..body.len().min(HEAD_BYTES)]))
+            .filter(not_utf8)
+            .or_else(|| declared(&body[..body.len().min(HEAD_BYTES)]).filter(not_utf8))
             .unwrap_or_else(|| guessed(body, host))
     };
     encoding.decode_without_bom_handling(body).0
@@ -262,14 +266,31 @@ mod tests {
         ]
         .concat();
         assert!(decode(&late, None, None).ends_with("<p>サービス一覧 | 三井住友銀行</p>"));
-        // A UTF-8 page with a stray byte stays UTF-8.
-        assert_eq!(
-            decode(
-                &["<title>Café 東京</title>".as_bytes(), b"\xE9"].concat(),
-                None,
-                None
-            ),
-            "<title>Café 東京</title>\u{FFFD}"
+        // A UTF-8 page with a stray byte stays UTF-8, whatever it says.
+        let stray = ["<title>Café 東京</title>".as_bytes(), b"\xE9"].concat();
+        for content_type in [None, Some("text/html; charset=utf-8")] {
+            assert_eq!(
+                decode(&stray, content_type, None),
+                "<title>Café 東京</title>\u{FFFD}"
+            );
+        }
+        // A page that says UTF-8 and is not is guessed, or read in the
+        // charset its head declares when only its header says UTF-8.
+        let (title, _, _) = encoding_rs::EUC_KR.encode("<title>이토마토 | 증권 정보</title>");
+        let page = [b"<meta charset=\"utf-8\" />".as_slice(), &title].concat();
+        assert!(decode(&page, None, Some("www.etomato.com"))
+            .ends_with("<title>이토마토 | 증권 정보</title>"));
+        let (title, _, _) = encoding_rs::BIG5.encode("<title>財政預算案</title>");
+        let page = [b"<meta charset=\"utf-8\" />".as_slice(), &title].concat();
+        assert!(decode(
+            &page,
+            Some("text/html; charset=UTF-8"),
+            Some("budget.gov.hk")
+        )
+        .ends_with("<title>財政預算案</title>"));
+        let page = b"<meta charset=\"iso-8859-1\"><title>Caf\xE9</title>";
+        assert!(
+            decode(page, Some("text/html; charset=utf-8"), None).ends_with("<title>Café</title>")
         );
     }
 }
