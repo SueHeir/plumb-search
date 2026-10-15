@@ -1825,3 +1825,77 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
         );
     }
 }
+
+/// New topics under a storage limit drop the sites kept for the old ones
+/// from the records, read a record at a time, and the index is built
+/// without them; a file that holds a site twice is read whole instead.
+#[test]
+fn new_topics_make_room_in_the_records_file() {
+    let site = |domain: &str, tranco: u32, title: &str| {
+        let mut r = SiteRecord::new(domain);
+        r.signals.tranco_rank = Some(tranco);
+        r.title = Some(title.into());
+        r
+    };
+    for twice in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let mut records = vec![
+            site("google.com", 1, "Google"),
+            site("youtube.com", 2, "YouTube"),
+            site("chess.com", 5_000, "Play Chess Games"),
+            site("allrecipes.com", 6_000, "Recipes for cooking"),
+        ];
+        if twice {
+            records.push(site("chess.com", 5_000, "Chess"));
+        }
+        write_jsonl(&path, &records).unwrap();
+        crate::records::RecordStore::open(&path)
+            .save(&[crate::records::Change::Merge {
+                record: site("seriouseats.com", 7_000, "Serious Eats cooking"),
+            }])
+            .unwrap();
+        assert_eq!(
+            crate::outline::outline_copy(&path, &dir.path().join("copy"))
+                .unwrap()
+                .is_none(),
+            twice
+        );
+        let net = dir.path().join("net");
+        std::fs::create_dir_all(&net).unwrap();
+        std::fs::write(net.join("fill.json"), r#"{"focus_base":2,"prune":true}"#).unwrap();
+        let mut config = test_config(dir.path());
+        config.settings.storage_limit_mb = 500;
+        config.focus_topics = vec!["cooking".to_owned()];
+        let rank = RankConfig::default();
+        let opened = open_data_dir(&config, rank).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let inner = Inner::new(config, rank, opened, stopped, None);
+
+        let built = crate::node::worker::make_room_for_new_topics(&inner).unwrap();
+        assert_eq!(built.docs, 4, "twice: {twice}");
+        let mut left: Vec<String> = read_jsonl(&path)
+            .unwrap()
+            .into_iter()
+            .map(|r: SiteRecord| r.domain)
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "allrecipes.com",
+                "google.com",
+                "seriouseats.com",
+                "youtube.com"
+            ]
+        );
+        assert!(!crate::records::journal_path(&path).exists());
+        let state = inner.fill_state();
+        assert!(!state.prune);
+        assert_eq!(
+            state.detail,
+            "Made room for the new topics: dropped 1 sites"
+        );
+        assert!(!crate::node::fill::FillState::load(&net).prune);
+    }
+}

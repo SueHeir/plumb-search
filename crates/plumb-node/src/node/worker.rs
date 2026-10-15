@@ -196,21 +196,7 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         && inner.settings().storage_limit_mb > 0
         && inner.saved().crawl_left == 0
     {
-        let built = blocking(inner, |inner| {
-            let _records = inner.hold_records();
-            inner.set_step(Step::Indexing, "Making room for sites about new topics");
-            let mut set = load_records(&inner.paths.records)?;
-            inner.check_stop()?;
-            if inner.prune_for_new_topics(&mut set)? > 0 {
-                replace_records_with_budget(
-                    &inner.paths.records,
-                    sorted_by_link_score(&set),
-                    inner.storage.as_ref(),
-                )?;
-            }
-            build(inner, &sorted_by_link_score(&set))
-        })
-        .await?;
+        let built = blocking(inner, make_room_for_new_topics).await?;
         put_in_service(inner, Some(built), false).await?;
         return Ok(Next::Continue);
     }
@@ -333,6 +319,38 @@ fn network_rebuild_gap(took: u64) -> u64 {
 /// that records from other nodes ask for: building at most a quarter of
 /// the time.
 const BUILD_GAP_PER_BUILD: u64 = 3;
+
+/// Drops the sites kept for topics the node no longer has from the records
+/// ([`Inner::prune_for_new_topics`]) and builds an index without them.
+/// Reads the records file a record at a time ([`crate::outline`]), holding
+/// an outline of each site and the domains of those about the topics, then
+/// writes it again with the lines of the sites left copied as they are; a
+/// file only a whole set can merge (a site on two lines) is read whole.
+pub(super) fn make_room_for_new_topics(inner: &Inner) -> Result<ServingIndex> {
+    let _records = inner.hold_records();
+    inner.set_step(Step::Indexing, "Making room for sites about new topics");
+    let path = &inner.paths.records;
+    let Some(mut outlines) = crate::outline::outline_with_budget(path, inner.storage.clone())?
+    else {
+        info!(
+            "{} holds a site more than once: reading it whole to merge them",
+            path.display()
+        );
+        let mut set = load_records(path)?;
+        inner.check_stop()?;
+        if inner.prune_for_new_topics(&mut set)? > 0 {
+            replace_records_with_budget(path, sorted_by_link_score(&set), inner.storage.as_ref())?;
+        }
+        return build(inner, &sorted_by_link_score(&set));
+    };
+    inner.check_stop()?;
+    if inner.prune_records_for_new_topics(&mut outlines)? > 0 {
+        crate::outline::replace_lines(path, &outlines, inner.storage.as_ref())?;
+    }
+    // The build reads its own outlines.
+    drop(outlines);
+    build_from_file(inner)
+}
 
 fn idle_detail(config: &NodeConfig) -> &'static str {
     if config.crawl_only {
