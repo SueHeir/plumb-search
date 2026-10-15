@@ -138,7 +138,10 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             info!("search by meaning: {} site vectors loaded", vectors.len());
             let mut meaning = MeaningIndex::new(embedder, vectors);
             if let Some(pages) = &inner.config.page_vectors {
-                meaning = meaning.with_pages(pages)?;
+                // Sites are still searched by meaning without them.
+                if let Err(err) = meaning.load_pages(pages) {
+                    warn!("search by meaning: no article vectors: {err:#}");
+                }
             }
             let meaning = Arc::new(meaning);
             inner.meaning.set(Arc::clone(&meaning));

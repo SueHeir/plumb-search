@@ -101,17 +101,17 @@ impl MeaningIndex {
         };
         let mut meaning = Self::open(model, vectors)?;
         meaning.instruction = args.query_instruction;
-        match &args.page_vectors {
-            Some(pages) => meaning.with_pages(pages).map(Some),
-            None => Ok(Some(meaning)),
+        if let Some(pages) = &args.page_vectors {
+            meaning.load_pages(pages)?;
         }
+        Ok(Some(meaning))
     }
 
     /// Takes the article vectors in `path` too, which this model must have
     /// made, so searches list the article nearest them in meaning. Every
     /// search reads the whole file, about 470 bytes an article (230 MB for
     /// the 500,000 most read), so it stays in memory.
-    pub fn with_pages(mut self, path: &Path) -> Result<Self> {
+    pub fn load_pages(&mut self, path: &Path) -> Result<()> {
         let pages = Vectors::load(path)?;
         if !made_by(&pages, &self.embedder) {
             bail!(
@@ -121,7 +121,7 @@ impl MeaningIndex {
         }
         info!("loaded {} article vectors", pages.len());
         self.pages = Some(pages);
-        Ok(self)
+        Ok(())
     }
 
     pub fn embedder(&self) -> &Embedder {

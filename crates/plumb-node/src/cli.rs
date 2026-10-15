@@ -354,9 +354,10 @@ pub struct RunArgs {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
     pub embed_threads: Option<u16>,
     /// Vectors of Wikipedia articles made by `plumb-tools embed-pages`
-    /// with the model search by meaning runs: the article nearest a search
-    /// in meaning is listed after the first sites. For trying out.
-    #[arg(long, value_name = "FILE", requires = "search_by_meaning", hide = true)]
+    /// with the model search by meaning runs: while it is on, the article
+    /// nearest a search in meaning is listed after the first sites. For
+    /// trying out.
+    #[arg(long, value_name = "FILE", hide = true)]
     pub page_vectors: Option<PathBuf>,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the

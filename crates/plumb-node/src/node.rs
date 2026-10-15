@@ -212,7 +212,7 @@ pub struct NodeConfig {
     /// CPUs this node may use.
     pub embed_threads: Option<usize>,
     /// Article vectors searches take the article nearest them in meaning
-    /// from ([`crate::meaning::MeaningIndex::with_pages`]).
+    /// from ([`crate::meaning::MeaningIndex::load_pages`]).
     pub page_vectors: Option<std::path::PathBuf>,
     /// On first start in the network, set up from the sites of a node this
     /// one trusts rather than from the seed downloads (Tranco, Common
