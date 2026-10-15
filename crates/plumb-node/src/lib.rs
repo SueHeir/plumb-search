@@ -177,6 +177,24 @@ pub(crate) fn write_records_atomically<'a, I>(path: &Path, records: I) -> Result
 where
     I: IntoIterator<Item = &'a SiteRecord>,
 {
+    write_lines_atomically(path, |out| {
+        let mut written = 0;
+        for record in records {
+            plumb_core::stored::write(&mut *out, record)?;
+            out.write_all(b"\n")?;
+            written += 1;
+        }
+        Ok(written)
+    })
+}
+
+/// [`write_records_atomically`] of the lines `write` writes, each with its
+/// line break, such as the lines of another records file copied as they
+/// are. Returns what `write` returns: the number of records written.
+pub(crate) fn write_lines_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<File>) -> Result<usize>,
+) -> Result<usize> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -184,7 +202,7 @@ where
         }
     }
     let tmp = temp_path_for(path);
-    let written = match write_lines_durably(&tmp, records) {
+    let written = match write_lines_durably(&tmp, write) {
         Ok(n) => n,
         Err(err) => {
             let _ = std::fs::remove_file(&tmp);
@@ -199,19 +217,14 @@ where
     Ok(written)
 }
 
-/// Writes one stored line per record ([`plumb_core::stored`]) to a new file
-/// at `path` and flushes it to disk. Returns the number of records written.
-fn write_lines_durably<'a, I>(path: &Path, records: I) -> Result<usize>
-where
-    I: IntoIterator<Item = &'a SiteRecord>,
-{
+/// Writes the lines `write` writes to a new file at `path` and flushes it
+/// to disk. Returns what `write` returns.
+fn write_lines_durably(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<File>) -> Result<usize>,
+) -> Result<usize> {
     let mut writer = BufWriter::with_capacity(1 << 20, File::create(path)?);
-    let mut written = 0;
-    for record in records {
-        plumb_core::stored::write(&mut writer, record)?;
-        writer.write_all(b"\n")?;
-        written += 1;
-    }
+    let written = write(&mut writer)?;
     let file = writer.into_inner().map_err(|err| err.into_error())?;
     file.sync_all()?;
     Ok(written)

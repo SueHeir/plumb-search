@@ -508,7 +508,9 @@ impl RecordStore {
         })
     }
 
-    fn admitted_rewrite<T>(
+    /// Replaces the file with `rewrite` once room for a new file of `max`
+    /// bytes is admitted against `budget`, and charges what it takes then.
+    pub(crate) fn admitted_rewrite<T>(
         &self,
         budget: &std::sync::Arc<plumb_core::storage::StorageBudget>,
         max: u64,
@@ -747,6 +749,13 @@ where
     I: IntoIterator<Item = &'a SiteRecord>,
 {
     let written = write_records_atomically(path, records)?;
+    delete_journal(path)?;
+    Ok(written)
+}
+
+/// Deletes the journal of the records file at `path`, once a new file that
+/// holds its changes is in place. No journal is fine.
+pub(crate) fn delete_journal(path: &Path) -> Result<()> {
     let journal = journal_path(path);
     match fs::remove_file(&journal) {
         Ok(()) => sync_parent_dir(&journal),
@@ -755,7 +764,7 @@ where
             return Err(err).with_context(|| format!("deleting {}", journal.display()));
         }
     }
-    Ok(written)
+    Ok(())
 }
 
 /// Node-managed full replacements hold peak room before creating their temp file.
