@@ -878,8 +878,9 @@ impl RecordReader {
         })
     }
 
-    /// The record `outline` points at, with page fields read off a bot
-    /// check dropped, as loading the file drops them.
+    /// The record `outline` points at, cleaned and with page fields read
+    /// off a bot check dropped, as loading the file does
+    /// ([`RecordSet::upsert`]).
     pub(crate) fn read(&mut self, outline: &Outline) -> Result<SiteRecord> {
         if outline.offset != self.at {
             // Relative seeks within the buffer keep it when they can.
@@ -899,6 +900,7 @@ impl RecordReader {
                 outline.domain
             );
         }
+        record.clean();
         record.drop_bot_check();
         Ok(record)
     }
@@ -1145,6 +1147,21 @@ mod tests {
         assert_eq!(outline(&path).unwrap(), None);
         assert!(journal_path(&path).exists());
         assert_eq!(load_records(&path).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_build_reads_records_clean_as_loading_makes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        // Decomposed é, and a URL ending in a bare `?`.
+        let mut cafe = crawled("cafe.com", "Cafe\u{301}", 5);
+        cafe.url = Some("https://cafe.com/?".into());
+        write_jsonl(&path, &[cafe]).unwrap();
+        let outlines = outline(&path).unwrap().unwrap();
+        let read = read_all(&path, &outlines);
+        assert_eq!(read[0].title.as_deref(), Some("Caf\u{e9}"));
+        assert_eq!(read[0].url.as_deref(), Some("https://cafe.com/"));
+        assert_eq!(read, load_records(&path).unwrap().into_sorted_vec());
     }
 
     #[test]

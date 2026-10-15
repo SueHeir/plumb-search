@@ -37,6 +37,7 @@ plumb-e2e uses it in its tests too. The only Plumb crate plumb-core depends on i
 | Module | What it does |
 | --- | --- |
 | [lib.rs](src/lib.rs) | `SiteRecord`, `Signals`, `LinkText`, `Redirect`, `RecordSet`; `link_score`; domain helpers (`registrable_domain`, `canonical_domain`, `host_of`, `is_homepage_path`); text helpers (`normalize_text`, `joined`, `site_language`, `unmangled`); `read_jsonl` and `write_jsonl` |
+| [site.rs](src/site.rs) | A site's stored item, read and set a part at a time (`signals`, `crawl_marks`, `link_texts` and the rest). Merging, cleaning, gone sites and bot checks work on it as on a `SiteRecord`, which code moves off |
 | [site_item.rs](src/site_item.rs) | A `SiteRecord` as an item of the data format, kind `site` (`to_item`, `from_item`), as the line of JSON crawl batches and bucket answers carry (`to_line`, `from_line`, `crawl_of_line`), and the fields of a set of sites (`site_fields`) |
 | [subsites.rs](src/subsites.rs) | Subdomains that are sites of their own (`SUBDOMAIN_SITES`, `UMBRELLA_DOMAINS`), the built-in site rules with the Public Suffix List in [data/](data/public_suffix_list.dat), and `use_site_rules` to swap in signed ones |
 | [keys.rs](src/keys.rs) | Bucket keys: how a search asks for sites without saying what it looks for |
