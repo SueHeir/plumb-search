@@ -43,6 +43,43 @@ pub enum Ref {
     Blob(String),
 }
 
+impl Ref {
+    /// Checks a ref built in code as reading one checks it: a ref that
+    /// passes reads back as itself from its text.
+    pub fn check(&self) -> Result<()> {
+        match self {
+            Ref::Wd(id) => {
+                let mut chars = id.chars();
+                ensure!(
+                    matches!(chars.next(), Some('Q' | 'P' | 'L'))
+                        && id.len() > 1
+                        && chars.all(|c| c.is_ascii_digit())
+                        && !id[1..].starts_with('0'),
+                    "{id:?} is not a Wikidata id"
+                );
+            }
+            Ref::Site(domain) => ensure!(is_domain(domain), "{domain:?} is not a site's domain"),
+            Ref::Url(url) => ensure!(is_canonical(url), "{url:?} is not a canonical URL"),
+            Ref::Id { namespace, value } => {
+                ensure!(
+                    is_namespace(namespace),
+                    "{namespace:?} is not an id namespace"
+                );
+                ensure!(!value.is_empty(), "id ref {self} has no value");
+            }
+            Ref::Item { publisher, set, id } => ensure!(
+                !publisher.is_empty() && !set.is_empty() && !id.is_empty(),
+                "item ref {self} has an empty part"
+            ),
+            Ref::Blob(hex) => ensure!(
+                hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "blob ref {self} is not sha256-<64 lower-case hex digits>"
+            ),
+        }
+        Ok(())
+    }
+}
+
 impl FromStr for Ref {
     type Err = Error;
 
@@ -51,35 +88,14 @@ impl FromStr for Ref {
             .split_once(':')
             .with_context(|| format!("ref {text:?} has no scheme"))?;
         ensure!(!value.is_empty(), "ref {text:?} is empty");
-        Ok(match scheme {
-            "wd" => {
-                let mut chars = value.chars();
-                ensure!(
-                    matches!(chars.next(), Some('Q' | 'P' | 'L'))
-                        && value.len() > 1
-                        && chars.all(|c| c.is_ascii_digit())
-                        && !value[1..].starts_with('0'),
-                    "{value:?} is not a Wikidata id"
-                );
-                Ref::Wd(value.to_string())
-            }
-            "site" => {
-                ensure!(is_domain(value), "{value:?} is not a site's domain");
-                Ref::Site(value.to_string())
-            }
-            "url" => {
-                ensure!(is_canonical(value), "{value:?} is not a canonical URL");
-                Ref::Url(value.to_string())
-            }
+        let to = match scheme {
+            "wd" => Ref::Wd(value.to_string()),
+            "site" => Ref::Site(value.to_string()),
+            "url" => Ref::Url(value.to_string()),
             "id" => {
                 let (namespace, id) = value
                     .split_once(':')
                     .with_context(|| format!("id ref {value:?} has no namespace"))?;
-                ensure!(
-                    is_namespace(namespace),
-                    "{namespace:?} is not an id namespace"
-                );
-                ensure!(!id.is_empty(), "id ref {value:?} has no value");
                 Ref::Id {
                     namespace: namespace.to_string(),
                     value: id.to_string(),
@@ -91,24 +107,18 @@ impl FromStr for Ref {
                     bail!("item ref {value:?} is not <publisher>/<set>/<id>");
                 };
                 let (publisher, set, id) = (decode(publisher)?, decode(set)?, decode(id)?);
-                ensure!(
-                    !publisher.is_empty() && !set.is_empty() && !id.is_empty(),
-                    "item ref {value:?} has an empty part"
-                );
                 Ref::Item { publisher, set, id }
             }
             "blob" => {
                 let hex = value
                     .strip_prefix("sha256-")
                     .with_context(|| format!("blob ref {value:?} is not sha256-<hex>"))?;
-                ensure!(
-                    hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
-                    "blob ref {value:?} is not sha256-<64 lower-case hex digits>"
-                );
                 Ref::Blob(hex.to_string())
             }
             _ => bail!("unknown ref scheme {scheme:?}"),
-        })
+        };
+        to.check()?;
+        Ok(to)
     }
 }
 
@@ -254,6 +264,43 @@ mod tests {
             "nope:x",
         ] {
             assert!(text.parse::<Ref>().is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_ref_made_in_code_passes_its_check_when_it_reads_back() {
+        let item = |publisher: &str, set: &str, id: &str| Ref::Item {
+            publisher: publisher.into(),
+            set: set.into(),
+            id: id.into(),
+        };
+        let id = |namespace: &str, value: &str| Ref::Id {
+            namespace: namespace.into(),
+            value: value.into(),
+        };
+        let good = [
+            Ref::Wd("L7".into()),
+            Ref::Site("python.org".into()),
+            Ref::Url("https://docs.python.org/3/".into()),
+            id("doi", "10.1000/a:b%c"),
+            item("ed25519:k", "plumb/wikipedia-en", "50%/off"),
+        ];
+        for to in good {
+            to.check().unwrap();
+            assert_eq!(to.to_string().parse::<Ref>().unwrap(), to);
+        }
+        let bad = [
+            Ref::Wd("Q0408".into()),
+            Ref::Site("foo_bar.com".into()),
+            Ref::Url("https://example.com/%Ab".into()),
+            id("do:i", "10.1000/x"),
+            id("doi", ""),
+            item("ed25519:k", "", "1"),
+            Ref::Blob("ABC".into()),
+        ];
+        for to in bad {
+            assert!(to.check().is_err(), "{to:?}");
+            assert_ne!(to.to_string().parse::<Ref>().ok(), Some(to));
         }
     }
 

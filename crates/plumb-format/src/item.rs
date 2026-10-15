@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -191,8 +191,8 @@ impl Item {
     /// Checks the rules every item keeps, whatever its set: a stable id,
     /// a kind for things and no title or URL for extensions, canonical
     /// http or https URLs, refs a reader takes, well-formed dates, ids and
-    /// language, text in NFC, and the size caps. Field types are checked against the set's
-    /// manifest ([`crate::Manifest::check_item`]).
+    /// language, text in NFC, and the size caps. Field types are checked
+    /// against the set's manifest ([`crate::Manifest::check_item`]).
     pub fn check(&self) -> Result<()> {
         ensure!(
             !self.id.is_empty() && self.id.len() <= MAX_ID_BYTES,
@@ -235,15 +235,10 @@ impl Item {
             );
         }
         // Reading an item checks its refs; one made in code is not, so each
-        // must read back as itself, as it will where the item is read.
+        // is checked as it will be where the item is read.
         let edges = self.edges.iter().map(|edge| &edge.to);
         for to in self.extends.iter().chain(&self.body).chain(edges) {
-            let text = to.to_string();
-            ensure!(
-                text.parse::<Ref>().is_ok_and(|read| read == *to),
-                "item {:?}: {text:?} is not a valid ref",
-                self.id
-            );
+            to.check().with_context(|| format!("item {:?}", self.id))?;
         }
         for date in [&self.published, &self.expires].into_iter().flatten() {
             ensure!(is_date(date), "item {:?}: {date:?} is not a date", self.id);
