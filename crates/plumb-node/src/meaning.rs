@@ -54,7 +54,7 @@ pub struct MeaningIndex {
 }
 
 /// What the model was trained to read before a search query.
-const QUERY_INSTRUCTION: &str = "Represent this sentence for searching relevant passages: ";
+pub const QUERY_INSTRUCTION: &str = "Represent this sentence for searching relevant passages: ";
 
 impl MeaningIndex {
     /// Loads the model in `model_dir` and the vectors in `vectors`, which
@@ -340,9 +340,10 @@ pub fn embed_records(
     embed_sites(embedder, vectors, todo, threads, stop, save, progress)
 }
 
-/// A site [`embed_records`] makes a vector for: its link score, domain,
-/// text hash and text.
-pub(crate) type ToEmbed = (f32, String, plumb_embed::TextHash, String);
+/// A text [`embed_sites`] makes a vector for: its popularity, its key (a
+/// site's domain, or a page's URL for `plumb-tools embed-pages`), the
+/// hash of its text and the text.
+pub type ToEmbed = (f32, String, plumb_embed::TextHash, String);
 
 /// The first half of [`embed_records`]: drops the vectors of sites not in
 /// `records`, or with no text there, and returns the sites to embed, best
@@ -484,8 +485,9 @@ fn domain_hash(domain: &str) -> u64 {
     hasher.finish()
 }
 
-/// The second half of [`embed_records`]: embeds `todo`.
-pub(crate) fn embed_sites(
+/// The second half of [`embed_records`]: embeds `todo`, each under its
+/// key.
+pub fn embed_sites(
     embedder: &Embedder,
     vectors: &RwLock<Vectors>,
     todo: Vec<ToEmbed>,

@@ -19,6 +19,7 @@ pub mod cli;
 pub mod crawl;
 pub mod dead_sites;
 pub mod embed;
+pub mod embed_pages;
 pub mod eval;
 pub mod eval_labels;
 pub mod fact_check;
@@ -71,6 +72,8 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Search(args) => search::run_search(args),
         Command::Spelling(args) => search::run_spelling(&args),
         Command::Embed(args) => embed::run(args),
+        Command::EmbedPages(args) => embed_pages::run_embed_pages(args),
+        Command::PageMeaning(args) => embed_pages::run_page_meaning(args),
         Command::DeadSites(args) => dead_sites::run(&args),
         Command::Relations(args) => relations::run(&args),
         Command::Relate(args) => relations::run_relate(&args),

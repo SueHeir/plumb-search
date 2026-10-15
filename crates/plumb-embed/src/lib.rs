@@ -31,5 +31,7 @@ pub use model::{
     MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
 };
 pub use server::SERVER_FILE;
-pub use text::{site_text, site_text_words, text_hash, TextHash, MAX_LINK_TEXTS, MAX_TEXT_WORDS};
+pub use text::{
+    page_text, site_text, site_text_words, text_hash, TextHash, MAX_LINK_TEXTS, MAX_TEXT_WORDS,
+};
 pub use vectors::{cosine, Vectors, VECTORS_FILE_NAME};
