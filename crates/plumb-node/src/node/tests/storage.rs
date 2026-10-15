@@ -686,6 +686,17 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
     let credits = plumb_net::credits::Ledger::open(&dir.path().join("net/credits"))
         .unwrap()
         .account(&crawler);
+    // The network's first tick saves popularity.json (33 bytes) off its
+    // swarm task, reserving them in this budget while it writes. Wait it
+    // out, so the strict reservation checks below see only replay.
+    let popularity = dir.path().join("net/popularity.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !popularity.exists() {
+        assert!(Instant::now() < deadline, "popularity.json was never saved");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // write_atomic holds the mutation lock until it charges what it wrote.
+    drop(budget.mutation());
     // Fixed across the failing old-allowance run and the repaired run.
     let limit = 663_711_744;
     budget.set_limit(limit);
