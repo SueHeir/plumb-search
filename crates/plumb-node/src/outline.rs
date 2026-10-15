@@ -15,11 +15,14 @@
 //! as they are when the change comes (ranks come from seed data, which a
 //! journal rarely changes twice).
 //!
-//! A file that two lines hold the same site in, or a domain that is not
+//! A file that holds a site on two lines, or under a domain that is not
 //! canonical, is something only a whole set can merge: [`outline`] returns
-//! `None` for it, and the caller loads the set once instead. A node then
-//! writes the file again from the set, each site on one line, and outlines
-//! that.
+//! `None` for it. The index build, trimming and making room for new topics
+//! get the outlines of the file from [`outline_merged`], which loads such a
+//! file as a set once, writes it again with each site on one line, and
+//! outlines that; they then read the file a record at a time like any
+//! other. A crawl round, which reads whole records, merges it the same way
+//! when it finds a site twice as it reads them.
 //!
 //! Every search index a node builds, and the buckets other nodes take with
 //! it, is built from the file this way ([`build_index`]), whatever wrote
@@ -350,6 +353,8 @@ pub(crate) fn outline(path: &Path) -> Result<Option<Vec<Outline>>> {
     }
 }
 
+/// [`outline`], with the journal folded in under the storage `budget` when
+/// there is one ([`crate::records::RecordStore::fold`]).
 pub(crate) fn outline_with_budget(
     path: &Path,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
@@ -363,6 +368,38 @@ pub(crate) fn outline_with_budget(
     } else {
         outline(path)
     }
+}
+
+/// The outlines of the records file at `path`, with its journal folded in
+/// ([`outline_with_budget`]): how an index build, trimming and making room
+/// for new topics get them. A file that only a whole set can merge (see the module docs) is first
+/// loaded once ([`crate::records::load_records`]) and written again with
+/// each site on one line, under the storage `budget` when there is one
+/// ([`crate::records::RecordStore::compact`]); the set is dropped before
+/// the file is outlined again. Fails, rather than load it again and
+/// again, should the file still hold a site twice after that.
+pub(crate) fn outline_merged(
+    path: &Path,
+    budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<Vec<Outline>> {
+    if let Some(outlines) = outline_with_budget(path, budget.clone())? {
+        return Ok(outlines);
+    }
+    info!(
+        "{} holds a site more than once: reading it whole to merge them",
+        path.display()
+    );
+    let set = crate::records::load_records(path)?;
+    crate::records::RecordStore::open(path)
+        .with_budget(budget.clone())
+        .compact(&set)?;
+    drop(set);
+    outline_with_budget(path, budget)?.with_context(|| {
+        format!(
+            "{} still holds a site more than once after merging",
+            path.display()
+        )
+    })
 }
 
 /// What [`fold_journal`] did.
@@ -1249,6 +1286,65 @@ mod tests {
         assert_eq!(outline(&path).unwrap(), None);
         assert!(journal_path(&path).exists());
         assert_eq!(load_records(&path).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_file_only_a_whole_set_can_merge_is_merged_once_and_outlined() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        // a.com on two lines, b.com under another form of its domain, and a
+        // journal still to fold in.
+        write_jsonl(
+            &path,
+            &[
+                record("a.com", 10),
+                record("WWW.B.com", 20),
+                crawled("a.com", "A", 5),
+                record("c.org", 30),
+            ],
+        )
+        .unwrap();
+        RecordStore::open(&path)
+            .save(&[Change::Merge {
+                record: crawled("d.net", "D", 6),
+            }])
+            .unwrap();
+        assert_eq!(outline(&path).unwrap(), None);
+        let loaded = load_records(&path).unwrap().into_sorted_vec();
+        let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
+
+        let outlines = outline_merged(&path, Some(budget.clone())).unwrap();
+        let mut domains: Vec<&str> = outlines.iter().map(|o| &*o.domain).collect();
+        domains.sort_unstable();
+        assert_eq!(domains, ["a.com", "b.com", "c.org", "d.net"]);
+        assert_eq!(read_all(&path, &outlines), loaded);
+        // Written again with each site on one line and the journal folded
+        // in, so it is outlined as it is from now on.
+        assert!(!journal_path(&path).exists());
+        assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 4);
+        assert_eq!(outline(&path).unwrap().unwrap(), outlines);
+        // The new file was admitted and is charged as it is.
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            plumb_core::storage::directory_bytes(dir.path()).unwrap()
+        );
+
+        // A file that holds each site once comes back as it was, byte for
+        // byte, whatever the shape of its lines and their order.
+        let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
+        let item =
+            String::from_utf8(stored::item_line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        let clean = format!(
+            "{}\n\n{}\r\n{item}\n",
+            line(&record("quiet.net", 5000)),
+            line(&record("a.com", 10))
+        );
+        fs::write(&path, &clean).unwrap();
+        let outlines = outline_merged(&path, Some(budget)).unwrap();
+        assert_eq!(outlines, outline(&path).unwrap().unwrap());
+        assert_eq!(outlines.len(), 3);
+        assert_eq!(fs::read_to_string(&path).unwrap(), clean);
     }
 
     #[test]
