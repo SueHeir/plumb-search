@@ -155,7 +155,7 @@ plumb-tools train-rank --features features.jsonl --features features-typo.jsonl 
   --out crates/plumb-index/src/learned_model.json
 ```
 
-- `--features-out` writes one JSON line per search (`suite`, `half`, `query`, `searched`, `expected` and the listed `rows` with their signals) in the hand-made order, so the model never trains on its own output. It cannot be combined with `--sweep` or `--facts`.
+- `--features-out` writes one JSON line per search (`suite`, `half`, `query`, `searched`, `expected` and the listed `rows` with their signals) in the hand-made order, so the model never trains on its own output. It writes the first 30 rows, or every site `--limit` asks for when that is more (`train-rank --rows`). It cannot be combined with `--sweep` or `--facts`.
 - `train-rank` trains on the tune half and prints, for each file and half, top-1, top-3 and MRR of the expected answers within the first ten rows, before and after.
 - A row can also carry an LLM's `grade` of how well it meets the search, 0 to 3; `train-rank` then reports NDCG@10 too, an expected answer counting as grade 3. A search marked `"half": "test"` is only judged, never trained on. The graded searches are not in this repository.
 - `--folds K` also trains on all but one of K parts of the training half and judges the part left out, in turn, to choose options without looking at the held-out half. `--learner net` trains a small neural ranker instead of trees; `--objective` picks the loss (`lambda-rank`, `lambda-loss` or `softmax`).

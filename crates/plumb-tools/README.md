@@ -146,7 +146,7 @@ plumb-tools train-rank --features features.jsonl --out crates/plumb-index/src/le
 plumb-tools train-rank --features features.jsonl --judge builtin
 ```
 
-`train-rank` trains on the tune half (`--half`) and prints top-1, top-3 and MRR for each queries file and half, before and after. `--judge builtin` measures the model nodes use instead of training one. The model itself is in [plumb-index](../plumb-index/src/learned.rs).
+`train-rank` trains on the tune half (`--half`) and prints top-1, top-3 and MRR for each queries file and half, before and after. `--judge builtin` measures the model nodes use instead of training one. The model reads and moves each search's first 10 rows; `--rows N` trains and judges one that reads deeper, on features written with `eval --limit N`. The model itself is in [plumb-index](../plumb-index/src/learned.rs).
 
 ### Build and sign a set
 

@@ -1271,7 +1271,8 @@ fn listed_with_pages(hits: &[Hit], pages: Vec<PlacedPage>) -> Vec<Vec<String>> {
     listed
 }
 
-/// Most listed rows of a query `--features-out` writes.
+/// Most listed rows of a query `--features-out` writes, unless more sites
+/// were asked for (`--limit`), to train a model that reads deeper.
 const FEATURE_ROWS: usize = 30;
 
 /// One query's listed rows with everything that ranked them, for
@@ -1349,7 +1350,7 @@ fn feature_rows(
                 row
             }),
     );
-    rows.truncate(FEATURE_ROWS);
+    rows.truncate(FEATURE_ROWS.max(hits.len()));
     json!({
         "line": q.line,
         "query": q.query,

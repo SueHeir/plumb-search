@@ -443,7 +443,12 @@ impl Model {
     /// `rows`, best first. Only the first [`LEARNED_ROWS`] move; ties
     /// keep their order.
     pub fn order(&self, query: &str, rows: &[RowSignals]) -> Vec<usize> {
-        let top = rows.len().min(LEARNED_ROWS);
+        self.order_first(query, rows, LEARNED_ROWS)
+    }
+
+    /// [`Model::order`], with the first `depth` rows moving.
+    pub fn order_first(&self, query: &str, rows: &[RowSignals], depth: usize) -> Vec<usize> {
+        let top = rows.len().min(depth);
         let scores: Vec<f64> = features(query, &rows[..top])
             .iter()
             .map(|x| self.score(x))
