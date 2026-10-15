@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -190,9 +190,9 @@ impl Item {
 
     /// Checks the rules every item keeps, whatever its set: a stable id,
     /// a kind for things and no title or URL for extensions, canonical
-    /// http or https URLs, well-formed dates, ids and language, text in
-    /// NFC, and the size caps. Field types are checked against the set's
-    /// manifest ([`crate::Manifest::check_item`]).
+    /// http or https URLs, refs a reader takes, well-formed dates, ids and
+    /// language, text in NFC, and the size caps. Field types are checked
+    /// against the set's manifest ([`crate::Manifest::check_item`]).
     pub fn check(&self) -> Result<()> {
         ensure!(
             !self.id.is_empty() && self.id.len() <= MAX_ID_BYTES,
@@ -233,6 +233,12 @@ impl Item {
                 "item {:?}: {site:?} is not a domain",
                 self.id
             );
+        }
+        // Reading an item checks its refs; one made in code is not, so each
+        // is checked as it will be where the item is read.
+        let edges = self.edges.iter().map(|edge| &edge.to);
+        for to in self.extends.iter().chain(&self.body).chain(edges) {
+            to.check().with_context(|| format!("item {:?}", self.id))?;
         }
         for date in [&self.published, &self.expires].into_iter().flatten() {
             ensure!(is_date(date), "item {:?}: {date:?} is not a date", self.id);
@@ -378,6 +384,27 @@ mod tests {
         bad_ids.ids.insert("Wikidata".into(), "Q408".into());
         let mut bad_date = australia();
         bad_date.published = Some("last week".into());
+        // Refs no reader would take: the URL is not canonical, and no
+        // site is named with a `_`.
+        let edge = |to: Ref| Edge {
+            rel: "links_to".into(),
+            to,
+            text: None,
+            w: None,
+            other: BTreeMap::new(),
+        };
+        let mut bad_url_edge = australia();
+        bad_url_edge
+            .edges
+            .push(edge(Ref::Url("https://example.com/%Ab".into())));
+        let mut bad_site_edge = australia();
+        bad_site_edge
+            .edges
+            .push(edge(Ref::Site("foo_bar.com".into())));
+        let mut bad_extends = australia();
+        bad_extends.title = None;
+        bad_extends.url = None;
+        bad_extends.extends = Some(Ref::Wd("Q0408".into()));
         for item in [
             no_kind,
             magnet,
@@ -387,6 +414,9 @@ mod tests {
             huge,
             bad_ids,
             bad_date,
+            bad_url_edge,
+            bad_site_edge,
+            bad_extends,
         ] {
             assert!(item.check().is_err(), "{item:?}");
         }

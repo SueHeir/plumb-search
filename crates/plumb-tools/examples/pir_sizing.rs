@@ -46,7 +46,7 @@ const ROW_SIZES: [u32; 5] = [4_096, 8_192, 16_384, 32_768, 65_536];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Variant {
-    /// Records as the node stores them.
+    /// Whole records, as their own JSON.
     Full,
     /// [`slim_record`]: what a browser downloads for private search.
     Slim,
@@ -145,7 +145,7 @@ fn main() -> Result<()> {
             let out = PathBuf::from(args.next().context("--build-lean needs a directory")?);
             let scratch = tempfile::tempdir()?;
             let table = if dir.is_file() {
-                let records: Vec<SiteRecord> = plumb_core::read_jsonl(&dir)?;
+                let records = plumb_core::stored::read_file(&dir)?;
                 BucketTable::build(&scratch.path().join("buckets"), &records)?
             } else {
                 BucketTable::open(&dir)?
@@ -175,10 +175,10 @@ fn main() -> Result<()> {
             };
             let path = PathBuf::from(args.next().context("--write-records needs a file")?);
             ensure!(!path.exists(), "{} already exists", path.display());
-            let records: Vec<SiteRecord> = plumb_core::read_jsonl(&dir)?;
+            let records = plumb_core::stored::read_file(&dir)?;
             let mut out = BufWriter::new(File::create(&path)?);
             for record in records {
-                serde_json::to_writer(&mut out, &variant.apply(record))?;
+                plumb_core::stored::write(&mut out, &variant.apply(record))?;
                 out.write_all(b"\n")?;
             }
             out.flush()?;
@@ -198,7 +198,7 @@ fn main() -> Result<()> {
 
     let scratch = tempfile::tempdir()?;
     let table = if dir.is_file() {
-        let records: Vec<SiteRecord> = plumb_core::read_jsonl(&dir)?;
+        let records = plumb_core::stored::read_file(&dir)?;
         BucketTable::build(&scratch.path().join("buckets"), &records)?
     } else {
         BucketTable::open(&dir)?
@@ -222,8 +222,8 @@ fn main() -> Result<()> {
         let records: Vec<SiteRecord> = table
             .get(bucket)?
             .iter()
-            .map(|json| serde_json::from_str(json))
-            .collect::<Result<_, _>>()
+            .map(|line| plumb_core::stored::read(line.as_bytes()))
+            .collect::<Result<_>>()
             .context("records.dat holds a record that does not parse")?;
         memberships += records.len() as u64;
         let mut by_piece: Vec<Vec<&SiteRecord>> = vec![Vec::new(); PIECES_PER_BUCKET as usize];

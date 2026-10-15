@@ -21,9 +21,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{ensure, Context, Result};
 use libp2p::identity::PublicKey;
+use plumb_core::site_item::crawl_of_line;
 use plumb_core::SiteRecord;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::agree::agree;
 use crate::assign::{epoch_of, is_assigned};
@@ -169,7 +170,7 @@ impl BatchReader {
             let Some(proof) = self.proof(id, *index)? else {
                 continue;
             };
-            if let Ok(record) = serde_json::from_str::<SiteRecord>(&proof.record) {
+            if let Ok(record) = SiteRecord::from_line(&proof.record) {
                 crawls.push((record, proof));
             }
         }
@@ -275,6 +276,7 @@ impl BatchStore {
             limits: None,
             delivery_retirement: Arc::default(),
         };
+        let mut old = 0;
         for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
             let path = entry?.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -284,6 +286,16 @@ impl BatchStore {
                 continue;
             }
             match read_batch(&path) {
+                Ok(batch) if batch.header.verify().is_err() => {
+                    // Signed before v0.4.0 (`plumb-batch-v1`), which no
+                    // node takes now; its delivery notes go with it.
+                    for path in ["json", "delivered-agreed", "delivered-trusted"]
+                        .map(|extension| path.with_extension(extension))
+                    {
+                        let _ = plumb_core::storage::remove_file(&path, storage.map(AsRef::as_ref));
+                    }
+                    old += 1;
+                }
                 Ok(batch) => {
                     let size = file_bytes(&path)?;
                     store.allocated = store.allocated.saturating_add(size);
@@ -295,6 +307,9 @@ impl BatchStore {
                     let _ = plumb_core::storage::remove_file(&path, storage.map(AsRef::as_ref));
                 }
             }
+        }
+        if old > 0 {
+            info!("removed {old} crawl batches signed before v0.4.0");
         }
         if let Some(limits) = limits {
             store.limits = Some(limits.clone());
@@ -659,8 +674,7 @@ impl BatchStore {
                     .flatten()
                     .into_iter()
                     .flat_map(|batch| batch.records)
-                    .filter_map(|line| serde_json::from_str::<SiteRecord>(&line).ok())
-                    .map(|record| record.domain)
+                    .filter_map(|line| Some(crawl_of_line(&line)?.0))
                     .collect()
             } else {
                 Vec::new()
@@ -748,7 +762,7 @@ impl BatchStore {
         let key = self.crawler_id(&h.crawler);
         let created = u32::try_from(created_at).unwrap_or(u32::MAX);
         for (index, line) in batch.records.iter().enumerate() {
-            let Ok(record) = serde_json::from_str::<SiteRecord>(line) else {
+            let Some((domain, crawled_at)) = crawl_of_line(line) else {
                 continue;
             };
             // Only crawls others can check: a node's own fetches of sites
@@ -756,11 +770,8 @@ impl BatchStore {
             // anyone else.
             // And only those a searcher counts: a crawl from outside its
             // batch's epoch would make the searcher distrust the answer.
-            let assigned =
-                crawler.is_some_and(|c| is_assigned(h.epoch, &c, &record.domain, h.share_ppm));
-            let in_window = record
-                .crawled_at
-                .is_some_and(|at| crate::batch::in_crawl_window(at, h.epoch));
+            let assigned = crawler.is_some_and(|c| is_assigned(h.epoch, &c, &domain, h.share_ppm));
+            let in_window = crawled_at.is_some_and(|at| crate::batch::in_crawl_window(at, h.epoch));
             if !in_window || !assigned {
                 continue;
             }
@@ -773,7 +784,7 @@ impl BatchStore {
                 created_at: created,
                 crawler: key,
             };
-            match self.crawls.get_mut(record.domain.as_str()) {
+            match self.crawls.get_mut(domain.as_str()) {
                 Some(held) => match held.iter_mut().find(|h| h.crawler == key) {
                     Some(old) if old.created_at > created => {}
                     Some(old) => *old = holding,
@@ -785,7 +796,7 @@ impl BatchStore {
                 },
                 None => {
                     self.crawls
-                        .insert(record.domain.into_boxed_str(), Box::new([holding]));
+                        .insert(domain.into_boxed_str(), Box::new([holding]));
                 }
             }
         }
@@ -863,6 +874,28 @@ mod tests {
             epochs: RETAIN_EPOCHS,
             storage,
         }
+    }
+
+    #[test]
+    fn batches_signed_before_v0_4_0_go_at_start_with_their_delivery_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_790_000_000;
+        let key = Keypair::generate_ed25519();
+        let (kept, old) = (quota_batch(&key, now, 0), quota_batch(&key, now, 1));
+        let mut store = BatchStore::open(dir.path()).unwrap();
+        store.insert(&kept).unwrap();
+        // As v0.3 signed it: under another context, so its signature does
+        // not check out now.
+        let mut stored = old.clone();
+        stored.header.signature = key.sign(b"plumb-batch-v1\0").unwrap();
+        fs::write(store.path(&old.id()), serde_json::to_vec(&stored).unwrap()).unwrap();
+        let note = store.delivery_ack(&old.id(), false).path;
+        fs::write(&note, b"").unwrap();
+        drop(store);
+        let store = BatchStore::open(dir.path()).unwrap();
+        assert!(store.contains(&kept.id()));
+        assert_eq!(store.len(), 1);
+        assert!(!store.path(&old.id()).exists() && !note.exists());
     }
 
     #[test]

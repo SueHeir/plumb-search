@@ -164,12 +164,12 @@ mod tests {
         let answer = BucketResponse {
             records: Some(vec![
                 BucketRecord {
-                    record: serde_json::to_string(&usbank).unwrap(),
+                    record: usbank.to_line().unwrap(),
                     proof: None,
                     also: Vec::new(),
                 },
                 BucketRecord {
-                    record: serde_json::to_string(&lying).unwrap(),
+                    record: lying.to_line().unwrap(),
                     proof: None,
                     also: Vec::new(),
                 },

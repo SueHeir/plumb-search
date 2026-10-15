@@ -21,7 +21,7 @@ use super::html::{
 use super::params::{NetSetting, Settings};
 use super::plugin_results::{render_notes, render_offers, render_plugin};
 use super::search::{NetOutcome, PLACES_MARK};
-use super::{answers, history, Icons};
+use super::{answers, history, Icons, DEFAULT_LIMIT, MAX_LIMIT};
 use crate::learn::{self, Block};
 use crate::news::Recent;
 use crate::websearch::Engine;
@@ -258,6 +258,39 @@ pub(crate) fn render_source(
     let _ = writeln!(out, "<p class=\"src\">{line}</p>");
 }
 
+/// Under a list of `shown` sites asked for `limit` at a time, "More
+/// results": the same search [`DEFAULT_LIMIT`] longer, landing on the first
+/// site this list did not have. A longer page that found nothing new says
+/// so instead, where its link landed.
+fn render_more(out: &mut String, query: &str, settings: &Settings, limit: usize, shown: usize) {
+    let longer = limit > DEFAULT_LIMIT;
+    if limit >= MAX_LIMIT || (shown == 0 && !longer) {
+        return;
+    }
+    // A longer page lists the page it came from first, so it found more
+    // when it has more than that page asked for.
+    if longer && shown <= limit - DEFAULT_LIMIT {
+        let _ = writeln!(
+            out,
+            "<p class=\"s\" id=\"r{}\">No more results.</p>",
+            shown + 1
+        );
+        return;
+    }
+    let net = settings.network == NetSetting::On;
+    let mut href = settings_link("/search", query, settings, &settings.options, net);
+    if settings.history.as_ref().is_some_and(|h| h.edit.is_some()) {
+        href.push_str("&edit=1");
+    }
+    let _ = write!(href, "&limit={}", (limit + DEFAULT_LIMIT).min(MAX_LIMIT));
+    let _ = writeln!(
+        out,
+        "<p class=\"more\"><a href=\"{}#r{}\">More results</a></p>",
+        escape_html(&href),
+        shown + 1
+    );
+}
+
 /// [`render_results_with`] without a "Recent" block.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
@@ -478,6 +511,7 @@ pub(crate) fn render_results_with(
     } else {
         body.push_str("<ol>\n");
         for (position, item) in shown.iter().enumerate() {
+            let row = body.len();
             for page in listed_pages(position) {
                 render_marked_page(&mut body, &page.hit, icons, &marked);
             }
@@ -538,6 +572,10 @@ pub(crate) fn render_results_with(
                 }
             }
             body.push_str(&rendered);
+            // Where "More results" from the page before lands.
+            if limit > DEFAULT_LIMIT {
+                body.insert_str(row + "<li".len(), &format!(" id=\"r{}\"", position + 1));
+            }
             if position == 0 {
                 if let Some(news) = &news {
                     body.push_str(news);
@@ -553,6 +591,7 @@ pub(crate) fn render_results_with(
             render_marked_page(&mut body, &page.hit, icons, &marked);
         }
         body.push_str("</ol>\n");
+        render_more(&mut body, query, settings, limit, shown.len());
     }
     if share_picks {
         body.push_str(

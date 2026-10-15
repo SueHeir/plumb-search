@@ -1,20 +1,20 @@
 //! What nodes say to each other, and the names of the protocols they say it
 //! over.
 //!
-//! * `/plumb/bucket/1`: one bucket of sites ([`BucketRequest`]); the query
-//!   itself never leaves the asking node (see [`crate::bucket`]). Each site
-//!   comes with a [`RecordProof`] when the answering node holds a signed
+//! * `/plumb/bucket/2`: one bucket of sites ([`BucketRequest`]), each a
+//!   `site` item; the query itself never leaves the asking node (see
+//!   [`crate::bucket`]). Each site comes with a [`RecordProof`] when the answering node holds a signed
 //!   crawl of it, and with proofs from other crawlers that agree with it
 //!   when it holds those. Asked under a throwaway identity, over a connection of
 //!   its own.
-//! * `/plumb/oblivious/1`: the same bucket requests, sealed to the answering
+//! * `/plumb/oblivious/2`: the same bucket requests, sealed to the answering
 //!   node's key and passed on by a relay, so the node answering never sees
 //!   the asker's IP address (see [`crate::oblivious`]).
-//! * `/plumb/batch/1`: a batch by id, or the headers of the batches a node
+//! * `/plumb/batch/2`: a batch by id, or the headers of the batches a node
 //!   holds since an epoch, so a node that was away can catch up.
-//! * Gossip topic `plumb/batches/1`: the [`SignedHeader`] of every new
+//! * Gossip topic `plumb/batches/2`: the [`SignedHeader`] of every new
 //!   batch, as JSON. Nodes that want the batch fetch it with
-//!   `/plumb/batch/1` from the node that passed the header on.
+//!   `/plumb/batch/2` from the node that passed the header on.
 //! * `/plumb/fill/1`: a stretch of a node's crawled sites, best-ranked
 //!   first, for a node filling its free space, or every site for a node
 //!   setting up (see [`crate::fill`]). Only taken from nodes the asker
@@ -55,8 +55,10 @@ use crate::hash::Hash;
 use crate::leads::Lead;
 use crate::popularity::Report;
 
-pub const BUCKET_PROTOCOL: &str = "/plumb/bucket/1";
-pub const BATCH_PROTOCOL: &str = "/plumb/batch/1";
+// Version 2 since v0.4.0, when batches and bucket answers came to carry
+// sites as items: nodes before it neither ask nor answer.
+pub const BUCKET_PROTOCOL: &str = "/plumb/bucket/2";
+pub const BATCH_PROTOCOL: &str = "/plumb/batch/2";
 pub const FILL_PROTOCOL: &str = "/plumb/fill/1";
 pub const PAGES_PROTOCOL: &str = "/plumb/pages/1";
 pub const SETS_PROTOCOL: &str = "/plumb/sets/1";
@@ -67,7 +69,7 @@ pub const CREDIT_PROTOCOL: &str = "/plumb/credits/1";
 pub const LEAD_PROTOCOL: &str = "/plumb/leads/1";
 pub const KAD_PROTOCOL: &str = "/plumb/kad/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/plumb/id/1.0.0";
-pub const BATCH_TOPIC: &str = "plumb/batches/1";
+pub const BATCH_TOPIC: &str = "plumb/batches/2";
 pub const REPORT_TOPIC: &str = "plumb/reports/1";
 pub const LEAD_TOPIC: &str = "plumb/leads/1";
 
@@ -138,7 +140,7 @@ pub struct BucketResponse {
 /// answering node holds one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketRecord {
-    /// The site's record, as JSON.
+    /// The site as its item, a line of JSON ([`plumb_core::SiteRecord::to_line`]).
     pub record: String,
     pub proof: Option<RecordProof>,
     /// Proofs of other crawlers' crawls of the same site that agree with

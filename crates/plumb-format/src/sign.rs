@@ -8,7 +8,7 @@
 //! followed by its canonical JSON ([`crate::canonical`]) without its
 //! `signature` key. The leading words keep a set signature from ever
 //! passing for another kind of signature, such as a crawl batch's
-//! (`plumb-batch-v1\0`). Key notes ([`crate::notes`]) are signed the same
+//! (`plumb-batch-v2\0`). Key notes ([`crate::notes`]) are signed the same
 //! way under `plumb-note/1\0`, so a note never passes for a manifest nor a
 //! manifest for a note. Keys and signatures are written in unpadded
 //! base64url, keys as `ed25519:<key>`.

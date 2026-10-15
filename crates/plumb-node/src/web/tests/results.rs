@@ -665,3 +665,78 @@ async fn a_local_site_put_first_is_opened_from_its_link() {
         "https://www.westword.com/bars/great-divide"
     );
 }
+
+/// Finds more the further it looks, and ranks some of it above what it
+/// found before.
+struct Deeper;
+
+impl SearchBackend for Deeper {
+    fn search(&self, _: &str, limit: usize) -> Result<Vec<Hit>> {
+        let found: &[&str] = if limit <= DEFAULT_LIMIT {
+            &["a.com", "b.com"]
+        } else {
+            &["a.com", "x.com", "b.com", "c.com"]
+        };
+        Ok(found.iter().map(|domain| scored(domain, 0.5)).collect())
+    }
+
+    fn num_docs(&self) -> u64 {
+        4
+    }
+}
+
+#[tokio::test]
+async fn more_results_keeps_the_page_before_on_top() {
+    let app = router_with(Arc::new(Deeper), HomeCountry::Off);
+    let (_, _, first) = send(app.clone(), "/search?q=abc").await;
+    // It lands on the first site the page does not have.
+    assert!(
+        first.contains("&amp;limit=20#r3\">More results</a>"),
+        "{first}"
+    );
+    assert!(!first.contains("id=\"r"), "{first}");
+    let (_, _, more) = send(app, "/search?q=abc&limit=20").await;
+    let at = |domain: &str| more.find(&format!("<span class=\"dn\">{domain}</span>"));
+    let order: Vec<_> = ["a.com", "b.com", "x.com", "c.com"].map(at).into();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{more}");
+    assert!(more.contains("<li id=\"r3\">"), "{more}");
+    // Four sites of twenty asked for: there are no more.
+    assert!(
+        more.contains("<p class=\"s\" id=\"r5\">No more results.</p>"),
+        "{more}"
+    );
+    assert!(!more.contains("More results</a>"), "{more}");
+}
+
+#[test]
+fn more_results_goes_on_while_pages_fill_up_to_the_most_listed() {
+    let sites = |n: usize| SearchResults {
+        hits: (0..n).map(|i| scored(&format!("s{i}.com"), 0.5)).collect(),
+        ..SearchResults::default()
+    };
+    let render = |results: &SearchResults, limit: usize| {
+        render_results(
+            "q",
+            results,
+            None,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            limit,
+            false,
+            &Icons::default(),
+        )
+    };
+    let page = render(&sites(15), 20);
+    assert!(
+        page.contains("&amp;limit=30#r16\">More results</a>"),
+        "{page}"
+    );
+    assert!(page.contains("<li id=\"r15\">"), "{page}");
+    let page = render(&sites(MAX_LIMIT), MAX_LIMIT);
+    assert!(
+        !page.contains("More results") && !page.contains("No more"),
+        "{page}"
+    );
+    assert!(!render(&sites(0), DEFAULT_LIMIT).contains("More results"));
+}

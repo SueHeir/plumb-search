@@ -1,8 +1,9 @@
 //! Crawl batches: the records one node's crawl produced, signed by that
 //! node, so that any other node can check them whoever it got them from.
 //!
-//! A batch is a list of site records, each kept as the exact JSON bytes that
-//! were hashed, and a [`SignedHeader`]: the crawler's public key, the epoch
+//! A batch is a list of site records, each a `site` item of the data format
+//! ([`SiteRecord::to_line`]) kept as the exact JSON bytes that were hashed,
+//! and a [`SignedHeader`]: the crawler's public key, the epoch
 //! the crawl was assigned in, the number of records and the Merkle root over
 //! them, signed with the crawler's key. Because the header commits to every
 //! record, a node can relay a batch it did not make, and a search answer can
@@ -25,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{bail, ensure, Context, Result};
 use libp2p::identity::{Keypair, PublicKey};
 use libp2p::PeerId;
+use plumb_core::site_item::SITE;
 use plumb_core::{canonical_domain, linker_bit, registrable_domain, SiteRecord};
 use serde::{Deserialize, Serialize};
 
@@ -49,7 +51,9 @@ pub const MAX_BATCH_AGE_EPOCHS: u64 = 7;
 /// the network with made-up domains.
 pub const MAX_LINKED_PER_CRAWLED: usize = 100;
 
-const SIGNING_CONTEXT: &[u8] = b"plumb-batch-v1\0";
+/// Version 2 since v0.4.0, whose records are items: a version 1 batch, of
+/// site records in their own JSON, never checks out as one.
+const SIGNING_CONTEXT: &[u8] = b"plumb-batch-v2\0";
 
 /// What a crawler signs about a batch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,8 +160,8 @@ pub struct Batch {
 }
 
 impl Batch {
-    /// Signs `records` with `key`. Records with invalid domains, or longer
-    /// than [`MAX_RECORD_BYTES`], are left out, and at most
+    /// Signs `records` with `key`, each as its item. Records with invalid
+    /// domains, or that make no item, are left out, and at most
     /// [`MAX_BATCH_RECORDS`] lines are kept, within [`MAX_BATCH_BYTES`];
     /// `None` when none are. A record's icon ([`SiteRecord::icon`]) goes on
     /// a line of its own after the records ([`IconLine`]), while there is
@@ -191,20 +195,19 @@ impl Batch {
                     continue;
                 }
             }
-            let icon = record.icon.is_some().then(|| record.to_mut().icon.take());
-            let line = serde_json::to_string(&*record).context("encoding a record")?;
-            if line.len() > MAX_RECORD_BYTES {
+            // An item is never over MAX_RECORD_BYTES, and holds no icon.
+            let Ok(line) = record.to_line() else {
                 continue;
-            }
+            };
             if bytes + line.len() > MAX_BATCH_BYTES {
                 break;
             }
             bytes += line.len();
             lines.push(line);
-            if let Some(Some(png)) = icon {
+            if let Some(png) = &record.icon {
                 icons.push(IconLine {
                     icon_of: record.domain.clone(),
-                    png,
+                    png: png.clone(),
                 });
             }
         }
@@ -311,7 +314,7 @@ impl Batch {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordProof {
     pub header: SignedHeader,
-    /// The record as the JSON that was hashed.
+    /// The record's item as the JSON that was hashed.
     pub record: String,
     pub path: MerkleProof,
 }
@@ -476,10 +479,11 @@ fn accept(batch: &Batch, crawler: &PeerId, now: u64, source: Source) -> Vec<Site
 /// counted once a site). Otherwise one record it keeps would get a batch of
 /// up to [`MAX_BATCH_BYTES`] of lines it does not keep onto its disk.
 pub fn mostly_kept(batch: &Batch, kept: &[SiteRecord]) -> bool {
-    /// The field naming the site, whatever the line is.
+    /// The fields naming the site, whatever the line is.
     #[derive(Deserialize)]
     struct Line {
-        domain: Option<String>,
+        id: Option<String>,
+        kind: Option<String>,
         icon_of: Option<String>,
         news_of: Option<String>,
     }
@@ -492,7 +496,8 @@ pub fn mostly_kept(batch: &Batch, kept: &[SiteRecord]) -> bool {
         let Ok(line) = serde_json::from_str::<Line>(line) else {
             continue;
         };
-        let (kind, name) = match (line.domain, line.icon_of, line.news_of) {
+        let site = line.id.filter(|_| line.kind.as_deref() == Some(SITE));
+        let (kind, name) = match (site, line.icon_of, line.news_of) {
             (Some(domain), None, None) => (0, domain),
             (None, Some(domain), None) => (1, domain),
             (None, None, Some(domain)) => (2, domain),
@@ -567,7 +572,7 @@ pub fn accept_news(batch: &Batch, now: u64) -> Vec<SiteRecord> {
 /// Reads one record from another node, with its domain made canonical.
 fn parse_record(line: &str) -> Result<SiteRecord> {
     ensure!(line.len() <= MAX_RECORD_BYTES, "a record is too long");
-    let mut record: SiteRecord = serde_json::from_str(line).context("a record does not parse")?;
+    let mut record = SiteRecord::from_line(line).context("a record does not read")?;
     let Some(domain) = canonical_domain(&record.domain) else {
         bail!("{:?} is not a registrable domain", record.domain);
     };
@@ -737,6 +742,15 @@ mod tests {
         let back: Batch = serde_json::from_str(&json).unwrap();
         assert_eq!(back.check(NOW).unwrap(), peer);
         assert_eq!(back.id(), batch.id());
+        // Each record goes as its item, and comes back the same but for
+        // the node's own bookkeeping.
+        for (line, record) in batch.records.iter().zip(&records) {
+            let carried = SiteRecord {
+                crawl_failures: 0,
+                ..record.clone()
+            };
+            assert_eq!(SiteRecord::from_line(line).unwrap(), carried);
+        }
     }
 
     #[test]

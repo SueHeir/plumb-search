@@ -1,44 +1,30 @@
 # Running Plumb Search with Docker
 
-The Docker image runs a Plumb Search node on a server or homelab machine.
-`plumb run` serves the search page and a JSON API on port 8080. On first start
-it takes the best sites of the plumbsearch.org node (or another node it
-trusts) and builds its index from them, searchable within two or three
-minutes, with the rest of that node's sites following in the background; only
-when no trusted node answers does it download the seed data instead
-(searchable within a minute or two, from the Tranco list; the rest of the
-seed data follows its first crawl). From then on it keeps
-crawling homepages and rebuilding the index. It also joins the Plumb network
-(see [Join the Plumb network](#join-the-plumb-network)), so its crawls help
-every other node and theirs help it. Everything it keeps is in one volume
-mounted at `/data`.
+The Docker image runs a Plumb Search node on a server or homelab machine: the search page and its JSON API on port 8080, the Plumb network on port 4001, and everything it keeps in one volume at `/data`. This page covers running it, its settings, updates, backups, proxies and what it needs. For what a node does and every `plumb run` flag, see [running-a-node.md](running-a-node.md).
 
-Images for `linux/amd64` and `linux/arm64` (including 64-bit Raspberry Pi OS)
-are published as `ghcr.io/sueheir/plumb-search`.
+- [Quick start](#quick-start)
+- [The image](#the-image)
+- [First start](#first-start)
+- [Ports and the network](#ports-and-the-network)
+- [Settings](#settings)
+- [Control it from the desktop app](#control-it-from-the-desktop-app)
+- [Behind a reverse proxy or tunnel](#behind-a-reverse-proxy-or-tunnel)
+- [Data and backups](#data-and-backups)
+- [Updating](#updating)
+- [Health checks](#health-checks)
+- [Memory and disk](#memory-and-disk)
+- [Building the image yourself](#building-the-image-yourself)
 
 ## Quick start
 
-From a copy of this repository, or of just its `docker-compose.yml`:
+From a copy of this repository, or of just its [docker-compose.yml](../docker-compose.yml):
 
 ```sh
 docker compose up -d
-```
-
-Then open `http://<server>:8080` (`http://localhost:8080` on the same machine).
-
-A first start that cannot reach a trusted node in the network (or runs with
-`--seed-from-outside`) downloads the seed data, so the container needs internet
-access: the Tranco list comes from tranco-list.eu and the official websites
-from query.wikidata.org (plus Common Crawl ranks from data.commoncrawl.org
-when you set `--cc-release`). Until the first index is ready, the page shows
-what the node is doing and how far it has got, instead of the search box. If
-a download fails, the page shows the error and when the node will try again.
-It retries by itself, first after 10 minutes and then less often, up to every
-6 hours. The log shows the same:
-
-```sh
 docker compose logs -f
 ```
+
+Then open `http://<server>:8080` (`http://localhost:8080` on the same machine). Until the first index is ready, the page shows what the node is doing and how far it has got.
 
 Without Compose:
 
@@ -48,246 +34,64 @@ docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
   -v plumb-data:/data ghcr.io/sueheir/plumb-search:latest
 ```
 
-`--stop-timeout 300` gives the node time to finish an index build when it is
-stopped (Compose sets the same with `stop_grace_period`). Stopping it sooner
-is safe, but the build is lost and done again later.
+`--stop-timeout 300` gives the node time to finish an index build when it is stopped (Compose sets the same with `stop_grace_period: 5m`). Stopping sooner is safe, but the build is lost and done again later.
 
-The page has no login, so anyone who can reach the port can search. To use
-another port, change the number on the left (`"80:8080"`). To keep the page
-to the machine itself, for example behind a reverse proxy, publish it as
-`"127.0.0.1:8080:8080"`.
+The search page has no login: anyone who can reach the port can search. To use another port, change the number on the left (`"80:8080"`). To keep the page to the machine itself, for example behind a reverse proxy, publish it as `"127.0.0.1:8080:8080"`.
 
-`http://<server>:8080/api/status` reports what the node is doing as JSON
-(`phase` is `setting_up` or `ready`), which suits uptime monitors. The
-image's health check, `plumb healthcheck`, asks it once a minute on
-`127.0.0.1:8080`, so `docker ps` shows the container as `healthy` while the
-node answers. If your command binds another port, override the check, for
-example in Compose:
-`healthcheck: {test: ["CMD", "plumb", "healthcheck", "--url", "http://127.0.0.1:9090"]}`.
+## The image
 
-## Join the Plumb network
+`ghcr.io/sueheir/plumb-search` is built from the [Dockerfile](../Dockerfile) for `linux/amd64` and `linux/arm64` (64-bit Raspberry Pi OS included).
 
-The node joins the Plumb network when it starts: it connects to the
-network's first nodes on plumbsearch.org, finds other nodes through them
-(and any on your own network by itself), crawls the share of sites the
-network assigns it each day, and shares those crawls, signed, with the
-others. Nothing needs to be forwarded on the router: the node dials out, and
-other nodes reach it through a relay when they cannot reach it directly.
-Forwarding port 4001, TCP and UDP, to this machine lets them connect
-directly instead, which is faster and spares the relay.
-
-Within a minute of starting, the log says `joined the Plumb network as
-12D3Koo...`, and `http://<server>:8080/api/status` shows the node under
-`network`: `peer_id`, its `peers`, and the batches of crawls it has published
-and received. If it cannot reach any node, `network.problem` says why.
-
-What the node gives and gets:
-
-* It takes in the crawls of the plumbsearch.org node at once, and other
-  nodes' crawls once a second crawler agrees with them.
-* Other nodes take in its crawls once they agree with their own crawls of
-  the same sites, which starts within a day or two: a new node's crawls count
-  on another node after they have matched that node's own crawls of 3 sites.
-* Confirmed crawls earn it crawl credits, which buy it priority on busy
-  nodes (docs/network.md, "Crawl credits").
-
-To keep a node to itself, run it without `--network` (see
-[Settings](#settings)). Other network flags, such as `--bootstrap` for
-another node to start from, are in docs/network.md.
-
-## Use Plumb as your browser's search engine
-
-Plumb's pages offer it to the browser as a search engine. In Firefox, open
-the Plumb page, right-click the address bar and choose **Add "Plumb
-Search"**. Chrome lists it under **Settings > Search engine > Manage search
-engines and site search** as an inactive shortcut once you have opened the
-page; activate it there. Any browser can also take it by hand, with the
-address `http://<server>:8080/search?q=%s` (`http://127.0.0.1:8080/search?q=%s`
-on the same machine).
-
-The search address the page offers is made from the address the browser
-reached Plumb at. Behind a reverse proxy, pass on the original `Host` header,
-and set `X-Forwarded-Proto: https` when the proxy serves HTTPS.
-
-## Behind a reverse proxy or tunnel
-
-A few things are kept to the computer Plumb runs on: changing settings on
-the panel, plugin buttons, and the MCP tools that fetch pages for your AI
-apps (`read_page`, findings, and sharing findings with other nodes on a
-node run with `--share-findings`, signed with its key). Plumb counts a request as local only when all
-three hold:
-
-* it connects from the machine itself (`127.0.0.1` or `::1`),
-* it was sent to a local name (`localhost`, `127.0.0.1` or `[::1]`), and
-* it has no `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header.
-
-A proxy or tunnel on the same machine passes the first test for everyone it
-lets in, so it must fail one of the other two:
-
-* **Caddy and Traefik** add `X-Forwarded-For` and keep the original `Host`
-  by themselves. Nothing to do.
-* **nginx** does neither by default: `proxy_pass http://127.0.0.1:8080;`
-  sends `Host: 127.0.0.1:8080` and no forwarding header, so every visitor
-  looks like you. Add both lines (they are needed for the browser search
-  address anyway):
-
-  ```nginx
-  location / {
-      proxy_pass http://127.0.0.1:8080;
-      proxy_set_header Host $host;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Forwarded-Proto $scheme;
-  }
-  ```
-
-  Nginx Proxy Manager sets these for you.
-* **Tunnels** (Cloudflare Tunnel, Tailscale Funnel, ngrok) need no port
-  forwarded on the router, but they still put the node on the internet, and
-  they run on the machine itself. Cloudflare Tunnel passes on the original
-  `Host` and adds `X-Forwarded-For`, so it is safe as it comes, unless set to
-  rewrite `Host` to `localhost` (its `httpHostHeader` setting). For others,
-  run the check below.
-
-To check, open `https://<your domain>/app` from another network, such as a
-phone off Wi-Fi: the settings must show as read-only. A node that only your
-own computers reach, at home or over a VPN, is fine either way.
-
-## Where the data lives
-
-Everything is in the named volume `plumb-data`, mounted at `/data`:
-
-| Path | What it holds |
+| Tag | What it is |
 | --- | --- |
-| `/data/records.jsonl` | One JSON line per site: everything the node has learned. Back it up together with the journal. |
-| `/data/records.jsonl.journal` | Crawl results not yet folded into `records.jsonl`. Crawls add to it as they go, and the node folds it in once it reaches a quarter of the size of `records.jsonl` (64 MB at least). Back it up with `records.jsonl`. |
-| `/data/indexes/000001/`, ... | The search index, rebuilt from the records. Each rebuild makes a new numbered directory and deletes the old one. |
-| `/data/seed/` | The first-start downloads. They can be deleted once `records.jsonl` exists. |
-| `/data/state.json` | Progress that survives restarts, such as when the next refresh is due |
-| `/data/node.lock` | Held while a node runs, so two nodes never share the directory |
+| `latest` | The newest release |
+| `0.3.1`, `0.3` | A release by version; from 1.0 on, the major version (`1`) too |
+| `main` | The main branch, unreleased changes included |
+| `sha-<commit>` | One build of one commit |
 
-**Mount the volume at `/data` itself**, not at an index directory or a file
-inside it. The node replaces its index, `records.jsonl` and `state.json` by
-renaming, and Linux cannot rename a mount point.
-
-To keep the data in a host directory instead, bind-mount it at `/data`. The
-container runs as the unprivileged user `plumb` (uid and gid 10001), not as
-root, so give the directory to that user first:
-
-```sh
-mkdir plumb-data && sudo chown 10001:10001 plumb-data
+```mermaid
+flowchart LR
+    users["Browsers and AI apps"] -->|"8080: search page, /api, /mcp, /app"| node
+    peers["Other Plumb nodes"] <-->|"4001 TCP and UDP"| node
+    subgraph container["Container, user 10001"]
+        node["plumb run"]
+        health["plumb healthcheck"]
+    end
+    health -->|"GET /api/status"| node
+    node --> data[("Volume at /data")]
 ```
 
-```yaml
-    volumes:
-      - ./plumb-data:/data
-```
+| | |
+| --- | --- |
+| Entry point | `plumb` |
+| Default command | `run --data /data --bind 0.0.0.0:8080 --network --search-by-meaning` |
+| User | `plumb`, uid and gid 10001 |
+| Volume | `/data`, also the working directory |
+| Ports | 8080 (web), 4001 TCP and UDP (network) |
+| Health check | `plumb healthcheck` every 60 s |
 
-To back up the records, copy out the journal, when there is one, and then
-`records.jsonl` (in that order, so that a journal folded in between the two
-copies is not missed):
+The default command runs the server profile: it keeps 1,000,000 sites, crawls 10,000 homepages once the first index is built and 5,000 more every hour. `--network` joins the Plumb network; `--search-by-meaning` downloads a small embedding model (about 130 MB) so searches that describe a site ("electric car maker") find it.
 
-```sh
-docker compose cp plumb:/data/records.jsonl.journal .
-docker compose cp plumb:/data/records.jsonl .
-```
+## First start
 
-When a node starts with a `records.jsonl` already in `/data`, it skips the
-seed downloads, so the same files can start a new installation; the node
-reads a journal next to `records.jsonl` together with it.
+A new node in the network sets up from the sites of a node it trusts (plumbsearch.org's by default): it takes the best 50,000 first, builds an index from them, and takes in the rest, up to `--sites`, in the background. When no trusted node answers within two minutes, or with `--seed-from-outside`, it downloads public seed data instead: the Tranco list of popular sites, then Wikidata's official websites (and Common Crawl ranks with `--cc-release`). Either way the container needs internet access.
 
-`docker compose down -v` deletes the container together with the volume and
-everything in it.
+If a download fails, the page shows the error and when the node will try again: after 10 minutes, then twice as long after each failure in a row, up to every 6 hours. `docker compose logs -f` shows the same.
+
+## Ports and the network
+
+| Port | What it is | Publish it? |
+| --- | --- | --- |
+| 8080 | The search page, `/api/...`, `/mcp` and the panel at `/app` | Yes, to reach the node |
+| 4001 TCP and UDP | Node-to-node connections, set by `--p2p-port` | Optional |
+
+The node joins the network by dialing out: it connects to the network's first nodes on plumbsearch.org, finds other nodes through them (and any on your own network by itself), crawls the share of sites the network assigns it, and shares those crawls, signed. Nothing needs forwarding on the router; other nodes reach it through a relay when they cannot reach it directly. Forwarding port 4001, TCP and UDP, to this machine lets them connect directly instead. [network.md](network.md) has how the network works.
+
+Within a minute of starting, the log says `joined the Plumb network as 12D3Koo...`, and `http://<server>:8080/api/status` shows the node under `network`: its `peer_id`, `connected_peers` and the crawl batches it has published and received. If it cannot reach any node, `network.problem` says why. To keep a node to itself, leave `--network` out of its command.
 
 ## Settings
 
-Open `/app` for the same organized node panel used by the desktop app:
-Overview, Search & browser, Resources, Network & privacy, and About.
-Network statistics reflect the live node, including peers, crawl agreement,
-popularity reports, and relay activity. Forms do not reload while being edited.
-
-The panel keeps the existing local-only write policy: remote connections
-see disabled controls and an explanation. Docker bridge networking can make
-even a host-local browser appear remote to the container. For those deployments,
-configure the node on the host with the startup flags below, or place
-`features.json` in the mounted data directory while the node is stopped:
-
-```json
-{
-  "network": true,
-  "search_by_meaning": true,
-  "share_popularity": false,
-  "bootstrap": [
-    "/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a",
-    "/ip4/198.211.114.63/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a"
-  ]
-}
-```
-
-To have a node collect all the data the network offers (every trusted
-node's crawled sites, every page set in full, all crawl batches), add
-`--blackhole` to its `command:` line; [network.md](network.md) says what it
-does.
-
-For a small server that only crawls for the network (nobody searches it),
-add `--crawl-only` instead: it builds no search index and keeps memory to a
-few hundred megabytes even with millions of sites.
-
-Feature choices in this file override startup feature flags and take effect
-on the next start (`docker compose restart`). Network transport, public
-addresses, relay, UPnP, and discovery flags are preserved. The two bootstrap
-addresses above are the network's own first nodes on plumbsearch.org; with no
-bootstrap addresses at all, the node finds only nodes on its own local
-network. Remove `features.json` while stopped to
-use only startup flags again. The node writes down which data directory the
-file was saved in; a copy of another node's data directory keeps the network
-off (with a warning in the log) unless started with `--network`, so a test
-node made from a live one does not join the network as that node. Resource limits stay in `settings.json` and
-apply immediately when saved through a local panel.
-
-### Control it from the desktop app
-
-The desktop app can show and change this node's settings from another
-computer. It sends the token only over HTTPS, so first have the node serve
-HTTPS too: add `--https-bind 0.0.0.0:8443` to its `plumb run` flags and
-publish that port (`-p 8443:8443`, or `"8443:8443"` under the compose file's
-`ports`). The node makes its own certificate for it, kept in `/data`.
-Remote control is off until you turn it on, on the node's host:
-
-```sh
-docker exec plumb plumb remote-control on
-```
-
-It prints a token, once, and the certificate's fingerprint. In the desktop
-app, choose **+ Connect to a node** above the panel and enter the node's
-HTTPS address (such as `https://192.168.1.20:8443`), the token and the
-fingerprint. The app then trusts only that certificate at that address; see
-[remote-control-security.md](remote-control-security.md). The app then shows the node next
-to **This computer**, with the same Overview, Search & browser, Resources and
-Network & privacy sections, and its forms change the node: resource limits at
-once, features after `docker compose restart`.
-
-The token can read the node's status and change its settings, features and
-refreshes, nothing else. The node keeps only its SHA-256 hash, in
-`/data/remote-control.json`. It is taken only from the host itself, local
-networks (including Docker's bridge and Tailscale) and requests straight to
-the node: requests from public addresses or through a reverse proxy (with a
-`Forwarded` or `X-Forwarded-For` header) are refused. So putting the node
-behind a proxy on the internet does not expose remote control.
-`remote-control on --allow-public` lifts that limit; only use it with HTTPS
-in front of the node, since the token is sent with every request.
-
-`plumb remote-control on` again makes a new token and stops the old one
-working; `plumb remote-control off` turns remote control off, and
-`plumb remote-control status` says which it is, with the fingerprint. Both
-take effect at once.
-
-
-Settings are flags of `plumb run`. The image's default command is
-`run --data /data --bind 0.0.0.0:8080 --network --search-by-meaning`, and a
-command you set replaces all of it, so keep those flags (leave out `--network`
-to keep the node to itself, and `--search-by-meaning` to skip the 130 MB
-model and the site vectors, at the cost of described searches such as
-"electric car maker"). In `docker-compose.yml`:
+Settings are flags of `plumb run`. A command you set replaces the default one whole, so keep `--data /data` and `--bind 0.0.0.0:8080`, and `--network` and `--search-by-meaning` unless you want them off. In `docker-compose.yml`:
 
 ```yaml
 services:
@@ -295,57 +99,56 @@ services:
     command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--search-by-meaning", "--sites", "250000"]
 ```
 
-Then apply it with `docker compose up -d`. With `docker run`, put the command
-after the image name:
-
-```sh
-docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
-  -p 8080:8080 -v plumb-data:/data ghcr.io/sueheir/plumb-search:latest \
-  run --data /data --bind 0.0.0.0:8080 --network --search-by-meaning --sites 250000
-```
+Apply it with `docker compose up -d`. With `docker run`, put the command after the image name. `docker run --rm ghcr.io/sueheir/plumb-search:latest run --help` lists every flag, and [Flags](running-a-node.md#flags) explains them; these are the ones Docker users change most:
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `--sites N` | 1,000,000 | How many of the best-ranked sites to keep from the seed data. First start only. |
-| `--cc-release NAME` | none | Also take ranks from a Common Crawl web graph release, such as `cc-main-2025-26-nov-dec-jan` (listed at https://commoncrawl.org/web-graphs). Only the top rows are downloaded. First start only. |
-| `--initial-crawl N` | 10,000 | Homepages to crawl once the first index is built; `0` for none. |
-| `--refresh-hours H` | 1 | Hours between refreshes, which crawl more homepages and rebuild the index, e.g. `24` or `0.5`. |
-| `--crawl-per-refresh N` | 5,000 | Homepages crawled per refresh. |
-| `--no-refresh` | | Never refresh: keep the index as the initial crawl leaves it. |
-| `--seed-from-outside` | | Set up from the seed downloads even in the network, instead of from a trusted node's sites. First start only. |
-| `--reseed` | | Fold the seed files already in `DIR/seed` into the records again before starting (only files over a week old are downloaded again). For records made before a change to how seed data is read; use it once. |
-| `--profile desktop` | `server` | Smaller defaults: 250,000 sites, 2,000 homepages at first and 1,000 more every 12 hours. The flags above still override it. |
-| `--alpha A` | the index's default | Weight of the popularity prior in the ranking, from 0 to 1. |
-| `--use-system-proxy` | off | Crawl homepages through the proxy in `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`; see [Behind a proxy](#behind-a-proxy). |
+| `--sites N` | 1,000,000 | How many of the best-ranked sites to set up with. First start only. |
+| `--profile desktop` | `server` | Smaller defaults: 250,000 sites, 2,000 homepages at first and 1,000 more every 12 hours |
+| `--initial-crawl N` | 10,000 | Homepages to crawl once the first index is built; `0` for none |
+| `--refresh-hours H` | 1 | Hours between refreshes, which crawl more homepages and rebuild the index |
+| `--crawl-per-refresh N` | 5,000 | Homepages crawled per refresh |
+| `--no-refresh` | | Keep the index as the initial crawl leaves it |
+| `--seed-from-outside` | | Download the seed data even in the network. First start only. |
+| `--cc-release NAME` | none | Also take ranks from a Common Crawl web graph release. First start only. |
+| `--https-bind ADDR` | none | Also serve HTTPS, for [remote control](#control-it-from-the-desktop-app) |
+| `--crawl-only` | | Crawl for the network and build no search index, for a small server nobody searches. Leave out `--search-by-meaning` with it. |
+| `--blackhole` | | Collect all the data the network offers, for a server with disk and memory to spare |
+| `--mcp-read-pages`, `--mcp-findings` | | Offer `read_page` or findings to MCP clients on other computers ([mcp.md](mcp.md#reading-pages)) |
+| `--use-system-proxy` | | Crawl through the proxy in `HTTPS_PROXY` (see [below](#outgoing-proxy)) |
+| `--p2p-port PORT` | 4001 | The network port; publish the same one |
 
-How much a container takes from the network by default: the best
-`--sites` (1,000,000) sites from a trusted node, then the network's crawls
-with no storage limit, until an index build would need more than half the
-machine's memory (about 800,000 sites on a 4 GB server, 1.6 million on 8 GB).
-A container never asks, unlike the desktop app's "Set up my node"; set a
-storage limit on the panel's Resources page, or a smaller `--sites`, to keep
-less.
+"First start only" flags apply while `/data/records.jsonl` does not exist yet. To change them later, start over with an empty volume.
 
-"First start only" settings take effect when the node sets itself up, that is,
-while `/data/records.jsonl` does not exist yet. To change them later, start
-over with an empty volume.
+**The panel.** `/app` is the same panel as the desktop app's, with Overview, Search & browser, Resources, Network & privacy, AI & plugins, Remote control, Activity and About. It changes settings only from the computer the node runs on, and a browser reaching the container through Docker's port does not count as that, so in Docker the panel is read-only. To change what the panel would:
 
-`docker run --rm ghcr.io/sueheir/plumb-search:latest run --help` lists every
-flag.
+- control the node from the [desktop app](#control-it-from-the-desktop-app), whose forms change it;
+- for features (network, search by meaning, trusted and bootstrap nodes), stop the node and write `/data/features.json`, which takes precedence over the feature flags at the next start. Its `bootstrap` list replaces the default one, so keep the network's first nodes in it:
 
-The log goes to the container log at the `info` level. Set `RUST_LOG` to
-change that, for example:
+  ```json
+  {
+    "network": true,
+    "search_by_meaning": true,
+    "bootstrap": [
+      "/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a",
+      "/ip4/198.211.114.63/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a"
+    ]
+  }
+  ```
+
+  Delete the file to go back to the flags alone;
+- for resource limits (storage, daily downloads, workload), stop the node and edit `/data/settings.json`, such as `"storage_limit_mb": 20000`.
+
+**Logs.** The log goes to the container log at the `info` level. Set `RUST_LOG` to change that:
 
 ```yaml
     environment:
       RUST_LOG: debug
 ```
 
-### Behind a proxy
+### Outgoing proxy
 
-If the server reaches the internet only through a proxy, pass the proxy's
-address to the container in the usual variables and add `--use-system-proxy`
-to the command:
+If the server reaches the internet only through a proxy, pass its address in the usual variables and add `--use-system-proxy` to the command:
 
 ```yaml
 services:
@@ -356,19 +159,89 @@ services:
       HTTP_PROXY: http://proxy.example.com:3128
 ```
 
-With `docker run`, put `-e HTTPS_PROXY=http://proxy.example.com:3128
--e HTTP_PROXY=http://proxy.example.com:3128` before the image name and
-`--use-system-proxy` at the end of the command. `NO_PROXY` lists hosts to
-reach directly.
+`NO_PROXY` lists hosts to reach directly. The seed downloads use these variables in any case, but without `--use-system-proxy` the node fetches homepages directly, so behind such a proxy every crawl fails and `/api/status` says the network seems to be down. Through a proxy, the crawler cannot check that a site's name leads to a public address, so use a proxy that refuses private addresses, or one that reaches nothing you want kept private.
 
-The seed downloads use these variables in any case, but without
-`--use-system-proxy` the node fetches homepages directly, so behind such a
-proxy every crawl fails: the page says the last update failed, and
-`/api/status` and the log say the network seems to be down. Through a proxy,
-the crawler cannot check that a site's name leads to a public address, as it
-does when it connects directly, so a site could point it at hosts on your own
-network that the proxy can reach. Use a proxy that refuses private addresses,
-or one that cannot reach anything you want kept private.
+## Control it from the desktop app
+
+The [desktop app](desktop.md) can show and change this node's settings: its forms change resource limits at once and save features for the next start (`docker compose restart`). [remote-control-security.md](remote-control-security.md) has how it is kept safe.
+
+1. **Turn remote control on**, on the node's host. It prints a token, once, and the fingerprint of the node's HTTPS certificate:
+
+   ```sh
+   docker compose exec plumb plumb remote-control on   # with Compose
+   docker exec plumb plumb remote-control on           # with docker run --name plumb
+   ```
+
+2. **From another computer, serve HTTPS.** The app sends the token only over HTTPS to anything but its own computer. Add `--https-bind 0.0.0.0:8443` to the command and publish the port (`-p 8443:8443`, or `"8443:8443"` under `ports`). The node makes its own certificate the first time and keeps it in `/data`. From the same computer as the container, skip this step and use `http://127.0.0.1:8080`.
+3. **Connect.** In the app, choose **+ Connect to a node** and enter the address (such as `https://192.168.1.20:8443`), the token and the fingerprint. The app then trusts only that certificate at that address.
+
+The token can read the node's status and change its settings, features and refreshes, nothing else. It works only from the host, local networks (Docker's own included) and Tailscale, straight to the node; requests from public addresses, and through a reverse proxy that adds a forwarding header, are refused. `plumb remote-control off` turns it off, `plumb remote-control status` says which it is and prints the fingerprint again, and `on` again replaces the token. Each takes effect at once.
+
+## Behind a reverse proxy or tunnel
+
+A few things are kept to the computer Plumb runs on: changing settings on the panel, plugin buttons, and the MCP tools that fetch or keep things for your AI apps (`read_page`, findings, and sharing findings with other nodes). Plumb counts a request as local only when all three hold:
+
+- it connects from the machine itself (a loopback address such as `127.0.0.1` or `::1`),
+- it was sent to a local name (`localhost` or a name under it, a `127.x.x.x` address or `[::1]`), and
+- it has no `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header.
+
+A proxy or tunnel on the same machine passes the first test for everyone it lets in, so it must fail one of the other two:
+
+- **Caddy and Traefik** add `X-Forwarded-For` and keep the original `Host` by themselves. Nothing to do.
+- **nginx** does neither by default: `proxy_pass http://127.0.0.1:8080;` sends `Host: 127.0.0.1:8080` and no forwarding header, so every visitor looks like you. Add these lines (the browser search address needs `Host` and `X-Forwarded-Proto` anyway):
+
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:8080;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+  ```
+
+- **Tunnels** (Cloudflare Tunnel, Tailscale Funnel, ngrok) need no port forwarded on the router, but they still put the node on the internet, and they run on the machine itself. Cloudflare Tunnel passes on the original `Host` and adds `X-Forwarded-For`, so it is safe as it comes, unless set to rewrite `Host` to `localhost` (its `httpHostHeader` setting). For others, run the check below.
+
+To check, open `https://<your domain>/app` from another network, such as a phone off Wi-Fi: the settings must show as read-only. A node only your own computers reach, at home or over a VPN, is fine either way.
+
+The search address the node offers browsers, for their list of search engines ([Add Plumb to your browser](searching.md#add-plumb-to-your-browser)), is built from the address the browser reached it at, so a proxy must pass on the original `Host`, and send `X-Forwarded-Proto: https` when it serves HTTPS. Remote control through a proxy is refused unless it was turned on with `--allow-public` ([remote-control-security.md](remote-control-security.md#who-may-use-the-token)).
+
+## Data and backups
+
+Everything is in the named volume `plumb-data`, mounted at `/data`. The main files:
+
+| Path | What it holds |
+| --- | --- |
+| `records.jsonl` | Every site the node knows, one JSON line each |
+| `records.jsonl.journal` | Crawl results not yet folded into `records.jsonl` |
+| `indexes/000001/`, ... | Search index builds; the newest is searched |
+| `seed/` | First-start downloads; may be deleted once `records.jsonl` exists |
+| `net/` | The network side: the node's key (`node.key`), crawl credits, crawl batches |
+| `settings.json`, `features.json` | Resource settings and feature choices |
+| `remote-control.json`, `remote-control-*.der` | Remote control's token hash and HTTPS certificate |
+
+[The data folder and backups](running-a-node.md#the-data-folder-and-backups) has the rest. **Mount the volume at `/data` itself**, not at an index directory or a file inside it: the node replaces those by renaming, and a mount point cannot be renamed.
+
+To keep the data in a host directory instead, bind-mount it at `/data`, after giving the directory to the container's user:
+
+```sh
+mkdir plumb-data && sudo chown 10001:10001 plumb-data
+```
+
+```yaml
+    volumes:
+      - ./plumb-data:/data
+```
+
+**Backups.** What a node cannot download again is small: `settings.json`, `features.json`, its identity and crawl credits in `net/node.key` and `net/credits/`, and the remote control files. The sites and the index it rebuilds by itself, from the network or the seed data, which takes time. To keep the records too, copy the journal first and then `records.jsonl`, so a journal folded in between the two copies is not missed:
+
+```sh
+docker compose cp plumb:/data/net/node.key .
+docker compose cp plumb:/data/net/credits .
+docker compose cp plumb:/data/records.jsonl.journal .
+docker compose cp plumb:/data/records.jsonl .
+```
+
+A node that starts with a `records.jsonl` in `/data` skips the seed downloads and reads a journal next to it, so the same files start a new installation. With `net/node.key` it is the same node in the network, so run only one copy. `docker compose down -v` deletes the container together with the volume and everything in it.
 
 ## Updating
 
@@ -377,11 +250,7 @@ docker compose pull
 docker compose up -d
 ```
 
-The data stays in the volume. `latest` is the newest release, and releases
-also get their version number (`1.2.3` and `1.2`). `main` follows the main
-branch, unreleased changes included, and every build is also tagged
-`sha-<commit>`. Put a version tag in `docker-compose.yml` to update only when
-you choose. `docker image prune` removes the images that were replaced.
+The data stays in the volume. Put a version tag in `docker-compose.yml` instead of `latest` to update only when you choose. `docker image prune` removes the images that were replaced.
 
 With `docker run`, pull the image, then replace the container:
 
@@ -391,6 +260,23 @@ docker stop plumb && docker rm plumb
 docker run -d --name plumb ...   # the same command as before
 ```
 
+## Health checks
+
+`http://<server>:8080/api/status` reports what the node is doing as JSON (`phase` is `setting_up` or `ready`), which suits uptime monitors. The image's health check runs `plumb healthcheck` every 60 seconds (10 seconds to answer, after a 120-second start period). It asks `/api/status` on `127.0.0.1:8080` and succeeds while the node answers, setting up included, so `docker ps` shows the container as `healthy`. If your command binds another port, override the check:
+
+```yaml
+    healthcheck:
+      test: ["CMD", "plumb", "healthcheck", "--url", "http://127.0.0.1:9090"]
+```
+
+## Memory and disk
+
+These come from the estimates the node itself plans with ([node/fill.rs](../crates/plumb-node/src/node/fill.rs), [web/setup.rs](../crates/plumb-node/src/web/setup.rs)).
+
+- **Memory.** Memory peaks while the node builds an index: a build of a million sites peaks at about 2.2 GB, and the node plans with 2.5 KB a site (`BUILD_BYTES_PER_SITE`) to leave room. Taking in sites from the network stops before a build would need more than half the machine's memory, or the container's memory limit when that is lower (`BUILD_MEMORY_PERCENT`): about 800,000 sites on a 4 GB server. With less memory, use a smaller `--sites` or `--profile desktop`. A `--crawl-only` node builds no index and needs about 500 bytes a site during a crawl round.
+- **Disk.** A site takes about 5 KB of disk with its index entry and its vector for search by meaning, so a million sites take about 5 GB. The node writes a new index and a new `records.jsonl` before it deletes the old ones, so leave room for a second copy. A node in the network also keeps the crawl batches it sees for 35 days in `/data/net` (`--keep-batches-days`). A server has no storage limit by default; set `storage_limit_mb` (see [Settings](#settings)) to keep less.
+- **CPU and bandwidth.** Index builds and crawls are bursts, and the node is idle between refreshes. `--refresh-hours` and `--crawl-per-refresh` set how much it crawls, and `download_limit_mb_per_day` in `settings.json` caps a day's downloads.
+
 ## Building the image yourself
 
 From a checkout of the repository:
@@ -399,62 +285,6 @@ From a checkout of the repository:
 docker compose build    # or: docker build -t plumb-search .
 ```
 
-Compose also builds the image when it cannot pull it. A local build is tagged
-`ghcr.io/sueheir/plumb-search:latest`, so a later `docker compose pull`
-replaces it with the published image.
+Compose also builds the image when it cannot pull it. A local build is tagged `ghcr.io/sueheir/plumb-search:latest`, so a later `docker compose pull` replaces it with the published image.
 
-The build needs BuildKit, the default builder since Docker 23. The first
-build compiles everything, which took about 16 minutes on a 4-core machine.
-The dependencies are compiled in a layer of their own (with cargo-chef), so
-later builds recompile only the workspace's crates until Cargo.lock or a
-Cargo.toml changes; after a code change that took under 5 minutes.
-`--build-arg RUST_VERSION=1.99` pins the Rust toolchain; the default is the
-newest 1.x release.
-
-## Disk and memory
-
-Rough figures for the default 1,000,000 sites, measured with the image on a
-4-core x86-64 machine using synthetic records shaped like real ones. A new
-node has seed ranks for every site but has crawled few homepages, so its
-records are small. They grow as it crawls: the second column is a node that
-has crawled 90% of its sites, at about 860 bytes per site. At the default
-5,000 homepages an hour, with each site crawled at most once every 30 days,
-a node gets there within a month or two, sooner in the network, where it
-also takes in other nodes' crawls. Real records may come out somewhat
-smaller or larger.
-
-| | New node | 90% of homepages crawled |
-| --- | --- | --- |
-| `records.jsonl` | 125 MB | 860 MB |
-| Search index | 100 MB | 500 MB |
-| Index build time | 20 to 26 seconds | 66 seconds |
-| Peak memory | 1.3 GB | 2.2 GB |
-| Memory between refreshes | under 100 MB | under 100 MB |
-
-- **Disk**: the node writes a new index and a new `records.jsonl` before it
-  deletes the old ones, so allow for two of each, plus the crawl journal
-  (up to a quarter of `records.jsonl`, or 64 MB if that is more), the seed
-  downloads (tens of megabytes, estimate) and the image (about 120 MB).
-  About 3 GB of free space covers the upper bound.
-- **Network**: a node in the network also keeps every crawl batch it sees,
-  its own and other nodes', for 35 days in `/data/net/batches`, at roughly
-  1 KB per homepage (estimate). A node crawling all day at the default pace
-  adds about 120 MB a day of its own, so give a network node 5 to 10 GB more,
-  and more as the network grows.
-- **Bandwidth**: at most 512 KB is read of each homepage, and most are far
-  smaller; crawling 120,000 homepages a day comes to a few GB a day
-  (estimate). `--refresh-hours 6` or `--crawl-per-refresh 1000` crawls less.
-- **Memory**: memory peaks while the node reads all its records, at the start
-  of every crawl and rebuild, and while it builds an index. A crawl keeps
-  the records in memory until it ends (about 0.6 GB for a new node), and
-  afterwards the node hands what it used back to the system, so between
-  refreshes it needs little more than the index pages that searches read
-  (measured on a later build than the other figures, with similar
-  synthetic records). A new node needs about 1.5 GB of free memory, growing
-  toward 2.5 GB as it crawls. With less, use `--profile desktop` or a smaller
-  `--sites`; memory grows about in proportion to the number of sites
-  (estimate).
-- **CPU**: index builds and crawls are short bursts, and the node is idle
-  between refreshes. A search took 10 to 25 milliseconds on the larger
-  index. Small machines such as a Raspberry Pi take several times longer to
-  build an index (estimate).
+The build needs BuildKit, the default builder since Docker 23. It compiles the dependencies in a layer of their own (with cargo-chef), so later builds recompile only the workspace's crates until `Cargo.lock` or a `Cargo.toml` changes. It also builds private search's WebAssembly and the third-party notices, which the image keeps in `/usr/share/doc/plumb-search/`. `--build-arg RUST_VERSION=1.99` pins the Rust toolchain; the default is the newest 1.x release.

@@ -29,7 +29,7 @@
 //! every [`KEY_LIFETIME`] seconds, the old one accepted until it expires.
 //! What is sealed is a CBOR [`BucketRequest`] or
 //! [`crate::proto::BucketResponse`] (the same messages as
-//! `/plumb/bucket/1`), or a popularity [`Report`] padded to
+//! `/plumb/bucket/2`), or a popularity [`Report`] padded to
 //! [`REPORT_REQUEST_SIZE`] and its [`crate::proto::ReportResponse`], not
 //! Binary HTTP: the encapsulation
 //! is RFC 9458's, so the same code serves a browser going through an HTTP
@@ -55,7 +55,8 @@ use serde_bytes::ByteBuf;
 use crate::popularity::Report;
 use crate::proto::BucketRequest;
 
-pub const OBLIVIOUS_PROTOCOL: &str = "/plumb/oblivious/1";
+/// Version 2 since v0.4.0, with [`crate::proto::BUCKET_PROTOCOL`].
+pub const OBLIVIOUS_PROTOCOL: &str = "/plumb/oblivious/2";
 /// Seconds a relay hands out a target's key before fetching it again.
 pub const RELAY_KEY_CACHE: u64 = 10 * 60;
 /// Every sealed popularity [`Report`] has this size before encryption, so
@@ -75,7 +76,7 @@ pub enum Opened {
     Report(Report),
 }
 
-/// What goes over `/plumb/oblivious/1`.
+/// What goes over `/plumb/oblivious/2`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObliviousRequest {
     /// To a relay: the key of `target`. A node answers for itself when it

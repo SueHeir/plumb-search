@@ -1,7 +1,8 @@
 //! `plumb serve`: a small web front end and JSON API.
 //!
 //! - `GET /` shows a search box,
-//! - `GET /search?q=` shows results as server-rendered HTML,
+//! - `GET /search?q=` shows results as server-rendered HTML, ten at first;
+//!   "More results" under them asks for ten more (`limit=`),
 //! - `GET /api/search?q=&limit=` returns a JSON list of [`Hit`](plumb_index::Hit)s, or with
 //!   `full=1` a [`SearchResults`] object that also holds the site search link,
 //!

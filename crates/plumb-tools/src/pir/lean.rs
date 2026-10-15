@@ -142,8 +142,8 @@ fn spill_pieces(table: &BucketTable, path: &Path) -> Result<(Vec<Span>, Vec<u64>
         let records: Vec<SiteRecord> = table
             .get(bucket)?
             .iter()
-            .map(|json| serde_json::from_str(json))
-            .collect::<Result<_, _>>()
+            .map(|line| plumb_core::stored::read(line.as_bytes()))
+            .collect::<Result<_>>()
             .context("the bucket table holds a record that does not parse")?;
         let mut by_piece: Vec<Vec<SiteRecord>> = vec![Vec::new(); PIECES_PER_BUCKET as usize];
         for record in records {

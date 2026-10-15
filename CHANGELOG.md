@@ -1,5 +1,164 @@
 # Changelog
 
+## 0.3.1
+
+Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.3.1), and the Docker image is `ghcr.io/sueheir/plumb-search:0.3.1` (also `:0.3` and `:latest`). Most of this release is search: fixes for problems found by running thousands of searches across many topics, and a learned ranking retrained on graded results. On a review of 1,000 searches whose first results an LLM (Claude Haiku) graded from 0 to 3, the mean grade went from 1.86 on a build just after 0.3.0 to 2.06.
+
+### Upgrading from 0.3.0
+
+- Docker: `docker compose pull`, then `docker compose up -d`. Desktop: install the new version over the old one. 0.3.0 and 0.3.1 nodes work together: nothing changed in what nodes send each other or in the signed set format. A crawl can carry one new optional field (`redirect.inner`), which 0.3.0 nodes pass on and ignore.
+- On its first start the node builds its page index again, and searches the old one meanwhile: the new index knows more names for pages (docs pages by their title and address, articles by their subtitle and without a leading "The", "c#" as C Sharp). It also updates its records from the seed data it holds and then builds its sites' index again, which gives nba.com, grammy.com, wimbledon.com and ufc.com their official mark back. That update reads the Wikidata claims files and the facts file whole (several hundred MB), so it runs when no other big job does.
+- Records whose homepage turns out to be only a stand-in (a hello page, a "Domain Parked" or "for sale" page, Caddy's default page, "Unsupported client", "Website Suspended", a defaced page) lose the page's title and text when the node next reads them, and those sites are crawled again.
+- A node with a places index and a town on one of its About pages now crawls the websites of places within 50 km of that town, up to 5,000 sites kept in its records. The desktop app now looks for the inner pages its own searches want and keeps those searches' words for 30 days; other nodes do so only with `plumb run --wanted-pages`. Both are under Crawling.
+- Some changes show only once the project builds the data they need again, and until then nodes use the data they hold: lakes, mountains, national parks, islands and more names for places come with the next places file; PEPs, RFCs, Rust's error codes and Go's standard library with the next docs set; what initialisms stand for with the next Wiktionary set; company owners without small shareholders with the next facts set; brands' product pages, Mayo Clinic's tabs and the pages a site's front page links to with the next subpages2 and reference sets; and papers' arXiv dates with the next papers set.
+- Plugins are not updated with the node. For the GitHub plugin's new behaviour, build it again and copy its new `plugin.json` and `plugin.wasm` into the node's `plugins/github/` folder.
+- A node still on 0.2.0 should go through 0.3.0 first and let it build its page index, since 0.3.1 leaves out 0.3.0's steps for an upgrade from 0.2.0. Upgraded straight to 0.3.1, a 0.2.0 node has no Wikipedia, Stack Overflow, docs or book results until its new page index is built, and one that follows the network's crawls takes in again every crawl batch it holds (up to a fifth of its storage limit).
+
+### Ranking
+
+- The learned ranking, which orders the first results, is retrained on 11,000 searches (AI agents' searches, searches written from the kinds the 1,000-search review found Plumb failing, and the eval suites), 7,800 of them with their first ten results graded 0 to 3 by an LLM (DeepSeek). It is LambdaMART with 400 trees of 15 leaves, and reads 14 more signals of each result: how many of the query's main words its title, address, description and pages hold, how a site matched the query (coverage, closeness in meaning, its full name or typed address), a title mostly in other letters for a plain ASCII query, a site whose name an earlier result shares, and the reference, subpages and docs sets. Measured offline on searches it never trained on, NDCG@10 of the grades rose from 0.882 to 0.927 on the review's 1,000 searches and from 0.805 to 0.860 on everyday searches.
+- The learned order no longer lifts a big or popular site that has only part of a search above the sites it names ("tom holland" listed thenation.com first; "toronto public library" now lists tpl.ca above utoronto.ca), no longer moves namesakes back above the first sites ("elden ring" no longer lifts the planned film above the first sites), and no longer moves a site's inner page above a page listed before it ("wolfram code" lists the article before MathWorld's "Barker Code").
+
+### Names and articles
+
+- A famous surname alone names the person when they are read three times as much as the other articles with the word in their title: "thatcher" is Margaret Thatcher and "kafka" Franz Kafka. A word that is an article's own title or a company's site ("swift", "tesla", "hilton") keeps its meaning.
+- A person is named, with their info box, when the search gives a title with the name ("president kennedy", "princess diana", "sir isaac newton", "senator bernie sanders"), a monarch's or pope's number in any form ("charles 3", "henry the 8th", "pope benedict 16"), or the name and then what they are ("tom hanks actor", "mozart composer"). "king charles" is Charles III, since a title and a bare name name the most read holder when that one is living; "president bush" and "queen elizabeth" still name neither.
+- Words after a name that ask about the person list their article: "obama daughters", "picasso paintings", "steve jobs cause of death", "who are taylor swift's parents", "lady gaga real name". What happened to them names its own article: "lincoln assassination", "princess diana death", "prince harry wedding".
+- "bts members" and "members of queen" list the band's article, and "who played the joker", "who plays spiderman" and "who voiced woody" the character's.
+- A less-read person whose Wikidata item gives no birth date still counts as a person when it gives a death date, or the article says "born" or gives the years ("terry stafford death").
+- Namesakes read far less than the article a search names are left out: "prince william" no longer lists the TV series or the 1788 ship, nor "kanye west" the Botswana constituency. A namesake goes only when the named article has the name to itself and is read more than 50 times as much, so Cleopatra (1963 film) stays.
+- A famous person's first name no longer brings in the site named by it: "ted kaczynski" no longer lists ted.com first, nor "gene hackman" gene.com. A person whose official website is a page or subdomain of a bigger site (sanders.senate.gov) no longer makes that site theirs.
+- A work searched with its maker finds its article: "radiohead ok computer", "taylor swift 1989", "1984 george orwell". "drake albums", "ed sheeran songs" and "brandon sanderson books" name the list of the maker's works, and "popes in order" and "british monarchs in order" the List of popes and List of British monarchs.
+- More ways of naming an article reach it: by its subtitle ("tears of the kingdom", "no way home"), without a leading "The" ("dark side of the moon", "wizard of oz"), with "the" when the article without it is read ten times as much ("the pope", "the titanic"), without its 's ("ohm law", "halley comet"), without its accents ("beyonce", "motley crue"), and by an alias even when site pages fill the candidates ("nfl", "fbi", "nhs"). "the chemical element mercury" lists Mercury (element).
+- An event's article is named whichever end of the search its year is on ("tour de france 2025", "2025 eurovision song contest"), and "who won the 2025 world series" and "X winner" search the event. A search for an event's, team's or venue's schedule, standings, results, tickets or lineup names it and lifts its site: "lakers schedule", "coachella lineup", "boston marathon results".
+- A search for one part or property of a thing lists the thing's article when no page is called the whole search: "ibuprofen side effects", "shingles symptoms", "density of gold". So do "benefits of meditation", "uses of graphene" and "effects of caffeine".
+- Pages named by part of a longer search are found: "frp reverse proxy" lists fatedier/frp and "adguard home" its repository. A page of the subpages or reference sets titled just "Napoleon" no longer comes before the Wikipedia article of that name, and a page of another set no longer comes before the official site of what a search names ("minecraft" no longer leads with the Computer History Museum).
+
+### Questions
+
+- Questions are matched more on what they ask about: "how", "do", "does", "what", "can" and "should" count half and are never taken for the topic, so "how does a refrigerator work" no longer lists a question about breast milk in the fridge. A Stack Overflow question is found only when its title, or the title of a question closed as its duplicate, has a word the search asks about, not by its tags alone ("what is the capital of australia" no longer leads with Australian capital gains tax). A question whose title is only asking words once its code is left out no longer leads "what does X" searches.
+- More questions list the article on what they ask about: "how tall is the eiffel tower" (not Eiffel Tower in Paris, Tennessee), "where is machu picchu", "what causes hiccups", "what does the liver do", "who discovered penicillin", "what do giraffes eat", "how long do dogs live", "how to get rid of acne", "what is a normal blood pressure" and "is coffee bad for you". Only the thing's own article is kept, not namesakes such as Giraffe, the chess engine.
+- A comparison lists the article on each side, unless a page is titled by the comparison alone: "mitosis vs meiosis", "ssd vs hdd", "difference between X and Y", "is a tomato a fruit". "vs" between two words is no longer searched as a word, so apple.com, which says "vs" on its homepage, is gone from them; "vs code" still names its site.
+- "plural of mouse", "past tense of swim", "how to spell necessary" and "is alot a word" list dictionaries first, and "opposite of brave" and synonym searches the thesauruses. "how do you say thank you in german" and "mood swings meaning in hindi" lead with translation sites.
+
+### Sites
+
+- When a search starts or ends with the best site's name, the rest of it is looked for among that site's own pages, listed under the site: "census population clock" lists census.gov with its Population Clock, and "who malaria fact sheet" who.int with its Malaria page. That site and its page come before other sites' pages.
+- A pasted web address with a path ("en.wikipedia.org/wiki/Albert_Einstein", "github.com/torvalds/linux") lists the page kept at it first. A search that is just an address names the most read article whose name the domain spells ("x.com" is X, the social network), and an address typed with "www" is searched without it ("www.ikea", "www netflix com").
+- A mistyped address of a well-known site suggests and lists the site meant ("amzon.com"), and a well-known site's name one slip away is suggested ("shien" is shein.com) unless a common word is the likelier slip ("wierd" is weird, not wired.com).
+- A site that one word of a longer search only happens to name is left out when it has none of the other words and is not near the search in meaning: web.com for "visit japan web", x.com for "derivative of sin x", mini.com for "ipad mini". So is a site that shares only a number with the search ("glastonbury 2026"), and a site with no title or description that only meaning found ("pyenv"). A year in a search is no longer asked of a homepage, so "wimbledon tickets 2026" and "tax brackets 2026" keep wimbledon.com and irs.gov.
+- A little-known site is kept when the search starts with a name it calls itself by and it is near in meaning (wimbledon.com for "wimbledon final"). A product's article goes with its own site on a subdomain, so "yahoo mail" lists mail.yahoo.com above yahoo.com.
+- A search for a brand leaves out its sites for other countries when its site on a generic ending is better known: "mcdonald's" no longer lists McDonald's Japan, Korea and China, nor "skyscanner" lead with skyscanner.nl. The searcher's country's site stays, and so does one the search names ("amazon uk").
+- A name a site borrows no longer names it when a better-known official site has that name as its domain: "facebook" no longer names holden.com.au, nor "spotify" okta.com. An official site takes an article's title only when its domain spells the article's name, so twitter.com no longer shows as "Snowflake ID". Wikidata disambiguation pages, categories, templates and domain endings no longer make a site official ("microsoft" no longer lists nic.microsoft), on a new node or once a node folds in Wikidata's official sites again.
+- nba.com, grammy.com, wimbledon.com, ufc.com and other front pages that Wikidata gives to an organization and to each of its seasons or ceremonies are official again, with the organization's names and Wikipedia link.
+- Pages titled only with what kind of page they are ("News", "Contact Us", "Careers") and tag archives (/tag/, /tags/) are listed only when the search is on their site, and pages of the reference set only when the search asks for them, as subpages already were. Another site's page titled just what a search names is listed only when that site is one of the three best, if the subject has a site of its own: "boston marathon" no longer leads with lanl.gov over baa.org.
+- A search naming a big site at its end after two words or more gets a link into that site's own search: "best budget laptop reddit" lists "Search reddit.com for best budget laptop". Inside a question, the text most links use for a site still names it ("how to cancel netflix").
+- A county search that ends in its state lists the sites of the same-named counties elsewhere after the rest ("lincoln county sheriff oregon").
+- A stored description that is an unfilled template ("{{description}}", "null") is replaced by Wikidata's, a description read in the wrong encoding is hidden, and a homepage crawled into a bot check links the site's root rather than a stale captcha address.
+
+### Docs and code
+
+- A search that is one API name written as code lists its docs page first: "useState", "Object.keys", "std::vector", "JSON.parse". MDN's reference pages are found by the name their title writes as code ("querySelectorAll", "border-radius", "X-Frame-Options"), and "man ls" finds ls(1).
+- "c#" names C Sharp rather than C, "c# minor" C-sharp minor, and "c# in depth jon skeet" finds the book.
+- "python asyncio tutorial" lists asyncio's docs page, as "tutorial", "guide" and "examples" now ask for docs, and "python logging basicConfig" logging's page.
+- A package name spelled as no word is ("serde_json", "react-dom", "@types/node") lists its registry page first. "tokio github", "react repo" and "pytorch github" list the project's repository.
+- A search that names a record by its identifier lists it first, at the address its scheme gives: "RFC 3339", "pep 8", "OEIS A001316", Wikidata items and properties, arXiv, PubMed, CVE, ISBN and DOI.
+- A one-word name with capitals inside that names no page ("CrashLoopBackOff", "UnicodeDecodeError") lists the questions with it in their titles. A command's options are searched as words, so "npm install --save-dev" and "git checkout -b" keep their pages.
+
+### Health and official pages
+
+- More searches count as medical, so the health authorities lead: conditions ("hepatitis b", "copd", "athlete's foot", any word ending in -itis), about 25 more drugs, symptoms ("fever in toddlers"), a complaint beside a body part ("knee pain") and lab results ("high TSH", "low eGFR"). A search about a pet ("parvo symptoms in dogs") is left to vets.
+- A health source named after other words leads any search, not only health searches: "seafood during pregnancy FDA advice" lists fda.gov first, and "sprained ankle NHS" now lists nhs.uk near the top.
+- "how to renew passport", "how to get a birth certificate", Real ID searches and "how to get a social security card" lead with the official page for the country the search names, or the searcher's, rather than paid services with official-looking names.
+
+### Music, films and news
+
+- "let it be lyrics", "wonderwall chords", "titanic trailer", "barbie review" and "where to watch breaking bad" list the article on the song, film or show, and "africa lyrics" shows Toto's song. "lyrics to hey jude" links the song's Genius page, "titanic cast" the IMDb page of the far most-read Titanic, and "hades steam" Steam. A song of the same title by another artist is no longer shown (Oasis's "Hello" for Adele's).
+- A podcast asked for by its title or host leads ("joe rogan podcast"), and "sports news" no longer leads with Huey Lewis and the News's album.
+- A search for an account ("drake instagram") links the person's, group's or organization's own account over a namesake's.
+- The Recent block shows the news of the site a search names ("fox news" shows Fox News, not that fox.com's feed has none), leaves out headlines in another language than the search's, and shows feed titles written as HTML as text. "latest headlines" and "news" list the newest story of each of the best-ranked news sites first.
+
+### Spelling
+
+- Misspelled everyday words get a "Did you mean": "recieve", "definately", "restuarant near me". Names stay as typed however few pages have them ("Jean Meeus", "htop"), and so does a word typed in capitals or with letters English does not use.
+- A slip in a name at the start of a search is corrected to a well-read article's name ("jeff bezoz", "serena wiliams"), the page a suggested spelling names is listed second, and misspellings Wikipedia keeps as redirects are corrected ("einstien").
+- A misspelled word is no longer taken for a site's name two edits away when a common word is a likelier slip ("existance" no longer suggests distance.to), and a word that names a site stays as typed unless a far better-known site is meant ("plagiarisma checker" keeps plagiarisma.net).
+
+### Languages
+
+- With English chosen (the default for `/api/search`, MCP and browsers that ask for none), a search written in another script keeps the sites written in it ("楽天", "погода москва"), and a well-known site named by the search's first two words or more stays in any language ("real madrid tickets"). A search in Latin letters whose words are found almost only on another language's sites keeps them ("wetter berlin", "boulangerie lyon"). Private search in the browser keeps the other-script and well-known-site exceptions, but not the Latin-letters one.
+- A site in Latin letters that declares no language is given the one its common words clearly say, so French, German and Spanish sites stay out of English searches. Vietnamese, Turkish, Polish, Czech, Hungarian and Romanian sites are told by their letters. Headlines take the language of their site.
+- Chinese, Japanese and Thai words are found inside titles, which have no spaces ("天気予報" finds "全国の天気予報"), once the node builds its sites' index with 0.3.1. Arabic, Greek and Russian typed without their marks also find the usual spelling ("الاهلي", "θεσσαλονικη", "королев").
+- With the default English model, a search the model cannot read (most Thai, Hindi and Japanese, and Russian or Greek read letter by letter) is searched by its words alone, not by meaning. A site found only by meaning whose title is mostly in a script the search has none of is left out unless it is well known.
+- A search garbled by being read in the wrong character set is read as the UTF-8 it was: "ZÃ¼rich" is "Zürich".
+- Search by meaning stays on for "global warming" and "email provider", since words count as a site's name only when some site is known by them, and when the nearest site by meaning stands out little from the rest, none counts as near.
+
+### Answers and facts
+
+- Sums said in words are worked out ("square root of 144", "2 to the power of 10", "15 percent of 80", "10 factorial", "log base 2 of 8"), and so are fractions asked as a decimal or percent ("3/8 as a decimal"), sums typed in full-width characters ("１＋１"), and a percent after + or - as calculators read it ("50 - 20%" is 40, "20% off 50" too). Phone numbers, dates and ISBNs written with dashes or slashes are searched rather than worked out.
+- Unit conversions read fractions and feet and inches ("5'10 in cm", "1 1/2 cups to ml", "180 cm to feet and inches") and questions ("how to convert celsius to fahrenheit", "convert 100 usd to eur"). Amounts are rounded to six significant digits, with the factor in full under them.
+- On a node with places, "time in" answers for any town it has ("time in boulder", "what time is it in cusco"), and never another town's: "time in paris, texas" no longer gives the time in Paris.
+- The date of a holiday or other yearly day is answered, with how long until it: "when is thanksgiving 2026", "easter 2027", "how many days until christmas".
+- More fact questions are answered: "who wrote 1984", "who directed titanic", "who painted the mona lisa"; "who is kamala harris husband", "what year did elvis die", "where is taylor swift from", "elon musk dob", "is betty white dead", "how old was elvis when he died"; "current ceo of apple", "governor of texas", "king of spain", "who founded facebook", Amazon's and Starbucks' CEO and headquarters; "tom cruise height in cm" and "how old is obama now". Fact questions about a name others share are answered from Wikipedia's main sense of it ("when was beethoven born").
+- A person's height is given in feet and inches ("1.7 m (5 ft 7 in)", not "1.7 m (6 ft)").
+- More ways of asking what a word means get the definition ("what does NASA stand for", "what's a roth ira"), a word typed in lower case is defined by its best-known form ("aka meaning"), and "what is a cell in biology" gives that field's sense. A misspelled search with no answer gets the answer to the suggested spelling ("weather in milwakee").
+- A sum gets no info box, and a name in quotes keeps its own. "988 area code" and "porsche 988" no longer show only the crisis lines, which every crisis word and phrase still shows.
+
+### Places
+
+- More place searches are understood: a town named without "in" ("coffee shop boulder", "denver breweries"), a landmark or neighbourhood with its town ("restaurants near central park nyc", "bars in soho london"), downtowns ("hotels in downtown chicago") and, with the next places file, national parks and lakes ("hotels near acadia", "hotels near lake tahoe"), any country after a town ("restaurants in marrakech morocco"), a state or province at the end ("springfield city hall illinois"), a state as the style books write it ("boston mass"), a time anywhere in the search ("pharmacy open now denver"), "nearest pharmacy" and "near me" with more words after it ("dentist near me that takes medicaid"). Towns are found however their name is written ("st paul", "ft lauderdale", "muenchen"), and a big city typed with a slip is offered ("hotels in cincinatti").
+- When the words of a place search find fewer than three places, the kind of place alone is looked for, and the heading says so ("24 hour pharmacy in denver"). A business named with its city lists its places there ("starbucks denver"), and a chain's branch is found ("sheraton charlotte").
+- A US state or Canadian province named alone is no town ("hotels in florida" no longer searches Florida, Uruguay). Boroughs and suburbs of 200,000 people or more rank as cities ("bars in brooklyn"), and namesakes within 30 km are searched around rather than asked about ("kansas city").
+- Searches about no place get no places: "calories in a shot", "keel in english", "how to merge cells in excel", "tallest building in the world". A search for parking lists car parks, not every park ("parking in denver").
+- A place whose website is a page on a bigger site (Facebook, Tripadvisor) is listed with that page under its own name. Around a town, sites named after it are listed after the places' sites rather than left out, and on a node with a places index, the sites of a town's namesakes elsewhere come last ("paris metro map").
+
+### Safety and spam
+
+- More spam is left out of searches not asking for it: online gambling spam ("ebay" no longer lists slot pages on expired domains), modded-app APK sites ("whatsapp download"), little-known sites offering a support number for others' products ("epson printer support"), pharmacies selling without a prescription, and little-known look-alikes of a well-known site the search names ("youtube" no longer lists yout-ube.com).
+- A search with a sign-in word leaves out strangers' sign-in pages and sites only meaning found ("hulu login" no longer lists "Login - Arvixe"). Held and parked domains whose homepage says only that are left out of every search but one for their address. Little-known sites sharing a title that is not their own name are listed once.
+- The denylist also takes off plugin results and places whose website it denies. With safe search on, the results page leaves out adult sites linked from places.
+- A denylist the node holds keeps applying after a restart. It was checked against the clock at every start, so once the delegation that signed it ran out, or the clock was set back, the node ran with no list. A held set is now checked as of its generation.
+
+### Crawling
+
+- Pages and feeds are read in the charset they declare, so sites still served in Shift_JIS, EUC-KR, GBK, windows-1251 or windows-1252 no longer come out garbled; sites already crawled get it when next due. The crawler also decodes brotli.
+- A site whose homepage redirects to a sign-in, a bot check or an inner page of another site stays a site of its own: Gmail, Docs and Drive are no longer folded into google.com. Sites behind a check and subdomain sites come back at the node's next sites' index build; one that redirects to another site's inner page once a 0.3.1 crawler reads it again.
+- More homepages that only stand in for a site keep no title or text: hello pages (thousands of parked domains), Caddy's default page, "Domain Parked", "coming soon", "Captcha Check", "Unsupported client", "Website Suspended", and "Hacked By ...". "canva" no longer shows canva.com titled "Unsupported client".
+- A node crawls its local sites: the websites of the places within 50 km of the towns on its About pages, nearest first, up to 5,000 sites, crawled whatever the network assigns it (up to 100 a round, again every 30 days) and kept through trims. Without a town or a places index, or when crawling only, there are none.
+- A node can look for the inner pages its own searches want (on for the desktop app, `--wanted-pages` elsewhere): it notes a search's words for each of the three best sites that show no page for them, and every ten minutes follows up to 30 such sites' links, a few pages deep, obeying robots.txt, the denylist, safe search and the day's download limit. Found pages are searched as the `wanted` set. The searchers' words are kept 30 days in `DIR/wanted`, readable only by the node's owner; leave it off on a server others search.
+
+### For AI apps
+
+- `search` lists the asked-for profile first ("superstition lyrics" leads with the song's Genius page), places a package page where the results page does, and a song's Genius page or a film's IMDb page is called a listing, not an official profile.
+- `check_lookalike` names the site whose name comes first in the host: bbc-news-live.com is a look-alike of bbc.co.uk, not live.com.
+- `official_site` finds "New Mexico" and "New South Wales", keeping a name that ends in a country's whole.
+- `read_page` reads a page in the charset it declares.
+
+### Plugins and apps
+
+- A Zotero add-on for Zotero 8 to 10 searches a Plumb node from Zotero and adds the results you tick to your library. It is released under its own `zotero-v` tags; see [zotero/README.md](zotero/README.md).
+- A new `zotero` node plugin lists items from the Zotero library on the same computer in every search. It needs Zotero 7 or later open with its local API on, and is installed like other plugins. Anyone who can search the node sees them, so it suits a node on your own computer.
+- The GitHub plugin is offered for more code searches ("python asyncio tutorial"), lists a project's most starred repositories for a search that names it, looks up a pasted github.com address, and searches READMEs when few repositories come back.
+- A plugin's button on the results page works on the node's own computer.
+- The home page and the settings panel count items (sites, pages and places), not only sites, and `/api/status` gains `places`.
+
+### Running a node
+
+- A node's big jobs run one at a time (building the page index, building the place index, keeping site vectors taken from another node, and each round of embedding): plumbsearch.org's first 0.3.0 start ran them all at once and was killed for memory.
+- A node that follows the network's crawls holds its crawl agreement in less memory (about 361 bytes a crawl instead of 586), and a start no longer reads every held batch a second time, which took 2.7 to 3 GB for 10 to 25 minutes on a large node.
+- Page sets and search by meaning start before the node joins the network, which takes about twenty minutes after a restart on plumbsearch.org, so searches have Wikipedia, other pages and meaning meanwhile.
+- A node told to stop while it builds its page index stops the build, instead of running past the grace period and being killed.
+- Records sent by other nodes are no longer lost when the records are folded while they are written, and the network loop no longer waits on the batch store's lock.
+- A node started with `--crawl-only` takes only the denylist and the site rules as signed sets, not the map (10 GB), the page sets or the adult list.
+- When a node holding a set says it is busy, the node asks again after a short wait instead of six hours later, and a node turning on search by meaning waits for the vectors set rather than embedding every site itself.
+
+### plumb-tools
+
+- `train-rank` learns from a 0 to 3 grade on any row as well as from each search's expected answer, reports NDCG@10, and writes the model's orders with `--orders-out`; `eval --features-out` rows carry each site's query evidence.
+- `fetch-pages --set docs` fetches PEPs, RFCs, Go's standard library and Rust's error index; `--set places` takes several OpenStreetMap extracts and the Wikipedia articles file; the subpages and reference builds take what a site's front page links to and keep brands' product pages and Mayo Clinic's tabs; the papers fetch gives a late preprint copy its arXiv DOI and year; the Wiktionary build keeps abbreviations; the facts build leaves out owners of under a tenth of a company.
+- `set site-rules --host-ranks FILE` makes the direct subdomains among Common Crawl's best-linked hosts sites of their own.
+- The evals run the node's new steps, so they measure what a node serves.
+
 ## 0.3.0
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.3.0), and the Docker image is `ghcr.io/sueheir/plumb-search:0.3.0` (also `:0.3` and `:latest`). 0.2.1 was never released, so its changes below come in this release too, and its upgrade notes apply to an upgrade from 0.2.0.

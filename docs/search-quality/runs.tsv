@@ -1,0 +1,11 @@
+# One row per run of the 1,000-search review. grade_sum is the sum of all
+# 1,000 grades (0 to 3 each); popular..everyday are each lane's mean grade.
+# great..useless count searches by grade (3, 2, 1, 0). known_* count the
+# known-answer searches with the answer at #1 and in the top 3. Times are
+# seconds per search on the test server. charts.py draws docs/search-quality/*.svg from this file.
+run	date	build	grade_sum	popular	known	agent	everyday	great	fine	poor	useless	known_n	known_top1	known_top3	median_s	p95_s
+1	2026-10-13	7405be6	1858	2.440	2.372	1.546	1.434	338	334	176	152	464	282	370	0.54	1.39
+2	2026-10-13	7f3e2e0	1874	2.435	2.385	1.617	1.426	344	326	190	140	464	280	368	0.78	1.39
+3	2026-10-13	0e67130	1965	2.728	2.460	1.704	1.423	407	282	180	131	464	319	375	0.89	1.55
+4	2026-10-14	874a662	1999	2.696	2.491	1.767	1.474	406	306	169	119	464	323	378	0.42	0.65
+5	2026-10-14	11bab11	2055	2.484	2.540	1.979	1.569	415	327	156	102	464	346	389	0.50	0.84

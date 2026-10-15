@@ -8,7 +8,9 @@
 //! for an index to be built again. Every search result, page, key page,
 //! headline, site it describes and place's website is looked up by its
 //! URL before it is shown: in the node's own pages, and in what it answers
-//! through its API and MCP tools.
+//! through its API and MCP tools. What other nodes answer to a network
+//! search goes through it before it is ranked, shown or kept
+//! ([`Inner::allows_record`]).
 //!
 //! What the list denies is also left out of what the node keeps and
 //! builds: the page index ([`super::pages`], built again when the list
@@ -178,18 +180,14 @@ impl Inner {
             return 0;
         };
         let before = records.len();
-        records.retain_mut(|record| {
-            let trimmed = match allowed_record(&list, record) {
-                None => return false,
-                Some(Cow::Borrowed(_)) => None,
-                Some(Cow::Owned(trimmed)) => Some(trimmed),
-            };
-            if let Some(trimmed) = trimmed {
-                *record = trimmed;
-            }
-            true
-        });
+        records.retain_mut(|record| allow(&list, record));
         before - records.len()
+    }
+
+    /// False when the denylist denies the site `record` describes; else
+    /// true, with the key pages and headlines it denies taken off it.
+    pub(super) fn allows_record(&self, record: &mut SiteRecord) -> bool {
+        self.denylist().is_none_or(|list| allow(&list, record))
     }
 
     /// `hit`, unless the denylist denies its site, without the key pages
@@ -214,6 +212,18 @@ impl Inner {
         }
         found
     }
+}
+
+/// False when `list` denies the site `record` describes; else true, with
+/// the key pages and headlines it denies taken off `record`.
+fn allow(list: &Denylist, record: &mut SiteRecord) -> bool {
+    let trimmed = match allowed_record(list, record) {
+        None => return false,
+        Some(Cow::Borrowed(_)) => return true,
+        Some(Cow::Owned(trimmed)) => trimmed,
+    };
+    *record = trimmed;
+    true
 }
 
 /// Places whose website `list` denies taken off `found`.

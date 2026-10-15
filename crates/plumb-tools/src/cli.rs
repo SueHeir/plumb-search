@@ -100,6 +100,10 @@ pub enum Command {
     /// site rules, sign it with a set-signing key, or check one as a node
     /// would.
     Set(crate::set::SetArgs),
+    /// What a records file's sites would lose as items of the data format,
+    /// field by field, and what they take on disk and in memory in each
+    /// shape, without changing anything.
+    SiteItems(crate::site_items::SiteItemsArgs),
 }
 
 #[derive(Debug, Args)]

@@ -691,8 +691,9 @@ pub enum SetUpdates {
     /// `MAX_GROWTH_PERCENT` past this node's own file at a time.
     #[default]
     All,
-    /// None: set files change only by hand (or `fetch-pages`). Files a node
-    /// has none of, or too few pages of, are still taken.
+    /// None: set files change only by hand (or `fetch-pages`), and a set
+    /// the node has none of is not taken. A file with too few pages still
+    /// fills up.
     Off,
     /// Only these sets (`map` for the map file), with no limit on growth:
     /// naming a set says this machine can hold whatever it grows to.

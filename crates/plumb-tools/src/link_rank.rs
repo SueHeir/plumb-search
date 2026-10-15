@@ -548,8 +548,7 @@ pub fn run(args: &LinkRankArgs) -> Result<()> {
                     changed += 1;
                 }
             }
-            let written = serde_json::to_writer(&mut file, &record)
-                .map_err(anyhow::Error::from)
+            let written = plumb_core::stored::write(&mut file, &record)
                 .and_then(|()| file.write_all(b"\n").map_err(anyhow::Error::from));
             if let Err(err) = written {
                 failed = Some(err);

@@ -199,8 +199,8 @@ where
     Ok(written)
 }
 
-/// Writes one JSON line per record to a new file at `path` and flushes it to
-/// disk. Returns the number of records written.
+/// Writes one stored line per record ([`plumb_core::stored`]) to a new file
+/// at `path` and flushes it to disk. Returns the number of records written.
 fn write_lines_durably<'a, I>(path: &Path, records: I) -> Result<usize>
 where
     I: IntoIterator<Item = &'a SiteRecord>,
@@ -208,7 +208,7 @@ where
     let mut writer = BufWriter::with_capacity(1 << 20, File::create(path)?);
     let mut written = 0;
     for record in records {
-        serde_json::to_writer(&mut writer, record)?;
+        plumb_core::stored::write(&mut writer, record)?;
         writer.write_all(b"\n")?;
         written += 1;
     }

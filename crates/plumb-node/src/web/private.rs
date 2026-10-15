@@ -284,7 +284,7 @@ async fn bucket(
 fn slim_bucket(records: &[String]) -> String {
     let slim: Vec<SiteRecord> = records
         .iter()
-        .filter_map(|json| serde_json::from_str::<SiteRecord>(json).ok())
+        .filter_map(|line| plumb_core::stored::read(line.as_bytes()).ok())
         .map(slim_record)
         .collect();
     serde_json::to_string(&slim).unwrap_or_else(|_| "[]".to_string())
@@ -325,7 +325,7 @@ mod tests {
         let mut record = SiteRecord::new("usbank.com");
         record.crawl_failures = 2;
         let json = slim_bucket(&[
-            serde_json::to_string(&record).unwrap(),
+            String::from_utf8(plumb_core::stored::line(&record).unwrap()).unwrap(),
             "not json".to_string(),
         ]);
         let back: Vec<SiteRecord> = serde_json::from_str(&json).unwrap();

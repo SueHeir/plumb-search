@@ -1,10 +1,11 @@
-//! Sign-in pages, gambling spam, app installers and fake help lines of
-//! sites a search does not name are left out, and so are domains only
-//! held.
+//! Sign-in pages, gambling spam, app installers, fake help lines and
+//! abuse contacts of sites a search does not name are left out, and so
+//! are domains only held.
 
 use super::*;
 use crate::junk::{
-    is_gambling, is_gambling_address, is_holding_page, offers_apk, offers_help_line,
+    is_abuse_contact, is_gambling, is_gambling_address, is_holding_page, offers_apk,
+    offers_help_line,
 };
 
 /// A site found only by meaning, whose homepage is at `url`.
@@ -445,4 +446,55 @@ fn help_lines_are_told_by_their_titles() {
     ] {
         assert!(!offers_help_line(Some(title), description), "{title}");
     }
+}
+
+#[test]
+fn abuse_contacts_of_name_servers_are_left_out() {
+    let records = [
+        site(
+            "elderabusehelp.example",
+            Some("Elder Abuse Help Line"),
+            Some("Help and advice for older people facing abuse."),
+            &[],
+            &[("elder abuse", 40)],
+            obscure(300_000, 20),
+        ),
+        // A name server's homepage, only an abuse contact, as nspmanaged.com
+        // listed for "memantine abuse" and "elder abuse".
+        site(
+            "nsmanaged.example",
+            Some("Abuse"),
+            None,
+            &[],
+            &[],
+            obscure(200_000, 40),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let found =
+        |query: &str| domains(&searcher.search_with(query, 10, &keep_all()).unwrap()).join(" ");
+    assert_eq!(found("elder abuse"), "elderabusehelp.example");
+    assert_eq!(found("abuse"), "elderabusehelp.example");
+    // Spelled, the site is found.
+    assert!(found("nsmanaged").contains("nsmanaged.example"));
+}
+
+#[test]
+fn abuse_contacts_are_told_by_their_titles() {
+    for title in [
+        "Abuse",
+        "Report Abuse",
+        "Report Abuse - SecureDNS93.com",
+        "Abuse Kontakt – mail.leenux.de",
+    ] {
+        assert!(is_abuse_contact(Some(title), None), "{title}");
+    }
+    for title in ["Elder Abuse Help Line", "Network Abuse Clearinghouse"] {
+        assert!(!is_abuse_contact(Some(title), None), "{title}");
+    }
+    // A site that says what it does is more than a contact.
+    assert!(!is_abuse_contact(
+        Some("Report Abuse"),
+        Some("How to report child abuse in Texas.")
+    ));
 }

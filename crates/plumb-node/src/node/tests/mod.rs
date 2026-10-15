@@ -342,6 +342,33 @@ async fn send(
     (code, head.to_ascii_lowercase(), body.to_string())
 }
 
+/// Writes a denylist of `entries` into `data`, signed by `publisher`.
+fn hold_denylist(
+    data: &Path,
+    publisher: &ed25519_dalek::SigningKey,
+    entries: &[plumb_tools::set::DenyEntryArgs],
+) {
+    let work = tempfile::tempdir().unwrap();
+    let mut text = String::new();
+    for entry in entries {
+        text += &serde_json::to_string(&plumb_tools::set::deny_entry(entry).unwrap()).unwrap();
+        text.push('\n');
+    }
+    let file = work.path().join("entries.jsonl");
+    std::fs::write(&file, text).unwrap();
+    let dir = crate::node::signed_sets::set_dir(data, "plumb/denylist").unwrap();
+    plumb_tools::set::denylist(&plumb_tools::set::DenylistArgs {
+        entries: file,
+        name: "plumb/denylist".into(),
+        out: dir.clone(),
+        title: None,
+        license: Some("CC0-1.0".into()),
+        level: 3,
+    })
+    .unwrap();
+    plumb_tools::set::sign_set(&dir, publisher, None, None).unwrap();
+}
+
 /// A node's buckets plus the signed sets in a data folder.
 struct WithSignedSets(plumb_net::BucketTable, PathBuf);
 

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="300" viewBox="0 0 720 300" role="img" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif">
+<title>Searches with a known right answer</title><desc>Share with the answer at #1 and in the top 3 by run: run 1 61% and 80%, run 2 60% and 79%, run 3 69% and 81%, run 4 70% and 81%, run 5 75% and 84%</desc>
+<text x="0.0" y="18.0" font-size="15" fill="#f0f6fc" text-anchor="start" font-weight="600">Searches with a known right answer</text>
+<text x="0.0" y="38.0" font-size="12" fill="#9198a1" text-anchor="start" font-weight="400">Where the expected page landed, 464 searches, no reviewer involved</text>
+<line x1="44.0" y1="254.0" x2="570.0" y2="254.0" stroke="#21262d" stroke-width="1"/>
+<text x="36.0" y="258.0" font-size="11" fill="#7d8590" text-anchor="end" font-weight="400">50%</text>
+<line x1="44.0" y1="216.0" x2="570.0" y2="216.0" stroke="#21262d" stroke-width="1"/>
+<text x="36.0" y="220.0" font-size="11" fill="#7d8590" text-anchor="end" font-weight="400">60%</text>
+<line x1="44.0" y1="178.0" x2="570.0" y2="178.0" stroke="#21262d" stroke-width="1"/>
+<text x="36.0" y="182.0" font-size="11" fill="#7d8590" text-anchor="end" font-weight="400">70%</text>
+<line x1="44.0" y1="140.0" x2="570.0" y2="140.0" stroke="#21262d" stroke-width="1"/>
+<text x="36.0" y="144.0" font-size="11" fill="#7d8590" text-anchor="end" font-weight="400">80%</text>
+<line x1="44.0" y1="102.0" x2="570.0" y2="102.0" stroke="#21262d" stroke-width="1"/>
+<text x="36.0" y="106.0" font-size="11" fill="#7d8590" text-anchor="end" font-weight="400">90%</text>
+<line x1="44.0" y1="64.0" x2="570.0" y2="64.0" stroke="#21262d" stroke-width="1"/>
+<text x="36.0" y="68.0" font-size="11" fill="#7d8590" text-anchor="end" font-weight="400">100%</text>
+<line x1="44.0" y1="254.0" x2="570.0" y2="254.0" stroke="#3d444d" stroke-width="1"/>
+<polyline points="68.0,141.0 187.5,142.6 307.0,136.9 426.5,134.4 546.0,125.4" fill="none" stroke="#d95926" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="68.0" cy="141.0" r="4.5" fill="#d95926" stroke="#0d1117" stroke-width="2"/>
+<circle cx="187.5" cy="142.6" r="4.5" fill="#d95926" stroke="#0d1117" stroke-width="2"/>
+<circle cx="307.0" cy="136.9" r="4.5" fill="#d95926" stroke="#0d1117" stroke-width="2"/>
+<circle cx="426.5" cy="134.4" r="4.5" fill="#d95926" stroke="#0d1117" stroke-width="2"/>
+<circle cx="546.0" cy="125.4" r="4.5" fill="#d95926" stroke="#0d1117" stroke-width="2"/>
+<text x="68.0" y="129.0" font-size="11" fill="#9198a1" text-anchor="middle" font-weight="400">80%</text>
+<text x="558.0" y="129.4" font-size="12" fill="#f0f6fc" text-anchor="start" font-weight="600">84%  in the top 3</text>
+<polyline points="68.0,213.1 187.5,214.7 307.0,182.8 426.5,179.5 546.0,160.6" fill="none" stroke="#3987e5" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="68.0" cy="213.1" r="4.5" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="187.5" cy="214.7" r="4.5" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="307.0" cy="182.8" r="4.5" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="426.5" cy="179.5" r="4.5" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="546.0" cy="160.6" r="4.5" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<text x="68.0" y="201.1" font-size="11" fill="#9198a1" text-anchor="middle" font-weight="400">61%</text>
+<text x="558.0" y="164.6" font-size="12" fill="#f0f6fc" text-anchor="start" font-weight="600">75%  at #1</text>
+<text x="68.0" y="272.0" font-size="12" fill="#9198a1" text-anchor="middle" font-weight="400">Run 1</text>
+<text x="68.0" y="287.0" font-size="11" fill="#7d8590" text-anchor="middle" font-weight="400">Oct 13</text>
+<text x="187.5" y="272.0" font-size="12" fill="#9198a1" text-anchor="middle" font-weight="400">Run 2</text>
+<text x="187.5" y="287.0" font-size="11" fill="#7d8590" text-anchor="middle" font-weight="400">Oct 13</text>
+<text x="307.0" y="272.0" font-size="12" fill="#9198a1" text-anchor="middle" font-weight="400">Run 3</text>
+<text x="307.0" y="287.0" font-size="11" fill="#7d8590" text-anchor="middle" font-weight="400">Oct 13</text>
+<text x="426.5" y="272.0" font-size="12" fill="#9198a1" text-anchor="middle" font-weight="400">Run 4</text>
+<text x="426.5" y="287.0" font-size="11" fill="#7d8590" text-anchor="middle" font-weight="400">Oct 14</text>
+<text x="546.0" y="272.0" font-size="12" fill="#9198a1" text-anchor="middle" font-weight="400">Run 5</text>
+<text x="546.0" y="287.0" font-size="11" fill="#7d8590" text-anchor="middle" font-weight="400">Oct 14</text>
+</svg>

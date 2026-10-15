@@ -47,10 +47,19 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/SueHeir/plumb-search"
+
+# Debug builds, and so tests, are lightly optimized: the network replay
+# tests push hundreds of MB through signing, JSON, text normalizing and
+# records folds, and unoptimized they took a quarter of an hour and timed
+# out in CI. Debug assertions and overflow checks stay on. Not 2 or 3:
+# there wasmi switches to tail-call dispatch, which overflows the stack when
+# debug assertions are on.
+[profile.dev]
+opt-level = 1
 
 # The private search page's WebAssembly (crates/plumb-private), built small
 # because every visitor downloads it: `--profile wasm`.

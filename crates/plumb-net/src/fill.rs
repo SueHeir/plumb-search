@@ -104,6 +104,9 @@ pub fn answer(source: &dyn BucketSource, from: u64, count: u32, all: bool) -> Fi
             response.next = (start + i) as u64;
             break;
         }
+        let Ok(line) = plumb_core::stored::record_json(line) else {
+            continue;
+        };
         // Keys are never escaped in a record's JSON and string values
         // always are, so this is only ever the crawl time's key.
         if all {
@@ -167,7 +170,15 @@ pub fn accept_seed(line: &str, now: u64) -> Option<SiteRecord> {
 
 fn parse(line: &str, now: u64, uncrawled: bool) -> Result<SiteRecord> {
     ensure!(line.len() <= MAX_RECORD_BYTES, "a record is too long");
-    let mut record: SiteRecord = serde_json::from_str(line).context("a record does not parse")?;
+    let record: SiteRecord = serde_json::from_str(line).context("a record does not parse")?;
+    accept_record(record, now, uncrawled)
+}
+
+/// A site from elsewhere (a trusted node's answer, or a set of sites a
+/// trusted publisher signed) as this node keeps it, checked and cut down
+/// as [`accept_filled`] says, or with `uncrawled` as [`accept_seed`]
+/// says, except for the length of its line, which the caller checks.
+pub fn accept_record(mut record: SiteRecord, now: u64, uncrawled: bool) -> Result<SiteRecord> {
     record.domain = canonical_domain(&record.domain).context("not a registrable domain")?;
     // A trusted node may hold old or malformed records. Its trust does not
     // allow a result to navigate to another site or run a non-web scheme.

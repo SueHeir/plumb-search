@@ -655,16 +655,13 @@ pub(crate) fn check_answer(
         if item.record.len() > MAX_RECORD_BYTES {
             continue;
         }
-        let Ok(mut record) = serde_json::from_str::<SiteRecord>(&item.record) else {
+        let Ok(mut record) = SiteRecord::from_line(&item.record) else {
             continue;
         };
         let Some(domain) = canonical_domain(&record.domain) else {
             continue;
         };
         record.domain = domain;
-        // Local bookkeeping of the node answering, of no use here.
-        record.crawl_attempted_at = None;
-        record.crawl_failures = 0;
         if record
             .url
             .as_deref()
@@ -1101,7 +1098,7 @@ mod tests {
 
     fn item(record: &SiteRecord) -> BucketRecord {
         BucketRecord {
-            record: serde_json::to_string(record).unwrap(),
+            record: record.to_line().unwrap(),
             proof: None,
             also: Vec::new(),
         }
@@ -1164,14 +1161,14 @@ mod tests {
         let mut shown = record.clone();
         shown.title = Some("Log in here".into());
         let forged = BucketRecord {
-            record: serde_json::to_string(&shown).unwrap(),
+            record: shown.to_line().unwrap(),
             proof: Some(forged_proof),
             also: Vec::new(),
         };
         assert!(check_answer(vec![item(&SiteRecord::new("other.com")), forged], now).is_none());
 
         let honest = BucketRecord {
-            record: serde_json::to_string(&shown).unwrap(),
+            record: shown.to_line().unwrap(),
             proof: Some(batch.proof(0)),
             also: Vec::new(),
         };

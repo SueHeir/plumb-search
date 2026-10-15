@@ -32,7 +32,6 @@ use plumb_format::{FieldSpec, Item, Manifest, Note, PublicKey, SiteRules, Vector
 use plumb_index::items::page_of_item;
 use plumb_index::pages::Page;
 use plumb_node::sets::{check_parts, check_set, id_hash, measure, now, Checked, MANIFEST};
-use plumb_node::site_rules::built_in_rules;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -99,6 +98,10 @@ pub enum SetCommand {
     /// turning search by meaning on takes them from, with a manifest still
     /// to be signed.
     Vectors(VectorsArgs),
+    /// Write the sites of a node's records file as the set other nodes
+    /// fill from (`plumb/sites`), best-ranked first, with a manifest still
+    /// to be signed.
+    Sites(SitesArgs),
 }
 
 #[derive(Debug, Args)]
@@ -227,6 +230,32 @@ pub struct VectorsArgs {
     pub out: PathBuf,
     /// The license of the text the vectors were made from: what sites'
     /// homepages say, and what Wikidata and Wikipedia say of them.
+    #[arg(long, default_value = "LicenseRef-plumb-crawl AND CC-BY-SA-4.0")]
+    pub license: String,
+    #[arg(
+        long,
+        default_value = "Made from sites' homepages, Wikidata and Wikipedia"
+    )]
+    pub attribution: String,
+    /// The zstd level of the parts.
+    #[arg(long, default_value_t = 19)]
+    pub level: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct SitesArgs {
+    /// A node's records file, `records.jsonl` in its data folder. It is
+    /// only read.
+    #[arg(long, value_name = "FILE")]
+    pub records: PathBuf,
+    /// The set's name, `<scope>/<name>`.
+    #[arg(long, default_value = "plumb/sites")]
+    pub name: String,
+    /// The folder to write. It must not exist yet, or be empty.
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// The license of what the sites' items hold: what their homepages
+    /// say, and what Wikidata and Wikipedia say of them.
     #[arg(long, default_value = "LicenseRef-plumb-crawl AND CC-BY-SA-4.0")]
     pub license: String,
     #[arg(
@@ -482,6 +511,17 @@ pub fn run(args: SetArgs) -> Result<()> {
                 args.out.display(),
                 written.items,
                 written.parts
+            );
+            Ok(())
+        }
+        SetCommand::Sites(args) => {
+            let written = sites(&args)?;
+            println!(
+                "{}: {} sites in {} parts, {} left out (too big as items); sign it with `plumb-tools set sign`",
+                args.out.display(),
+                written.items,
+                written.parts,
+                written.left_out
             );
             Ok(())
         }
@@ -941,7 +981,7 @@ pub fn site_rules(args: &SiteRulesArgs) -> Result<(Written, usize, Vec<Moved>)> 
     let text =
         fs::read_to_string(&args.psl).with_context(|| format!("reading {}", args.psl.display()))?;
     let mut rules = read_suffix_list(&text).with_context(|| args.psl.display().to_string())?;
-    rules.extend(built_in_rules());
+    rules.extend(plumb_core::subsites::list_rules());
     if let Some(path) = &args.host_ranks {
         let set: SiteRules = rules.iter().cloned().collect();
         let ranks = plumb_ingest::open_maybe_gz(path)?;
@@ -1129,6 +1169,58 @@ pub fn vectors(args: &VectorsArgs) -> Result<(Written, String)> {
         written.and_then(|written| read.map(|_| written))
     })?;
     Ok((written, name))
+}
+
+/// Sites in the first part of a set of sites: about what a node setting
+/// up takes in before its first index (`QUICK_SEED_SITES` in plumb-node).
+pub const FIRST_SITES: u64 = 50_000;
+
+/// Sites in each later part of a set of sites: a node takes the parts it
+/// fills from whole, so one with room for few more sites takes little
+/// more than it uses.
+pub const SITES_A_PART: u64 = 200_000;
+
+/// Writes the sites of `args.records` as items of kind `site`
+/// ([`SiteRecord::to_item`]), best-ranked first as nodes fill from them:
+/// the first [`FIRST_SITES`] in a part a node sets up with, then
+/// [`SITES_A_PART`] a part. Sites the node judged
+/// gone are left out, and so is a record too big to be an item, counted
+/// in [`Written::left_out`].
+///
+/// [`SiteRecord::to_item`]: plumb_core::SiteRecord::to_item
+pub fn sites(args: &SitesArgs) -> Result<Written> {
+    ensure!(
+        is_set_name(&args.name),
+        "{:?} is not <scope>/<name>",
+        args.name
+    );
+    let records = plumb_node::records::load_records(&args.records)?;
+    ensure!(
+        !records.is_empty(),
+        "{} holds no sites",
+        args.records.display()
+    );
+    let mut manifest = Map::new();
+    manifest.insert("format".into(), json!(FORMAT));
+    manifest.insert("set".into(), json!(args.name));
+    manifest.insert("generation".into(), json!(now()));
+    manifest.insert("license".into(), json!(args.license));
+    manifest.insert("attribution".into(), json!(args.attribution));
+    let part_ends: Vec<u64> = (0..=records.len() as u64 / SITES_A_PART)
+        .map(|n| FIRST_SITES + n * SITES_A_PART)
+        .collect();
+    let items = plumb_node::records::sorted_by_link_score(&records)
+        .into_iter()
+        .filter(|record| record.gone_at.is_none())
+        .map(|record| record.to_item().ok());
+    write_set(
+        items,
+        plumb_core::site_item::site_fields(),
+        manifest,
+        &args.out,
+        &part_ends,
+        args.level,
+    )
 }
 
 /// The entry `args` describes, checked as a node reads it.
@@ -1773,6 +1865,59 @@ mod tests {
         assert_eq!(
             python.vectors,
             [Vector::new(&model, &[1; 32], &[-127, 0, 64, 127])]
+        );
+    }
+
+    #[test]
+    fn a_records_file_is_a_set_of_sites_best_ranked_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let (file, dir) = (temp.path().join("records.jsonl"), temp.path().join("set"));
+        let site = |domain: &str, tranco: u32| {
+            let mut record = plumb_core::SiteRecord::new(domain);
+            record.url = Some(format!("https://{domain}/"));
+            record.title = Some(format!("{domain} home"));
+            record.signals.tranco_rank = Some(tranco);
+            record.crawled_at = Some(1_791_605_520);
+            record
+        };
+        let mut gone = site("gone.example", 1);
+        gone.gone_at = Some(1_791_000_000);
+        let mut too_big = site("big.example", 5);
+        too_big.aliases = (0..16)
+            .map(|i| format!("{i} {}", "x".repeat(1_100)))
+            .collect();
+        let records = [
+            site("third.example", 300),
+            gone,
+            site("first.example", 2),
+            too_big,
+            site("second.example", 40),
+        ];
+        plumb_core::write_jsonl(&file, &records).unwrap();
+        let args = SitesArgs {
+            records: file,
+            name: "plumb/sites".into(),
+            out: dir.clone(),
+            license: "CC0-1.0".into(),
+            attribution: "From a test".into(),
+            level: 3,
+        };
+        let written = sites(&args).unwrap();
+        assert_eq!((written.items, written.left_out), (3, 1));
+        let key = SigningKey::from_bytes(&[5; 32]);
+        sign_set(&dir, &key, None, None).unwrap();
+        check_set(&dir, Some(&PublicKey::of(&key)), &[]).unwrap();
+        let (manifest, items) = plumb_node::sets::read_items(&dir).unwrap();
+        assert_eq!(manifest.kinds, ["site"]);
+        assert!(manifest.fields.contains_key("ranks"));
+        let domains: Vec<_> = items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(
+            domains,
+            ["first.example", "second.example", "third.example"]
+        );
+        assert_eq!(
+            plumb_core::SiteRecord::from_item(&items[0]).unwrap(),
+            site("first.example", 2)
         );
     }
 

@@ -692,7 +692,7 @@ fn check_inbox_payload(records: &[SiteRecord]) -> Result<()> {
         limit: MAX_INBOX_PAYLOAD as u64,
     };
     for record in records {
-        serde_json::to_writer(&mut size, record).context(UnsupportedInboxPayload)?;
+        plumb_core::stored::write(&mut size, record).context(UnsupportedInboxPayload)?;
         size.write_all(b"\n").context(UnsupportedInboxPayload)?;
     }
     Ok(())
@@ -710,7 +710,7 @@ fn append_inbox_reserved(
         limit: MAX_INBOX_PAYLOAD,
     };
     for record in records {
-        serde_json::to_writer(&mut lines, record).context(UnsupportedInboxPayload)?;
+        plumb_core::stored::write(&mut lines, record).context(UnsupportedInboxPayload)?;
         lines.write_all(b"\n").context(UnsupportedInboxPayload)?;
     }
     let _guard = inner.inbox_lock.locked();
@@ -884,7 +884,7 @@ fn read_inbox(
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_slice::<SiteRecord>(&line) {
+        match plumb_core::stored::read(&line) {
             Ok(record) => each(record)?,
             Err(_) => damaged += 1,
         }

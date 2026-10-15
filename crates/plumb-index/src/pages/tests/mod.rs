@@ -21,7 +21,8 @@ use plumb_core::{Operators, SafeSearch};
 use super::docs::naming_docs;
 use super::placing::subpage_asked;
 use super::search::{
-    aspect_asked, compared, hinted_name, last_word_in_other_number, regnal_name, year_moved, Hint,
+    aspect_asked, compared, drug_asked, hinted_name, last_word_in_other_number, regnal_name,
+    year_moved, Hint,
 };
 use super::sites::{base_title, describes_an_event, describes_an_organization, site_is_titled};
 use super::*;

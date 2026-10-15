@@ -137,6 +137,13 @@ const NOT_BUILT_WORDS: &[&str] = &[
 /// their one word and by meaning.
 const GREETING_WORDS: &[&str] = &["hello", "hi", "hey", "hallo", "hola", "welcome", "world"];
 
+/// Most words, title and all, of a homepage that is only an address for
+/// reporting abuse ([`only_an_abuse_contact`]): servidorlinux5.com's "Server
+/// En caso de abusos escríbanos a : abuse@servidorlinux5.com In case of
+/// abuse write to: abuse@servidorlinux5.com" has 20, and dnsperfect.net's
+/// "Report Abuse" page 26.
+const ABUSE_CONTACT_WORDS: usize = 30;
+
 /// What a page title is split at into parts for [`STAND_IN_TITLE_PARTS`].
 const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»', '«', '/', '\\'];
 
@@ -294,9 +301,10 @@ fn not_built_yet(part: &str) -> bool {
 
 /// Whether a crawled homepage stands in for the site: a bot check or
 /// placeholder ([`is_bot_check_page`]), a defaced or bare "Checking..."
-/// one ([`defaced_or_checking`]), or a page that only greets
-/// ([`only_greets`]). A page someone asks to read is what it is, so the
-/// page reader asks [`is_bot_check_page`] alone.
+/// one ([`defaced_or_checking`]), a page that only greets
+/// ([`only_greets`]) or one that only gives an address to report abuse to
+/// ([`only_an_abuse_contact`]). A page someone asks to read is what it is,
+/// so the page reader asks [`is_bot_check_page`] alone.
 pub fn is_stand_in_homepage(
     domain: &str,
     title: Option<&str>,
@@ -307,6 +315,7 @@ pub fn is_stand_in_homepage(
     is_bot_check_page(domain, title, description, headings, body_text)
         || defaced_or_checking(title)
         || only_greets(title, description, headings, body_text)
+        || only_an_abuse_contact(title, description, headings, body_text)
 }
 
 /// Whether a homepage's title is a defacer's ("Hacked By Peyman Siyahi")
@@ -346,6 +355,39 @@ fn only_greets(
         }
     }
     greets
+}
+
+/// Whether a homepage's whole text is little more than an address to
+/// report abuse to: a name server's or host's page ("RouteDNS Abuse Email:
+/// abuse@routedns.net", "Hospedagem Denuncie: abuse@locadados.com.br").
+/// Every domain such a host serves links to it, and its one word found it
+/// for "memantine abuse", "gabapentin abuse" and "elder abuse". Judged only
+/// with the page's text to hand, as [`only_greets`] is.
+fn only_an_abuse_contact(
+    title: Option<&str>,
+    description: Option<&str>,
+    headings: &[String],
+    body_text: Option<&str>,
+) -> bool {
+    if headings.is_empty() && body_text.is_none_or(|text| text.trim().is_empty()) {
+        return false;
+    }
+    let texts = || {
+        title
+            .into_iter()
+            .chain(description)
+            .chain(headings.iter().map(String::as_str))
+            .chain(body_text)
+    };
+    let words: usize = texts()
+        .map(|text| normalize_text(text).split_whitespace().count())
+        .sum();
+    // Cloudflare hides an address on the page as "[email protected]".
+    words <= ABUSE_CONTACT_WORDS
+        && texts().any(|text| {
+            let text = text.to_lowercase().replace(' ', "");
+            text.contains("abuse@") || text.contains("abuse") && text.contains("[emailprotected]")
+        })
 }
 
 /// Whole titles, after [`normalize_text`], of sign-in pages that
@@ -799,6 +841,59 @@ mod tests {
             None,
             &[],
             Some("Hello, world!")
+        ));
+    }
+
+    #[test]
+    fn abuse_contacts_of_hosts_are_not_homepages() {
+        let page = |title: &str, body: &str| {
+            is_stand_in_homepage("example.com", Some(title), None, &[], Some(body))
+        };
+        assert!(page(
+            "Server",
+            "Server En caso de abusos escríbanos a : abuse@servidorlinux5.com \
+             In case of abuse write to: abuse@servidorlinux5.com"
+        ));
+        assert!(page("RouteDNS", "RouteDNS Abuse Email: abuse@routedns.net"));
+        assert!(page(
+            "name-servers.gr",
+            "name-servers.gr abuse-mailbox: abuse@name-servers.gr"
+        ));
+        assert!(page(
+            "Report Abuse",
+            "DNS Perfect Abuse Report To report abuse or policy violations, please \
+             contact: [email protected] We will respond to your report as soon as possible."
+        ));
+        // A site with more to say, or against abuse, is a homepage.
+        assert!(!page(
+            "Example Hosting",
+            "Fast, secure web hosting for small businesses since 2004. Shared hosting, \
+             VPS and dedicated servers with daily backups, free SSL and support around \
+             the clock from our team in Lisbon. To report abuse write to abuse@example.com."
+        ));
+        assert!(!page(
+            "Elder Abuse Help Line",
+            "Call us if you or someone you know is being abused: 0800 123 456."
+        ));
+        assert!(!page(
+            "Jane Doe",
+            "Jane Doe, illustrator. Email: jane@example.com"
+        ));
+        // A title alone is not enough, nor is it a bot check for a page
+        // someone asks to read.
+        assert!(!is_stand_in_homepage(
+            "example.com",
+            Some("Abuse"),
+            None,
+            &[],
+            None
+        ));
+        assert!(!is_bot_check_page(
+            "example.com",
+            Some("RouteDNS"),
+            None,
+            &[],
+            Some("RouteDNS Abuse Email: abuse@routedns.net")
         ));
     }
 
