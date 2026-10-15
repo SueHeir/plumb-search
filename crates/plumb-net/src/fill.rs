@@ -173,7 +173,8 @@ fn parse(line: &str, now: u64, uncrawled: bool) -> Result<SiteRecord> {
 
 /// A site from elsewhere (a trusted node's answer, or a set of sites a
 /// trusted publisher signed) as this node keeps it, checked and cut down
-/// as [`accept_filled`] says; with `uncrawled`, as [`accept_seed`] says.
+/// as [`accept_filled`] says, or with `uncrawled` as [`accept_seed`]
+/// says, except for the length of its line, which the caller checks.
 pub fn accept_record(mut record: SiteRecord, now: u64, uncrawled: bool) -> Result<SiteRecord> {
     record.domain = canonical_domain(&record.domain).context("not a registrable domain")?;
     // A trusted node may hold old or malformed records. Its trust does not

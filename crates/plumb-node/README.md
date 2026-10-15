@@ -46,7 +46,7 @@ flowchart LR
 | [node/store.rs](src/node/store.rs) | Data folder paths, the folder lock, `state.json`, numbered index folders |
 | [node/round.rs](src/node/round.rs), [node/schedule.rs](src/node/schedule.rs) | The slim view of each site a crawl round holds; workload presets and crawl hours |
 | [node/network.rs](src/node/network.rs) | Joining plumb-net: the records inbox, buckets, popularity, `--publish-records` |
-| [node/fill.rs](src/node/fill.rs), [node/trim.rs](src/node/trim.rs) | Filling free space from trusted nodes (and first setup from one); staying under the storage limit |
+| [node/fill.rs](src/node/fill.rs), [node/site_set.rs](src/node/site_set.rs), [node/trim.rs](src/node/trim.rs) | Filling free space from the set of sites or trusted nodes (and first setup from them); fetching the parts of the set it reads; staying under the storage limit |
 | [node/pages.rs](src/node/pages.rs), [node/places.rs](src/node/places.rs), [node/newer.rs](src/node/newer.rs) | Page set and places files and their indexes; newer files from trusted nodes |
 | [node/signed_sets.rs](src/node/signed_sets.rs), [node/denylist.rs](src/node/denylist.rs), [node/adult.rs](src/node/adult.rs) | Signed sets taken from the network; the project's denylist; the adult blocklist |
 | [node/embedding.rs](src/node/embedding.rs), [node/shared_vectors.rs](src/node/shared_vectors.rs) | Search by meaning: the model, embedding after each build, vectors from other nodes |

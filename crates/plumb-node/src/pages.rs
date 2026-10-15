@@ -798,13 +798,29 @@ impl HeldPageSet {
             return None;
         }
         let name = format!("plumb/{}", set.id);
-        let held = crate::node::signed_sets::HeldParts::find(data_dir, &name, publishers)?;
+        let (dir, manifest) = crate::node::signed_sets::held_trusted(data_dir, &name, publishers)?;
+        if manifest.is_denylist() || manifest.is_site_rules() {
+            return None;
+        }
+        let generation = plumb_format::value::unix_seconds(&manifest.generation)?;
+        // A part is in place only once checked whole, so its size says
+        // it is there.
+        let parts: Vec<&plumb_format::FilePart> = manifest
+            .files
+            .iter()
+            .take_while(|part| {
+                std::fs::metadata(dir.join(&part.path)).is_ok_and(|meta| meta.len() == part.bytes)
+            })
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
         Some(HeldPageSet {
-            items: held.items(),
-            complete: held.complete,
-            parts: held.parts.iter().map(|part| part.path.clone()).collect(),
-            dir: held.dir,
-            generation: held.generation,
+            items: parts.iter().map(|part| part.count).sum(),
+            complete: parts.len() == manifest.files.len(),
+            parts: parts.iter().map(|part| part.path.clone()).collect(),
+            dir,
+            generation,
         })
     }
 
@@ -820,7 +836,29 @@ impl HeldPageSet {
         self.parts
             .clone()
             .into_iter()
-            .flat_map(move |part| part_lines(dir.join(part)))
+            .flat_map(move |part| {
+                let path = dir.join(part);
+                let lines = std::fs::File::open(&path)
+                    .and_then(zstd::Decoder::new)
+                    .map(|decoder| std::io::BufRead::lines(std::io::BufReader::new(decoder)));
+                let lines = match lines {
+                    Ok(lines) => Some(lines),
+                    Err(err) => {
+                        warn!("reading {}: {err}", path.display());
+                        None
+                    }
+                };
+                lines
+                    .into_iter()
+                    .flatten()
+                    .map_while(move |line| match line {
+                        Ok(line) => Some(line),
+                        Err(err) => {
+                            warn!("reading {}: {err}", path.display());
+                            None
+                        }
+                    })
+            })
             .filter_map(move |line| {
                 let item: plumb_format::Item = serde_json::from_str(&line).ok()?;
                 if item.is_extension() || item.is_deleted() {
@@ -830,31 +868,6 @@ impl HeldPageSet {
             })
             .take(usize::try_from(limit).unwrap_or(usize::MAX))
     }
-}
-
-/// The lines of the part at `path`, a zstd file of items one a line; a
-/// part that can't be read ends early, with a warning.
-pub(crate) fn part_lines(path: PathBuf) -> impl Iterator<Item = String> {
-    let lines = std::fs::File::open(&path)
-        .and_then(zstd::Decoder::new)
-        .map(|decoder| std::io::BufRead::lines(std::io::BufReader::new(decoder)));
-    let lines = match lines {
-        Ok(lines) => Some(lines),
-        Err(err) => {
-            warn!("reading {}: {err}", path.display());
-            None
-        }
-    };
-    lines
-        .into_iter()
-        .flatten()
-        .map_while(move |line| match line {
-            Ok(line) => Some(line),
-            Err(err) => {
-                warn!("reading {}: {err}", path.display());
-                None
-            }
-        })
 }
 
 /// What one page index holds: for each set kept, how many pages from

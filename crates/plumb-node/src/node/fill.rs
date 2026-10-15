@@ -54,18 +54,19 @@
 //!
 //! # The set of sites
 //!
-//! The project also publishes its node's list as a signed set, `plumb/sites`
-//! ([`SITES`], written by `plumb-tools set sites`), which any node can
-//! pass on, trusted or not. A node that finds it takes its parts as filling
-//! reads them ([`sites_wanted`], [`signed_sets::look_sites`]) and reads
-//! the sites from them in place of asking a trusted node, the same way:
-//! best-ranked first, crawled sites only once set up. Setting up, it takes
+//! The project also publishes its node's list as a signed set,
+//! `plumb/sites` ([`SITES`], written by `plumb-tools set sites`), which any
+//! node passes on, trusted or not. A node that takes the project's sets
+//! reads its sites from it in place of asking a trusted node, the same
+//! way: best-ranked first, crawled sites only once set up. It fetches each
+//! part when it reaches it ([`site_set::fetch`]). Setting up, the node takes
 //! the set's first part, which holds the [`QUICK_SEED_SITES`] best sites,
-//! when a node it meets in [`SEED_SET_WAIT`] holds it. Parts are held from
-//! the first, so a node partway through a trusted node's list reads on to
-//! its end and moves to the set when reading starts over ([`reads_set`]);
-//! one that loses the set goes on in a trusted node's list from the same
-//! place, since the set is in the project's node's order. A node collecting
+//! when a node it meets in [`SEED_SET_WAIT`] holds it. When no node sends
+//! the part it reads next, the node goes on in a trusted node's list from
+//! the same place, the set being the project's node's list, and reads that
+//! list to its end. A node partway through a trusted node's list moves to
+//! the set when it starts over ([`reads_set`]), since the set leaves out
+//! sites the list holds and is not in step with it. A node collecting
 //! everything ([`super::NodeConfig::blackhole`]) reads each trusted node's
 //! own list.
 
@@ -86,7 +87,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use super::network::{self, REBUILD_AFTER_RECORDS};
-use super::signed_sets::{self, HeldParts, Looked, SITES};
+use super::site_set::{self, Fetched, HeldSites, SITES};
 use super::{Inner, Step, Stopped, MB};
 use crate::about::Topics;
 use crate::records::sorted_by_link_score;
@@ -488,101 +489,70 @@ impl From<FillPage> for SitesPage {
 enum FromSet {
     /// The node holds none: ask a trusted node.
     Nothing,
-    /// Filling read every part held, and the next is still to come.
+    /// The part that holds it is not here yet.
     Waiting,
+    /// A part could not be read.
+    Failed(anyhow::Error),
     Page(SitesPage),
-}
-
-/// How many of the best sites of the set of sites ([`SITES`]) the node
-/// wants to hold: the first part, and the parts the next round reads.
-/// `None` when it does not fill from the set now: not filling, collecting
-/// every trusted node's own list (blackhole), partway through a trusted
-/// node's list ([`reads_set`]), or resting after reading the whole list,
-/// when a newer set waits until reading starts over.
-pub(super) fn sites_wanted(inner: &Inner) -> Option<u64> {
-    let fills = inner.config.network.as_ref().is_some_and(|net| net.fill);
-    if !fills || inner.config.blackhole || inner.config.set_publishers.is_empty() {
-        return None;
-    }
-    let state = inner.fill_state();
-    if !inner.settings().fill_from_network && !state.seed {
-        return None;
-    }
-    // Rested, reading starts over where the round will.
-    let next = match state.done_at {
-        Some(done) if now_unix() < done.saturating_add(FILL_AGAIN_AFTER.as_secs()) => {
-            return None;
-        }
-        Some(_) => state.focus_from.unwrap_or(0),
-        None => state.next,
-    };
-    if !reads_set(state.peer.as_deref(), next) {
-        return None;
-    }
-    Some(
-        next.saturating_add(FILL_PER_ROUND)
-            .max(QUICK_SEED_SITES as u64),
-    )
-}
-
-/// Whether filling reads the set of sites, when the node holds it, from
-/// `next` after reading from `peer` (a trusted node's id, or [`SITES`]):
-/// a node partway through a trusted node's list reads on to its end
-/// first, since the set's parts are taken from the first and would bring
-/// again the sites it has.
-fn reads_set(peer: Option<&str>, next: u64) -> bool {
-    next == 0 || peer.is_none_or(|peer| peer == SITES)
 }
 
 /// Up to `count` sites of the set of sites held, from its `from`th on,
 /// kept as a trusted node's would be ([`accept_record`]): the crawled ones
 /// among the next [`MAX_FILL_SCAN`], or with `all` every one.
 fn read_set(inner: &Inner, from: u64, count: u64, all: bool) -> FromSet {
-    if inner.config.blackhole {
+    if !site_set::taken(inner) {
         return FromSet::Nothing;
     }
-    let data = &inner.paths.data;
-    let Some(held) = HeldParts::find(data, SITES, &inner.config.set_publishers) else {
-        return FromSet::Nothing;
-    };
-    let held_items = held.items();
-    if from >= held_items && !held.complete && from < held.total {
-        return FromSet::Waiting;
-    }
+    site_set::with_held(inner, |held| read_held(held, from, count, all)).unwrap_or(FromSet::Nothing)
+}
+
+/// Whether filling reads the set of sites from `next` after reading from
+/// `peer` (a trusted node's id, or [`SITES`]): a node partway through a
+/// trusted node's list reads on to its end first, since the set leaves out
+/// sites that list holds and so is not in step with it.
+fn reads_set(peer: Option<&str>, next: u64) -> bool {
+    next == 0 || peer.is_none_or(|peer| peer == SITES)
+}
+
+/// [`read_set`] from the set `held`.
+fn read_held(held: &HeldSites, from: u64, count: u64, all: bool) -> FromSet {
+    let total = held.total();
     let now = now_unix();
     let scan = if all { count } else { MAX_FILL_SCAN as u64 };
     let (mut records, mut bytes, mut read) = (Vec::new(), 0, 0);
-    let mut ended = true;
-    for line in held.lines_from(from) {
-        read += 1;
-        let item = serde_json::from_str::<Item>(&line).ok();
-        let record = item
-            .filter(|item| !item.is_extension() && !item.is_deleted())
-            .and_then(|item| SiteRecord::from_item(&item).ok())
-            .and_then(|record| accept_record(record, now, all).ok());
-        if let Some(record) = record {
-            bytes += line.len() as u64;
-            records.push(record);
+    if from < total {
+        for line in held.lines_from(from) {
+            let line = match line {
+                Ok(line) => line,
+                Err(err) => return FromSet::Failed(err),
+            };
+            read += 1;
+            let item = serde_json::from_str::<Item>(&line).ok();
+            let record = item
+                .filter(|item| !item.is_extension() && !item.is_deleted())
+                .filter(|item| held.check(item).is_ok())
+                .and_then(|item| SiteRecord::from_item(&item).ok())
+                .and_then(|record| accept_record(record, now, all).ok());
+            if let Some(record) = record {
+                bytes += line.len() as u64;
+                records.push(record);
+            }
+            if records.len() as u64 >= count || read >= scan {
+                break;
+            }
         }
-        if records.len() as u64 >= count || read >= scan {
-            ended = false;
-            break;
+        if read == 0 {
+            return FromSet::Waiting;
         }
     }
-    // Read to the end of the parts held: the set is done when they are
-    // all of it or reading began past its end (as after a longer list),
-    // and otherwise the next part is wanted.
-    let next = match ended {
-        true if held.complete || from >= held.total => held.total,
-        true => held_items,
-        false => from + read,
-    };
+    // Reading from past the end, as after a longer list, ends the set.
+    let next = if from < total { from + read } else { total };
     FromSet::Page(SitesPage {
         source: SITES.into(),
         peer: None,
         records,
         next,
-        total: held.total,
+        total,
         busy: false,
         bytes,
         downloaded: 0,
@@ -605,28 +575,24 @@ async fn seed_from_set(
     net: &NetHandle,
     want: u64,
 ) -> Result<Option<SitesPage>> {
-    if inner.config.set_publishers.is_empty() {
-        return Ok(None);
-    }
     let deadline = Instant::now() + SEED_SET_WAIT;
-    let publishers = &inner.config.set_publishers;
-    while HeldParts::find(&inner.paths.data, SITES, publishers).is_none() {
-        match signed_sets::look_sites(inner, net, want).await {
-            Ok(Looked::Took(_)) => break,
-            Ok(Looked::NoPeer | Looked::Busy) if Instant::now() < deadline => {
-                if pause(inner, SEED_PEER_POLL).await {
-                    return Err(Stopped.into());
-                }
-            }
-            Ok(_) => return Ok(None),
-            Err(err) => {
-                warn!("taking {SITES} to set up: {err:#}");
-                return Ok(None);
-            }
+    match site_set::fetch_first(inner, net, want, deadline).await {
+        Ok(true) => {}
+        Ok(false) => {
+            inner.check_stop()?;
+            return Ok(None);
+        }
+        Err(err) => {
+            warn!("taking {SITES} to set up: {err:#}");
+            return Ok(None);
         }
     }
     match read_set_now(inner, 0, want, true).await? {
         FromSet::Page(page) => Ok(Some(page)),
+        FromSet::Failed(err) => {
+            warn!("reading {SITES} to set up: {err:#}");
+            Ok(None)
+        }
         FromSet::Nothing | FromSet::Waiting => Ok(None),
     }
 }
@@ -961,6 +927,8 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         return Ok(());
     }
     inner.update_fill(|s| s.detail = "Looking for crawled sites to take in".into());
+    let reads =
+        |state: &FillState| site_set::taken(inner) && reads_set(state.peer.as_deref(), state.next);
     let mut prefer = state.peer.as_deref().and_then(|p| p.parse().ok());
     let mut taken: u64 = 0;
     let mut busy = 0;
@@ -971,19 +939,47 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         let count = (FILL_PER_ROUND - taken)
             .min(site_room.unwrap_or(u64::MAX))
             .min(seed_room.unwrap_or(u64::MAX));
-        let from_held = if reads_set(state.peer.as_deref(), state.next) {
-            read_set_now(inner, state.next, count.min(SET_PAGE), seed).await?
-        } else {
-            FromSet::Nothing
-        };
-        let page = match from_held {
+        let mut read = FromSet::Nothing;
+        if reads(&state) {
+            let fetched = tokio::select! {
+                fetched = site_set::fetch(inner, &net, state.next, SET_PAGE) => fetched?,
+                () = inner.stopped() => return Ok(()),
+            };
+            match fetched {
+                Fetched::Here => {
+                    read = read_set_now(inner, state.next, count.min(SET_PAGE), seed).await?;
+                }
+                // No node sends the set, or the part: a trusted node's list
+                // from here on.
+                Fetched::Missing | Fetched::NoPeer => {}
+                Fetched::Busy => {
+                    inner.update_fill(|s| {
+                        s.detail =
+                            "The nodes that send the set of sites are busy; trying again later"
+                                .into()
+                    });
+                    break;
+                }
+                Fetched::Paused => {
+                    inner.update_fill(|s| {
+                        s.detail = "Paused until tomorrow: today's download limit is reached".into()
+                    });
+                    break;
+                }
+            }
+        }
+        let page = match read {
             FromSet::Page(page) => page,
             FromSet::Waiting => {
-                // The parts are taken as filling reads them: the next
-                // round reads on once it is here.
-                inner.sets_wake.notify_one();
                 inner.update_fill(|s| {
                     s.detail = "Waiting for the next part of the set of sites".into()
+                });
+                break;
+            }
+            FromSet::Failed(err) => {
+                warn!("reading {SITES}: {err:#}");
+                inner.update_fill(|s| {
+                    s.detail = format!("Waiting to read the set of sites: {err:#}")
                 });
                 break;
             }
@@ -1023,8 +1019,10 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         }
         if state.peer.as_deref() != Some(page.source.as_str()) {
             // Another node's list is in another order: start it from the
-            // top. The set of sites is in the project's node's order, so
-            // a node's list goes on from where the set was left.
+            // top. The set of sites is the project's node's list, so a node
+            // that leaves it for a trusted node's, when no node sends its
+            // next part, keeps the place, and only a list starting over
+            // moves to the set ([`reads_set`]).
             let restart = state.peer.as_deref().is_some_and(|old| old != SITES) && state.next > 0;
             state.peer = Some(page.source.clone());
             if restart {
@@ -1123,10 +1121,6 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         if done || stopped {
             break;
         }
-    }
-    if from_set {
-        // The parts the next round reads, ahead of it.
-        inner.sets_wake.notify_one();
     }
     if room == Some(0) {
         inner.update_fill(|s| {
