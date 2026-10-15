@@ -25,8 +25,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use plumb_core::{canonical_domain, parent_domain, RecordSet, Redirect, Signals, SiteRecord};
-use serde::Deserialize;
+use plumb_core::{canonical_domain, parent_domain, stored, RecordSet, Signals, SiteRecord};
 use tracing::{info, warn};
 
 use crate::records::{journal_path, Change};
@@ -44,7 +43,7 @@ pub struct Outline {
     /// The canonical domain.
     pub(crate) domain: Box<str>,
     /// The canonical domain of the site it is under another name
-    /// ([`Redirect::folds_into`]); empty when it redirects to no valid
+    /// ([`plumb_core::Redirect::folds_into`]); empty when it redirects to no valid
     /// domain, as [`plumb_index::redirect_targets`] takes it.
     pub(crate) redirect_to: Option<Box<str>>,
     /// Judged dead ([`SiteRecord::gone_at`]).
@@ -66,19 +65,6 @@ impl Outline {
             gone: record.gone_at.is_some(),
         }
     }
-}
-
-/// The fields of a record [`outline`] reads when it has no journal to fold
-/// in; the rest of the line is skipped.
-#[derive(Deserialize)]
-struct Head {
-    domain: String,
-    #[serde(default)]
-    signals: Signals,
-    #[serde(default)]
-    redirect: Option<Redirect>,
-    #[serde(default)]
-    gone_at: Option<u64>,
 }
 
 /// Sorts outlines the way [`crate::records::sorted_by_link_score`] sorts
@@ -248,13 +234,13 @@ impl Pending {
             if line_no.is_multiple_of(1_000) {
                 check()?;
             }
-            let Ok(head) = serde_json::from_slice::<Head>(line) else {
+            let Ok(head) = stored::head(line) else {
                 continue;
             };
             if !self.parents.contains(&head.domain) || ranks.contains_key(&head.domain) {
                 continue;
             }
-            let record: SiteRecord = serde_json::from_slice(line)
+            let record = stored::read(line)
                 .with_context(|| format!("{}: invalid JSON line", path.display()))?;
             if let Some(signals) = self.parent_signals(&head.domain, Some(record)) {
                 ranks.insert(head.domain, signals);
@@ -436,7 +422,7 @@ pub fn for_each_record(path: &Path, mut each: impl FnMut(SiteRecord)) -> Result<
     let mut line_no = 0usize;
     while let Some((_, line)) = lines.next()? {
         line_no += 1;
-        let record: SiteRecord = serde_json::from_slice(line)
+        let record = stored::read(line)
             .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
         each(record);
     }
@@ -451,7 +437,7 @@ fn scan(path: &Path) -> Result<Option<Vec<Outline>>> {
     let mut line_no = 0usize;
     while let Some((offset, line)) = lines.next()? {
         line_no += 1;
-        let head: Head = serde_json::from_slice(line)
+        let head = stored::head(line)
             .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
         let Some(domain) = canonical_domain(&head.domain) else {
             continue;
@@ -634,7 +620,7 @@ fn write_folded_into<W: Write>(
         if line_no.is_multiple_of(1_000) {
             check()?;
         }
-        let record: SiteRecord = serde_json::from_slice(line)
+        let record = stored::read(line)
             .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
         let Some(domain) = canonical_domain(&record.domain) else {
             continue;
@@ -852,7 +838,7 @@ impl<W: Write> Written<W> {
 
     fn write(&mut self, record: &SiteRecord) -> Result<()> {
         self.line.clear();
-        serde_json::to_writer(&mut self.line, record)?;
+        stored::write(&mut self.line, record)?;
         let len = u32::try_from(self.line.len()).context("a record line is too long")?;
         anyhow::ensure!(
             (self.line.len() as u64) < self.limit.saturating_sub(self.at),
@@ -904,7 +890,7 @@ impl RecordReader {
         self.line.resize(outline.len as usize, 0);
         self.file.read_exact(&mut self.line)?;
         self.at = outline.offset + u64::from(outline.len);
-        let mut record: SiteRecord = serde_json::from_slice(&self.line)
+        let mut record = stored::read(&self.line)
             .with_context(|| format!("reading the record of {}", outline.domain))?;
         if record.domain.as_str() != &*outline.domain {
             anyhow::bail!(
@@ -920,7 +906,7 @@ impl RecordReader {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{write_jsonl, LinkText};
+    use plumb_core::{write_jsonl, LinkText, Redirect};
 
     use super::*;
     use crate::records::{load_records, RecordStore};

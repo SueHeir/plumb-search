@@ -66,7 +66,7 @@ fn delivery_bytes_up_to(records: &[SiteRecord], limit: u64) -> Result<u64> {
     use std::io::Write;
     let mut size = plumb_core::storage::ByteCount { bytes: 0, limit };
     for record in records {
-        serde_json::to_writer(&mut size, record)?;
+        plumb_core::stored::write(&mut size, record)?;
         size.write_all(b"\n")?;
     }
     Ok(allocation_for(size.bytes.saturating_add(1)))

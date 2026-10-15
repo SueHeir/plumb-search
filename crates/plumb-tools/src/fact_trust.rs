@@ -545,8 +545,7 @@ fn apply_to(records: &Path, apply: &Path, found: &Found) -> Result<()> {
             counted += 1;
             scored += u64::from(fact_accuracy(&record.signals).is_some());
         }
-        let line = serde_json::to_writer(&mut file, &record)
-            .map_err(anyhow::Error::from)
+        let line = plumb_core::stored::write(&mut file, &record)
             .and_then(|()| file.write_all(b"\n").map_err(anyhow::Error::from));
         if let Err(err) = line {
             failed = Some(err);

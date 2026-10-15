@@ -72,6 +72,7 @@ plumb-e2e uses it in its tests too. The only Plumb crate plumb-core depends on i
 | --- | --- |
 | [locks.rs](src/locks.rs) | `Locked` and `RwLocked`: take a std lock whatever happened to its last holder |
 | [storage.rs](src/storage.rs) | The storage budget and the write helpers that charge it |
+| [stored.rs](src/stored.rs) | A site as a node keeps it on disk (records file, journal, inbox, bucket table): every read and write of those goes through `write`, `line`, `read`, `read_file` and `head`, so their shape can change in one place |
 | [oblivious.rs](src/oblivious.rs) | The asker's half of sealed bucket requests (feature `oblivious`) |
 
 ## How it works
