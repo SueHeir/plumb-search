@@ -96,9 +96,12 @@ impl SiteGrades {
 /// graded hit up nor pull it down past the rest.
 ///
 /// A site whose address is the query keeps its score, as does a
-/// `low_value` site the query names: someone searching for a little-known
-/// service by name wants it. A named `spam` site loses it, since spam is
-/// often named by the words of links pointing to it ("ebay").
+/// `low_value` site the query names (someone searching for a little-known
+/// service by name wants it) or that Wikidata lists as an organization's
+/// official site: the model judges the record, and an official site's
+/// record can be a stand-in page a crawl got. A named or official `spam`
+/// site loses it, since spam is often named by the words of links
+/// pointing to it ("ebay") and a taken-over domain stays listed.
 pub fn demote(grades: &SiteGrades, percent: u8, query: &str, hits: &mut [Hit]) {
     demote_by(grades, percent, query, hits, |hit| hit);
 }
@@ -123,7 +126,7 @@ pub fn demote_by<T>(
             continue;
         };
         let addressed = typed.is_some() && typed == plumb_core::registrable_domain(&hit.domain);
-        if addressed || grade == Grade::LowValue && hit.named {
+        if addressed || grade == Grade::LowValue && (hit.named || hit.official) {
             continue;
         }
         hit.score -= weight * grade.penalty() * hit.score.abs();
@@ -243,20 +246,31 @@ mod tests {
     }
 
     #[test]
-    fn a_named_low_value_site_keeps_its_place_but_named_spam_does_not() {
+    fn a_named_or_official_low_value_site_keeps_its_place_but_spam_does_not() {
         let grades = SiteGrades::new([
             ("datahubnet.online".to_string(), Grade::LowValue),
+            ("manhattanda.org".to_string(), Grade::LowValue),
             ("ebay-deals.example".to_string(), Grade::Spam),
         ]);
+        let official = |domain: &str, score: f32| Hit {
+            official: true,
+            ..hit(domain, score, false)
+        };
         let mut hits = vec![
             hit("datahubnet.online", 1.0, true),
+            official("manhattanda.org", 0.95),
             hit("ebay-deals.example", 0.9, true),
             hit("ebay.com", 0.8, true),
         ];
         demote(&grades, 100, "ebay", &mut hits);
         assert_eq!(
             order(&hits),
-            ["datahubnet.online", "ebay.com", "ebay-deals.example"]
+            [
+                "datahubnet.online",
+                "manhattanda.org",
+                "ebay.com",
+                "ebay-deals.example"
+            ]
         );
     }
 

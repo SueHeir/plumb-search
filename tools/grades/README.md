@@ -7,7 +7,7 @@ Each site gets one of three grades:
 | Grade | Meaning | In a search, at 100% |
 | --- | --- | --- |
 | `ok` | A real site, fine to list | Unchanged; not in the set |
-| `low_value` | Real, but no use to anyone who doesn't already use it: a little-known sign-in page, a stand-in page, a thin directory | Loses 30% of its score, unless the search names it |
+| `low_value` | Real, but no use to anyone who doesn't already use it: a little-known sign-in page, a stand-in page, a thin directory | Loses 30% of its score, unless the search names it or Wikidata lists it as official (the model judges the record, which for an official site can be a stand-in page a crawl got) |
 | `spam` | Made to game search or mislead: gambling on taken-over domains, free sports streams, pirated apps, pill shops | Loses 90% of its score, unless the search is its address |
 
 A graded site moves down past the sites that now score above it, and nothing else moves. Results from other nodes are graded the same way before they join a node's own.
