@@ -123,6 +123,80 @@ pub(crate) fn held_trusted(
         .then_some((dir, manifest))
 }
 
+/// The first parts of a set held, or all of them, when one of the
+/// publishers the node takes sets from signed it and this version reads
+/// it: a set of items, not a denylist or site rules.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HeldParts {
+    pub dir: PathBuf,
+    /// Its generation, in Unix seconds.
+    pub generation: i64,
+    /// The parts held, the set's first, in order.
+    pub parts: Vec<FilePart>,
+    /// Items in the whole set.
+    pub total: u64,
+    /// Whether they are all the set's parts.
+    pub complete: bool,
+}
+
+impl HeldParts {
+    /// The parts of `set` held in `data`, signed by one of `publishers`;
+    /// `None` when not even its first part is.
+    pub(crate) fn find(data: &Path, set: &str, publishers: &[PublicKey]) -> Option<HeldParts> {
+        let (dir, manifest) = held_trusted(data, set, publishers)?;
+        if manifest.is_denylist() || manifest.is_site_rules() {
+            return None;
+        }
+        let generation = unix_seconds(&manifest.generation)?;
+        // A part is in place only once checked whole, so its size says
+        // it is there.
+        let parts: Vec<FilePart> = manifest
+            .files
+            .iter()
+            .take_while(|part| {
+                fs::metadata(dir.join(&part.path)).is_ok_and(|meta| meta.len() == part.bytes)
+            })
+            .cloned()
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        Some(HeldParts {
+            total: manifest.files.iter().map(|part| part.count).sum(),
+            complete: parts.len() == manifest.files.len(),
+            parts,
+            dir,
+            generation,
+        })
+    }
+
+    /// Items in the parts held.
+    pub(crate) fn items(&self) -> u64 {
+        self.parts.iter().map(|part| part.count).sum()
+    }
+
+    /// The items of the parts held from the `from`th on (0 the first), as
+    /// lines of JSON. Parts before it are not read.
+    pub(crate) fn lines_from(&self, from: u64) -> impl Iterator<Item = String> {
+        let (mut skip, mut first) = (from, self.parts.len());
+        for (n, part) in self.parts.iter().enumerate() {
+            if skip < part.count {
+                first = n;
+                break;
+            }
+            skip -= part.count;
+        }
+        let paths: Vec<PathBuf> = self.parts[first..]
+            .iter()
+            .map(|part| self.dir.join(&part.path))
+            .collect();
+        paths
+            .into_iter()
+            .flat_map(crate::pages::part_lines)
+            .skip(usize::try_from(skip).unwrap_or(usize::MAX))
+    }
+}
+
 /// The generation (Unix seconds) and size of the map held as the set
 /// [`MAP`], when a publisher in `publishers` signed it and its map file
 /// is there whole. Its generation is the time of the file it was made
@@ -186,6 +260,10 @@ pub(super) fn held_part(data: &Path, sha256: &str) -> Option<PathBuf> {
 
 /// The site rules set.
 const SITE_RULES: &str = "plumb/site-rules";
+
+/// The set of sites (`plumb-tools set sites`), which a node fills from
+/// ([`super::fill`]) as far as filling reads it.
+pub(crate) const SITES: &str = "plumb/sites";
 
 /// Puts the site rules set held in `data` in place of the built-in lists
 /// ([`crate::site_rules`]) when one of `publishers` signed it. At start,
@@ -306,9 +384,23 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 return;
             }
         }
+        let sites = super::fill::sites_wanted(&inner);
+        if let Some(sites) = sites.filter(|_| inner.download_pause().is_none()) {
+            match look_sites(&inner, &net, sites).await {
+                Ok(Looked::NoPeer | Looked::Busy) => unsettled = true,
+                Ok(Looked::Current) => {}
+                Ok(Looked::Took(generation)) => {
+                    info!("took {SITES} generation {generation}");
+                }
+                Err(err) => {
+                    warn!("taking {SITES}: {err:#}");
+                }
+            }
+        }
         let wait = if unsettled { RETRY_WAIT } else { LOOK_EVERY };
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
+            () = inner.sets_wake.notified() => {}
             _ = stopped.wait_for(|stop| *stop) => return,
         }
     }
@@ -564,8 +656,22 @@ async fn look_page_set(
     if inner.config.set_updates.allows(set.id).is_none() && (has_file || held.is_some()) {
         return Ok(Looked::Current);
     }
-    let held_generation = held.as_ref().map(|held| held.generation);
-    match ask_newest(inner, net, &name, held_generation).await? {
+    let held = held.map(|held| (held.generation, held.parts.len(), held.holds(pages)));
+    look_parts(inner, net, &name, held, pages).await
+}
+
+/// Keeps the set `name` up to date as far as its first `items` items:
+/// takes a newer generation, or more parts of the one held when more are
+/// wanted. `held` says what the node holds of it: its generation, how
+/// many parts, and whether they hold `items` items or are the whole set.
+async fn look_parts(
+    inner: &Inner,
+    net: &NetHandle,
+    name: &str,
+    held: Option<(i64, usize, bool)>,
+    items: u64,
+) -> Result<Looked> {
+    match ask_newest(inner, net, name, held.map(|(generation, ..)| generation)).await? {
         Offer::NoPeer => Ok(Looked::NoPeer),
         Offer::Busy => Ok(Looked::Busy),
         Offer::Newer {
@@ -574,27 +680,38 @@ async fn look_page_set(
             publisher,
         } => {
             let (manifest, _) = Manifest::from_signed_json(&text, &now())?;
-            let parts = parts_for(&manifest, pages);
+            let parts = parts_for(&manifest, items);
             // A first take keeps what it could fetch; a newer generation
             // replaces the one held only whole.
             let at_least = if held.is_some() { parts } else { 1 };
             let want = Want { parts, at_least };
-            take(inner, net, &name, &text, Some(from), publisher, want).await
+            take(inner, net, name, &text, Some(from), publisher, want).await
         }
         Offer::Current => {
-            let Some(held) = held.filter(|held| !held.holds(pages)) else {
+            let Some((_, parts_held, _)) = held.filter(|(.., holds)| !holds) else {
                 return Ok(Looked::Current);
             };
-            let text = held_manifest(data, &name).context("its manifest is gone")?;
-            let (_, publisher) = vet(inner, &name, &text)?;
+            let text = held_manifest(&inner.paths.data, name).context("its manifest is gone")?;
+            let (_, publisher) = vet(inner, name, &text)?;
             let (manifest, _) = Manifest::from_signed_json(&text, &now())?;
             let want = Want {
-                parts: parts_for(&manifest, pages),
-                at_least: held.parts.len() + 1,
+                parts: parts_for(&manifest, items),
+                at_least: parts_held + 1,
             };
-            take(inner, net, &name, &text, None, publisher, want).await
+            take(inner, net, name, &text, None, publisher, want).await
         }
     }
+}
+
+/// Keeps the set of sites ([`SITES`]) up to date as far as its first
+/// `sites` sites, for filling ([`super::fill`]).
+pub(super) async fn look_sites(inner: &Inner, net: &NetHandle, sites: u64) -> Result<Looked> {
+    let held = HeldParts::find(&inner.paths.data, SITES, &inner.config.set_publishers);
+    let held = held.map(|held| {
+        let holds = held.complete || held.items() >= sites;
+        (held.generation, held.parts.len(), holds)
+    });
+    look_parts(inner, net, SITES, held, sites).await
 }
 
 /// The generation (Unix seconds) of the manifest `text` and the trusted
@@ -919,6 +1036,41 @@ mod tests {
         plumb_tools::set::write_set(items, fields, manifest, dir, &[1, 2], 3).unwrap();
         plumb_tools::set::sign_set(dir, key, None, None).unwrap();
         fs::read_to_string(dir.join(MANIFEST)).unwrap()
+    }
+
+    #[test]
+    fn held_parts_read_from_any_item_of_the_parts_in_place() {
+        let data = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[3; 32]);
+        let publishers = [PublicKey::of(&key)];
+        let dir = set_dir(data.path(), "plumb/books").unwrap();
+        books(&dir, &key);
+        let titles = |held: &HeldParts, from: u64| -> Vec<String> {
+            held.lines_from(from)
+                .map(|line| serde_json::from_str::<Value>(&line).unwrap()["title"].to_string())
+                .collect()
+        };
+
+        let held = HeldParts::find(data.path(), "plumb/books", &publishers).unwrap();
+        assert_eq!((held.items(), held.total, held.complete), (3, 3, true));
+        assert_eq!(
+            titles(&held, 0),
+            [r#""Book 1""#, r#""Book 2""#, r#""Book 3""#]
+        );
+        assert_eq!(titles(&held, 1), [r#""Book 2""#, r#""Book 3""#]);
+        assert!(titles(&held, 3).is_empty());
+        let other = SigningKey::from_bytes(&[4; 32]);
+        assert!(HeldParts::find(data.path(), "plumb/books", &[PublicKey::of(&other)]).is_none());
+
+        // Without the last part, the first two are read; without the
+        // first, none.
+        let parts: Vec<PathBuf> = held.parts.iter().map(|part| dir.join(&part.path)).collect();
+        fs::remove_file(&parts[2]).unwrap();
+        let held = HeldParts::find(data.path(), "plumb/books", &publishers).unwrap();
+        assert_eq!((held.items(), held.total, held.complete), (2, 3, false));
+        assert_eq!(titles(&held, 1), [r#""Book 2""#]);
+        fs::remove_file(&parts[0]).unwrap();
+        assert!(HeldParts::find(data.path(), "plumb/books", &publishers).is_none());
     }
 
     #[test]

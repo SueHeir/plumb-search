@@ -51,6 +51,23 @@
 //! usual from where it got to. When no trusted node answers within
 //! [`SEED_PEER_WAIT`], or it sends too few sites (a network just started),
 //! the node downloads the seed data as before.
+//!
+//! # The set of sites
+//!
+//! The project also publishes its node's list as a signed set, `plumb/sites`
+//! ([`SITES`], written by `plumb-tools set sites`), which any node can
+//! pass on, trusted or not. A node that finds it takes its parts as filling
+//! reads them ([`sites_wanted`], [`signed_sets::look_sites`]) and reads
+//! the sites from them in place of asking a trusted node, the same way:
+//! best-ranked first, crawled sites only once set up. Setting up, it takes
+//! the set's first part, which holds the [`QUICK_SEED_SITES`] best sites,
+//! when a node it meets in [`SEED_SET_WAIT`] holds it. Parts are held from
+//! the first, so a node partway through a trusted node's list reads on to
+//! its end and moves to the set when reading starts over ([`reads_set`]);
+//! one that loses the set goes on in a trusted node's list from the same
+//! place, since the set is in the project's node's order. A node collecting
+//! everything ([`super::NodeConfig::blackhole`]) reads each trusted node's
+//! own list.
 
 use plumb_core::locks::Locked;
 use std::collections::BTreeMap;
@@ -62,10 +79,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use plumb_core::{now_unix, RecordSet, SiteRecord};
+use plumb_format::Item;
+use plumb_net::fill::{accept_record, FillPage, MAX_FILL_SCAN};
+use plumb_net::{NetHandle, PeerId};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use super::network::{self, REBUILD_AFTER_RECORDS};
+use super::signed_sets::{self, HeldParts, Looked, SITES};
 use super::{Inner, Step, Stopped, MB};
 use crate::about::Topics;
 use crate::records::sorted_by_link_score;
@@ -123,6 +144,16 @@ const SEED_PAGE: u32 = plumb_net::fill::MAX_SEED_RECORDS;
 /// How often a node setting up looks for a trusted node to connect.
 const SEED_PEER_POLL: Duration = Duration::from_millis(500);
 
+/// How long a node setting up looks for a node that holds the set of
+/// sites before it asks a trusted node for its list instead.
+#[cfg(not(test))]
+const SEED_SET_WAIT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const SEED_SET_WAIT: Duration = Duration::from_secs(5);
+
+/// Sites read from the set of sites at once.
+const SET_PAGE: u64 = 10_000;
+
 /// Pause between two pages, so a node answers this one at most
 /// `plumb_net::fill::FILL_REQUESTS_PER_MINUTE` times a minute.
 #[cfg(not(test))]
@@ -176,7 +207,8 @@ const FILL_FILE: &str = "fill.json";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct FillState {
-    /// The trusted node filled from last.
+    /// The trusted node filled from last, or [`SITES`] for the set of
+    /// sites.
     pub peer: Option<String>,
     /// Where in its list to ask from next.
     pub next: u64,
@@ -230,7 +262,8 @@ pub struct FillStatus {
     pub position: u64,
     /// Sites in that list, crawled or not.
     pub total: u64,
-    /// The trusted node filled from last.
+    /// The trusted node filled from last, or `plumb/sites` for the
+    /// network's set of sites.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
     /// What filling is doing, in words.
@@ -409,6 +442,195 @@ fn memory_limit() -> Option<u64> {
     }
 }
 
+/// A page of sites to take in: from a trusted node's list, or from the
+/// set of sites held.
+struct SitesPage {
+    /// Where it came from: a trusted node's id, or [`SITES`].
+    source: String,
+    /// The trusted node that answered; `None` for the set.
+    peer: Option<PeerId>,
+    records: Vec<SiteRecord>,
+    /// Where to read from next; `total` once the list is done.
+    next: u64,
+    /// Sites in the list, crawled or not.
+    total: u64,
+    /// The trusted node was busy and sent nothing; ask again later.
+    busy: bool,
+    /// Bytes of the records, for the disk they take.
+    bytes: u64,
+    /// Bytes downloaded for them: none from the set, whose parts counted
+    /// as they were fetched.
+    downloaded: u64,
+}
+
+impl SitesPage {
+    fn done(&self) -> bool {
+        !self.busy && self.next >= self.total
+    }
+}
+
+impl From<FillPage> for SitesPage {
+    fn from(page: FillPage) -> Self {
+        SitesPage {
+            source: page.peer.to_string(),
+            peer: Some(page.peer),
+            records: page.records,
+            next: page.next,
+            total: page.total,
+            busy: page.busy,
+            bytes: page.bytes,
+            downloaded: page.bytes,
+        }
+    }
+}
+
+/// What the set of sites held has from where filling got to.
+enum FromSet {
+    /// The node holds none: ask a trusted node.
+    Nothing,
+    /// Filling read every part held, and the next is still to come.
+    Waiting,
+    Page(SitesPage),
+}
+
+/// How many of the best sites of the set of sites ([`SITES`]) the node
+/// wants to hold: the first part, and the parts the next round reads.
+/// `None` when it does not fill from the set now: not filling, collecting
+/// every trusted node's own list (blackhole), partway through a trusted
+/// node's list ([`reads_set`]), or resting after reading the whole list,
+/// when a newer set waits until reading starts over.
+pub(super) fn sites_wanted(inner: &Inner) -> Option<u64> {
+    let fills = inner.config.network.as_ref().is_some_and(|net| net.fill);
+    if !fills || inner.config.blackhole || inner.config.set_publishers.is_empty() {
+        return None;
+    }
+    let state = inner.fill_state();
+    if !inner.settings().fill_from_network && !state.seed {
+        return None;
+    }
+    // Rested, reading starts over where the round will.
+    let next = match state.done_at {
+        Some(done) if now_unix() < done.saturating_add(FILL_AGAIN_AFTER.as_secs()) => {
+            return None;
+        }
+        Some(_) => state.focus_from.unwrap_or(0),
+        None => state.next,
+    };
+    if !reads_set(state.peer.as_deref(), next) {
+        return None;
+    }
+    Some(
+        next.saturating_add(FILL_PER_ROUND)
+            .max(QUICK_SEED_SITES as u64),
+    )
+}
+
+/// Whether filling reads the set of sites, when the node holds it, from
+/// `next` after reading from `peer` (a trusted node's id, or [`SITES`]):
+/// a node partway through a trusted node's list reads on to its end
+/// first, since the set's parts are taken from the first and would bring
+/// again the sites it has.
+fn reads_set(peer: Option<&str>, next: u64) -> bool {
+    next == 0 || peer.is_none_or(|peer| peer == SITES)
+}
+
+/// Up to `count` sites of the set of sites held, from its `from`th on,
+/// kept as a trusted node's would be ([`accept_record`]): the crawled ones
+/// among the next [`MAX_FILL_SCAN`], or with `all` every one.
+fn read_set(inner: &Inner, from: u64, count: u64, all: bool) -> FromSet {
+    if inner.config.blackhole {
+        return FromSet::Nothing;
+    }
+    let data = &inner.paths.data;
+    let Some(held) = HeldParts::find(data, SITES, &inner.config.set_publishers) else {
+        return FromSet::Nothing;
+    };
+    let held_items = held.items();
+    if from >= held_items && !held.complete && from < held.total {
+        return FromSet::Waiting;
+    }
+    let now = now_unix();
+    let scan = if all { count } else { MAX_FILL_SCAN as u64 };
+    let (mut records, mut bytes, mut read) = (Vec::new(), 0, 0);
+    let mut ended = true;
+    for line in held.lines_from(from) {
+        read += 1;
+        let item = serde_json::from_str::<Item>(&line).ok();
+        let record = item
+            .filter(|item| !item.is_extension() && !item.is_deleted())
+            .and_then(|item| SiteRecord::from_item(&item).ok())
+            .and_then(|record| accept_record(record, now, all).ok());
+        if let Some(record) = record {
+            bytes += line.len() as u64;
+            records.push(record);
+        }
+        if records.len() as u64 >= count || read >= scan {
+            ended = false;
+            break;
+        }
+    }
+    // Read to the end of the parts held: the set is done when they are
+    // all of it or reading began past its end (as after a longer list),
+    // and otherwise the next part is wanted.
+    let next = match ended {
+        true if held.complete || from >= held.total => held.total,
+        true => held_items,
+        false => from + read,
+    };
+    FromSet::Page(SitesPage {
+        source: SITES.into(),
+        peer: None,
+        records,
+        next,
+        total: held.total,
+        busy: false,
+        bytes,
+        downloaded: 0,
+    })
+}
+
+/// [`read_set`] off the async threads: it reads and unpacks parts.
+async fn read_set_now(inner: &Arc<Inner>, from: u64, count: u64, all: bool) -> Result<FromSet> {
+    let inner = inner.clone();
+    tokio::task::spawn_blocking(move || read_set(&inner, from, count, all))
+        .await
+        .context("reading the set of sites")
+}
+
+/// Setting up from the set of sites: takes its first part from a node
+/// that holds it, met within [`SEED_SET_WAIT`], and reads the best `want`
+/// sites of it, crawled or not. `None` when no node met holds it.
+async fn seed_from_set(
+    inner: &Arc<Inner>,
+    net: &NetHandle,
+    want: u64,
+) -> Result<Option<SitesPage>> {
+    if inner.config.set_publishers.is_empty() {
+        return Ok(None);
+    }
+    let deadline = Instant::now() + SEED_SET_WAIT;
+    let publishers = &inner.config.set_publishers;
+    while HeldParts::find(&inner.paths.data, SITES, publishers).is_none() {
+        match signed_sets::look_sites(inner, net, want).await {
+            Ok(Looked::Took(_)) => break,
+            Ok(Looked::NoPeer | Looked::Busy) if Instant::now() < deadline => {
+                if pause(inner, SEED_PEER_POLL).await {
+                    return Err(Stopped.into());
+                }
+            }
+            Ok(_) => return Ok(None),
+            Err(err) => {
+                warn!("taking {SITES} to set up: {err:#}");
+                return Ok(None);
+            }
+        }
+    }
+    match read_set_now(inner, 0, want, true).await? {
+        FromSet::Page(page) => Ok(Some(page)),
+        FromSet::Nothing | FromSet::Waiting => Ok(None),
+    }
+}
+
 /// Fills the node's space round after round until it stops.
 pub(super) async fn fill_space(inner: Arc<Inner>) {
     let mut wait = FIRST_FILL_AFTER;
@@ -443,11 +665,12 @@ pub(super) fn can_seed_from_network(inner: &Inner) -> bool {
 }
 
 /// First start in the network: takes the best [`QUICK_SEED_SITES`] sites
-/// of a trusted node's list, crawled or not, for the first records file,
-/// and leaves the rest to filling. `None` when no trusted node answered in
-/// [`SEED_PEER_WAIT`] or it sent fewer than [`MIN_SEED_SITES`]: the node
-/// downloads the seed data instead. With the records comes the bytes
-/// received.
+/// of the set of sites ([`seed_from_set`]) or of a trusted node's list,
+/// crawled or not, for the first records file, and leaves the rest to
+/// filling. `None` when no trusted node answered in [`SEED_PEER_WAIT`] or
+/// it sent fewer than [`MIN_SEED_SITES`]: the node downloads the seed data
+/// instead. With the records comes the bytes received from trusted nodes;
+/// the set's parts are counted as they are taken.
 pub(super) async fn seed_from_network(
     inner: &Arc<Inner>,
 ) -> Result<Option<(Vec<SiteRecord>, u64)>> {
@@ -463,17 +686,29 @@ pub(super) async fn seed_from_network(
         "Waiting for a trusted node in the network to send its sites",
     );
     let want = inner.config.sites.min(QUICK_SEED_SITES);
-    let deadline = Instant::now() + SEED_PEER_WAIT;
     let mut set = RecordSet::new();
     let mut state = FillState::default();
     let mut prefer = None;
     let mut busy = 0;
     let mut bytes = 0;
     let mut done = false;
-    while set.len() < want {
+    if let Some(page) = seed_from_set(inner, &net, want as u64).await? {
+        inner.set_step(Step::Downloading, "Taking in the network's set of sites");
+        done = page.done();
+        state.peer = Some(page.source);
+        state.next = page.next;
+        state.total = page.total;
+        let mut records = page.records;
+        inner.drop_denied_records(&mut records);
+        for record in records {
+            set.upsert(record);
+        }
+    }
+    let deadline = Instant::now() + SEED_PEER_WAIT;
+    while set.len() < want && state.peer.as_deref() != Some(SITES) {
         let count = (want - set.len()).min(plumb_net::fill::MAX_SEED_RECORDS as usize) as u32;
         let page = match net.fill(prefer, state.next, count, true).await {
-            Ok(Some(page)) => page,
+            Ok(Some(page)) => SitesPage::from(page),
             Ok(None) if set.is_empty() && Instant::now() < deadline => {
                 if pause(inner, SEED_PEER_POLL).await {
                     return Err(Stopped.into());
@@ -496,16 +731,16 @@ pub(super) async fn seed_from_network(
             }
             continue;
         }
-        if prefer.is_some_and(|peer| peer != page.peer) {
+        if prefer.is_some() && prefer != page.peer {
             // Another node's list is in another order: filling takes it
             // from the top.
             break;
         }
-        prefer = Some(page.peer);
-        state.peer = Some(page.peer.to_string());
+        prefer = page.peer;
+        state.peer = Some(page.source.clone());
         state.next = page.next;
         state.total = page.total;
-        bytes += page.bytes;
+        bytes += page.downloaded;
         done = page.done();
         let mut records = page.records;
         inner.drop_denied_records(&mut records);
@@ -522,9 +757,12 @@ pub(super) async fn seed_from_network(
         }
     }
     inner.check_stop()?;
+    let from_set = state.peer.as_deref() == Some(SITES);
     if set.len() < MIN_SEED_SITES.min(want) {
         let why = if state.peer.is_none() {
             "no trusted node answered".to_string()
+        } else if from_set {
+            format!("the set of sites held only {} sites", set.len())
         } else {
             format!("a trusted node sent only {} sites", set.len())
         };
@@ -541,26 +779,34 @@ pub(super) async fn seed_from_network(
     } else {
         state.seed = records.len() < inner.config.sites;
     }
-    state.detail = if state.seed {
-        "Setting up: taking in the rest of a trusted node's sites".into()
-    } else {
-        "Done: holds the trusted node's sites".into()
-    };
+    state.detail = match (state.seed, from_set) {
+        (true, true) => "Setting up: taking in the rest of the set of sites",
+        (true, false) => "Setting up: taking in the rest of a trusted node's sites",
+        (false, true) => "Done: holds the set of sites",
+        (false, false) => "Done: holds the trusted node's sites",
+    }
+    .into();
     state.save(&inner.paths.net)?;
     inner.set_fill(state);
+    let source = if from_set {
+        "the network's set of sites"
+    } else {
+        "a trusted node in the network"
+    };
     info!(
-        "took {} sites from a trusted node to set up, without the seed downloads",
+        "took {} sites from {source} to set up, without the seed downloads",
         records.len()
     );
     inner.journal.info(format!(
-        "Set up from a trusted node in the network: {} sites, the rest to follow",
+        "Set up from {source}: {} sites, the rest to follow",
         records.len()
     ));
     Ok(Some((records, bytes)))
 }
 
-/// One round: pages of a trusted node's crawled sites until the round's
-/// share, the room left or the list runs out.
+/// One round: pages of crawled sites, from the set of sites held or a
+/// trusted node's list, until the round's share, the room left or the
+/// list runs out.
 async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
     let Some(net) = network::handle(inner).cloned() else {
         return Ok(());
@@ -609,7 +855,12 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         state.done_at = None;
     } else if let Some(done) = state.done_at {
         if now < done + FILL_AGAIN_AFTER.as_secs() {
-            inner.update_fill(|s| s.detail = "Done: holds the trusted node's crawled sites".into());
+            let detail = if state.peer.as_deref() == Some(SITES) {
+                "Done: holds the crawled sites of the set of sites"
+            } else {
+                "Done: holds the trusted node's crawled sites"
+            };
+            inner.update_fill(|s| s.detail = detail.into());
             return Ok(());
         }
         state.done_at = None;
@@ -709,20 +960,42 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         state.save(&inner.paths.net)?;
         return Ok(());
     }
-    inner.update_fill(|s| s.detail = "Asking a trusted node for its crawled sites".into());
+    inner.update_fill(|s| s.detail = "Looking for crawled sites to take in".into());
     let mut prefer = state.peer.as_deref().and_then(|p| p.parse().ok());
     let mut taken: u64 = 0;
     let mut busy = 0;
+    let mut from_set = false;
     let page_size = if seed { SEED_PAGE } else { FILL_PAGE };
     while taken < FILL_PER_ROUND && room != Some(0) && site_room != Some(0) && seed_room != Some(0)
     {
         let count = (FILL_PER_ROUND - taken)
-            .min(u64::from(page_size))
             .min(site_room.unwrap_or(u64::MAX))
-            .min(seed_room.unwrap_or(u64::MAX)) as u32;
-        let Some(page) = net.fill(prefer, state.next, count, seed).await? else {
-            inner.update_fill(|s| s.detail = "Waiting for a trusted node to connect".into());
-            break;
+            .min(seed_room.unwrap_or(u64::MAX));
+        let from_held = if reads_set(state.peer.as_deref(), state.next) {
+            read_set_now(inner, state.next, count.min(SET_PAGE), seed).await?
+        } else {
+            FromSet::Nothing
+        };
+        let page = match from_held {
+            FromSet::Page(page) => page,
+            FromSet::Waiting => {
+                // The parts are taken as filling reads them: the next
+                // round reads on once it is here.
+                inner.sets_wake.notify_one();
+                inner.update_fill(|s| {
+                    s.detail = "Waiting for the next part of the set of sites".into()
+                });
+                break;
+            }
+            FromSet::Nothing => {
+                let count = count.min(u64::from(page_size)) as u32;
+                let Some(page) = net.fill(prefer, state.next, count, seed).await? else {
+                    inner
+                        .update_fill(|s| s.detail = "Waiting for a trusted node to connect".into());
+                    break;
+                };
+                SitesPage::from(page)
+            }
         };
         if page.busy {
             busy += 1;
@@ -737,19 +1010,23 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             }
             continue;
         }
-        let peer = page.peer.to_string();
-        if blackhole && state.peer.as_deref() != Some(&peer) {
+        from_set = page.source == SITES;
+        if blackhole && state.peer.as_deref() != Some(page.source.as_str()) {
             // The node chosen is gone for now; its list waits, where it
             // stopped, for the next round rather than another node's
             // being read in its place.
             inner.update_fill(|s| s.detail = "Waiting for a trusted node to connect".into());
             break;
         }
-        prefer = Some(page.peer);
-        if state.peer.as_deref() != Some(&peer) {
-            // Another node's list is in another order: start it from the top.
-            let restart = state.peer.is_some() && state.next > 0;
-            state.peer = Some(peer);
+        if page.peer.is_some() {
+            prefer = page.peer;
+        }
+        if state.peer.as_deref() != Some(page.source.as_str()) {
+            // Another node's list is in another order: start it from the
+            // top. The set of sites is in the project's node's order, so
+            // a node's list goes on from where the set was left.
+            let restart = state.peer.as_deref().is_some_and(|old| old != SITES) && state.next > 0;
+            state.peer = Some(page.source.clone());
             if restart {
                 state.next = 0;
                 continue;
@@ -779,8 +1056,10 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
                 inner.wake.notify_one();
             }
         }
-        if let Err(err) = inner.add_downloaded(page.bytes) {
-            warn!("cannot count the download: {err:#}");
+        if page.downloaded > 0 {
+            if let Err(err) = inner.add_downloaded(page.downloaded) {
+                warn!("cannot count the download: {err:#}");
+            }
         }
         if state.pending == 0 {
             state.pending_since = now_unix();
@@ -806,26 +1085,48 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             state.seed = false;
         }
         let detail = if done && blackhole {
-            "Done with this trusted node's crawled sites; the next one follows".to_string()
+            "Done with this trusted node's crawled sites; the next one follows"
+        } else if from_set {
+            if done && seed {
+                "Done: holds the set of sites"
+            } else if done {
+                "Done: holds the crawled sites of the set of sites"
+            } else if state.seed {
+                "Setting up: taking in the rest of the set of sites"
+            } else if focus {
+                "Keeping the sites about this node's topics from the set of sites"
+            } else {
+                "Taking in crawled sites from the set of sites"
+            }
         } else if done && seed {
-            "Done: holds the trusted node's sites".to_string()
+            "Done: holds the trusted node's sites"
         } else if done {
-            "Done: holds the trusted node's crawled sites".to_string()
+            "Done: holds the trusted node's crawled sites"
         } else if state.seed {
-            "Setting up: taking in the rest of a trusted node's sites".to_string()
+            "Setting up: taking in the rest of a trusted node's sites"
         } else if focus {
-            "Keeping the sites about this node's topics from a trusted node's crawls".to_string()
+            "Keeping the sites about this node's topics from a trusted node's crawls"
         } else {
-            "Taking in crawled sites from a trusted node".to_string()
+            "Taking in crawled sites from a trusted node"
         };
-        state.detail = detail;
+        state.detail = detail.into();
         inner.set_fill(state.clone());
         if let Err(err) = state.save(&inner.paths.net) {
             warn!("{err:#}");
         }
-        if done || pause(inner, FILL_PAGE_GAP).await {
+        // Reading the set asks no node, so it needs no pause.
+        let stopped = if from_set {
+            inner.stopping()
+        } else {
+            pause(inner, FILL_PAGE_GAP).await
+        };
+        if done || stopped {
             break;
         }
+    }
+    if from_set {
+        // The parts the next round reads, ahead of it.
+        inner.sets_wake.notify_one();
     }
     if room == Some(0) {
         inner.update_fill(|s| {
@@ -836,15 +1137,20 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             s.detail = "Full: a bigger index would not fit in this machine's memory".into()
         });
     }
+    let source = if from_set {
+        "the set of sites"
+    } else {
+        "a trusted node"
+    };
     if taken > 0 && seed {
-        info!("took in {taken} sites from a trusted node to finish setting up");
+        info!("took in {taken} sites from {source} to finish setting up");
         inner.journal.info(format!(
-            "Took in {taken} sites from a trusted node to finish setting up"
+            "Took in {taken} sites from {source} to finish setting up"
         ));
     } else if taken > 0 {
-        info!("took in {taken} crawled sites from a trusted node to fill free space");
+        info!("took in {taken} crawled sites from {source} to fill free space");
         inner.journal.info(format!(
-            "Took in {taken} crawled sites from a trusted node to fill free space"
+            "Took in {taken} crawled sites from {source} to fill free space"
         ));
     }
     Ok(())
@@ -1135,6 +1441,16 @@ mod tests {
         state.read_list_of("mac".into());
         assert_eq!(state.next, 2_000);
         assert!(!state.positions.contains_key("ny"));
+    }
+
+    #[test]
+    fn reads_the_set_of_sites_unless_partway_through_a_trusted_node_s_list() {
+        let node = "12D3KooWTrusted";
+        assert!(reads_set(None, 0));
+        assert!(reads_set(Some(SITES), 40_000));
+        // A node's list starting over moves to the set.
+        assert!(reads_set(Some(node), 0));
+        assert!(!reads_set(Some(node), 40_000));
     }
 
     #[test]

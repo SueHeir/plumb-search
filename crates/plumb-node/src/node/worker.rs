@@ -360,7 +360,11 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     if let Some((records, downloaded)) = from_network {
         let built = blocking(inner, move |inner| {
             let mut fresh = SavedState::fresh(inner.config.initial_crawl);
-            fresh.add_downloaded(downloaded, now_unix());
+            // What was counted meanwhile, such as the set of sites' first
+            // part, stays counted.
+            let now = now_unix();
+            let today = inner.saved().downloaded_today(now);
+            fresh.add_downloaded(today.saturating_add(downloaded), now);
             inner.update_saved(|saved| *saved = fresh)?;
             save_seed_records(inner, &records)?;
             inner.check_stop()?;

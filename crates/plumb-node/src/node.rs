@@ -1310,6 +1310,9 @@ struct Inner {
     stopped: watch::Receiver<bool>,
     /// Wakes the background work for a refresh request.
     wake: Notify,
+    /// Wakes the look for newer sets when filling wants more of the set
+    /// of sites ([`fill::sites_wanted`]).
+    sets_wake: Notify,
     refresh_requested: AtomicBool,
     lock: Mutex<Option<DirLock>>,
     /// Tries at Wikidata's official websites while setup went on without
@@ -1582,6 +1585,7 @@ impl Inner {
             retired: Mutex::new(opened.leftover),
             stopped,
             wake: Notify::new(),
+            sets_wake: Notify::new(),
             refresh_requested: AtomicBool::new(false),
             lock: Mutex::new(opened.lock),
             wikidata: Mutex::new(WikidataTries {
