@@ -32,7 +32,7 @@ const NEAREST: usize = 1_000;
 /// right one.
 const LEAST_SPREAD: f32 = 0.15;
 /// Articles nearest a query in meaning looked at for the one to list
-/// ([`QueryMeaning::nearest_page`]).
+/// ([`nearest_page`]).
 const NEAREST_PAGES: usize = 10;
 /// How far the nearest article's cosine must stand above the last of the
 /// [`NEAREST_PAGES`] for it to be listed. As with sites, the raw cosine
@@ -168,22 +168,25 @@ impl MeaningIndex {
                 None
             }
         };
-        let vectors = self.read();
         let instruction = if self.embedder.takes_query_instruction() {
             self.instruction
         } else {
             QueryInstruction::Off
         };
-        match instruction {
-            QueryInstruction::Off => Some(vec![plain()?]),
-            QueryInstruction::On => Some(vec![instructed()?]),
-            QueryInstruction::Mix | QueryInstruction::Min => {
-                Some(vec![embed(query)?, instructed()?])
-            }
+        let query = match instruction {
+            QueryInstruction::Off => vec![plain()?],
+            QueryInstruction::On => vec![instructed()?],
+            QueryInstruction::Mix | QueryInstruction::Min => vec![embed(query)?, instructed()?],
             // Ranked by the instructed vector; placed by the plain one.
-            QueryInstruction::Split => Some(vec![instructed()?, embed(query)?]),
-        }
-        .map(|query| QueryMeaning::new(vectors, self.pages.as_ref(), query, instruction))
+            QueryInstruction::Split => vec![instructed()?, embed(query)?],
+        };
+        // Before taking the sites' vectors, which the embedding job may be
+        // waiting to add to.
+        let page = self
+            .pages
+            .as_ref()
+            .and_then(|pages| nearest_page(pages, &query[0]));
+        Some(QueryMeaning::new(self.read(), query, instruction, page))
     }
 }
 
@@ -219,8 +222,9 @@ impl SharedMeaning {
 /// stays below 1 ([`LEAST_SPREAD`]).
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
-    pages: Option<&'a Vectors>,
     nearest: Vec<String>,
+    /// The article nearest the query ([`nearest_page`]).
+    page: Option<String>,
     /// The query's vectors (one, or as it is and after the instruction)
     /// with the cosines of the nearest and of the last of the nearest sites.
     spreads: Vec<Spread>,
@@ -251,9 +255,9 @@ impl<'a> QueryMeaning<'a> {
     /// The nearest sites are those nearest the first of `vectors`.
     fn new(
         vectors: RwLockReadGuard<'a, Vectors>,
-        pages: Option<&'a Vectors>,
         query: Vec<Vec<i8>>,
         combine: QueryInstruction,
+        page: Option<String>,
     ) -> Self {
         let mut nearest = None;
         let spreads = query
@@ -281,8 +285,8 @@ impl<'a> QueryMeaning<'a> {
             .collect();
         QueryMeaning {
             vectors,
-            pages,
             nearest: nearest.unwrap_or_default(),
+            page,
             spreads,
             combine,
         }
@@ -298,20 +302,8 @@ impl Meaning for QueryMeaning<'_> {
         self.nearest.clone()
     }
 
-    /// By the first of the query's vectors, as the nearest sites are:
-    /// after the instruction, as nodes embed searches.
     fn nearest_page(&self) -> Option<String> {
-        let found = self
-            .pages?
-            .nearest(&self.spreads.first()?.vector, NEAREST_PAGES);
-        match (found.first(), found.last()) {
-            (Some(&(url, best)), Some(&(_, last)))
-                if found.len() == NEAREST_PAGES && best - last >= LEAST_PAGE_GAP =>
-            {
-                Some(url.to_string())
-            }
-            _ => None,
-        }
+        self.page.clone()
     }
 
     fn plain_closeness(&self, domain: &str) -> Option<Option<f32>> {
@@ -334,6 +326,22 @@ impl Meaning for QueryMeaning<'_> {
             QueryInstruction::Min => all.into_iter().reduce(f32::min),
             _ => Some(all.iter().sum::<f32>() / all.len().max(1) as f32),
         }
+    }
+}
+
+/// The address of the article in `pages` nearest `query`, the first of a
+/// query's vectors as the nearest sites are (after the instruction, as
+/// nodes embed searches), when it stands [`LEAST_PAGE_GAP`] above the
+/// last of the [`NEAREST_PAGES`].
+fn nearest_page(pages: &Vectors, query: &[i8]) -> Option<String> {
+    let found = pages.nearest(query, NEAREST_PAGES);
+    match (found.first(), found.last()) {
+        (Some(&(url, best)), Some(&(_, last)))
+            if found.len() == NEAREST_PAGES && best - last >= LEAST_PAGE_GAP =>
+        {
+            Some(url.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -769,11 +777,9 @@ mod tests {
 
     #[test]
     fn the_nearest_article_is_listed_only_when_it_stands_out() {
-        let model = [0; 32];
-        let sites = RwLock::new(Vectors::new(model, 2));
         // Ten articles at these cosines to a query pointing along x.
         let articles = |cosines: &[f32]| {
-            let mut pages = Vectors::new(model, 2);
+            let mut pages = Vectors::new([0; 32], 2);
             for (n, cosine) in cosines.iter().enumerate() {
                 let sine = (1.0 - cosine * cosine).sqrt();
                 let vector = [(cosine * 127.0) as i8, (sine * 127.0) as i8];
@@ -782,15 +788,7 @@ mod tests {
             }
             pages
         };
-        let nearest = |pages: &Vectors| {
-            QueryMeaning::new(
-                sites.read_locked(),
-                Some(pages),
-                vec![vec![127, 0]],
-                QueryInstruction::Split,
-            )
-            .nearest_page()
-        };
+        let nearest = |pages: &Vectors| nearest_page(pages, &[127, 0]);
         let stands_out = articles(&[1.0, 0.95, 0.94, 0.94, 0.93, 0.93, 0.92, 0.92, 0.91, 0.9]);
         assert_eq!(
             nearest(&stands_out).as_deref(),

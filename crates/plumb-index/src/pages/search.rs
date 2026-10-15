@@ -1244,7 +1244,8 @@ impl PageSearcher {
     /// suggestion names is ([`crate::suggested_site_second`]): "isaac
     /// newtonn" lists Isaac Newton under what has the letters typed rather
     /// than a click away. Not when the results are for the spelling
-    /// already, the page is listed, or `options` leave it out. It counts
+    /// already, the page is listed other than as only meant, or `options`
+    /// leave it out. It counts
     /// as named by the spelling, not the query, so it gets no info box.
     pub fn list_suggested_page(
         &self,
@@ -1263,8 +1264,13 @@ impl PageSearcher {
         }) else {
             return Ok(());
         };
-        if placed.iter().any(|p| p.hit.page.url == hit.page.url) {
-            return Ok(());
+        // A page only meant ([`PageHit::meant`]) moves up: "dextocardia"
+        // lists Dextrocardia, found by meaning too, next to the suggestion.
+        if let Some(at) = placed.iter().position(|p| p.hit.page.url == hit.page.url) {
+            if !placed[at].hit.meant {
+                return Ok(());
+            }
+            placed.remove(at);
         }
         hit.named = false;
         let at = placed

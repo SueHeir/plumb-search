@@ -235,7 +235,9 @@ impl PageSearcher {
     /// so it comes after the first sites. Words found it too when it is in
     /// `found`: it is then listed as they scored it, or as meant when only
     /// meaning lists it. Nothing is added when a page found is named by the
-    /// whole query or answers it whole, as words find those better.
+    /// whole query or answers it whole, as words find those better. Callers
+    /// check the searcher's options ([`super::options_allow`]) after, as
+    /// for any page found.
     pub fn add_meant(&self, url: Option<&str>, found: &mut Vec<PageHit>) -> Result<()> {
         let Some(url) = url else {
             return Ok(());
@@ -247,9 +249,10 @@ impl PageSearcher {
             Some(at) if found[at].score >= MIN_PARTIAL_SCORE => return Ok(()),
             Some(at) => found.remove(at),
             None => {
-                let Some(mut hit) = self.page_at(url)?.filter(|hit| {
-                    hit.page.url == url && hit.page.is_article() && self.reads(&hit.page)
-                }) else {
+                let Some(mut hit) = self
+                    .page_at(url)?
+                    .filter(|hit| hit.page.url == url && hit.page.is_article())
+                else {
                     return Ok(());
                 };
                 hit.page.drop_borrowed_site();
@@ -270,16 +273,6 @@ impl PageSearcher {
             .unwrap_or(found.len());
         found.insert(at, hit);
         Ok(())
-    }
-
-    /// Whether `page` is in the language searched in, as
-    /// [`PageSearcher::language_query`] allows.
-    fn reads(&self, page: &Page) -> bool {
-        match (self.requested_language.as_deref(), page.language()) {
-            (None, _) => true,
-            (Some(wanted), Some(language)) => wanted == language,
-            (Some(wanted), None) => wanted == "en",
-        }
     }
 
     /// The page stored at `address`.
