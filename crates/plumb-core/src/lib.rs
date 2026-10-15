@@ -35,6 +35,7 @@ pub mod profiles;
 pub mod safe;
 mod sign_in;
 pub mod simhash;
+pub mod site;
 pub mod site_item;
 mod site_search;
 pub mod stack_exchange;
