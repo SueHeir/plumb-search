@@ -27,7 +27,7 @@ fn a_batch_naming_what_the_denylist_takes_off_is_not_relayed() {
         }
     }
     let lines: Vec<String> = [
-        r#"{"domain":"example.com","url":"https://www.example.com/","key_pages":[{"label":"Docs","url":"https://example.com/docs"}]}"#,
+        r#"{"id":"example.com","kind":"site","url":"https://www.example.com/","edges":[{"rel":"key_page","to":"url:https://example.com/docs","text":"Docs"}]}"#,
         r#"{"icon_of":"icons.example","png":"AAAA"}"#,
         r#"{"news_of":"news.example","items":[{"title":"A","url":"https://news.example/a","at":1}]}"#,
         "not a record",
@@ -45,6 +45,53 @@ fn a_batch_naming_what_the_denylist_takes_off_is_not_relayed() {
     ] {
         assert!(holds_denied(&Denying(Some(denied)), &lines), "{denied}");
     }
+}
+
+/// A replay releases at most one crawl for each line of the batch that sets
+/// it off, each the facts of a crawl held as an item of at most
+/// `MAX_RECORD_BYTES`. Written as the receiver writes them, those facts are
+/// no longer than the item, so even the largest replay of signed crawls
+/// fits the receiver's envelope and is admitted like any other.
+#[test]
+fn the_largest_replay_of_signed_crawls_fits_the_receiver_s_envelope() {
+    let key = Keypair::generate_ed25519();
+    let crawler = key.public().to_peer_id();
+    let now = 1_800_000_000;
+    // As long as an item's text may be, in characters of four bytes.
+    let long = |chars: usize| "\u{1d11e}".repeat(chars);
+    let mut record = SiteRecord::new("example.com");
+    record.url = Some(format!("https://example.com/{}", "a".repeat(1_000)));
+    record.title = Some(long(1_000));
+    record.description = Some(long(1_000));
+    record.crawled_at = Some(now);
+    for n in 0..plumb_core::MAX_ALIASES {
+        let mut more = record.clone();
+        more.aliases.push(format!("{n} {}", long(250)));
+        if more.to_line().is_err() {
+            break;
+        }
+        record = more;
+    }
+    let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+        .unwrap()
+        .unwrap();
+    let line = &batch.records[0];
+    assert!(
+        line.len() > crate::batch::MAX_RECORD_BYTES - 1_200,
+        "{}",
+        line.len()
+    );
+    let mut agreement = crate::agree::Agreement::new(PeerId::random(), [crawler]);
+    let released = agreement.observe(crawler, accept_trusted_batch(&batch, &crawler, now), now);
+    assert_eq!(released.len(), 1);
+    let written = serde_json::to_vec(&released[0]).unwrap().len() + 1;
+    assert!(
+        written <= line.len(),
+        "{written} written of a {} byte line",
+        line.len()
+    );
+    let largest = (MAX_BATCH_RECORDS * crate::batch::MAX_RECORD_BYTES) as u64;
+    assert!(largest <= MAX_RECORD_DELIVERY_BYTES);
 }
 
 #[test]
@@ -656,10 +703,10 @@ fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
     let answer = || {
         (0..2)
             .map(|i| {
-                let mut bare: SiteRecord = serde_json::from_str(&batch.records[i]).unwrap();
+                let mut bare = SiteRecord::from_line(&batch.records[i]).unwrap();
                 bare.body_text = None;
                 BucketRecord {
-                    record: serde_json::to_string(&bare).unwrap(),
+                    record: bare.to_line().unwrap(),
                     proof: Some(batch.proof(i)),
                     also: Vec::new(),
                 }

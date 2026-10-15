@@ -113,7 +113,7 @@ Values follow [value.rs](src/value.rs): dates in ISO 8601 UTC as precise as know
 
 ### Signing
 
-A manifest is signed with Ed25519 over the bytes `plumb-set/1\0` followed by its canonical JSON without the `signature` key. Key notes are signed the same way under `plumb-note/1\0`, so a note never passes for a manifest or a manifest for a note, and neither passes for a crawl batch (`plumb-batch-v1\0`). Keys and signatures are unpadded base64url; keys are written `ed25519:<key>`.
+A manifest is signed with Ed25519 over the bytes `plumb-set/1\0` followed by its canonical JSON without the `signature` key. Key notes are signed the same way under `plumb-note/1\0`, so a note never passes for a manifest or a manifest for a note, and neither passes for a crawl batch (`plumb-batch-v2\0`, `v1` before v0.4.0). Keys and signatures are unpadded base64url; keys are written `ed25519:<key>`.
 
 `canonical_json` is RFC 8785 (JCS): no whitespace, object keys sorted by their UTF-16 code units, strings escaped as JavaScript's `JSON.stringify` does, and numbers written as JavaScript writes them (`1`, not `1.0`). Key order and spacing in the file do not matter; any change to a value breaks the signature.
 

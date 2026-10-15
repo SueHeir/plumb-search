@@ -1,8 +1,8 @@
 //! A crawled site as an item of the data format ([`plumb_format`]): kind
 //! `site`, its id the registrable domain. [`SiteRecord::to_item`] makes one
 //! and [`SiteRecord::from_item`] reads it back, so sets of sites
-//! (`plumb/sites`) and, later, crawl batches and bucket answers can carry
-//! sites as items.
+//! (`plumb/sites`), crawl batches and bucket answers carry sites as items,
+//! the last two a line of JSON each ([`SiteRecord::to_line`]).
 //!
 //! The item's own members hold what any reader of items understands: the
 //! homepage's URL, title and description (`about`), the start of its text
@@ -68,6 +68,26 @@ pub fn site_fields() -> BTreeMap<String, FieldSpec> {
         "crawl_version": {"type": "number"},
     }))
     .expect("the site fields are well formed")
+}
+
+/// The site a line [`SiteRecord::to_line`] wrote names, and when it was
+/// crawled, read without checking the rest: enough to note where a crawl
+/// of a site is, for much less work than [`SiteRecord::from_line`].
+pub fn crawl_of_line(line: &str) -> Option<(String, Option<u64>)> {
+    #[derive(serde::Deserialize)]
+    struct Line {
+        id: String,
+        kind: String,
+        #[serde(default)]
+        fields: Fields,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Fields {
+        crawled: Option<String>,
+    }
+    let line: Line = serde_json::from_str(line).ok()?;
+    let crawled = line.fields.crawled.as_deref().and_then(unix_seconds);
+    (line.kind == SITE).then(|| (line.id, crawled.and_then(|at| u64::try_from(at).ok())))
 }
 
 impl SiteRecord {
@@ -190,6 +210,25 @@ impl SiteRecord {
             }
         }
         Ok(record)
+    }
+
+    /// This site as one line of JSON, the item [`SiteRecord::to_item`]
+    /// makes: how crawl batches and bucket answers carry a site.
+    pub fn to_line(&self) -> Result<String> {
+        Ok(serde_json::to_string(&self.to_item()?)?)
+    }
+
+    /// The site of a line [`SiteRecord::to_line`] wrote, once its item
+    /// keeps the format's rules ([`Item::check`]).
+    pub fn from_line(line: &str) -> Result<SiteRecord> {
+        let item: Item = serde_json::from_str(line)?;
+        item.check()?;
+        ensure!(
+            !item.is_extension() && !item.is_deleted(),
+            "item {:?} is not a whole site",
+            item.id
+        );
+        SiteRecord::from_item(&item)
     }
 
     /// The item's fields ([`site_fields`]), each only when it says
@@ -459,6 +498,45 @@ mod tests {
         assert_eq!(
             SiteRecord::from_item(&read).unwrap(),
             as_carried(full_record())
+        );
+        // As a line, as a batch or a bucket answer carries it.
+        let line = full_record().to_line().unwrap();
+        assert_eq!(line, json);
+        assert_eq!(
+            SiteRecord::from_line(&line).unwrap(),
+            as_carried(full_record())
+        );
+    }
+
+    #[test]
+    fn a_line_is_read_only_as_a_whole_site_that_keeps_the_format_s_rules() {
+        let line = |value: Value| SiteRecord::from_line(&value.to_string());
+        assert!(line(json!({"id": "example.com", "kind": "site"})).is_ok());
+        // A site record of its own, as nodes before v0.4.0 sent them.
+        let old = serde_json::to_string(&SiteRecord::new("example.com")).unwrap();
+        assert!(SiteRecord::from_line(&old).is_err());
+        assert!(line(json!({"id": "example.com", "kind": "page"})).is_err());
+        assert!(line(json!({"id": "example.com", "extends": "site:example.com"})).is_err());
+        let not_canonical =
+            json!({"id": "example.com", "kind": "site", "url": "HTTPS://example.com"});
+        assert!(line(not_canonical).is_err());
+        assert!(SiteRecord::from_line("not json").is_err());
+    }
+
+    #[test]
+    fn a_line_says_its_site_and_crawl_time_without_being_read_whole() {
+        let line = full_record().to_line().unwrap();
+        let crawled = full_record().crawled_at;
+        assert_eq!(crawl_of_line(&line), Some(("python.org".into(), crawled)));
+        let never = SiteRecord::new("example.com").to_line().unwrap();
+        assert_eq!(crawl_of_line(&never), Some(("example.com".into(), None)));
+        assert_eq!(
+            crawl_of_line(r#"{"icon_of": "example.com", "png": ""}"#),
+            None
+        );
+        assert_eq!(
+            crawl_of_line(r#"{"id": "example.com", "kind": "page"}"#),
+            None
         );
     }
 

@@ -16,7 +16,7 @@
 //! buckets are retained, subject to count and byte limits, oldest fetch first.
 //!
 //! ```text
-//! <dir>/<bucket>.json   {"fetched_at": .., "answers": [[BucketRecord, ..], ..]}
+//! <dir>/<bucket>.json   {"version": 1, "fetched_at": .., "answers": [[BucketRecord, ..], ..]}
 //! ```
 
 use plumb_core::locks::Locked;
@@ -60,9 +60,15 @@ struct Entry {
 /// One bucket as fetched: the records of each node that answered for it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Saved {
+    /// [`VERSION`]; a bucket kept by an older version is read as none.
+    #[serde(default)]
+    version: u32,
     fetched_at: u64,
     answers: Vec<Vec<BucketRecord>>,
 }
+
+/// What [`Saved`] holds: 1 since v0.4.0, answers whose records are items.
+const VERSION: u32 = 1;
 
 /// Fetched buckets, on disk, with when each was fetched in memory.
 #[derive(Debug)]
@@ -200,6 +206,7 @@ impl BucketCache {
             return;
         }
         let saved = Saved {
+            version: VERSION,
             fetched_at: now,
             answers,
         };
@@ -415,7 +422,7 @@ fn read(path: &Path) -> Option<(Saved, u64)> {
         return None;
     }
     let saved: Saved = serde_json::from_slice(&bytes).ok()?;
-    if saved.answers.is_empty() {
+    if saved.version != VERSION || saved.answers.is_empty() {
         return None;
     }
     Some((saved, bytes.len() as u64))
@@ -553,6 +560,22 @@ mod tests {
         assert_eq!(saved.fetched_at, now);
         assert_eq!(saved.answers, vec![Vec::<BucketRecord>::new()]);
         assert!(reopened.get_retained(8, now + FRESH_FOR).is_none());
+    }
+
+    #[test]
+    fn buckets_kept_before_v0_4_0_are_removed_at_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_800_000_000;
+        let cache = BucketCache::open(dir.path(), now);
+        cache.put(7, vec![answer("item")], now);
+        drop(cache);
+        // As v0.3 wrote it, with site records of their own.
+        let old = serde_json::json!({"fetched_at": now, "answers": [answer("record")]});
+        fs::write(dir.path().join("8.json"), old.to_string()).unwrap();
+        let reopened = BucketCache::open(dir.path(), now);
+        assert!(reopened.get(7, now).is_some());
+        assert!(reopened.get(8, now).is_none());
+        assert!(!dir.path().join("8.json").exists());
     }
 
     #[test]
@@ -709,6 +732,7 @@ mod tests {
         fs::write(
             dir.path().join("0.json"),
             serde_json::to_vec(&Saved {
+                version: VERSION,
                 fetched_at: now,
                 answers: vec![answer("oldest")],
             })
