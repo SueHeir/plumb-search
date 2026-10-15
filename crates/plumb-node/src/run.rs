@@ -101,6 +101,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     config.focus_topics = args.focus;
     config.seed_from_network = !args.seed_from_outside;
     config.project_denylist = !args.no_project_denylist;
+    config.set_publishers.extend(args.set_publisher);
     if let Some(updates) = args.set_updates {
         config.set_updates = updates;
     }

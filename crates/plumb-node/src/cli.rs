@@ -502,6 +502,11 @@ pub struct RunArgs {
     /// takedown. Its entries for child sexual abuse material apply anyway.
     #[arg(long)]
     pub no_project_denylist: bool,
+    /// Also take the sets this key signs (`ed25519:...`), beside the
+    /// project's: to try a set, such as `plumb/sites`, signed with a key
+    /// of one's own before the project signs it. May be repeated.
+    #[arg(long, value_name = "KEY")]
+    pub set_publisher: Vec<plumb_format::PublicKey>,
     /// Which page set files to replace by themselves when a node this one
     /// trusts has a newer one: `all` (the default; each may grow at most a
     /// quarter past this node's own at a time, so a much bigger set is not
@@ -820,6 +825,15 @@ mod tests {
             Some("cc-main-2025-26-nov-dec-jan")
         );
         assert_eq!(args.alpha, Some(0.5));
+
+        let key = crate::node::signed_sets::PROJECT_KEY;
+        let Command::Run(args) = parse(&["run", "--data", "d", "--set-publisher", key])
+            .unwrap()
+            .command
+        else {
+            panic!("not run");
+        };
+        assert_eq!(args.set_publisher, vec![key.parse().unwrap()]);
     }
 
     #[test]
@@ -841,6 +855,7 @@ mod tests {
             &["--alpha", "2"],
             &["--profile", "laptop"],
             &["--bind", "localhost"],
+            &["--set-publisher", "ed25519:nope"],
         ] {
             assert!(run(bad).is_err(), "{bad:?}");
         }
