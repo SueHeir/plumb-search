@@ -112,8 +112,9 @@ impl SiteRecord {
     /// text is not cut, unlike the item's, and a node's own bookkeeping,
     /// the icon and headlines are left as they are. So is a redirect,
     /// which folding reads even to a site no item can name (with a `_`),
-    /// but for its site's canonical spelling. Cleaning a clean record
-    /// changes nothing.
+    /// but for its site's canonical spelling, and unless its date has no
+    /// timestamp (past the year 9999). Cleaning a clean record changes
+    /// nothing.
     pub fn clean(&mut self) {
         self.url = self.url.take().and_then(canonical_owned);
         self.title = self.title.take().and_then(tidy);
@@ -148,6 +149,7 @@ impl SiteRecord {
         self.intro = self.intro.take().and_then(tidy);
         self.summary = self.summary.take().and_then(tidy);
         self.crawled_at = self.crawled_at.filter(|&at| timestamp(at).is_some());
+        self.redirect = self.redirect.take().filter(|r| timestamp(r.at).is_some());
         if let Some(redirect) = &mut self.redirect {
             if let Some(to) = canonical_domain(&redirect.to) {
                 redirect.to = to;
@@ -179,35 +181,19 @@ impl SiteRecord {
 
     /// [`SiteRecord::to_item`] of a clean record.
     fn clean_to_item(self) -> Result<Item> {
-        let fields = self.fields();
-        let mut item = Item {
-            kind: SITE.into(),
-            url: self.url,
-            title: self.title,
-            about: self.description,
-            text: self
-                .body_text
-                .map(|text| match text.char_indices().nth(MAX_TEXT_CHARS) {
-                    Some((cut, _)) => text[..cut].trim_end().to_string(),
-                    None => text,
-                }),
-            lang: self.language,
-            names: self.aliases,
-            weight: (self.signals.linking_domains > 0)
-                .then(|| f64::from(self.signals.linking_domains)),
-            fields,
-            id: self.domain,
-            ..Item::default()
-        };
+        let mut item = self.whole_item();
+        item.text = item
+            .text
+            .map(|text| match text.char_indices().nth(MAX_TEXT_CHARS) {
+                Some((cut, _)) => text[..cut].trim_end().to_string(),
+                None => text,
+            });
+        let unnamed = |redirect: &Value| !redirect["to"].as_str().is_some_and(is_domain);
+        if item.fields.get("redirect").is_some_and(unnamed) {
+            item.fields.remove("redirect");
+        }
         if item.url.is_none() && is_domain(&item.id) {
             item.site = Some(item.id.clone());
-        }
-        for page in self.key_pages {
-            item.edges
-                .push(edge("key_page", Ref::Url(page.url), Some(page.label)));
-        }
-        for site in self.links_to {
-            item.edges.push(edge("links_to", Ref::Site(site), None));
         }
         while too_big(&item) {
             if let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) {
@@ -222,9 +208,94 @@ impl SiteRecord {
         Ok(item)
     }
 
+    /// This site as a node stores it ([`crate::stored`]): its item with all
+    /// a clean record holds, which an item sent elsewhere may not (the
+    /// whole page text, every field however big, a redirect to a site no
+    /// item can name), and fields of its own for the rest: the node's
+    /// crawl marks (`"crawl": {"tried": 1791605600, "failures": 2, "gone":
+    /// 1791000000}`, unix seconds as the record keeps them), and the icon
+    /// and headlines a crawl from another node brings into the inbox
+    /// (`"icon"`, and `"news"` as the record's [`crate::Headline`]s). Never
+    /// sent, so never checked against the format's rules.
+    pub(crate) fn to_stored_item(&self) -> Item {
+        let mut site = self.clone();
+        site.clean();
+        let mut crawl = Map::new();
+        if let Some(tried) = site.crawl_attempted_at {
+            crawl.insert("tried".into(), json!(tried));
+        }
+        if site.crawl_failures > 0 {
+            crawl.insert("failures".into(), json!(site.crawl_failures));
+        }
+        if let Some(gone) = site.gone_at {
+            crawl.insert("gone".into(), json!(gone));
+        }
+        let (icon, news) = (site.icon.take(), std::mem::take(&mut site.news));
+        let mut item = site.whole_item();
+        if !crawl.is_empty() {
+            item.fields.insert("crawl".into(), Value::Object(crawl));
+        }
+        if let Some(icon) = icon {
+            item.fields.insert("icon".into(), json!(icon));
+        }
+        if !news.is_empty() {
+            item.fields.insert("news".into(), json!(news));
+        }
+        item
+    }
+
+    /// The site a stored item holds ([`SiteRecord::to_stored_item`]).
+    pub(crate) fn from_stored_item(item: &Item) -> Result<SiteRecord> {
+        let mut record = SiteRecord::read_item(item, true)?;
+        if let Some(crawl) = item.fields.get("crawl") {
+            record.crawl_attempted_at = crawl.get("tried").and_then(Value::as_u64);
+            record.crawl_failures = number(crawl.get("failures")).unwrap_or_default();
+            record.gone_at = crawl.get("gone").and_then(Value::as_u64);
+        }
+        record.icon = string(item.fields.get("icon"));
+        if let Some(news) = item.fields.get("news") {
+            record.news = serde_json::from_value(news.clone())?;
+        }
+        Ok(record)
+    }
+
+    /// The item of a clean record with all it holds: its whole page text,
+    /// every field, and a redirect to any site.
+    fn whole_item(self) -> Item {
+        let fields = self.fields();
+        let mut item = Item {
+            kind: SITE.into(),
+            url: self.url,
+            title: self.title,
+            about: self.description,
+            text: self.body_text,
+            lang: self.language,
+            names: self.aliases,
+            weight: (self.signals.linking_domains > 0)
+                .then(|| f64::from(self.signals.linking_domains)),
+            fields,
+            id: self.domain,
+            ..Item::default()
+        };
+        for page in self.key_pages {
+            item.edges
+                .push(edge("key_page", Ref::Url(page.url), Some(page.label)));
+        }
+        for site in self.links_to {
+            item.edges.push(edge("links_to", Ref::Site(site), None));
+        }
+        item
+    }
+
     /// The site a `site` item holds ([`crate::site_item`]). Members and
     /// fields it does not know, or that do not read, are left out.
     pub fn from_item(item: &Item) -> Result<SiteRecord> {
+        SiteRecord::read_item(item, false)
+    }
+
+    /// [`SiteRecord::from_item`], taking a redirect to a site no item can
+    /// name when the item is `stored`.
+    fn read_item(item: &Item, stored: bool) -> Result<SiteRecord> {
         ensure!(item.kind == SITE, "item {:?} is not a site", item.id);
         let field = |name: &str| item.fields.get(name);
         let member = |name: &str, key: &str| field(name).and_then(|value| value.get(key));
@@ -278,7 +349,7 @@ impl SiteRecord {
             .collect();
         record.redirect = field("redirect").and_then(|redirect| {
             Some(Redirect {
-                to: string(redirect.get("to")).filter(|to| is_domain(to))?,
+                to: string(redirect.get("to")).filter(|to| stored || is_domain(to))?,
                 at: redirect
                     .get("at")
                     .and_then(Value::as_str)
@@ -324,7 +395,7 @@ impl SiteRecord {
     }
 
     /// The item's fields ([`site_fields`]) of a clean record, each only
-    /// when it says something.
+    /// when it says something. The redirect is there whatever its site.
     fn fields(&self) -> BTreeMap<String, Value> {
         let mut fields = BTreeMap::new();
         let mut put = |name: &str, value: Value| {
@@ -379,7 +450,7 @@ impl SiteRecord {
             wikidata.insert("sitelinks".into(), json!(signals.sitelinks));
         }
         put("wikidata", Value::Object(wikidata));
-        if signals.fact_checks > 0 {
+        if signals.fact_checks > 0 || signals.fact_agrees > 0 {
             put(
                 "fact_checks",
                 json!({"checked": signals.fact_checks, "agreed": signals.fact_agrees}),
@@ -391,7 +462,7 @@ impl SiteRecord {
         if self.crawl_version > 0 {
             put("crawl_version", json!(self.crawl_version));
         }
-        if let Some(redirect) = self.redirect.as_ref().filter(|r| is_domain(&r.to)) {
+        if let Some(redirect) = &self.redirect {
             if let Some(at) = timestamp(redirect.at) {
                 let mut object = json!({"to": redirect.to, "at": at});
                 if redirect.inner {
@@ -857,6 +928,34 @@ mod tests {
             .unwrap()
             .fields
             .contains_key("redirect"));
+    }
+
+    #[test]
+    fn a_clean_record_comes_back_whole_from_its_stored_item() {
+        let mut record = full_record();
+        record.body_text = Some("word ".repeat(400));
+        // Over 16 KiB, which an item sent elsewhere sheds.
+        record.terms = (0..100)
+            .map(|i| format!("term {i} {}", "x".repeat(150)))
+            .collect();
+        record.redirect.as_mut().unwrap().to = "foo_bar.com".into();
+        record.signals.fact_checks = 0;
+        record.signals.fact_agrees = 2;
+        record.clean();
+        let item = record.to_stored_item();
+        assert!(item.fields.contains_key("crawl"));
+        let json = serde_json::to_string(&item).unwrap();
+        let back: Item = serde_json::from_str(&json).unwrap();
+        assert_eq!(SiteRecord::from_stored_item(&back).unwrap(), record);
+        // A site never crawled has no crawl marks to store.
+        let bare = SiteRecord::new("example.com").to_stored_item();
+        assert!(bare.fields.is_empty());
+        // Sent elsewhere, the same site is cut down to the format's rules.
+        let sent = record.to_item().unwrap();
+        assert!(!sent.fields.contains_key("redirect"));
+        assert!(!sent.fields.contains_key("crawl"));
+        assert!(!sent.fields.contains_key("icon"));
+        assert!(!sent.fields.contains_key("terms"));
     }
 
     #[test]
