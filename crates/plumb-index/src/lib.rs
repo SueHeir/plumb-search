@@ -382,6 +382,12 @@ pub trait Meaning {
     fn plain_closeness(&self, _domain: &str) -> Option<Option<f32>> {
         None
     }
+    /// The address of the article nearest the query in meaning, when the
+    /// node has article vectors and it stands out from the next nearest
+    /// ([`pages::PageSearcher::add_meant`]).
+    fn nearest_page(&self) -> Option<String> {
+        None
+    }
 }
 
 /// What [`build_index`] built. Every record is a document, merged into
@@ -563,6 +569,10 @@ pub struct SearchResults {
     /// Set when the query looks misspelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spelling: Option<Spelling>,
+    /// The article nearest the query in meaning ([`Meaning::nearest_page`]),
+    /// for the page search to add. Not sent: a node finds its own.
+    #[serde(skip)]
+    pub meant: Option<String>,
 }
 
 /// A suggested spelling of a query: "amazom" -> "amazon".

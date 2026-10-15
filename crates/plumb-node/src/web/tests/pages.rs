@@ -496,6 +496,7 @@ fn plugins_are_shown_what_articles_are_about_and_mark_them_up() {
         hits: vec![scored("cheerz.com", 0.5)],
         site_search: None,
         spelling: None,
+        meant: None,
     };
     let shown = shown_results(&results, 10);
     assert_eq!(shown.len(), 2);

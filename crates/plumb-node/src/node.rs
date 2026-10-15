@@ -211,6 +211,9 @@ pub struct NodeConfig {
     /// Threads that embed sites for search by meaning; `None` for half the
     /// CPUs this node may use.
     pub embed_threads: Option<usize>,
+    /// Article vectors searches take the article nearest them in meaning
+    /// from ([`crate::meaning::MeaningIndex::with_pages`]).
+    pub page_vectors: Option<std::path::PathBuf>,
     /// On first start in the network, set up from the sites of a node this
     /// one trusts rather than from the seed downloads (Tranco, Common
     /// Crawl, Wikidata, Wikipedia), which are then a fallback for when no
@@ -357,6 +360,7 @@ impl NodeConfig {
             search_by_meaning: false,
             meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
+            page_vectors: None,
             seed_from_network: true,
             set_updates: crate::pages::SetUpdates::All,
             sources: SeedSources::default(),

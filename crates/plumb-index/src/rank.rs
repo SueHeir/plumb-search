@@ -1010,7 +1010,7 @@ impl Searcher {
             hits,
             pages: Vec::new(),
             site_search,
-            spelling: None,
+            ..SearchResults::default()
         };
         Ok((results, named))
     }

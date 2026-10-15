@@ -226,6 +226,7 @@ impl Searcher {
         let ops = Operators::parse(query_text);
         if !ops.any() {
             let mut results = self.search_words(query_text, limit, cfg, options, meaning)?;
+            results.meant = meaning.and_then(|meaning| meaning.nearest_page());
             if cfg.health_authorities {
                 health::authorities_first(
                     query_text,
