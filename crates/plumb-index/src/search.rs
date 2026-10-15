@@ -22,9 +22,9 @@ use crate::query::{matching_docs, words_after, ParsedQuery, COMPARISON_WORDS};
 use crate::rank::{best_link_score, bm25_of, domain_of, link_scores};
 use crate::schema::Fields;
 use crate::{
-    analysis, health, pages, schema, spell, spell_model, CandidatePool, Hit, Meaning, RankConfig,
-    SearchOptions, SearchResults, Searcher, SiteSearch, Spelling, WordsOrder, FILLER_WORDS,
-    WELL_KNOWN_LINK_SCORE,
+    analysis, health, learned, pages, schema, spell, spell_model, CandidatePool, Hit, Meaning,
+    RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch, Spelling, WordsOrder,
+    FILLER_WORDS, WELL_KNOWN_LINK_SCORE,
 };
 
 /// A query with operators ranks this many times its limit, and at least
@@ -225,7 +225,16 @@ impl Searcher {
         let query_text = without_www(query_text);
         let ops = Operators::parse(query_text);
         if !ops.any() {
-            let mut results = self.search_words(query_text, limit, cfg, options, meaning)?;
+            let depth = if cfg.learned_sites {
+                limit.max(learned::LEARNED_SITES)
+            } else {
+                limit
+            };
+            let mut results = self.search_words(query_text, depth, cfg, options, meaning)?;
+            if cfg.learned_sites {
+                learned::reorder_sites(learned::Model::sites(), query_text, &mut results.hits);
+                results.hits.truncate(limit);
+            }
             if cfg.health_authorities {
                 health::authorities_first(
                     query_text,

@@ -217,6 +217,8 @@ Then the learned ranking reorders the first rows, and `after_learned_order` puts
 
 The model reads 45 signals per row (`FEATURES`): the row's place, query length and whether it is a question, whether it is a page and of which set, a page's name match and popularity, a site's score, text and link scores and how far they are below the best site's, whether it is named or official, its country, the pages under it, how many of the query's main words its title, address and description hold, and how the site matched (`CandidateEvidence` in [query_evidence.rs](../crates/plumb-index/src/query_evidence.rs)). `Model::from_json` refuses a model trained on other features.
 
+A second model, built in from [learned_sites_model.json](../crates/plumb-index/src/learned_sites_model.json), can put the first 100 sites (`LEARNED_SITES`) in order before pages are placed (`reorder_sites`, `RankConfig::learned_sites`, off until that model is trained). The blend often finds the site a described search wants but lists it far down, where the first 10 rows never reach: "photo sharing app" has instagram.com below the tenth. It reads the same signals, follows the same guards, and is trained on deeper rows (`eval --limit 100 --features-out`, `train-rank --rows 100`).
+
 The model only reorders. Guards in `reorder` keep the hand-made ranking's say where the model is known to go wrong:
 
 - A record the query names by its identifier ("rfc 3339") stays first; the model never saw one.

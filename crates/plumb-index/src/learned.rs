@@ -25,6 +25,10 @@ pub use net::{squash, Layer, Net};
 /// How many of the first listed rows the model puts in order.
 pub const LEARNED_ROWS: usize = 10;
 
+/// How many of a search's first sites the site model puts in order
+/// ([`reorder_sites`]), before pages are placed among them.
+pub const LEARNED_SITES: usize = 100;
+
 /// Page sets the model tells apart, by the start of their name
 /// ([`crate::pages::Page::set`]).
 const SETS: [&str; 8] = [
@@ -433,6 +437,17 @@ impl Model {
         })
     }
 
+    /// The model that puts a search's first [`LEARNED_SITES`] sites in
+    /// order ([`reorder_sites`]), trained on the sites `eval/` lists
+    /// (`plumb-tools train-rank --rows 100`).
+    pub fn sites() -> &'static Model {
+        static MODEL: OnceLock<Model> = OnceLock::new();
+        MODEL.get_or_init(|| {
+            Model::from_json(include_str!("learned_sites_model.json"))
+                .expect("the built-in site ranking model reads")
+        })
+    }
+
     /// The score of a row with features `x`; higher comes first.
     pub fn score(&self, x: &[f64]) -> f64 {
         let trees: f64 = self.trees.iter().map(|tree| tree.value(x)).sum();
@@ -564,11 +579,26 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
         .into_iter()
         .partition(|page| crate::pages::is_record(&page.hit));
     *placed = rest;
-    reorder_rows(model, query, hits, placed);
+    reorder_rows(model, query, hits, placed, LEARNED_ROWS);
     placed.splice(0..0, records);
 }
 
-fn reorder_rows(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec<PlacedPage>) {
+/// Puts the first [`LEARNED_SITES`] of `hits` in the order `model` gives,
+/// as [`reorder`] does the first rows once pages are placed, and under
+/// the same rules. Deep enough for the model to lift a site the hand-made
+/// ranking found but listed far down: "photo sharing app" has
+/// instagram.com, with every word and the most links, below the tenth.
+pub fn reorder_sites(model: &Model, query: &str, hits: &mut Vec<Hit>) {
+    reorder_rows(model, query, hits, &mut Vec::new(), LEARNED_SITES);
+}
+
+fn reorder_rows(
+    model: &Model,
+    query: &str,
+    hits: &mut Vec<Hit>,
+    placed: &mut Vec<PlacedPage>,
+    depth: usize,
+) {
     let rows = listed(hits, placed);
     if rows.len() < 2 {
         return;
@@ -587,7 +617,7 @@ fn reorder_rows(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Ve
             Listed::Page(i) => RowSignals::page(&placed[i].hit),
         })
         .collect();
-    let mut order = model.order(query, &signals);
+    let mut order = model.order_first(query, &signals, depth);
     // The model may reorder within a relevance tier, but an unsupported
     // domain word cannot regain top placement because it is popular.
     // A named page's corroborated official-site identity is also query
@@ -794,6 +824,29 @@ mod tests {
             right: leaf(2.0),
         };
         Model::new(vec![tree], None)
+    }
+
+    #[test]
+    fn the_site_model_lifts_a_site_from_far_down_the_list() {
+        // The named site is 13th of 120: the model puts it first, sites
+        // past the hundredth keep their places, and scores still go down.
+        let mut hits: Vec<Hit> = (0..120)
+            .map(|i| site(&format!("site{i}.example"), 1.0 - i as f32 / 200.0, i == 12))
+            .collect();
+        reorder_sites(&named_first_model(), "some site", &mut hits);
+        let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
+        assert_eq!(
+            domains[..3],
+            ["site12.example", "site0.example", "site1.example"]
+        );
+        assert_eq!(
+            domains[LEARNED_SITES],
+            format!("site{LEARNED_SITES}.example")
+        );
+        assert_eq!(hits.len(), 120);
+        assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
+        // The model nodes use reads.
+        assert_eq!(Model::sites().features.len(), FEATURES.len());
     }
 
     #[test]

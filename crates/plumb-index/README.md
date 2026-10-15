@@ -82,8 +82,9 @@ About 43,000 lines, tests included.
 | [pages/docs.rs](src/pages/docs.rs), [pages/papers.rs](src/pages/papers.rs), [pages/records.rs](src/pages/records.rs), [pages/repos.rs](src/pages/repos.rs) | documentation pages, papers, records named by identifier ("rfc 3339"), repositories |
 | [items.rs](src/items.rs) | data format items read back as pages |
 | [places.rs](src/places.rs) | the places index: `parse_place_query`, `PlaceSearcher`, `build_place_index` |
-| [learned.rs](src/learned.rs), [learned/net.rs](src/learned/net.rs) | the learned ranking: features, trees or a small net, `reorder` |
+| [learned.rs](src/learned.rs), [learned/net.rs](src/learned/net.rs) | the learned ranking: features, trees or a small net, `reorder` and `reorder_sites` |
 | [learned_model.json](src/learned_model.json) | the built-in model nodes use |
+| [learned_sites_model.json](src/learned_sites_model.json) | the built-in model for the first 100 sites, before pages are placed (empty until trained) |
 
 ## How it works
 
@@ -128,7 +129,7 @@ where the prior is the site's `link_score`, the text score is BM25 normalized ov
 
 The page index is searched next to the sites: a page is found by name (some kinds also by the words of their title, tags, description or lead; see [Page sets](../../docs/pages.md#how-pages-are-searched-and-shown)), and scored by how well the query names it and how much it is read. `place_pages` decides for each page whether it goes under a site it is about, before a site, or after the sites. The caller runs these steps (plumb-node in `node/pages.rs`, plumb-tools in `eval.rs`). Keep the two in step, or the evals measure something the node does not serve.
 
-`learned::reorder` then reorders the first 10 rows (`LEARNED_ROWS`) with the built-in model. The model is gradient-boosted trees trained with LambdaMART by `plumb-tools train-rank`; [learned/net.rs](src/learned/net.rs) is a small neural ranker the same command can train instead.
+`learned::reorder` then reorders the first 10 rows (`LEARNED_ROWS`) with the built-in model. With `RankConfig::learned_sites` on, `Searcher::search_meaning` first has the site model reorder the first 100 sites (`LEARNED_SITES`), under the same rules, before anything else moves them. That way a site the blend found but listed far down can come up: the first 10 rows never hold it. It is trained the same way, on deeper rows (`eval --limit 100 --features-out`, `train-rank --rows 100`). The model is gradient-boosted trees trained with LambdaMART by `plumb-tools train-rank`; [learned/net.rs](src/learned/net.rs) is a small neural ranker the same command can train instead.
 
 ### Invariants
 
@@ -165,6 +166,7 @@ for hit in &results.hits {
 | `pages::place_pages`, `place_operator_pages`, `add_named_site`, `lift_named_sites` | list pages among the sites |
 | `places::build_place_index`, `places::PlaceSearcher`, `parse_place_query` | build and search the places index |
 | `learned::reorder`, `learned::Model::builtin` | the learned order |
+| `learned::reorder_sites`, `learned::Model::sites` | the learned order of the first 100 sites (`RankConfig::learned_sites`) |
 | `health::sources_lead` | a health source the query names, first again after the learned order |
 | `remove_build_leftovers` | clear a crashed build's staging directories at start |
 
