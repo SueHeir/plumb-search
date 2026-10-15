@@ -1423,7 +1423,13 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
         }
         restarted.shutdown().await;
         drop(replayed);
-        assert_eq!(budget.status().reserved_bytes, 0);
+        // The replay runs on a blocking thread that shutting down does not
+        // wait for; it lets its reservation go once it sees the stop.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while budget.status().reserved_bytes != 0 {
+            assert!(Instant::now() < deadline, "the replay kept its reservation");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(std::fs::read(&signed_path).unwrap(), signed);
         assert_eq!(
             plumb_net::credits::Ledger::open(&credit_dir)

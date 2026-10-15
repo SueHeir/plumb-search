@@ -359,9 +359,11 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     };
     if let Some((records, downloaded)) = from_network {
         let built = blocking(inner, move |inner| {
-            let mut fresh = SavedState::fresh(inner.config.initial_crawl);
-            fresh.add_downloaded(downloaded, now_unix());
-            inner.update_saved(|saved| *saved = fresh)?;
+            let fresh = SavedState::fresh(inner.config.initial_crawl);
+            inner.update_saved(|saved| {
+                saved.start_over(fresh);
+                saved.add_downloaded(downloaded, now_unix());
+            })?;
             save_seed_records(inner, &records)?;
             inner.check_stop()?;
             build_unless_crawling_only(inner, &records)
@@ -384,9 +386,11 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
         let mut fresh = SavedState::fresh(inner.config.initial_crawl);
         fresh.wikidata_missing = true;
         fresh.quick_start = true;
-        fresh.add_downloaded(downloaded, now_unix());
         // Saved first: records on disk always come with their state.
-        inner.update_saved(|saved| *saved = fresh)?;
+        inner.update_saved(|saved| {
+            saved.start_over(fresh);
+            saved.add_downloaded(downloaded, now_unix());
+        })?;
         save_seed_records(inner, &records)?;
         inner.check_stop()?;
         build_unless_crawling_only(inner, &records)

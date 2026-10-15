@@ -310,6 +310,16 @@ impl SavedState {
         }
     }
 
+    /// Starts over from `fresh`, keeping what this state counted as
+    /// downloaded, such as the seed data or the set of sites' first part
+    /// taken before setting up.
+    pub(super) fn start_over(&mut self, mut fresh: SavedState) {
+        fresh.download_day = self.download_day;
+        fresh.downloaded_on_day = self.downloaded_on_day;
+        fresh.downloaded_total = self.downloaded_total;
+        *self = fresh;
+    }
+
     pub(super) fn add_downloaded(&mut self, bytes: u64, now: u64) {
         let today = now / SECONDS_PER_DAY;
         if self.download_day != today {
