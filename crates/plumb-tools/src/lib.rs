@@ -3,7 +3,8 @@
 //! train ranking ([`eval`], [`eval_labels`], [`train_rank`]), do a node's
 //! work by hand ([`crawl`], [`search`], [`embed`]), and look into records
 //! files and a node's data ([`link_rank`], [`top_sites`], [`fact_trust`],
-//! [`terms`], [`summaries`], [`storage`], [`dead_sites`]). [`set`] writes
+//! [`terms`], [`summaries`], [`storage`], [`dead_sites`],
+//! [`site_items`]). [`set`] writes
 //! and signs sets in the data format, page sets as items with
 //! [`page_items`], which nodes only check and read. [`pir`] is the table a
 //! private information retrieval server would answer from, which no node
@@ -31,6 +32,7 @@ pub mod reference_sites;
 pub mod relations;
 pub mod search;
 pub mod set;
+pub mod site_items;
 pub mod site_rules;
 pub mod storage;
 pub mod subpage_sites;
@@ -63,6 +65,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::FactTrust(args) => fact_trust::run(&args),
         Command::TopSites(args) => top_sites::run(&args),
         Command::Set(args) => set::run(args),
+        Command::SiteItems(args) => site_items::run(&args),
         Command::Crawl(args) => crawl::run(args),
         Command::Index(args) => search::run_index(args),
         Command::Search(args) => search::run_search(args),
