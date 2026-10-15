@@ -45,7 +45,7 @@ The search page has no login: anyone who can reach the port can search. To use a
 | Tag | What it is |
 | --- | --- |
 | `latest` | The newest release |
-| `0.3.1`, `0.3` | A release by version; from 1.0 on, the major version (`1`) too |
+| `0.4.0`, `0.4` | A release by version; from 1.0 on, the major version (`1`) too |
 | `main` | The main branch, unreleased changes included |
 | `sha-<commit>` | One build of one commit |
 
