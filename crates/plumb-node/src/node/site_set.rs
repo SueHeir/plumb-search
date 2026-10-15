@@ -6,9 +6,9 @@
 //!
 //! Unlike the other sets, which the signed sets job takes whole, it is
 //! held part by part, and only while filling reads it. Filling fetches the
-//! part it reads next when it reaches it ([`fetch`]), and the first part
-//! too: the best sites, which a new node sets up from, so the part most
-//! asked for. It removes the parts it is past but the first. While filling
+//! part it reads next when it reaches it ([`fetch`]), and removes the parts
+//! it is past but the first, the best sites, which a new node sets up from
+//! and so the part most asked for. While filling
 //! reads the set, it looks for a newer generation every [`LOOK_EVERY`], and
 //! whenever a part it needs is missing, since no node keeps the parts of a
 //! generation a newer one replaced. It puts a newer one in place of the one
@@ -248,11 +248,10 @@ pub(super) async fn fetch(
     fetch_parts(inner, net, at, count, look).await
 }
 
-/// Brings the parts that hold the `count` sites from the `at`th on, and
-/// then the first part, which new nodes ask for: looks for a newer
-/// generation when `look`, when none is held, or when a part of the one
-/// held is missing, as once a newer one takes its place no node holds its
-/// parts. Removes the parts before `at` but the first.
+/// Brings the parts that hold the `count` sites from the `at`th on: looks
+/// for a newer generation when `look`, when none is held, or when a part
+/// of the one held is missing, as once a newer one takes its place no node
+/// holds its parts. Removes the parts before `at` but the first.
 async fn fetch_parts(
     inner: &Arc<Inner>,
     net: &NetHandle,
@@ -275,8 +274,11 @@ async fn fetch_parts(
             match signed_sets::ask_newest(inner, net, SITES, generation).await? {
                 Offer::NoPeer if held.is_none() => return Ok(Fetched::NoPeer),
                 Offer::Busy if held.is_none() => return Ok(Fetched::Busy),
-                Offer::NoPeer | Offer::Busy => {}
-                Offer::Current => *inner.sites.looked.locked() = Some(Instant::now()),
+                // With the set held, a look that found no answer waits
+                // its turn like one that did.
+                Offer::NoPeer | Offer::Busy | Offer::Current => {
+                    *inner.sites.looked.locked() = Some(Instant::now());
+                }
                 Offer::Newer {
                     text, from: peer, ..
                 } => {
@@ -299,11 +301,6 @@ async fn fetch_parts(
             }
         }
         if here[held.parts_for(at, count)].iter().all(|here| *here) {
-            // The first part is for other nodes: what came of it does not
-            // change what filling reads.
-            if !here.is_empty() {
-                let _ = fetch_part(inner, net, &held, 0, &mut here, from).await?;
-            }
             return Ok(Fetched::Here);
         }
         look = true;
@@ -330,9 +327,10 @@ async fn fetch_part(
     let partial = held.dir.join(format!("{}.partial", part.path));
     if let Err(err) = signed_sets::fetch_part(inner, net, &part, &partial, from).await {
         debug!("{SITES}: part {}: {err:#}", part.path);
-        // Not resumed: filling reads a trusted node's list from here on.
+        // Not resumed, unless the node is stopping: filling reads a
+        // trusted node's list from here on.
         blocking(inner, move |inner| {
-            if fs::metadata(&partial).is_ok() {
+            if !inner.stopping() && fs::metadata(&partial).is_ok() {
                 storage::remove_file(&partial, inner.storage.as_deref())?;
             }
             Ok(())
