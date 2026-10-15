@@ -2110,7 +2110,7 @@ mod tests {
         // and blog.example.org a site of its own.
         let mut rules =
             plumb_format::sites::read_suffix_list("com\norg\napp\nplumbtest.app\n").unwrap();
-        rules.extend(crate::site_rules::built_in_rules());
+        rules.extend(plumb_core::subsites::list_rules());
         rules.push(plumb_format::sites::Rule::Subsite(
             "blog.example.org".into(),
         ));

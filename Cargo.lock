@@ -5926,6 +5926,7 @@ dependencies = [
  "cbor4ii",
  "libp2p-identity",
  "ohttp",
+ "plumb-format",
  "psl",
  "serde",
  "serde_bytes",

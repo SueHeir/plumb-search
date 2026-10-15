@@ -24,11 +24,11 @@ flowchart LR
   tools["plumb-tools"] --> core
   net["plumb-net"] -->|"oblivious"| core
   private["plumb-private"] -->|"oblivious"| core
-  core["plumb-core"] --> psl["psl<br/>Public Suffix List"]
+  core["plumb-core"] --> format["plumb-format<br/>site rules, items"]
   core -.->|"oblivious"| ohttp["ohttp<br/>RFC 9458"]
 ```
 
-plumb-e2e uses it in its tests too. plumb-core depends on no other Plumb crate.
+plumb-e2e uses it in its tests too. The only Plumb crate plumb-core depends on is [plumb-format](../plumb-format/README.md), for its site rules and for sites as items.
 
 ## What is in it
 
@@ -37,7 +37,8 @@ plumb-e2e uses it in its tests too. plumb-core depends on no other Plumb crate.
 | Module | What it does |
 | --- | --- |
 | [lib.rs](src/lib.rs) | `SiteRecord`, `Signals`, `LinkText`, `Redirect`, `RecordSet`; `link_score`; domain helpers (`registrable_domain`, `canonical_domain`, `host_of`, `is_homepage_path`); text helpers (`normalize_text`, `joined`, `site_language`, `unmangled`); `read_jsonl` and `write_jsonl` |
-| [subsites.rs](src/subsites.rs) | Subdomains that are sites of their own (`SUBDOMAIN_SITES`, `UMBRELLA_DOMAINS`), and `use_site_list` to swap in signed site rules |
+| [site_item.rs](src/site_item.rs) | A `SiteRecord` as an item of the data format, kind `site` (`to_item`, `from_item`), and the fields of a set of sites (`site_fields`) |
+| [subsites.rs](src/subsites.rs) | Subdomains that are sites of their own (`SUBDOMAIN_SITES`, `UMBRELLA_DOMAINS`), the built-in site rules with the Public Suffix List in [data/](data/public_suffix_list.dat), and `use_site_rules` to swap in signed ones |
 | [keys.rs](src/keys.rs) | Bucket keys: how a search asks for sites without saying what it looks for |
 | [kinds.rs](src/kinds.rs) | Kinds of site from Wikidata ("bank", "airline"), plurals and generic kinds |
 | [country.rs](src/country.rs) | Which country a site belongs to (`site_country`, `tld_country`) and the country setting's choices |
@@ -130,7 +131,7 @@ score  = 0.75 * rank + 0.25 * links
 
 `normalize_text` is the one normalization every searcher uses (index, network search, private search), so queries and records always meet: lowercase, letters and digits only, apostrophes and combining marks dropped, and runs of one-letter tokens joined (`U.S. Bank` is `us bank`). `joined` drops the spaces too, so "us bank" meets the domain label `usbank`.
 
-`registrable_domain` turns a URL or host into the site it belongs to: the registrable domain by the Public Suffix List (`news.bbc.co.uk` is `bbc.co.uk`), except for the subdomains in [subsites.rs](src/subsites.rs) that are sites of their own (`news.ycombinator.com`, `dmv.ca.gov`). A node may install other lists once at start with `use_site_list`; plumb-node does this with the signed site rules from [plumb-format](../plumb-format/README.md). `host_of` refuses IP addresses, user info and schemes other than http and https.
+`registrable_domain` turns a URL or host into the site it belongs to: the registrable domain by the Public Suffix List (`news.bbc.co.uk` is `bbc.co.uk`), except for the subdomains in [subsites.rs](src/subsites.rs) that are sites of their own (`news.ycombinator.com`, `dmv.ca.gov`). The lists are [plumb-format](../plumb-format/README.md) site rules (`built_in_rules`), applied by its `SiteRules`. A node may install other rules once at start with `use_site_rules`; plumb-node does this with the signed site rules set. `host_of` refuses IP addresses, user info and schemes other than http and https.
 
 ### Bucket keys
 

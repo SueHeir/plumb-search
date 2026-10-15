@@ -20,9 +20,8 @@
 //! an article or a package is belongs to the code that builds or ranks
 //! it.
 //!
-//! Nothing else in the workspace uses this crate yet. It is the first,
-//! additive step of the v0.3.0 data format rework, so v0.2.0 nodes and
-//! today's page sets are unaffected.
+//! plumb-node and plumb-index read the sets a node takes with it, and
+//! plumb-core's built-in site rules are [`SiteRules`] too.
 
 pub mod canonical;
 pub mod deny;
