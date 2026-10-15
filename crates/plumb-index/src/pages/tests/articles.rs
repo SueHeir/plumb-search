@@ -1409,21 +1409,30 @@ fn what_is_asked_about_a_drug_finds_its_article() {
             "Maltreatment of a child",
             None,
         ),
+        drug(
+            "Opioid withdrawal",
+            &[],
+            "Symptoms after stopping opioids",
+            None,
+        ),
     ]);
     let named = |q: &str| named_titles(&s, q);
     assert_eq!(named("memantine abuse"), ["Memantine"]);
     assert_eq!(named("namenda misuse"), ["Memantine"]);
     assert_eq!(named("gabapentin withdrawal symptoms"), ["Gabapentin"]);
     assert_eq!(named("xanax addiction"), ["Alprazolam"]);
-    assert_eq!(named("alprazolam half-life"), ["Alprazolam"]);
+    assert_eq!(named("what is memantine abuse"), ["Memantine"]);
+    assert_eq!(named("memantine abuse treatment"), ["Memantine"]);
     assert_eq!(
-        hinted_name("gabapentin withdrawal symptoms"),
-        Some(("gabapentin".into(), Hint::Drug))
+        drug_asked("Gabapentin withdrawal symptoms?"),
+        Some("gabapentin".into())
     );
-    // Only a drug, and not when a page is called the whole query or the
-    // name is a kind of drug.
+    // Only a drug, and not when a page is named otherwise or the name is a
+    // kind of drug.
     assert!(named("report abuse").is_empty());
     assert!(named("alcohol addiction").is_empty());
     assert!(named("opioid addiction").is_empty());
     assert_eq!(named("child abuse"), ["Child abuse"]);
+    assert_eq!(named("what is child abuse"), ["Child abuse"]);
+    assert_eq!(named("opioid withdrawal symptoms"), ["Opioid withdrawal"]);
 }

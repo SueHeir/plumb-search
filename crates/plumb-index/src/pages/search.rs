@@ -52,7 +52,7 @@ pub(crate) enum Hint {
     /// something is asked: "lakers schedule", "coachella lineup".
     Event,
     /// A drug or other substance of that name, of whose use something is
-    /// asked: "memantine abuse", "gabapentin withdrawal".
+    /// asked: "memantine abuse", "gabapentin withdrawal" ([`drug_asked`]).
     Drug,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
@@ -493,27 +493,6 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" stands for", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
-    // What people ask of a drug's use, which its article tells but not in
-    // these words: "memantine abuse", "gabapentin withdrawal", "metformin
-    // interactions". Longer tails first, before " symptoms": "gabapentin
-    // withdrawal symptoms" is not about a "gabapentin withdrawal".
-    (" abuse potential", Hint::Drug),
-    (" abuse", Hint::Drug),
-    (" misuse", Hint::Drug),
-    (" addiction", Hint::Drug),
-    (" dependence", Hint::Drug),
-    (" tolerance", Hint::Drug),
-    (" withdrawal symptoms", Hint::Drug),
-    (" withdrawal", Hint::Drug),
-    (" overdose symptoms", Hint::Drug),
-    (" overdose", Hint::Drug),
-    (" recreational use", Hint::Drug),
-    (" drug interactions", Hint::Drug),
-    (" interactions", Hint::Drug),
-    (" half life", Hint::Drug),
-    (" half-life", Hint::Drug),
-    (" mechanism of action", Hint::Drug),
-    (" contraindications", Hint::Drug),
     // The article on a drug, an illness or a thing of science says what
     // these ask, and none of the words: "melatonin dosage", "shingles
     // symptoms", "photosynthesis equation".
@@ -529,6 +508,39 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" uses", Hint::Aspect),
     (" diagram", Hint::Aspect),
 ];
+
+/// Words after a drug's name that ask about its use, which its article
+/// tells but not in these words: "memantine abuse", "gabapentin
+/// withdrawal", "metformin interactions". Longer tails first.
+const DRUG_TAILS: &[&str] = &[
+    " abuse potential",
+    " abuse",
+    " misuse",
+    " addiction",
+    " dependence",
+    " tolerance",
+    " withdrawal symptoms",
+    " withdrawal",
+    " overdose symptoms",
+    " overdose",
+    " recreational use",
+    " drug interactions",
+    " interactions",
+    " mechanism of action",
+    " contraindications",
+];
+
+/// The drug whose use `name` asks about ([`DRUG_TAILS`]): "memantine" of
+/// "memantine abuse". `None` without such words, or when what is left is
+/// a kind of drug ("opioid addiction").
+pub(crate) fn drug_asked(name: &str) -> Option<String> {
+    let name = plumb_core::collapse_whitespace(name.trim().trim_end_matches('?')).to_lowercase();
+    let drug = DRUG_TAILS
+        .iter()
+        .find_map(|tail| name.strip_suffix(tail))?
+        .trim();
+    (!drug.is_empty() && !names_a_kind_of_drug(drug)).then(|| drug.to_string())
+}
 
 /// Words before a name that ask what is usual or wise for it, not what it
 /// is: "normal" of "normal blood pressure".
@@ -1599,8 +1611,9 @@ impl PageSearcher {
             .unwrap_or_else(|| (query.to_lowercase(), Hint::Any));
         let moved = year_moved(&name).map(|name| (name, hint));
         let judged = hinted.is_some().then(|| judged_name(&name)).flatten();
+        let drug = drug_asked(&name);
         let searches: Vec<(String, Hint)> = hinted.into_iter().chain(moved).collect();
-        if searches.is_empty() {
+        if searches.is_empty() && drug.is_none() {
             return Ok(false);
         }
         for (name, hint) in searches {
@@ -1624,6 +1637,13 @@ impl PageSearcher {
         // pressure" names are found too. "Normal distribution" is.
         if let Some(judged) = judged.filter(|_| !hits.iter().any(|hit| hit.named)) {
             self.add_found(hits, judged, Hint::Named, limit, scope)?;
+        }
+        // "memantine abuse" asks about Memantine, whose article tells of
+        // its abuse in other words, when nothing else is named: "child
+        // abuse", "what is child abuse" and "opioid withdrawal symptoms"
+        // have articles of their own.
+        if let Some(drug) = drug.filter(|_| !hits.iter().any(|hit| hit.named)) {
+            self.add_found(hits, &drug, Hint::Drug, limit, scope)?;
         }
         Ok(true)
     }
@@ -1657,16 +1677,10 @@ impl PageSearcher {
                     !called && hit.named && describes_an_event(hit.page.description.as_deref())
                 });
             }
-            // Only a drug or other substance, and not when a page is
-            // called the whole query or the name is a kind of drug:
-            // "report abuse" is not about Report, nor "child abuse" about
-            // Child, nor "drug misuse" about Drug.
-            Hint::Drug => {
-                let called = hits.iter().any(|hit| hit.named) || names_a_kind_of_drug(name);
-                found.retain(|hit| {
-                    !called && hit.named && hit.page.is_article() && describes_a_drug(&hit.page)
-                });
-            }
+            // Only a drug or other substance: "report abuse" is not about
+            // Report.
+            Hint::Drug => found
+                .retain(|hit| hit.named && hit.page.is_article() && describes_a_drug(&hit.page)),
             Hint::Named => found.retain(|hit| hit.named),
             Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
             // Only a repository called so: "reverse repo" is finance.

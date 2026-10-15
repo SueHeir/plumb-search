@@ -30,13 +30,12 @@ impl PageSearcher {
         }
         let ops = Operators::parse(&query.query);
         // "gene family" is a topic, not a person's, "transformer review" a
-        // kind of paper, not a film's, "trial results" not an event's, and
-        // "opioid misuse" not a drug's.
+        // kind of paper, not a film's, and "trial results" not an event's.
         let words = hinted_name(&ops.words)
             .filter(|(_, hint)| {
                 !matches!(
                     hint,
-                    Hint::Aspect | Hint::Event | Hint::Drug | Hint::Person | Hint::Work(_)
+                    Hint::Aspect | Hint::Event | Hint::Person | Hint::Work(_)
                 )
             })
             .map_or_else(|| ops.words.clone(), |(name, _)| name);
