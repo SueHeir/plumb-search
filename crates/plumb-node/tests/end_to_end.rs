@@ -177,7 +177,12 @@ async fn web_app_escapes_text_from_the_web() {
     let mut plain = SiteRecord::new("example.org");
     plain.url = Some("https://example.org/?a=1&b=2".into());
     plain.title = Some("Example Org".into());
-    build_index(&index, &[evil, plain]).unwrap();
+    // The index is built from stored items, whose cleaning drops a URL
+    // that is not the web's; put it back, since this is about what the web
+    // app makes of whatever text the index holds.
+    let mut evil = evil.to_stored_item();
+    evil.url = Some("javascript:alert(document.cookie)".into());
+    build_index(&index, &[evil, plain.to_stored_item()]).unwrap();
 
     // The index hands the raw text back, so escaping is up to the web app.
     let searcher = Searcher::open(&index).unwrap();

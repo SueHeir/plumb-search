@@ -4,6 +4,7 @@
 mod brands_and_copies;
 mod building;
 mod candidates;
+mod golden;
 mod junk;
 mod kinds_and_filters;
 mod link_names;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use plumb_core::{LinkText, Signals, SiteRecord, MAX_TEXT_CHARS};
+use plumb_format::Item;
 use tempfile::TempDir;
 
 use super::*;
@@ -218,9 +220,15 @@ fn corpus() -> Vec<SiteRecord> {
     ]
 }
 
+/// The stored items of `records`, which an index is built from
+/// ([`SiteRecord::to_stored_item`]).
+fn items(records: &[SiteRecord]) -> Vec<Item> {
+    records.iter().map(SiteRecord::to_stored_item).collect()
+}
+
 fn build(records: &[SiteRecord]) -> (TempDir, Searcher) {
     let dir = TempDir::new().unwrap();
-    let stats = build_index(dir.path(), records).unwrap();
+    let stats = build_index(dir.path(), &items(records)).unwrap();
     assert_eq!(stats.docs, records.len() as u64);
     let searcher = Searcher::open(dir.path()).unwrap();
     (dir, searcher)

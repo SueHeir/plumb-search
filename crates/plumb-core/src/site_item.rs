@@ -217,7 +217,7 @@ impl SiteRecord {
     /// and headlines a crawl from another node brings into the inbox
     /// (`"icon"`, and `"news"` as the record's [`crate::Headline`]s). Never
     /// sent, so never checked against the format's rules.
-    pub(crate) fn to_stored_item(&self) -> Item {
+    pub fn to_stored_item(&self) -> Item {
         let mut site = self.clone();
         site.clean();
         site.stored_item_as_is()

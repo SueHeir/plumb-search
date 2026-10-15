@@ -85,7 +85,8 @@ fn index_top_with_relevance(
 ) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("index");
-    build_index(&path, records).unwrap();
+    let sites: Vec<_> = records.iter().map(SiteRecord::to_stored_item).collect();
+    build_index(&path, &sites).unwrap();
     // The browser does not correct typos.
     let options = SearchOptions {
         exact: true,

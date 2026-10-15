@@ -40,8 +40,8 @@ use crate::SiteRecord;
 use crate::{
     canonical_domain, collapse_whitespace, is_generic_kind, is_stand_in_homepage, kind_key,
     linker_bit, min_some, normalize_text, registrable_domain, site_language,
-    sort_and_cap_link_texts, truncate_chars, Headline, KeyPage, LinkText, Redirect, Signals,
-    MAX_ALIASES, MAX_KEY_PAGES, MAX_KINDS, MAX_LINKS_TO, MAX_TEXT_CHARS,
+    sort_and_cap_link_texts, truncate_chars, AdultLevel, Headline, KeyPage, LinkText, Redirect,
+    Signals, MAX_ALIASES, MAX_KEY_PAGES, MAX_KINDS, MAX_LINKS_TO, MAX_TEXT_CHARS,
 };
 
 /// A new site's item, holding nothing but its domain, which must already
@@ -396,6 +396,26 @@ pub fn written_language(site: &Item) -> Option<String> {
 /// The site's popularity prior ([`crate::link_score`]).
 pub fn link_score(site: &Item) -> f32 {
     crate::link_score(&signals(site))
+}
+
+/// The country the site belongs to ([`crate::site_country`]): Wikidata's
+/// ([`country`]) when it has one, else its domain ending's.
+pub fn site_country(site: &Item) -> Option<String> {
+    crate::country::country_of(country(site), &site.id)
+}
+
+/// How adult the site looks ([`crate::record_adult_level`]): by its kinds,
+/// and by its title, description, Wikidata's description and other names.
+pub fn adult_level(site: &Item) -> AdultLevel {
+    let texts = [
+        site.title.as_deref(),
+        site.about.as_deref(),
+        wikidata_about(site),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(site.names.iter().map(String::as_str));
+    crate::safe::site_adult_level(&site.id, &kinds(site), texts)
 }
 
 /// [`SiteRecord::add_link_text`].
@@ -1149,6 +1169,28 @@ pub(crate) mod tests {
             assert_eq!(site, record.to_stored_item());
             assert_eq!(written_language(&site), record.written_language());
             assert_eq!(link_score(&site), record.link_score());
+        }
+    }
+
+    #[test]
+    fn a_site_s_country_and_adult_level_are_its_record_s() {
+        let mut records = variants();
+        let mut adult = SiteRecord::new("example.fr");
+        adult.kinds = vec!["adult website".into()];
+        let mut suggestive = SiteRecord::new("example.com");
+        suggestive.title = Some("Sexy lingerie".into());
+        suggestive.country = Some("uk".into());
+        let mut named = SiteRecord::new("example.de");
+        named.aliases = vec!["XXX".into()];
+        let mut described = SiteRecord::new("example.org");
+        described.description = Some("Erotic stories".into());
+        described.about = Some("website".into());
+        records.extend([adult, suggestive, named, described]);
+        for mut record in records {
+            record.clean();
+            let site = record.to_stored_item();
+            assert_eq!(site_country(&site), crate::site_country(&record));
+            assert_eq!(adult_level(&site), crate::record_adult_level(&record));
         }
     }
 

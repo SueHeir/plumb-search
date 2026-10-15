@@ -1,6 +1,8 @@
-//! Building the site index from site records: one document a site,
-//! records for the same domain merged and redirecting domains folded into
-//! the site they redirect to.
+//! Building the site index from sites as a node stores them, their stored
+//! items ([`plumb_core::site`]): one document a site, items for the same
+//! domain merged and redirecting domains folded into the site they
+//! redirect to. Callers holding records turn them into their items
+//! ([`plumb_core::SiteRecord::to_stored_item`]).
 
 use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
@@ -8,7 +10,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use plumb_core::{canonical_domain, AdultLevel, SiteRecord};
+use plumb_core::{canonical_domain, site, AdultLevel};
+use plumb_format::Item;
 use tantivy::directory::Directory;
 use tantivy::merge_policy::NoMergePolicy;
 use tantivy::{Index, IndexWriter};
@@ -18,19 +21,20 @@ use crate::schema::Fields;
 use crate::{analysis, schema, spell, spell_model, storage, IndexStats};
 
 /// Memory budget of the index writer, shared by its threads. Enough for a
-/// million records without flushing tiny segments.
+/// million sites without flushing tiny segments.
 const WRITER_HEAP_BYTES: usize = 200_000_000;
 
-/// Builds a fresh index of `records` in `dir`, replacing any index already
-/// there.
+/// Builds a fresh index of `sites`, stored items of sites
+/// ([`plumb_core::site`]), in `dir`, replacing any index already there.
 ///
-/// Each record's domain is made canonical with
+/// Each site's domain is made canonical with
 /// [`plumb_core::canonical_domain`] (`Example.com` -> `example.com`,
 /// `münchen.de` -> `xn--mnchen-3ya.de`, `www.example.com` ->
-/// `example.com`), and records that end up with the same domain are merged
-/// into one document with [`SiteRecord::merge`], as
-/// [`plumb_core::RecordSet`] would. Records whose domain is not a valid
-/// registrable domain are skipped. The returned [`IndexStats`] counts both.
+/// `example.com`), and sites that end up with the same domain are merged
+/// into one document with [`site::merge`], as
+/// [`plumb_core::sites::Sites`] would. Sites whose domain is not a valid
+/// registrable domain, and sites judged gone, are skipped. The returned
+/// [`IndexStats`] counts both.
 ///
 /// The index is built in a hidden directory next to `dir` and swapped in
 /// only once it is complete, so a failed build leaves the previous index in
@@ -47,18 +51,18 @@ const WRITER_HEAP_BYTES: usize = 200_000_000;
 /// Its parent must be writable, and `dir` itself cannot be a mount point
 /// (mount the parent).
 ///
-/// `records` may be the records themselves or references to them, so a
-/// caller holding a [`plumb_core::RecordSet`] need not copy it into a list.
-pub fn build_index<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<IndexStats> {
-    build_index_with_budget(dir, records, None)
+/// `sites` may be the items themselves or references to them, so a caller
+/// holding them elsewhere need not copy them into a list.
+pub fn build_index<S: Borrow<Item>>(dir: &Path, sites: &[S]) -> Result<IndexStats> {
+    build_index_with_budget(dir, sites, None)
 }
 
-pub fn build_index_with_budget<R: Borrow<SiteRecord>>(
+pub fn build_index_with_budget<S: Borrow<Item>>(
     dir: &Path,
-    records: &[R],
+    sites: &[S],
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
 ) -> Result<IndexStats> {
-    let (sites, mut stats) = merge_by_domain(records);
+    let (sites, mut stats) = merge_by_domain(sites);
     let (sites, redirect_names) = fold_redirects(sites);
     stats.redirected = stats.docs - sites.len() as u64;
     stats.docs = sites.len() as u64;
@@ -72,10 +76,10 @@ pub fn build_index_with_budget<R: Borrow<SiteRecord>>(
 }
 
 /// An index built one site at a time, for a caller that cannot hold every
-/// record at once: a node reads its records file a record at a time
-/// instead. [`build_index`] does the rest for records in memory: merging
-/// records of one domain and folding redirects ([`redirect_targets`]), which
-/// a caller of this does itself.
+/// site at once: a node reads its records file a site at a time instead.
+/// [`build_index`] does the rest for sites in memory: merging sites of one
+/// domain and folding redirects ([`redirect_targets`]), which a caller of
+/// this does itself.
 ///
 /// The index is built in a hidden directory next to `dir`, and replaces
 /// what is there only on [`IndexBuild::finish`], as [`build_index`] says.
@@ -115,14 +119,14 @@ impl IndexBuild {
         })
     }
 
-    /// Adds `site`, whose domain is canonical and not added before, with
-    /// the names other sites give it by redirecting to it
-    /// ([`redirect_name`]).
-    pub fn add(&mut self, site: &SiteRecord, redirect_names: &[String]) -> Result<()> {
+    /// Adds the site of the stored item `site` ([`plumb_core::site`]),
+    /// whose domain is canonical and not added before, with the names other
+    /// sites give it by redirecting to it ([`redirect_name`]).
+    pub fn add(&mut self, site: &Item, redirect_names: &[String]) -> Result<()> {
         self.writer
             .add_document(schema::document(&self.fields, site, redirect_names))?;
         // Adult sites' words are never offered as completions.
-        if plumb_core::record_adult_level(site) == AdultLevel::None {
+        if site::adult_level(site) == AdultLevel::None {
             let texts = schema::spelling_texts(site, redirect_names);
             self.spelling.add(texts.iter().map(String::as_str));
         }
@@ -200,72 +204,73 @@ pub fn redirect_targets<T>(
         .collect()
 }
 
-/// A site to index: one of the records given, or a copy where records had
-/// to be merged or their domain changed. Two words, where a
-/// `Cow<SiteRecord>` would take the size of a whole record for each of a
-/// million sites even when it only borrows.
+/// A site to index: one of the items given, or a copy where items had to
+/// be merged or their domain changed. Two words, where a `Cow<Item>` would
+/// take the size of a whole item for each of a million sites even when it
+/// only borrows.
 enum Site<'a> {
-    Borrowed(&'a SiteRecord),
-    Owned(Box<SiteRecord>),
+    Borrowed(&'a Item),
+    Owned(Box<Item>),
 }
 
 impl Site<'_> {
-    fn to_mut(&mut self) -> &mut SiteRecord {
-        if let Site::Borrowed(record) = *self {
-            *self = Site::Owned(Box::new(record.clone()));
+    fn to_mut(&mut self) -> &mut Item {
+        if let Site::Borrowed(item) = *self {
+            *self = Site::Owned(Box::new(item.clone()));
         }
         match self {
-            Site::Owned(record) => record,
+            Site::Owned(item) => item,
             Site::Borrowed(_) => unreachable!("made owned above"),
         }
     }
 }
 
 impl std::ops::Deref for Site<'_> {
-    type Target = SiteRecord;
+    type Target = Item;
 
-    fn deref(&self) -> &SiteRecord {
+    fn deref(&self) -> &Item {
         match self {
-            Site::Borrowed(record) => record,
-            Site::Owned(record) => record,
+            Site::Borrowed(item) => item,
+            Site::Owned(item) => item,
         }
     }
 }
 
-/// One record per canonical domain ([`canonical_domain`]), in the order the
-/// domains first appear: records for the same domain are merged
-/// ([`SiteRecord::merge`]) and records without a valid domain are skipped.
-/// Records that are already canonical and unique are not copied.
-fn merge_by_domain<R: Borrow<SiteRecord>>(records: &[R]) -> (Vec<Site<'_>>, IndexStats) {
-    let mut sites: Vec<Site> = Vec::with_capacity(records.len());
-    let mut positions: HashMap<String, usize> = HashMap::with_capacity(records.len());
+/// One site per canonical domain ([`canonical_domain`]), in the order the
+/// domains first appear: items for the same domain are merged
+/// ([`site::merge`]), and items without a valid domain or of a site judged
+/// gone are skipped. Items that are already canonical and unique are not
+/// copied.
+fn merge_by_domain<S: Borrow<Item>>(items: &[S]) -> (Vec<Site<'_>>, IndexStats) {
+    let mut sites: Vec<Site> = Vec::with_capacity(items.len());
+    let mut positions: HashMap<String, usize> = HashMap::with_capacity(items.len());
     let mut stats = IndexStats::default();
-    for record in records {
-        let record: &SiteRecord = record.borrow();
-        let Some(domain) = canonical_domain(&record.domain).filter(|_| record.gone_at.is_none())
-        else {
+    for item in items {
+        let item: &Item = item.borrow();
+        let gone = site::crawl_marks(item).gone.is_some();
+        let Some(domain) = canonical_domain(site::domain(item)).filter(|_| !gone) else {
             stats.skipped += 1;
             continue;
         };
         let with_domain = |domain: &String| {
-            let mut record = record.clone();
-            record.domain.clone_from(domain);
-            record
+            let mut item = item.clone();
+            item.id.clone_from(domain);
+            item
         };
         match positions.entry(domain) {
             Entry::Occupied(entry) => {
                 let other = with_domain(entry.key());
-                sites[*entry.get()].to_mut().merge(other);
+                site::merge(sites[*entry.get()].to_mut(), other);
                 stats.merged += 1;
             }
             Entry::Vacant(entry) => {
-                let site = if record.domain == *entry.key() {
-                    Site::Borrowed(record)
+                let kept = if item.id == *entry.key() {
+                    Site::Borrowed(item)
                 } else {
                     Site::Owned(Box::new(with_domain(entry.key())))
                 };
                 entry.insert(sites.len());
-                sites.push(site);
+                sites.push(kept);
             }
         }
     }
@@ -281,8 +286,8 @@ fn merge_by_domain<R: Borrow<SiteRecord>>(records: &[R]) -> (Vec<Site<'_>>, Inde
 fn fold_redirects(sites: Vec<Site<'_>>) -> (Vec<Site<'_>>, HashMap<usize, Vec<String>>) {
     let targets = redirect_targets(
         &sites,
-        |site| site.domain.as_str(),
-        |site| site.redirect.as_ref()?.folds_into(&site.domain),
+        |kept| site::domain(kept),
+        |kept| site::redirect(kept)?.folds_into(site::domain(kept)),
     );
     let mut kept_at = vec![None; sites.len()];
     let mut kept = 0;
@@ -298,7 +303,7 @@ fn fold_redirects(sites: Vec<Site<'_>>) -> (Vec<Site<'_>>, HashMap<usize, Vec<St
             names
                 .entry(target)
                 .or_default()
-                .push(redirect_name(&sites[i].domain));
+                .push(redirect_name(site::domain(&sites[i])));
         }
     }
     let sites = sites

@@ -134,7 +134,8 @@ mod tests {
         // Searching with the vectors finds the site nearest in meaning,
         // even with no word in common.
         let index = dir.path().join("index");
-        build_index(&index, &records).unwrap();
+        let sites: Vec<_> = records.iter().map(|r| r.to_stored_item()).collect();
+        build_index(&index, &sites).unwrap();
         let searcher = Searcher::open(&index).unwrap();
         let meaning = MeaningIndex::open(&model, &vectors_path).unwrap();
         let query = meaning.query("solar").unwrap();

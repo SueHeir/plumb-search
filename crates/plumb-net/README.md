@@ -57,7 +57,7 @@ plumb-node runs the swarm and answers other nodes from its index through `Bucket
 
 | Module | What it does |
 | --- | --- |
-| [bucket.rs](src/bucket.rs) | `BucketSource`, and `BucketTable` and `BucketWriter` for the bucket table on disk |
+| [bucket.rs](src/bucket.rs) | `BucketSource`, and `BucketTable` and `BucketWriter` for the bucket table on disk, written from sites' stored items |
 | [search.rs](src/search.rs) | Asking for buckets under throwaway identities, hedging, checking answers, `NetSearch` |
 | [oblivious.rs](src/oblivious.rs) | Sealed requests through a relay over `/plumb/oblivious/2`: signed keys and padding |
 | [rounds.rs](src/rounds.rs) | Scheduled background rounds and the queue of buckets they fetch |

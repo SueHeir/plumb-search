@@ -39,12 +39,17 @@ pub fn tld_country(domain: &str) -> Option<&'static str> {
 /// The country a site belongs to: its [`SiteRecord::country`] from
 /// Wikidata when it has one, otherwise its domain ending's
 /// ([`tld_country`]). `None` for global sites such as most `.com`s.
+/// [`crate::site::site_country`] is the same of a site's item.
 pub fn site_country(record: &SiteRecord) -> Option<String> {
-    record
-        .country
-        .as_deref()
+    country_of(record.country.as_deref(), &record.domain)
+}
+
+/// [`site_country`] of the site `domain`, which Wikidata says is of
+/// `country`.
+pub(crate) fn country_of(country: Option<&str>, domain: &str) -> Option<String> {
+    country
         .and_then(normalize_country)
-        .or_else(|| tld_country(&record.domain).map(str::to_string))
+        .or_else(|| tld_country(domain).map(str::to_string))
 }
 
 /// `us`, ` US ` -> `US`; `UK` -> `GB`. `None` unless it is a two-letter

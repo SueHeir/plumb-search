@@ -1,4 +1,4 @@
-//! The local search index: a Tantivy index over site records, ranked for
+//! The local search index: a Tantivy index over sites, ranked for
 //! navigational queries ("us bank" should put usbank.com first).
 //!
 //! Ranking blends how well the query matches the site's names (BM25 over the
@@ -390,23 +390,23 @@ pub trait Meaning {
     }
 }
 
-/// What [`build_index`] built. Every record is a document, merged into
+/// What [`build_index`] built. Every site given is a document, merged into
 /// another one, skipped or folded into the site it redirects to: `docs +
-/// merged + skipped + redirected` is the number of records.
+/// merged + skipped + redirected` is the number of sites given.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexStats {
     /// Documents in the index, one per domain.
     pub docs: u64,
-    /// Records merged into an earlier record for the same domain.
+    /// Sites merged into an earlier one of the same domain.
     #[serde(default)]
     pub merged: u64,
-    /// Records skipped because their domain is not a valid registrable
+    /// Sites skipped because their domain is not a valid registrable
     /// domain ([`plumb_core::canonical_domain`] rejects it), empty ones
     /// included, or because the site is gone
-    /// ([`plumb_core::SiteRecord::gone_at`]).
+    /// ([`plumb_core::site::crawl_marks`]).
     #[serde(default)]
     pub skipped: u64,
-    /// Records left out because their homepage redirects to another site in
+    /// Sites left out because their homepage redirects to another site in
     /// the index, whose names they joined.
     #[serde(default)]
     pub redirected: u64,
