@@ -6231,6 +6231,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libp2p",
  "osmpbf",
+ "percent-encoding",
  "plumb-answer",
  "plumb-core",
  "plumb-crawl",
