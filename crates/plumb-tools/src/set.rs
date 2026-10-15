@@ -203,6 +203,10 @@ pub struct SiteGradesArgs {
     /// "low_value" | "spam"}`.
     #[arg(long, value_name = "FILE")]
     pub grades: PathBuf,
+    /// The sites as they were graded (`plumb-tools grades pick`). A site
+    /// whose record showed only its address keeps no `low_value` grade.
+    #[arg(long, value_name = "FILE")]
+    pub picks: PathBuf,
     /// The set's name, `<scope>/<name>`.
     #[arg(long, default_value = plumb_node::node::grades::SITE_GRADES)]
     pub name: String,
@@ -494,10 +498,11 @@ pub fn run(args: SetArgs) -> Result<()> {
         SetCommand::SiteGrades(args) => {
             let written = site_grades(&args)?;
             println!(
-                "{}: {} graded sites in {} parts; sign it with `plumb-tools set sign`",
+                "{}: {} graded sites in {} parts, {} low_value grades of sites shown only by their address left out; sign it with `plumb-tools set sign`",
                 args.out.display(),
                 written.items,
-                written.parts
+                written.parts,
+                written.left_out
             );
             Ok(())
         }
@@ -1065,6 +1070,11 @@ pub fn adult_sites(args: &AdultSitesArgs) -> Result<Written> {
 /// A last line that is not JSON, cut short by a grading run that was
 /// stopped, is left out; any other line that is not a grade of a site is
 /// an error, so a mistyped correction is not signed unseen.
+///
+/// A site whose pick in `args.picks` shows only its address, such as an
+/// agency's site no crawl reached (fafsa.gov), keeps no `low_value` grade:
+/// the model had nothing to judge its use by. Spam can show in an address,
+/// so that grade stays. The `low_value` grades left out are `left_out`.
 pub fn site_grades(args: &SiteGradesArgs) -> Result<Written> {
     use plumb_index::grades::Grade;
     use plumb_node::node::grades::GRADE_FIELD;
@@ -1101,10 +1111,26 @@ pub fn site_grades(args: &SiteGradesArgs) -> Result<Written> {
         );
         graded.insert(domain, grade);
     }
-    let graded: BTreeMap<String, Grade> = graded
+    let mut graded: BTreeMap<String, Grade> = graded
         .into_iter()
         .filter_map(|(domain, grade)| Some((domain, grade?)))
         .collect();
+    let mut bare = 0;
+    let path = args.picks.display();
+    let file = File::open(&args.picks).with_context(|| format!("opening {path}"))?;
+    for (at, line) in std::io::BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let pick: crate::grades::Pick =
+            serde_json::from_str(&line).with_context(|| format!("line {} of {path}", at + 1))?;
+        let domain = pick.domain.to_ascii_lowercase();
+        if pick.bare() && graded.get(&domain) == Some(&Grade::LowValue) {
+            graded.remove(&domain);
+            bare += 1;
+        }
+    }
     let mut manifest = Map::new();
     manifest.insert("format".into(), json!(FORMAT));
     manifest.insert("set".into(), json!(args.name));
@@ -1123,7 +1149,11 @@ pub fn site_grades(args: &SiteGradesArgs) -> Result<Written> {
         GRADE_FIELD.to_string(),
         serde_json::from_value(json!({"type": "keyword"}))?,
     )]);
-    write_set(items, fields, manifest, &args.out, PART_ENDS, args.level)
+    let written = write_set(items, fields, manifest, &args.out, PART_ENDS, args.level)?;
+    Ok(Written {
+        left_out: bare,
+        ..written
+    })
 }
 
 /// The kind of the item that names a map file.
@@ -1843,9 +1873,17 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let (grades, dir) = (temp.path().join("grades.jsonl"), temp.path().join("set"));
+        let picks = temp.path().join("picks.jsonl");
+        let pick_lines = [
+            r#"{"domain": "status.example.com", "title": "Status", "link_score": 0.2}"#,
+            r#"{"domain": "nflbox.sx", "link_score": 0.1}"#,
+            r#"{"domain": "fafsa.gov", "official": false, "link_score": 0.34}"#,
+        ];
+        fs::write(&picks, pick_lines.join("\n")).unwrap();
         fs::write(
             &grades,
             [
+                r#"{"domain": "fafsa.gov", "grade": "low_value", "words": []}"#,
                 r#"{"domain": "nflbox.sx", "grade": "spam", "words": []}"#,
                 r#"{"domain": "nba.com", "grade": "ok", "words": ["basketball"]}"#,
                 r#"{"domain": "Status.Example.com", "grade": "spam"}"#,
@@ -1859,13 +1897,17 @@ mod tests {
         .unwrap();
         let args = SiteGradesArgs {
             grades,
+            picks,
             name: "plumb/site-grades".into(),
             out: dir.clone(),
             license: "CC0-1.0".into(),
             attribution: "From a test".into(),
             level: 3,
         };
-        assert_eq!(site_grades(&args).unwrap().items, 2);
+        // fafsa.gov's record showed only its address, so its low_value
+        // grade is left out; nflbox.sx's spam stays.
+        let written = site_grades(&args).unwrap();
+        assert_eq!((written.items, written.left_out), (2, 1));
         let key = SigningKey::from_bytes(&[5; 32]);
         sign_set(&dir, &key, None, None).unwrap();
         let checked = check_set(&dir, Some(&PublicKey::of(&key)), &[]).unwrap();
@@ -1880,6 +1922,7 @@ mod tests {
         assert_eq!(read.get("espn.com"), None);
         assert_eq!(read.get("example.com"), None);
         assert_eq!(read.get("nba.com"), None);
+        assert_eq!(read.get("fafsa.gov"), None);
 
         // A mistyped correction is an error, not left out unseen.
         let bad = temp.path().join("bad.jsonl");

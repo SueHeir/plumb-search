@@ -4,7 +4,7 @@
     plumb-tools grades pick --records records.jsonl --out picks.jsonl
     python3 tools/grades/grade.py --picks picks.jsonl --out grades.jsonl --direct 25
     python3 tools/grades/grade.py --picks picks.jsonl --out grades.jsonl
-    plumb-tools set site-grades --grades grades.jsonl --out site-grades
+    plumb-tools set site-grades --grades grades.jsonl --picks picks.jsonl --out site-grades
 
 Each call sends `--per-call` sites, `--workers` calls at once, to a model
 run through its command-line tool on a subscription, so no API key is

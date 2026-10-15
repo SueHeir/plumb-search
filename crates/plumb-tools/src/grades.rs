@@ -109,6 +109,15 @@ pub struct Pick {
     pub link_score: f32,
 }
 
+impl Pick {
+    /// True when the record shows nothing of the site but its address: a
+    /// model can tell spam from that, but not how much use the site is.
+    pub fn bare(&self) -> bool {
+        let empty = |text: &Option<String>| text.as_deref().is_none_or(str::is_empty);
+        empty(&self.title) && empty(&self.description) && self.key_pages.is_empty()
+    }
+}
+
 pub fn run(args: GradesArgs) -> Result<()> {
     match args.command {
         GradesCommand::Pick(args) => run_pick(&args),

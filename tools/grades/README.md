@@ -22,14 +22,14 @@ To take back a wrong grade, add a line with the site's right grade to the grades
 plumb-tools grades pick --records records.jsonl --out picks.jsonl
 python3 tools/grades/grade.py --picks picks.jsonl --out grades.jsonl --direct 25
 until python3 tools/grades/grade.py --picks picks.jsonl --out grades.jsonl; do sleep 1800; done
-plumb-tools set site-grades --grades grades.jsonl --out site-grades
+plumb-tools set site-grades --grades grades.jsonl --picks picks.jsonl --out site-grades
 plumb-tools set sign site-grades --key KEY
 ```
 
 1. `grades pick` writes every live site of the records file with what a search shows of it: address, title, description, key pages' labels, whether Wikidata lists it as official, and link score. Not its homepage text, which is where a spam site would write to the model. It leaves out sites everyone knows (link score 0.5 or more, about the top ten thousand; `--known-link-score`), which also leaves out the rare taken-over domain that kept its links, and writes the sites about health, addiction, money or law first, where a bad site does the most harm, so a run stopped by a usage limit has graded those already. `--domains FILE` picks only the sites listed, such as those the evals show.
 2. `--direct 25` grades the first 25 and prints them, to read a sample first.
 3. The rest. Sites already in `--out` are skipped, so a stopped run carries on, and sites an answer left out are asked once more at the end. A run stops after five failed calls in a row, usually a usage limit. A run with any failed call exits with 1, and the loop starts it again half an hour later; it ends when a run has no failed calls, leaving only sites the model twice would not grade.
-4. `set site-grades` writes the spam and low-value sites as a layer on them, each labelled `machine-written`.
+4. `set site-grades` writes the spam and low-value sites as a layer on them, each labelled `machine-written`. It leaves out a `low_value` grade of a site whose pick shows only its address: the model judges an empty record, not the site, and graded government sites no crawl reached (fafsa.gov) low value. An address can show spam, so that grade stays.
 5. `set sign` signs it with the project's key, on the computer that holds it.
 
 To see what the grades change before publishing them, sign the set with a test key (`plumb-tools set new-key`), never the project key, and give it to the evals: `plumb-tools eval --site-grades site-grades ...` ([eval/README.md](../../eval/README.md)). The evals read a set signed by any key; a node reads only one its publishers signed.

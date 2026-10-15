@@ -384,10 +384,14 @@ fn hold_grades(data: &Path, publisher: &ed25519_dalek::SigningKey, grades: &[(&s
         })
         .collect();
     std::fs::write(&file, lines).unwrap();
+    // No picks: every grade stays.
+    let picks = work.path().join("picks.jsonl");
+    std::fs::write(&picks, "").unwrap();
     let name = crate::node::grades::SITE_GRADES;
     let dir = crate::node::signed_sets::set_dir(data, name).unwrap();
     plumb_tools::set::site_grades(&plumb_tools::set::SiteGradesArgs {
         grades: file,
+        picks,
         name: name.into(),
         out: dir.clone(),
         license: "CC0-1.0".into(),
