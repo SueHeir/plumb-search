@@ -123,7 +123,6 @@ pub fn run_embed_pages(args: EmbedPagesArgs) -> Result<()> {
         Ok(())
     })?;
     flush(&mut batch)?;
-    drop(flush);
     // Pages gone from the set, or past --max now, lose their vectors.
     vectors.write_locked().retain(|url| kept.contains(url));
     Vectors::save_shared(&vectors, &path)?;
@@ -208,31 +207,31 @@ pub fn run_page_meaning(args: PageMeaningArgs) -> Result<()> {
     let found = Mutex::new(Vec::with_capacity(searches.len()));
     std::thread::scope(|scope| {
         for _ in 0..threads {
-            scope.spawn(|| loop {
-                let Some((id, query, wanted)) = searches.get(next.fetch_add(1, Ordering::Relaxed))
-                else {
-                    break;
-                };
-                let key = title_key(wanted);
-                let held = wanted != "-"
-                    && vectors
-                        .get(&plumb_core::article::article_url("en", wanted))
-                        .is_some();
-                let near = |vector: Option<Vec<i8>>| {
-                    vector.map_or_else(Nearest::default, |vector| {
-                        nearest(&vectors, &vector, args.nearest, &key)
-                    })
-                };
-                let plain = near(embedder.embed_query(query).ok());
-                let instructed = near(instructed_vector(&embedder, query));
-                found.locked().push(Found {
-                    id: id.clone(),
-                    query: query.clone(),
-                    wanted: wanted.clone(),
-                    held,
-                    plain,
-                    instructed,
-                });
+            scope.spawn(|| {
+                while let Some((id, query, wanted)) =
+                    searches.get(next.fetch_add(1, Ordering::Relaxed))
+                {
+                    let key = title_key(wanted);
+                    let held = wanted != "-"
+                        && vectors
+                            .get(&plumb_core::article::article_url("en", wanted))
+                            .is_some();
+                    let near = |vector: Option<Vec<i8>>| {
+                        vector.map_or_else(Nearest::default, |vector| {
+                            nearest(&vectors, &vector, args.nearest, &key)
+                        })
+                    };
+                    let plain = near(embedder.embed_query(query).ok());
+                    let instructed = near(instructed_vector(&embedder, query));
+                    found.locked().push(Found {
+                        id: id.clone(),
+                        query: query.clone(),
+                        wanted: wanted.clone(),
+                        held,
+                        plain,
+                        instructed,
+                    });
+                }
             });
         }
     });
