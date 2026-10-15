@@ -38,6 +38,7 @@ pub mod simhash;
 pub mod site;
 pub mod site_item;
 mod site_search;
+pub mod sites;
 pub mod stack_exchange;
 pub mod storage;
 pub mod stored;

@@ -20,6 +20,10 @@
 //! version does not know stay, as the format keeps them; [`clean`] drops
 //! them. Reading never fails: a part that is not there, or does not read,
 //! is nothing.
+//!
+//! A node's sites together, by domain, are a [`crate::sites::Sites`],
+//! which does with these functions what [`crate::RecordSet`] does with
+//! records.
 
 use plumb_format::refs::is_domain;
 use plumb_format::value::{is_language, unix_seconds};
@@ -811,7 +815,7 @@ fn fill(site: &mut Item, other: &mut Item, name: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::site_item::tests::full_record;
     use crate::SiteRecord;
@@ -893,7 +897,7 @@ mod tests {
     /// which was crawled last, a crawl that found no search box or page
     /// text, a gone site, redirects before and after a crawl, a try at the
     /// same time, and names, kinds, link texts and ranks of their own.
-    fn variants() -> Vec<SiteRecord> {
+    pub(crate) fn variants() -> Vec<SiteRecord> {
         let full = full_record();
         let mut never = SiteRecord::new("python.org");
         never.signals.tranco_rank = Some(900);
