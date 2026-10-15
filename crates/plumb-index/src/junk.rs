@@ -43,6 +43,11 @@
 //!   printer support" and "canon printer support number". A company's own
 //!   line is on its own site; tech-support scams wait for callers on sites
 //!   like these. Only a search spelling the whole name finds one.
+//! - Little-known homepages with no description that are only a name
+//!   server's or host's abuse contact ([`is_abuse_contact`]): "Abuse" on
+//!   nspmanaged.com, "Report Abuse" on dnsperfect.net. Their one word
+//!   matched every "<something> abuse" search, and "memantine abuse",
+//!   "elder abuse" and "steroid abuse" listed nspmanaged.com.
 
 use plumb_core::{
     asks_to_sign_in, is_sign_in_page, names_label, normalize_text, registrable_domain, spells_label,
@@ -83,6 +88,17 @@ const HOLDING_STARTS: &[&str] = &["domain registered", "domain reserved"];
 const HOLDING_OPENINGS: &[&str] = &[
     "this domain name has been registered",
     "this domain has been registered",
+];
+
+/// Title parts, after [`normalize_text`], of a homepage that is only a
+/// form or an address to report abuse of a name server's or host's
+/// domains.
+const ABUSE_CONTACT_TITLES: &[&str] = &[
+    "abuse",
+    "report abuse",
+    "abuse contact",
+    "abuse kontakt",
+    "abuse report",
 ];
 
 /// What a help line's number is called, after [`normalize_text`] and
@@ -257,6 +273,9 @@ pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
         return false;
     }
     let title = hit.title.as_deref();
+    if !hit.official && is_abuse_contact(title, hit.description.as_deref()) {
+        return true;
+    }
     let says_nothing_meaning_found = || {
         hit.description.is_none()
             && hit
@@ -269,6 +288,20 @@ pub(crate) fn left_out(query: &str, hit: &Hit, named: bool) -> bool {
             && (is_sign_in_page(&hit.url, title)
                 || (asks_to_sign_in(query) && says_nothing_meaning_found()))
             && !names_label(query, &hit.domain))
+}
+
+/// Whether a homepage titled `title` and described as `description` is
+/// only an abuse contact: no description and a title part of
+/// [`ABUSE_CONTACT_TITLES`] ("Report Abuse - SecureDNS93.com", "Abuse
+/// Kontakt – mail.leenux.de"). A site against abuse says what it does
+/// ("Elder Abuse Help Line").
+pub(crate) fn is_abuse_contact(title: Option<&str>, description: Option<&str>) -> bool {
+    description.is_none()
+        && title.is_some_and(|title| {
+            title_parts(title)
+                .into_iter()
+                .any(|part| ABUSE_CONTACT_TITLES.contains(&normalize_text(part).as_str()))
+        })
 }
 
 /// Whether `title` offers a help line's number to call: it calls it one
