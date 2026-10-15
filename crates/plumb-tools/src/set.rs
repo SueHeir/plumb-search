@@ -89,6 +89,10 @@ pub enum SetCommand {
     /// Project publishes it) as the layer that labels those sites `adult`,
     /// with a manifest still to be signed.
     AdultSites(AdultSitesArgs),
+    /// Write the grades a language model gave sites (`tools/grades/grade.py`)
+    /// as the layer that marks the spam and low-value ones, with a
+    /// manifest still to be signed.
+    SiteGrades(SiteGradesArgs),
     /// Write a map file (`map.pmtiles` from `plumb-tools fetch-map`) as a
     /// set: one item that names the file by its hash, and the file itself
     /// as a blob part, linked rather than copied where it can be. Its
@@ -191,6 +195,31 @@ pub struct AdultSitesArgs {
     #[arg(long, default_value = "Unlicense")]
     pub license: String,
     #[arg(long, default_value = "From the Block List Project")]
+    pub attribution: String,
+    /// The zstd level of the parts.
+    #[arg(long, default_value_t = 19)]
+    pub level: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct SiteGradesArgs {
+    /// The grades, JSON lines of `{"domain": ..., "grade": "ok" |
+    /// "low_value" | "spam"}`.
+    #[arg(long, value_name = "FILE")]
+    pub grades: PathBuf,
+    /// The sites as they were graded (`plumb-tools grades pick`). A site
+    /// whose record showed only its address keeps no `low_value` grade.
+    #[arg(long, value_name = "FILE")]
+    pub picks: PathBuf,
+    /// The set's name, `<scope>/<name>`.
+    #[arg(long, default_value = plumb_node::node::grades::SITE_GRADES)]
+    pub name: String,
+    /// The folder to write. It must not exist yet, or be empty.
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    #[arg(long, default_value = "CC0-1.0")]
+    pub license: String,
+    #[arg(long, default_value = "Graded by Claude Haiku for Plumb")]
     pub attribution: String,
     /// The zstd level of the parts.
     #[arg(long, default_value_t = 19)]
@@ -489,6 +518,17 @@ pub fn run(args: SetArgs) -> Result<()> {
             let written = adult_sites(&args)?;
             println!(
                 "{}: {} adult sites in {} parts, {} lines left out; sign it with `plumb-tools set sign`",
+                args.out.display(),
+                written.items,
+                written.parts,
+                written.left_out
+            );
+            Ok(())
+        }
+        SetCommand::SiteGrades(args) => {
+            let written = site_grades(&args)?;
+            println!(
+                "{}: {} graded sites in {} parts, {} low_value grades of government sites or sites shown only by their address left out; sign it with `plumb-tools set sign`",
                 args.out.display(),
                 written.items,
                 written.parts,
@@ -1063,6 +1103,120 @@ pub fn adult_sites(args: &AdultSitesArgs) -> Result<Written> {
         PART_ENDS,
         args.level,
     )
+}
+
+/// Writes the spam and low-value sites of the grades in `args.grades` as a
+/// layer on those sites, each labelled `machine-written` with its `grade`.
+/// A site's last line decides, so a later `ok` takes back a wrong grade.
+/// A last line that is not JSON, cut short by a grading run that was
+/// stopped, is left out; any other line that is not a grade of a site is
+/// an error, so a mistyped correction is not signed unseen.
+///
+/// A site whose pick in `args.picks` shows only its address, such as an
+/// agency's site no crawl reached (fafsa.gov), keeps no `low_value` grade:
+/// the model had nothing to judge its use by. Nor does a site under a
+/// government's own suffix, which is of use to someone however thin its
+/// record (indianvisaonline.gov.in, mytn.gov). Spam can show in an
+/// address, so that grade stays. The `low_value` grades left out are
+/// `left_out`.
+pub fn site_grades(args: &SiteGradesArgs) -> Result<Written> {
+    use plumb_index::grades::Grade;
+    use plumb_node::node::grades::GRADE_FIELD;
+
+    ensure!(
+        is_set_name(&args.name),
+        "{:?} is not <scope>/<name>",
+        args.name
+    );
+    let path = args.grades.display();
+    let file = File::open(&args.grades).with_context(|| format!("opening {path}"))?;
+    let mut graded = BTreeMap::new();
+    let mut lines = std::io::BufReader::new(file)
+        .split(b'\n')
+        .enumerate()
+        .peekable();
+    while let Some((at, line)) = lines.next() {
+        let line = line?;
+        if line.trim_ascii().is_empty() {
+            continue;
+        }
+        let line: Value = match serde_json::from_slice(&line) {
+            Ok(line) => line,
+            Err(_) if lines.peek().is_none() => continue,
+            Err(err) => return Err(err).with_context(|| format!("line {} of {path}", at + 1)),
+        };
+        let domain = line["domain"].as_str().unwrap_or("").to_ascii_lowercase();
+        let name = line["grade"].as_str().unwrap_or("");
+        let grade = Grade::parse(name);
+        ensure!(
+            plumb_format::refs::is_domain(&domain) && (grade.is_some() || name == "ok"),
+            "line {} of {path} is not a site's address and ok, low_value or spam",
+            at + 1
+        );
+        graded.insert(domain, grade);
+    }
+    let mut left_out = 0;
+    let mut graded: BTreeMap<String, Grade> = graded
+        .into_iter()
+        .filter_map(|(domain, grade)| Some((domain, grade?)))
+        .filter(|(domain, grade)| {
+            let keep = *grade != Grade::LowValue || !government(domain);
+            left_out += u64::from(!keep);
+            keep
+        })
+        .collect();
+    let path = args.picks.display();
+    let file = File::open(&args.picks).with_context(|| format!("opening {path}"))?;
+    for (at, line) in std::io::BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let pick: crate::grades::Pick =
+            serde_json::from_str(&line).with_context(|| format!("line {} of {path}", at + 1))?;
+        let domain = pick.domain.to_ascii_lowercase();
+        if pick.bare() && graded.get(&domain) == Some(&Grade::LowValue) {
+            graded.remove(&domain);
+            left_out += 1;
+        }
+    }
+    let mut manifest = Map::new();
+    manifest.insert("format".into(), json!(FORMAT));
+    manifest.insert("set".into(), json!(args.name));
+    manifest.insert("generation".into(), json!(now()));
+    manifest.insert("license".into(), json!(args.license));
+    manifest.insert("attribution".into(), json!(args.attribution));
+    manifest.insert("extends".into(), json!(["site"]));
+    let items = graded.iter().map(|(domain, grade)| {
+        serde_json::from_value(json!({
+            "id": domain, "extends": format!("site:{domain}"), "labels": ["machine-written"],
+            "fields": {GRADE_FIELD: grade.name()},
+        }))
+        .ok()
+    });
+    let fields = BTreeMap::from([(
+        GRADE_FIELD.to_string(),
+        serde_json::from_value(json!({"type": "keyword"}))?,
+    )]);
+    let written = write_set(items, fields, manifest, &args.out, PART_ENDS, args.level)?;
+    Ok(Written {
+        left_out,
+        ..written
+    })
+}
+
+/// Whether `domain` is under a government's own suffix: `.gov` or `.mil`,
+/// or a country's (`.gov.uk`, `.gob.es`, `.gouv.fr`, `.nic.in`, `.go.jp`).
+fn government(domain: &str) -> bool {
+    let labels: Vec<&str> = domain.rsplit('.').collect();
+    match labels.as_slice() {
+        ["gov" | "mil", ..] => true,
+        [country, second, _, ..] if country.len() == 2 => matches!(
+            *second,
+            "gov" | "gob" | "gouv" | "govt" | "gv" | "go" | "gc" | "nic" | "mil"
+        ),
+        _ => false,
+    }
 }
 
 /// The kind of the item that names a map file.
@@ -1826,6 +1980,85 @@ mod tests {
         );
         assert_eq!(items[1].id, "other.example");
         assert!(items.iter().all(|item| item.labels == ["adult"]));
+    }
+
+    #[test]
+    fn site_grades_are_a_layer_that_marks_spam_and_low_value_sites() {
+        use plumb_index::grades::Grade;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (grades, dir) = (temp.path().join("grades.jsonl"), temp.path().join("set"));
+        let picks = temp.path().join("picks.jsonl");
+        let pick_lines = [
+            r#"{"domain": "status.example.com", "title": "Status", "link_score": 0.2}"#,
+            r#"{"domain": "nflbox.sx", "link_score": 0.1}"#,
+            r#"{"domain": "fafsa.gov", "official": false, "link_score": 0.34}"#,
+        ];
+        fs::write(&picks, pick_lines.join("\n")).unwrap();
+        fs::write(
+            &grades,
+            [
+                r#"{"domain": "fafsa.gov", "grade": "low_value", "words": []}"#,
+                r#"{"domain": "indianvisaonline.gov.in", "grade": "low_value"}"#,
+                r#"{"domain": "spam.gov.example", "grade": "low_value"}"#,
+                r#"{"domain": "nflbox.sx", "grade": "spam", "words": []}"#,
+                r#"{"domain": "nba.com", "grade": "ok", "words": ["basketball"]}"#,
+                r#"{"domain": "Status.Example.com", "grade": "spam"}"#,
+                r#"{"domain": "status.example.com", "grade": "low_value"}"#,
+                r#"{"domain": "espn.com", "grade": "spam"}"#,
+                r#"{"domain": "espn.com", "grade": "ok"}"#,
+                r#"{"domain": "cut.exam"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let args = SiteGradesArgs {
+            grades,
+            picks,
+            name: "plumb/site-grades".into(),
+            out: dir.clone(),
+            license: "CC0-1.0".into(),
+            attribution: "From a test".into(),
+            level: 3,
+        };
+        // fafsa.gov's record showed only its address and
+        // indianvisaonline.gov.in is a government's, so their low_value
+        // grades are left out; nflbox.sx's spam stays, as does a "gov" that
+        // is not a country's suffix.
+        let written = site_grades(&args).unwrap();
+        assert_eq!((written.items, written.left_out), (3, 2));
+        let key = SigningKey::from_bytes(&[5; 32]);
+        sign_set(&dir, &key, None, None).unwrap();
+        let checked = check_set(&dir, Some(&PublicKey::of(&key)), &[]).unwrap();
+        assert_eq!(checked.items, 3);
+        let (manifest, items) = plumb_node::sets::read_items(&dir).unwrap();
+        assert_eq!(manifest.extends, ["site"]);
+        assert!(items.iter().all(|item| item.labels == ["machine-written"]));
+        let read = plumb_node::node::grades::read(&dir).unwrap();
+        assert_eq!(read.len(), 3);
+        assert_eq!(read.get("indianvisaonline.gov.in"), None);
+        assert_eq!(read.get("spam.gov.example"), Some(Grade::LowValue));
+        assert_eq!(read.get("nflbox.sx"), Some(Grade::Spam));
+        assert_eq!(read.get("status.example.com"), Some(Grade::LowValue));
+        assert_eq!(read.get("espn.com"), None);
+        assert_eq!(read.get("example.com"), None);
+        assert_eq!(read.get("nba.com"), None);
+        assert_eq!(read.get("fafsa.gov"), None);
+
+        // A mistyped correction is an error, not left out unseen.
+        let bad = temp.path().join("bad.jsonl");
+        let lines = [
+            r#"{"domain": "nba.com", "grade": "OK"}"#,
+            r#"{"domain": "nflbox.sx", "grade": "spam"}"#,
+        ];
+        fs::write(&bad, lines.join("\n")).unwrap();
+        let bad = SiteGradesArgs {
+            grades: bad,
+            out: temp.path().join("bad-set"),
+            ..args
+        };
+        let err = site_grades(&bad).unwrap_err();
+        assert!(err.to_string().contains("line 1 of"), "{err:#}");
     }
 
     #[test]

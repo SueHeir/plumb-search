@@ -167,7 +167,7 @@ A change must keep these, or released nodes misread sets:
 - The denylist: `Denylist::new(Switch)`, `Denylist::add_items`, `Denylist::denies`, `Denylist::denies_url`.
 - Site rules: `SiteRules::add_items`, `SiteRules::site_of`, `sites::read_suffix_list`.
 
-`plumb-tools set` is the command line for sets: `new-key`, `from-pages`, `page-sets`, `denylist`, `deny-entry`, `site-rules`, `adult-sites`, `map`, `vectors`, `note`, `sign` and `check`. Signing is a step someone takes on purpose; no build signs anything.
+`plumb-tools set` is the command line for sets: `new-key`, `from-pages`, `page-sets`, `denylist`, `deny-entry`, `site-rules`, `adult-sites`, `site-grades`, `map`, `vectors`, `note`, `sign` and `check`. Signing is a step someone takes on purpose; no build signs anything.
 
 ## Tests
 

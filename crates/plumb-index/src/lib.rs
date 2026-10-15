@@ -70,6 +70,7 @@
 //! `us bank` and `US BANK` are the same query and `nestle` finds `Nestlé`.
 
 mod analysis;
+pub mod grades;
 pub mod health;
 mod hits;
 mod indexing;
