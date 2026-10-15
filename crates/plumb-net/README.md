@@ -51,7 +51,7 @@ plumb-node runs the swarm and answers other nodes from its index through `Bucket
 | [hash.rs](src/hash.rs) | SHA-256 and the Merkle tree over a batch's records |
 | [store.rs](src/store.rs) | Batches held on disk, pruning, proofs for search answers, `CrawlerView` |
 | [agree.rs](src/agree.rs) | Agreement between crawlers: quorum, vouching, disputes and rechecks |
-| [fill.rs](src/fill.rs) | `/plumb/fill/1`: a trusted node's crawled sites, best-ranked first |
+| [fill.rs](src/fill.rs) | `/plumb/fill/1`: a trusted node's crawled sites, best-ranked first; `accept_record`, the checks on a site from elsewhere, which reading the set of sites shares |
 
 **Network search**
 

@@ -198,6 +198,180 @@ async fn a_node_keeps_the_adult_list_set_it_holds_as_its_list() {
     node.shutdown().await.unwrap();
 }
 
+/// A node's buckets, its own list to fill from and the signed sets in a
+/// data folder.
+struct ListAndSets(plumb_net::BucketTable, PathBuf);
+
+impl plumb_net::BucketSource for ListAndSets {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn ranked(&self, from: usize, count: usize) -> Option<(Vec<String>, usize)> {
+        plumb_net::BucketSource::ranked(&self.0, from, count)
+    }
+
+    fn set_manifest(&self, set: &str) -> Option<String> {
+        crate::node::signed_sets::held_manifest(&self.1, set)
+    }
+
+    fn set_part_file(&self, sha256: &str) -> Option<PathBuf> {
+        crate::node::signed_sets::held_part(&self.1, sha256)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_node_sets_up_and_fills_from_the_set_of_sites() {
+    use ed25519_dalek::SigningKey;
+    use plumb_format::PublicKey;
+
+    // The project's set of sites: five, two never crawled, the best
+    // three in the first part.
+    let now = now_unix();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let held = peer_dir.path().join("held");
+    let publisher = SigningKey::from_bytes(&[7; 32]);
+    let sites: Vec<SiteRecord> = [
+        "lighthouses.org",
+        "uncrawledlanterns.org",
+        "harbourmasters.org",
+        "tidetables.org",
+        "uncrawledbuoys.org",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, domain)| {
+        let mut record = SiteRecord::new(*domain);
+        record.signals.tranco_rank = Some(1 + i as u32);
+        record.about = Some(format!("keepers of {domain}"));
+        if !domain.starts_with("uncrawled") {
+            record.url = Some(format!("https://{domain}/"));
+            record.title = Some(format!("Guild of {domain}"));
+            record.crawled_at = Some(now - 600);
+        }
+        record
+    })
+    .collect();
+    let set = crate::node::signed_sets::set_dir(&held, "plumb/sites").unwrap();
+    let serde_json::Value::Object(manifest) = serde_json::json!({"format": plumb_format::FORMAT,
+        "set": "plumb/sites", "generation": "2026-10-15T04:00:00Z", "license": "CC0-1.0"})
+    else {
+        unreachable!()
+    };
+    let items = sites.iter().map(|site| Some(site.to_item().unwrap()));
+    let fields = plumb_core::site_item::site_fields();
+    plumb_tools::set::write_set(items, fields, manifest, &set, &[3], 3).unwrap();
+    plumb_tools::set::sign_set(&set, &publisher, None, None).unwrap();
+
+    // The node holding it is trusted too, and its own list holds another
+    // site: the set comes first.
+    let mut own = SiteRecord::new("trustedonly.org");
+    own.url = Some("https://trustedonly.org/".into());
+    own.crawled_at = Some(now - 600);
+    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[own]).unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(ListAndSets(table, held)))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // A new node, whose seed sources lead nowhere.
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.sites = 10;
+    config.settings.setup_chosen = false;
+    config.set_publishers = vec![PublicKey::of(&publisher)];
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    // The first index holds the set's first part, crawled or not.
+    assert_eq!(status.sites, 3, "{status:?}");
+    assert!(status.last_error.is_none(), "{status:?}");
+    assert_eq!(
+        search(addr, "lighthouses").await[0].domain,
+        "lighthouses.org"
+    );
+    let taken = crate::node::signed_sets::set_dir(dir.path(), "plumb/sites").unwrap();
+    // Its part counts as downloaded, through setting up.
+    let first_part = std::fs::metadata(taken.join("items-001.jsonl.zst"))
+        .unwrap()
+        .len();
+    assert!(status.downloaded_today >= first_part, "{status:?}");
+
+    wait_for(addr, "the setup question", |s| {
+        s.fill
+            .as_ref()
+            .is_some_and(|f| f.detail.contains("Set up my node"))
+    })
+    .await;
+    node.inner
+        .change_settings(NodeSettings {
+            storage_limit_mb: 500,
+            setup_chosen: true,
+            ..node.inner.settings()
+        })
+        .unwrap();
+
+    // Filling takes the next part and the rest of the sites from it.
+    let status = wait_for(addr, "the rest of the set of sites", |s| {
+        s.fill
+            .as_ref()
+            .is_some_and(|f| f.filled == 5 && f.detail.starts_with("Done"))
+    })
+    .await;
+    let fill = status.fill.unwrap();
+    assert_eq!((fill.total, fill.peer.as_deref()), (5, Some("plumb/sites")));
+    assert!(taken.join("items-002.jsonl.zst").is_file());
+    node.refresh_now();
+    wait_for(addr, "a new index", |s| {
+        ready_and_idle(s) && s.index.as_deref() != Some("000001")
+    })
+    .await;
+    assert_eq!(
+        search(addr, "uncrawledbuoys").await[0].domain,
+        "uncrawledbuoys.org"
+    );
+    let records = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
+    assert_eq!(records.len(), 5);
+    let buoys = records.get("uncrawledbuoys.org").unwrap();
+    assert_eq!(buoys.signals.tranco_rank, Some(5));
+    assert_eq!(
+        buoys.about.as_deref(),
+        Some("keepers of uncrawledbuoys.org")
+    );
+    assert!(buoys.crawled_at.is_none());
+    // The trusted node's own list was never asked for.
+    assert!(records.get("trustedonly.org").is_none());
+    assert_eq!(peer.status().fill_records_served, 0);
+    assert!(names(&dir.path().join("seed")).is_empty());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
 /// A node's buckets and signed sets, sending `served` for the map's part:
 /// the map with its first half zeroed, so only a node that goes on from
 /// the half it fetched before gets the map whole.

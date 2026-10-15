@@ -81,6 +81,7 @@ Taken from [cli.rs](src/cli.rs). `plumb ingest`, which folds seed data into a re
 | | `set page-sets` | Write every page set a node holds as `plumb/<id>` sets |
 | | `set denylist`, `set deny-entry` | Write a denylist set from an entries file; print one entry |
 | | `set site-rules` | Write the rules that say which site a host is on, from the Public Suffix List, and list the hosts they move |
+| | `set sites` | Write a node's records file as `plumb/sites`, the set other nodes set up and fill from |
 | | `set adult-sites` | Write an adult blocklist as the layer that labels those sites `adult` |
 | | `set site-grades` | Write a language model's grades as the layer that marks spam and low-value sites |
 | | `set map`, `set vectors` | Write the map file or a node's `vectors.bin` as a set |

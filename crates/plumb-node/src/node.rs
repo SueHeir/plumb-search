@@ -124,6 +124,7 @@ mod round;
 pub mod schedule;
 mod shared_vectors;
 pub(crate) mod signed_sets;
+mod site_set;
 pub(crate) mod store;
 mod trim;
 mod wanted_pages;
@@ -1316,6 +1317,8 @@ struct Inner {
     stopped: watch::Receiver<bool>,
     /// Wakes the background work for a refresh request.
     wake: Notify,
+    /// What filling and fetching the set of sites share.
+    sites: site_set::Shared,
     refresh_requested: AtomicBool,
     lock: Mutex<Option<DirLock>>,
     /// Tries at Wikidata's official websites while setup went on without
@@ -1593,6 +1596,7 @@ impl Inner {
             retired: Mutex::new(opened.leftover),
             stopped,
             wake: Notify::new(),
+            sites: site_set::Shared::default(),
             refresh_requested: AtomicBool::new(false),
             lock: Mutex::new(opened.lock),
             wikidata: Mutex::new(WikidataTries {

@@ -190,6 +190,8 @@ With no storage limit it takes the trusted node's whole list. A node with topics
 
 A node answers at most 2 fill requests at once and 6 a minute from one node, and only when it answers searches.
 
+**From the set of sites.** The project also publishes its node's list as the signed set `plumb/sites` (`plumb-tools set sites`): a first part of the 50,000 best sites, then parts of 200,000, each site an item. A node that takes the project's sets reads its sites from that set, taken from any node, in place of asking a trusted node, each record kept or refused as a trusted node's would be, under the same limits. It fetches each part when it reaches it and removes it once it reads past it, but for the first, which new nodes ask for, so a node never holds the whole set. A node keeps the first part from setting up or from the start of its list, until a newer set replaces it. While it reads, it looks for a newer set every 6 hours, and whenever a part it needs is missing, since nodes drop the parts of a set a newer one replaced. It goes on in the newer set from the same place, keeping the parts the two share. A node partway through a trusted node's list reads on to its end first, and moves to the set when it starts over; one that finds no node with the part it needs goes on in a trusted node's list from the same place, to its end. `fill.peer` in `/api/status` is `plumb/sites` while it reads the set. A blackhole node reads each trusted node's own list.
+
 **Staying under the storage limit** ([node/trim.rs](../crates/plumb-node/src/node/trim.rs)):
 
 - At 90% of the limit, a shared crawl only refreshes a site the node holds. A new site is taken in only when it is about one of the node's topics or is an official website.
@@ -198,9 +200,9 @@ A node answers at most 2 fill requests at once and 6 a minute from one node, and
 
 **Blackhole.** `--blackhole` is for a server with disk and memory to spare. It fills from every connected trusted node, going through each one's list again a day after it last did (`fill.lists_done` in `/api/status` counts the lists held); keeps every page set (Wikipedia, GitHub, Stack Overflow, books, papers) in full; keeps the network's batches for good unless `--keep-batches-days` is given; and asks each node it meets for the batches of the last 7 epochs rather than 3. The storage limit, the day's download limit and the memory an index build may take still hold, and the trust rules are the same.
 
-**Crawl only.** `--crawl-only` is for a small server that supports the network and that nobody searches. Its crawl rounds go on and publish their batches, and it still holds, serves and passes on batches, but it builds no search index, keeps no page sets, places or feeds, does not fold in other nodes' crawls, and answers no searches or fill requests. It takes only the `plumb/denylist` and `plumb/site-rules` sets. Starting without the flag again builds a fresh index.
+**Crawl only.** `--crawl-only` is for a small server that supports the network and that nobody searches. Its crawl rounds go on and publish their batches, and it still holds, serves and passes on batches, but it builds no search index, keeps no page sets, places or feeds, does not fold in other nodes' crawls, and answers no searches or fill requests. It takes only the `plumb/denylist` and `plumb/site-rules` sets, and the parts of `plumb/sites` filling reads. Starting without the flag again builds a fresh index.
 
-**Setting up from the network.** A new node that trusts a node sets up from it instead of downloading the seed data (Tranco, Common Crawl, Wikidata, Wikipedia): it asks with `all` set, and the trusted node sends every site of its list, crawled or not, up to 5,000 a page, each with the ranks and facts its own seed gave it. The best 50,000 make the first index, and filling then takes the rest, a round a minute, until the node holds `--sites` of them or runs out of room. When no trusted node answers within 2 minutes, or one sends fewer than 1,000 sites, the node downloads the seed data as before. So does a node given `--seed-from-outside` or `--no-fill`, or one that trusts no one.
+**Setting up from the network.** A new node that trusts a node sets up from the network instead of downloading the seed data (Tranco, Common Crawl, Wikidata, Wikipedia). It first looks for a node that holds the set of sites for 30 seconds, and builds its first index from the set's first part, every site crawled or not. Otherwise it asks the trusted node with `all` set, and the trusted node sends every site of its list, crawled or not, up to 5,000 a page, each with the ranks and facts its own seed gave it. The best 50,000 make the first index, and filling then takes the rest, a round a minute, until the node holds `--sites` of them or runs out of room. When no trusted node answers within the 2 minutes after that, or one sends fewer than 1,000 sites, the node downloads the seed data as before. So does a node given `--seed-from-outside` or `--no-fill`, or one that trusts no one.
 
 **Other data from the network first.** Nodes do not each fetch from Wikimedia and other sources what the network already holds. Page set files come from trusted nodes over `/plumb/pages/1` (see [pages.md](pages.md#nodes-in-the-network)), as do site vectors for search by meaning (`vectors-<model>`) and the adult blocklist safe search uses (`adult-domains`, asked for once the node's copy is a week old). The project's own data also comes as signed sets, from any node (below).
 
@@ -214,6 +216,8 @@ Because a node checks a set rather than trusting whoever sends it, it takes sets
 2. When one signed by a publisher it trusts is newer than its own, it fetches the parts it lacks from whichever node holds them, a piece of at most 1 MiB at a time, checking each part's size and hash.
 3. It checks the whole set as `plumb-tools set check` does, and only then puts it in place of the old one, in `DATA/sets/plumb/<name>/`. A download that stops keeps the parts it got and goes on from there next time.
 
+`plumb/sites` is the exception: filling takes it part by part as it reads it, and checks each item as it reads it (see [Filling free space](#filling-free-space)).
+
 A node serves the sets it holds in turn: 4 requests at once, 120 a minute from one node.
 
 | Set | Taken by | Use |
@@ -222,6 +226,7 @@ A node serves the sets it holds in turn: 4 requests at once, 120 a minute from o
 | `plumb/site-rules` | Every node | The public suffix and subsite lists that say which site a host is on; used from the next start |
 | `plumb/adult-sites` | Every node that searches | The adult blocklist safe search uses |
 | `plumb/site-grades` | Every node that searches | Sites a language model graded spam or low value, which searches push down, in other nodes' answers too; applied as soon as it is taken |
+| `plumb/sites` | A node that fills, but not with `--blackhole` | The project's node's sites: the part filling reads, and the first part once read (see [Filling free space](#filling-free-space)) |
 | `plumb/map` | A node that keeps a map | The map, under the same `--set-updates`, storage and growth rules as the map file |
 | `plumb/<page set id>` | A node that keeps that page set | Item sets such as `plumb/wikipedia-en`, as far as the node keeps pages of it |
 | `plumb/vectors-<model>` | A node with search by meaning | Site vectors made with its model |

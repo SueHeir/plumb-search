@@ -82,9 +82,9 @@ pub(super) const DIR: &str = "sets";
 /// a look at every set stays within the requests a node answers another a
 /// minute ([`plumb_net::sets::SETS_REQUESTS_PER_MINUTE`]).
 #[cfg(not(test))]
-const LOOK_EVERY: Duration = Duration::from_secs(6 * 3600);
+pub(super) const LOOK_EVERY: Duration = Duration::from_secs(6 * 3600);
 #[cfg(test)]
-const LOOK_EVERY: Duration = Duration::from_secs(30);
+pub(super) const LOOK_EVERY: Duration = Duration::from_secs(30);
 /// Wait before looking again when a set found no node that serves sets
 /// connected, or only busy ones.
 #[cfg(not(test))]
@@ -327,7 +327,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
 }
 
 /// What asking the connected nodes for a set's manifest found.
-enum Offer {
+pub(super) enum Offer {
     /// No node that serves sets was connected.
     NoPeer,
     /// None offered a newer generation, but one was busy.
@@ -351,7 +351,12 @@ fn held_generation(data: &Path, set: &str) -> Option<i64> {
 
 /// Asks the connected nodes for `set`'s newest manifest, for one a trusted
 /// publisher signed that is newer than `held`.
-async fn ask_newest(inner: &Inner, net: &NetHandle, set: &str, held: Option<i64>) -> Result<Offer> {
+pub(super) async fn ask_newest(
+    inner: &Inner,
+    net: &NetHandle,
+    set: &str,
+    held: Option<i64>,
+) -> Result<Offer> {
     let mut asked: Vec<PeerId> = Vec::new();
     let mut newest: Option<(i64, String, PeerId, PublicKey)> = None;
     let mut busy = false;
@@ -754,7 +759,7 @@ fn keep_fetched(
 
 /// Fetches `part` into `dest`, from `first` when it holds it, else from
 /// other nodes.
-async fn fetch_part(
+pub(super) async fn fetch_part(
     inner: &Inner,
     net: &NetHandle,
     part: &FilePart,

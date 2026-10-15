@@ -46,7 +46,7 @@ flowchart LR
 | [node/store.rs](src/node/store.rs) | Data folder paths, the folder lock, `state.json`, numbered index folders |
 | [node/round.rs](src/node/round.rs), [node/schedule.rs](src/node/schedule.rs) | The slim view of each site a crawl round holds; workload presets and crawl hours |
 | [node/network.rs](src/node/network.rs) | Joining plumb-net: the records inbox, buckets, popularity, `--publish-records` |
-| [node/fill.rs](src/node/fill.rs), [node/trim.rs](src/node/trim.rs) | Filling free space from trusted nodes (and first setup from one); staying under the storage limit |
+| [node/fill.rs](src/node/fill.rs), [node/site_set.rs](src/node/site_set.rs), [node/trim.rs](src/node/trim.rs) | Filling free space from the set of sites or trusted nodes (and first setup from them); fetching the parts of the set it reads; staying under the storage limit |
 | [node/pages.rs](src/node/pages.rs), [node/places.rs](src/node/places.rs), [node/newer.rs](src/node/newer.rs) | Page set and places files and their indexes; newer files from trusted nodes |
 | [node/signed_sets.rs](src/node/signed_sets.rs), [node/denylist.rs](src/node/denylist.rs), [node/adult.rs](src/node/adult.rs), [node/grades.rs](src/node/grades.rs) | Signed sets taken from the network; the project's denylist; the adult blocklist; the site grades searches push spam down by |
 | [node/embedding.rs](src/node/embedding.rs), [node/shared_vectors.rs](src/node/shared_vectors.rs) | Search by meaning: the model, embedding after each build, vectors from other nodes |
@@ -166,7 +166,7 @@ Everything a node keeps is under `--data DIR`. Paths are defined in [node/store.
 | `indexes/NNNNNN/` | Numbered search indexes, the newest that opens is searched; `buckets/` inside for the network and private search |
 | `icons/xx/<domain>.png` | Site icons for results pages ([icons.rs](src/icons.rs)) |
 | `net/` | The network side: `node.key`, `batches/`, `credits/`, `reports/`, `bucket-cache/`, `inbox.jsonl`, `fill.json`, `picks.json`, `published.json`, `leads.jsonl`, `friends.json`, `popularity.json`, `search-scope` |
-| `sets/<scope>/<name>/` | Signed sets taken from the network ([node/signed_sets.rs](src/node/signed_sets.rs)) |
+| `sets/<scope>/<name>/` | Signed sets taken from the network ([node/signed_sets.rs](src/node/signed_sets.rs)), and the parts of `plumb/sites` filling reads ([node/site_set.rs](src/node/site_set.rs)) |
 | `pages/sets/` | Page set files, `places.tsv.gz` and `map.pmtiles`, with `.prev` copies ([pages.rs](src/pages.rs)) |
 | `pages/index-<key>/`, `pages/places-<key>/` | The page index and the place index |
 | `safe/adult-domains.txt` | The adult blocklist ([node/adult.rs](src/node/adult.rs)) |
