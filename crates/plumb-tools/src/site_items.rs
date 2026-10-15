@@ -28,6 +28,10 @@ pub struct SiteItemsArgs {
     /// How many sites to name for each field that changes.
     #[arg(long, value_name = "N", default_value_t = 5)]
     pub examples: usize,
+    /// With each example, what changed: the elements of a list only one
+    /// side has, or where two texts part.
+    #[arg(long)]
+    pub diffs: bool,
     /// How many of the first sites to hold in memory in each shape, each
     /// in a process of its own, to measure what a site takes; 0 for none.
     #[arg(long, value_name = "N", default_value_t = 100_000)]
@@ -61,7 +65,8 @@ struct Field {
     dropped: u64,
     /// Read back different.
     changed: u64,
-    examples: Vec<String>,
+    /// Sites it changed in, each with what changed when asked for.
+    examples: Vec<(String, Option<String>)>,
 }
 
 #[derive(Debug, Default)]
@@ -93,7 +98,7 @@ pub fn run(args: &SiteItemsArgs) -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        report.add(&line, args.examples);
+        report.add(&line, args);
     }
     report.print();
     if args.memory_sample > 0 {
@@ -111,9 +116,10 @@ pub fn run(args: &SiteItemsArgs) -> Result<()> {
 }
 
 impl Report {
-    fn add(&mut self, line: &str, examples: usize) {
+    fn add(&mut self, line: &str, args: &SiteItemsArgs) {
+        let examples = args.examples;
         let started = Instant::now();
-        let Ok(record) = serde_json::from_str::<SiteRecord>(line) else {
+        let Ok(record) = plumb_core::stored::read(line.as_bytes()) else {
             self.unreadable += 1;
             return;
         };
@@ -164,7 +170,8 @@ impl Report {
                 field.changed += 1;
             }
             if field.examples.len() < examples {
-                field.examples.push(record.domain.clone());
+                let diff = args.diffs.then(|| difference(was, now));
+                field.examples.push((record.domain.clone(), diff));
             }
         }
         self.same += u64::from(same);
@@ -178,17 +185,26 @@ impl Report {
             n(self.unreadable),
             n(self.same)
         );
+        if self.no_item.is_empty() {
+            println!("  sites that make no item: 0");
+        }
         for (why, (count, domains)) in &self.no_item {
             println!("  no item, {why}: {} ({})", n(*count), domains.join(", "));
         }
         println!("field: read back empty, read back different (sites)");
         for (name, field) in &self.fields {
+            let domains: Vec<&str> = field.examples.iter().map(|(d, _)| d.as_str()).collect();
             println!(
                 "  {name}: {}, {} ({})",
                 n(field.dropped),
                 n(field.changed),
-                field.examples.join(", ")
+                domains.join(", ")
             );
+            for (domain, diff) in &field.examples {
+                if let Some(diff) = diff {
+                    println!("    {domain}: {diff}");
+                }
+            }
         }
         let ms = |time: Duration| time.as_millis() as u64;
         println!(
@@ -230,6 +246,51 @@ fn pairs<'a>(
             (format!("{prefix}{name}"), value(a), value(b))
         })
         .collect()
+}
+
+/// What differs between a member's value before and after, in short: the
+/// elements of a list only one side has, or two texts from where they
+/// part, escaped so that a change of spaces or Unicode form shows.
+fn difference(was: &Value, now: &Value) -> String {
+    match (was, now) {
+        (Value::Array(a), Value::Array(b)) => {
+            let only = |x: &[Value], y: &[Value]| {
+                let only: Vec<&Value> = x.iter().filter(|v| !y.contains(v)).collect();
+                shortened(&serde_json::to_string(&only).unwrap_or_default())
+            };
+            if a.iter().all(|v| b.contains(v)) && b.iter().all(|v| a.contains(v)) {
+                return format!("same {} elements in another order or count", a.len());
+            }
+            format!("lost {}, gained {}", only(a, b), only(b, a))
+        }
+        (Value::String(a), Value::String(b)) => {
+            let at = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+            let from = at.saturating_sub(10);
+            let part =
+                |s: &str| shortened(&format!("{:?}", s.chars().skip(from).collect::<String>()));
+            format!(
+                "{} chars to {}, parting at char {at}: {} to {}",
+                a.chars().count(),
+                b.chars().count(),
+                part(a),
+                part(b)
+            )
+        }
+        _ => format!(
+            "{} to {}",
+            shortened(&was.to_string()),
+            shortened(&now.to_string())
+        ),
+    }
+}
+
+/// `text` cut to its first 120 characters.
+fn shortened(text: &str) -> String {
+    const SHOWN: usize = 120;
+    if text.chars().count() <= SHOWN {
+        return text.to_string();
+    }
+    format!("{}...", text.chars().take(SHOWN).collect::<String>())
 }
 
 /// Whether a member says nothing.
@@ -280,7 +341,7 @@ fn sample_items(args: &SiteItemsArgs) -> Result<PathBuf> {
     let path = std::env::temp_dir().join(format!("plumb-site-items-{}.jsonl", std::process::id()));
     let mut out = std::io::BufWriter::new(File::create(&path)?);
     for line in sample(&args.records, args.memory_sample)? {
-        let Ok(record) = serde_json::from_str::<SiteRecord>(&line) else {
+        let Ok(record) = plumb_core::stored::read(line.as_bytes()) else {
             continue;
         };
         if let Ok(item) = record.to_line() {
@@ -310,7 +371,7 @@ fn hold(args: &SiteItemsArgs, shape: Shape) -> Result<()> {
     let records: Vec<SiteRecord> = match shape {
         Shape::Record => lines
             .iter()
-            .filter_map(|l| serde_json::from_str(l).ok())
+            .filter_map(|l| plumb_core::stored::read(l.as_bytes()).ok())
             .collect(),
         Shape::Item => Vec::new(),
     };
@@ -356,20 +417,42 @@ mod tests {
         long.signals.sitelinks = 0;
         let mut spaced = SiteRecord::new("spaced.example");
         spaced.title = Some(" Spaced ".into());
+        spaced.headings = vec![" Get Started ".into(), "Docs".into()];
         // Over the format's 16 KiB with nothing to shed.
         let mut big = SiteRecord::new("big.example");
         big.description = Some("a ".repeat(10_000));
+        let args = SiteItemsArgs {
+            records: PathBuf::new(),
+            examples: 5,
+            diffs: true,
+            memory_sample: 0,
+            hold: None,
+        };
         let mut report = Report::default();
         for record in [same, long, spaced, big] {
-            report.add(&serde_json::to_string(&record).unwrap(), 5);
+            report.add(&serde_json::to_string(&record).unwrap(), &args);
         }
-        report.add("not json", 5);
+        report.add("not json", &args);
         assert_eq!((report.sites, report.unreadable, report.same), (4, 1, 1));
         assert_eq!(report.no_item.values().map(|(n, _)| n).sum::<u64>(), 1);
         let text = &report.fields["body_text"];
         assert_eq!((text.dropped, text.changed), (0, 1));
-        assert_eq!(text.examples, ["long.example"]);
-        assert_eq!(report.fields["title"].changed, 1);
+        let (domain, diff) = &text.examples[0];
+        assert_eq!(domain, "long.example");
+        assert!(diff
+            .as_ref()
+            .unwrap()
+            .starts_with("2000 chars to 999, parting at char 999: "));
+        let title = &report.fields["title"];
+        assert_eq!(title.changed, 1);
+        assert_eq!(
+            title.examples[0].1.as_deref(),
+            Some(r#"8 chars to 6, parting at char 0: " Spaced " to "Spaced""#)
+        );
+        assert_eq!(
+            report.fields["headings"].examples[0].1.as_deref(),
+            Some(r#"lost [" Get Started "], gained ["Get Started"]"#)
+        );
         assert!(!report.fields.contains_key("signals.linking_domains"));
         assert!(!report.fields.contains_key("crawl_failures"));
         assert!(report.item_bytes > 0 && report.record_bytes > report.item_bytes / 2);
