@@ -3,7 +3,11 @@
 //! of a site, how many sites read back from their item without it or with
 //! it changed; how many sites make no item at all; the bytes of both
 //! shapes, the time to read them, and the memory a sample of sites takes
-//! held in each.
+//! held in each. And how many sites cleaning changes
+//! ([`SiteRecord::clean`]), and the time it takes, first and once clean;
+//! and the bytes of the stored items a node would write
+//! ([`plumb_core::stored::item_line`]), the time to read them, and how many
+//! do not read back as their clean site.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -82,6 +86,17 @@ struct Report {
     item_bytes: u64,
     record_read: Duration,
     item_read: Duration,
+    /// Sites [`SiteRecord::clean`] changes.
+    cleaned: u64,
+    clean_time: Duration,
+    /// The time to clean sites clean already, as a node does each time it
+    /// reads its records once they are.
+    clean_again_time: Duration,
+    stored_bytes: u64,
+    stored_read: Duration,
+    /// Sites whose stored item does not read back as the clean site, with
+    /// the first few.
+    stored_differ: (u64, Vec<String>),
 }
 
 /// Reads every site of the records file as its item and back, and prints
@@ -126,6 +141,26 @@ impl Report {
         self.record_read += started.elapsed();
         self.sites += 1;
         self.record_bytes += line.len() as u64 + 1;
+        let mut clean = record.clone();
+        let started = Instant::now();
+        clean.clean();
+        self.clean_time += started.elapsed();
+        self.cleaned += u64::from(clean != record);
+        let started = Instant::now();
+        clean.clean();
+        self.clean_again_time += started.elapsed();
+        if let Ok(stored) = plumb_core::stored::item_line(&record) {
+            self.stored_bytes += stored.len() as u64 + 1;
+            let started = Instant::now();
+            let back = plumb_core::stored::read(&stored);
+            self.stored_read += started.elapsed();
+            if back.ok().as_ref() != Some(&clean) {
+                self.stored_differ.0 += 1;
+                if self.stored_differ.1.len() < examples {
+                    self.stored_differ.1.push(record.domain.clone());
+                }
+            }
+        }
         let item_line = match record.to_line() {
             Ok(item_line) => item_line,
             Err(err) => {
@@ -213,6 +248,19 @@ impl Report {
             n(self.item_bytes),
             n(ms(self.record_read)),
             n(ms(self.item_read))
+        );
+        println!(
+            "cleaning: {} sites change; {} ms, {} ms once clean",
+            n(self.cleaned),
+            n(ms(self.clean_time)),
+            n(ms(self.clean_again_time))
+        );
+        println!(
+            "stored items: {} bytes, read in {} ms; {} do not read back as their clean site ({})",
+            n(self.stored_bytes),
+            n(ms(self.stored_read)),
+            n(self.stored_differ.0),
+            self.stored_differ.1.join(", ")
         );
     }
 }
@@ -456,5 +504,10 @@ mod tests {
         assert!(!report.fields.contains_key("signals.linking_domains"));
         assert!(!report.fields.contains_key("crawl_failures"));
         assert!(report.item_bytes > 0 && report.record_bytes > report.item_bytes / 2);
+        // Trailing and leading spaces come off long, spaced and big.
+        assert_eq!(report.cleaned, 3);
+        // Stored items keep all four whole, big included.
+        assert_eq!(report.stored_differ.0, 0);
+        assert!(report.stored_bytes > 0);
     }
 }

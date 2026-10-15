@@ -620,7 +620,8 @@ fn on_site(page: &Page, domain: &str) -> bool {
 /// comes before the best site (see [`kept_below`]); a namesake of a better
 /// page comes after [`PARTIAL_AFTER`] sites, as [`place_pages_by_rules`]
 /// put it ("taylor swift" wants the singer's article under
-/// taylorswift.com, then sites, then the album "Taylor Swift"); and,
+/// taylorswift.com, then sites, then the album "Taylor Swift"), and so
+/// does a page only meant by part of the query ([`PageHit::meant`]); and,
 /// unless the query asks for them, podcasts come after the best site and
 /// the other pages listed on their own ("better call saul" wants amc.com
 /// and the article first).
@@ -636,7 +637,7 @@ pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<Place
         }
         if is_record(&page.hit) || code(page) {
             page.at = 0;
-        } else if namesake {
+        } else if namesake || page.hit.meant && !page.hit.named && !page.hit.whole {
             page.at = page.at.max(PARTIAL_AFTER).min(sites.len());
         } else if kept_below(&page.hit, sites, names_best) {
             page.at = page.at.max(1).min(sites.len());

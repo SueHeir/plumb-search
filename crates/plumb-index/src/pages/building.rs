@@ -36,6 +36,14 @@ pub(crate) fn schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
+    let aliases = builder.add_text_field(
+        "aliases",
+        TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(JOINED_ANALYZER)
+                .set_index_option(IndexRecordOption::Basic),
+        ),
+    );
     let scope = builder.add_text_field("scope", STRING);
     let topic = builder.add_text_field(
         "topic",
@@ -80,6 +88,7 @@ pub(crate) fn schema() -> (Schema, Fields) {
         Fields {
             words,
             keys,
+            aliases,
             scope,
             topic,
             about,
@@ -262,6 +271,11 @@ pub fn build_page_index_with_budget(
         if page.package.is_some() || page.set == DOCS_SET {
             for alias in &page.aliases {
                 document.add_text(fields.keys, alias);
+            }
+        }
+        if page.is_article() {
+            for alias in &page.aliases {
+                document.add_text(fields.aliases, alias);
             }
         }
         if let Some(site) = page.site.as_deref().filter(|_| page.is_article()) {

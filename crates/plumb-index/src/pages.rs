@@ -31,6 +31,7 @@ use tantivy::IndexReader;
 
 mod building;
 mod docs;
+mod linking;
 mod named_site;
 mod page;
 mod papers;
@@ -183,6 +184,17 @@ pub const DESCRIBED_WORD: f32 = 0.5;
 /// theirs does. "triassic jurassic cretaceous" finds Mesozoic.
 pub const LEAD_MATCH: f32 = 0.55;
 
+/// `name` of the article a part of the query means ([`PageSearcher::linked`])
+/// when the rest of the query says more than the article does: "hamstring
+/// insertion point" means Hamstring. Below every page that covers more of
+/// the query, and listed among the sites only once read enough to reach
+/// [`MIN_PARTIAL_SCORE`].
+pub const ENTITY_MATCH: f32 = 0.45;
+
+/// How many times as read as any other article a part of the query names
+/// an article must be to be the one that part means.
+const MEANT_READS: u64 = 3;
+
 /// Most pages looked at for each part of a query that may be a title
 /// ([`PageSearcher::search`]: "titanic sinking" finds Titanic).
 const TITLE_INSIDE_CANDIDATES: usize = 20;
@@ -191,7 +203,7 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 const LEAD_CANDIDATES: usize = 20;
 
 /// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v10-docs-address-symbols-short-titles-sharps";
+pub const PAGE_INDEX_VERSION: &str = "v11-docs-address-symbols-short-titles-sharps-aliases";
 
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
@@ -414,6 +426,13 @@ pub struct PageHit {
     /// ([`crate::learned::reorder`]), which [`place_pages`] keeps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learned: Option<LearnedPlace>,
+    /// Listed only for what a part of the query means
+    /// ([`PageSearcher::linked`]), not found any other way: listed after
+    /// [`PARTIAL_AFTER`] sites, wherever the learned ranking puts it, as
+    /// "cons of drinking coffee" is not about Cons. A page also named by
+    /// another reading of the query ("tylenol formula") is not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub meant: bool,
 }
 
 /// Where the learned ranking listed a page on its own.
@@ -453,6 +472,11 @@ pub struct PageIndexStats {
 struct Fields {
     words: Field,
     keys: Field,
+    /// A Wikipedia article's aliases, each as one token like [`Fields::keys`],
+    /// for [`PageSearcher::linked`] alone: a key for them would make
+    /// misspellings Wikipedia redirects ("Barak Obama") look like names to
+    /// the speller.
+    aliases: Field,
     /// Exact eligibility and docs identity terms, applied before TopDocs:
     /// set, host and host suffixes; docs product, overview and symbols.
     scope: Field,
