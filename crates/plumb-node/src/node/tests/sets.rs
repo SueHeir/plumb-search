@@ -1079,10 +1079,18 @@ async fn a_held_denylist_takes_results_off_and_its_csam_entries_stay_when_off() 
     assert!(!body.contains("usbank.com"), "{body}");
     node.shutdown().await.unwrap();
 
-    // Turned off, only the csam entry applies.
+    // Turned off, only the csam entry applies. The index was built
+    // without the sites the list denied, which come back in the next one.
+    let paths = store::Paths::new(dir.path());
+    let mut saved = store::load_state(&paths).unwrap();
+    saved.index_stale = true;
+    store::save_state(&paths, &saved).unwrap();
     let node = start(config(false)).await.unwrap();
     let addr = node.addr();
-    wait_for(addr, "the index", ready_and_idle).await;
+    wait_for(addr, "the index built again", |status| {
+        ready_and_idle(status) && status.index.as_deref() == Some("000002")
+    })
+    .await;
     assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
     let found = domains(search(addr, "chase").await);
     assert!(!found.iter().any(|d| d == "chase.com"), "{found:?}");
@@ -1104,4 +1112,112 @@ async fn a_held_denylist_takes_results_off_and_its_csam_entries_stay_when_off() 
     wait_for(addr, "the index", ready_and_idle).await;
     assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
     node.shutdown().await.unwrap();
+}
+
+/// An index built from the records file, as every index is, leaves out
+/// what the denylist denies, before redirects are folded: the denied site,
+/// in the index, in the buckets other nodes take and among the feeds
+/// watched, and the denied key page of a site it keeps. A site whose
+/// homepage sends visitors to the denied one is indexed on its own.
+#[test]
+fn an_index_built_from_the_records_file_leaves_out_what_the_denylist_denies() {
+    let dir = tempfile::tempdir().unwrap();
+    let publisher = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+    let deny = |target: &str| plumb_tools::set::DenyEntryArgs {
+        category: "copyright".into(),
+        target: Some(target.into()),
+        hash_of: None,
+        any_query: false,
+        places: Vec::new(),
+        id: None,
+    };
+    hold_denylist(
+        dir.path(),
+        &publisher,
+        &[
+            deny("site:lighthouse-wreckers.org"),
+            deny("url:https://lighthouse-keepers.org/wreck-maps"),
+        ],
+    );
+    let site = |domain: &str, tranco: u32, title: &str| {
+        let mut record = SiteRecord::new(domain);
+        record.url = Some(format!("https://{domain}/"));
+        record.title = Some(title.to_string());
+        record.signals.tranco_rank = Some(tranco);
+        record
+    };
+    let mut keepers = site("lighthouse-keepers.org", 2, "Lighthouse Keepers Guild");
+    let page = |label: &str, path: &str| plumb_core::KeyPage {
+        label: label.into(),
+        url: format!("https://lighthouse-keepers.org/{path}"),
+    };
+    keepers.key_pages = vec![
+        page("Visiting hours", "hours"),
+        page("Wreck maps", "wreck-maps"),
+    ];
+    let mut cove = SiteRecord::new("wreckers-cove.org");
+    cove.signals.tranco_rank = Some(4);
+    cove.redirect = Some(plumb_core::Redirect {
+        to: "lighthouse-wreckers.org".into(),
+        at: 1_700_000_000,
+        inner: false,
+    });
+    write_jsonl(
+        &dir.path().join("records.jsonl"),
+        &[
+            site("lighthouse-wreckers.org", 1, "Lighthouse Wreckers"),
+            keepers,
+            site("lighthouse-beacons.org", 3, "Lighthouse Beacons"),
+            cove,
+        ],
+    )
+    .unwrap();
+    let mut config = test_config(dir.path());
+    config.set_publishers = vec![plumb_format::PublicKey::of(&publisher)];
+    // Buckets, as for private search, and feeds to watch.
+    config.private_search = true;
+    config.news_feeds = 10;
+    let rank = RankConfig::default();
+    let opened = open_data_dir(&config, rank).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let inner = Inner::new(config, rank, opened, stopped, None);
+    inner.load_denylist();
+
+    let built = {
+        let _records = inner.hold_records();
+        crate::node::worker::build_from_file(&inner).unwrap()
+    };
+    assert_eq!(built.docs, 3);
+    // The index itself, not searches through the node, which the
+    // denylist would take results off anyway.
+    let searcher = plumb_index::Searcher::open(&built.dir).unwrap();
+    assert!(!searcher.has_domain("lighthouse-wreckers.org"));
+    assert!(searcher.has_domain("lighthouse-beacons.org"));
+    assert!(searcher.has_domain("wreckers-cove.org"), "not folded away");
+    let hit = searcher.site("lighthouse-keepers.org").unwrap().unwrap();
+    let pages: Vec<&str> = hit.key_pages.iter().map(|p| p.url.as_str()).collect();
+    assert_eq!(pages, ["https://lighthouse-keepers.org/hours"]);
+
+    let table = built.buckets.as_ref().expect("buckets");
+    let mut shared: Vec<SiteRecord> = table
+        .ranked(0, table.len())
+        .unwrap()
+        .iter()
+        .map(|line| plumb_core::stored::read(line.as_bytes()).unwrap())
+        .collect();
+    shared.sort_by(|a, b| a.domain.cmp(&b.domain));
+    let domains: Vec<&str> = shared.iter().map(|r| r.domain.as_str()).collect();
+    assert_eq!(
+        domains,
+        [
+            "lighthouse-beacons.org",
+            "lighthouse-keepers.org",
+            "wreckers-cove.org"
+        ]
+    );
+    let pages: Vec<&str> = shared[1].key_pages.iter().map(|p| p.url.as_str()).collect();
+    assert_eq!(pages, ["https://lighthouse-keepers.org/hours"]);
+    // The keepers' and the beacons' feeds, not the wreckers'; the cove
+    // redirects, and has none to watch.
+    assert_eq!(inner.news.watched().0, 2);
 }

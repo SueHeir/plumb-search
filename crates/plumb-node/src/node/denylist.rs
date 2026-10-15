@@ -14,18 +14,21 @@
 //!
 //! What the list denies is also left out of what the node keeps and
 //! builds: the page index ([`super::pages`], built again when the list
-//! changes), the search index and the buckets other nodes take
-//! ([`super::worker`]), crawls and headlines other nodes send or fill
-//! with, and its own feed checks. It passes none of it on: its own crawls
-//! and headlines are published without it ([`Inner::drop_denied_records`]),
-//! it keeps and lists no lead for a denied page, and it relays no stored
-//! batch that names one, since a signed batch can't be passed on without
-//! it ([`plumb_net::bucket::BucketSource::denies`]). Buckets take a new
-//! entry at the next build of the search index.
+//! changes), the search index, the buckets other nodes take and the feeds
+//! watched, as each record is read ([`super::worker::build_from_file`]),
+//! crawls and headlines other nodes send or fill with, and its own feed
+//! checks. It passes none of it on: its own crawls and headlines are
+//! published without it ([`Inner::drop_denied_records`]), it keeps and
+//! lists no lead for a denied page, and it relays no stored batch that
+//! names one, since a signed batch can't be passed on without it
+//! ([`plumb_net::bucket::BucketSource::denies`]). Buckets take a new entry
+//! at the next build of the search index.
 //!
 //! The owner can turn the list off ([`NodeConfig::project_denylist`]); its
 //! `csam` entries apply anyway. A result a `csam` entry takes off is
-//! logged by the entry's id, never by its address.
+//! logged by the entry's id, never by its address. A site the index left
+//! out comes back in it, and in the buckets, at the next build after its
+//! entry goes or the list is turned off.
 //!
 //! [`NodeConfig::project_denylist`]: super::NodeConfig::project_denylist
 
@@ -215,8 +218,9 @@ impl Inner {
 }
 
 /// False when `list` denies the site `record` describes; else true, with
-/// the key pages and headlines it denies taken off `record`.
-fn allow(list: &Denylist, record: &mut SiteRecord) -> bool {
+/// the key pages and headlines it denies taken off `record`. What an index
+/// build asks of each record ([`super::worker::build_from_file`]).
+pub(super) fn allow(list: &Denylist, record: &mut SiteRecord) -> bool {
     let trimmed = match allowed_record(list, record) {
         None => return false,
         Some(Cow::Borrowed(_)) => return true,
@@ -239,10 +243,7 @@ fn drop_denied_places(list: &Denylist, found: &mut PlaceResults) {
 /// `record` as the node may index or pass it on by `list`: `None` when
 /// the list denies its site or homepage, else without the key pages and
 /// headlines it denies (borrowed when it denies none).
-pub(super) fn allowed_record<'a>(
-    list: &Denylist,
-    record: &'a SiteRecord,
-) -> Option<Cow<'a, SiteRecord>> {
+fn allowed_record<'a>(list: &Denylist, record: &'a SiteRecord) -> Option<Cow<'a, SiteRecord>> {
     let site = format!("https://{}/", record.domain);
     if denies(list, &site) || record.url.as_deref().is_some_and(|url| denies(list, url)) {
         return None;

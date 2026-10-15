@@ -113,6 +113,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
             None,
             0,
             None,
+            None,
             &mut |_| Ok(()),
         )
         .with_context(|| format!("building the index in {}", args.index.display()))?;

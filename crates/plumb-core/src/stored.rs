@@ -17,17 +17,27 @@
 //! A record inside another stored value, such as a change in the journal,
 //! is written and read the same way with
 //! `#[serde(with = "plumb_core::stored")]`.
+//!
+//! Code that holds sites as their stored items ([`crate::sites::Sites`])
+//! reads and writes them here too, while the files still hold records'
+//! JSON: [`read_item`] reads a line of either shape as the site's stored
+//! item, and [`write_item`] and [`item_as_line`] write a stored item as
+//! the record's JSON ([`SiteRecord::from_stored_item`]), as [`write`] and
+//! [`line`] write a record. An item inside another stored value goes
+//! through [`item`] in the same way. A later version switches these to
+//! write the stored item itself.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use plumb_format::Item;
 use serde_json::Value;
 
+use crate::site_item::SITE;
 use crate::{Redirect, Signals, SiteRecord};
 
 /// Writes `record` as a stored line, without its line break.
@@ -55,6 +65,40 @@ pub fn read(line: &[u8]) -> Result<SiteRecord> {
         return SiteRecord::from_stored_item(&item);
     }
     Ok(serde_json::from_slice(line)?)
+}
+
+/// The stored item ([`SiteRecord::to_stored_item`]) a stored line holds,
+/// in either shape. A record's JSON is mapped as it is
+/// ([`SiteRecord::stored_item_as_is`]), not cleaned, since [`read`] does
+/// not clean either; a set cleans what it takes
+/// ([`crate::sites::Sites::upsert`]).
+pub fn read_item(line: &[u8]) -> Result<Item> {
+    if is_item(line) {
+        return site_item(serde_json::from_slice(line)?);
+    }
+    let record: SiteRecord = serde_json::from_slice(line)?;
+    Ok(record.stored_item_as_is())
+}
+
+/// Writes a site's stored item as a stored line, without its line break:
+/// for now the record's JSON, as [`write`] writes it, so that the file
+/// stays one every node reads. A later version writes the item itself.
+pub fn write_item<W: Write>(out: W, site: &Item) -> Result<()> {
+    write(out, &SiteRecord::from_stored_item(site)?)
+}
+
+/// A site's stored item as a stored line, without its line break, as
+/// [`write_item`] writes it: for now the record's JSON, as [`line`] makes
+/// it. A later version makes the item's own line.
+pub fn item_as_line(site: &Item) -> Result<Vec<u8>> {
+    line(&SiteRecord::from_stored_item(site)?)
+}
+
+/// A stored item read as it is, once it is a site's, as [`read`] takes
+/// only a site.
+fn site_item(site: Item) -> Result<Item> {
+    ensure!(site.kind == SITE, "item {:?} is not a site", site.id);
+    Ok(site)
 }
 
 /// Whether a stored line is a stored item rather than a record's JSON.
@@ -170,16 +214,51 @@ pub fn serialize<S: Serializer>(record: &SiteRecord, serializer: S) -> Result<S:
 pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SiteRecord, D::Error> {
     use serde::de::Error;
     let value = Value::deserialize(deserializer)?;
-    if value.get("domain").is_some() || value.get("id").is_none() {
+    if is_record(&value) {
         return SiteRecord::deserialize(value).map_err(D::Error::custom);
     }
     let item = Item::deserialize(value).map_err(D::Error::custom)?;
     SiteRecord::from_stored_item(&item).map_err(D::Error::custom)
 }
 
+/// Whether a stored value is a record's JSON rather than a stored item.
+fn is_record(value: &Value) -> bool {
+    value.get("domain").is_some() || value.get("id").is_none()
+}
+
+/// A site's stored item inside another stored value, such as a change in
+/// the journal, with `#[serde(with = "plumb_core::stored::item")]`:
+/// written as [`write_item`] writes it, for now the record's JSON, and read
+/// in either shape as [`read_item`] reads it.
+pub mod item {
+    use super::*;
+
+    /// Writes a site's stored item inside another stored value: for now
+    /// the record's JSON. A later version writes the item itself.
+    pub fn serialize<S: Serializer>(site: &Item, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error;
+        let record = SiteRecord::from_stored_item(site).map_err(S::Error::custom)?;
+        record.serialize(serializer)
+    }
+
+    /// Reads a site's stored item inside another stored value, in either
+    /// shape.
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Item, D::Error> {
+        use serde::de::Error;
+        let value = Value::deserialize(deserializer)?;
+        if is_record(&value) {
+            let record = SiteRecord::deserialize(value).map_err(D::Error::custom)?;
+            return Ok(record.stored_item_as_is());
+        }
+        let site = Item::deserialize(value).map_err(D::Error::custom)?;
+        site_item(site).map_err(D::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::site_item::tests::full_record;
 
     #[test]
     fn a_stored_line_reads_back_as_its_record() {
@@ -279,5 +358,63 @@ mod tests {
         file.extend_from_slice(&super::line(&clean).unwrap());
         std::fs::write(&path, file).unwrap();
         assert_eq!(read_file(&path).unwrap(), vec![clean.clone(), clean]);
+    }
+
+    #[test]
+    fn a_stored_line_reads_as_its_stored_item_and_writes_back_as_it_was() {
+        let mut full = full_record();
+        full.clean();
+        for record in [full, SiteRecord::new("example.com")] {
+            let line = line(&record).unwrap();
+            let site = read_item(&line).unwrap();
+            assert_eq!(site, record.to_stored_item());
+            assert_eq!(read_item(&item_line(&record).unwrap()).unwrap(), site);
+            // Written as the record's JSON, byte for byte, for now.
+            let mut written = Vec::new();
+            write_item(&mut written, &site).unwrap();
+            assert_eq!(written, line);
+            assert_eq!(item_as_line(&site).unwrap(), line);
+        }
+        // A record's line is read as it is, as `read` reads it.
+        let mut untidy = SiteRecord::new("example.com");
+        untidy.title = Some(" Example\u{7} ".into());
+        let site = read_item(&line(&untidy).unwrap()).unwrap();
+        assert_eq!(site, untidy.clone().stored_item_as_is());
+        assert_eq!(read(&item_as_line(&site).unwrap()).unwrap(), untidy);
+        // Only a site's item is a stored site.
+        assert!(read_item(br#"{"id": "example.com", "kind": "page"}"#).is_err());
+        assert!(read(br#"{"id": "example.com", "kind": "page"}"#).is_err());
+        assert!(read_item(b"not json").is_err());
+    }
+
+    #[test]
+    fn a_stored_item_inside_another_stored_value_is_written_as_its_record() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Change {
+            #[serde(with = "crate::stored::item")]
+            site: Item,
+        }
+        #[derive(Serialize)]
+        struct RecordChange {
+            #[serde(with = "crate::stored")]
+            site: SiteRecord,
+        }
+        let mut record = full_record();
+        record.clean();
+        let change = Change {
+            site: record.to_stored_item(),
+        };
+        let json = serde_json::to_string(&change).unwrap();
+        let record_change = RecordChange {
+            site: record.clone(),
+        };
+        assert_eq!(json, serde_json::to_string(&record_change).unwrap());
+        assert_eq!(serde_json::from_str::<Change>(&json).unwrap(), change);
+        // A stored item's JSON reads too, as a later version will write it.
+        let line = String::from_utf8(item_line(&record).unwrap()).unwrap();
+        let json = format!(r#"{{"site": {line}}}"#);
+        assert_eq!(serde_json::from_str::<Change>(&json).unwrap(), change);
+        let page = r#"{"site": {"id": "example.com", "kind": "page"}}"#;
+        assert!(serde_json::from_str::<Change>(page).is_err());
     }
 }

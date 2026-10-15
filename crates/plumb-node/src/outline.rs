@@ -17,7 +17,21 @@
 //!
 //! A file that two lines hold the same site in, or a domain that is not
 //! canonical, is something only a whole set can merge: [`outline`] returns
-//! `None` for it, and the caller loads the set once instead.
+//! `None` for it, and the caller loads the set once instead. A node then
+//! writes the file again from the set, each site on one line, and outlines
+//! that.
+//!
+//! Every search index a node builds, and the buckets other nodes take with
+//! it, is built from the file this way ([`build_index`]), whatever wrote
+//! the file last: setup, the full seed, a crawl, trimming. What the node's
+//! denylist denies is left out as each record is read.
+//!
+//! The steps that drop sites from the file (trimming to the storage limit,
+//! making room for new topics) work the same way. They pick the sites to
+//! drop from the outlines, with the little else the choice needs read off
+//! each record once ([`domains_where`]), and write the file again without
+//! them by copying the lines kept as the file holds them
+//! ([`replace_lines`]), never reading those as records.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -429,6 +443,27 @@ pub fn for_each_record(path: &Path, mut each: impl FnMut(SiteRecord)) -> Result<
     Ok(())
 }
 
+/// The domains of the sites of the records file at `path` that `wanted`
+/// says yes to, read a record at a time ([`for_each_record`]) and cleaned
+/// as loading the file cleans them ([`RecordSet::upsert`]), so that each
+/// is judged as a whole set holds it. This is what a step that picks sites
+/// to drop holds of them besides their [`Outline`]s. The journal is not
+/// replayed: fold it in first ([`outline`]).
+pub(crate) fn domains_where(
+    path: &Path,
+    mut wanted: impl FnMut(&SiteRecord) -> bool,
+) -> Result<HashSet<Box<str>>> {
+    let mut domains = HashSet::new();
+    for_each_record(path, |mut record| {
+        record.clean();
+        record.drop_bot_check();
+        if wanted(&record) {
+            domains.insert(record.domain.into_boxed_str());
+        }
+    })?;
+    Ok(domains)
+}
+
 /// [`outline`] of a file with no journal to fold in.
 fn scan(path: &Path) -> Result<Option<Vec<Outline>>> {
     let mut lines = Lines::open(path)?;
@@ -671,7 +706,7 @@ pub fn outline_copy<'a>(
 /// How far [`build_index`] got, for its caller to show (and to stop it,
 /// by returning an error).
 pub enum Step {
-    /// Reading `sites` records, of which `docs` go in the index.
+    /// Reading `sites` records, of which at most `docs` go in the index.
     Started { docs: usize, sites: usize },
     /// `done` of the `sites` read.
     Read { done: usize, sites: usize },
@@ -701,16 +736,29 @@ const STEP_EVERY: usize = 10_000;
 /// buckets of the same sites there ([`plumb_net::BucketWriter`]); a failure
 /// there is logged and leaves the index without. `step` is called as the
 /// build goes; an error from it stops the build.
+///
+/// `allowed`, when given, says whether a site goes in, and may take parts
+/// off its record first: a node leaves out what its denylist denies. It is
+/// asked of each site by its domain alone (a record that holds nothing
+/// else) before redirects are folded, so that a site left out lends its
+/// name to no other and one that redirects to it goes in on its own, as
+/// when the site was never there; then of each record as it is read, for
+/// the index, the buckets and the feeds alike.
+#[allow(clippy::too_many_arguments)]
 pub fn build_index(
     path: &Path,
     mut outlines: Vec<Outline>,
     index_dir: &Path,
     buckets: Option<&Path>,
     feeds: usize,
+    allowed: Option<&dyn Fn(&mut SiteRecord) -> bool>,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
     step: &mut dyn FnMut(Step) -> Result<()>,
 ) -> Result<Built> {
-    outlines.retain(|outline| !outline.gone);
+    outlines.retain(|outline| {
+        !outline.gone
+            && allowed.is_none_or(|allowed| allowed(&mut SiteRecord::new(&*outline.domain)))
+    });
     outlines.shrink_to_fit();
     sort(&mut outlines);
     let folded_into = plumb_index::redirect_targets(
@@ -743,12 +791,18 @@ pub fn build_index(
         },
     };
     let mut watched = Vec::new();
+    let mut indexed = 0;
     let mut reader = RecordReader::open(path)?;
     for (i, outline) in outlines.iter().enumerate() {
         if i > 0 && i % STEP_EVERY == 0 {
             step(Step::Read { done: i, sites })?;
         }
-        let record = reader.read(outline)?;
+        let mut record = reader.read(outline)?;
+        // Left out by its homepage, which no outline holds, a site takes
+        // the sites folded into it out with it.
+        if allowed.is_some_and(|allowed| !allowed(&mut record)) {
+            continue;
+        }
         if let (Some(bucket_writer), Some(dir)) = (writer.as_mut(), buckets) {
             if let Err(err) = bucket_writer.add(&record) {
                 writer = None;
@@ -761,6 +815,7 @@ pub fn build_index(
         if folded_into[i].is_none() {
             let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
             index.add(&record, names)?;
+            indexed += 1;
         }
     }
     drop((reader, redirect_names, folded_into, outlines));
@@ -774,7 +829,7 @@ pub fn build_index(
         }
     }
     Ok(Built {
-        docs,
+        docs: indexed,
         buckets: wrote_buckets,
         feeds: watched,
     })
@@ -878,10 +933,9 @@ impl RecordReader {
         })
     }
 
-    /// The record `outline` points at, cleaned and with page fields read
-    /// off a bot check dropped, as loading the file does
-    /// ([`RecordSet::upsert`]).
-    pub(crate) fn read(&mut self, outline: &Outline) -> Result<SiteRecord> {
+    /// The line `outline` points at, as the file holds it, without its
+    /// line break.
+    fn line(&mut self, outline: &Outline) -> Result<&[u8]> {
         if outline.offset != self.at {
             // Relative seeks within the buffer keep it when they can.
             let delta = i64::try_from(outline.offset).unwrap_or(i64::MAX)
@@ -891,7 +945,14 @@ impl RecordReader {
         self.line.resize(outline.len as usize, 0);
         self.file.read_exact(&mut self.line)?;
         self.at = outline.offset + u64::from(outline.len);
-        let mut record = stored::read(&self.line)
+        Ok(&self.line)
+    }
+
+    /// The record `outline` points at, cleaned and with page fields read
+    /// off a bot check dropped, as loading the file does
+    /// ([`RecordSet::upsert`]).
+    pub(crate) fn read(&mut self, outline: &Outline) -> Result<SiteRecord> {
+        let mut record = stored::read(self.line(outline)?)
             .with_context(|| format!("reading the record of {}", outline.domain))?;
         if record.domain.as_str() != &*outline.domain {
             anyhow::bail!(
@@ -904,6 +965,47 @@ impl RecordReader {
         record.drop_bot_check();
         Ok(record)
     }
+}
+
+/// Replaces the records file at `path` with the sites of it that `outlines`
+/// gives, in their order, as [`crate::records::replace_records`] replaces it
+/// with records: by way of a file next to it flushed to disk before the
+/// rename, then deleting the journal, which must be folded in already
+/// ([`outline`]). Each line is copied as the file holds it, never read as a
+/// record and written again. With a storage `budget`, room for the new
+/// file (the lines and their line breaks) is admitted first, as
+/// [`crate::records::replace_records_with_budget`] admits it. Returns how
+/// many records were written.
+pub(crate) fn replace_lines(
+    path: &Path,
+    outlines: &[Outline],
+    budget: Option<&std::sync::Arc<plumb_core::storage::StorageBudget>>,
+) -> Result<usize> {
+    let Some(budget) = budget else {
+        return write_lines(path, outlines);
+    };
+    let bytes = outlines
+        .iter()
+        .map(|outline| u64::from(outline.len) + 1)
+        .sum();
+    crate::records::RecordStore::open(path)
+        .admitted_rewrite(budget, bytes, || write_lines(path, outlines))
+}
+
+/// [`replace_lines`], with no storage budget to admit the file.
+fn write_lines(path: &Path, outlines: &[Outline]) -> Result<usize> {
+    let written = crate::write_lines_atomically(path, |out| {
+        // Closed before the new file takes its place: Windows cannot
+        // rename over a file that is open.
+        let mut reader = RecordReader::open(path)?;
+        for outline in outlines {
+            out.write_all(reader.line(outline)?)?;
+            out.write_all(b"\n")?;
+        }
+        Ok(outlines.len())
+    })?;
+    crate::records::delete_journal(path)?;
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -1182,5 +1284,71 @@ mod tests {
         let outlines = outline(&path).unwrap().unwrap();
         let read = read_all(&path, &outlines);
         assert_eq!(read, load_records(&path).unwrap().into_sorted_vec());
+    }
+
+    #[test]
+    fn replacing_lines_copies_them_as_the_file_holds_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
+        let item =
+            String::from_utf8(stored::item_line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        // A record not yet clean, a stored item, a line break of two bytes
+        // and a blank line: copied as they are.
+        let raw = line(&crawled("cafe.com", "Cafe\u{301}", 5));
+        fs::write(
+            &path,
+            format!(
+                "{}\n\n{raw}\r\n{item}\n{}\n",
+                line(&record("a.com", 1)),
+                line(&record("quiet.net", 9))
+            ),
+        )
+        .unwrap();
+        RecordStore::open(&path)
+            .save(&[Change::Mark {
+                domain: "a.com".into(),
+                attempted_at: None,
+                failures: 0,
+            }])
+            .unwrap();
+        // The journal is folded in first, which writes each line clean.
+        let outlines = outline(&path).unwrap().unwrap();
+        let folded = fs::read_to_string(&path).unwrap();
+        let mut kept: Vec<Outline> = outlines
+            .into_iter()
+            .filter(|o| &*o.domain != "quiet.net")
+            .collect();
+        kept.reverse();
+        let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        assert_eq!(replace_lines(&path, &kept, Some(&budget)).unwrap(), 3);
+        let lines: Vec<&str> = folded.lines().collect();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("{}\n{}\n{}\n", lines[2], lines[1], lines[0])
+        );
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            plumb_core::storage::directory_bytes(dir.path()).unwrap()
+        );
+
+        // With no journal, the lines are copied as they are, whatever their
+        // shape or line break, and a journal left meanwhile goes.
+        fs::write(
+            &path,
+            format!("{}\n\n{raw}\r\n{item}\n", line(&record("a.com", 1))),
+        )
+        .unwrap();
+        let mut outlines = outline(&path).unwrap().unwrap();
+        fs::write(journal_path(&path), "").unwrap();
+        outlines.reverse();
+        replace_lines(&path, &outlines, None).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("{item}\n{raw}\n{}\n", line(&record("a.com", 1)))
+        );
+        assert!(!journal_path(&path).exists());
+        assert!(!temp_path_for(&path).exists());
     }
 }

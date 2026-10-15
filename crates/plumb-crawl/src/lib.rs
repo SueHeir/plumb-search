@@ -52,7 +52,7 @@ pub use feed::{parse_date, read_feed};
 pub use follow::{follow_links, match_words, FollowTarget, Followed, Lead, WantedPage};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
-pub use records::{to_records, CRAWL_VERSION, REREAD_BELOW};
+pub use records::{to_records, CHARSETS_READ_SINCE, CRAWL_VERSION, REREAD_BELOW};
 pub use terms::{pick_terms, words_of, TERM_WORDS};
 
 /// Sent with every request so site owners can see who is crawling and why.

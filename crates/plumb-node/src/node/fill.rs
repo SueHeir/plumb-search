@@ -25,8 +25,10 @@
 //! asks for the same pages either way, so the node it asks learns nothing
 //! of the topics. When the topics change, it first drops the sites below
 //! the best ones that are about none of the new topics
-//! ([`prune_for_topics`], with an index build), so the share is free for
-//! the new topics, then reads on from where the best sites stopped again.
+//! ([`prune_outlines_for_topics`]), reading the records file a record at a
+//! time, and builds the index from the file the same way, so the share is
+//! free for the new topics, then reads on from where the best sites
+//! stopped again.
 //!
 //! # Blackhole
 //!
@@ -90,6 +92,7 @@ use super::network::{self, REBUILD_AFTER_RECORDS};
 use super::site_set::{self, Fetched, HeldSites, SITES};
 use super::{Inner, Step, Stopped, MB};
 use crate::about::Topics;
+use crate::outline::Outline;
 use crate::records::sorted_by_link_score;
 
 /// Time between two fill rounds.
@@ -1225,16 +1228,64 @@ pub(super) fn prune_for_topics(set: &mut RecordSet, keep_best: usize, topics: &T
     drop.len()
 }
 
+/// [`prune_for_topics`] of the records file at `path`, whose sites
+/// `outlines` gives ([`crate::outline`]), read a record at a time: of each
+/// site only its outline is held, and the domains of those about one of
+/// `topics`. Leaves in `outlines` the sites kept, best link score first,
+/// when any went; the caller writes the file again with only them
+/// ([`crate::outline::replace_lines`]). Returns how many went.
+pub(super) fn prune_outlines_for_topics(
+    path: &Path,
+    outlines: &mut Vec<Outline>,
+    keep_best: usize,
+    topics: &Topics,
+) -> Result<usize> {
+    if outlines.len() <= keep_best {
+        return Ok(0);
+    }
+    let about = crate::outline::domains_where(path, |record| topics.matches(record))?;
+    crate::outline::sort(outlines);
+    let before = outlines.len();
+    let mut at = 0;
+    outlines.retain(|outline| {
+        at += 1;
+        at <= keep_best || about.contains(&outline.domain)
+    });
+    Ok(before - outlines.len())
+}
+
 impl Inner {
     /// Drops the sites kept for old topics from `set`, when the topics
-    /// changed ([`FillState::prune`]); the caller saves it and builds the
-    /// index from what is left. Returns how many were dropped.
+    /// changed ([`FillState::prune`]); the caller writes the records file
+    /// again with what is left and builds the index from the file. Returns
+    /// how many were dropped.
     pub(super) fn prune_for_new_topics(&self, set: &mut RecordSet) -> Result<usize> {
+        self.prune_with(|keep_best, topics| Ok(prune_for_topics(set, keep_best, topics)))
+    }
+
+    /// [`Inner::prune_for_new_topics`] of the records file, whose sites
+    /// `outlines` gives, read a record at a time
+    /// ([`prune_outlines_for_topics`]): the caller writes the file again
+    /// with the sites left in `outlines` when any went, and builds the
+    /// index from it.
+    pub(super) fn prune_records_for_new_topics(
+        &self,
+        outlines: &mut Vec<Outline>,
+    ) -> Result<usize> {
+        self.prune_with(|keep_best, topics| {
+            prune_outlines_for_topics(&self.paths.records, outlines, keep_best, topics)
+        })
+    }
+
+    /// Has `prune` drop the sites kept for old topics, given how many of
+    /// the best sites to keep whatever their topics and the topics kept
+    /// now, and notes that room was made. Returns how many were dropped.
+    fn prune_with(&self, prune: impl FnOnce(usize, &Topics) -> Result<usize>) -> Result<usize> {
         let mut state = self.fill_state();
         // A node with no storage limit never loses sites to make room.
         let dropped = match state.focus_base {
             Some(base) if self.settings().storage_limit_mb > 0 => {
-                prune_for_topics(set, base as usize, &self.keep_topics())
+                prune(base as usize, &self.keep_topics())?
             }
             _ => 0,
         };
@@ -1383,6 +1434,88 @@ mod tests {
         assert_eq!(prune_for_topics(&mut set, 2, &Topics::default()), 2);
         assert_eq!(set.len(), 2);
         assert_eq!(prune_for_topics(&mut set, 5, &Topics::default()), 0);
+    }
+
+    #[test]
+    fn new_topics_drop_the_same_sites_read_a_record_at_a_time() {
+        use crate::records::{journal_path, load_records, replace_records, Change, RecordStore};
+
+        let site = |domain: &str, tranco: Option<u32>, title: Option<&str>| {
+            let mut r = SiteRecord::new(domain);
+            r.signals.tranco_rank = tranco;
+            r.title = title.map(Into::into);
+            r
+        };
+        // A records file as a node writes it, and a journal still to fold
+        // in: sites about the topic and others among the lowest-ranked,
+        // one of them made about it by the journal.
+        let write = |path: &Path| {
+            let mut set = RecordSet::new();
+            set.upsert(site("google.com", Some(1), Some("Google")));
+            set.upsert(site("youtube.com", Some(2), Some("YouTube")));
+            set.upsert(site("chess.com", Some(5_000), Some("Play Chess Games")));
+            set.upsert(site(
+                "allrecipes.com",
+                Some(6_000),
+                Some("Recipes for cooking"),
+            ));
+            set.upsert(site("seriouseats.com", Some(7_000), Some("Serious Eats")));
+            set.upsert(site("knitting.example", Some(8_000), Some("Knitting")));
+            replace_records(path, sorted_by_link_score(&set)).unwrap();
+            let mut crawled = site("seriouseats.com", None, Some("Serious Eats cooking"));
+            crawled.crawled_at = Some(1_700_000_000);
+            RecordStore::open(path)
+                .save(&[
+                    Change::Merge { record: crawled },
+                    Change::Merge {
+                        record: site("bakery.example", None, Some("Bread and cooking")),
+                    },
+                    Change::Merge {
+                        record: site("quiet.example", None, None),
+                    },
+                ])
+                .unwrap();
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let whole = dir.path().join("whole.jsonl");
+        let streamed = dir.path().join("streamed.jsonl");
+        write(&whole);
+        write(&streamed);
+        let topics = Topics::new(&["cooking".to_owned()]);
+
+        let mut set = load_records(&whole).unwrap();
+        let expected = prune_for_topics(&mut set, 2, &topics);
+        replace_records(&whole, sorted_by_link_score(&set)).unwrap();
+        let mut outlines = crate::outline::outline(&streamed).unwrap().unwrap();
+        let dropped = prune_outlines_for_topics(&streamed, &mut outlines, 2, &topics).unwrap();
+        crate::outline::replace_lines(&streamed, &outlines, None).unwrap();
+        assert_eq!(dropped, expected);
+        assert_eq!(dropped, 3, "chess.com, knitting.example and quiet.example");
+        assert_eq!(fs::read(&streamed).unwrap(), fs::read(&whole).unwrap());
+        assert!(!journal_path(&streamed).exists());
+        let mut left: Vec<String> = set.iter().map(|r| r.domain.clone()).collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "allrecipes.com",
+                "bakery.example",
+                "google.com",
+                "seriouseats.com",
+                "youtube.com"
+            ]
+        );
+        // The best sites stay whatever the topics, and the file is not read
+        // when there are no more.
+        let mut outlines = crate::outline::outline(&streamed).unwrap().unwrap();
+        assert_eq!(
+            prune_outlines_for_topics(&streamed, &mut outlines, 5, &topics).unwrap(),
+            0
+        );
+        assert_eq!(
+            prune_outlines_for_topics(Path::new("missing"), &mut outlines, 5, &topics).unwrap(),
+            0
+        );
     }
 
     #[test]
