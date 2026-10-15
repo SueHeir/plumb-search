@@ -890,23 +890,9 @@ async fn a_node_pushes_down_the_sites_its_grades_set_marks_as_far_as_its_setting
     assert!(ungraded.len() > 1, "{ungraded:?}");
 
     // The first of them graded spam, in a set the node holds.
-    let grades = dir.path().join("grades.jsonl");
-    let line = serde_json::json!({"domain": ungraded[0], "grade": "spam"});
-    std::fs::write(&grades, format!("{line}\n")).unwrap();
-    let out =
-        crate::node::signed_sets::set_dir(dir.path(), crate::node::grades::SITE_GRADES).unwrap();
-    plumb_tools::set::site_grades(&plumb_tools::set::SiteGradesArgs {
-        grades,
-        name: crate::node::grades::SITE_GRADES.into(),
-        out: out.clone(),
-        license: "CC0-1.0".into(),
-        attribution: "From a test".into(),
-        level: 3,
-    })
-    .unwrap();
-    plumb_tools::set::sign_set(&out, &publisher, None, None).unwrap();
+    hold_grades(dir.path(), &publisher, &[(&ungraded[0], "spam")]);
     node.inner.grades_from_set();
-    assert_eq!(node.inner.site_grades().unwrap().len(), 1);
+    assert_eq!(node.inner.grades_in_force().unwrap().0.len(), 1);
 
     let graded = domains(search(addr, "bank").await);
     assert_eq!(graded[0], ungraded[1]);

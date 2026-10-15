@@ -89,28 +89,54 @@ impl SiteGrades {
 }
 
 /// Takes `percent` (0 to 100) of each graded hit's penalty off its score
-/// and sorts again, keeping the order of equal scores. A `low_value` site
-/// the query names keeps its score: someone searching for a little-known
-/// service by name wants it. A `spam` site loses it even then, since spam
-/// is often named by the words of links pointing to it ("ebay").
-pub fn demote(grades: &SiteGrades, percent: u8, hits: &mut [Hit]) {
+/// and moves the hit down past the later hits that now score above it.
+/// Nothing else moves, so the sites placed by rule rather than score (the
+/// health authorities first, a docs site, the site a `site:` query names)
+/// keep their places.
+///
+/// A site whose address is the query keeps its score, as does a
+/// `low_value` site the query names: someone searching for a little-known
+/// service by name wants it. A named `spam` site loses it, since spam is
+/// often named by the words of links pointing to it ("ebay").
+pub fn demote(grades: &SiteGrades, percent: u8, query: &str, hits: &mut [Hit]) {
+    demote_by(grades, percent, query, hits, |hit| hit);
+}
+
+/// [`demote`] for results that each hold a hit, such as other nodes'.
+pub fn demote_by<T>(
+    grades: &SiteGrades,
+    percent: u8,
+    query: &str,
+    results: &mut [T],
+    hit: impl Fn(&mut T) -> &mut Hit,
+) {
     let weight = f32::from(percent.min(100)) / 100.0;
     if weight == 0.0 || grades.is_empty() {
         return;
     }
-    let mut changed = false;
-    for hit in hits.iter_mut() {
+    let typed = crate::names::typed_domain(query);
+    let mut demoted = Vec::new();
+    for (at, result) in results.iter_mut().enumerate() {
+        let hit = hit(result);
         let Some(grade) = grades.get(&hit.domain) else {
             continue;
         };
-        if grade == Grade::LowValue && hit.named {
+        let addressed = typed.is_some() && typed == plumb_core::registrable_domain(&hit.domain);
+        if addressed || grade == Grade::LowValue && hit.named {
             continue;
         }
         hit.score -= weight * grade.penalty() * hit.score.abs();
-        changed = true;
+        demoted.push(at);
     }
-    if changed {
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    // The last first, so each moves past hits already in their places.
+    for at in demoted.into_iter().rev() {
+        let score = hit(&mut results[at]).score;
+        let past = results[at + 1..]
+            .iter_mut()
+            .rposition(|result| hit(result).score > score);
+        if let Some(past) = past {
+            results[at..=at + 1 + past].rotate_left(1);
+        }
     }
 }
 
@@ -142,6 +168,10 @@ mod tests {
             missing_words: false,
             query_evidence: None,
         }
+    }
+
+    fn order(hits: &[Hit]) -> Vec<&str> {
+        hits.iter().map(|h| h.domain.as_str()).collect()
     }
 
     fn grades() -> SiteGrades {
@@ -178,14 +208,12 @@ mod tests {
                 hit("espn.com", 0.5, false),
             ]
         };
-        let order = |hits: &[Hit]| hits.iter().map(|h| h.domain.clone()).collect::<Vec<_>>();
-
         let mut hits = ranked();
-        demote(&grades, 0, &mut hits);
+        demote(&grades, 0, "nfl", &mut hits);
         assert_eq!(hits, ranked());
 
         let mut hits = ranked();
-        demote(&grades, 100, &mut hits);
+        demote(&grades, 100, "nfl", &mut hits);
         assert_eq!(
             order(&hits),
             ["nfl.com", "signin.example", "espn.com", "nflbox.sx"]
@@ -193,7 +221,7 @@ mod tests {
         assert!((hits[1].score - 0.63).abs() < 1e-6);
 
         let mut hits = ranked();
-        demote(&grades, 50, &mut hits);
+        demote(&grades, 50, "nfl", &mut hits);
         assert_eq!(
             order(&hits),
             ["nfl.com", "signin.example", "nflbox.sx", "espn.com"]
@@ -211,11 +239,34 @@ mod tests {
             hit("ebay-deals.example", 0.9, true),
             hit("ebay.com", 0.8, true),
         ];
-        demote(&grades, 100, &mut hits);
-        let order: Vec<_> = hits.iter().map(|h| h.domain.as_str()).collect();
+        demote(&grades, 100, "ebay", &mut hits);
         assert_eq!(
-            order,
+            order(&hits),
             ["datahubnet.online", "ebay.com", "ebay-deals.example"]
         );
+    }
+
+    #[test]
+    fn only_graded_sites_move_and_not_when_the_query_is_their_address() {
+        let grades = SiteGrades::new([("rxpills.top".to_string(), Grade::Spam)]);
+        // An authority the ranking put first by rule, with a lower score.
+        let ranked = || {
+            vec![
+                hit("nhs.uk", 0.0, false),
+                hit("rxpills.top", 0.8, false),
+                hit("webmd.com", 0.5, false),
+                hit("mayoclinic.org", 0.05, false),
+            ]
+        };
+        let mut hits = ranked();
+        demote(&grades, 100, "ibuprofen", &mut hits);
+        assert_eq!(
+            order(&hits),
+            ["nhs.uk", "webmd.com", "rxpills.top", "mayoclinic.org"]
+        );
+
+        let mut hits = ranked();
+        demote(&grades, 100, "www.rxpills.top", &mut hits);
+        assert_eq!(hits, ranked());
     }
 }

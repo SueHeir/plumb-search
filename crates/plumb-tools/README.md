@@ -73,7 +73,7 @@ Taken from [cli.rs](src/cli.rs). `plumb ingest`, which folds seed data into a re
 | | `fact-trust` | How often each site's pages state Wikidata's facts right, from Common Crawl's page text |
 | | `summaries pick` | Write the best-scored sites with no text, for a language model to describe |
 | | `summaries apply` | Write the sentences that came back into a copy of the records (see [tools/summaries](../../tools/summaries/README.md)) |
-| | `grades pick` | Write a records file's sites for a language model to grade (see [tools/grades](../../tools/grades/README.md)) |
+| | `grades pick` | Write a records file's sites for a language model to grade, those about health, addiction, money or law first and well-known ones left out (see [tools/grades](../../tools/grades/README.md)) |
 | Experiments | `fetch-text`, `terms` | Fetch homepages' visible text once, then try ways of picking each site's search terms |
 | | `relations`, `relate` | Learn kinds of Wikidata facts as maps between article vectors, then follow or check a relation |
 | Sets | `set new-key` | Make a set-signing key and print its public key |

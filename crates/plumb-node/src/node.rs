@@ -2324,8 +2324,7 @@ impl Inner {
             _ => wanted,
         };
         // And sites the project's grades push down, to fill their places.
-        let percent = self.settings().site_grades_percent;
-        let grades = self.site_grades().filter(|_| percent > 0);
+        let grades = self.grades_in_force();
         let wanted = match grades {
             Some(_) => wanted + plumb_index::grades::MARGIN,
             None => wanted,
@@ -2352,8 +2351,8 @@ impl Inner {
                     results
                 }
             };
-            if let Some(grades) = &grades {
-                plumb_index::grades::demote(grades, percent, &mut results.hits);
+            if let Some((grades, percent)) = &grades {
+                plumb_index::grades::demote(grades, *percent, query, &mut results.hits);
             }
             Ok(results)
         };
@@ -2444,6 +2443,10 @@ impl StatusSource for Inner {
 
     fn blocks_adult(&self, domain: &str) -> bool {
         self.adult_list().is_some_and(|list| list.contains(domain))
+    }
+
+    fn site_grades(&self) -> Option<(Arc<plumb_index::grades::SiteGrades>, u8)> {
+        self.grades_in_force()
     }
 
     fn keep_from_network(&self, records: Vec<plumb_core::SiteRecord>) {

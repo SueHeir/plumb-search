@@ -221,7 +221,7 @@ A node serves the sets it holds in turn: 4 requests at once, 120 a minute from o
 | `plumb/denylist` | Every node | Pages and sites the project accepted a takedown for, applied as soon as it is taken (see below) |
 | `plumb/site-rules` | Every node | The public suffix and subsite lists that say which site a host is on; used from the next start |
 | `plumb/adult-sites` | Every node that searches | The adult blocklist safe search uses |
-| `plumb/site-grades` | Every node that searches | Sites a language model graded spam or low value, which searches push down; applied as soon as it is taken |
+| `plumb/site-grades` | Every node that searches | Sites a language model graded spam or low value, which searches push down, in other nodes' answers too; applied as soon as it is taken |
 | `plumb/map` | A node that keeps a map | The map, under the same `--set-updates`, storage and growth rules as the map file |
 | `plumb/<page set id>` | A node that keeps that page set | Item sets such as `plumb/wikipedia-en`, as far as the node keeps pages of it |
 | `plumb/vectors-<model>` | A node with search by meaning | Site vectors made with its model |

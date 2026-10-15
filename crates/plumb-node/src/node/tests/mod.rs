@@ -369,6 +369,35 @@ fn hold_denylist(
     plumb_tools::set::sign_set(&dir, publisher, None, None).unwrap();
 }
 
+/// Holds in `data` the site grades set `publisher` signed, grading each
+/// `(domain, grade)`.
+fn hold_grades(data: &Path, publisher: &ed25519_dalek::SigningKey, grades: &[(&str, &str)]) {
+    let work = tempfile::tempdir().unwrap();
+    let file = work.path().join("grades.jsonl");
+    let lines: String = grades
+        .iter()
+        .map(|(domain, grade)| {
+            format!(
+                "{}\n",
+                serde_json::json!({"domain": domain, "grade": grade})
+            )
+        })
+        .collect();
+    std::fs::write(&file, lines).unwrap();
+    let name = crate::node::grades::SITE_GRADES;
+    let dir = crate::node::signed_sets::set_dir(data, name).unwrap();
+    plumb_tools::set::site_grades(&plumb_tools::set::SiteGradesArgs {
+        grades: file,
+        name: name.into(),
+        out: dir.clone(),
+        license: "CC0-1.0".into(),
+        attribution: "From a test".into(),
+        level: 3,
+    })
+    .unwrap();
+    plumb_tools::set::sign_set(&dir, publisher, None, None).unwrap();
+}
+
 /// A node's buckets plus the signed sets in a data folder.
 struct WithSignedSets(plumb_net::BucketTable, PathBuf);
 

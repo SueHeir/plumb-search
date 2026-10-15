@@ -73,8 +73,11 @@ impl Inner {
         }
     }
 
-    /// The site grades, once the node holds a set of them.
-    pub(super) fn site_grades(&self) -> Option<Arc<SiteGrades>> {
-        self.grades.read_locked().clone()
+    /// The site grades searches use and the share of their penalty they
+    /// take, while the node holds grades and its settings take some.
+    pub(super) fn grades_in_force(&self) -> Option<(Arc<SiteGrades>, u8)> {
+        let percent = self.settings().site_grades_percent;
+        let grades = self.grades.read_locked().clone()?;
+        (percent > 0 && !grades.is_empty()).then_some((grades, percent))
     }
 }

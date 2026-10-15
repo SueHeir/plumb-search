@@ -496,7 +496,7 @@ fn observe(
         &options,
         semantic,
     )?;
-    let mut found = super::graded(args, setup, found, args.limit);
+    let mut found = super::graded(args, setup, &query, found, args.limit);
     let paper = plumb_core::paper_query::PaperQuery::parse(&query)?;
     let typed = case
         .options

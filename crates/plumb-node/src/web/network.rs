@@ -143,6 +143,17 @@ pub(crate) async fn network_search(
                     .hits
                     .retain(|result| !node.blocks_adult(&result.hit.domain));
             }
+            // And graded sites go down as in the node's own results, or
+            // other nodes would put back what it pushed out.
+            if let Some((grades, percent)) = node.site_grades() {
+                plumb_index::grades::demote_by(
+                    &grades,
+                    percent,
+                    &query,
+                    &mut results.hits,
+                    |result| &mut result.hit,
+                );
+            }
         }
         Ok(results)
     })

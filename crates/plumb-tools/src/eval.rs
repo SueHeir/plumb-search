@@ -705,7 +705,9 @@ mod pages_cache {
 /// as a node does.
 fn grades_margin(args: &EvalArgs, setup: &Setup) -> usize {
     match &setup.grades {
-        Some(_) if args.site_grades_percent > 0 => plumb_index::grades::MARGIN,
+        Some(grades) if args.site_grades_percent > 0 && !grades.is_empty() => {
+            plumb_index::grades::MARGIN
+        }
         _ => 0,
     }
 }
@@ -715,11 +717,13 @@ fn grades_margin(args: &EvalArgs, setup: &Setup) -> usize {
 fn graded(
     args: &EvalArgs,
     setup: &Setup,
+    query: &str,
     mut results: plumb_index::SearchResults,
     limit: usize,
 ) -> plumb_index::SearchResults {
     if let Some(grades) = &setup.grades {
-        plumb_index::grades::demote(grades, args.site_grades_percent, &mut results.hits);
+        let percent = args.site_grades_percent;
+        plumb_index::grades::demote(grades, percent, query, &mut results.hits);
         results.hits.truncate(limit);
     }
     results
@@ -779,7 +783,7 @@ fn evaluate(
                         .map(|m| m as &dyn plumb_index::Meaning),
                 )
                 .with_context(|| format!("searching for {query:?}"));
-            results.map(|results| (graded(args, setup, results, fetched), query_meaning))
+            results.map(|results| (graded(args, setup, query, results, fetched), query_meaning))
         };
         let (mut results, mut query_meaning) = search(&q.query)?;
         // As a node with pages does (`add_pages`): a query that names a

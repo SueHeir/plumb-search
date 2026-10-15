@@ -1062,7 +1062,9 @@ pub fn adult_sites(args: &AdultSitesArgs) -> Result<Written> {
 
 /// Writes the spam and low-value sites of the grades in `args.grades` as a
 /// layer on those sites, each labelled `machine-written` with its `grade`.
-/// Sites graded ok, and lines that name no site, are left out.
+/// A site's last line decides, so a later `ok` takes back a wrong grade.
+/// Lines that name no site are left out, as is a line cut short by a
+/// grading run that was stopped.
 pub fn site_grades(args: &SiteGradesArgs) -> Result<Written> {
     use plumb_index::grades::Grade;
     use plumb_node::node::grades::GRADE_FIELD;
@@ -1076,17 +1078,22 @@ pub fn site_grades(args: &SiteGradesArgs) -> Result<Written> {
         File::open(&args.grades).with_context(|| format!("opening {}", args.grades.display()))?;
     let mut graded = BTreeMap::new();
     for line in std::io::BufReader::new(file).lines() {
-        let line: Value = serde_json::from_str(&line?)?;
+        let Ok(line) = serde_json::from_str::<Value>(&line?) else {
+            continue;
+        };
         let domain = line["domain"].as_str().unwrap_or("").to_ascii_lowercase();
-        let Some(grade) = line["grade"].as_str().and_then(Grade::parse) else {
+        let known = |name: &&str| *name == "ok" || Grade::parse(name).is_some();
+        let Some(name) = line["grade"].as_str().filter(known) else {
             continue;
         };
         if plumb_format::refs::is_domain(&domain) {
-            // A site graded twice keeps its worse grade.
-            let worst = graded.entry(domain).or_insert(grade);
-            *worst = (*worst).max(grade);
+            graded.insert(domain, Grade::parse(name));
         }
     }
+    let graded: BTreeMap<String, Grade> = graded
+        .into_iter()
+        .filter_map(|(domain, grade)| Some((domain, grade?)))
+        .collect();
     let mut manifest = Map::new();
     manifest.insert("format".into(), json!(FORMAT));
     manifest.insert("set".into(), json!(args.name));
@@ -1830,9 +1837,12 @@ mod tests {
             [
                 r#"{"domain": "nflbox.sx", "grade": "spam", "words": []}"#,
                 r#"{"domain": "nba.com", "grade": "ok", "words": ["basketball"]}"#,
-                r#"{"domain": "Status.Example.com", "grade": "low_value"}"#,
-                r#"{"domain": "status.example.com", "grade": "spam"}"#,
+                r#"{"domain": "Status.Example.com", "grade": "spam"}"#,
+                r#"{"domain": "status.example.com", "grade": "low_value"}"#,
+                r#"{"domain": "espn.com", "grade": "spam"}"#,
+                r#"{"domain": "espn.com", "grade": "ok"}"#,
                 r#"{"domain": "not a domain", "grade": "spam"}"#,
+                r#"{"domain": "cut.exam"#,
             ]
             .join("\n"),
         )
@@ -1856,7 +1866,8 @@ mod tests {
         let read = plumb_node::node::grades::read(&dir).unwrap();
         assert_eq!(read.len(), 2);
         assert_eq!(read.get("nflbox.sx"), Some(Grade::Spam));
-        assert_eq!(read.get("status.example.com"), Some(Grade::Spam));
+        assert_eq!(read.get("status.example.com"), Some(Grade::LowValue));
+        assert_eq!(read.get("espn.com"), None);
         assert_eq!(read.get("example.com"), None);
         assert_eq!(read.get("nba.com"), None);
     }
