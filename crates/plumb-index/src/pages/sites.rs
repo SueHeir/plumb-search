@@ -292,6 +292,63 @@ pub(crate) fn describes_an_event(description: Option<&str>) -> bool {
     describes_as(description, EVENT_WORDS)
 }
 
+/// Words of a short description or first sentence saying a page is about
+/// a drug, medication or other substance people take: what can be abused
+/// or overdosed. Gabapentin's description ("Gamma-aminobutyric acid
+/// analog") says none, but its lead's first sentence does ("an
+/// anticonvulsant medication"). Not "compound", which "Alcohol
+/// (chemistry)" is, but not "Alcohol (drug)".
+const DRUG_WORDS: &[&str] = &[
+    "anaesthetic",
+    "analgesic",
+    "anesthetic",
+    "anticonvulsant",
+    "antidepressant",
+    "antihistamine",
+    "antipsychotic",
+    "benzodiazepine",
+    "depressant",
+    "drug",
+    "hallucinogen",
+    "hormone",
+    "inhalant",
+    "medication",
+    "medicine",
+    "narcotic",
+    "opiate",
+    "opioid",
+    "painkiller",
+    "prodrug",
+    "psychedelic",
+    "sedative",
+    "steroid",
+    "stimulant",
+    "tranquilizer",
+    "tranquilliser",
+];
+
+/// Whether Wikipedia says `page` is about a drug, medication or other
+/// substance people take ("Benzodiazepine medication", "Psychedelic
+/// drug"), in its short description or its lead's first sentence, see
+/// [`DRUG_WORDS`].
+pub(crate) fn describes_a_drug(page: &Page) -> bool {
+    let first = page
+        .lead
+        .as_deref()
+        .map(plumb_core::article::first_sentence);
+    [page.description.as_deref(), first]
+        .into_iter()
+        .any(|text| describes_as(text, DRUG_WORDS))
+}
+
+/// Whether `name` is what drugs of a kind are called ([`DRUG_WORDS`]):
+/// "drug misuse" and "opioid addiction" ask about many drugs, not about
+/// the articles Drug and Opioid.
+pub(crate) fn names_a_kind_of_drug(name: &str) -> bool {
+    let one = name.strip_suffix('s').unwrap_or(name);
+    DRUG_WORDS.contains(&name) || DRUG_WORDS.contains(&one)
+}
+
 /// Whether `description` has one of `words`, or its plural.
 fn describes_as(description: Option<&str>, words: &[&str]) -> bool {
     description.is_some_and(|text| {

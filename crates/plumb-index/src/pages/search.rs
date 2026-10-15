@@ -17,7 +17,7 @@ use super::page::is_item_id;
 use super::placing::{is_year, options_allow};
 use super::records::records_named;
 use super::scoring::truncate_keeping_inner_pages;
-use super::sites::{base_title, describes_an_event};
+use super::sites::{base_title, describes_a_drug, describes_an_event, names_a_kind_of_drug};
 use super::{
     Page, PageHit, PageIndexStats, PageSearcher, PaperCoverage, PlacedPage, ALIAS_MATCH,
     ASKING_WORDS, CANDIDATES, FILMS_SET, GITHUB_SET, KNOWN_WORD_PAGES, MIN_PAGE_FIX_PAGES,
@@ -51,6 +51,9 @@ pub(crate) enum Hint {
     /// An event, competition, team or venue of that name, of which
     /// something is asked: "lakers schedule", "coachella lineup".
     Event,
+    /// A drug or other substance of that name, of whose use something is
+    /// asked: "memantine abuse", "gabapentin withdrawal".
+    Drug,
     /// Whatever is named so: "who is galileo", "ariana grande age".
     Any,
     /// The thing, of which one part is asked about: "ibuprofen side
@@ -490,6 +493,27 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" stands for", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
+    // What people ask of a drug's use, which its article tells but not in
+    // these words: "memantine abuse", "gabapentin withdrawal", "metformin
+    // interactions". Longer tails first, before " symptoms": "gabapentin
+    // withdrawal symptoms" is not about a "gabapentin withdrawal".
+    (" abuse potential", Hint::Drug),
+    (" abuse", Hint::Drug),
+    (" misuse", Hint::Drug),
+    (" addiction", Hint::Drug),
+    (" dependence", Hint::Drug),
+    (" tolerance", Hint::Drug),
+    (" withdrawal symptoms", Hint::Drug),
+    (" withdrawal", Hint::Drug),
+    (" overdose symptoms", Hint::Drug),
+    (" overdose", Hint::Drug),
+    (" recreational use", Hint::Drug),
+    (" drug interactions", Hint::Drug),
+    (" interactions", Hint::Drug),
+    (" half life", Hint::Drug),
+    (" half-life", Hint::Drug),
+    (" mechanism of action", Hint::Drug),
+    (" contraindications", Hint::Drug),
     // The article on a drug, an illness or a thing of science says what
     // these ask, and none of the words: "melatonin dosage", "shingles
     // symptoms", "photosynthesis equation".
@@ -1631,6 +1655,16 @@ impl PageSearcher {
                 let called = hits.iter().any(|hit| hit.named);
                 found.retain(|hit| {
                     !called && hit.named && describes_an_event(hit.page.description.as_deref())
+                });
+            }
+            // Only a drug or other substance, and not when a page is
+            // called the whole query or the name is a kind of drug:
+            // "report abuse" is not about Report, nor "child abuse" about
+            // Child, nor "drug misuse" about Drug.
+            Hint::Drug => {
+                let called = hits.iter().any(|hit| hit.named) || names_a_kind_of_drug(name);
+                found.retain(|hit| {
+                    !called && hit.named && hit.page.is_article() && describes_a_drug(&hit.page)
                 });
             }
             Hint::Named => found.retain(|hit| hit.named),

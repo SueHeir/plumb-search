@@ -1370,3 +1370,60 @@ fn what_is_asked_about_an_event_finds_its_article() {
     assert!(named("bus schedule").is_empty());
     assert_eq!(named("truth table"), ["Truth table"]);
 }
+
+#[test]
+fn what_is_asked_about_a_drug_finds_its_article() {
+    let drug = |title: &str, aliases: &[&str], description: &str, lead: Option<&str>| {
+        let mut page = page(title, 50_000, aliases);
+        page.description = Some(description.into());
+        page.lead = lead.map(str::to_string);
+        page
+    };
+    let (_dir, s) = searcher(&[
+        drug(
+            "Memantine",
+            &["Namenda"],
+            "Medication used to treat Alzheimer's disease",
+            None,
+        ),
+        // Only the lead says it is a medication.
+        drug(
+            "Gabapentin",
+            &["Neurontin"],
+            "Gamma-aminobutyric acid analog",
+            Some("Gabapentin, sold under the brand name Neurontin among others, is an anticonvulsant medication used to treat neuropathic pain. It is taken by mouth."),
+        ),
+        drug("Alprazolam", &["Xanax"], "Benzodiazepine medication", None),
+        drug("Report", &[], "Document that presents information", None),
+        drug("Opioid", &[], "Class of analgesic drug", None),
+        drug(
+            "Alcohol (chemistry)",
+            &[],
+            "Organic compound with a hydroxyl group",
+            None,
+        ),
+        drug("Child", &[], "Human between birth and puberty", None),
+        drug(
+            "Child abuse",
+            &[],
+            "Maltreatment of a child",
+            None,
+        ),
+    ]);
+    let named = |q: &str| named_titles(&s, q);
+    assert_eq!(named("memantine abuse"), ["Memantine"]);
+    assert_eq!(named("namenda misuse"), ["Memantine"]);
+    assert_eq!(named("gabapentin withdrawal symptoms"), ["Gabapentin"]);
+    assert_eq!(named("xanax addiction"), ["Alprazolam"]);
+    assert_eq!(named("alprazolam half-life"), ["Alprazolam"]);
+    assert_eq!(
+        hinted_name("gabapentin withdrawal symptoms"),
+        Some(("gabapentin".into(), Hint::Drug))
+    );
+    // Only a drug, and not when a page is called the whole query or the
+    // name is a kind of drug.
+    assert!(named("report abuse").is_empty());
+    assert!(named("alcohol addiction").is_empty());
+    assert!(named("opioid addiction").is_empty());
+    assert_eq!(named("child abuse"), ["Child abuse"]);
+}
