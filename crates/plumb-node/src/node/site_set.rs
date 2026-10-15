@@ -6,12 +6,14 @@
 //!
 //! Unlike the other sets, which the signed sets job takes whole, it is
 //! held part by part, and only while filling reads it. Filling fetches the
-//! part it reads next when it reaches it ([`fetch`]), which removes the
-//! parts it is past but the first: the best sites, which a new node sets up
-//! from, so the part most asked for. While filling reads the set, it looks
-//! for a newer generation every [`LOOK_EVERY`] and puts it in place of the
-//! one held, keeping the parts they share; filling reads on in it from the
-//! same place, as it does in a trusted node's list, which changes as it is
+//! part it reads next when it reaches it ([`fetch`]), and the first part
+//! too: the best sites, which a new node sets up from, so the part most
+//! asked for. It removes the parts it is past but the first. While filling
+//! reads the set, it looks for a newer generation every [`LOOK_EVERY`], and
+//! whenever a part it needs is missing, since no node keeps the parts of a
+//! generation a newer one replaced. It puts a newer one in place of the one
+//! held, keeping the parts they share; filling reads on in it from the same
+//! place, as it does in a trusted node's list, which changes as it is
 //! read. A part is fetched into a file beside its own, checked against the
 //! manifest, and renamed into place under [`Shared::held`], which reading
 //! holds, so filling reads only whole parts.
@@ -28,7 +30,7 @@ use plumb_core::locks::Locked;
 use plumb_core::storage;
 use plumb_format::value::unix_seconds;
 use plumb_format::{FilePart, Item, Manifest, PublicKey};
-use plumb_net::NetHandle;
+use plumb_net::{NetHandle, PeerId};
 use tracing::{debug, info, warn};
 
 use super::signed_sets::{self, held_trusted, set_dir, Offer, LOOK_EVERY};
@@ -132,12 +134,7 @@ impl HeldSites {
             .zip(&self.here[first..])
             .take_while(|(_, here)| **here)
             .map(|(part, _)| self.dir.join(&part.path));
-        // An error reading a part ends what is read, skipped or not.
-        paths.flat_map(part_lines).filter(move |line| {
-            let skipped = skip > 0 && line.is_ok();
-            skip -= u64::from(skipped);
-            !skipped
-        })
+        paths.flat_map(move |path| part_lines(path, std::mem::take(&mut skip)))
     }
 
     /// Checks an item of the set against its manifest, as taking a set
@@ -153,19 +150,37 @@ fn is_here(dir: &Path, part: &FilePart) -> bool {
     fs::metadata(dir.join(&part.path)).is_ok_and(|meta| meta.len() == part.bytes)
 }
 
-/// The lines of the part at `path`, and any error reading it.
-fn part_lines(path: PathBuf) -> Box<dyn Iterator<Item = Result<String>>> {
+/// The lines of the part at `path` after its first `skip`, and any error
+/// reading it.
+fn part_lines(path: PathBuf, skip: u64) -> Box<dyn Iterator<Item = Result<String>>> {
     let shown = path.display().to_string();
-    match fs::File::open(&path).and_then(zstd::Decoder::new) {
-        Ok(decoder) => Box::new(
-            std::io::BufReader::new(decoder)
-                .lines()
-                .map(move |line| line.with_context(|| format!("reading {shown}"))),
-        ),
-        Err(err) => Box::new(std::iter::once(
-            Err(err).with_context(|| format!("reading {shown}")),
-        )),
+    let mut reader = match fs::File::open(&path).and_then(zstd::Decoder::new) {
+        Ok(decoder) => std::io::BufReader::new(decoder),
+        Err(err) => {
+            return Box::new(std::iter::once(
+                Err(err).with_context(|| format!("reading {shown}")),
+            ))
+        }
+    };
+    // Skipped lines are read into one buffer, not a string each.
+    let mut skipped = Vec::new();
+    for _ in 0..skip {
+        skipped.clear();
+        match reader.read_until(b'\n', &mut skipped) {
+            Ok(0) => return Box::new(std::iter::empty()),
+            Ok(_) => {}
+            Err(err) => {
+                return Box::new(std::iter::once(
+                    Err(err).with_context(|| format!("reading {shown}")),
+                ))
+            }
+        }
     }
+    Box::new(
+        reader
+            .lines()
+            .map(move |line| line.with_context(|| format!("reading {shown}"))),
+    )
 }
 
 /// What fetching the set of sites came to.
@@ -230,75 +245,134 @@ pub(super) async fn fetch(
         .looked
         .locked()
         .is_none_or(|looked| looked.elapsed() >= LOOK_EVERY);
-    let fetched = fetch_parts(inner, net, at, count, look).await?;
-    let mut looked = inner.sites.looked.locked();
-    match fetched {
-        // Perhaps a newer generation took the place of the one held.
-        Fetched::Missing => *looked = None,
-        Fetched::NoPeer | Fetched::Busy => {}
-        Fetched::Paused | Fetched::Here if look => *looked = Some(Instant::now()),
-        Fetched::Paused | Fetched::Here => {}
-    }
-    Ok(fetched)
+    fetch_parts(inner, net, at, count, look).await
 }
 
-/// Brings the parts that hold the `count` sites from the `at`th on: looks
-/// for a newer generation when `look` or when none is held, removes the
-/// parts before `at` but the first, and fetches the parts wanted that are
-/// not here.
+/// Brings the parts that hold the `count` sites from the `at`th on, and
+/// then the first part, which new nodes ask for: looks for a newer
+/// generation when `look`, when none is held, or when a part of the one
+/// held is missing, as once a newer one takes its place no node holds its
+/// parts. Removes the parts before `at` but the first.
 async fn fetch_parts(
     inner: &Arc<Inner>,
     net: &NetHandle,
     at: u64,
     count: u64,
-    look: bool,
+    mut look: bool,
 ) -> Result<Fetched> {
     let _one = inner.sites.fetching.lock().await;
-    let publishers = &inner.config.set_publishers;
-    let mut held = HeldSites::find(&inner.paths.data, publishers);
-    let mut from = None;
-    if look || held.is_none() {
-        let generation = held.as_ref().map(|held| held.generation);
-        match signed_sets::ask_newest(inner, net, SITES, generation).await? {
-            Offer::NoPeer => return Ok(Fetched::NoPeer),
-            Offer::Busy if held.is_none() => return Ok(Fetched::Busy),
-            Offer::Busy | Offer::Current => {}
-            Offer::Newer {
-                text, from: peer, ..
-            } => {
-                held = Some(blocking(inner, move |inner| install(inner, &text)).await?);
-                from = Some(peer);
-            }
-        }
-    }
-    let Some(held) = held else {
-        return Ok(Fetched::Missing);
-    };
-    blocking(inner, move |inner| remove_before(inner, at)).await?;
-    for n in held.parts_for(at, count) {
-        if held.here[n] {
-            continue;
-        }
-        if inner.download_pause().is_some() {
-            return Ok(Fetched::Paused);
-        }
-        let part = held.manifest.files[n].clone();
-        let partial = held.dir.join(format!("{}.partial", part.path));
-        if let Err(err) = signed_sets::fetch_part(inner, net, &part, &partial, from).await {
-            debug!("{SITES}: part {}: {err:#}", part.path);
-            return Ok(Fetched::Missing);
-        }
-        if let Err(err) = inner.add_downloaded(part.bytes) {
-            warn!("cannot count the download: {err:#}");
-        }
-        let generation = held.generation;
-        blocking(inner, move |inner| {
-            put_in_place(inner, generation, &part, &partial)
+    loop {
+        let mut held = blocking(inner, |inner| {
+            Ok(HeldSites::find(
+                &inner.paths.data,
+                &inner.config.set_publishers,
+            ))
         })
         .await?;
-        debug!("{SITES}: took part {}", held.manifest.files[n].path);
+        let mut from = None;
+        if look || held.is_none() {
+            let generation = held.as_ref().map(|held| held.generation);
+            match signed_sets::ask_newest(inner, net, SITES, generation).await? {
+                Offer::NoPeer if held.is_none() => return Ok(Fetched::NoPeer),
+                Offer::Busy if held.is_none() => return Ok(Fetched::Busy),
+                Offer::NoPeer | Offer::Busy => {}
+                Offer::Current => *inner.sites.looked.locked() = Some(Instant::now()),
+                Offer::Newer {
+                    text, from: peer, ..
+                } => {
+                    held = Some(blocking(inner, move |inner| install(inner, &text)).await?);
+                    from = Some(peer);
+                    *inner.sites.looked.locked() = Some(Instant::now());
+                }
+            }
+        }
+        let Some(held) = held else {
+            return Ok(Fetched::Missing);
+        };
+        blocking(inner, move |inner| remove_before(inner, at)).await?;
+        let mut here = held.here.clone();
+        for n in held.parts_for(at, count) {
+            match fetch_part(inner, net, &held, n, &mut here, from).await? {
+                Fetched::Here => {}
+                Fetched::Missing if !look => break,
+                fetched => return Ok(fetched),
+            }
+        }
+        if here[held.parts_for(at, count)].iter().all(|here| *here) {
+            // The first part is for other nodes: what came of it does not
+            // change what filling reads.
+            if !here.is_empty() {
+                let _ = fetch_part(inner, net, &held, 0, &mut here, from).await?;
+            }
+            return Ok(Fetched::Here);
+        }
+        look = true;
     }
+}
+
+/// Fetches the `n`th part of `held` unless it is `here`, first from
+/// `from` when given.
+async fn fetch_part(
+    inner: &Arc<Inner>,
+    net: &NetHandle,
+    held: &HeldSites,
+    n: usize,
+    here: &mut [bool],
+    from: Option<PeerId>,
+) -> Result<Fetched> {
+    if here[n] {
+        return Ok(Fetched::Here);
+    }
+    if inner.download_pause().is_some() {
+        return Ok(Fetched::Paused);
+    }
+    let part = held.manifest.files[n].clone();
+    let partial = held.dir.join(format!("{}.partial", part.path));
+    if let Err(err) = signed_sets::fetch_part(inner, net, &part, &partial, from).await {
+        debug!("{SITES}: part {}: {err:#}", part.path);
+        // Not resumed: filling reads a trusted node's list from here on.
+        blocking(inner, move |inner| {
+            if fs::metadata(&partial).is_ok() {
+                storage::remove_file(&partial, inner.storage.as_deref())?;
+            }
+            Ok(())
+        })
+        .await?;
+        return Ok(Fetched::Missing);
+    }
+    if let Err(err) = inner.add_downloaded(part.bytes) {
+        warn!("cannot count the download: {err:#}");
+    }
+    let generation = held.generation;
+    let path = part.path.clone();
+    blocking(inner, move |inner| {
+        put_in_place(inner, generation, &part, &partial)
+    })
+    .await?;
+    debug!("{SITES}: took part {path}");
+    here[n] = true;
     Ok(Fetched::Here)
+}
+
+/// Removes the parts of the set of sites that hold the `count` sites
+/// from the `at`th on and do not match the manifest, so that they are
+/// fetched again. Whether any was.
+pub(super) fn remove_damaged(inner: &Inner, at: u64, count: u64) -> Result<bool> {
+    let _held = inner.sites.held.locked();
+    let Some(held) = HeldSites::find(&inner.paths.data, &inner.config.set_publishers) else {
+        return Ok(false);
+    };
+    let mut removed = false;
+    for n in held.parts_for(at, count) {
+        let part = &held.manifest.files[n];
+        let path = held.dir.join(&part.path);
+        if held.here[n] && !measure(&path).is_ok_and(|(_, sha256)| sha256 == part.sha256) {
+            warn!("{SITES}: part {} is damaged; fetching it again", part.path);
+            storage::remove_file(&path, inner.storage.as_deref())?;
+            removed = true;
+        }
+    }
+    Ok(removed)
 }
 
 /// Runs `work` off the async threads.
@@ -364,14 +438,23 @@ fn take(dir: &Path, text: &str, budget: Option<&Arc<storage::StorageBudget>>) ->
 /// filling is past, but the first, which new nodes ask for.
 fn remove_before(inner: &Inner, at: u64) -> Result<()> {
     let _held = inner.sites.held.locked();
-    let Some(held) = HeldSites::find(&inner.paths.data, &inner.config.set_publishers) else {
-        return Ok(());
-    };
+    match HeldSites::find(&inner.paths.data, &inner.config.set_publishers) {
+        Some(held) => remove_parts_before(&held, at, inner.storage.as_deref()),
+        None => Ok(()),
+    }
+}
+
+/// [`remove_before`] in `held`.
+fn remove_parts_before(
+    held: &HeldSites,
+    at: u64,
+    budget: Option<&storage::StorageBudget>,
+) -> Result<()> {
     let mut end = 0u64;
     for (n, part) in held.manifest.files.iter().enumerate() {
         end = end.saturating_add(part.count);
         if n > 0 && end <= at && held.here[n] {
-            storage::remove_file(&held.dir.join(&part.path), inner.storage.as_deref())?;
+            storage::remove_file(&held.dir.join(&part.path), budget)?;
         }
     }
     Ok(())
@@ -391,6 +474,13 @@ fn put_in_place(inner: &Inner, generation: i64, part: &FilePart, partial: &Path)
     Ok(())
 }
 
+/// For tests: a signed set of sites in `data`, a.org to e.org in parts
+/// of two, two and one.
+#[cfg(test)]
+pub(super) fn test_set(data: &Path, key: &ed25519_dalek::SigningKey) {
+    tests::sites(data, key);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,7 +488,7 @@ mod tests {
     use serde_json::{json, Value};
 
     /// A signed set of sites, five sites in parts of two, two and one.
-    fn sites(data: &Path, key: &SigningKey) {
+    pub(super) fn sites(data: &Path, key: &SigningKey) {
         let dir = set_dir(data, SITES).unwrap();
         write_sites(&dir, key, "2026-10-01T04:00:00Z", ["a", "b", "c", "d", "e"]);
     }
@@ -509,5 +599,23 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["items-001.jsonl.zst", MANIFEST]);
+    }
+
+    #[test]
+    fn the_parts_filling_is_past_go_but_the_first() {
+        let data = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[3; 32]);
+        let publishers = [PublicKey::of(&key)];
+        sites(data.path(), &key);
+        let held = HeldSites::find(data.path(), &publishers).unwrap();
+        remove_parts_before(&held, 3, None).unwrap();
+        let held = HeldSites::find(data.path(), &publishers).unwrap();
+        assert_eq!(held.here, [true, true, true]);
+        remove_parts_before(&held, 4, None).unwrap();
+        let held = HeldSites::find(data.path(), &publishers).unwrap();
+        assert_eq!(held.here, [true, false, true]);
+        remove_parts_before(&held, 5, None).unwrap();
+        let held = HeldSites::find(data.path(), &publishers).unwrap();
+        assert_eq!(held.here, [true, false, false]);
     }
 }

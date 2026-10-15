@@ -166,7 +166,7 @@ Everything a node keeps is under `--data DIR`. Paths are defined in [node/store.
 | `indexes/NNNNNN/` | Numbered search indexes, the newest that opens is searched; `buckets/` inside for the network and private search |
 | `icons/xx/<domain>.png` | Site icons for results pages ([icons.rs](src/icons.rs)) |
 | `net/` | The network side: `node.key`, `batches/`, `credits/`, `reports/`, `bucket-cache/`, `inbox.jsonl`, `fill.json`, `picks.json`, `published.json`, `leads.jsonl`, `friends.json`, `popularity.json`, `search-scope` |
-| `sets/<scope>/<name>/` | Signed sets taken from the network ([node/signed_sets.rs](src/node/signed_sets.rs)) |
+| `sets/<scope>/<name>/` | Signed sets taken from the network ([node/signed_sets.rs](src/node/signed_sets.rs)), and the parts of `plumb/sites` filling reads ([node/site_set.rs](src/node/site_set.rs)) |
 | `pages/sets/` | Page set files, `places.tsv.gz` and `map.pmtiles`, with `.prev` copies ([pages.rs](src/pages.rs)) |
 | `pages/index-<key>/`, `pages/places-<key>/` | The page index and the place index |
 | `safe/adult-domains.txt` | The adult blocklist ([node/adult.rs](src/node/adult.rs)) |
