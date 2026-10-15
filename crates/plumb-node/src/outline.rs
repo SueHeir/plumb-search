@@ -6,7 +6,7 @@
 //! [`crate::records::load_records`] replays it, one record at a time, and
 //! returns an [`Outline`] of each site: where its line is in the file and
 //! the little an index build needs to put the sites in order and fold
-//! redirects. [`RecordReader`] then reads the records back one at a time.
+//! redirects. [`RecordReader`] then reads the sites back one at a time.
 //!
 //! Only the journal's changes are held in memory meanwhile, grouped by the
 //! site they change. A change to a site on a subdomain
@@ -26,8 +26,12 @@
 //!
 //! Every search index a node builds, and the buckets other nodes take with
 //! it, is built from the file this way ([`build_index`]), whatever wrote
-//! the file last: setup, the full seed, a crawl, trimming. What the node's
-//! denylist denies is left out as each record is read.
+//! the file last: setup, the full seed, a crawl, trimming. The build reads
+//! each line as the site's stored item ([`RecordReader::read_item`],
+//! [`plumb_core::site`]), and the index, the buckets, the feeds watched and
+//! the node's denylist all work on that item; what the denylist denies is
+//! left out as each site is read. The fold and the steps that drop sites
+//! still read records, until the records file itself moves onto items.
 //!
 //! The steps that drop sites from the file (trimming to the storage limit,
 //! making room for new topics) work the same way. They pick the sites to
@@ -42,7 +46,8 @@ use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use plumb_core::{canonical_domain, parent_domain, stored, RecordSet, Signals, SiteRecord};
+use plumb_core::{canonical_domain, parent_domain, site, stored, RecordSet, Signals, SiteRecord};
+use plumb_format::Item;
 use tracing::{info, warn};
 
 use crate::records::{journal_path, Change};
@@ -743,11 +748,11 @@ pub fn outline_copy<'a>(
 /// How far [`build_index`] got, for its caller to show (and to stop it,
 /// by returning an error).
 pub enum Step {
-    /// Reading `sites` records, of which at most `docs` go in the index.
+    /// Reading `sites` sites, of which at most `docs` go in the index.
     Started { docs: usize, sites: usize },
     /// `done` of the `sites` read.
     Read { done: usize, sites: usize },
-    /// Every record read; the index is being written out.
+    /// Every site read; the index is being written out.
     Writing,
 }
 
@@ -762,11 +767,12 @@ pub struct Built {
     pub feeds: Vec<crate::news::Watched>,
 }
 
-/// Records read between calls of [`build_index`]'s `step`.
+/// Sites read between calls of [`build_index`]'s `step`.
 const STEP_EVERY: usize = 10_000;
 
 /// Builds an index in `index_dir` of the records file at `path`, whose
-/// sites `outlines` gives ([`outline`]), reading a record at a time: what
+/// sites `outlines` gives ([`outline`]), reading a site at a time as its
+/// stored item ([`RecordReader::read_item`]): what
 /// [`plumb_index::build_index`] makes of the whole set, best link score
 /// first, without the sites judged dead, and with sites whose homepage
 /// redirects to another folded into it. With `buckets`, also writes the
@@ -775,12 +781,12 @@ const STEP_EVERY: usize = 10_000;
 /// build goes; an error from it stops the build.
 ///
 /// `allowed`, when given, says whether a site goes in, and may take parts
-/// off its record first: a node leaves out what its denylist denies. It is
-/// asked of each site by its domain alone (a record that holds nothing
-/// else) before redirects are folded, so that a site left out lends its
-/// name to no other and one that redirects to it goes in on its own, as
-/// when the site was never there; then of each record as it is read, for
-/// the index, the buckets and the feeds alike.
+/// off its item first: a node leaves out what its denylist denies. It is
+/// asked of each site by its domain alone (an item that holds nothing
+/// else, [`site::new`]) before redirects are folded, so that a site left
+/// out lends its name to no other and one that redirects to it goes in on
+/// its own, as when the site was never there; then of each site as it is
+/// read, for the index, the buckets and the feeds alike.
 #[allow(clippy::too_many_arguments)]
 pub fn build_index(
     path: &Path,
@@ -788,13 +794,12 @@ pub fn build_index(
     index_dir: &Path,
     buckets: Option<&Path>,
     feeds: usize,
-    allowed: Option<&dyn Fn(&mut SiteRecord) -> bool>,
+    allowed: Option<&dyn Fn(&mut Item) -> bool>,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
     step: &mut dyn FnMut(Step) -> Result<()>,
 ) -> Result<Built> {
     outlines.retain(|outline| {
-        !outline.gone
-            && allowed.is_none_or(|allowed| allowed(&mut SiteRecord::new(&*outline.domain)))
+        !outline.gone && allowed.is_none_or(|allowed| allowed(&mut site::new(&*outline.domain)))
     });
     outlines.shrink_to_fit();
     sort(&mut outlines);
@@ -834,24 +839,24 @@ pub fn build_index(
         if i > 0 && i % STEP_EVERY == 0 {
             step(Step::Read { done: i, sites })?;
         }
-        let mut record = reader.read(outline)?;
+        let mut site = reader.read_item(outline)?;
         // Left out by its homepage, which no outline holds, a site takes
         // the sites folded into it out with it.
-        if allowed.is_some_and(|allowed| !allowed(&mut record)) {
+        if allowed.is_some_and(|allowed| !allowed(&mut site)) {
             continue;
         }
         if let (Some(bucket_writer), Some(dir)) = (writer.as_mut(), buckets) {
-            if let Err(err) = bucket_writer.add(&record) {
+            if let Err(err) = bucket_writer.add(&site) {
                 writer = None;
                 drop_buckets(dir, &err);
             }
         }
-        if watched.len() < feeds && wants_feed(&record) {
-            watched.push(feed_of(&record));
+        if watched.len() < feeds && wants_feed(&site) {
+            watched.push(feed_of(&site));
         }
         if folded_into[i].is_none() {
             let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
-            index.add(&record, names)?;
+            index.add(&site, names)?;
             indexed += 1;
         }
     }
@@ -881,24 +886,25 @@ fn drop_buckets(dir: &Path, err: &anyhow::Error) {
     let _ = fs::remove_dir_all(dir.with_extension("staging"));
 }
 
-/// Whether a node watches the feed of `record`'s site, among its
-/// best-ranked: it answered its last crawl and redirects nowhere.
-pub(crate) fn wants_feed(record: &SiteRecord) -> bool {
-    record.redirect.is_none() && record.crawl_failures == 0
+/// Whether a node watches the feed of the site of the stored item `site`,
+/// among its best-ranked: it answered its last crawl and redirects nowhere.
+pub(crate) fn wants_feed(site: &Item) -> bool {
+    site::redirect(site).is_none() && site::crawl_marks(site).failures == 0
 }
 
-/// The site of `record` to watch the feed of ([`crate::news`]): its domain,
-/// homepage and language, as the index has it, so a search in English
-/// leaves out the headlines of a site written in Cyrillic that declares
-/// nothing as it leaves out the site.
-pub(crate) fn feed_of(record: &SiteRecord) -> crate::news::Watched {
+/// The site of the stored item `site` to watch the feed of
+/// ([`crate::news`]): its domain, homepage and language, as the index has
+/// it, so a search in English leaves out the headlines of a site written in
+/// Cyrillic that declares nothing as it leaves out the site.
+pub(crate) fn feed_of(site: &Item) -> crate::news::Watched {
+    let domain = site::domain(site);
     crate::news::Watched {
-        domain: record.domain.clone(),
-        homepage: record
+        domain: domain.to_string(),
+        homepage: site
             .url
             .clone()
-            .unwrap_or_else(|| format!("https://{}/", record.domain)),
-        language: record.written_language(),
+            .unwrap_or_else(|| format!("https://{domain}/")),
+        language: site::written_language(site),
         ..Default::default()
     }
 }
@@ -952,7 +958,7 @@ impl<W: Write> Written<W> {
     }
 }
 
-/// Reads records of a file by their [`Outline`]s.
+/// Reads the sites of a records file by their [`Outline`]s.
 pub(crate) struct RecordReader {
     file: BufReader<File>,
     /// Where the reader is in the file.
@@ -985,23 +991,44 @@ impl RecordReader {
         Ok(&self.line)
     }
 
+    /// The site `outline` points at, as its stored item
+    /// ([`stored::read_item`]), cleaned and with page fields read off a bot
+    /// check dropped ([`site::clean`], [`site::drop_bot_check`]), as loading
+    /// the file does: the item of what [`RecordReader::read`] reads.
+    pub(crate) fn read_item(&mut self, outline: &Outline) -> Result<Item> {
+        let mut site = stored::read_item(self.line(outline)?)
+            .with_context(|| format!("reading the site {}", outline.domain))?;
+        same_site(site::domain(&site), outline)?;
+        site::clean(&mut site);
+        site::drop_bot_check(&mut site);
+        Ok(site)
+    }
+
     /// The record `outline` points at, cleaned and with page fields read
     /// off a bot check dropped, as loading the file does
-    /// ([`RecordSet::upsert`]).
+    /// ([`RecordSet::upsert`]). The fold's tests read the folded file back
+    /// with it; an index build reads items ([`RecordReader::read_item`]).
+    #[cfg(test)]
     pub(crate) fn read(&mut self, outline: &Outline) -> Result<SiteRecord> {
         let mut record = stored::read(self.line(outline)?)
             .with_context(|| format!("reading the record of {}", outline.domain))?;
-        if record.domain.as_str() != &*outline.domain {
-            anyhow::bail!(
-                "the records file changed while it was read: found {} where {} was",
-                record.domain,
-                outline.domain
-            );
-        }
+        same_site(&record.domain, outline)?;
         record.clean();
         record.drop_bot_check();
         Ok(record)
     }
+}
+
+/// Fails unless `domain`, of a line read by its outline, is the outline's:
+/// the file changed under the reader.
+fn same_site(domain: &str, outline: &Outline) -> Result<()> {
+    if domain != &*outline.domain {
+        anyhow::bail!(
+            "the records file changed while it was read: found {domain} where {} was",
+            outline.domain
+        );
+    }
+    Ok(())
 }
 
 /// Replaces the records file at `path` with the sites of it that `outlines`
@@ -1069,21 +1096,45 @@ mod tests {
 
     #[test]
     fn a_feed_is_in_the_language_its_site_is_written_in() {
+        let feed = |record: &SiteRecord| feed_of(&record.to_stored_item());
         let mut news = crawled("lenta.example", "Лента новостей России и мира сегодня", 1);
-        assert_eq!(feed_of(&news).language.as_deref(), Some("Cyrl"));
+        assert_eq!(feed(&news).language.as_deref(), Some("Cyrl"));
+        assert_eq!(feed(&news).homepage, "https://lenta.example/");
         // A declaration still wins.
         news.language = Some("en".into());
-        assert_eq!(feed_of(&news).language.as_deref(), Some("en"));
+        assert_eq!(feed(&news).language.as_deref(), Some("en"));
         let english = crawled("news.example", "World news", 1);
-        assert_eq!(feed_of(&english).language, None);
+        assert_eq!(feed(&english).language, None);
+        // Not of a site that redirects or failed its last crawl.
+        assert!(wants_feed(&english.to_stored_item()));
+        let mut failed = english.clone();
+        failed.crawl_failures = 1;
+        assert!(!wants_feed(&failed.to_stored_item()));
+        let mut moved = english;
+        moved.redirect = Some(Redirect {
+            to: "news.example.org".into(),
+            at: 2,
+            inner: false,
+        });
+        assert!(!wants_feed(&moved.to_stored_item()));
     }
 
     /// Every site in the records file at `path`, read a record at a time.
+    /// Each is also read as its stored item, as an index build reads it,
+    /// which is the record's.
     fn read_all(path: &Path, outlines: &[Outline]) -> Vec<SiteRecord> {
         let mut reader = RecordReader::open(path).unwrap();
         let mut sorted = outlines.to_vec();
         sort(&mut sorted);
-        sorted.iter().map(|o| reader.read(o).unwrap()).collect()
+        let mut items = RecordReader::open(path).unwrap();
+        sorted
+            .iter()
+            .map(|o| {
+                let record = reader.read(o).unwrap();
+                assert_eq!(items.read_item(o).unwrap(), record.to_stored_item());
+                record
+            })
+            .collect()
     }
 
     /// A records file and a journal that make every kind of change.
@@ -1347,6 +1398,98 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), clean);
     }
 
+    /// Checks `text` against the golden file at `path`, or writes it there
+    /// when `PLUMB_WRITE_GOLDEN` is set, as plumb-index's golden test does.
+    fn check_golden(path: &Path, text: &str) {
+        if std::env::var_os("PLUMB_WRITE_GOLDEN").is_some() {
+            fs::write(path, text).unwrap();
+            return;
+        }
+        let golden = fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        let (mut want, mut got) = (golden.lines(), text.lines());
+        for n in 1.. {
+            match (want.next(), got.next()) {
+                (None, None) => break,
+                (want, got) if want == got => continue,
+                (want, got) => panic!(
+                    "{}:{n} differs\n  golden: {}\n  now:    {}",
+                    path.display(),
+                    want.unwrap_or("(the end)"),
+                    got.unwrap_or("(the end)")
+                ),
+            }
+        }
+    }
+
+    /// What a node's build of the sites of plumb-index's golden file makes
+    /// beside the index, against `outline_golden.txt` next to this file:
+    /// the buckets other nodes take, byte for byte, and the feeds watched;
+    /// and a bucket table of the same sites built in memory
+    /// ([`plumb_net::BucketTable::build`]). Written once by the build that
+    /// read records, before it moved onto items; never written again to
+    /// make a test pass (see plumb-index's `tests/golden.rs`).
+    #[test]
+    fn a_build_of_the_golden_sites_makes_the_golden_buckets_and_feeds() {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write as _;
+
+        let golden = include_str!("../../plumb-index/src/tests/golden.txt");
+        let lines: Vec<&str> = golden
+            .lines()
+            .filter_map(|line| line.strip_prefix("line "))
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let outlines = outline(&path).unwrap().unwrap();
+        assert_eq!(outlines.len(), lines.len());
+        let buckets = dir.path().join("buckets");
+        let built = build_index(
+            &path,
+            outlines,
+            &dir.path().join("index"),
+            Some(&buckets),
+            1_000,
+            None,
+            None,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert!(built.buckets);
+        let table = dir.path().join("table");
+        let records: Vec<SiteRecord> = lines
+            .iter()
+            .map(|line| stored::read(line.as_bytes()).unwrap())
+            .collect();
+        plumb_net::BucketTable::build(&table, &records).unwrap();
+
+        let mut text = String::from(
+            "# What a node's build makes of the sites of plumb-index's golden file\n\
+             # (crates/plumb-index/src/tests/golden.txt) beside the index: the size\n\
+             # and SHA-256 of each file of its buckets and of a bucket table of the\n\
+             # same sites built in memory, and the feeds it watches. Written by\n\
+             # `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-node --lib golden`; see\n\
+             # plumb-index's tests/golden.rs before writing it again.\n",
+        );
+        writeln!(text, "docs {}", built.docs).unwrap();
+        for (name, dir) in [("buckets", &buckets), ("table", &table)] {
+            for file in ["records.dat", "records.idx", "buckets.idx", "buckets.dat"] {
+                let bytes = fs::read(dir.join(file)).unwrap();
+                let hash: String = Sha256::digest(&bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                writeln!(text, "{name} {file} {} bytes {hash}", bytes.len()).unwrap();
+            }
+        }
+        for feed in &built.feeds {
+            writeln!(text, "feed {}", serde_json::to_string(feed).unwrap()).unwrap();
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/outline_golden.txt");
+        check_golden(&path, &text);
+    }
+
     #[test]
     fn a_build_reads_records_clean_as_loading_makes_them() {
         let dir = tempfile::tempdir().unwrap();
@@ -1354,11 +1497,18 @@ mod tests {
         // Decomposed é, and a URL ending in a bare `?`.
         let mut cafe = crawled("cafe.com", "Cafe\u{301}", 5);
         cafe.url = Some("https://cafe.com/?".into());
-        write_jsonl(&path, &[cafe]).unwrap();
+        // A homepage read on another site's host, which says nothing of
+        // this one.
+        let mut elsewhere = crawled("bank.com", "Google", 5);
+        elsewhere.url = Some("https://www.google.com/".into());
+        write_jsonl(&path, &[cafe, elsewhere]).unwrap();
         let outlines = outline(&path).unwrap().unwrap();
         let read = read_all(&path, &outlines);
-        assert_eq!(read[0].title.as_deref(), Some("Caf\u{e9}"));
-        assert_eq!(read[0].url.as_deref(), Some("https://cafe.com/"));
+        let cafe = read.iter().find(|r| r.domain == "cafe.com").unwrap();
+        assert_eq!(cafe.title.as_deref(), Some("Caf\u{e9}"));
+        assert_eq!(cafe.url.as_deref(), Some("https://cafe.com/"));
+        let bank = read.iter().find(|r| r.domain == "bank.com").unwrap();
+        assert_eq!((&bank.url, &bank.title), (&None, &None));
         assert_eq!(read, load_records(&path).unwrap().into_sorted_vec());
     }
 

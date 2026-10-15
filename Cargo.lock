@@ -6082,6 +6082,7 @@ dependencies = [
  "libp2p",
  "ohttp",
  "plumb-core",
+ "plumb-format",
  "rand_core 0.6.4",
  "serde",
  "serde_bytes",

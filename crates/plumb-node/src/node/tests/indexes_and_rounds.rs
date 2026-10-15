@@ -370,8 +370,9 @@ async fn falls_back_to_the_newest_index_that_opens_and_clears_leftovers() {
     let records = fixture_records();
     // Two indexes of earlier runs, a newer one that is broken, and what
     // interrupted work leaves: a staging directory and temporary files.
-    plumb_index::build_index(&paths.index(2), &records[..5]).unwrap();
-    plumb_index::build_index(&paths.index(4), &records[..10]).unwrap();
+    let sites: Vec<_> = records.iter().map(SiteRecord::to_stored_item).collect();
+    plumb_index::build_index(&paths.index(2), &sites[..5]).unwrap();
+    plumb_index::build_index(&paths.index(4), &sites[..10]).unwrap();
     std::fs::create_dir_all(paths.index(7)).unwrap();
     std::fs::write(paths.index(7).join("meta.json"), "not an index").unwrap();
     std::fs::create_dir_all(paths.indexes.join(".000008.new-1-0")).unwrap();

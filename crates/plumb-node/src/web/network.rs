@@ -174,8 +174,12 @@ fn rank_found(
     }
     let dir = tempfile::tempdir().context("making a folder for ranking")?;
     let index = dir.path().join("index");
-    let records: Vec<SiteRecord> = found.found.iter().map(|f| f.record.clone()).collect();
-    build_index(&index, &records)?;
+    let sites: Vec<_> = found
+        .found
+        .iter()
+        .map(|f| f.record.to_stored_item())
+        .collect();
+    build_index(&index, &sites)?;
     // The few sites found are no dictionary to correct typos against: the
     // query was corrected, if at all, by this node's own index.
     let options = SearchOptions {

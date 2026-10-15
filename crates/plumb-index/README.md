@@ -1,6 +1,6 @@
 # plumb-index
 
-The search side of Plumb: a Tantivy index over site records and the ranking that puts the right site first, plus the page sets' index, the places index, spelling correction and the learned ranking model. plumb-node searches with it; plumb-tools builds indexes, measures them and trains the model.
+The search side of Plumb: a Tantivy index over sites and the ranking that puts the right site first, plus the page sets' index, the places index, spelling correction and the learned ranking model. plumb-node searches with it; plumb-tools builds indexes, measures them and trains the model.
 
 Part of [Plumb Search](../../README.md). See [the architecture](../../docs/architecture.md) for how the crates fit together, and [How search works](../../docs/search.md) for the whole path of a search through a node.
 
@@ -39,9 +39,9 @@ About 43,000 lines, tests included.
 | Module | What it does |
 | --- | --- |
 | [lib.rs](src/lib.rs) | `Searcher`, `Hit`, `SearchResults`, `SearchOptions`, the `Meaning` trait, and `RankConfig` with every ranking knob and its default |
-| [schema.rs](src/schema.rs) | the index's fields and how a `SiteRecord` becomes a document |
+| [schema.rs](src/schema.rs) | the index's fields and how a site's stored item becomes a document |
 | [analysis.rs](src/analysis.rs) | the text analyzers shared by indexing and querying |
-| [indexing.rs](src/indexing.rs) | `build_index` and `IndexBuild`: one document per site, records of a domain merged, redirecting domains folded in |
+| [indexing.rs](src/indexing.rs) | `build_index` and `IndexBuild`: one document per site from its stored item, items of a domain merged, redirecting domains folded in |
 | [replace.rs](src/replace.rs) | swaps a new index directory in without ever leaving it missing or half built |
 | [storage.rs](src/storage.rs) | counts what index builds and merges write against a node's storage budget |
 
@@ -96,7 +96,7 @@ Each index lives in its own directory and is built the same way: in a hidden sta
 | Pages | `pages::build_page_index` | `pages::PageSearcher` | page of a page set |
 | Places | `places::build_place_index` | `places::PlaceSearcher` | place |
 
-`build_index` makes each domain canonical, merges records of the same domain with `SiteRecord::merge`, folds domains that redirect into their target (their names become the target's), and skips invalid or gone sites. The writer uses a 200 MB heap (`WRITER_HEAP_BYTES`) and merges once at the end into one segment. The spelling model is built in the same pass. `IndexBuild` takes records one at a time, for a node that streams its records file instead of holding it.
+`build_index` takes the sites as a node stores them, their stored items (`plumb_core::site`; a caller holding records turns them into items with `SiteRecord::to_stored_item`). It makes each domain canonical, merges items of the same domain with `site::merge`, folds domains that redirect into their target (their names become the target's), and skips invalid or gone sites. The writer uses a 200 MB heap (`WRITER_HEAP_BYTES`) and merges once at the end into one segment. The spelling model is built in the same pass. `IndexBuild` takes sites one at a time, for a node that streams its records file instead of holding it.
 
 All text, at index and at query time, goes through `plumb_core::normalize_text` and is then ASCII-folded, so `U.S. Bank`, `us bank` and `US BANK` are the same query.
 
@@ -144,7 +144,8 @@ The page index is searched next to the sites: a page is found by name (some kind
 ```rust
 use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
 
-build_index(&dir, &records)?;
+let sites: Vec<_> = records.iter().map(SiteRecord::to_stored_item).collect();
+build_index(&dir, &sites)?;
 let searcher = Searcher::open(&dir)?;
 let results = searcher.search_full("us bank", 10, &RankConfig::default(), &SearchOptions::default())?;
 for hit in &results.hits {
@@ -154,7 +155,7 @@ for hit in &results.hits {
 
 | Entry point | Use |
 | --- | --- |
-| `build_index`, `IndexBuild` | build the site index from records in memory or one at a time |
+| `build_index`, `IndexBuild` | build the site index from sites' stored items in memory or one at a time |
 | `Searcher::open`, `search`, `search_full` | search the site index |
 | `Searcher::search_meaning` | search with closeness in meaning from a `Meaning` (plumb-node's `meaning.rs` implements it) |
 | `Searcher::candidate_pool` | the candidates a query ranks, by source |
@@ -189,5 +190,6 @@ cargo test -p plumb-index
 | [src/places/tests.rs](src/places/tests.rs) | the places index and place queries |
 | [learned.rs](src/learned.rs), [health.rs](src/health.rs) | tests in the module |
 | [tests/fixtures/short-docs.tsv](tests/fixtures/short-docs.tsv) | a small docs page set, also used by plumb-node's tests |
+| [src/tests/golden.rs](src/tests/golden.rs), [golden.txt](src/tests/golden.txt) | the golden file: each site's document, spelling texts and bucket keys for a fixed set of sites, written once and checked by every build since; plumb-node checks its build's buckets of the same sites |
 
-Most tests build a small index from records written in the test, search it and check the order. [examples/boilerplate_retrieval.rs](examples/boilerplate_retrieval.rs) compares retrieval on probe pages without embeddings: it takes a queries JSON file as its argument and the probe JSONL on standard input.
+Most tests build a small index from records written in the test (as their stored items), search it and check the order. [examples/boilerplate_retrieval.rs](examples/boilerplate_retrieval.rs) compares retrieval on probe pages without embeddings: it takes a queries JSON file as its argument and the probe JSONL on standard input.

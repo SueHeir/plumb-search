@@ -16,12 +16,18 @@
 //! Nodes searching each other (`plumb_net`) and browsers searching a site
 //! privately (`plumb-private`) both use these, so they live here, with no
 //! dependency that keeps them from compiling to WebAssembly.
+//!
+//! A site's keys come from its record ([`record_keys`]) or from its stored
+//! item ([`site_keys`]), the same either way: a node's index build files
+//! its sites as items, and private search, PIR tables and the tools still
+//! work on records until they move onto items too.
 
 use std::collections::BTreeSet;
 
+use plumb_format::Item;
 use sha2::{Digest, Sha256};
 
-use crate::{domain_label, is_function_word, joined, normalize_text, SiteRecord};
+use crate::{domain_label, is_function_word, joined, normalize_text, LinkText, SiteRecord};
 
 /// Buckets keys are spread over.
 pub const BUCKETS: u32 = 16_384;
@@ -83,22 +89,46 @@ fn add_keys(keys: &mut BTreeSet<String>, text: &str) {
 
 /// Every key a site can be found by.
 pub fn record_keys(record: &SiteRecord) -> BTreeSet<String> {
+    name_keys(
+        &record.domain,
+        record.title.as_deref(),
+        &record.aliases,
+        &record.link_texts,
+    )
+}
+
+/// Every key the site of a stored item ([`crate::site`]) can be found by:
+/// what [`record_keys`] gives for the same site.
+pub fn site_keys(site: &Item) -> BTreeSet<String> {
+    let link_texts = crate::site::link_texts(site);
+    name_keys(&site.id, site.title.as_deref(), &site.names, &link_texts)
+}
+
+/// The keys of the names the site `domain` goes by: its domain label,
+/// its homepage's `title` and the title's parts, its other `names`, and
+/// its [`KEY_LINK_TEXTS`] most used `link_texts`.
+fn name_keys(
+    domain: &str,
+    title: Option<&str>,
+    names: &[String],
+    link_texts: &[LinkText],
+) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
-    let label = domain_label(&record.domain);
+    let label = domain_label(domain);
     add_keys(&mut keys, &label);
     for part in label.split('-') {
         add_keys(&mut keys, part);
     }
-    if let Some(title) = &record.title {
+    if let Some(title) = title {
         add_keys(&mut keys, title);
         for part in title.split(TITLE_SEPARATORS).flat_map(|p| p.split(" - ")) {
             add_keys(&mut keys, part);
         }
     }
-    for alias in &record.aliases {
-        add_keys(&mut keys, alias);
+    for name in names {
+        add_keys(&mut keys, name);
     }
-    let mut texts: Vec<_> = record.link_texts.iter().collect();
+    let mut texts: Vec<_> = link_texts.iter().collect();
     texts.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.text.cmp(&b.text)));
     for lt in texts.into_iter().take(KEY_LINK_TEXTS) {
         add_keys(&mut keys, &lt.text);
@@ -219,7 +249,6 @@ pub fn lean_record(record: SiteRecord) -> SiteRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LinkText;
 
     #[test]
     fn buckets_never_change() {
@@ -269,6 +298,23 @@ mod tests {
         spain.title = Some("Social Security in Spain".into());
         assert!(record_keys(&spain).contains("in"));
         assert!(!matches(&spain, &query_keys("weather in denver")));
+    }
+
+    #[test]
+    fn a_site_s_item_has_its_record_s_keys() {
+        let mut records = crate::site::tests::variants();
+        records.push(crate::site_item::tests::full_record());
+        let mut usbank = SiteRecord::new("us-bank.com");
+        usbank.title = Some("U.S. Bank | Checking - Savings".into());
+        usbank.link_texts = (0..20)
+            .map(|i| LinkText::with_count(format!("text {i}"), i))
+            .collect();
+        records.push(usbank);
+        for mut record in records {
+            record.clean();
+            let site = record.to_stored_item();
+            assert_eq!(site_keys(&site), record_keys(&record), "{}", record.domain);
+        }
     }
 
     #[test]

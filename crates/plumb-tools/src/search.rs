@@ -127,10 +127,14 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     }
     drop(copy);
     // Merging makes hand-made or concatenated files safe to index too.
-    let records = load_records(&args.records)
+    // Each record goes in as its stored item, as the records file holds it.
+    let sites: Vec<_> = load_records(&args.records)
         .with_context(|| format!("loading records {}", args.records.display()))?
-        .into_sorted_vec();
-    let stats = build_index(&args.index, &records)
+        .into_sorted_vec()
+        .into_iter()
+        .map(|record| record.to_stored_item())
+        .collect();
+    let stats = build_index(&args.index, &sites)
         .with_context(|| format!("building the index in {}", args.index.display()))?;
     println!(
         "indexed {} sites from {} into {}",
