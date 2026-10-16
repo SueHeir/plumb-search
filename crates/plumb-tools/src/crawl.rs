@@ -95,7 +95,7 @@ fn crawl_file_with(
     if out != args.records {
         // The journal of `out` holds changes to `out`, which starts as what
         // was read.
-        store.compact(&set)?;
+        store.compact_records(&set)?;
     }
     let window = args
         .skip_crawled_within_days
@@ -116,7 +116,7 @@ fn crawl_file_with(
         fetcher,
         |_| Ok(()),
     )?;
-    let written = store.compact(&set)?;
+    let written = store.compact_records(&set)?;
 
     let o = &totals.outcomes;
     println!(

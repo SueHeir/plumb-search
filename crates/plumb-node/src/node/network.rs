@@ -841,7 +841,7 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     n += changes.len() as u64;
     drop(changes);
     if store.wants_compaction() {
-        // Folded a record at a time; a file only a whole set can fold
+        // Folded a site at a time; a file only a whole set can fold
         // (a site on two lines) keeps its journal for the next build.
         store.fold_with_check(|| inner.check_stop())?;
     }

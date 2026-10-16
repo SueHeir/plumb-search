@@ -320,7 +320,7 @@ const BUILD_GAP_PER_BUILD: u64 = 3;
 
 /// Drops the sites kept for topics the node no longer has from the records
 /// ([`Inner::prune_records_for_new_topics`]) and builds an index without
-/// them. Reads the records file a record at a time
+/// them. Reads the records file a site at a time
 /// ([`crate::outline::outline_merged`]), holding an outline of each site
 /// and the domains of those about the topics, then writes it again with
 /// the lines of the sites left copied as they are. A file only a whole set

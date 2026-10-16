@@ -227,9 +227,28 @@ impl Sites {
     /// each read from its line as it is reached: the order of
     /// [`Sites::into_sorted`].
     pub fn by_link_score(&self) -> impl ExactSizeIterator<Item = Item> + '_ {
+        self.best_first().into_iter().map(Held::item)
+    }
+
+    /// Every site's stored line, without its line break, in no particular
+    /// order and without reading any site: what [`stored::write_item`]
+    /// writes of it.
+    pub fn lines(&self) -> impl ExactSizeIterator<Item = &[u8]> + '_ {
+        self.held.iter().map(Held::line)
+    }
+
+    /// Every site's stored line, in the order of [`Sites::by_link_score`],
+    /// as [`SiteList::lines`] gives the lines of [`Sites::into_sorted`]:
+    /// for writing the set while keeping it, without reading any site or
+    /// copying any line.
+    pub fn lines_by_link_score(&self) -> impl ExactSizeIterator<Item = &[u8]> + '_ {
+        self.best_first().into_iter().map(Held::line)
+    }
+
+    fn best_first(&self) -> Vec<&Held> {
         let mut held: Vec<&Held> = self.held.iter().collect();
         held.sort_unstable_by(|a, b| best_first(a, b));
-        held.into_iter().map(Held::item)
+        held
     }
 
     /// All sites, best [`site::link_score`] first, ties broken by domain,
@@ -758,6 +777,7 @@ mod tests {
             .link_scores()
             .map(|(domain, score)| (domain.to_string(), score))
             .collect();
+        let whole = all_sites.clone();
         let list = all_sites.into_sorted();
         let sites: Vec<Item> = list.iter().collect();
         assert_eq!(sites, in_order);
@@ -768,8 +788,16 @@ mod tests {
             let site = sites.iter().find(|site| site.id == domain).unwrap();
             assert_eq!(score, site::link_score(site), "{domain}");
         }
-        // Written, the list is its sites' stored lines, as they are.
+        // Written, the list is its sites' stored lines, as they are, and
+        // so are the set's, in the same order.
         let lines: Vec<&[u8]> = list.lines().collect();
+        let set_lines: Vec<&[u8]> = whole.lines_by_link_score().collect();
+        assert_eq!(set_lines, lines);
+        let mut unordered: Vec<&[u8]> = whole.lines().collect();
+        unordered.sort_unstable();
+        let mut ordered = lines.clone();
+        ordered.sort_unstable();
+        assert_eq!(unordered, ordered);
         for (line, record) in lines.iter().zip(&records) {
             assert_eq!(line.to_vec(), stored::line(record).unwrap());
         }

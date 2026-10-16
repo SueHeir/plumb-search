@@ -210,7 +210,7 @@ impl CrawlSet for RecordSet {
     }
 
     fn compact(&self, store: &mut RecordStore) -> Result<usize> {
-        store.compact(self)
+        store.compact_records(self)
     }
 }
 

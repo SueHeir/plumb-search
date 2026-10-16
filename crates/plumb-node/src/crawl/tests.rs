@@ -491,7 +491,7 @@ fn every_batch_is_saved_before_and_after_it_is_fetched() {
     // The file itself waits for the journal to be folded in.
     let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
     assert_eq!(file, sites(5));
-    store.compact(&set).unwrap();
+    store.compact_records(&set).unwrap();
     assert!(!journal_path(&path).exists());
     let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
     let order: Vec<&str> = file.iter().map(|r| r.domain.as_str()).collect();
@@ -1067,7 +1067,7 @@ impl CrawlSet for Holding {
     }
 
     fn compact(&self, store: &mut RecordStore) -> Result<usize> {
-        store.compact(&self.0)
+        store.compact_records(&self.0)
     }
 }
 

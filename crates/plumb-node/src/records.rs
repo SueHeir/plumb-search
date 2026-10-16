@@ -8,8 +8,9 @@
 //! before the crawl goes on, and folds the journal into the file
 //! ([`RecordStore::compact`]) only once the journal has grown to a quarter of
 //! the file's size (at least [`MIN_COMPACT_BYTES`], at most
-//! [`MAX_JOURNAL_BYTES`]), and when `plumb-tools crawl` ends. [`load_records`] replays a journal it finds, so whatever an
-//! interrupted crawl saved is kept.
+//! [`MAX_JOURNAL_BYTES`]), and when `plumb-tools crawl` ends.
+//! [`load_sites`] replays a journal it finds, so whatever an interrupted
+//! crawl saved is kept.
 //!
 //! The file is always replaced whole and atomically, by way of a temporary
 //! file flushed to disk before the rename (see
@@ -21,10 +22,12 @@
 //! A change that brings a site carries the site's stored item
 //! ([`plumb_core::site`]), as the file's lines hold it, and is made to a
 //! set of sites ([`Change::apply`]): whatever makes a change (a crawl, the
-//! seed, the inbox of sites other nodes send) makes it of items. Code that
-//! works on sites' stored items rather than records loads and replaces a
-//! file with [`load_sites`] and [`replace_sites`], which read and write
-//! the same lines.
+//! seed, the inbox of sites other nodes send) makes it of items. A file is
+//! loaded whole as a set of sites ([`load_sites`]), which holds each site
+//! as its stored line, and written whole ([`RecordStore::compact`],
+//! [`replace_sites`]) as the lines the set holds. [`load_records`] loads
+//! the same sites as records, for `plumb-tools crawl` until it holds
+//! [`Sites`].
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -247,9 +250,10 @@ pub fn journal_path(records: &Path) -> PathBuf {
     records.with_file_name(name)
 }
 
-/// Reads a records file into a set, then replays the journal an interrupted
-/// crawl may have left next to it. Records for the same domain are merged,
-/// and ones without a valid domain are dropped.
+/// [`load_sites`] as records: reads a records file into a record set, then
+/// replays the journal an interrupted crawl may have left next to it.
+/// Records for the same domain are merged, and ones without a valid domain
+/// are dropped.
 pub fn load_records(path: &Path) -> Result<RecordSet> {
     let mut set = RecordSet::new();
     let loaded = read_lines(path, |line| {
@@ -263,12 +267,14 @@ pub fn load_records(path: &Path) -> Result<RecordSet> {
     Ok(set)
 }
 
-/// [`load_records`] of the sites' stored items ([`plumb_core::site`]),
-/// for code that works on those: each line is read as its site's stored
-/// item ([`plumb_core::stored::read_item`]), and [`Sites`] merges and
-/// cleans them as a record set does records, then the journal's changes
-/// are made to them ([`Change::apply`]). The sites are the stored items
-/// of the records [`load_records`] loads.
+/// Reads a records file into a set of sites' stored items
+/// ([`plumb_core::site`]), then replays the journal an interrupted crawl
+/// may have left next to it. Each line is read as its site's stored item
+/// ([`plumb_core::stored::read_item`]), and [`Sites`] merges and cleans
+/// them as a record set does records: sites of the same domain are merged,
+/// and ones without a valid domain are dropped. Then the journal's changes
+/// are made to them ([`Change::apply`]). The sites are the stored items of
+/// the records [`load_records`] loads.
 pub fn load_sites(path: &Path) -> Result<Sites> {
     let mut sites = Sites::new();
     let loaded = read_lines(path, |line| {
@@ -466,7 +472,7 @@ pub struct RecordStore {
 impl RecordStore {
     /// A store for the records file at `path`. A journal already there must
     /// have been replayed into the set the crawl changes, as
-    /// [`load_records`] does: new changes are added to it.
+    /// [`load_sites`] does: new changes are added to it.
     pub fn open(path: &Path) -> Self {
         let journal_path = journal_path(path);
         RecordStore {
@@ -579,9 +585,28 @@ impl RecordStore {
                     .max((self.file_bytes / 4).min(MAX_JOURNAL_BYTES))
     }
 
-    /// Writes every record of `set` to the file, best link score first,
-    /// then deletes the journal. Returns how many records were written.
-    pub fn compact(&mut self, set: &RecordSet) -> Result<usize> {
+    /// Writes every site of `sites` to the file, best link score first,
+    /// each as the line the set holds of it ([`Sites::lines_by_link_score`]),
+    /// then deletes the journal. Returns how many sites were written.
+    pub fn compact(&mut self, sites: &Sites) -> Result<usize> {
+        // Closed first: Windows cannot delete a file that is open.
+        self.journal = None;
+        let written = if let Some(budget) = self.budget.clone() {
+            self.admitted_rewrite(&budget, lines_bytes(sites.lines()), || {
+                replace_lines(&self.path, sites.lines_by_link_score())
+            })?
+        } else {
+            replace_lines(&self.path, sites.lines_by_link_score())?
+        };
+        self.journal_bytes = 0;
+        self.file_bytes = file_len(&self.path);
+        Ok(written)
+    }
+
+    /// [`RecordStore::compact`] of a record set, which writes the same
+    /// lines of the same sites: for plumb-tools crawl and the crawl tests
+    /// until they hold [`Sites`].
+    pub fn compact_records(&mut self, set: &RecordSet) -> Result<usize> {
         // Closed first: Windows cannot delete a file that is open.
         self.journal = None;
         let written = if let Some(budget) = self.budget.clone() {
@@ -943,15 +968,30 @@ where
 /// [`plumb_core::stored::write_item`] writes it, which is the line
 /// [`replace_records`] writes of the site's record.
 pub fn replace_sites(path: &Path, sites: &SiteList) -> Result<usize> {
+    replace_lines(path, sites.lines())
+}
+
+/// Replaces the records file at `path` with `lines`, sites' stored lines
+/// without their line breaks, and deletes the file's journal. Returns how
+/// many lines were written.
+fn replace_lines<'a>(path: &Path, lines: impl ExactSizeIterator<Item = &'a [u8]>) -> Result<usize> {
     let written = write_lines_atomically(path, |out| {
-        for line in sites.lines() {
+        let written = lines.len();
+        for line in lines {
             out.write_all(line)?;
             out.write_all(b"\n")?;
         }
-        Ok(sites.len())
+        Ok(written)
     })?;
     delete_journal(path)?;
     Ok(written)
+}
+
+/// The bytes a file of `lines` takes, a line break after each.
+fn lines_bytes<'a>(lines: impl Iterator<Item = &'a [u8]>) -> u64 {
+    lines.fold(0u64, |bytes, line| {
+        bytes.saturating_add(line.len() as u64 + 1)
+    })
 }
 
 /// Deletes the journal of the records file at `path`, once a new file that
@@ -979,10 +1019,9 @@ pub(crate) fn replace_sites_with_budget(
     let Some(budget) = budget else {
         return replace_sites(path, sites);
     };
-    let bytes = sites.lines().fold(0u64, |bytes, line| {
-        bytes.saturating_add(line.len() as u64 + 1)
-    });
-    RecordStore::open(path).admitted_rewrite(budget, bytes, || replace_sites(path, sites))
+    RecordStore::open(path).admitted_rewrite(budget, lines_bytes(sites.lines()), || {
+        replace_sites(path, sites)
+    })
 }
 
 /// Opens a journal for appending. The directory entry of a new journal is
@@ -1827,15 +1866,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
         write_jsonl(&path, &[record("b.com", 20), record("a.com", 10)]).unwrap();
+        let mut sites = load_sites(&path).unwrap();
         let mut set = load_records(&path).unwrap();
         let mut store = RecordStore::open(&path);
         let changes = vec![titled("c.com", "C"), mark("a.com", Some(5), 1)];
         store.save(&changes).unwrap();
         for change in changes {
-            change.apply_to_records(&mut set);
+            change.clone().apply_to_records(&mut set);
+            change.apply(&mut sites);
         }
 
-        assert_eq!(store.compact(&set).unwrap(), 3);
+        assert_eq!(store.compact(&sites).unwrap(), 3);
         assert_eq!(names(dir.path()), ["records.jsonl"]);
         let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
         assert_eq!(file, sorted(set.clone()));
@@ -1844,6 +1885,14 @@ mod tests {
             ["a.com", "b.com", "c.com"]
         );
         assert_eq!(sorted(load_records(&path).unwrap()), file);
+        // The lines compacting the records writes.
+        let of_records = dir.path().join("of-records");
+        fs::create_dir(&of_records).unwrap();
+        let of_records = of_records.join("records.jsonl");
+        RecordStore::open(&of_records)
+            .compact_records(&set)
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), fs::read(&of_records).unwrap());
 
         // The store goes on with a new journal.
         store.save(&[mark("b.com", Some(9), 0)]).unwrap();
@@ -1855,8 +1904,8 @@ mod tests {
                 .crawl_attempted_at,
             Some(9)
         );
-        store.compact(&load_records(&path).unwrap()).unwrap();
-        assert_eq!(names(dir.path()), ["records.jsonl"]);
+        store.compact(&load_sites(&path).unwrap()).unwrap();
+        assert_eq!(names(dir.path()), ["of-records", "records.jsonl"]);
     }
 
     #[test]
