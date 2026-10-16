@@ -19,9 +19,8 @@
 //!
 //! A site's keys come from its record ([`record_keys`]) or from its stored
 //! item ([`site_keys`]), the same either way: a node's index build files
-//! its sites as items, PIR tables and the tools cut items down
-//! ([`slim_site`], [`lean_site`]), and private search still works on
-//! records until it moves onto items too.
+//! its sites as items, and private search, PIR tables and the tools cut
+//! items down ([`slim_site`], [`lean_site`]).
 
 use std::collections::BTreeSet;
 

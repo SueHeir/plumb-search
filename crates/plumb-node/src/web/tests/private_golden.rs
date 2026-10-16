@@ -14,11 +14,16 @@
 //! linked sites). Scores are written to 3 decimal places, as their last
 //! bit can differ from one run to the next.
 //!
-//! Written on trimmed records, before private search moved onto sites'
-//! items (step 10 of the data format plan), so that the ranking on items
-//! is checked against it. Never written again to make a test pass:
-//! `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-node --lib private_golden`
-//! writes them.
+//! Both were written on trimmed records, before private search moved onto
+//! sites' items (step 10 of the data format plan), so that the ranking on
+//! items is checked against it. `private_golden.txt` passed unchanged on
+//! items. The buckets changed form, from trimmed records' JSON to trimmed
+//! items, and `private_buckets_golden.txt` was written again then; what it
+//! held before is kept in `private_buckets_records.txt`, never written
+//! again, as what a browser may still have cached of a node of an earlier
+//! version, and ranking that gives `private_golden.txt` too. Never
+//! written again to make a test pass: `PLUMB_WRITE_GOLDEN=1 cargo test -p
+//! plumb-node --lib private_golden` writes them.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -412,8 +417,11 @@ fn lying(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn private_golden() {
+/// What plumb-private ranks for each search here, as `private_golden.txt`
+/// holds it, with each bucket fetched from this node answered by `serve`
+/// (its number and stored lines in, the JSON answer out); and every
+/// answer served, by bucket.
+fn rank_all(serve: impl Fn(u32, &[String]) -> String) -> (String, BTreeMap<u32, String>) {
     let dir = tempfile::tempdir().unwrap();
     let table = table(dir.path(), &sites());
     let node = Sealed::new(dir.path());
@@ -453,7 +461,7 @@ fn private_golden() {
         let mut opened = Vec::new();
         for (i, &bucket) in buckets.iter().enumerate() {
             let lines = table.get(bucket).unwrap();
-            let json = slim_bucket(&lines);
+            let json = serve(bucket, &lines);
             fetched.push(plumb_private::read_bucket(&json).unwrap());
             served.insert(bucket, json);
             let (honest, lies) = (sent(&lines), lying(&lines));
@@ -474,10 +482,16 @@ fn private_golden() {
         let hits = plumb_private::search(query, &keys, opened, &options, limit);
         ranked(&mut ranks, &hits);
     }
+    (ranks, served)
+}
 
+#[test]
+fn private_golden() {
+    let (ranks, served) = rank_all(|_, lines| slim_bucket(lines));
     let mut buckets = String::from(
         "# The bytes GET /api/buckets/{table}/{n} answers with for each bucket\n\
-         # private_golden.rs fetches: see it before writing this again.\n",
+         # private_golden.rs fetches: see it before writing this again.\n\
+         # Written on items; private_buckets_records.txt holds the records before.\n",
     );
     for (bucket, json) in &served {
         writeln!(buckets, "bucket {bucket} {json}").unwrap();
@@ -485,4 +499,32 @@ fn private_golden() {
     let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/web/tests");
     crate::outline::tests::check_golden(&here.join("private_buckets_golden.txt"), &buckets);
     crate::outline::tests::check_golden(&here.join("private_golden.txt"), &ranks);
+}
+
+/// A browser holding the buckets as a node answered with them before it
+/// moved onto items, trimmed records' JSON, ranks them as it ranks the
+/// trimmed items the node answers with now: `private_golden.txt`, line
+/// for line.
+#[test]
+fn buckets_cached_as_records_rank_as_the_golden_file() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/web/tests");
+    let cached = std::fs::read_to_string(here.join("private_buckets_records.txt")).unwrap();
+    let cached: BTreeMap<u32, String> = cached
+        .lines()
+        .filter_map(|line| line.strip_prefix("bucket "))
+        .map(|line| {
+            let (bucket, json) = line.split_once(' ').unwrap();
+            (bucket.parse().unwrap(), json.to_string())
+        })
+        .collect();
+    let mut records = cached.values().filter(|json| *json != "[]");
+    assert!(records.clone().count() > 0);
+    assert!(records.all(|json| json.starts_with("[{\"domain\":")));
+    let (ranks, served) = rank_all(|bucket, _| cached[&bucket].clone());
+    assert_eq!(served, cached);
+    let golden = std::fs::read_to_string(here.join("private_golden.txt")).unwrap();
+    assert_eq!(
+        ranks.lines().collect::<Vec<_>>(),
+        golden.lines().collect::<Vec<_>>()
+    );
 }
