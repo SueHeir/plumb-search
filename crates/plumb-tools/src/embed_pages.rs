@@ -46,20 +46,25 @@ pub struct EmbedPagesArgs {
     /// on where it stopped.
     #[arg(long, value_name = "FILE")]
     pub vectors: PathBuf,
-    /// Embed only the first N pages that have a snippet, in the set's order
-    /// (most read first) [default: all].
+    /// Embed only the first N pages, in the set's order (most read first)
+    /// [default: all].
     #[arg(long, value_name = "N", value_parser = parse_positive)]
     pub max: Option<usize>,
     /// Texts embedded at once [default: one per CPU].
     #[arg(long, value_name = "N", value_parser = parse_positive)]
     pub threads: Option<usize>,
+    /// Embed pages with no snippet too, from their title and description
+    /// alone. A set can't carry their vectors yet, as the data format pins
+    /// a vector to its item's text.
+    #[arg(long)]
+    pub without_snippet: bool,
 }
 
 /// `plumb-tools embed-pages`: a vector for every page of the set that has
 /// a snippet, made from [`page_text`], a batch at a time so only one
-/// batch's texts are held. Pages without a snippet have no vector, as a
-/// vector in the data format is pinned to its item's text
-/// ([`plumb_format::Item::is_current`]).
+/// batch's texts are held. Pages without a snippet have no vector unless
+/// `--without-snippet` is given, as a vector in the data format is pinned
+/// to its item's text ([`plumb_format::Item::is_current`]).
 pub fn run_embed_pages(args: EmbedPagesArgs) -> Result<()> {
     block_on(ensure_model(&args.model, MODEL_BASE_URL))??;
     let embedder = load_embedder(&args.model)?;
@@ -70,6 +75,7 @@ pub fn run_embed_pages(args: EmbedPagesArgs) -> Result<()> {
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
     let max = args.max.unwrap_or(usize::MAX);
+    let without_snippet = args.without_snippet;
     let started = Instant::now();
     let (mut seen, mut kept, mut long, mut embedded, mut failed) =
         (0usize, HashSet::new(), 0, 0, 0);
@@ -95,23 +101,27 @@ pub fn run_embed_pages(args: EmbedPagesArgs) -> Result<()> {
         Ok(())
     };
     plumb_node::sets::for_each_item(&args.set, |item| {
-        if seen >= max || item.is_extension() || item.is_deleted() || item.text.is_none() {
+        let skipped = item.text.is_none() && !without_snippet;
+        if seen >= max || item.is_extension() || item.is_deleted() || skipped {
             return Ok(());
         }
         let Some(url) = item.url else {
             return Ok(());
         };
-        seen += 1;
-        if url.len() > MAX_KEY {
-            long += 1;
-            return Ok(());
-        }
         let text = page_text(
             item.title.as_deref(),
             item.about.as_deref(),
             item.text.as_deref(),
             embedder.text_words(),
         );
+        if text.is_empty() {
+            return Ok(());
+        }
+        seen += 1;
+        if url.len() > MAX_KEY {
+            long += 1;
+            return Ok(());
+        }
         let hash = text_hash(&text);
         kept.insert(url.clone());
         if vectors.read_locked().get(&url).map(|(saved, _)| saved) != Some(&hash) {
@@ -127,7 +137,7 @@ pub fn run_embed_pages(args: EmbedPagesArgs) -> Result<()> {
     vectors.write_locked().retain(|url| kept.contains(url));
     Vectors::save_shared(&vectors, &path)?;
     println!(
-        "{} page vectors in {} ({seen} pages with a snippet, {embedded} embedded now, {failed} failed, {long} with a URL too long to key)",
+        "{} page vectors in {} ({seen} pages with text, {embedded} embedded now, {failed} failed, {long} with a URL too long to key)",
         vectors.read_locked().len(),
         path.display(),
     );
@@ -393,6 +403,7 @@ mod tests {
             vectors: vectors.clone(),
             max,
             threads: Some(2),
+            without_snippet: false,
         };
         run_embed_pages(args(None)).unwrap();
         let saved = Vectors::load(&vectors).unwrap();
@@ -405,6 +416,15 @@ mod tests {
         let saved = Vectors::load(&vectors).unwrap();
         assert_eq!(saved.len(), 1);
         assert!(saved.get(&tesla).is_some());
+
+        // Asked for, a page with no snippet gets one from its title.
+        run_embed_pages(EmbedPagesArgs {
+            without_snippet: true,
+            ..args(None)
+        })
+        .unwrap();
+        let paper = plumb_core::article::article_url("en", "Paper");
+        assert!(Vectors::load(&vectors).unwrap().get(&paper).is_some());
         run_embed_pages(args(None)).unwrap();
 
         let queries = dir.path().join("queries.tsv");
