@@ -27,9 +27,8 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use plumb_core::sites::Sites;
+use plumb_core::sites::{SiteList, Sites};
 use plumb_core::{site, RecordSet, SiteRecord};
-use plumb_format::Item;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -170,7 +169,7 @@ impl Change {
             }
             Change::RefreshShared { record } => {
                 let held = plumb_core::canonical_domain(&record.domain)
-                    .is_some_and(|domain| sites.get(&domain).is_some());
+                    .is_some_and(|domain| sites.contains(&domain));
                 if held {
                     sites.upsert_shared(record.to_stored_item());
                 }
@@ -180,19 +179,20 @@ impl Change {
                 attempted_at,
                 failures,
             } => {
-                if sites.get(&domain).is_some() {
-                    let site = sites.entry(&domain);
-                    let marks = site::CrawlMarks {
-                        tried: attempted_at,
-                        failures,
-                        ..site::crawl_marks(site)
-                    };
-                    site::set_crawl_marks(site, marks);
+                if sites.contains(&domain) {
+                    sites.update(&domain, |site| {
+                        let marks = site::CrawlMarks {
+                            tried: attempted_at,
+                            failures,
+                            ..site::crawl_marks(site)
+                        };
+                        site::set_crawl_marks(site, marks);
+                    });
                 }
             }
             Change::Gone { domain, at } => {
-                if sites.get(&domain).is_some() {
-                    site::make_gone(sites.entry(&domain), at);
+                if sites.contains(&domain) {
+                    sites.update(&domain, |site| site::make_gone(site, at));
                 }
             }
             Change::TakeBack { domain, names } => {
@@ -202,7 +202,7 @@ impl Change {
             Change::SubdomainSite { mut record } => {
                 let Some(parent) = plumb_core::parent_domain(&record.domain)
                     .and_then(|parent| sites.get(parent))
-                    .map(site::signals)
+                    .map(|parent| site::signals(&parent))
                 else {
                     return;
                 };
@@ -871,20 +871,16 @@ where
 }
 
 /// [`replace_records`] with sites' stored items ([`plumb_core::site`]),
-/// each written as [`plumb_core::stored::write_item`] writes it: the line
+/// in the order of `sites`: each site's line as the list holds it, as
+/// [`plumb_core::stored::write_item`] writes it, which is the line
 /// [`replace_records`] writes of the site's record.
-pub fn replace_sites<'a, I>(path: &Path, sites: I) -> Result<usize>
-where
-    I: IntoIterator<Item = &'a Item>,
-{
+pub fn replace_sites(path: &Path, sites: &SiteList) -> Result<usize> {
     let written = write_lines_atomically(path, |out| {
-        let mut written = 0;
-        for site in sites {
-            plumb_core::stored::write_item(&mut *out, site)?;
+        for line in sites.lines() {
+            out.write_all(line)?;
             out.write_all(b"\n")?;
-            written += 1;
         }
-        Ok(written)
+        Ok(sites.len())
     })?;
     delete_journal(path)?;
     Ok(written)
@@ -907,28 +903,18 @@ pub(crate) fn delete_journal(path: &Path) -> Result<()> {
 /// [`replace_sites`] for the node, which holds room for the new file in
 /// its storage `budget` before it creates the file: node-managed full
 /// replacements hold their peak room first.
-pub(crate) fn replace_sites_with_budget<'a, I>(
+pub(crate) fn replace_sites_with_budget(
     path: &Path,
-    sites: I,
+    sites: &SiteList,
     budget: Option<&std::sync::Arc<plumb_core::storage::StorageBudget>>,
-) -> Result<usize>
-where
-    I: IntoIterator<Item = &'a Item>,
-    I::IntoIter: Clone,
-{
-    let sites = sites.into_iter();
+) -> Result<usize> {
     let Some(budget) = budget else {
         return replace_sites(path, sites);
     };
-    let mut size = plumb_core::storage::ByteCount {
-        bytes: 0,
-        limit: u64::MAX,
-    };
-    for site in sites.clone() {
-        plumb_core::stored::write_item(&mut size, site)?;
-        size.bytes = size.bytes.saturating_add(1);
-    }
-    RecordStore::open(path).admitted_rewrite(budget, size.bytes, || replace_sites(path, sites))
+    let bytes = sites.lines().fold(0u64, |bytes, line| {
+        bytes.saturating_add(line.len() as u64 + 1)
+    });
+    RecordStore::open(path).admitted_rewrite(budget, bytes, || replace_sites(path, sites))
 }
 
 /// Opens a journal for appending. The directory entry of a new journal is
@@ -971,18 +957,6 @@ pub fn sorted_by_link_score(set: &RecordSet) -> Vec<&SiteRecord> {
             .then_with(|| a.1.domain.cmp(&b.1.domain))
     });
     scored.into_iter().map(|(_, r)| r).collect()
-}
-
-/// All sites in the order [`Sites::into_sorted_vec`] gives (best
-/// [`site::link_score`] first, ties by domain), without copying them, as
-/// [`sorted_by_link_score`] gives records.
-pub fn sites_by_link_score(sites: &Sites) -> Vec<&Item> {
-    let mut scored: Vec<(f32, &Item)> = sites
-        .iter()
-        .map(|site| (site::link_score(site), site))
-        .collect();
-    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
-    scored.into_iter().map(|(_, site)| site).collect()
 }
 
 fn shallow_bytes(path: &Path) -> Result<u64> {
@@ -1634,7 +1608,11 @@ mod tests {
             fs::write(&path, &file).unwrap();
             fs::write(journal_path(&path), lines.join("\n") + "\n").unwrap();
             let records = load_records(&path).unwrap().into_sorted_vec();
-            let sites = load_sites(&path).unwrap().into_sorted_vec();
+            let sites: Vec<plumb_format::Item> = load_sites(&path)
+                .unwrap()
+                .into_sorted()
+                .into_iter()
+                .collect();
             crate::outline::outline(&path).unwrap().unwrap();
             assert!(!journal_path(&path).exists());
             (records, sites, fs::read_to_string(&path).unwrap())
@@ -1917,7 +1895,7 @@ mod tests {
                 let domain = &record.domain;
                 let site = sites.get(domain);
                 let site = site.unwrap_or_else(|| panic!("{what}: {domain} is missing"));
-                assert_eq!(site, &record.to_stored_item(), "{what}: {domain}");
+                assert_eq!(site, record.to_stored_item(), "{what}: {domain}");
             }
             (records, sites)
         };
@@ -1929,25 +1907,18 @@ mod tests {
             assert_same(&format!("change {n}"));
         }
         let (records, sites) = assert_same("all changes");
-        assert!(sites.get("scholar.google.com").is_some());
-        assert!(site::crawl_marks(sites.get("quiet.net").unwrap())
+        assert!(sites.contains("scholar.google.com"));
+        assert!(site::crawl_marks(&sites.get("quiet.net").unwrap())
             .gone
             .is_some());
 
         // In the same order, and written back as the same lines.
-        let by_score: Vec<&str> = sites_by_link_score(&sites)
-            .iter()
-            .map(|site| site.id.as_str())
-            .collect();
+        let by_score: Vec<String> = sites.by_link_score().map(|site| site.id).collect();
         let records_by_score: Vec<&SiteRecord> = sorted_by_link_score(&records);
         let domains: Vec<&str> = records_by_score.iter().map(|r| r.domain.as_str()).collect();
         assert_eq!(by_score, domains);
-        let owned: Vec<String> = sites
-            .clone()
-            .into_sorted_vec()
-            .into_iter()
-            .map(|site| site.id)
-            .collect();
+        let sorted = sites.clone().into_sorted();
+        let owned: Vec<String> = sorted.iter().map(|site| site.id).collect();
         assert_eq!(by_score, owned);
         let copy = dir.path().join("copy.jsonl");
         fs::write(
@@ -1955,7 +1926,7 @@ mod tests {
             serde_json::to_string(&titled("old.com", "Old")).unwrap() + "\n",
         )
         .unwrap();
-        let written = replace_sites(&copy, sites_by_link_score(&sites)).unwrap();
+        let written = replace_sites(&copy, &sorted).unwrap();
         assert_eq!(written, sites.len());
         assert!(!journal_path(&copy).exists());
         replace_records(&path, records_by_score).unwrap();

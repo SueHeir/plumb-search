@@ -514,14 +514,14 @@ mod tests {
         ]));
         let target = sites.get("target.org").unwrap();
         assert_eq!(
-            site::link_texts(target),
+            site::link_texts(&target),
             [LinkText::from_linkers(
                 "target",
                 linker_bit("old.net") | linker_bit("a.com") | linker_bit("b.com")
             )]
         );
-        assert_eq!(texts(target), [("target".into(), 3)]);
-        assert_eq!(linking_domains(target), 2);
+        assert_eq!(texts(&target), [("target".into(), 3)]);
+        assert_eq!(linking_domains(&target), 2);
         assert_eq!(sites.len(), 3);
     }
 

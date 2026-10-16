@@ -154,7 +154,7 @@ async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
     // The limit is a target, as in 0.2.0: the rewrites and folds a node
     // makes, those that trim it back under the limit among them, run past
     // it rather than leave the node stuck over it.
-    let seed = [large.clone().stored_item_as_is()];
+    let seed = [large.clone().stored_item_as_is()].into_iter().collect();
     crate::node::worker::save_seed_sites(&node.inner, &seed).unwrap();
     crate::node::round::RoundSites::load_with_budget(
         &node.inner.paths.records,

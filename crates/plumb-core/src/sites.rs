@@ -6,27 +6,41 @@
 //! [`RecordSet`] onto it (step 4 of the data format plan), and each of its
 //! operations is tested against the record set's: doing it to the records'
 //! stored items gives the stored item of each record the record set holds.
+//!
+//! A set holds each site as its stored line ([`stored::write_item`]), not
+//! as its item. An item is a wide struct, and each JSON object in it (its
+//! fields, and every object among them: its ranks, crawl marks, each link
+//! text) is a B-tree node of over 600 bytes however little it holds. So a
+//! site known only by its ranks takes about 2.1 kB as an item, 0.7 kB as a
+//! record and 0.15 kB as its line, and a crawled site about 12 kB, 3 kB
+//! and a little over its line's 1.6 kB. A site is read from its line when
+//! it is asked for ([`Sites::get`], [`Sites::iter`]), and written again
+//! when it changes ([`Sites::update`], [`Sites::upsert`]). Its link score
+//! is kept next to its line, so that putting the sites in order reads
+//! none of them. Sites in order are a [`SiteList`], whose lines are
+//! written as they are.
 
-use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::borrow::Borrow;
+use std::cell::RefCell;
+use std::cmp::{Ordering, Reverse};
+use std::collections::HashSet;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 
 use plumb_format::Item;
 
 use crate::site_item::tidy;
-use crate::{canonical_domain, parent_domain, site};
+use crate::{canonical_domain, parent_domain, site, stored};
 #[cfg(doc)]
 use crate::{RecordSet, SITES_VERSION};
 
 /// Sites' stored items keyed by domain; adding a site for a domain already
-/// present merges them.
-///
-/// Each item is boxed: an [`Item`] is several hundred bytes even when
-/// nearly empty, and a hash table keeps room for about twice its entries,
-/// so a million sites held inline would take a gigabyte of table alone,
-/// and twice that while it grows.
+/// present merges them. Each site is held as its stored line (see the
+/// module doc): reading one parses its line, so code that reads every site
+/// more than once reads each once and keeps what it needs of it.
 #[derive(Debug, Clone, Default)]
 pub struct Sites {
-    map: HashMap<String, Box<Item>>,
+    held: HashSet<Held>,
 }
 
 impl Sites {
@@ -35,24 +49,46 @@ impl Sites {
     }
 
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.held.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.held.is_empty()
     }
 
-    pub fn get(&self, domain: &str) -> Option<&Item> {
-        self.map.get(domain).map(|site| &**site)
+    /// Whether the set holds a site of `domain`.
+    pub fn contains(&self, domain: &str) -> bool {
+        self.held.contains(domain)
     }
 
-    /// The site of `domain`, created with nothing but its domain if it is
-    /// not there yet. `domain` must already be canonical, as
-    /// [`crate::registrable_domain`] returns it.
-    pub fn entry(&mut self, domain: &str) -> &mut Item {
-        self.map
-            .entry(domain.to_string())
-            .or_insert_with(|| Box::new(site::new(domain)))
+    /// The site of `domain`, read from its line.
+    pub fn get(&self, domain: &str) -> Option<Item> {
+        self.held.get(domain).map(Held::item)
+    }
+
+    /// Changes the site of `domain` with `change`, which gets the site
+    /// created with nothing but its domain ([`site::new`]) if it is not
+    /// there yet, and keeps what `change` makes of it. Returns what
+    /// `change` returns. `domain` must already be canonical, as
+    /// [`crate::registrable_domain`] returns it, and `change` must leave the
+    /// item's id as it is.
+    pub fn update<R>(&mut self, domain: &str, change: impl FnOnce(&mut Item) -> R) -> R {
+        let mut site = match self.held.take(domain) {
+            Some(held) => held.item(),
+            None => site::new(domain),
+        };
+        let changed = change(&mut site);
+        self.held.insert(Held::new(domain, site));
+        changed
+    }
+
+    /// [`Sites::update`] of a site the set holds: `None`, and nothing
+    /// changed, when it holds none of `domain`.
+    fn update_held<R>(&mut self, domain: &str, change: impl FnOnce(&mut Item) -> R) -> Option<R> {
+        let mut site = self.held.take(domain)?.item();
+        let changed = change(&mut site);
+        self.held.insert(Held::new(domain, site));
+        Some(changed)
     }
 
     /// Takes off parent domains what they got from `seed` items of their
@@ -61,19 +97,25 @@ impl Sites {
     /// Wikipedia intro ([`site::intro`]). For seed data read again after
     /// the subdomain lists grew ([`SITES_VERSION`]), before it is upserted;
     /// the parent's own seed item adds its own back. The seed's text is
-    /// compared cleaned, as the set holds it ([`site::clean`]).
-    pub fn split_subdomain_sites(&mut self, seed: &[Item]) {
+    /// compared cleaned, as the set holds it ([`site::clean`]). `seed` may
+    /// be the items or references to them, or a [`SiteList`], whose sites
+    /// on a subdomain alone are read.
+    pub fn split_subdomain_sites<S: Borrow<Item>>(&mut self, seed: impl IntoIterator<Item = S>) {
+        for subsite in seed {
+            self.split_subdomain_site(subsite.borrow());
+        }
+    }
+
+    /// [`Sites::split_subdomain_sites`] of one seed item.
+    fn split_subdomain_site(&mut self, subsite: &Item) {
         // Whether the parent's text is there and is the seed's, cleaned.
         let same = |parent: Option<&str>, seed: Option<&str>| {
             parent.is_some() && parent == seed.map(str::to_string).and_then(tidy).as_deref()
         };
-        for subsite in seed {
-            let Some(parent) = parent_domain(site::domain(subsite)) else {
-                continue;
-            };
-            let Some(site) = self.map.get_mut(parent) else {
-                continue;
-            };
+        let Some(parent) = parent_domain(site::domain(subsite)) else {
+            return;
+        };
+        self.update_held(parent, |site| {
             let names: Vec<String> = subsite.names.iter().cloned().filter_map(tidy).collect();
             site.names.retain(|name| !names.contains(name));
             if same(site::wikidata_about(site), site::wikidata_about(subsite)) {
@@ -82,7 +124,7 @@ impl Sites {
             if same(site::intro(site), site::intro(subsite)) {
                 site::set_intro(site, None);
             }
-        }
+        });
     }
 
     /// Takes back what a misread Wikidata claim (an email address read as a
@@ -92,22 +134,21 @@ impl Sites {
     /// own seed item adds back when it is upserted after. `names` are
     /// compared cleaned, as the set holds them ([`site::clean`]).
     pub fn take_back_official_site(&mut self, domain: &str, names: &[&str]) {
-        let Some(site) = self.map.get_mut(domain) else {
-            return;
-        };
-        let names: Vec<String> = names
-            .iter()
-            .filter_map(|name| tidy(name.to_string()))
-            .collect();
-        site.names.retain(|name| !names.contains(name));
-        let mut signals = site::signals(site);
-        signals.official_site = false;
-        signals.sitelinks = 0;
-        site::set_signals(site, &signals);
-        site::set_country(site, None);
-        site::set_kinds(site, Vec::new());
-        site::set_wikidata_about(site, None);
-        site::set_intro(site, None);
+        self.update_held(domain, |site| {
+            let names: Vec<String> = names
+                .iter()
+                .filter_map(|name| tidy(name.to_string()))
+                .collect();
+            site.names.retain(|name| !names.contains(name));
+            let mut signals = site::signals(site);
+            signals.official_site = false;
+            signals.sitelinks = 0;
+            site::set_signals(site, &signals);
+            site::set_country(site, None);
+            site::set_kinds(site, Vec::new());
+            site::set_wikidata_about(site, None);
+            site::set_intro(site, None);
+        });
     }
 
     /// Inserts a site, merging it into the one already there for its
@@ -136,44 +177,80 @@ impl Sites {
         // A bot check crawled in place of the homepage, by this node or by
         // one whose crawl it took, before crawlers knew to skip them.
         site::drop_bot_check(&mut site);
-        match self.map.get_mut(&site.id) {
-            Some(existing) => merge(existing, site),
-            None => {
-                self.map.insert(site.id.clone(), Box::new(site));
+        let site = match self.held.take(site.id.as_str()) {
+            Some(existing) => {
+                let mut existing = existing.item();
+                merge(&mut existing, site);
+                existing
             }
-        }
+            None => site,
+        };
+        self.held.insert(Held::of(site));
         true
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Item> {
-        self.map.values().map(|site| &**site)
+    /// Every site, in no particular order, each read from its line as it
+    /// is reached.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = Item> + '_ {
+        self.held.iter().map(Held::item)
     }
 
-    /// Keeps only the sites for which `keep` is true.
+    /// Keeps only the sites for which `keep` is true, reading each.
     pub fn retain(&mut self, mut keep: impl FnMut(&Item) -> bool) {
-        self.map.retain(|_, site| keep(site));
+        self.held.retain(|held| keep(&held.item()));
+        self.fit();
     }
 
-    /// All sites, best [`site::link_score`] first, ties broken by domain.
-    pub fn into_sorted_vec(self) -> Vec<Item> {
-        let mut sites: Vec<Item> = self.into_iter().collect();
-        sort_by_link_score(&mut sites);
-        sites
+    /// Each site's domain and link score ([`site::link_score`]), in no
+    /// particular order, without reading any site.
+    pub fn link_scores(&self) -> impl ExactSizeIterator<Item = (&str, f32)> + '_ {
+        self.held.iter().map(|held| (held.domain(), held.score()))
+    }
+
+    /// Keeps only the sites of the domains for which `keep` is true,
+    /// without reading any site.
+    pub fn retain_domains(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.held.retain(|held| keep(held.domain()));
+        self.fit();
+    }
+
+    /// Gives back the room of sites taken out, once most are: a table
+    /// emptied in place also takes longer to look up in, each lookup
+    /// probing past the places the sites took.
+    fn fit(&mut self) {
+        if self.held.len() < self.held.capacity() / 4 {
+            self.held.shrink_to_fit();
+        }
+    }
+
+    /// Every site, best [`site::link_score`] first, ties broken by domain,
+    /// each read from its line as it is reached: the order of
+    /// [`Sites::into_sorted`].
+    pub fn by_link_score(&self) -> impl ExactSizeIterator<Item = Item> + '_ {
+        let mut held: Vec<&Held> = self.held.iter().collect();
+        held.sort_unstable_by(|a, b| best_first(a, b));
+        held.into_iter().map(Held::item)
+    }
+
+    /// All sites, best [`site::link_score`] first, ties broken by domain,
+    /// as [`crate::sort_by_link_score`] sorts records: their lines, moved
+    /// and not read.
+    pub fn into_sorted(self) -> SiteList {
+        let mut held: Vec<Held> = self.held.into_iter().collect();
+        held.sort_unstable_by(best_first);
+        SiteList { held }
     }
 }
 
-/// All sites, in no particular order. Each item is freed as soon as it is
-/// taken, so a caller that keeps only a little of each never holds two
-/// copies of the set.
+/// All sites, in no particular order, each read from its line as it is
+/// taken, and the line freed then, so a caller that keeps only a little of
+/// each never holds two copies of the set.
 impl IntoIterator for Sites {
     type Item = Item;
-    type IntoIter = std::iter::Map<
-        std::collections::hash_map::IntoValues<String, Box<Item>>,
-        fn(Box<Item>) -> Item,
-    >;
+    type IntoIter = Box<dyn ExactSizeIterator<Item = Item> + Send>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.map.into_values().map(|site| *site)
+        Box::new(self.held.into_iter().map(|held| held.item()))
     }
 }
 
@@ -191,6 +268,203 @@ impl FromIterator<Item> for Sites {
         sites.extend(iter);
         sites
     }
+}
+
+/// Sites in an order, each held as its stored line as [`Sites`] holds it:
+/// what [`Sites::into_sorted`] gives, or sites collected in the order they
+/// come. What it writes of them is their lines as they are
+/// ([`SiteList::lines`]), and what it reads, one site at a time
+/// ([`SiteList::iter`]).
+#[derive(Debug, Clone, Default)]
+pub struct SiteList {
+    held: Vec<Held>,
+}
+
+impl SiteList {
+    pub fn len(&self) -> usize {
+        self.held.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+
+    /// Keeps the first `n` sites.
+    pub fn truncate(&mut self, n: usize) {
+        self.held.truncate(n);
+        self.held.shrink_to_fit();
+    }
+
+    /// The sites in order, each read from its line as it is reached.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = Item> + '_ {
+        self.held.iter().map(Held::item)
+    }
+
+    /// The sites' stored lines in order, without their line breaks: what
+    /// [`stored::write_item`] writes of each.
+    pub fn lines(&self) -> impl ExactSizeIterator<Item = &[u8]> + Clone + '_ {
+        self.held.iter().map(Held::line)
+    }
+}
+
+/// The sites in order, each read from its line as it is taken, and the
+/// line freed then.
+impl IntoIterator for SiteList {
+    type Item = Item;
+    type IntoIter = Box<dyn ExactSizeIterator<Item = Item> + Send>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.held.into_iter().map(|held| held.item()))
+    }
+}
+
+/// The sites in order, each read from its line as it is reached.
+impl<'a> IntoIterator for &'a SiteList {
+    type Item = Item;
+    type IntoIter = Box<dyn ExactSizeIterator<Item = Item> + Send + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.held.iter().map(Held::item))
+    }
+}
+
+/// The sites in the order they come, each as its line, neither merged nor
+/// cleaned.
+impl FromIterator<Item> for SiteList {
+    fn from_iter<I: IntoIterator<Item = Item>>(iter: I) -> Self {
+        let held = iter.into_iter().map(Held::of).collect();
+        SiteList { held }
+    }
+}
+
+/// A site as [`Sites`] and [`SiteList`] hold it, in one allocation: its
+/// link score (4 bytes), the length of its domain (4 bytes), its domain,
+/// and its stored line ([`stored::write_item`]). The domain is the key a
+/// [`Sites`] finds it by, and the score orders it, both without reading
+/// the line.
+#[derive(Clone)]
+struct Held(Box<[u8]>);
+
+/// Bytes before a [`Held`] site's domain: its score and the domain's
+/// length.
+const HEAD: usize = 8;
+
+thread_local! {
+    /// Where [`Held::new`] writes a line before it knows its length, so
+    /// that each site takes one allocation of just its size.
+    static SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+impl Held {
+    /// `site`, held under `domain`, as [`stored::write_item`] writes it.
+    /// Its score is the site's link score: a site written cleaned, for an
+    /// edge that would not read back, has its signals as they were, and
+    /// so its score.
+    ///
+    /// The item is dropped before the line is allocated, so that the line
+    /// can take the room the item's parts leave: allocated while they were
+    /// still there, lines and freed parts ended up spread through the heap,
+    /// and loading 500,000 crawled sites took 190 s rather than 130 s.
+    fn new(domain: &str, site: Item) -> Held {
+        Held::write(|bytes| {
+            Held::put(bytes, domain, &site);
+            drop(site);
+        })
+    }
+
+    /// [`Held::new`] under the site's own domain, its id.
+    fn of(site: Item) -> Held {
+        Held::write(|bytes| {
+            Held::put(bytes, &site.id, &site);
+            drop(site);
+        })
+    }
+
+    /// Writes what [`Held::new`] holds of `site` to `bytes`.
+    fn put(bytes: &mut Vec<u8>, domain: &str, site: &Item) {
+        bytes.extend(site::link_score(site).to_le_bytes());
+        let len = u32::try_from(domain.len()).expect("a domain shorter than 4 GB");
+        bytes.extend(len.to_le_bytes());
+        bytes.extend(domain.as_bytes());
+        stored::write_item(&mut *bytes, site).expect("a site is written as JSON");
+    }
+
+    /// The site `write` writes to the scratch buffer, in an allocation of
+    /// just its size.
+    fn write(write: impl FnOnce(&mut Vec<u8>)) -> Held {
+        SCRATCH.with(|scratch| {
+            let mut bytes = scratch.borrow_mut();
+            bytes.clear();
+            write(&mut bytes);
+            let held = Held(Box::from(&bytes[..]));
+            // A big line's room is not kept for the next one.
+            if bytes.capacity() > 1 << 16 {
+                *bytes = Vec::new();
+            }
+            held
+        })
+    }
+
+    fn score(&self) -> f32 {
+        f32::from_le_bytes(self.0[..4].try_into().expect("four bytes"))
+    }
+
+    fn domain_bytes(&self) -> &[u8] {
+        let len = u32::from_le_bytes(self.0[4..HEAD].try_into().expect("four bytes"));
+        &self.0[HEAD..HEAD + len as usize]
+    }
+
+    fn domain(&self) -> &str {
+        std::str::from_utf8(self.domain_bytes()).expect("a domain is UTF-8")
+    }
+
+    fn line(&self) -> &[u8] {
+        &self.0[HEAD + self.domain_bytes().len()..]
+    }
+
+    /// The site, read from its line.
+    fn item(&self) -> Item {
+        // The line is the JSON of an item whose edges all read
+        // ([`stored::write_item`]), so it reads back as that item.
+        serde_json::from_slice(self.line()).expect("a held site reads back")
+    }
+}
+
+impl fmt::Debug for Held {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Held")
+            .field(&String::from_utf8_lossy(self.line()))
+            .finish()
+    }
+}
+
+/// Held sites are found by their domains.
+impl Borrow<str> for Held {
+    fn borrow(&self) -> &str {
+        self.domain()
+    }
+}
+
+impl Hash for Held {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.domain().hash(state);
+    }
+}
+
+impl PartialEq for Held {
+    fn eq(&self, other: &Held) -> bool {
+        self.domain_bytes() == other.domain_bytes()
+    }
+}
+
+impl Eq for Held {}
+
+/// Best link score first, ties broken by domain, as
+/// [`crate::sort_by_link_score`] sorts records.
+fn best_first(a: &Held, b: &Held) -> Ordering {
+    b.score()
+        .total_cmp(&a.score())
+        .then_with(|| a.domain_bytes().cmp(b.domain_bytes()))
 }
 
 /// Sorts best [`site::link_score`] first, ties broken by domain so output
@@ -228,9 +502,12 @@ mod tests {
             let domain = &record.domain;
             let site = sites.get(domain);
             let site = site.unwrap_or_else(|| panic!("{what}: {domain} is missing"));
-            assert_eq!(site, &record.to_stored_item(), "{what}: {domain}");
-            let line = serde_json::to_vec(site).unwrap();
+            assert_eq!(site, record.to_stored_item(), "{what}: {domain}");
+            let line = serde_json::to_vec(&site).unwrap();
             assert_eq!(line, stored::line(record).unwrap(), "{what}: {domain}");
+            let held = sites.held.get(domain.as_str()).unwrap();
+            assert_eq!(held.line(), line, "{what}: {domain}");
+            assert_eq!(held.score(), record.link_score(), "{what}: {domain}");
         }
     }
 
@@ -323,7 +600,7 @@ mod tests {
             .find(|record| record.title.as_deref() == Some("Sorry..."));
         let mut checked = Sites::new();
         assert!(checked.upsert(check.unwrap().stored_item_as_is()));
-        assert_eq!(checked.get("usbank.com"), Some(&site::new("usbank.com")));
+        assert_eq!(checked.get("usbank.com"), Some(site::new("usbank.com")));
 
         let mut rust = SiteRecord::new("rust-lang.org");
         rust.body_text = Some("A language empowering everyone.".into());
@@ -351,20 +628,23 @@ mod tests {
             rust.text.as_deref(),
             Some("A language empowering everyone.")
         );
-        assert_eq!(site::headings(rust), ["Why Rust?"]);
+        assert_eq!(site::headings(&rust), ["Why Rust?"]);
         assert_eq!(sites.len(), 6);
     }
 
     #[test]
-    fn an_entry_is_the_site_or_a_new_one_as_with_records() {
+    fn an_update_is_of_the_site_or_a_new_one_as_an_entry_is_with_records() {
         let (mut records, mut sites) = both(&incoming());
         for domain in ["python.org", "plumbsearch.org"] {
             records.entry(domain).add_alias("Plumb Search");
-            site::add_alias(sites.entry(domain), "Plumb Search");
+            sites.update(domain, |site| site::add_alias(site, "Plumb Search"));
         }
         records.entry("rust-lang.org");
-        assert_eq!(sites.entry("rust-lang.org"), &site::new("rust-lang.org"));
-        assert_same(&sites, &records, "entry");
+        let new = sites.update("rust-lang.org", |site| site.clone());
+        assert_eq!(new, site::new("rust-lang.org"));
+        assert!(sites.contains("rust-lang.org"));
+        assert!(!sites.contains("crates.io"));
+        assert_same(&sites, &records, "update");
         assert_eq!(sites.len(), 6);
     }
 
@@ -377,7 +657,8 @@ mod tests {
         let mut google = SiteRecord::new("google.com");
         google.aliases = vec!["Google".into()];
         google.about = Some("search engine".into());
-        let (mut records, mut sites) = both(&[parent, google, full_record()]);
+        let parents = [parent, google, full_record()];
+        let (mut records, mut sites) = both(&parents);
 
         // Seed text not yet cleaned, as the set holds it.
         let mut news = SiteRecord::new("news.ycombinator.com");
@@ -402,16 +683,26 @@ mod tests {
         assert_same(&sites, &records, "split");
         let yc = sites.get("ycombinator.com").unwrap();
         assert_eq!(yc.names, ["Y Combinator"]);
-        assert_eq!(site::wikidata_about(yc), None);
-        assert_eq!(site::intro(yc), None);
+        assert_eq!(site::wikidata_about(&yc), None);
+        assert_eq!(site::intro(&yc), None);
         let google = sites.get("google.com").unwrap();
-        assert_eq!(site::wikidata_about(google), Some("search engine"));
+        assert_eq!(site::wikidata_about(&google), Some("search engine"));
+
+        // The same of seed sites held as lines.
+        let mut split = both(&parents).1;
+        let lines: SiteList = seed_items.iter().cloned().collect();
+        split.split_subdomain_sites(&lines);
+        for domain in ["ycombinator.com", "google.com", "python.org"] {
+            assert_eq!(split.get(domain), sites.get(domain), "{domain}");
+        }
 
         records.extend(seed);
         sites.extend(seed_items);
         assert_same(&sites, &records, "split, then the seed");
+        split.extend(lines);
+        assert_same(&split, &records, "split from lines, then the seed");
         let yc = sites.get("ycombinator.com").unwrap();
-        assert_eq!(site::wikidata_about(yc), Some("startup accelerator"));
+        assert_eq!(site::wikidata_about(&yc), Some("startup accelerator"));
         assert_eq!(
             sites.get("news.ycombinator.com").unwrap().names,
             ["Hacker News"]
@@ -432,15 +723,15 @@ mod tests {
         assert!(!python
             .names
             .contains(&"Python Software Foundation".to_string()));
-        let signals = site::signals(python);
+        let signals = site::signals(&python);
         assert!(!signals.official_site);
         assert_eq!(signals.sitelinks, 0);
         assert_eq!(signals.tranco_rank, Some(400));
-        assert!(site::kinds(python).is_empty());
-        assert_eq!(site::country(python), None);
-        assert_eq!(site::wikidata_about(python), None);
-        assert_eq!(site::intro(python), None);
-        assert!(site::summary(python).is_some());
+        assert!(site::kinds(&python).is_empty());
+        assert_eq!(site::country(&python), None);
+        assert_eq!(site::wikidata_about(&python), None);
+        assert_eq!(site::intro(&python), None);
+        assert!(site::summary(&python).is_some());
     }
 
     #[test]
@@ -462,7 +753,26 @@ mod tests {
         assert_eq!(sites.len(), 3);
 
         let records = all_records.into_sorted_vec();
-        let sites = all_sites.into_sorted_vec();
+        let in_order: Vec<Item> = all_sites.by_link_score().collect();
+        let scores: Vec<(String, f32)> = all_sites
+            .link_scores()
+            .map(|(domain, score)| (domain.to_string(), score))
+            .collect();
+        let list = all_sites.into_sorted();
+        let sites: Vec<Item> = list.iter().collect();
+        assert_eq!(sites, in_order);
+        assert_eq!(list.clone().into_iter().collect::<Vec<Item>>(), sites);
+        assert_eq!((&list).into_iter().collect::<Vec<Item>>(), sites);
+        assert_eq!(scores.len(), sites.len());
+        for (domain, score) in scores {
+            let site = sites.iter().find(|site| site.id == domain).unwrap();
+            assert_eq!(score, site::link_score(site), "{domain}");
+        }
+        // Written, the list is its sites' stored lines, as they are.
+        let lines: Vec<&[u8]> = list.lines().collect();
+        for (line, record) in lines.iter().zip(&records) {
+            assert_eq!(line.to_vec(), stored::line(record).unwrap());
+        }
         let domains: Vec<&str> = sites.iter().map(|site| site.id.as_str()).collect();
         let record_domains: Vec<&str> = records.iter().map(|r| r.domain.as_str()).collect();
         assert_eq!(domains, record_domains);
@@ -514,6 +824,72 @@ mod tests {
             .collect();
         expected.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(taken, expected);
+    }
+
+    #[test]
+    fn a_site_is_held_as_its_stored_line() {
+        let (_, sites) = both(&incoming());
+        for site in sites.iter() {
+            let held = sites.held.get(site.id.as_str()).unwrap();
+            assert_eq!(held.domain(), site.id);
+            assert_eq!(held.line(), stored::item_as_line(&site).unwrap());
+            assert_eq!(held.score(), site::link_score(&site));
+        }
+        // A site known only by its ranks takes a line of under 100 bytes,
+        // and is held in one allocation of the line, its domain and 8
+        // bytes more.
+        let mut ranked = SiteRecord::new("example.com");
+        ranked.signals.tranco_rank = Some(1_234);
+        ranked.signals.harmonic_rank = Some(56_789);
+        let line = stored::line(&ranked).unwrap();
+        assert!(line.len() < 100, "{}", String::from_utf8_lossy(&line));
+        let held = Held::new("example.com", ranked.to_stored_item());
+        assert_eq!(held.line(), line);
+        assert_eq!(held.0.len(), HEAD + "example.com".len() + line.len());
+
+        // A change that leaves an edge no reader takes holds the site as it
+        // is written, cleaned, as before it held it until it was written.
+        let mut sites = Sites::new();
+        let changed = sites.update("example.com", |site| {
+            site::set_links_to(site, vec!["foo_bar.blogspot.com".into(), "a.com".into()]);
+            site.clone()
+        });
+        let held = sites.get("example.com").unwrap();
+        assert_eq!(site::links_to(&held), ["a.com"]);
+        assert_eq!(
+            serde_json::to_vec(&held).unwrap(),
+            stored::item_as_line(&changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_list_keeps_its_sites_in_the_order_they_come() {
+        let (_, sites) = both(&incoming());
+        let mut items: Vec<Item> = sites.iter().collect();
+        items.sort_by(|a, b| b.id.cmp(&a.id));
+        let mut list: SiteList = items.iter().cloned().collect();
+        assert_eq!(list.len(), items.len());
+        assert_eq!(list.iter().collect::<Vec<Item>>(), items);
+        for (line, site) in list.lines().zip(&items) {
+            assert_eq!(line, stored::item_as_line(site).unwrap());
+        }
+        list.truncate(2);
+        assert_eq!(list.into_iter().collect::<Vec<Item>>(), items[..2]);
+        assert!(SiteList::default().is_empty());
+    }
+
+    #[test]
+    fn sites_are_kept_by_domain_without_reading_them() {
+        let (_, mut sites) = both(&incoming());
+        let before: Vec<Item> = sites.by_link_score().collect();
+        sites.retain_domains(|domain| domain != "example.com" && domain != "usbank.com");
+        let after: Vec<Item> = sites.by_link_score().collect();
+        let kept: Vec<Item> = before
+            .into_iter()
+            .filter(|site| site.id != "example.com" && site.id != "usbank.com")
+            .collect();
+        assert_eq!(after, kept);
+        assert_eq!(sites.len(), 2);
     }
 
     #[test]

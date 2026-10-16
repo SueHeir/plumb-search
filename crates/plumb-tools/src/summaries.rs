@@ -18,7 +18,7 @@ use plumb_core::{collapse_whitespace, site, MAX_TEXT_CHARS};
 use plumb_format::Item;
 use serde::{Deserialize, Serialize};
 
-use plumb_node::records::{load_sites, replace_sites, sites_by_link_score};
+use plumb_node::records::{load_sites, replace_sites};
 
 /// Link texts sent with each site, most used first.
 const PICK_LINK_TEXTS: usize = 8;
@@ -152,13 +152,13 @@ fn run_pick(args: &PickArgs) -> Result<()> {
     );
     let mut picked = 0;
     let mut no_text = 0usize;
-    for site in sites_by_link_score(&sites) {
-        if !wanted(site) {
+    for site in sites.by_link_score() {
+        if !wanted(&site) {
             continue;
         }
         no_text += 1;
         if picked < args.top {
-            serde_json::to_writer(&mut out, &pick_of(site))?;
+            serde_json::to_writer(&mut out, &pick_of(&site))?;
             out.write_all(b"\n")?;
             picked += 1;
         }
@@ -211,14 +211,14 @@ fn run_apply(args: &ApplyArgs) -> Result<()> {
             unknown += 1;
             continue;
         };
-        if sites.get(&line.domain).is_none() {
+        if !sites.contains(&line.domain) {
             missing += 1;
             continue;
         }
-        site::set_summary(sites.entry(&line.domain), Some(summary));
+        sites.update(&line.domain, |site| site::set_summary(site, Some(summary)));
         applied += 1;
     }
-    let written = replace_sites(&args.out, sites_by_link_score(&sites))?;
+    let written = replace_sites(&args.out, &sites.into_sorted())?;
     println!(
         "{applied} of {} summaries applied ({unknown} empty or unknown, {missing} for sites \
          not in the records); wrote {written} records to {}",

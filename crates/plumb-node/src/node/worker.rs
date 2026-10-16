@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use plumb_core::sites::Sites;
+use plumb_core::sites::{SiteList, Sites};
 #[cfg(doc)]
 use plumb_core::SITES_VERSION;
 use plumb_core::{now_unix, parent_domain, site, SiteRecord, SUBDOMAIN_SITE_NAMES};
@@ -56,9 +56,7 @@ use crate::crawl::{
     Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
 };
 use crate::icons::IconStore;
-use crate::records::{
-    load_sites, replace_sites_with_budget, sites_by_link_score, Change, RecordStore,
-};
+use crate::records::{load_sites, replace_sites_with_budget, Change, RecordStore};
 use crate::web::{duration_words, group_thousands};
 
 /// A homepage fetched or answered this recently is not due for a crawl, as
@@ -416,7 +414,7 @@ pub(super) async fn set_up(inner: &Arc<Inner>) -> Result<()> {
 /// ([`build_from_file`]), so the two never take memory at once. Crawling
 /// only ([`NodeConfig::crawl_only`]), no index: `None`, noting how many
 /// sites were saved.
-fn save_and_build_seed(inner: &Inner, seed: Vec<Item>) -> Result<Option<ServingIndex>> {
+fn save_and_build_seed(inner: &Inner, seed: SiteList) -> Result<Option<ServingIndex>> {
     let _records = inner.hold_records();
     let sites = save_seed_sites(inner, &seed)?;
     drop(seed);
@@ -522,7 +520,7 @@ pub(super) async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             change.apply_to_sites(&mut set);
         }
         inner.check_stop()?;
-        let sites = sites_by_link_score(&set);
+        let sites = set.into_sorted();
         inner.set_step(
             Step::Ingesting,
             format!(
@@ -530,11 +528,7 @@ pub(super) async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
                 group_thousands(sites.len() as u64)
             ),
         );
-        replace_sites_with_budget(
-            &inner.paths.records,
-            sites.iter().copied(),
-            inner.storage.as_ref(),
-        )?;
+        replace_sites_with_budget(&inner.paths.records, &sites, inner.storage.as_ref())?;
         inner.update_saved(|saved| {
             saved.wikidata_missing = wikidata_missing;
             saved.quick_start = false;
@@ -547,7 +541,6 @@ pub(super) async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
         );
         // The build reads the file, a record at a time.
         drop(sites);
-        drop(set);
         inner.check_stop()?;
         build_from_file(inner)
     })
@@ -990,7 +983,7 @@ fn is_recent(path: &Path) -> bool {
 /// best [`NodeConfig::sites`], best first. Also gives the front page
 /// claims that count for nothing ([`OfficialSite::claims_nothing`]), to
 /// take back off sites an earlier fold made with them.
-fn seed_sites(inner: &Inner, files: &SeedFiles) -> Result<(Vec<Item>, Vec<OfficialSite>)> {
+fn seed_sites(inner: &Inner, files: &SeedFiles) -> Result<(SiteList, Vec<OfficialSite>)> {
     let wikidata = files.wikidata.as_ref().ok();
     let mut void = Vec::new();
     let sources = 1 + usize::from(wikidata.is_some()) + usize::from(files.cc_ranks.is_some());
@@ -1060,7 +1053,7 @@ fn seed_sites(inner: &Inner, files: &SeedFiles) -> Result<(Vec<Item>, Vec<Offici
 
 /// Saves the sites of a setup as the records file. Returns how many it
 /// wrote.
-pub(super) fn save_seed_sites(inner: &Inner, sites: &[Item]) -> Result<usize> {
+pub(super) fn save_seed_sites(inner: &Inner, sites: &SiteList) -> Result<usize> {
     inner.set_step(
         Step::Ingesting,
         format!(
@@ -1635,7 +1628,7 @@ fn drop_dead_sites(
     {
         return Ok(());
     }
-    let dead: Vec<String> = crate::dead::find_dead(|| set.iter(), now, RoundSite::kept)
+    let dead: Vec<String> = crate::dead::find_dead(set.iter(), now, RoundSite::kept)
         .into_iter()
         .map(|record| record.domain().to_owned())
         .collect();

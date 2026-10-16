@@ -18,6 +18,8 @@
 //! keeps it from being found again as new. It is tried again every three
 //! recrawl windows, and a crawl that reaches it brings it back.
 
+use std::borrow::Borrow;
+
 use crate::crawl::{CrawlSite, SECONDS_PER_DAY};
 
 /// Tries in a row that could not reach a site before it can look dead.
@@ -40,22 +42,27 @@ pub(crate) fn looks_dead(record: &impl CrawlSite, now: u64) -> bool {
 
 /// The sites of `sites` that look dead at `now`, best link score first:
 /// none of the best [`NEVER_DEAD_BEST`], and none that `keeps`. `sites`
-/// gives every site, as many times as asked.
-pub fn find_dead<'a, S: CrawlSite + 'a, I: Iterator<Item = &'a S>>(
-    sites: impl Fn() -> I,
+/// gives every site once, by reference or owned (a site read from its
+/// line, say), and only the dead ones are kept.
+pub fn find_dead<S: CrawlSite, T: Borrow<S>>(
+    sites: impl IntoIterator<Item = T>,
     now: u64,
     keeps: impl Fn(&S) -> bool,
-) -> Vec<&'a S> {
-    let mut dead: Vec<(f32, &S)> = sites()
-        .filter(|record| looks_dead(*record, now))
-        .map(|record| (record.link_score(), record))
-        .collect();
+) -> Vec<T> {
+    let mut scores: Vec<f32> = Vec::new();
+    let mut dead: Vec<(f32, T)> = Vec::new();
+    for site in sites {
+        let score = site.borrow().link_score();
+        scores.push(score);
+        if looks_dead(site.borrow(), now) {
+            dead.push((score, site));
+        }
+    }
     if dead.is_empty() {
         return Vec::new();
     }
     // The link score of the last of the best: a site scoring as well is
     // kept, ties included.
-    let mut scores: Vec<f32> = sites().map(|site| site.link_score()).collect();
     if scores.len() > NEVER_DEAD_BEST {
         let (_, nth, _) = scores.select_nth_unstable_by(NEVER_DEAD_BEST - 1, |a, b| b.total_cmp(a));
         let bar = *nth;
@@ -63,10 +70,10 @@ pub fn find_dead<'a, S: CrawlSite + 'a, I: Iterator<Item = &'a S>>(
     } else {
         dead.clear();
     }
-    dead.retain(|(_, record)| !keeps(record));
+    dead.retain(|(_, record)| !keeps(record.borrow()));
     dead.sort_by(|a, b| {
         b.0.total_cmp(&a.0)
-            .then_with(|| a.1.domain().cmp(b.1.domain()))
+            .then_with(|| a.1.borrow().domain().cmp(b.1.borrow().domain()))
     });
     dead.into_iter().map(|(_, record)| record).collect()
 }
@@ -118,15 +125,14 @@ mod tests {
         let mut official = site("official.com", 7, None);
         official.signals.official_site = true;
         set.extend([best, worst, official]);
-        let dead: Vec<&str> =
-            find_dead(|| set.iter(), NOW, |r: &SiteRecord| r.signals.official_site)
-                .iter()
-                .map(|r| r.domain.as_str())
-                .collect();
+        let dead: Vec<&str> = find_dead(set.iter(), NOW, |r: &SiteRecord| r.signals.official_site)
+            .iter()
+            .map(|r| r.domain.as_str())
+            .collect();
         assert_eq!(dead, ["worst.com"]);
         // A small node keeps all of them.
         let small: RecordSet = [site("worst.com", 7, None)].into_iter().collect();
-        assert!(find_dead(|| small.iter(), NOW, |_: &SiteRecord| false).is_empty());
+        assert!(find_dead(small.iter(), NOW, |_: &SiteRecord| false).is_empty());
     }
 
     #[test]
@@ -151,17 +157,15 @@ mod tests {
         ]);
         let sites: Sites = set.iter().map(SiteRecord::to_stored_item).collect();
         let records: Vec<&str> =
-            find_dead(|| set.iter(), NOW, |r: &SiteRecord| r.signals.official_site)
+            find_dead(set.iter(), NOW, |r: &SiteRecord| r.signals.official_site)
                 .iter()
                 .map(|r| r.domain.as_str())
                 .collect();
-        let items: Vec<&str> = find_dead(
-            || sites.iter(),
-            NOW,
-            |site: &Item| site::signals(site).official_site,
-        )
-        .iter()
-        .map(|site| site.id.as_str())
+        let items: Vec<String> = find_dead(sites.iter(), NOW, |site: &Item| {
+            site::signals(site).official_site
+        })
+        .into_iter()
+        .map(|site| site.id)
         .collect();
         assert_eq!(items, records);
         assert_eq!(items, ["quiet.com", "worst.com"]);

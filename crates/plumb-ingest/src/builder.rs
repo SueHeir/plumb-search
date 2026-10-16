@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use plumb_core::site::{self, Item};
-use plumb_core::sites::Sites;
+use plumb_core::sites::{SiteList, Sites};
 use plumb_core::{
     canonical_domain, collapse_whitespace, is_generic_kind, kind_key, link_score, linker_count,
     normalize_text, parent_domain, subdomain_sites, truncate_chars, Signals, MAX_ALIASES,
@@ -32,11 +32,11 @@ const DOMINANT_SITELINKS: u32 = 3;
 /// `plumb ingest` write of the seed stays byte for byte what it was when
 /// the builder made records.
 ///
-/// Most sites of the rank lists are nothing but their ranks, and a site's
-/// item holds those in nested fields: about 2.2 kB a site, against 0.75 kB
-/// for its record. So a site the builder knows only the ranks of is held
-/// as those ranks (`Ranks`, about 0.16 kB), and becomes the item they
-/// stand for once anything else is added to it or it is kept.
+/// Most sites of the rank lists are nothing but their ranks. A site the
+/// builder knows only the ranks of is held as those ranks (`Ranks`), and
+/// becomes the item they stand for once anything else is added to it or
+/// it is kept; the others are held as [`Sites`] holds them, as their
+/// stored lines.
 #[derive(Debug, Default)]
 pub struct Builder {
     sites: Sites,
@@ -91,7 +91,7 @@ impl Builder {
 
     /// Whether a site of `domain` is held, as an item or by its ranks.
     fn holds(&self, domain: &str) -> bool {
-        self.sites.get(domain).is_some() || self.ranked.contains_key(domain)
+        self.sites.contains(domain) || self.ranked.contains_key(domain)
     }
 
     /// The signals of `domain`'s site, which must be held.
@@ -101,20 +101,22 @@ impl Builder {
             None => self
                 .sites
                 .get(domain)
-                .map(site::signals)
+                .map(|site| site::signals(&site))
                 .unwrap_or_default(),
         }
     }
 
-    /// The item of `domain`'s site, made of its ranks when they are all
-    /// that is known of it, or new ([`Sites::entry`]).
-    fn entry(&mut self, domain: &str) -> &mut Item {
+    /// Changes the item of `domain`'s site with `change`: the item made of
+    /// its ranks when they are all that is known of it, or new
+    /// ([`Sites::update`]).
+    fn update<R>(&mut self, domain: &str, change: impl FnOnce(&mut Item) -> R) -> R {
         let ranks = self.ranked.remove(domain);
-        let held = self.sites.entry(domain);
-        if let Some(ranks) = ranks {
-            site::set_signals(held, &ranks.signals());
-        }
-        held
+        self.sites.update(domain, |held| {
+            if let Some(ranks) = ranks {
+                site::set_signals(held, &ranks.signals());
+            }
+            change(held)
+        })
     }
 
     /// Merges `site` into the one held for its domain, as a node's sites
@@ -122,7 +124,7 @@ impl Builder {
     fn upsert(&mut self, site: Item) {
         if let Some(domain) = canonical_domain(&site.id) {
             if self.ranked.contains_key(&domain) {
-                self.entry(&domain);
+                self.update(&domain, |_| ());
             }
         }
         self.sites.upsert(site);
@@ -131,11 +133,12 @@ impl Builder {
     /// Changes the ranks of `domain`'s site, made new when it is not held:
     /// `change` changes only ranks.
     fn change_ranks(&mut self, domain: String, change: impl FnOnce(&mut Signals)) {
-        if self.sites.get(&domain).is_some() {
-            let held = self.sites.entry(&domain);
-            let mut signals = site::signals(held);
-            change(&mut signals);
-            site::set_signals(held, &signals);
+        if self.sites.contains(&domain) {
+            self.sites.update(&domain, |held| {
+                let mut signals = site::signals(held);
+                change(&mut signals);
+                site::set_signals(held, &signals);
+            });
         } else {
             let ranks = self.ranked.entry(domain).or_default();
             let mut signals = ranks.signals();
@@ -319,72 +322,74 @@ impl Builder {
             }
             let claims = &claims;
             official += 1;
-            let held = self.entry(domain);
-            let mut signals = site::signals(held);
-            signals.official_site = true;
-            let sitelinks = claims.iter().map(|site| site.sitelinks).max().unwrap_or(0);
-            signals.sitelinks = signals.sitelinks.max(sitelinks);
-            site::set_signals(held, &signals);
-            for site in claims {
-                let label = site.label.trim();
-                if label != site.item {
-                    add_name(held, label);
+            self.update(domain, |held| {
+                let mut signals = site::signals(held);
+                signals.official_site = true;
+                let sitelinks = claims.iter().map(|site| site.sitelinks).max().unwrap_or(0);
+                signals.sitelinks = signals.sitelinks.max(sitelinks);
+                site::set_signals(held, &signals);
+                for site in claims {
+                    let label = site.label.trim();
+                    if label != site.item {
+                        add_name(held, label);
+                    }
                 }
-            }
-            // Then their other names, after every main name.
-            for site in claims {
-                for name in &site.names {
-                    add_name(held, name);
+                // Then their other names, after every main name.
+                for site in claims {
+                    for name in &site.names {
+                        add_name(held, name);
+                    }
                 }
-            }
-            // When several items claim the front page, the facts are those
-            // of the item that is far better known than the others
-            // (Wikipedia over the Wikipedia community at wikipedia.org);
-            // without one, only what they agree on is the site's: their
-            // shared country and kinds (x.com's former bank and X Corp.).
-            // (Claims of one item carry the same facts.)
-            let dominant = claims.iter().copied().find(|site| {
-                site.sitelinks > 0
-                    && claims.iter().all(|other| {
-                        other.item == site.item
-                            || site.sitelinks >= DOMINANT_SITELINKS.saturating_mul(other.sitelinks)
-                    })
-            });
-            let (first, others): (&OfficialSite, &[&OfficialSite]) = match dominant {
-                Some(site) => (site, &[]),
-                None => {
-                    let (first, others) = claims.split_first().expect("a domain has a claim");
-                    (first, others)
-                }
-            };
-            let mut country = first.country.clone();
-            let mut kinds: Vec<String> = first.kinds.clone();
-            for site in others {
-                if country != site.country {
-                    country = None;
-                }
-                kinds.retain(|kind| {
-                    site.kinds
-                        .iter()
-                        .any(|other| kind_key(other) == kind_key(kind))
+                // When several items claim the front page, the facts are those
+                // of the item that is far better known than the others
+                // (Wikipedia over the Wikipedia community at wikipedia.org);
+                // without one, only what they agree on is the site's: their
+                // shared country and kinds (x.com's former bank and X Corp.).
+                // (Claims of one item carry the same facts.)
+                let dominant = claims.iter().copied().find(|site| {
+                    site.sitelinks > 0
+                        && claims.iter().all(|other| {
+                            other.item == site.item
+                                || site.sitelinks
+                                    >= DOMINANT_SITELINKS.saturating_mul(other.sitelinks)
+                        })
                 });
-            }
-            if site::country(held).is_none() {
-                site::set_country(held, country);
-            }
-            // A description only says what the site is when one item claims
-            // it, or one is far better known.
-            if items.len() == 1 || dominant.is_some() {
-                if site::wikidata_about(held).is_none() {
-                    site::set_wikidata_about(held, first.about.clone());
+                let (first, others): (&OfficialSite, &[&OfficialSite]) = match dominant {
+                    Some(site) => (site, &[]),
+                    None => {
+                        let (first, others) = claims.split_first().expect("a domain has a claim");
+                        (first, others)
+                    }
+                };
+                let mut country = first.country.clone();
+                let mut kinds: Vec<String> = first.kinds.clone();
+                for site in others {
+                    if country != site.country {
+                        country = None;
+                    }
+                    kinds.retain(|kind| {
+                        site.kinds
+                            .iter()
+                            .any(|other| kind_key(other) == kind_key(kind))
+                    });
                 }
-                if site::intro(held).is_none() {
-                    site::set_intro(held, first.intro.clone());
+                if site::country(held).is_none() {
+                    site::set_country(held, country);
                 }
-            }
-            for kind in &kinds {
-                add_kind(held, kind);
-            }
+                // A description only says what the site is when one item claims
+                // it, or one is far better known.
+                if items.len() == 1 || dominant.is_some() {
+                    if site::wikidata_about(held).is_none() {
+                        site::set_wikidata_about(held, first.about.clone());
+                    }
+                    if site::intro(held).is_none() {
+                        site::set_intro(held, first.intro.clone());
+                    }
+                }
+                for kind in &kinds {
+                    add_kind(held, kind);
+                }
+            });
         }
         warn_invalid("Wikidata official sites", invalid);
         info!(
@@ -401,20 +406,22 @@ impl Builder {
     }
 
     /// All sites, best link score first (ties broken by domain), cut to
-    /// the best `top_n` when given.
+    /// the best `top_n` when given, each its stored line ([`SiteList`]).
     ///
-    /// With a cut, each site is scored once, only the kept ones are
-    /// sorted, and they are moved out of the set rather than copied.
-    pub fn finish(mut self, top_n: Option<usize>) -> Vec<Item> {
+    /// With a cut, each site is scored once, without reading any held
+    /// site, and only the kept ones are sorted and made of their ranks.
+    pub fn finish(mut self, top_n: Option<usize>) -> SiteList {
         self.rank_subdomain_sites();
         let total = self.len();
         let n = match top_n {
             Some(n) if n < total => n,
             _ => {
                 for (domain, ranks) in std::mem::take(&mut self.ranked) {
-                    site::set_signals(self.sites.entry(&domain), &ranks.signals());
+                    self.sites.update(&domain, |held| {
+                        site::set_signals(held, &ranks.signals());
+                    });
                 }
-                return self.sites.into_sorted_vec();
+                return self.sites.into_sorted();
             }
         };
         fn best_first(a: &(f32, &str), b: &(f32, &str)) -> Ordering {
@@ -422,8 +429,8 @@ impl Builder {
         }
         let held = self
             .sites
-            .iter()
-            .map(|held| (site::link_score(held), held.id.as_str()));
+            .link_scores()
+            .map(|(domain, score)| (score, domain));
         let ranked = self
             .ranked
             .iter()
@@ -431,15 +438,22 @@ impl Builder {
         let mut scored: Vec<(f32, &str)> = held.chain(ranked).collect();
         scored.select_nth_unstable_by(n, best_first);
         scored.truncate(n);
-        scored.sort_unstable_by(best_first);
-        let kept: Vec<String> = scored
+        let kept: HashSet<String> = scored
             .into_iter()
             .map(|(_, domain)| domain.to_string())
             .collect();
         info!("kept the top {n} of {total} records by link score");
-        kept.iter()
-            .map(|domain| std::mem::take(self.entry(domain)))
-            .collect()
+        // The kept sites are put in the same order again: the best first,
+        // ties broken by domain.
+        self.sites.retain_domains(|domain| kept.contains(domain));
+        for (domain, ranks) in std::mem::take(&mut self.ranked) {
+            if kept.contains(&domain) {
+                self.sites.update(&domain, |held| {
+                    site::set_signals(held, &ranks.signals());
+                });
+            }
+        }
+        self.sites.into_sorted()
     }
 }
 
@@ -455,11 +469,12 @@ impl Builder {
         for (subsite, name) in SUBDOMAIN_SITE_NAMES {
             let parent = parent_domain(subsite).is_some_and(|domain| self.holds(domain));
             if parent && !self.holds(subsite) {
-                let held = self.sites.entry(subsite);
-                let mut signals = site::signals(held);
-                signals.official_site = true;
-                site::set_signals(held, &signals);
-                add_name(held, name);
+                self.sites.update(subsite, |held| {
+                    let mut signals = site::signals(held);
+                    signals.official_site = true;
+                    site::set_signals(held, &signals);
+                    add_name(held, name);
+                });
             }
         }
         for (subsite, domain) in subdomain_sites() {
@@ -580,10 +595,10 @@ mod tests {
 
     /// The sites [`Builder::finish`] gives, each as its record, which these
     /// tests read.
-    fn records_of(sites: Vec<Item>) -> Vec<SiteRecord> {
+    fn records_of(sites: SiteList) -> Vec<SiteRecord> {
         sites
-            .iter()
-            .map(|site| SiteRecord::from_stored_item(site).unwrap())
+            .into_iter()
+            .map(|site| SiteRecord::from_stored_item(&site).unwrap())
             .collect()
     }
 
@@ -1381,10 +1396,11 @@ mod tests {
             builder.add_wat(&extract);
             builder
         };
-        let full = builder().finish(None);
+        let full: Vec<Item> = builder().finish(None).into_iter().collect();
         assert_eq!(full.len(), 60);
         for n in [0, 1, 5, 13, 30, 59, 60, 1000] {
-            assert_eq!(builder().finish(Some(n)), full[..n.min(60)], "top {n}");
+            let top: Vec<Item> = builder().finish(Some(n)).into_iter().collect();
+            assert_eq!(top, full[..n.min(60)], "top {n}");
         }
     }
 
@@ -1430,15 +1446,16 @@ mod tests {
 
     /// What the builder made of `tranco` and `sites` while it held every
     /// site as its item: each rank set on the site's item as it came
-    /// ([`Sites::entry`]), and each site merged in ([`Sites::upsert`]).
+    /// ([`Sites::update`]), and each site merged in ([`Sites::upsert`]).
     fn held_as_items(tranco: &[TrancoEntry], sites: &[Item], ranks_first: bool) -> Vec<Item> {
         let rank = |held: &mut Sites| {
             for entry in tranco {
                 let domain = canonical_domain(&entry.domain).unwrap();
-                let site = held.entry(&domain);
-                let mut signals = site::signals(site);
-                signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
-                site::set_signals(site, &signals);
+                held.update(&domain, |site| {
+                    let mut signals = site::signals(site);
+                    signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
+                    site::set_signals(site, &signals);
+                });
             }
         };
         let mut held = Sites::new();
@@ -1449,7 +1466,7 @@ mod tests {
         if !ranks_first {
             rank(&mut held);
         }
-        held.into_sorted_vec()
+        held.into_sorted().into_iter().collect()
     }
 
     #[test]
@@ -1501,7 +1518,8 @@ mod tests {
                 }
                 assert_eq!(builder.len(), want.len());
                 let kept = top.unwrap_or(want.len()).min(want.len());
-                assert_eq!(builder.finish(top), want[..kept], "{ranks_first} {top:?}");
+                let got: Vec<Item> = builder.finish(top).into_iter().collect();
+                assert_eq!(got, want[..kept], "{ranks_first} {top:?}");
             }
         }
     }
@@ -1797,7 +1815,7 @@ mod tests {
             let sites = builder.finish(top);
             writeln!(out, "## {what}: {held} held, {} kept", sites.len()).unwrap();
             for site in &sites {
-                writeln!(out, "{}", line(site)).unwrap();
+                writeln!(out, "{}", line(&site)).unwrap();
             }
         }
         // Each source alone.
@@ -1813,7 +1831,7 @@ mod tests {
             let sites = builder.finish(None);
             writeln!(out, "## {what} alone: {}", sites.len()).unwrap();
             for site in &sites {
-                writeln!(out, "{}", line(site)).unwrap();
+                writeln!(out, "{}", line(&site)).unwrap();
             }
         }
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/builder_golden.txt");
