@@ -1,6 +1,6 @@
 # plumb-ingest
 
-Loads the public datasets that seed a Plumb index (Tranco, Common Crawl's ranks and WAT files, Wikidata's official websites and facts, Wikipedia's first sentences) and folds them into site records. It also downloads them. A node fetches and folds the seed when it first starts; after that its records grow mostly from its own crawls.
+Loads the public datasets that seed a Plumb index (Tranco, Common Crawl's ranks and WAT files, Wikidata's official websites and facts, Wikipedia's first sentences) and folds them into sites, each the site's stored item (plumb-core's `site` module). It also downloads them. A node fetches and folds the seed when it first starts; after that its sites grow mostly from its own crawls.
 
 Part of [Plumb Search](../../README.md). See [the architecture](../../docs/architecture.md) for how the crates fit together.
 
@@ -32,7 +32,7 @@ flowchart LR
 | [kind_sites.rs](src/kind_sites.rs) | Official websites of kinds people look for by name (banks, credit unions, airlines, universities, agencies), however few Wikipedia articles they have |
 | [facts.rs](src/facts.rs) | Country, kinds, other English names, description and sitelinks of the organizations behind official websites |
 | [intros.rs](src/intros.rs) | The first sentences of the English Wikipedia articles about the best-known of them |
-| [builder.rs](src/builder.rs) | `Builder`: folds every source into one `RecordSet` and keeps the best sites |
+| [builder.rs](src/builder.rs) | `Builder`: folds every source into one plumb-core `Sites` and keeps the best sites |
 | [download.rs](src/download.rs), [download/](src/download/) | Downloads: Tranco, Common Crawl ranks (whole or the top rows), Wikidata queries with pacing and retries, resumable files |
 | [storage.rs](src/storage.rs) | Charges a node's seed downloads to its storage budget (`with_budget`) |
 
@@ -40,19 +40,19 @@ flowchart LR
 
 ### The sources
 
-| Source | File | What a record gets |
+| Source | File | What a site's item gets |
 | --- | --- | --- |
-| [Tranco](https://tranco-list.eu/) top 1M | `tranco-top-1m.csv.zip` | `signals.tranco_rank` |
-| [Common Crawl web graph](https://commoncrawl.org/web-graphs) domain ranks | `<release>-domain-ranks.txt.gz` | `signals.harmonic_rank`, `signals.pagerank_rank` |
-| Common Crawl WAT files | `*.wat.gz`, downloaded by you | Homepage `url`, `title`, `description`, `og:site_name` as an alias, link texts, `signals.linking_domains` |
-| Wikidata official websites (P856) | `wikidata-official-sites.tsv` (`item`, `label`, `website`) | `signals.official_site`, the item's label as an alias |
+| [Tranco](https://tranco-list.eu/) top 1M | `tranco-top-1m.csv.zip` | `ranks.tranco` |
+| [Common Crawl web graph](https://commoncrawl.org/web-graphs) domain ranks | `<release>-domain-ranks.txt.gz` | `ranks.harmonic`, `ranks.pagerank` |
+| Common Crawl WAT files | `*.wat.gz`, downloaded by you | Homepage `url`, `title`, description (`about`), `og:site_name` as one of its `names`, `link_texts`, linking sites (`weight`) |
+| Wikidata official websites (P856) | `wikidata-official-sites.tsv` (`item`, `label`, `website`) | `wikidata.official_site`, the item's label as one of its `names` |
 | Wikidata sites by kind | `wikidata-kind-sites.tsv`, same format | More official websites, of the kinds in `KIND_LABELS` |
-| Wikidata facts | `wikidata-site-facts.tsv` | `country` (P17), `kinds` (P31 and P452), other names, `about`, `signals.sitelinks` |
+| Wikidata facts | `wikidata-site-facts.tsv` | `wikidata.country` (P17), `kinds` (P31 and P452), other names, `wikidata.about`, `wikidata.sitelinks` |
 | Wikipedia intros | `wikipedia-intros.tsv` (`item`, `intro`) | `intro` for the `INTRO_ITEMS` (20,000) best-known items |
 
-The loaders read plain or gzipped files (`open_maybe_gz`), skip rows they cannot read rather than failing the file, and reduce each host to its registrable domain with plumb-core's `registrable_domain`, so `www.usbank.com` and `usbank.com` land on one record.
+The loaders read plain or gzipped files (`open_maybe_gz`), skip rows they cannot read rather than failing the file, and reduce each host to its registrable domain with plumb-core's `registrable_domain`, so `www.usbank.com` and `usbank.com` land on one site.
 
-### Folding them into records
+### Folding them into sites
 
 ```mermaid
 flowchart LR
@@ -63,19 +63,19 @@ flowchart LR
   facts["wikidata-site-facts.tsv"] -->|"attach_facts"| sites
   intros["wikipedia-intros.tsv"] -->|"attach_intros"| sites
   sites -->|"add_official_sites"| builder["Builder"]
-  earlier["earlier records"] -->|"add_records"| builder
-  builder -->|"finish top_n"| out["SiteRecords<br/>best link score first"]
+  earlier["earlier sites"] -->|"add_sites"| builder
+  builder -->|"finish top_n"| out["sites' items<br/>best link score first"]
 ```
 
-`Builder` holds a plumb-core `RecordSet`, and each `add_*` call merges into it, so sources can come in any order:
+`Builder` holds a plumb-core `Sites`, the sites' items by domain as a node holds them, and each `add_*` call merges into it, so sources can come in any order. Names and kinds are added as the seed has them, with their whitespace collapsed, as records added them:
 
 - **Ranks** keep the best (lowest) rank a domain has. Entries without a valid registrable domain or with rank 0 are dropped.
-- **WAT data** carries no crawl time, so its homepage fields only fill fields that are still empty. Link text comes only from links to a site's front page (text on a deeper link names the page, not the site), counted once per linking site, and generic texts ("click here", "official website") are dropped. A domain seen only as a link target gets a record of its own, which is how WAT files discover sites the rank lists lack.
+- **WAT data** carries no crawl time, so its homepage fields only fill fields that are still empty. Link text comes only from links to a site's front page (text on a deeper link names the page, not the site), counted once per linking site, and generic texts ("click here", "official website") are dropped. A domain seen only as a link target gets a site of its own, which is how WAT files discover sites the rank lists lack.
 - **Official websites** count only when the claim is on the domain's own front page (`OfficialSite::is_root_homepage`): `https://www.ox.ac.uk/` makes `ox.ac.uk` Oxford's site, while a college on a subdomain or a band at `linktr.ee/...` grants nothing to the parent. An inner page counts when no item claims the front page and the item's names name the domain. A front page claimed by more than five items is a shared host and is skipped, unless one item owns it. When several items claim a front page, one with three times the sitelinks of each other gives the country, kinds, description and intro; otherwise only the country and kinds they share count.
-- **`finish(top_n)`** gives each subdomain site (`news.ycombinator.com`) the ranks of its parent domain, which the rank lists only know, then keeps the `top_n` records with the best `link_score`, best first.
+- **`finish(top_n)`** gives each subdomain site (`news.ycombinator.com`) the ranks of its parent domain, which the rank lists only know, then keeps the `top_n` sites with the best `link_score`, best first.
 
 > [!NOTE]
-> The builder holds every record in memory. Common Crawl's ranks file lists over 100 million domains, and each million rows read takes about 0.9 GB until the records are written, so `load_cc_domain_ranks` stops at `DEFAULT_CC_RANKS_LIMIT` (1,000,000) rows unless given a limit, and `plumb ingest` reads twice `--top` rows unless `--limit-per-source` says otherwise.
+> The builder holds every site in memory, those it knows only the ranks of as their ranks and the others as their items. Common Crawl's ranks file lists over 100 million domains, and each million rows read takes about 0.9 GB until the sites are written, so `load_cc_domain_ranks` stops at `DEFAULT_CC_RANKS_LIMIT` (1,000,000) rows unless given a limit, and `plumb ingest` reads twice `--top` rows unless `--limit-per-source` says otherwise.
 
 ### Downloads
 
@@ -91,7 +91,7 @@ A node keeps seed files saved within the last week (`SEED_MAX_AGE` in plumb-node
 
 ## Using it
 
-- `Builder::new`, `add_tranco`, `add_cc_ranks`, `add_wat`, `add_official_sites`, `add_records`, `finish`.
+- `Builder::new`, `add_tranco`, `add_cc_ranks`, `add_wat`, `add_official_sites`, `add_sites`, `finish`.
 - Loaders: `load_tranco`, `load_cc_domain_ranks`, `parse_wat` into a `WatExtract`, `load_wikidata_official_sites`, `load_site_facts` with `attach_facts`, `load_intros` with `attach_intros`.
 - Downloads: `download::http_client`, `download::download_tranco`, `download::download_to_file`, `download::download_cc_domain_ranks_top`, `download::download_wikidata_official_sites_with`, `facts::download_site_facts_with`, `kind_sites::download_kind_sites`, `intros::download_wikipedia_intros`.
 - `open_maybe_gz` and `WarcReader`, which plumb-tools also uses to read other dumps.

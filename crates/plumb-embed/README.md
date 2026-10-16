@@ -24,7 +24,7 @@ flowchart LR
 
 | Module | What it does |
 | --- | --- |
-| [text.rs](src/text.rs) | `site_text`: the text of a site record that is embedded, and its `text_hash`; `page_text`, the same for a page |
+| [text.rs](src/text.rs) | `site_text`: the text of a site (its stored item) that is embedded, and its `text_hash`; `page_text`, the same for a page |
 | [model.rs](src/model.rs) | `Embedder`: loads a model directory and turns text into a vector; bge-small-en-v1.5 runs here; `quantize`, `model_id` |
 | [gemma.rs](src/gemma.rs) | EmbeddingGemma 2 run from its GGUF file, the way llama.cpp runs it |
 | [server.rs](src/server.rs) | A model run by an outside embedding server, for trying models out |
@@ -34,7 +34,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  record["SiteRecord"] -->|"site_text"| text["text, at most 100 words"]
+  site["a site's item"] -->|"site_text"| text["text, at most 100 words"]
   text -->|"text_hash"| hash["SHA-256"]
   text -->|"Embedder::embed"| vector["unit vector"]
   vector -->|"quantize"| bytes["one byte per value"]
@@ -74,7 +74,7 @@ A node searches by meaning when that is turned on: with `--search-by-meaning` (t
 
 Nodes hand vectors to each other, so a node that turns search by meaning on need not embed millions of sites itself. That only works if two nodes get the same vector for the same site, so three things are pinned:
 
-- **The text.** `site_text` gives the same text, byte for byte, from the same record. Each vector is stored with the SHA-256 of its text (`text_hash`), and a node keeps a vector from elsewhere only when that hash matches its own text for the site (plumb-node's [shared_vectors.rs](../plumb-node/src/node/shared_vectors.rs)).
+- **The text.** `site_text` gives the same text, byte for byte, from the same site. Each vector is stored with the SHA-256 of its text (`text_hash`), and a node keeps a vector from elsewhere only when that hash matches its own text for the site (plumb-node's [shared_vectors.rs](../plumb-node/src/node/shared_vectors.rs)).
 - **The model.** A `ModelId` is the SHA-256 of the SHA-256s of the model's files (for Gemma, also of `GEMMA_DIM` and the two prefixes, which change the vectors too). A vectors file names its model, and vectors of different models never mix.
 - **The output.** Each value of the unit vector is rounded to one byte, `round(x * 127)` (`quantize`), which absorbs last-bit differences between CPUs. The model runs one text at a time, never in padded batches, so a site's vector does not depend on which sites were embedded with it.
 
@@ -102,7 +102,7 @@ On Unix the file is mapped into memory (memmap2) and read in place, not copied: 
 ## Using it
 
 - `Embedder::load(dir)`, then `embed(text)` for a site and `embed_query(query)` for a search; `id()`, `dim()`, `text_words()`, `reads(text)`.
-- `site_text(&record)` (or `site_text_words` with another word limit) and `text_hash(&text)`. `page_text(title, about, snippet, words)` joins a page's parts the same way; only plumb-tools' `embed-pages` uses it so far.
+- `site_text(&site)` (or `site_text_words` with another word limit), of a site's stored item as plumb-core's `site` module reads it, and `text_hash(&text)`. `page_text(title, about, snippet, words)` joins a page's parts the same way; only plumb-tools' `embed-pages` uses it so far.
 - `Vectors::new(model, dim)`, `insert`, `get`, `retain`, `nearest`, `closeness`; `load`, `read_header`, `for_each_in`, `save`, `save_shared_with_budget` (charged to the node's storage budget).
 - `cosine(a, b)` on two quantized vectors.
 

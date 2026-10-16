@@ -38,7 +38,7 @@ flowchart LR
 | [main.rs](src/main.rs), [lib.rs](src/lib.rs) | Parses the command line and runs one subcommand; logging, glibc allocator settings, atomic records writes |
 | [cli.rs](src/cli.rs) | Every subcommand and flag (clap): `run`, `ingest`, `serve`, `remote-control`, `experiments`, `click-labels`, `mcp`, `try-plugin`, `healthcheck`, `build-info` |
 | [run.rs](src/run.rs) | `plumb run`: flags to a `NodeConfig`, stop on Ctrl-C or SIGTERM; `plumb remote-control` |
-| [ingest.rs](src/ingest.rs) | `plumb ingest`: folds seed files and earlier records into one records file |
+| [ingest.rs](src/ingest.rs) | `plumb ingest`: folds seed files and earlier records files into one records file, as sites' stored items |
 | [limits.rs](src/limits.rs), [build_info.rs](src/build_info.rs) | Raises the open-file limit; the version and Git revision built in |
 | **The long-running node** | |
 | [node.rs](src/node.rs) | `NodeConfig`, `NodeSettings`, `Status`, `start`, `NodeHandle`, `supervise` and the shared state `Inner` |
@@ -230,8 +230,8 @@ These come from [CLAUDE.md](../../CLAUDE.md), which has the full list.
 - `plumb_node::run(cli)`: runs one subcommand; `main.rs` is a thin wrapper.
 - `node::start(NodeConfig) -> NodeHandle`, with `NodeConfig::server` and `NodeConfig::desktop` as defaults: the desktop app embeds a node this way. `NodeHandle` has `addr`, `status`, `refresh_now`, `restart_signal` and `shutdown`.
 - `web::router`, `web::node_router_with`: the router over any `SearchBackend`, for tests and `plumb serve`.
-- `crawl::{select_targets, crawl_rolling}`, `records::{load_records, RecordStore}`, `outline`, `meaning`: used by `plumb-tools crawl`, `index`, `embed` and `search`.
-- `records::{load_sites, replace_sites, sites_by_link_score}`, `outline::for_each_site`, `dead::find_dead`, `about::Topics`: used by the `plumb-tools` commands that read or rewrite a records file as sites' stored items (`summaries`, `terms`, `fetch-text`, `top-sites`, `link-rank`, `fact-trust`, `dead-sites`, `set sites`, and `index` for a file it merges).
+- `crawl::{select_targets, crawl_rolling}`, `records::{load_records, RecordStore}`, `outline`, `meaning`: used by `plumb-tools crawl`, `index` and `search`.
+- `records::{load_sites, replace_sites, sites_by_link_score}`, `outline::for_each_site`, `dead::find_dead`, `about::Topics`: used by the `plumb-tools` commands that read or rewrite a records file as sites' stored items (`summaries`, `terms`, `fetch-text`, `top-sites`, `link-rank`, `fact-trust`, `dead-sites`, `set sites`, `embed` with `meaning::embed_all`, and `index` for a file it merges).
 
 ## Tests
 

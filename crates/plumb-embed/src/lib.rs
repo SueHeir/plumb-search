@@ -5,8 +5,8 @@
 //! Every node must get the same numbers for the same site, so that nodes can
 //! check each other's by recomputing a few. Three things are pinned down:
 //!
-//! - **The text** ([`site_text`]): built the same way from the same record,
-//!   byte for byte, and identified by its [`text_hash`].
+//! - **The text** ([`site_text`]): built the same way from the same site's
+//!   stored item, byte for byte, and identified by its [`text_hash`].
 //! - **The model** ([`Embedder`]): one small model, identified by the
 //!   [`ModelId`] hash of its files; vectors of different models never mix.
 //! - **The output**: each value is rounded to one byte ([`quantize`]), which
