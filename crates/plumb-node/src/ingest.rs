@@ -791,7 +791,7 @@ mod tests {
         RecordStore::open(&records)
             .save(&[
                 Change::Merge {
-                    record: titled("found.com", "Found"),
+                    site: titled("found.com", "Found").stored_item_as_is(),
                 },
                 Change::Mark {
                     domain: "known.com".into(),
@@ -805,7 +805,7 @@ mod tests {
         write_jsonl(&out, &[SiteRecord::new("old.com")]).unwrap();
         RecordStore::open(&out)
             .save(&[Change::Merge {
-                record: titled("stale.com", "Stale"),
+                site: titled("stale.com", "Stale").stored_item_as_is(),
             }])
             .unwrap();
 

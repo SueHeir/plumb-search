@@ -3,9 +3,10 @@
 //! ([`crate::node`]) crawls through [`select_targets`] and
 //! [`crawl_rolling`], and so does `plumb-tools crawl`, by hand. What a
 //! crawl reads of its homepages are sites, each its stored item
-//! ([`plumb_crawl::to_items`]), and choosing homepages reads a site's
-//! crawl marks as its item holds them ([`CrawlSite`]); the journal still
-//! takes records, which they become in one place ([`to_record`]).
+//! ([`plumb_crawl::to_items`]), which the journal's changes carry, and
+//! choosing homepages reads a site's crawl marks as its item holds them
+//! ([`CrawlSite`]). Only the crawls a node shares with the network still
+//! become records, in one place ([`to_record`]).
 //!
 //! # Which homepages
 //!
@@ -201,7 +202,7 @@ impl CrawlSet for RecordSet {
     }
 
     fn apply(&mut self, change: Change) {
-        change.apply(self);
+        change.apply_to_records(self);
     }
 
     fn len(&self) -> usize {
@@ -689,19 +690,18 @@ fn offline_batch(before: &[Mark], outcomes: &HashMap<&str, &CrawlOutcome>) -> Op
     })
 }
 
-/// A site a crawl read, as the record the journal's changes and the
-/// network's shared crawls still take: the one place where a crawl's
-/// sites become records ([`SiteRecord::from_stored_item`]), until the
-/// store keeps items (step 7a-2 of the data format plan) and the network
-/// shares them (step 9). It reads back every field a crawl sets, so the
-/// record is the one crawls made before they made items.
+/// A site a crawl read, as the record the network's shared crawls still
+/// take: the one place where a crawl's sites become records
+/// ([`SiteRecord::from_stored_item`]), until the network shares items
+/// (step 9 of the data format plan). It reads back every field a crawl
+/// sets, so the record is the one crawls made before they made items.
 pub(crate) fn to_record(site: &Item) -> SiteRecord {
     // Only an item that is not a site, or headlines that do not read,
     // fail; a crawl's sites are made by `site::new` and have none.
     SiteRecord::from_stored_item(site).expect("a crawl's site reads as a record")
 }
 
-/// Turns crawl batches into changes to a record set.
+/// Turns crawl batches into changes to a set of sites.
 #[derive(Debug, Default)]
 struct BatchMerger {
     /// Distinct crawled domains linking to each domain, over the whole run.
@@ -723,8 +723,7 @@ fn domain_hash(domain: &str) -> u64 {
 
 impl BatchMerger {
     /// The sites [`to_items`] makes of a batch's results, with
-    /// `linking_domains` counted over the whole run, as changes to merge
-    /// ([`to_record`]).
+    /// `linking_domains` counted over the whole run, as changes to merge.
     fn changes(&mut self, results: &[CrawlResult]) -> Vec<Change> {
         for result in results {
             let CrawlOutcome::Fetched(page) = &result.outcome else {
@@ -750,9 +749,7 @@ impl BatchMerger {
                     signals.linking_domains = signals.linking_domains.max(count);
                     site::set_signals(&mut site, &signals);
                 }
-                Change::Merge {
-                    record: to_record(&site),
-                }
+                Change::Merge { site }
             })
             .collect()
     }

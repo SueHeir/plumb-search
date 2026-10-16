@@ -353,23 +353,19 @@ impl CrawlSet for RoundSites {
     }
 
     fn apply(&mut self, change: Change) {
-        // The journal's changes carry records until the store keeps items;
-        // a round reads each as its stored item, as it reads the file.
         match change {
-            Change::Merge { record }
-            | Change::MergeShared { record }
-            | Change::SubdomainSite { record } => {
-                if let Some(domain) = canonical_domain(&record.domain) {
-                    let mut record = record;
-                    record.domain = domain;
-                    self.add(&record.stored_item_as_is());
+            Change::Merge { mut site }
+            | Change::MergeShared { mut site }
+            | Change::SubdomainSite { mut site } => {
+                if let Some(domain) = canonical_domain(&site.id) {
+                    site.id = domain;
+                    self.add(&site);
                 }
             }
-            Change::RefreshShared { mut record } => {
-                if let Some(domain) = canonical_domain(&record.domain) {
-                    record.domain = domain;
-                    if let Some(site) = self.get_mut(&record.domain) {
-                        site.merge(&record.stored_item_as_is());
+            Change::RefreshShared { site } => {
+                if let Some(domain) = canonical_domain(&site.id) {
+                    if let Some(held) = self.get_mut(&domain) {
+                        held.merge(&site);
                     }
                 }
             }
@@ -451,7 +447,9 @@ mod tests {
         found.crawled_at = Some(2_000);
         RecordStore::open(&path)
             .save(&[
-                Change::Merge { record: found },
+                Change::Merge {
+                    site: found.stored_item_as_is(),
+                },
                 Change::Mark {
                     domain: "quiet.net".into(),
                     attempted_at: Some(1_500),
@@ -486,9 +484,11 @@ mod tests {
         assert_eq!(sites.marks("quiet.net"), (Some(3_000), 4));
         let mut fresh = SiteRecord::new("new.com");
         fresh.crawled_at = Some(3_100);
-        sites.apply(Change::Merge { record: fresh });
+        sites.apply(Change::Merge {
+            site: fresh.stored_item_as_is(),
+        });
         sites.apply(Change::RefreshShared {
-            record: SiteRecord::new("unheld.com"),
+            site: SiteRecord::new("unheld.com").stored_item_as_is(),
         });
         assert_eq!(sites.len(), 4);
         sites.apply(Change::Gone {

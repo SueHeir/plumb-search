@@ -236,7 +236,9 @@ async fn indexes_what_an_interrupted_crawl_saved() {
     found.crawled_at = Some(now_unix());
     let mut store = crate::records::RecordStore::open(&records);
     store
-        .save(&[crate::records::Change::Merge { record: found }])
+        .save(&[crate::records::Change::Merge {
+            site: found.stored_item_as_is(),
+        }])
         .unwrap();
     drop(store);
 
@@ -280,7 +282,7 @@ fn an_index_build_merges_a_site_the_records_file_holds_twice() {
     // And a journal still to fold in.
     crate::records::RecordStore::open(&path)
         .save(&[crate::records::Change::Merge {
-            record: site("pnc.com", 4, "PNC Bank"),
+            site: site("pnc.com", 4, "PNC Bank").stored_item_as_is(),
         }])
         .unwrap();
     assert!(

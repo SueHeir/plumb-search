@@ -56,7 +56,7 @@ use crate::crawl::{
     Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
 };
 use crate::icons::IconStore;
-use crate::records::{load_sites, replace_sites_with_budget, Change, RecordStore};
+use crate::records::{load_sites, replace_sites_with_budget, Change, ChangeLines, RecordStore};
 use crate::web::{duration_words, group_thousands};
 
 /// A homepage fetched or answered this recently is not due for a crawl, as
@@ -517,7 +517,7 @@ pub(super) async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             .get(plumb_core::HOME_SITE)
             .is_some_and(|home| home.title.is_some());
         if let Some(change) = home_site_change(inner, titled) {
-            change.apply_to_sites(&mut set);
+            change.apply(&mut set);
         }
         inner.check_stop()?;
         let sites = set.into_sorted();
@@ -608,13 +608,19 @@ pub(super) async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
             let _big = inner.one_big_job();
             subdomain_changes(&inner.paths.seed)?
         };
-        let n = changes.len();
+        // Each change's site is read off the seed's sites as it is saved,
+        // and held as the journal's line.
+        let mut lines = ChangeLines::default();
+        for change in changes {
+            lines.push(&change)?;
+        }
+        let n = lines.len();
         inner.check_stop()?;
         {
             let _records = inner.hold_records();
             RecordStore::open(&inner.paths.records)
                 .with_budget(inner.storage.clone())
-                .save(&changes)?;
+                .save_lines(&lines)?;
         }
         inner.update_saved(|saved| {
             saved.sites_current();
@@ -636,11 +642,12 @@ pub(super) async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
 /// ([`SUBDOMAIN_SITE_NAMES`]), its record, made where its parent domain
 /// has one ([`Change::SubdomainSite`]); for each front page more items
 /// claim than one site carries ([`crowded_front_pages`]), the record of the
-/// item that owns it, if one does.
+/// item that owns it, if one does. The changes come in that order, each
+/// site read off the seed's sites as its change is taken.
 ///
 /// A site that earlier rules made but the rules in use do not keeps its
 /// record until the seed is folded in whole again.
-fn subdomain_changes(seed: &Path) -> Result<Vec<Change>> {
+fn subdomain_changes(seed: &Path) -> Result<impl Iterator<Item = Change>> {
     let files = [
         seed.join(download::WIKIDATA_FILE_NAME),
         seed.join(kind_sites::KIND_SITES_FILE_NAME),
@@ -698,7 +705,7 @@ fn subdomain_changes(seed: &Path) -> Result<Vec<Change>> {
     if intros.is_file() && !sites.is_empty() {
         attach_intros(&mut sites, &load_intros(&intros)?);
     }
-    let mut changes: Vec<Change> = taken_back
+    let taken_back: Vec<Change> = taken_back
         .iter()
         .map(|site| Change::TakeBack {
             domain: site.domain.clone(),
@@ -709,19 +716,19 @@ fn subdomain_changes(seed: &Path) -> Result<Vec<Change>> {
         .collect();
     let mut builder = Builder::new();
     builder.add_official_sites(&sites);
-    for held in builder.finish(None) {
-        let record = seed_record(&held);
-        changes.push(if parent_domain(&record.domain).is_some() {
-            Change::SubdomainSite { record }
+    let held = builder.finish(None).into_iter().map(|site| {
+        if parent_domain(site::domain(&site)).is_some() {
+            Change::SubdomainSite { site }
         } else {
-            Change::Merge { record }
+            Change::Merge { site }
+        }
+    });
+    let named = SUBDOMAIN_SITE_NAMES
+        .iter()
+        .map(|(subsite, name)| Change::SubdomainSite {
+            site: named_subdomain_site(subsite, name),
         });
-    }
-    for (subsite, name) in SUBDOMAIN_SITE_NAMES {
-        let record = seed_record(&named_subdomain_site(subsite, name));
-        changes.push(Change::SubdomainSite { record });
-    }
-    Ok(changes)
+    Ok(taken_back.into_iter().chain(held).chain(named))
 }
 
 /// A subdomain site the seed data may not name ([`SUBDOMAIN_SITE_NAMES`]),
@@ -733,17 +740,6 @@ fn named_subdomain_site(subsite: &str, name: &str) -> Item {
     site::set_signals(&mut held, &signals);
     site::add_alias(&mut held, name);
     held
-}
-
-/// A site the seed made, as the record the journal's changes still take:
-/// the one place where the seed's sites become records
-/// ([`SiteRecord::from_stored_item`]), until the store keeps items (step
-/// 7a-2 of the data format plan). It reads back every field the seed
-/// sets, so the record is the one the seed made before it made items.
-fn seed_record(site: &Item) -> SiteRecord {
-    // Only an item that is not a site, or headlines that do not read,
-    // fail; the seed's sites are made by `site::new` and have none.
-    SiteRecord::from_stored_item(site).expect("a seed site reads as a record")
 }
 
 /// The site the built-in lists give `site`'s claim, when the site rules
@@ -1213,15 +1209,15 @@ async fn crawl(inner: &Arc<Inner>) -> Result<()> {
 }
 
 /// The change that gives the records the network's own site
-/// ([`plumb_core::home_site_record`]) while they have no title for it
-/// (`titled` false): never crawled, or only through a bot check. `None`
-/// unless [`super::NodeConfig::crawl_home_site`].
+/// ([`plumb_core::home_site`]) while they have no title for it (`titled`
+/// false): never crawled, or only through a bot check. `None` unless
+/// [`super::NodeConfig::crawl_home_site`].
 fn home_site_change(inner: &Inner, titled: bool) -> Option<Change> {
     if !inner.config.crawl_home_site {
         return None;
     }
     (!titled).then(|| Change::Merge {
-        record: plumb_core::home_site_record(),
+        site: plumb_core::home_site(),
     })
 }
 
@@ -1571,7 +1567,7 @@ fn add_local_sites(set: &mut RoundSites, store: &mut RecordStore, local: &[Strin
         .iter()
         .filter(|domain| set.get(domain).is_none())
         .map(|domain| Change::Merge {
-            record: SiteRecord::new(domain.as_str()),
+            site: site::new(domain.as_str()),
         })
         .collect();
     if changes.is_empty() {
@@ -2041,7 +2037,9 @@ mod tests {
             record.add_alias(name);
             let held = named_subdomain_site(subsite, name);
             assert_eq!(held, record.clone().stored_item_as_is(), "{subsite}");
-            assert_eq!(seed_record(&held), record, "{subsite}");
+            // And so the change brings the record the change on records did.
+            let read = SiteRecord::from_stored_item(&held).unwrap();
+            assert_eq!(read, record, "{subsite}");
         }
     }
 
@@ -2084,15 +2082,16 @@ mod tests {
                 .iter()
                 .filter_map(|change| match change {
                     Change::TakeBack { domain, .. } => Some(format!("back {domain}")),
-                    Change::Merge { record } => Some(record.domain.clone()),
-                    Change::SubdomainSite { record } => Some(format!("sub {}", record.domain)),
+                    Change::Merge { site } => Some(site.id.clone()),
+                    Change::SubdomainSite { site } => Some(format!("sub {}", site.id)),
                     _ => None,
                 })
                 .filter(|domain| domain.contains("example") || domain.contains("plumbtest"))
                 .collect()
         };
         // With no rules in use, the built-in lists, nothing moves.
-        assert!(domains(&subdomain_changes(seed.path()).unwrap()).is_empty());
+        let changes = |seed: &Path| -> Vec<Change> { subdomain_changes(seed).unwrap().collect() };
+        assert!(domains(&changes(seed.path())).is_empty());
 
         // Rules that make plumbtest.app a public suffix, as the Public
         // Suffix List does when a host lets people make sites under it,
@@ -2114,7 +2113,7 @@ mod tests {
             plumb_core::registrable_domain("https://foo.plumbtest.app/").as_deref(),
             Some("foo.plumbtest.app")
         );
-        let changes = subdomain_changes(seed.path()).unwrap();
+        let changes = changes(seed.path());
         let mut changed = domains(&changes);
         // Each claim is taken back off the site the built-in lists made it
         // part of, which gets its own claims again (plumbtest.app has none
@@ -2156,22 +2155,18 @@ mod tests {
         claims.push_str("Q20\tExample\thttps://www.example.com/\n");
         std::fs::write(seed.path().join(download::WIKIDATA_FILE_NAME), claims).unwrap();
         std::fs::write(seed.path().join(facts::FACTS_FILE_NAME), facts).unwrap();
-        let changes = subdomain_changes(seed.path()).unwrap();
-        let merged: Vec<&SiteRecord> = changes
-            .iter()
+        let merged: Vec<Item> = subdomain_changes(seed.path())
+            .unwrap()
             .filter_map(|change| match change {
-                Change::Merge { record } => Some(record),
+                Change::Merge { site } => Some(site),
                 _ => None,
             })
             .collect();
         // nba.com is the NBA's, not its seasons'; example.com did not change.
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].domain, "nba.com");
-        assert!(merged[0].signals.official_site);
-        assert_eq!(
-            merged[0].aliases,
-            ["National Basketball Association", "NBA"]
-        );
+        assert_eq!(merged[0].id, "nba.com");
+        assert!(site::signals(&merged[0]).official_site);
+        assert_eq!(merged[0].names, ["National Basketball Association", "NBA"]);
     }
 
     #[test]

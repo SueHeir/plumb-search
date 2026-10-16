@@ -386,7 +386,9 @@ mod tests {
         late.title = Some("Saved to the journal".into());
         plumb_node::records::RecordStore::open(&records)
             .save(&[
-                plumb_node::records::Change::Merge { record: late },
+                plumb_node::records::Change::Merge {
+                    site: late.stored_item_as_is(),
+                },
                 plumb_node::records::Change::Gone {
                     domain: "pncbank.com".into(),
                     at: 1_791_700_000,

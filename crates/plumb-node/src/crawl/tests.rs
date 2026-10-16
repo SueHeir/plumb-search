@@ -305,7 +305,14 @@ fn a_batch_marks_every_target_by_outcome() {
     );
     let mut flaky = record("flaky.com", 50, Some(100), Some(200));
     flaky.crawl_failures = 2;
-    commit(&mut set, &mut store, vec![Change::Merge { record: flaky }]).unwrap();
+    commit(
+        &mut set,
+        &mut store,
+        vec![Change::Merge {
+            site: flaky.stored_item_as_is(),
+        }],
+    )
+    .unwrap();
 
     let started = now_unix();
     let targets: Vec<CrawlTarget> = ["a.com", "b.com", "c.com", "d.com", "flaky.com"]
@@ -392,7 +399,7 @@ fn linking_domains_count_over_the_whole_run() {
     let mut merger = BatchMerger::default();
     for batch in results.chunks(2) {
         for change in merger.changes(batch) {
-            change.apply(&mut set);
+            change.apply_to_records(&mut set);
         }
     }
     for domain in ["hub.com", "other.com"] {
@@ -408,7 +415,7 @@ fn linking_domains_count_over_the_whole_run() {
     known.signals.linking_domains = 10;
     let mut set: RecordSet = [known].into_iter().collect();
     for change in BatchMerger::default().changes(&results) {
-        change.apply(&mut set);
+        change.apply_to_records(&mut set);
     }
     assert_eq!(set.get("hub.com").unwrap().signals.linking_domains, 10);
 }
@@ -1048,7 +1055,7 @@ impl CrawlSet for Holding {
     }
 
     fn apply(&mut self, change: Change) {
-        change.apply(&mut self.0);
+        change.apply_to_records(&mut self.0);
     }
 
     fn len(&self) -> usize {
