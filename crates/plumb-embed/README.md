@@ -24,7 +24,7 @@ flowchart LR
 
 | Module | What it does |
 | --- | --- |
-| [text.rs](src/text.rs) | `site_text`: the text of a site (its stored item) that is embedded, and its `text_hash` |
+| [text.rs](src/text.rs) | `site_text`: the text of a site (its stored item) that is embedded, and its `text_hash`; `page_text`, the same for a page |
 | [model.rs](src/model.rs) | `Embedder`: loads a model directory and turns text into a vector; bge-small-en-v1.5 runs here; `quantize`, `model_id` |
 | [gemma.rs](src/gemma.rs) | EmbeddingGemma 2 run from its GGUF file, the way llama.cpp runs it |
 | [server.rs](src/server.rs) | A model run by an outside embedding server, for trying models out |
@@ -102,7 +102,7 @@ On Unix the file is mapped into memory (memmap2) and read in place, not copied: 
 ## Using it
 
 - `Embedder::load(dir)`, then `embed(text)` for a site and `embed_query(query)` for a search; `id()`, `dim()`, `text_words()`, `reads(text)`.
-- `site_text(&site)` (or `site_text_words` with another word limit), of a site's stored item as plumb-core's `site` module reads it, and `text_hash(&text)`.
+- `site_text(&site)` (or `site_text_words` with another word limit), of a site's stored item as plumb-core's `site` module reads it, and `text_hash(&text)`. `page_text(title, about, snippet, words)` joins a page's parts the same way; only plumb-tools' `embed-pages` uses it so far.
 - `Vectors::new(model, dim)`, `insert`, `get`, `retain`, `nearest`, `closeness`; `load`, `read_header`, `for_each_in`, `save`, `save_shared_with_budget` (charged to the node's storage budget).
 - `cosine(a, b)` on two quantized vectors.
 

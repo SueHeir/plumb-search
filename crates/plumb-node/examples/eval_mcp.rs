@@ -104,6 +104,7 @@ impl FrozenBackend {
         let query = applied.as_deref().unwrap_or(query);
         let mut found = pages.search(query, DISPLAY_CANDIDATES)?;
         pages.add_other_number(query, &results.hits, &mut found, DISPLAY_CANDIDATES)?;
+        pages.add_meant(results.meant.as_deref(), &mut found)?;
         found.retain(|hit| options_allow(options, &hit.page));
         if rank.add_named_site {
             add_named_site(&mut results.hits, &found, |domain| self.sites.site(domain));

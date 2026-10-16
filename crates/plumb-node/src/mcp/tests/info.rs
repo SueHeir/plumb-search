@@ -68,6 +68,7 @@ impl SearchBackend for Australia {
             pages,
             site_search: None,
             spelling: None,
+            meant: None,
         })
     }
 
@@ -268,6 +269,7 @@ impl SearchBackend for EntityIndex {
             }],
             spelling: None,
             site_search: None,
+            meant: None,
         })
     }
     fn entities(
@@ -558,6 +560,7 @@ impl SearchBackend for LyricsWithEntity {
             pages,
             spelling: None,
             site_search: None,
+            meant: None,
         })
     }
 }
