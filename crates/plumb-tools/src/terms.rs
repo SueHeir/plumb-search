@@ -315,8 +315,6 @@ impl Picker {
 
 #[cfg(test)]
 mod tests {
-    use plumb_node::records::{load_records, replace_records, sorted_by_link_score};
-
     use super::*;
 
     #[test]
@@ -395,7 +393,7 @@ mod tests {
 
         // What a record set made of the same file writes.
         let picker = Picker::new(&args());
-        let mut set = load_records(&records).unwrap();
+        let mut set = crate::test_sites::load_records(&records);
         for page in &pages {
             let terms = picker.terms(&page.full_text());
             if !terms.is_empty() && set.get(&page.domain).is_some() {
@@ -403,7 +401,7 @@ mod tests {
             }
         }
         let expected = dir.path().join("expected.jsonl");
-        replace_records(&expected, sorted_by_link_score(&set)).unwrap();
+        crate::test_sites::write_sorted(&expected, &set);
         assert_eq!(
             String::from_utf8(std::fs::read(&out).unwrap()).unwrap(),
             String::from_utf8(std::fs::read(&expected).unwrap()).unwrap()

@@ -28,7 +28,7 @@ use plumb_core::{stored, Signals};
 
 use super::*;
 use crate::cli::IngestArgs;
-use crate::records::{journal_path, load_records, load_sites, Change, RecordStore};
+use crate::records::{journal_path, load_sites, Change, RecordStore};
 
 /// The lines of the file at `path`, as they are.
 fn lines_of(path: &Path) -> Vec<String> {
@@ -50,10 +50,10 @@ fn section(out: &mut String, what: &str, lines: &[String]) {
 /// The records file at `path` with its journal, loaded as a node loads
 /// it, each site as a stored line, best first.
 fn loaded(path: &Path) -> Vec<String> {
-    let set = load_records(path).unwrap();
-    crate::records::sorted_by_link_score(&set)
-        .into_iter()
-        .map(|record| String::from_utf8(stored::line(record).unwrap()).unwrap())
+    let sites = load_sites(path).unwrap().into_sorted();
+    sites
+        .lines()
+        .map(|line| String::from_utf8(line.to_vec()).unwrap())
         .collect()
 }
 

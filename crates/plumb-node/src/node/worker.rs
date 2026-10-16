@@ -2026,7 +2026,6 @@ impl Backoff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::load_records;
 
     #[test]
     fn named_subdomain_sites_are_the_records_they_were() {
@@ -2392,9 +2391,9 @@ mod tests {
             .collect();
         assert_eq!(domains, ["near.com", "known.com", "far.com"]);
         drop(store);
-        let saved = load_records(&path).unwrap();
-        assert!(saved.get("near.com").is_some() && saved.get("far.com").is_some());
-        assert!(saved.get("known.com").is_none(), "only the sites it lacked");
+        let saved = load_sites(&path).unwrap();
+        assert!(saved.contains("near.com") && saved.contains("far.com"));
+        assert!(!saved.contains("known.com"), "only the sites it lacked");
     }
 
     #[test]

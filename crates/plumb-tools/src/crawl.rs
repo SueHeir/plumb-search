@@ -1,9 +1,12 @@
 //! `plumb-tools crawl`: one crawl of a records file by hand, through the
 //! same choice of homepages and saving as a node's rounds
-//! ([`plumb_node::crawl`]). A batch that looks offline is fetched again
-//! after 30 seconds, then 1, 2 and 4 minutes ([`OFFLINE_WAITS`]), since a
-//! home router that was swamped usually recovers; when it still looks
-//! offline, the crawl stops with an error.
+//! ([`plumb_node::crawl`]). The file is held whole as a set of sites
+//! ([`plumb_core::sites::Sites`], each site as its stored line), which the
+//! crawl's changes are made to and which is written back at the end. A
+//! batch that looks offline is fetched again after 30 seconds, then 1, 2
+//! and 4 minutes ([`OFFLINE_WAITS`]), since a home router that was swamped
+//! usually recovers; when it still looks offline, the crawl stops with an
+//! error.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,9 +17,9 @@ use plumb_core::now_unix;
 use plumb_crawl::{CrawlConfig, HomepageCrawler};
 use plumb_node::cli::parse_positive;
 use plumb_node::crawl::{
-    crawl_rolling, select_targets, Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
+    crawl_rolling, select_site_targets, Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
 };
-use plumb_node::records::{load_records, RecordStore};
+use plumb_node::records::{load_sites, RecordStore};
 use tracing::info;
 
 #[derive(Debug, Args)]
@@ -89,26 +92,26 @@ fn crawl_file_with(
     offline_waits: &[Duration],
     fetcher: &mut impl Fetcher,
 ) -> Result<()> {
-    let mut set = load_records(&args.records)?;
+    let mut sites = load_sites(&args.records)?;
     let out = args.out.as_deref().unwrap_or(&args.records);
     let mut store = RecordStore::open(out);
     if out != args.records {
         // The journal of `out` holds changes to `out`, which starts as what
         // was read.
-        store.compact_records(&set)?;
+        store.compact(&sites)?;
     }
     let window = args
         .skip_crawled_within_days
         .saturating_mul(SECONDS_PER_DAY);
-    let targets = select_targets(set.iter(), args.top, now_unix(), window);
+    let targets = select_site_targets(&sites, args.top, now_unix(), window);
     info!(
         "crawling {} of {} homepages, {} at a time",
         targets.len(),
-        set.len(),
+        sites.len(),
         args.concurrency
     );
     let totals = crawl_rolling(
-        &mut set,
+        &mut sites,
         &targets,
         CRAWL_BATCH_SIZE,
         &mut store,
@@ -116,7 +119,7 @@ fn crawl_file_with(
         fetcher,
         |_| Ok(()),
     )?;
-    let written = store.compact_records(&set)?;
+    let written = store.compact(&sites)?;
 
     let o = &totals.outcomes;
     println!(

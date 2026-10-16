@@ -346,7 +346,7 @@ mod tests {
     use plumb_core::{write_jsonl, SiteRecord};
 
     use super::*;
-    use crate::records::{journal_path, load_records, Change, RecordStore};
+    use crate::records::{journal_path, Change, RecordStore};
 
     /// Arguments that read nothing and write to `out`; tests fill in the rest.
     fn writing_to(out: PathBuf) -> IngestArgs {
@@ -822,9 +822,9 @@ mod tests {
         );
         // The old file's journal is gone rather than replayed onto the new one.
         assert!(!journal_path(&out).exists());
-        let reread = load_records(&out).unwrap();
+        let reread = load_sites(&out).unwrap();
         assert_eq!(reread.len(), 3);
-        assert!(reread.get("stale.com").is_none());
+        assert!(!reread.contains("stale.com"));
         // Only --out is replaced: the input keeps its journal.
         assert!(journal_path(&records).exists());
 

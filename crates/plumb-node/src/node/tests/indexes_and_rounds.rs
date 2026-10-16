@@ -250,8 +250,8 @@ async fn indexes_what_an_interrupted_crawl_saved() {
     node.shutdown().await.unwrap();
     // Building the index folded it into the records file.
     assert!(!dir.path().join("records.jsonl.journal").exists());
-    let set = crate::records::load_records(&records).unwrap();
-    assert!(set.get("plumbline-example.com").is_some());
+    let sites = crate::records::load_sites(&records).unwrap();
+    assert!(sites.contains("plumbline-example.com"));
 }
 
 /// A records file that holds a site on two lines, as one put together by

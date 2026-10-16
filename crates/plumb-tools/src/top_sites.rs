@@ -220,7 +220,7 @@ mod tests {
     use plumb_core::{write_jsonl, SiteRecord};
 
     use super::*;
-    use plumb_node::records::load_records;
+    use plumb_node::records::load_sites;
 
     fn site(domain: &str, tranco: u32, title: Option<&str>) -> SiteRecord {
         let mut r = SiteRecord::new(domain);
@@ -256,8 +256,8 @@ mod tests {
             named_only: true,
         };
         run(&args).unwrap();
-        let kept = load_records(&out).unwrap();
-        let mut domains: Vec<&str> = kept.iter().map(|r| r.domain.as_str()).collect();
+        let kept = load_sites(&out).unwrap();
+        let mut domains: Vec<String> = kept.iter().map(|s| s.id).collect();
         domains.sort_unstable();
         assert_eq!(domains, ["aliased.org", "best.com"]);
         assert!(path.is_file(), "the records are left alone");
@@ -268,7 +268,7 @@ mod tests {
             ..args
         };
         run(&args).unwrap();
-        assert_eq!(load_records(&out).unwrap().len(), 4, "all but the gone one");
+        assert_eq!(load_sites(&out).unwrap().len(), 4, "all but the gone one");
     }
 
     #[test]

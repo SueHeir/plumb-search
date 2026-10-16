@@ -213,8 +213,8 @@ fn absorbing_the_inbox_waits_for_whoever_holds_the_records() {
     assert!(!journal.exists(), "nothing is appended meanwhile");
     drop(held);
     assert_eq!(absorbing.join().unwrap(), 1);
-    let records = crate::records::load_records(&inner.paths.records).unwrap();
-    assert!(records.get("sent.example").is_some());
+    let sites = crate::records::load_sites(&inner.paths.records).unwrap();
+    assert!(sites.contains("sent.example"));
 }
 
 #[test]
@@ -1811,12 +1811,12 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
         assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 1);
         let inbox: Vec<SiteRecord> =
             plumb_core::stored::read_file(&receiver.inner.paths.inbox).unwrap_or_default();
-        let held = crate::records::load_records(&receiver.inner.paths.records).unwrap();
+        let held = crate::records::load_sites(&receiver.inner.paths.records).unwrap();
         let durable_raw = inbox
             .iter()
             .filter(|r| r.domain == "headline-persist.example")
             .count()
-            + usize::from(held.get("headline-persist.example").is_some());
+            + usize::from(held.contains("headline-persist.example"));
         assert_eq!(durable_raw, usize::from(with_raw));
         assert_eq!(
             std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
