@@ -235,7 +235,8 @@ impl PageSearcher {
     /// so it comes after the first sites. Words found it too when it is in
     /// `found`: it is then listed as they scored it, or as meant when only
     /// meaning lists it. Nothing is added when a page found is named by the
-    /// whole query or answers it whole, as words find those better. Callers
+    /// whole query or answers it whole, as words find those better. An
+    /// article only meaning found is never placed under its site. Callers
     /// check the searcher's options ([`super::options_allow`]) after, as
     /// for any page found.
     pub fn add_meant(&self, url: Option<&str>, found: &mut Vec<PageHit>) -> Result<()> {
@@ -255,7 +256,11 @@ impl PageSearcher {
                 else {
                     return Ok(());
                 };
-                hit.page.drop_borrowed_site();
+                // Found by meaning alone, it is listed on its own and never
+                // under its site, where it would lift that site in the
+                // learned order: "spectrum jacksonville nc" put
+                // spectrumcentercharlotte.com third under Spectrum Center.
+                hit.page.site = None;
                 hit.score = 0.0;
                 (hit.named, hit.whole) = (false, false);
                 hit

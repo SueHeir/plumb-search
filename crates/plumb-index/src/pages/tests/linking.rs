@@ -122,7 +122,8 @@ fn a_part_of_the_query_is_not_linked_by_a_word_of_a_longer_name_or_a_last_word()
 
 #[test]
 fn the_article_nearest_in_meaning_comes_after_three_sites() {
-    let sleep = article("Microsleep", "Brief episode of sleep", 900_000, &[]);
+    let mut sleep = article("Microsleep", "Brief episode of sleep", 900_000, &[]);
+    sleep.site = Some("c.com".into());
     let url = sleep.url.clone();
     let (_dir, s) = searcher(&[
         sleep.clone(),
@@ -133,7 +134,8 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         .map(|domain| site(domain, false))
         .collect();
     // No word of "micro naps" names Microsleep; meaning lists it after
-    // the first sites, wherever the learned order would put it.
+    // the first sites, wherever the learned order would put it, and not
+    // under its site, which it would lift.
     let mut found = s.search("micro naps", 5).unwrap();
     assert!(found.is_empty());
     s.add_meant(Some(&url), &mut found).unwrap();
@@ -148,7 +150,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         &mut placed,
     );
     assert_eq!(placed.len(), 1);
-    assert!(placed[0].at >= PARTIAL_AFTER);
+    assert!(placed[0].at >= PARTIAL_AFTER && placed[0].under.is_none());
     // Found by words too: kept as they scored it when that lists it, else
     // scored and marked as meant.
     let found_by_words = |score: f32| PageHit {
