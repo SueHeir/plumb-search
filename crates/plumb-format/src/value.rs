@@ -246,6 +246,14 @@ pub fn check_text(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether NFC leaves `c` as it is whatever is around it: a starter that
+/// NFC neither changes nor joins to the character before it.
+pub fn stays_in_nfc(c: char) -> bool {
+    use unicode_normalization::char::canonical_combining_class;
+    use unicode_normalization::{is_nfc_quick, IsNormalized};
+    canonical_combining_class(c) == 0 && is_nfc_quick(std::iter::once(c)) == IsNormalized::Yes
+}
+
 /// `text` made fit for an item: in Unicode NFC, with every control
 /// character but a newline made a space.
 pub fn normalize_text(text: &str) -> String {
