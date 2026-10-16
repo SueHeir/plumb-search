@@ -49,18 +49,15 @@ pub fn run(args: &DeadSitesArgs) -> Result<()> {
 }
 
 /// What [`run`] prints of the sites of `set` at `now`, naming the best
-/// `show` of the dead ones, none that `keeps`.
+/// `show` of the dead ones, none that `keeps`. Each site is read once.
 fn report(set: &Sites, now: u64, show: usize, keeps: impl Fn(&Item) -> bool) -> String {
-    let dead = find_dead(|| set.iter(), now, keeps);
-    let failing = set
-        .iter()
-        .map(site::crawl_marks)
-        .filter(|marks| marks.gone.is_none() && marks.failures > 0)
-        .count();
-    let gone = set
-        .iter()
-        .filter(|site| site::crawl_marks(site).gone.is_some())
-        .count();
+    let (mut failing, mut gone) = (0, 0);
+    let read = set.iter().inspect(|site| {
+        let marks = site::crawl_marks(site);
+        failing += usize::from(marks.gone.is_none() && marks.failures > 0);
+        gone += usize::from(marks.gone.is_some());
+    });
+    let dead = find_dead(read, now, keeps);
     let never_reached = dead
         .iter()
         .filter(|site| site::crawled(site).is_none())
@@ -114,7 +111,7 @@ mod tests {
         show: usize,
         keeps: impl Fn(&SiteRecord) -> bool,
     ) -> String {
-        let dead = find_dead(|| set.iter(), now, keeps);
+        let dead = find_dead(set.iter(), now, keeps);
         let failing = set
             .iter()
             .filter(|record| record.gone_at.is_none() && record.crawl_failures > 0)

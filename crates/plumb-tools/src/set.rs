@@ -1207,10 +1207,11 @@ pub fn sites(args: &SitesArgs) -> Result<Written> {
     let part_ends: Vec<u64> = (0..=sites.len() as u64 / SITES_A_PART)
         .map(|n| FIRST_SITES + n * SITES_A_PART)
         .collect();
-    let items = plumb_node::records::sites_by_link_score(&sites)
+    let items = sites
+        .into_sorted()
         .into_iter()
         .filter(|site| plumb_core::site::crawl_marks(site).gone.is_none())
-        .map(|site| plumb_core::site::to_item(site).ok());
+        .map(|site| plumb_core::site::to_item(&site).ok());
     write_set(
         items,
         plumb_core::site_item::site_fields(),

@@ -73,7 +73,7 @@ fn fixture_records() -> Vec<SiteRecord> {
     let sites = builder.finish(None);
     sites
         .iter()
-        .map(|site| SiteRecord::from_stored_item(site).unwrap())
+        .map(|site| SiteRecord::from_stored_item(&site).unwrap())
         .collect()
 }
 

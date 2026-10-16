@@ -231,7 +231,7 @@ These come from [CLAUDE.md](../../CLAUDE.md), which has the full list.
 - `node::start(NodeConfig) -> NodeHandle`, with `NodeConfig::server` and `NodeConfig::desktop` as defaults: the desktop app embeds a node this way. `NodeHandle` has `addr`, `status`, `refresh_now`, `restart_signal` and `shutdown`.
 - `web::router`, `web::node_router_with`: the router over any `SearchBackend`, for tests and `plumb serve`.
 - `crawl::{select_targets, crawl_rolling}`, `records::{load_records, RecordStore}`, `outline`, `meaning`: used by `plumb-tools crawl`, `index` and `search`.
-- `records::{load_sites, replace_sites, sites_by_link_score}`, `outline::for_each_site`, `dead::find_dead`, `about::Topics`: used by the `plumb-tools` commands that read or rewrite a records file as sites' stored items (`summaries`, `terms`, `fetch-text`, `top-sites`, `link-rank`, `fact-trust`, `dead-sites`, `set sites`, `embed` with `meaning::embed_all`, and `index` for a file it merges).
+- `records::{load_sites, replace_sites}`, `outline::for_each_site`, `dead::find_dead`, `about::Topics`: used by the `plumb-tools` commands that read or rewrite a records file as sites' stored items (`summaries`, `terms`, `fetch-text`, `top-sites`, `link-rank`, `fact-trust`, `dead-sites`, `set sites`, `embed` with `meaning::embed_all`, and `index` for a file it merges).
 
 ## Tests
 

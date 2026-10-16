@@ -466,7 +466,7 @@ async fn plumb_ingest_writes_what_the_golden_file_holds() {
 /// file at `path` holds it with its journal.
 fn text_hash_of(path: &Path, domain: &str) -> plumb_embed::TextHash {
     let set = load_sites(path).unwrap();
-    plumb_embed::text_hash(&plumb_embed::site_text(set.get(domain).unwrap()))
+    plumb_embed::text_hash(&plumb_embed::site_text(&set.get(domain).unwrap()))
 }
 
 /// What the node's embedding holds of each site to embed: its link score,
