@@ -31,8 +31,8 @@ pub(super) fn lookup(
         let sites: Vec<(String, String)> = lines
             .iter()
             .filter_map(|line| {
-                let record = plumb_core::stored::read(line.as_bytes()).ok()?;
-                Some((record.to_line().ok()?, record.domain))
+                let site = plumb_core::stored::read_item(line.as_bytes()).ok()?;
+                Some((plumb_core::site::to_line(&site).ok()?, site.id))
             })
             .collect();
         // Where each site's proofs are is in memory; the batches are read

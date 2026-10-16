@@ -17,7 +17,8 @@
 use std::fmt::Write as _;
 
 use base64::Engine as _;
-use plumb_core::{stored, Headline, KeyPage, LinkText, RecordSet};
+use plumb_core::sites::{SiteLine, Sites};
+use plumb_core::{stored, Headline, KeyPage, LinkText};
 use plumb_index::{RankConfig, SearchOptions};
 use plumb_net::{FoundSite, NetSearch};
 
@@ -26,11 +27,6 @@ use crate::web::{rank_found, take_found};
 
 /// When the sites here were crawled, fixed so the lines come out the same.
 const CRAWLED: u64 = 1_792_000_000;
-
-/// The stored line the inbox and the records file get of `record`.
-fn line(record: &SiteRecord) -> String {
-    String::from_utf8(stored::line(record).unwrap()).unwrap()
-}
 
 /// The lines of the file at `path` from line `from` on, and how many it
 /// has in all.
@@ -136,7 +132,8 @@ fn delivery(now: u64) -> Vec<SiteRecord> {
 }
 
 /// A found site, as a network search hands it to the node: the site as
-/// answered, and the signed crawl when one counts.
+/// answered, and the signed crawl when one counts, each the stored item
+/// of the record.
 fn found(
     record: SiteRecord,
     shared: Option<SiteRecord>,
@@ -144,8 +141,10 @@ fn found(
     confirmed: bool,
 ) -> FoundSite {
     let crawler = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5".to_string();
+    let held = |record: SiteRecord| SiteLine::of(record.stored_item_as_is());
+    let shared = shared.map(held);
     FoundSite {
-        record,
+        site: held(record),
         verified: shared.is_some(),
         crawler: shared.as_ref().map(|_| crawler.clone()),
         answers: 1,
@@ -284,7 +283,7 @@ async fn the_node_takes_in_the_golden_sites() {
     };
     take_found(&*inner, &mut search);
     inbox(&mut out, &inner, "a network search", &mut seen);
-    let kept: Vec<SiteRecord> = search
+    let kept: SiteList = search
         .found
         .iter()
         .filter_map(|f| f.keeps().cloned())
@@ -315,14 +314,14 @@ async fn the_node_takes_in_the_golden_sites() {
         ("a page filled", None),
         ("a page filled about the topics", Some(inner.keep_topics())),
     ] {
-        let mut records = filled();
-        super::fill::keep_filled(&inner, &mut records, topics.as_ref());
-        network::append_inbox(&inner, &listed(&records)).unwrap();
+        let mut sites = listed(&filled());
+        super::fill::keep_filled(&inner, &mut sites, topics.as_ref());
+        network::append_inbox(&inner, &sites).unwrap();
         inbox(&mut out, &inner, what, &mut seen);
     }
 
     // The pages a node sets up from, as the records file it saves.
-    let mut set = RecordSet::new();
+    let mut set = Sites::new();
     let mut first = crawl("WWW.Setup.Example", " Setup\u{7} Site ");
     first.aliases = vec!["Setup".into(), "Setup".into()];
     let mut ranked = SiteRecord::new("setup-ranked.example");
@@ -336,10 +335,12 @@ async fn the_node_takes_in_the_golden_sites() {
     super::fill::take_seed_page(
         &inner,
         &mut set,
-        vec![first, ranked, crawl("denied.example", "Denied")],
+        listed(&[first, ranked, crawl("denied.example", "Denied")]),
     );
-    super::fill::take_seed_page(&inner, &mut set, vec![again, bot]);
-    let seed: Vec<String> = set.into_sorted_vec().iter().map(line).collect();
+    super::fill::take_seed_page(&inner, &mut set, listed(&[again, bot]));
+    let seed: Vec<String> = (set.into_sorted().lines())
+        .map(|line| String::from_utf8(line.to_vec()).unwrap())
+        .collect();
     writeln!(out, "## set up from: {} sites", seed.len()).unwrap();
     for line in seed {
         writeln!(out, "{line}").unwrap();

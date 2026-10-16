@@ -75,8 +75,8 @@ use libp2p::{
     Multiaddr, PeerId, Swarm,
 };
 use plumb_core::locks::Locked;
+use plumb_core::now_unix;
 use plumb_core::sites::SiteList;
-use plumb_core::{now_unix, SiteRecord};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -946,22 +946,20 @@ fn keep_trusted_crawls(found: &mut NetSearch, trusted: &[PeerId], now: u64) {
         let Ok((signed, _)) = proof.verify_trusted(now) else {
             continue;
         };
-        let Ok(signed) = SiteRecord::from_stored_item(&signed) else {
-            continue;
-        };
-        if signed.domain != site.record.domain {
+        if signed.id != site.site.domain() {
             continue;
         }
-        let record = &mut site.record;
-        record.url = signed.url.clone();
-        record.title = signed.title.clone();
-        record.description = signed.description.clone();
-        record.headings = signed.headings.clone();
-        record.body_text = signed.body_text.clone();
-        record.terms = signed.terms.clone();
-        record.key_pages = signed.key_pages.clone();
-        record.links_to = signed.links_to.clone();
-        record.crawled_at = signed.crawled_at;
+        site.site.update(|shown| {
+            shown.url = signed.url.clone();
+            shown.title = signed.title.clone();
+            shown.about = signed.about.clone();
+            plumb_core::site::set_headings(shown, plumb_core::site::headings(&signed));
+            shown.text = signed.text.clone();
+            plumb_core::site::set_terms(shown, plumb_core::site::terms(&signed));
+            plumb_core::site::set_key_pages(shown, plumb_core::site::key_pages(&signed));
+            plumb_core::site::set_links_to(shown, plumb_core::site::links_to(&signed));
+            plumb_core::site::set_crawled(shown, plumb_core::site::crawled(&signed));
+        });
         if !site.verified {
             site.verified = true;
             site.crawler = Some(crawler.to_string());
@@ -969,7 +967,7 @@ fn keep_trusted_crawls(found: &mut NetSearch, trusted: &[PeerId], now: u64) {
                 site.crawlers.insert(0, crawler.to_string());
             }
         }
-        site.shared = Some(signed);
+        site.shared = Some(signed.into());
         site.trusted = true;
     }
 }

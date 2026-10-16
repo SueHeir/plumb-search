@@ -15,6 +15,7 @@ use crate::popularity::Report;
 use crate::storage::allocation_for;
 use plumb_core::site::{self as site_item, Item};
 use plumb_core::sites::SiteList;
+use plumb_core::SiteRecord;
 
 /// A site crawled at `at` with `title`, as a node signs its crawls.
 fn crawled_at(domain: &str, title: &str, at: u64) -> Item {
@@ -680,7 +681,7 @@ fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
             ..NetSearch::default()
         };
         keep_trusted_crawls(&mut found, trusted, now);
-        let by = |d: &str| found.found.iter().find(|s| s.record.domain == d).cloned();
+        let by = |d: &str| found.found.iter().find(|s| s.site.domain() == d).cloned();
         (by(&assigned).unwrap(), by(&unassigned).unwrap())
     };
 
@@ -691,8 +692,8 @@ fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
     // assigned the site.
     assert!(a.keeps().is_none());
     let shared = a.shared.clone().expect("an assigned crawl counts");
-    assert_eq!(shared.description.as_deref(), Some("Handmade shoes"));
-    assert_eq!(shared.body_text, None);
+    assert_eq!(shared.item().about.as_deref(), Some("Handmade shoes"));
+    assert_eq!(shared.item().text, None);
     assert!(u.shared.is_none() && !u.verified);
     // Confirmed by crawlers this node counts, it is.
     let confirmed = crate::search::FoundSite {
@@ -707,8 +708,8 @@ fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
         assert!(site.verified);
         assert!(site.keeps().is_some());
         let text = Some("Handmade leather shoes, made to order");
-        assert_eq!(site.shared.unwrap().body_text.as_deref(), text);
-        assert_eq!(site.record.body_text.as_deref(), text);
+        assert_eq!(site.shared.unwrap().item().text.as_deref(), text);
+        assert_eq!(site.site.item().text.as_deref(), text);
     }
 }
 

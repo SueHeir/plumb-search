@@ -67,14 +67,14 @@ impl Task {
                 } else {
                     crate::fill::accept_filled
                 };
-                let records = response
+                let sites = response
                     .records
                     .iter()
                     .filter_map(|line| accept(line, now))
                     .collect();
                 let _ = reply.send(Ok(Some(FillPage {
                     peer,
-                    records,
+                    sites,
                     next: response.next,
                     total: response.total,
                     busy: response.busy,
