@@ -205,7 +205,7 @@ impl PageSearcher {
     /// The page held at the address `query` is, or else the one whose
     /// address is the longest start of its path. Found among the pages on
     /// its host named or worded like parts of its path.
-    fn page_at(&self, query: &str) -> Result<Option<PageHit>> {
+    pub(super) fn page_at(&self, query: &str) -> Result<Option<PageHit>> {
         let Some(typed) = typed_address(query) else {
             return Ok(None);
         };

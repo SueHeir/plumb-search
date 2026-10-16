@@ -92,6 +92,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     config.search_by_meaning |= args.search_by_meaning;
     config.meaning_model = args.meaning_model;
     config.embed_threads = args.embed_threads.map(usize::from);
+    config.page_vectors = args.page_vectors;
     if args.use_system_proxy {
         config.use_system_proxy = true;
     }

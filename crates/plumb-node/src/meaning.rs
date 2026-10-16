@@ -33,6 +33,16 @@ const NEAREST: usize = 1_000;
 /// (median) where an unrelated site led, 0.15 where meaning found the
 /// right one.
 const LEAST_SPREAD: f32 = 0.15;
+/// Articles nearest a query in meaning looked at for the one to list
+/// ([`nearest_page`]).
+const NEAREST_PAGES: usize = 10;
+/// How far the nearest article's cosine must stand above the last of the
+/// [`NEAREST_PAGES`] for it to be listed. As with sites, the raw cosine
+/// can't tell a right article from one nobody asked for. How far the
+/// nearest stood out could, somewhat: of 7,902 searches on hpc, this kept
+/// 93% of the nearest articles that were the one wanted, 57% of those
+/// that were not, and 77% of those for searches that want no article.
+const LEAST_PAGE_GAP: f32 = 0.05;
 /// Vectors made between saves of the vectors file, so a stopped run keeps
 /// most of its work.
 pub const SAVE_EVERY: usize = 10_000;
@@ -52,11 +62,14 @@ pub fn vectors_set(model: &ModelId) -> String {
 pub struct MeaningIndex {
     embedder: Embedder,
     vectors: RwLock<Vectors>,
+    /// Vectors of Wikipedia articles by address (`plumb-tools
+    /// embed-pages`), when given.
+    pages: Option<Vectors>,
     instruction: QueryInstruction,
 }
 
 /// What the model was trained to read before a search query.
-const QUERY_INSTRUCTION: &str = "Represent this sentence for searching relevant passages: ";
+pub const QUERY_INSTRUCTION: &str = "Represent this sentence for searching relevant passages: ";
 
 impl MeaningIndex {
     /// Loads the model in `model_dir` and the vectors in `vectors`, which
@@ -78,19 +91,39 @@ impl MeaningIndex {
         MeaningIndex {
             embedder,
             vectors: RwLock::new(vectors),
+            pages: None,
             instruction: QueryInstruction::default(),
         }
     }
 
     /// Opens the model and vectors `args` name, if it names them.
     pub fn from_args(args: &MeaningArgs) -> Result<Option<Self>> {
-        match (&args.model, &args.vectors) {
-            (Some(model), Some(vectors)) => Self::open(model, vectors).map(|mut meaning| {
-                meaning.instruction = args.query_instruction;
-                Some(meaning)
-            }),
-            _ => Ok(None),
+        let (Some(model), Some(vectors)) = (&args.model, &args.vectors) else {
+            return Ok(None);
+        };
+        let mut meaning = Self::open(model, vectors)?;
+        meaning.instruction = args.query_instruction;
+        if let Some(pages) = &args.page_vectors {
+            meaning.load_pages(pages)?;
         }
+        Ok(Some(meaning))
+    }
+
+    /// Takes the article vectors in `path` too, which this model must have
+    /// made, so searches list the article nearest them in meaning. Every
+    /// search reads the whole file, about 470 bytes an article (230 MB for
+    /// the 500,000 most read), so it stays in memory.
+    pub fn load_pages(&mut self, path: &Path) -> Result<()> {
+        let pages = Vectors::load(path)?;
+        if !made_by(&pages, &self.embedder) {
+            bail!(
+                "the article vectors in {} were made by another model; run plumb-tools embed-pages again",
+                path.display()
+            );
+        }
+        info!("loaded {} article vectors", pages.len());
+        self.pages = Some(pages);
+        Ok(())
     }
 
     pub fn embedder(&self) -> &Embedder {
@@ -137,22 +170,25 @@ impl MeaningIndex {
                 None
             }
         };
-        let vectors = self.read();
         let instruction = if self.embedder.takes_query_instruction() {
             self.instruction
         } else {
             QueryInstruction::Off
         };
-        match instruction {
-            QueryInstruction::Off => Some(vec![plain()?]),
-            QueryInstruction::On => Some(vec![instructed()?]),
-            QueryInstruction::Mix | QueryInstruction::Min => {
-                Some(vec![embed(query)?, instructed()?])
-            }
+        let query = match instruction {
+            QueryInstruction::Off => vec![plain()?],
+            QueryInstruction::On => vec![instructed()?],
+            QueryInstruction::Mix | QueryInstruction::Min => vec![embed(query)?, instructed()?],
             // Ranked by the instructed vector; placed by the plain one.
-            QueryInstruction::Split => Some(vec![instructed()?, embed(query)?]),
-        }
-        .map(|query| QueryMeaning::new(vectors, query, instruction))
+            QueryInstruction::Split => vec![instructed()?, embed(query)?],
+        };
+        // Before taking the sites' vectors, which the embedding job may be
+        // waiting to add to.
+        let page = self
+            .pages
+            .as_ref()
+            .and_then(|pages| nearest_page(pages, &query[0]));
+        Some(QueryMeaning::new(self.read(), query, instruction, page))
     }
 }
 
@@ -189,6 +225,8 @@ impl SharedMeaning {
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
     nearest: Vec<String>,
+    /// The article nearest the query ([`nearest_page`]).
+    page: Option<String>,
     /// The query's vectors (one, or as it is and after the instruction)
     /// with the cosines of the nearest and of the last of the nearest sites.
     spreads: Vec<Spread>,
@@ -221,6 +259,7 @@ impl<'a> QueryMeaning<'a> {
         vectors: RwLockReadGuard<'a, Vectors>,
         query: Vec<Vec<i8>>,
         combine: QueryInstruction,
+        page: Option<String>,
     ) -> Self {
         let mut nearest = None;
         let spreads = query
@@ -249,6 +288,7 @@ impl<'a> QueryMeaning<'a> {
         QueryMeaning {
             vectors,
             nearest: nearest.unwrap_or_default(),
+            page,
             spreads,
             combine,
         }
@@ -262,6 +302,10 @@ impl<'a> QueryMeaning<'a> {
 impl Meaning for QueryMeaning<'_> {
     fn nearest(&self) -> Vec<String> {
         self.nearest.clone()
+    }
+
+    fn nearest_page(&self) -> Option<String> {
+        self.page.clone()
     }
 
     fn plain_closeness(&self, domain: &str) -> Option<Option<f32>> {
@@ -284,6 +328,22 @@ impl Meaning for QueryMeaning<'_> {
             QueryInstruction::Min => all.into_iter().reduce(f32::min),
             _ => Some(all.iter().sum::<f32>() / all.len().max(1) as f32),
         }
+    }
+}
+
+/// The address of the article in `pages` nearest `query`, the first of a
+/// query's vectors as the nearest sites are (after the instruction, as
+/// nodes embed searches), when it stands [`LEAST_PAGE_GAP`] above the
+/// last of the [`NEAREST_PAGES`].
+fn nearest_page(pages: &Vectors, query: &[i8]) -> Option<String> {
+    let found = pages.nearest(query, NEAREST_PAGES);
+    match (found.first(), found.last()) {
+        (Some(&(url, best)), Some(&(_, last)))
+            if found.len() == NEAREST_PAGES && best - last >= LEAST_PAGE_GAP =>
+        {
+            Some(url.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -342,9 +402,10 @@ pub fn embed_all(
     embed_sites(embedder, vectors, todo, threads, stop, save, progress)
 }
 
-/// A site [`embed_all`] makes a vector for: its link score, domain,
-/// text hash and text.
-pub(crate) type ToEmbed = (f32, String, plumb_embed::TextHash, String);
+/// A text [`embed_sites`] makes a vector for: its popularity (a site's
+/// link score), its key (a site's domain, or a page's URL for
+/// `plumb-tools embed-pages`), the hash of its text and the text.
+pub type ToEmbed = (f32, String, plumb_embed::TextHash, String);
 
 /// The first half of [`embed_all`]: drops the vectors of sites not in
 /// `sites`, or with no text there, and returns the sites to embed, best
@@ -496,8 +557,8 @@ fn domain_hash(domain: &str) -> u64 {
     hasher.finish()
 }
 
-/// The second half of [`embed_all`]: embeds `todo`.
-pub(crate) fn embed_sites(
+/// The second half of [`embed_all`]: embeds `todo`, each under its key.
+pub fn embed_sites(
     embedder: &Embedder,
     vectors: &RwLock<Vectors>,
     todo: Vec<ToEmbed>,
@@ -727,6 +788,30 @@ mod tests {
         assert_eq!(near.stretch(0.794), 1.0);
         assert!((near.stretch(0.714) - 0.5).abs() < 0.01);
         assert_eq!(near.stretch(0.6), 0.0);
+    }
+
+    #[test]
+    fn the_nearest_article_is_listed_only_when_it_stands_out() {
+        // Ten articles at these cosines to a query pointing along x.
+        let articles = |cosines: &[f32]| {
+            let mut pages = Vectors::new([0; 32], 2);
+            for (n, cosine) in cosines.iter().enumerate() {
+                let sine = (1.0 - cosine * cosine).sqrt();
+                let vector = [(cosine * 127.0) as i8, (sine * 127.0) as i8];
+                let url = format!("https://en.wikipedia.org/wiki/{n}");
+                pages.insert(&url, text_hash(&url), &vector).unwrap();
+            }
+            pages
+        };
+        let nearest = |pages: &Vectors| nearest_page(pages, &[127, 0]);
+        let stands_out = articles(&[1.0, 0.95, 0.94, 0.94, 0.93, 0.93, 0.92, 0.92, 0.91, 0.9]);
+        assert_eq!(
+            nearest(&stands_out).as_deref(),
+            Some("https://en.wikipedia.org/wiki/0")
+        );
+        let bunched = articles(&[1.0, 0.99, 0.99, 0.98, 0.98, 0.98, 0.98, 0.97, 0.97, 0.97]);
+        assert_eq!(nearest(&bunched), None);
+        assert_eq!(nearest(&articles(&[1.0, 0.5])), None, "too few to tell");
     }
 
     #[test]
