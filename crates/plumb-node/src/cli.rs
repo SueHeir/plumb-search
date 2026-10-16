@@ -176,6 +176,11 @@ pub struct MeaningArgs {
     /// search queries ([`QueryInstruction`]); for trying the others out.
     #[arg(long, value_enum, default_value_t = QueryInstruction::Split, hide = true)]
     pub query_instruction: QueryInstruction,
+    /// Vectors of Wikipedia articles made by `plumb-tools embed-pages`
+    /// with the same model: the article nearest a search in meaning is
+    /// listed after the first sites. For trying out.
+    #[arg(long, value_name = "FILE", requires = "model", hide = true)]
+    pub page_vectors: Option<PathBuf>,
 }
 
 /// How a search is embedded: as it is, or after the instruction the model
@@ -348,6 +353,12 @@ pub struct RunArgs {
     /// faster with more.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
     pub embed_threads: Option<u16>,
+    /// Vectors of Wikipedia articles made by `plumb-tools embed-pages`
+    /// with the model search by meaning runs: while it is on, the article
+    /// nearest a search in meaning is listed after the first sites. For
+    /// trying out.
+    #[arg(long, value_name = "FILE", hide = true)]
+    pub page_vectors: Option<PathBuf>,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
     /// internet only through one. Without it, homepages are fetched directly

@@ -421,6 +421,7 @@ fn an_article_the_query_names_gets_an_info_box() {
         hits: vec![scored("mariecurie.org.uk", 0.5)],
         site_search: None,
         spelling: None,
+        meant: None,
     };
     let page = render_results(
         "marie curie",

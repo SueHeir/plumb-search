@@ -80,6 +80,14 @@ pub enum Command {
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(crate::embed::EmbedArgs),
+    /// Make a vector of each page of a page set from its title,
+    /// description and snippet (an article's lead), keyed by its URL (an
+    /// experiment: nodes find pages by their words only).
+    EmbedPages(crate::embed_pages::EmbedPagesArgs),
+    /// Which pages searches find by meaning alone, with the vectors
+    /// `embed-pages` made: where each search's wanted article comes among
+    /// the nearest pages.
+    PageMeaning(crate::embed_pages::PageMeaningArgs),
     /// Count the sites in a node's records that look dead, the ones
     /// `plumb run --drop-dead-sites` takes out of its index, without
     /// changing anything. Reads the whole records file into memory.

@@ -764,6 +764,19 @@ fn a_suggested_spelling_lists_the_page_it_names_second() {
     s.list_suggested_page(&spelling("isaac newton", false), &options, &mut pages)
         .unwrap();
     assert_eq!(pages.len(), 3);
+    // Unless only meant: it moves up to second.
+    let mut meant = placed("Isaac Newton", PARTIAL_AFTER);
+    meant.hit.meant = true;
+    let mut pages = vec![placed("Newton, Massachusetts", 0), meant];
+    s.list_suggested_page(&spelling("isaac newton", false), &options, &mut pages)
+        .unwrap();
+    assert_eq!(
+        listed(&pages),
+        [
+            ("Newton, Massachusetts".to_string(), 0),
+            ("Isaac Newton".to_string(), 1),
+        ]
+    );
     // Nothing when the results are for the spelling, or it names no page.
     for spelling in [
         spelling("isaac newton", true),

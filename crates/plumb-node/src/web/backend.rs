@@ -29,9 +29,7 @@ pub trait SearchBackend: Send + Sync {
         let _ = options;
         Ok(SearchResults {
             hits: self.search(query, limit)?,
-            pages: Vec::new(),
-            site_search: None,
-            spelling: None,
+            ..SearchResults::default()
         })
     }
     /// [`SearchBackend::search_full`] ranked with `rank` instead of the

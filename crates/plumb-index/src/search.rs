@@ -239,6 +239,7 @@ impl Searcher {
                 learned::reorder_sites(learned::Model::sites(), query_text, &mut results.hits);
                 results.hits.truncate(limit);
             }
+            results.meant = meaning.and_then(|meaning| meaning.nearest_page());
             if cfg.health_authorities {
                 health::authorities_first(
                     query_text,

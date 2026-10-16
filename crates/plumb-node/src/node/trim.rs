@@ -25,7 +25,7 @@
 //! node keeps, judged on each site's stored item ([`Keep::keeps`]), not
 //! their whole records. The file is then written again
 //! without the sites dropped, the other lines copied as they are, and the
-//! index built from it a record at a time. A file that holds a site twice,
+//! index built from it a site at a time. A file that holds a site twice,
 //! which only a whole set can merge, is first read whole once and written
 //! again with each site on one line ([`outline::outline_merged`]); the
 //! sites to drop are then chosen from it in the same way.
@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use plumb_core::storage::StorageBudget;
-use plumb_core::{now_unix, site, SiteRecord};
+use plumb_core::{now_unix, site};
 use plumb_format::Item;
 use tracing::info;
 
@@ -131,10 +131,10 @@ pub(super) fn takes_new_sites(inner: &Inner) -> bool {
     limit == 0 || inner.disk_used() < share(limit, FILL_UP_TO_PERCENT)
 }
 
-/// Whether a full node still takes in `record`, a site it does not hold:
-/// one about its topics, or an official website.
-pub(super) fn keeps_new_site(record: &SiteRecord, topics: &Topics) -> bool {
-    record.signals.official_site || topics.matches(record)
+/// Whether a full node still takes in `site`, the stored item of a site
+/// it does not hold: one about its topics, or an official website.
+pub(super) fn keeps_new_site(site: &Item, topics: &Topics) -> bool {
+    site::signals(site).official_site || topics.matches_site(site)
 }
 
 fn share(limit: u64, percent: u64) -> u64 {
@@ -330,10 +330,10 @@ fn site_usage(inner: &Inner) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::RecordSet;
+    use plumb_core::{RecordSet, SiteRecord};
 
     use super::*;
-    use crate::records::{load_records, replace_records, sorted_by_link_score};
+    use crate::records::reference::{load_records, replace_records, sorted_by_link_score};
 
     fn set_of(n: usize) -> RecordSet {
         let mut set = RecordSet::new();
@@ -456,9 +456,9 @@ mod tests {
         chess.title = Some("Play chess online".into());
         let mut official = SiteRecord::new("bank.example");
         official.signals.official_site = true;
-        assert!(keeps_new_site(&chess, &topics));
-        assert!(keeps_new_site(&official, &topics));
-        assert!(!keeps_new_site(&SiteRecord::new("other.example"), &topics));
+        assert!(keeps_new_site(&chess.stored_item_as_is(), &topics));
+        assert!(keeps_new_site(&official.stored_item_as_is(), &topics));
+        assert!(!keeps_new_site(&site::new("other.example"), &topics));
     }
 
     /// A records file of a few sites more than [`MIN_SITES_KEPT`], as a
@@ -480,9 +480,11 @@ mod tests {
             .save(&[
                 // A site below them all.
                 crate::records::Change::Merge {
-                    record: SiteRecord::new("unlinked.example"),
+                    site: site::new("unlinked.example"),
                 },
-                crate::records::Change::Merge { record: crawled },
+                crate::records::Change::Merge {
+                    site: crawled.stored_item_as_is(),
+                },
                 crate::records::Change::Gone {
                     domain: last(6),
                     at: 1_700_000_000,

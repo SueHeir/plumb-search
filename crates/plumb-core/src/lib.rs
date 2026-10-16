@@ -69,23 +69,39 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// The network's own public site. Few sites link to it yet and no ranking
-/// list has it, so every node keeps a record of it ([`home_site_record`])
-/// and crawls it, rather than waiting for a link to bring it in.
+/// list has it, so every node keeps it ([`home_site`]) and crawls it,
+/// rather than waiting for a link to bring it in.
 pub const HOME_SITE: &str = "plumbsearch.org";
+
+/// What [`HOME_SITE`] is called, and says of itself, until a crawl of it.
+const HOME_SITE_NAME: &str = "Plumb Search";
+const HOME_SITE_ABOUT: &str =
+    "Free, open-source search engine run by a peer-to-peer network of nodes anyone can host.";
 
 /// The record every node starts [`HOME_SITE`] with, until a crawl of the
 /// site replaces its url, title and description.
 pub fn home_site_record() -> SiteRecord {
     let mut record = SiteRecord::new(HOME_SITE);
     record.url = Some(format!("https://{HOME_SITE}/"));
-    record.title = Some("Plumb Search".into());
-    record.description = Some(
-        "Free, open-source search engine run by a peer-to-peer network of nodes anyone can host."
-            .into(),
-    );
-    record.add_alias("Plumb Search");
+    record.title = Some(HOME_SITE_NAME.into());
+    record.description = Some(HOME_SITE_ABOUT.into());
+    record.add_alias(HOME_SITE_NAME);
     record.signals.official_site = true;
     record
+}
+
+/// [`home_site_record`] as the site's stored item ([`site`]), which is
+/// how a node keeps it.
+pub fn home_site() -> plumb_format::Item {
+    let mut home = site::new(HOME_SITE);
+    home.url = Some(format!("https://{HOME_SITE}/"));
+    home.title = Some(HOME_SITE_NAME.into());
+    home.about = Some(HOME_SITE_ABOUT.into());
+    site::add_alias(&mut home, HOME_SITE_NAME);
+    let mut signals = site::signals(&home);
+    signals.official_site = true;
+    site::set_signals(&mut home, &signals);
+    home
 }
 
 /// Most inbound link texts kept per site (the most frequent ones win).
@@ -1673,6 +1689,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_home_site_is_the_stored_item_of_its_record() {
+        let home = home_site_record();
+        assert_eq!(home_site(), home.clone().stored_item_as_is());
+        assert_eq!(home_site(), home.to_stored_item());
+        assert_eq!(
+            stored::item_as_line(&home_site()).unwrap(),
+            stored::line(&home_site_record()).unwrap()
+        );
+    }
 
     #[test]
     fn garbled_text_reads_as_the_utf8_it_was() {

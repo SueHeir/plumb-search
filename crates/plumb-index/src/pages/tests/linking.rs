@@ -119,3 +119,64 @@ fn a_part_of_the_query_is_not_linked_by_a_word_of_a_longer_name_or_a_last_word()
     assert!(!listed("how to fix a squeaky floor", "Squeaky Fromme"));
     assert!(!listed("maven central", "Maven (wrestler)"));
 }
+
+#[test]
+fn the_article_nearest_in_meaning_comes_after_three_sites() {
+    let mut sleep = article("Microsleep", "Brief episode of sleep", 900_000, &[]);
+    sleep.site = Some("c.com".into());
+    let url = sleep.url.clone();
+    let (_dir, s) = searcher(&[
+        sleep.clone(),
+        article("Napoleon", "French emperor (1769–1821)", 500_000, &[]),
+    ]);
+    let mut sites: Vec<crate::Hit> = ["a.com", "b.com", "c.com", "d.com", "e.com"]
+        .iter()
+        .map(|domain| site(domain, false))
+        .collect();
+    // No word of "micro naps" names Microsleep; meaning lists it after
+    // the first sites, wherever the learned order would put it, and not
+    // under its site, which it would lift.
+    let mut found = s.search("micro naps", 5).unwrap();
+    assert!(found.is_empty());
+    s.add_meant(Some(&url), &mut found).unwrap();
+    assert_eq!(found.len(), 1);
+    assert!(found[0].meant && !found[0].named && !found[0].whole);
+    assert!(found[0].score >= MIN_PARTIAL_SCORE);
+    let mut placed = place_pages("micro naps", &sites, found);
+    crate::learned::reorder(
+        crate::learned::Model::builtin(),
+        "micro naps",
+        &mut sites,
+        &mut placed,
+    );
+    assert_eq!(placed.len(), 1);
+    assert!(placed[0].at >= PARTIAL_AFTER && placed[0].under.is_none());
+    // Found by words too: kept as they scored it when that lists it, else
+    // scored and marked as meant.
+    let found_by_words = |score: f32| PageHit {
+        page: sleep.clone(),
+        score,
+        named: false,
+        popularity: 1.0,
+        whole: false,
+        learned: None,
+        meant: false,
+    };
+    let mut found = vec![found_by_words(0.5)];
+    s.add_meant(Some(&url), &mut found).unwrap();
+    assert!(found.len() == 1 && found[0].score == 0.5 && !found[0].meant);
+    let mut found = vec![found_by_words(0.1)];
+    s.add_meant(Some(&url), &mut found).unwrap();
+    assert!(found.len() == 1 && found[0].score >= MIN_PARTIAL_SCORE && found[0].meant);
+    // Words find a page the query names better.
+    let mut found = s.search("napoleon", 5).unwrap();
+    let before: Vec<String> = found.iter().map(|hit| hit.page.url.clone()).collect();
+    s.add_meant(Some(&url), &mut found).unwrap();
+    let after: Vec<String> = found.iter().map(|hit| hit.page.url.clone()).collect();
+    assert_eq!(after, before);
+    // An address the pages lack adds nothing.
+    let mut found = Vec::new();
+    s.add_meant(Some("https://en.wikipedia.org/wiki/Nowhere"), &mut found)
+        .unwrap();
+    assert!(found.is_empty());
+}

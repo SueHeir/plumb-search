@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use plumb_core::site;
+use plumb_core::sites::SiteList;
 use plumb_format::Item;
 use plumb_ingest::{
     attach_facts, attach_intros, load_cc_domain_ranks, load_intros, load_site_facts, load_tranco,
@@ -172,19 +173,19 @@ pub fn run(args: IngestArgs) -> Result<()> {
     for path in &args.records {
         let mut sites = load_sites(path)
             .with_context(|| format!("loading records {}", path.display()))?
-            .into_sorted_vec();
+            .into_sorted();
         if let Some(n) = limit {
             sites.truncate(n);
-        }
-        for site in &mut sites {
-            fresh.strip(site);
         }
         println!(
             "records   {:>9} records         ({})",
             sites.len(),
             path.display()
         );
-        builder.add_sites(sites);
+        builder.add_sites(sites.into_iter().map(|mut site| {
+            fresh.strip(&mut site);
+            site
+        }));
     }
 
     let sites = builder.finish(args.top);
@@ -329,12 +330,12 @@ struct RecordSummary {
 }
 
 impl RecordSummary {
-    fn of(sites: &[Item]) -> Self {
+    fn of(sites: &SiteList) -> Self {
         let mut summary = RecordSummary::default();
         for held in sites {
             summary.with_title += usize::from(held.title.is_some());
-            summary.with_link_text += usize::from(!site::link_texts(held).is_empty());
-            summary.official += usize::from(site::signals(held).official_site);
+            summary.with_link_text += usize::from(!site::link_texts(&held).is_empty());
+            summary.official += usize::from(site::signals(&held).official_site);
         }
         summary
     }
@@ -345,7 +346,7 @@ mod tests {
     use plumb_core::{write_jsonl, SiteRecord};
 
     use super::*;
-    use crate::records::{journal_path, load_records, Change, RecordStore};
+    use crate::records::{journal_path, Change, RecordStore};
 
     /// Arguments that read nothing and write to `out`; tests fill in the rest.
     fn writing_to(out: PathBuf) -> IngestArgs {
@@ -451,7 +452,7 @@ mod tests {
         a.signals.official_site = true;
         let mut b = SiteRecord::new("b.com");
         b.add_link_text("Bee", "a.com");
-        let sites: Vec<Item> = [a, b, SiteRecord::new("c.com")]
+        let sites: SiteList = [a, b, SiteRecord::new("c.com")]
             .into_iter()
             .map(SiteRecord::stored_item_as_is)
             .collect();
@@ -790,7 +791,7 @@ mod tests {
         RecordStore::open(&records)
             .save(&[
                 Change::Merge {
-                    record: titled("found.com", "Found"),
+                    site: titled("found.com", "Found").stored_item_as_is(),
                 },
                 Change::Mark {
                     domain: "known.com".into(),
@@ -804,7 +805,7 @@ mod tests {
         write_jsonl(&out, &[SiteRecord::new("old.com")]).unwrap();
         RecordStore::open(&out)
             .save(&[Change::Merge {
-                record: titled("stale.com", "Stale"),
+                site: titled("stale.com", "Stale").stored_item_as_is(),
             }])
             .unwrap();
 
@@ -821,9 +822,9 @@ mod tests {
         );
         // The old file's journal is gone rather than replayed onto the new one.
         assert!(!journal_path(&out).exists());
-        let reread = load_records(&out).unwrap();
+        let reread = load_sites(&out).unwrap();
         assert_eq!(reread.len(), 3);
-        assert!(reread.get("stale.com").is_none());
+        assert!(!reread.contains("stale.com"));
         // Only --out is replaced: the input keeps its journal.
         assert!(journal_path(&records).exists());
 

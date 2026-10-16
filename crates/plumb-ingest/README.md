@@ -67,15 +67,15 @@ flowchart LR
   builder -->|"finish top_n"| out["sites' items<br/>best link score first"]
 ```
 
-`Builder` holds a plumb-core `Sites`, the sites' items by domain as a node holds them, and each `add_*` call merges into it, so sources can come in any order. Names and kinds are added as the seed has them, with their whitespace collapsed, as records added them:
+`Builder` holds a plumb-core `Sites`, the sites' items by domain as a node holds them (each as its stored line), and each `add_*` call merges into it, so sources can come in any order. Names and kinds are added as the seed has them, with their whitespace collapsed, as records added them:
 
 - **Ranks** keep the best (lowest) rank a domain has. Entries without a valid registrable domain or with rank 0 are dropped.
 - **WAT data** carries no crawl time, so its homepage fields only fill fields that are still empty. Link text comes only from links to a site's front page (text on a deeper link names the page, not the site), counted once per linking site, and generic texts ("click here", "official website") are dropped. A domain seen only as a link target gets a site of its own, which is how WAT files discover sites the rank lists lack.
 - **Official websites** count only when the claim is on the domain's own front page (`OfficialSite::is_root_homepage`): `https://www.ox.ac.uk/` makes `ox.ac.uk` Oxford's site, while a college on a subdomain or a band at `linktr.ee/...` grants nothing to the parent. An inner page counts when no item claims the front page and the item's names name the domain. A front page claimed by more than five items is a shared host and is skipped, unless one item owns it. When several items claim a front page, one with three times the sitelinks of each other gives the country, kinds, description and intro; otherwise only the country and kinds they share count.
-- **`finish(top_n)`** gives each subdomain site (`news.ycombinator.com`) the ranks of its parent domain, which the rank lists only know, then keeps the `top_n` sites with the best `link_score`, best first.
+- **`finish(top_n)`** gives each subdomain site (`news.ycombinator.com`) the ranks of its parent domain, which the rank lists only know, then keeps the `top_n` sites with the best `link_score`, best first, as a plumb-core `SiteList` of their stored lines.
 
 > [!NOTE]
-> The builder holds every site in memory, those it knows only the ranks of as their ranks and the others as their items. Common Crawl's ranks file lists over 100 million domains, and each million rows read takes about 0.9 GB until the sites are written, so `load_cc_domain_ranks` stops at `DEFAULT_CC_RANKS_LIMIT` (1,000,000) rows unless given a limit, and `plumb ingest` reads twice `--top` rows unless `--limit-per-source` says otherwise.
+> The builder holds every site in memory, those it knows only the ranks of as their ranks and the others as their stored lines. Common Crawl's ranks file lists over 100 million domains, and each million rows read takes about 0.9 GB until the sites are written, so `load_cc_domain_ranks` stops at `DEFAULT_CC_RANKS_LIMIT` (1,000,000) rows unless given a limit, and `plumb ingest` reads twice `--top` rows unless `--limit-per-source` says otherwise.
 
 ### Downloads
 

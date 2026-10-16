@@ -25,7 +25,7 @@ use tracing::info;
 
 use plumb_node::cli::parse_positive;
 use plumb_node::crawl::target_for;
-use plumb_node::records::{load_sites, replace_sites, sites_by_link_score};
+use plumb_node::records::{load_sites, replace_sites};
 use plumb_node::runtime;
 
 #[derive(Debug, Args)]
@@ -119,17 +119,17 @@ impl PageText {
 /// `plumb-tools fetch-text`.
 pub fn run_fetch_text(args: FetchTextArgs) -> Result<()> {
     let sites = load_sites(&args.records)?;
-    let mut wanted: Vec<&Item> = sites_by_link_score(&sites)
-        .into_iter()
+    let mut wanted: Vec<Item> = sites
+        .by_link_score()
         .filter(|site| site::redirect(site).is_none())
         .take(args.top)
         .collect();
-    let mut seen: HashSet<&str> = wanted.iter().map(|site| site.id.as_str()).collect();
+    let mut seen: HashSet<String> = wanted.iter().map(|site| site.id.clone()).collect();
     let mut missing = 0;
     for path in &args.domains {
         for domain in read_domains(path)? {
             match sites.get(&domain) {
-                Some(site) if seen.insert(site.id.as_str()) => wanted.push(site),
+                Some(site) if seen.insert(site.id.clone()) => wanted.push(site),
                 Some(_) => {}
                 None => missing += 1,
             }
@@ -138,7 +138,7 @@ pub fn run_fetch_text(args: FetchTextArgs) -> Result<()> {
     if missing > 0 {
         info!("{missing} listed domains have no record and are skipped");
     }
-    let targets: Vec<_> = wanted.iter().map(|site| target_for(*site)).collect();
+    let targets: Vec<_> = wanted.iter().map(target_for).collect();
     let total = targets.len();
     println!("fetching {total} homepages, {} at a time", args.concurrency);
 
@@ -248,15 +248,15 @@ pub fn run_terms(args: TermsArgs) -> Result<()> {
     let (mut with_terms, mut words, mut bytes) = (0usize, 0usize, 0usize);
     for (i, terms, ms) in results.into_inner().unwrap() {
         times.push(ms);
-        if terms.is_empty() || sites.get(&pages[i].domain).is_none() {
+        if terms.is_empty() || !sites.contains(&pages[i].domain) {
             continue;
         }
         with_terms += 1;
         words += terms.iter().collect::<HashSet<_>>().len();
         bytes += terms.iter().map(|t| t.len() + 1).sum::<usize>();
-        site::set_terms(sites.entry(&pages[i].domain), terms);
+        sites.update(&pages[i].domain, |site| site::set_terms(site, terms));
     }
-    let written = replace_sites(&args.out, sites_by_link_score(&sites))?;
+    let written = replace_sites(&args.out, &sites.into_sorted())?;
 
     times.sort_by(f64::total_cmp);
     let pct = |p: f64| {
@@ -315,8 +315,6 @@ impl Picker {
 
 #[cfg(test)]
 mod tests {
-    use plumb_node::records::{load_records, replace_records, sorted_by_link_score};
-
     use super::*;
 
     #[test]
@@ -395,7 +393,7 @@ mod tests {
 
         // What a record set made of the same file writes.
         let picker = Picker::new(&args());
-        let mut set = load_records(&records).unwrap();
+        let mut set = crate::test_sites::load_records(&records);
         for page in &pages {
             let terms = picker.terms(&page.full_text());
             if !terms.is_empty() && set.get(&page.domain).is_some() {
@@ -403,7 +401,7 @@ mod tests {
             }
         }
         let expected = dir.path().join("expected.jsonl");
-        replace_records(&expected, sorted_by_link_score(&set)).unwrap();
+        crate::test_sites::write_sorted(&expected, &set);
         assert_eq!(
             String::from_utf8(std::fs::read(&out).unwrap()).unwrap(),
             String::from_utf8(std::fs::read(&expected).unwrap()).unwrap()

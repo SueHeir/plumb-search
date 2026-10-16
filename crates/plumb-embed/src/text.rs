@@ -55,6 +55,25 @@ pub fn site_text_words(site: &Item, words: usize) -> String {
         .chain(link_texts)
         .chain(headings.iter().map(String::as_str))
         .chain(site.text.as_deref());
+    joined(parts, words)
+}
+
+/// The text of a page to embed: its title, the line under it and its
+/// snippet (for a Wikipedia article, its description and lead), joined as
+/// [`site_text`] joins a site's parts and cut at `words` words.
+pub fn page_text(
+    title: Option<&str>,
+    about: Option<&str>,
+    snippet: Option<&str>,
+    words: usize,
+) -> String {
+    joined([title, about, snippet].into_iter().flatten(), words)
+}
+
+/// `parts` in Unicode NFC with their whitespace collapsed, a part equal to
+/// an earlier one (ignoring case) left out, joined by ". " and cut at
+/// `words` words.
+fn joined<'a>(parts: impl Iterator<Item = &'a str>, words: usize) -> String {
     let mut seen = HashSet::new();
     let mut kept = Vec::new();
     for part in parts {
@@ -366,5 +385,24 @@ mod tests {
             .collect();
         site::set_link_texts(&mut linked, &texts);
         assert_eq!(site_text(&linked), "Chicago Tribune. chicago news. a. b. c");
+    }
+
+    #[test]
+    fn page_text_joins_title_description_and_lead() {
+        assert_eq!(
+            page_text(
+                Some("Napoleon"),
+                Some("French emperor (1769–1821)"),
+                Some("Napoleon  Bonaparte was a French\nmilitary officer"),
+                MAX_TEXT_WORDS
+            ),
+            "Napoleon. French emperor (1769–1821). Napoleon Bonaparte was a French military officer"
+        );
+        assert_eq!(
+            page_text(Some("Iron lung"), None, Some("iron lung"), 100),
+            "Iron lung"
+        );
+        assert_eq!(page_text(Some("a b c"), None, None, 2), "a b");
+        assert_eq!(page_text(None, None, None, 100), "");
     }
 }
