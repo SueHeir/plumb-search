@@ -199,8 +199,9 @@ impl SiteRecord {
         site.stored_item_as_is()
     }
 
-    /// [`SiteRecord::to_stored_item`] of the record as it is, not cleaned.
-    pub(crate) fn stored_item_as_is(mut self) -> Item {
+    /// [`SiteRecord::to_stored_item`] of the record as it is, not cleaned:
+    /// the item a stored line holds of it ([`crate::stored`]).
+    pub fn stored_item_as_is(mut self) -> Item {
         let mut crawl = Map::new();
         if let Some(tried) = self.crawl_attempted_at {
             crawl.insert("tried".into(), json!(tried));
@@ -225,8 +226,11 @@ impl SiteRecord {
         item
     }
 
-    /// The site a stored item holds ([`SiteRecord::to_stored_item`]).
-    pub(crate) fn from_stored_item(item: &Item) -> Result<SiteRecord> {
+    /// The site a stored item holds ([`SiteRecord::to_stored_item`]), as
+    /// it is: the record of [`SiteRecord::stored_item_as_is`]. Code that
+    /// makes sites as items hands them on this way to what still takes
+    /// records, such as the journal's changes.
+    pub fn from_stored_item(item: &Item) -> Result<SiteRecord> {
         let mut record = SiteRecord::read_item(item, true)?;
         if let Some(crawl) = item.fields.get("crawl") {
             record.crawl_attempted_at = crawl.get("tried").and_then(Value::as_u64);

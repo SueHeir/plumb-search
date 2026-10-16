@@ -1171,12 +1171,13 @@ impl Fetcher for NodeFetcher<'_> {
 }
 
 /// What a node shares of a batch's results with the network, before the
-/// denylist: the sites [`plumb_crawl::to_records`] makes of them, each
-/// fetched homepage with its icon ([`crate::icons::attach`]).
+/// denylist: the sites [`plumb_crawl::to_items`] makes of them, each
+/// fetched homepage with its icon ([`crate::icons::attach`]), as the
+/// records the network still takes ([`crate::crawl::to_record`]).
 pub(super) fn published_crawl(results: &[CrawlResult]) -> Vec<SiteRecord> {
-    let mut records = plumb_crawl::to_records(results);
-    crate::icons::attach(&mut records, results);
-    records
+    let mut sites = plumb_crawl::to_items(results);
+    crate::icons::attach(&mut sites, results);
+    sites.iter().map(crate::crawl::to_record).collect()
 }
 
 /// Crawls the rest of the round under way, then puts an index of the result
@@ -2146,9 +2147,10 @@ mod tests {
         assert_eq!(network_rebuild_gap(1_500), 4_500);
     }
 
-    /// What a round keeps of `record`.
+    /// What a round keeps of `record`, read as its stored item.
     fn round(record: SiteRecord) -> RoundSite {
-        RoundSite::of(&record, &crate::about::Topics::default(), &Keep::default())
+        let site = record.stored_item_as_is();
+        RoundSite::of(&site, &crate::about::Topics::default(), &Keep::default())
     }
 
     #[test]

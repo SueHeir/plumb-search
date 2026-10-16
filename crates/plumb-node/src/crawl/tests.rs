@@ -385,7 +385,7 @@ fn linking_domains_count_over_the_whole_run() {
         fetched("b.com", 1, &["hub.com"]),
         fetched("c.com", 1, &["hub.com", "other.com"]),
     ];
-    let unbatched: RecordSet = to_records(&results).into_iter().collect();
+    let unbatched: RecordSet = to_items(&results).iter().map(to_record).collect();
     assert_eq!(unbatched.get("hub.com").unwrap().signals.linking_domains, 3);
 
     let mut set = RecordSet::new();

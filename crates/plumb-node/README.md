@@ -44,7 +44,7 @@ flowchart LR
 | [node.rs](src/node.rs) | `NodeConfig`, `NodeSettings`, `Status`, `start`, `NodeHandle`, `supervise` and the shared state `Inner` |
 | [node/worker.rs](src/node/worker.rs) | Setup, crawl rounds, index builds and the refresh schedule, with retries |
 | [node/store.rs](src/node/store.rs) | Data folder paths, the folder lock, `state.json`, numbered index folders |
-| [node/round.rs](src/node/round.rs), [node/schedule.rs](src/node/schedule.rs) | The slim view of each site a crawl round holds; workload presets and crawl hours |
+| [node/round.rs](src/node/round.rs), [node/schedule.rs](src/node/schedule.rs) | The slim view of each site a crawl round holds, read off its stored item; workload presets and crawl hours |
 | [node/network.rs](src/node/network.rs) | Joining plumb-net: the records inbox, buckets, popularity, `--publish-records` |
 | [node/fill.rs](src/node/fill.rs), [node/site_set.rs](src/node/site_set.rs), [node/trim.rs](src/node/trim.rs) | Filling free space from the set of sites or trusted nodes (and first setup from them); fetching the parts of the set it reads; staying under the storage limit |
 | [node/pages.rs](src/node/pages.rs), [node/places.rs](src/node/places.rs), [node/newer.rs](src/node/newer.rs) | Page set and places files and their indexes; newer files from trusted nodes |
@@ -54,7 +54,7 @@ flowchart LR
 | [node/features.rs](src/node/features.rs), [node/backup.rs](src/node/backup.rs), [node/control.rs](src/node/control.rs), [node/journal.rs](src/node/journal.rs) | `features.json`; backups; the remote control token; the activity log |
 | **Records and crawling** | |
 | [records.rs](src/records.rs), [outline.rs](src/outline.rs) | `records.jsonl` and its journal, loaded as records or as sites' stored items; reading it a site at a time and building an index, buckets and feeds from each site's stored item that way |
-| [crawl.rs](src/crawl.rs), [dead.rs](src/dead.rs), [icons.rs](src/icons.rs) | Which homepages a round fetches and how results merge (shared with `plumb-tools crawl`); dead sites; site icons |
+| [crawl.rs](src/crawl.rs), [dead.rs](src/dead.rs), [icons.rs](src/icons.rs) | Which homepages a round fetches and how results merge (shared with `plumb-tools crawl`): a crawl's results are sites' stored items, made records for the journal and the network in one place (`crawl::to_record`); dead sites; site icons |
 | [sets.rs](src/sets.rs), [site_rules.rs](src/site_rules.rs) | Checking and reading `plumb-format` sets; signed site rules |
 | **Search features** | |
 | [meaning.rs](src/meaning.rs) | Search by meaning: models, vectors files, query embedding |

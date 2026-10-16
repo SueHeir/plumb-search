@@ -5961,6 +5961,7 @@ dependencies = [
  "html5ever",
  "image",
  "plumb-core",
+ "plumb-format",
  "psl",
  "regex-automata 0.4.18",
  "reqwest",
