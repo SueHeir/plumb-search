@@ -11,8 +11,8 @@ use clap::Args;
 use plumb_embed::{Vectors, MODEL_BASE_URL};
 use plumb_node::block_on;
 use plumb_node::cli::parse_positive;
-use plumb_node::meaning::{embed_records, ensure_model, load_embedder, load_vectors_for};
-use plumb_node::records::load_records;
+use plumb_node::meaning::{embed_all, ensure_model, load_embedder, load_vectors_for};
+use plumb_node::records::load_sites;
 
 #[derive(Debug, Args)]
 pub struct EmbedArgs {
@@ -37,16 +37,16 @@ pub struct EmbedArgs {
 pub fn run(args: EmbedArgs) -> Result<()> {
     block_on(ensure_model(&args.model, MODEL_BASE_URL))??;
     let embedder = load_embedder(&args.model)?;
-    let records = load_records(&args.records)
+    let sites = load_sites(&args.records)
         .with_context(|| format!("loading records {}", args.records.display()))?;
     let vectors = RwLock::new(load_vectors_for(&args.vectors, &embedder)?);
     let threads = args
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let embedded = embed_records(
+    let embedded = embed_all(
         &embedder,
         &vectors,
-        records,
+        sites,
         threads,
         &|| false,
         &mut |vectors| Vectors::save_shared(vectors, &args.vectors),
@@ -123,10 +123,9 @@ mod tests {
         let embedder = Embedder::load(&model).unwrap();
         assert_eq!(
             embedder
-                .embed(&plumb_embed::site_text(&record(
-                    "tesla.com",
-                    "Tesla electric cars and solar energy"
-                )))
+                .embed(&plumb_embed::site_text(
+                    &record("tesla.com", "Tesla electric cars and solar energy").to_stored_item()
+                ))
                 .unwrap(),
             tesla
         );

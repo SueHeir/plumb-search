@@ -32,10 +32,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
+use plumb_core::sites::Sites;
 #[cfg(doc)]
 use plumb_core::SITES_VERSION;
-use plumb_core::{now_unix, parent_domain, RecordSet, SiteRecord, SUBDOMAIN_SITE_NAMES};
+use plumb_core::{now_unix, parent_domain, site, SiteRecord, SUBDOMAIN_SITE_NAMES};
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
+use plumb_format::Item;
 use plumb_ingest::{
     attach_facts, attach_intros, crowded_front_pages, download, facts, intros, kind_sites,
     load_cc_domain_ranks, load_intros, load_misread_official_sites, load_site_facts, load_tranco,
@@ -55,7 +57,7 @@ use crate::crawl::{
 };
 use crate::icons::IconStore;
 use crate::records::{
-    load_records, replace_records_with_budget, sorted_by_link_score, Change, RecordStore,
+    load_sites, replace_sites_with_budget, sites_by_link_score, Change, RecordStore,
 };
 use crate::web::{duration_words, group_thousands};
 
@@ -359,7 +361,7 @@ fn idle_detail(config: &NodeConfig) -> &'static str {
 /// service, so search works within a minute or two. The rest of the seed
 /// data, whose downloads take many minutes (Wikidata's above all), is
 /// folded in right after by [`complete_seed`].
-async fn set_up(inner: &Arc<Inner>) -> Result<()> {
+pub(super) async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     let from_network = tokio::select! {
         records = super::fill::seed_from_network(inner) => records?,
         () = inner.stopped() => return Err(Stopped.into()),
@@ -371,7 +373,14 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
                 saved.start_over(fresh);
                 saved.add_downloaded(downloaded, now_unix());
             })?;
-            save_and_build_seed(inner, records)
+            // The network still brings records until it carries items
+            // (step 9 of the data format plan): each becomes its stored
+            // item as it is, the line the records file held of it.
+            let sites = records
+                .into_iter()
+                .map(SiteRecord::stored_item_as_is)
+                .collect();
+            save_and_build_seed(inner, sites)
         })
         .await?;
         return put_in_service(inner, built, true).await;
@@ -387,7 +396,7 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     };
     let downloaded = store::dir_size(&inner.paths.seed).saturating_sub(before);
     let built = blocking(inner, move |inner| {
-        let (records, _) = seed_records(inner, &files)?;
+        let (sites, _) = seed_sites(inner, &files)?;
         let mut fresh = SavedState::fresh(inner.config.initial_crawl);
         fresh.wikidata_missing = true;
         fresh.quick_start = true;
@@ -396,21 +405,21 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
             saved.start_over(fresh);
             saved.add_downloaded(downloaded, now_unix());
         })?;
-        save_and_build_seed(inner, records)
+        save_and_build_seed(inner, sites)
     })
     .await?;
     put_in_service(inner, built, true).await
 }
 
-/// Saves the records of a setup as the records file ([`save_seed_records`])
+/// Saves the sites of a setup as the records file ([`save_seed_sites`])
 /// and, once they are dropped, builds an index from the file
 /// ([`build_from_file`]), so the two never take memory at once. Crawling
 /// only ([`NodeConfig::crawl_only`]), no index: `None`, noting how many
 /// sites were saved.
-fn save_and_build_seed(inner: &Inner, records: Vec<SiteRecord>) -> Result<Option<ServingIndex>> {
+fn save_and_build_seed(inner: &Inner, seed: Vec<Item>) -> Result<Option<ServingIndex>> {
     let _records = inner.hold_records();
-    let sites = save_seed_records(inner, &records)?;
-    drop(records);
+    let sites = save_seed_sites(inner, &seed)?;
+    drop(seed);
     inner.check_stop()?;
     if inner.config.crawl_only {
         inner.round_sites.store(sites as u64, Ordering::SeqCst);
@@ -437,7 +446,7 @@ fn build_from_file_unless_crawling_only(inner: &Inner) -> Result<Option<ServingI
 ///
 /// A failure of Wikidata only sets the time of the next try: it is shown in
 /// the status, but does not hold up other work.
-async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
+pub(super) async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     let from_network = tokio::select! {
         done = complete_seed_from_network(inner) => done?,
         () = inner.stopped() => return Err(Stopped.into()),
@@ -486,15 +495,15 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     let wikidata_missing = wikidata_err.is_some();
     let built = blocking(inner, move |inner| {
         let _records = inner.hold_records();
-        let (seed, void) = seed_records(inner, &files)?;
+        let (seed, void) = seed_sites(inner, &files)?;
         inner.set_step(Step::Ingesting, "Reading the site records");
-        let mut set = load_records(&inner.paths.records)?;
+        let mut set = load_sites(&inner.paths.records)?;
         let before = set.len();
         if quick {
             // Quick records the full seed leaves out are dropped, unless a
             // crawl reached them or found links to them.
-            set.retain(|record| {
-                record.crawl_attempted_at.is_some() || !record.link_texts.is_empty()
+            set.retain(|held| {
+                site::crawl_marks(held).tried.is_some() || !site::link_texts(held).is_empty()
             });
         }
         take_back_misread(&files, &mut set);
@@ -510,20 +519,20 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             .get(plumb_core::HOME_SITE)
             .is_some_and(|home| home.title.is_some());
         if let Some(change) = home_site_change(inner, titled) {
-            change.apply(&mut set);
+            change.apply_to_sites(&mut set);
         }
         inner.check_stop()?;
-        let records = sorted_by_link_score(&set);
+        let sites = sites_by_link_score(&set);
         inner.set_step(
             Step::Ingesting,
             format!(
                 "Saving {} site records",
-                group_thousands(records.len() as u64)
+                group_thousands(sites.len() as u64)
             ),
         );
-        replace_records_with_budget(
+        replace_sites_with_budget(
             &inner.paths.records,
-            records.iter().copied(),
+            sites.iter().copied(),
             inner.storage.as_ref(),
         )?;
         inner.update_saved(|saved| {
@@ -534,10 +543,10 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
         })?;
         info!(
             "folded the seed data into the records: {} sites (there were {before})",
-            records.len(),
+            sites.len(),
         );
         // The build reads the file, a record at a time.
-        drop(records);
+        drop(sites);
         drop(set);
         inner.check_stop()?;
         build_from_file(inner)
@@ -599,7 +608,7 @@ async fn complete_seed_from_network(inner: &Arc<Inner>) -> Result<bool> {
 /// items with 3 sitelinks or more, so it holds [`Inner::one_big_job`]. A
 /// node stopped part way does it again on its next start: the changes come
 /// out the same.
-async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
+pub(super) async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
     info!("the lists of sites changed: updating the records from the seed data");
     blocking(inner, |inner| {
         let changes = {
@@ -707,20 +716,41 @@ fn subdomain_changes(seed: &Path) -> Result<Vec<Change>> {
         .collect();
     let mut builder = Builder::new();
     builder.add_official_sites(&sites);
-    for record in builder.finish(None) {
+    for held in builder.finish(None) {
+        let record = seed_record(&held);
         changes.push(if parent_domain(&record.domain).is_some() {
             Change::SubdomainSite { record }
         } else {
             Change::Merge { record }
         });
     }
-    for (site, name) in SUBDOMAIN_SITE_NAMES {
-        let mut record = SiteRecord::new(*site);
-        record.signals.official_site = true;
-        record.add_alias(name);
+    for (subsite, name) in SUBDOMAIN_SITE_NAMES {
+        let record = seed_record(&named_subdomain_site(subsite, name));
         changes.push(Change::SubdomainSite { record });
     }
     Ok(changes)
+}
+
+/// A subdomain site the seed data may not name ([`SUBDOMAIN_SITE_NAMES`]),
+/// as [`subdomain_changes`] makes it: an official site with its name.
+fn named_subdomain_site(subsite: &str, name: &str) -> Item {
+    let mut held = site::new(subsite);
+    let mut signals = site::signals(&held);
+    signals.official_site = true;
+    site::set_signals(&mut held, &signals);
+    site::add_alias(&mut held, name);
+    held
+}
+
+/// A site the seed made, as the record the journal's changes still take:
+/// the one place where the seed's sites become records
+/// ([`SiteRecord::from_stored_item`]), until the store keeps items (step
+/// 7a-2 of the data format plan). It reads back every field the seed
+/// sets, so the record is the one the seed made before it made items.
+fn seed_record(site: &Item) -> SiteRecord {
+    // Only an item that is not a site, or headlines that do not read,
+    // fail; the seed's sites are made by `site::new` and have none.
+    SiteRecord::from_stored_item(site).expect("a seed site reads as a record")
 }
 
 /// The site the built-in lists give `site`'s claim, when the site rules
@@ -732,9 +762,9 @@ fn moved_from(site: &OfficialSite) -> Option<String> {
 }
 
 /// Takes back what Wikidata claims that earlier versions misread gave the
-/// records ([`plumb_ingest::OfficialSite::misread`]), for a full fold of
-/// the seed: the domain's own seed record adds its facts back after.
-fn take_back_misread(files: &SeedFiles, set: &mut RecordSet) {
+/// sites ([`plumb_ingest::OfficialSite::misread`]), for a full fold of
+/// the seed: the domain's own seed site adds its facts back after.
+fn take_back_misread(files: &SeedFiles, set: &mut Sites) {
     let Ok(wikidata) = &files.wikidata else {
         return;
     };
@@ -956,11 +986,11 @@ fn is_recent(path: &Path) -> bool {
             .map_or(true, |age| age < SEED_MAX_AGE)
 }
 
-/// Folds the seed files into site records and keeps the best
-/// [`NodeConfig::sites`], best first. Also gives the front page claims
-/// that count for nothing ([`OfficialSite::claims_nothing`]), to take back
-/// off records an earlier fold made with them.
-fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<(Vec<SiteRecord>, Vec<OfficialSite>)> {
+/// Folds the seed files into sites, each its stored item, and keeps the
+/// best [`NodeConfig::sites`], best first. Also gives the front page
+/// claims that count for nothing ([`OfficialSite::claims_nothing`]), to
+/// take back off sites an earlier fold made with them.
+fn seed_sites(inner: &Inner, files: &SeedFiles) -> Result<(Vec<Item>, Vec<OfficialSite>)> {
     let wikidata = files.wikidata.as_ref().ok();
     let mut void = Vec::new();
     let sources = 1 + usize::from(wikidata.is_some()) + usize::from(files.cc_ranks.is_some());
@@ -1020,29 +1050,28 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<(Vec<SiteRecord>, Ve
     }
 
     let found = builder.len();
-    let records = builder.finish(Some(inner.config.sites));
+    let sites = builder.finish(Some(inner.config.sites));
     info!(
         "kept the best {} of {found} sites from the seed data",
-        records.len()
+        sites.len()
     );
-    Ok((records, void))
+    Ok((sites, void))
 }
 
-/// Saves the records of a setup as the records file. Returns how many it
+/// Saves the sites of a setup as the records file. Returns how many it
 /// wrote.
-pub(super) fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<usize> {
+pub(super) fn save_seed_sites(inner: &Inner, sites: &[Item]) -> Result<usize> {
     inner.set_step(
         Step::Ingesting,
         format!(
             "Saving {} site records",
-            group_thousands(records.len() as u64)
+            group_thousands(sites.len() as u64)
         ),
     );
-    let written =
-        replace_records_with_budget(&inner.paths.records, records, inner.storage.as_ref())?;
+    let written = replace_sites_with_budget(&inner.paths.records, sites, inner.storage.as_ref())?;
     info!(
         "saved {} site records in {}",
-        records.len(),
+        sites.len(),
         inner.paths.records.display()
     );
     Ok(written)
@@ -2008,6 +2037,20 @@ impl Backoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::records::load_records;
+
+    #[test]
+    fn named_subdomain_sites_are_the_records_they_were() {
+        for (subsite, name) in SUBDOMAIN_SITE_NAMES {
+            // What subdomain_changes made of them on records.
+            let mut record = SiteRecord::new(*subsite);
+            record.signals.official_site = true;
+            record.add_alias(name);
+            let held = named_subdomain_site(subsite, name);
+            assert_eq!(held, record.clone().stored_item_as_is(), "{subsite}");
+            assert_eq!(seed_record(&held), record, "{subsite}");
+        }
+    }
 
     /// Set in the copy of the test binary that
     /// [`claims_the_site_rules_move_are_taken_back_and_get_records`] runs,

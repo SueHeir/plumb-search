@@ -10,10 +10,12 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::RecordSet;
+use plumb_core::site;
+use plumb_core::sites::Sites;
 use plumb_embed::{
     site_text_words, text_hash, Embedder, ModelId, Vectors, MODEL_FILES, MODEL_NAME,
 };
+use plumb_format::Item;
 use plumb_index::Meaning;
 use tracing::{info, warn};
 
@@ -307,7 +309,7 @@ pub fn load_vectors_for(path: &Path, embedder: &Embedder) -> Result<Vectors> {
     }
 }
 
-/// What [`embed_records`] did.
+/// What [`embed_all`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Embedded {
     /// Sites embedded.
@@ -316,57 +318,50 @@ pub struct Embedded {
     pub failed: usize,
 }
 
-/// Makes a vector for each of `records` whose text changed since its
-/// vector was made, best [`plumb_core::SiteRecord::link_score`] first, on `threads`
-/// threads, and drops the vectors of sites not in `records`. Calls `save`
+/// Makes a vector for each of `sites` whose text changed since its
+/// vector was made, best [`site::link_score`] first, on `threads`
+/// threads, and drops the vectors of sites not in `sites`. Calls `save`
 /// after every [`SAVE_EVERY`] sites and at the end, and logs progress every
 /// [`REPORT_EVERY`], when it also tells `progress` how many of how many
 /// are done. Stops early, after a save, once `stop` says so.
 ///
-/// The records are taken, and each is freed once its text is read: a run
-/// can take hours, and holding every record that long, next to the copy an
+/// The sites are taken, and each is freed once its text is read: a run
+/// can take hours, and holding every site that long, next to the copy an
 /// index build or crawl loads, is more than a small server has. Only the
 /// domain, hash and text of the sites to embed are kept.
-pub fn embed_records(
+pub fn embed_all(
     embedder: &Embedder,
     vectors: &RwLock<Vectors>,
-    records: RecordSet,
+    sites: Sites,
     threads: usize,
     stop: &(dyn Fn() -> bool + Sync),
     save: &mut dyn FnMut(&RwLock<Vectors>) -> Result<()>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
-    let todo = sites_to_embed(vectors, records, embedder.text_words());
+    let todo = sites_to_embed(vectors, sites, embedder.text_words());
     embed_sites(embedder, vectors, todo, threads, stop, save, progress)
 }
 
-/// A site [`embed_records`] makes a vector for: its link score, domain,
+/// A site [`embed_all`] makes a vector for: its link score, domain,
 /// text hash and text.
 pub(crate) type ToEmbed = (f32, String, plumb_embed::TextHash, String);
 
-/// The first half of [`embed_records`]: drops the vectors of sites not in
-/// `records`, or with no text there, and returns the sites to embed, best
-/// first. The records are freed by the time it returns.
+/// The first half of [`embed_all`]: drops the vectors of sites not in
+/// `sites`, or with no text there, and returns the sites to embed, best
+/// first. The sites are freed by the time it returns.
 pub(crate) fn sites_to_embed(
     vectors: &RwLock<Vectors>,
-    records: RecordSet,
+    sites: Sites,
     words: usize,
 ) -> Vec<ToEmbed> {
-    let total = records.len();
+    let total = sites.len();
     let mut domains: HashSet<u64> = HashSet::new();
     let mut todo = Vec::new();
     {
         let vectors = vectors.read_locked();
-        for record in records {
-            let text = site_text_words(&record, words);
-            if text.is_empty() {
-                continue;
-            }
-            domains.insert(domain_hash(&record.domain));
-            let hash = text_hash(&text);
-            if vectors.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
-                let score = record.link_score();
-                todo.push((score, record.domain, hash, text));
+        for held in sites {
+            if let Some(site) = to_embed(held, words, &mut domains, &vectors) {
+                todo.push(site);
             }
         }
     }
@@ -386,8 +381,9 @@ pub(crate) fn sites_to_embed(
 }
 
 /// [`sites_to_embed`] for a node, reading the records file at `path` a
-/// record at a time (its journal folded in first, see [`crate::outline`])
-/// rather than holding every record: drops the vectors of sites not in the
+/// site at a time, each the stored item the file holds
+/// ([`crate::outline::for_each_site`]), once its journal is folded in,
+/// rather than holding every site: drops the vectors of sites not in the
 /// file, or with no text there (a homepage now read as a placeholder,
 /// [`plumb_core::is_stand_in_homepage`]), and returns the best `max` sites to
 /// embed, best first, and whether
@@ -411,16 +407,10 @@ pub(crate) fn sites_to_embed_from_file(
     let best_first = |a: &ToEmbed, b: &ToEmbed| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1));
     {
         let held = vectors.read_locked();
-        crate::outline::for_each_record(path, |record| {
+        crate::outline::for_each_site(path, |site| {
             total += 1;
-            let text = site_text_words(&record, words);
-            if text.is_empty() {
-                return;
-            }
-            domains.insert(domain_hash(&record.domain));
-            let hash = text_hash(&text);
-            if held.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
-                todo.push((record.link_score(), record.domain, hash, text));
+            if let Some(site) = to_embed(site, words, &mut domains, &held) {
+                todo.push(site);
                 if todo.len() >= 2 * max {
                     todo.select_nth_unstable_by(max, best_first);
                     todo.truncate(max);
@@ -463,17 +453,39 @@ pub(crate) fn wanted_texts(
         .fold()?;
     let mut wanted = std::collections::HashMap::new();
     let held = vectors.read_locked();
-    crate::outline::for_each_record(path, |record| {
-        let text = site_text_words(&record, words);
+    crate::outline::for_each_site(path, |site| {
+        let text = site_text_words(&site, words);
         if text.is_empty() {
             return;
         }
         let hash = text_hash(&text);
-        if held.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
-            wanted.insert(record.domain, hash);
+        if held.get(&site.id).map(|(saved, _)| saved) != Some(&hash) {
+            wanted.insert(site.id, hash);
         }
     })?;
     Ok(wanted)
+}
+
+/// `site` to embed, unless it has no text (a homepage now read as a
+/// placeholder, [`plumb_core::is_stand_in_homepage`]) or `held` has its
+/// vector of its text already. A site with text has its domain's hash
+/// added to `domains`, the sites whose vectors are kept.
+fn to_embed(
+    site: Item,
+    words: usize,
+    domains: &mut HashSet<u64>,
+    held: &Vectors,
+) -> Option<ToEmbed> {
+    let text = site_text_words(&site, words);
+    if text.is_empty() {
+        return None;
+    }
+    domains.insert(domain_hash(&site.id));
+    let hash = text_hash(&text);
+    if held.get(&site.id).map(|(saved, _)| saved) == Some(&hash) {
+        return None;
+    }
+    Some((site::link_score(&site), site.id, hash, text))
 }
 
 /// A 64-bit hash of `domain`, the same in every run.
@@ -484,7 +496,7 @@ fn domain_hash(domain: &str) -> u64 {
     hasher.finish()
 }
 
-/// The second half of [`embed_records`]: embeds `todo`.
+/// The second half of [`embed_all`]: embeds `todo`.
 pub(crate) fn embed_sites(
     embedder: &Embedder,
     vectors: &RwLock<Vectors>,
@@ -657,12 +669,18 @@ pub(crate) async fn download_file_with_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plumb_core::SiteRecord;
 
-    fn record(domain: &str, title: &str) -> SiteRecord {
-        let mut record = SiteRecord::new(domain);
-        record.title = Some(title.into());
-        record
+    fn titled(domain: &str, title: &str) -> Item {
+        let mut site = site::new(domain);
+        site.title = Some(title.into());
+        site
+    }
+
+    fn ranked(mut site: Item, rank: u32) -> Item {
+        let mut signals = site::signals(&site);
+        signals.tranco_rank = Some(rank);
+        site::set_signals(&mut site, &signals);
+        site
     }
 
     #[test]
@@ -672,14 +690,12 @@ mod tests {
         plumb_embed::write_test_model(&model).unwrap();
         let embedder = Embedder::load(&model).unwrap();
         let vectors = RwLock::new(Vectors::new(embedder.id(), embedder.dim()));
-        let mut obscure = record("aaa.example", "Some small site");
-        obscure.signals.tranco_rank = Some(900_000);
-        let mut popular = record("zzz.example", "A big site");
-        popular.signals.tranco_rank = Some(10);
+        let obscure = ranked(titled("aaa.example", "Some small site"), 900_000);
+        let popular = ranked(titled("zzz.example", "A big site"), 10);
         // Stops after the first site.
         let asked = AtomicUsize::new(0);
         let stop = || asked.fetch_add(1, Ordering::Relaxed) >= 1;
-        embed_records(
+        embed_all(
             &embedder,
             &vectors,
             [obscure, popular].into_iter().collect(),
@@ -721,13 +737,13 @@ mod tests {
         let embedder = Embedder::load(&model).unwrap();
         let vectors = RwLock::new(Vectors::new(embedder.id(), embedder.dim()));
         let embed = |text: &str| {
-            let mut parked = record("parked.example", text);
-            parked.body_text = Some(text.into());
-            let records = [parked].into_iter().collect();
-            embed_records(
+            let mut parked = titled("parked.example", text);
+            parked.text = Some(text.into());
+            let sites = [parked].into_iter().collect();
+            embed_all(
                 &embedder,
                 &vectors,
-                records,
+                sites,
                 1,
                 &|| false,
                 &mut |_| Ok(()),

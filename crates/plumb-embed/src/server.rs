@@ -303,10 +303,10 @@ mod tests {
         assert_eq!(plain.text_words(), crate::MAX_TEXT_WORDS);
         assert_eq!(longer.text_words(), 3);
         assert_ne!(plain.id(), longer.id());
-        let mut record = plumb_core::SiteRecord::new("tesla.com");
-        record.title = Some("Tesla electric cars and solar".into());
-        assert_eq!(longer.site_text(&record), "Tesla electric cars");
-        assert_eq!(plain.site_text(&record), crate::site_text(&record));
+        let mut site = plumb_core::site::new("tesla.com");
+        site.title = Some("Tesla electric cars and solar".into());
+        assert_eq!(longer.site_text(&site), "Tesla electric cars");
+        assert_eq!(plain.site_text(&site), crate::site_text(&site));
     }
 
     #[test]

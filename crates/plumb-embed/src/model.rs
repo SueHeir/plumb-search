@@ -146,10 +146,10 @@ impl Embedder {
         }
     }
 
-    /// The text of `record` this model embeds ([`crate::site_text_words`]).
+    /// The text of `site` this model embeds ([`crate::site_text_words`]).
     #[cfg(test)]
-    pub fn site_text(&self, record: &plumb_core::SiteRecord) -> String {
-        crate::site_text_words(record, self.text_words())
+    pub fn site_text(&self, site: &plumb_core::site::Item) -> String {
+        crate::site_text_words(site, self.text_words())
     }
 
     /// The vector of a site's `text`: the model's output for its first
