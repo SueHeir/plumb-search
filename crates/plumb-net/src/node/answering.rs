@@ -20,14 +20,14 @@ use crate::scope::{SearchScope, MAX_SHARED_TRUST};
 use crate::store::BatchStore;
 
 /// Bucket `bucket` of `source`, each site as its item, with the proof of
-/// its signed crawl when `store` holds one.
+/// its signed crawl when `store` holds one that has not expired by `now`.
 pub(super) fn lookup(
     source: &dyn BucketSource,
     store: &Mutex<BatchStore>,
     bucket: u32,
+    now: u64,
 ) -> BucketResponse {
     let records = source.bucket(bucket).map(|lines| {
-        let now = now_unix();
         let sites: Vec<(String, String)> = lines
             .iter()
             .filter_map(|line| {
@@ -141,7 +141,7 @@ impl Task {
         let store = self.store.clone();
         let tx = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let response = lookup(&*source, &store, request.bucket);
+            let response = lookup(&*source, &store, request.bucket, now_unix());
             let _ = tx.send(Answer::Bucket(channel, response));
         });
     }
@@ -303,7 +303,7 @@ impl Task {
         let store = self.store.clone();
         let tx = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let response = lookup(&*source, &store, request.bucket);
+            let response = lookup(&*source, &store, request.bucket, now_unix());
             let sealed = match seal_response(sealer, &response) {
                 Ok(sealed) => Some(serde_bytes::ByteBuf::from(sealed)),
                 Err(err) => {

@@ -1,5 +1,7 @@
 //! The network node's tests.
 
+mod golden;
+
 use super::answering::holds_denied;
 use super::batches::{
     batch_chunks, by_crawl_epoch, delivery_bytes, max_delivery_bytes, queue_confirmed_delivery,
@@ -988,8 +990,11 @@ fn answers_are_the_same_whatever_the_shape_of_the_stored_lines() {
 
     let dir = tempfile::tempdir().unwrap();
     let store = Mutex::new(BatchStore::open(dir.path()).unwrap());
-    let answer = super::answering::lookup(&new, &store, 0);
-    assert_eq!(answer, super::answering::lookup(&old, &store, 0));
+    let answer = super::answering::lookup(&new, &store, 0, now_unix());
+    assert_eq!(
+        answer,
+        super::answering::lookup(&old, &store, 0, now_unix())
+    );
     let sent = answer.records.unwrap();
     assert_eq!(sent.len(), sites.len());
     for (sent, site) in sent.iter().zip(&sites) {

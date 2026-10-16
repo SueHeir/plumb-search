@@ -167,6 +167,24 @@ pub fn record_json(line: String) -> Result<String> {
     Ok(line)
 }
 
+/// The stored item of a site sent as the record's own JSON, as a
+/// `/plumb/fill/1` answer carries each ([`record_json`]): the item
+/// [`SiteRecord::stored_item_as_is`] makes of the record read from it, so
+/// that a node keeps a filled site as it kept the record. A crawl time no
+/// item can hold (past the year 9999) is refused, as a crawl from the
+/// future is ([`crate::site::set_crawled`]).
+pub fn read_record_json(line: &str) -> Result<Item> {
+    let record: SiteRecord = serde_json::from_str(line)?;
+    ensure!(
+        record
+            .crawled_at
+            .is_none_or(|at| crate::site_item::timestamp(at).is_some()),
+        "{} was crawled past the year 9999",
+        record.domain
+    );
+    Ok(record.stored_item_as_is())
+}
+
 /// What a stored line says of its site that putting sites in order and
 /// folding redirects needs, read without the rest of the line.
 #[derive(Debug, Deserialize)]
@@ -487,5 +505,22 @@ mod tests {
 
         let page = r#"{"site": {"id": "example.com", "kind": "page"}}"#;
         assert!(serde_json::from_str::<Change>(page).is_err());
+    }
+
+    /// A fill answer's record reads as the record's stored item, and back
+    /// as the same JSON, but for a crawl no item can date.
+    #[test]
+    fn a_record_s_json_reads_as_its_stored_item() {
+        for record in [full_record(), untidy_record(), SiteRecord::new("a.com")] {
+            let json = serde_json::to_string(&record).unwrap();
+            let site = read_record_json(&json).unwrap();
+            assert_eq!(site, record.clone().stored_item_as_is());
+            let line = item_as_line(&site).unwrap();
+            assert_eq!(record_json(String::from_utf8(line).unwrap()).unwrap(), json);
+        }
+        let mut late = full_record();
+        late.crawled_at = Some(300_000_000_000);
+        assert!(read_record_json(&serde_json::to_string(&late).unwrap()).is_err());
+        assert!(read_record_json("{\"title\": \"no domain\"}").is_err());
     }
 }

@@ -110,6 +110,8 @@ use self::html::{
 pub(crate) use self::html::{duration_words, http_url, time_ago};
 pub use self::html::{escape_html, group_thousands};
 use self::network::network_page;
+#[cfg(test)]
+pub(crate) use self::network::{rank_found, take_found};
 pub use self::panel::ADD_TO_FIREFOX_PATH;
 use self::params::{flag, SearchParams};
 use self::search::{

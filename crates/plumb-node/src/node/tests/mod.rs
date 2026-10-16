@@ -10,6 +10,7 @@ mod agents;
 mod crawl_golden;
 mod indexes_and_rounds;
 mod meaning;
+mod network_golden;
 mod owner;
 mod seed_golden;
 mod sets;

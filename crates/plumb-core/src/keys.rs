@@ -202,6 +202,12 @@ pub fn matches(record: &SiteRecord, keys: &[String]) -> bool {
     keys.iter().any(|k| mine.contains(k))
 }
 
+/// [`matches`] of a site's item ([`crate::site`]), by its [`site_keys`].
+pub fn site_matches(site: &Item, keys: &[String]) -> bool {
+    let mine = site_keys(site);
+    keys.iter().any(|k| mine.contains(k))
+}
+
 /// `record` cut down to what finding and ranking it by its keys needs: the
 /// [`KEY_LINK_TEXTS`] link texts whose keys count, without the sets of
 /// sites that use them, and none of the crawler's bookkeeping. What a

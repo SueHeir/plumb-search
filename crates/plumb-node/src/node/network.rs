@@ -307,22 +307,11 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
                 }
             };
             let plumb_net::node::RecordDelivery {
-                records: mut batch,
+                records: batch,
                 reservation,
                 acknowledgment,
             } = delivery;
-            // Crawling only, other nodes' crawls are not kept: they would
-            // only grow the records this node crawls from.
-            if receiver.config.crawl_only {
-                batch.clear();
-            }
-            receiver.drop_denied_records(&mut batch);
-            // Feed checks and raw crawls have separate durable destinations.
-            let (news, mut batch): (Vec<_>, Vec<_>) =
-                batch.into_iter().partition(|r| !r.news.is_empty());
-            if !receiver.config.take_new_sites {
-                held_only(&receiver, &mut batch);
-            }
+            let (batch, news) = delivered(&receiver, batch);
             persist_delivery(
                 receiver.clone(),
                 batch,
@@ -334,6 +323,27 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         }
     });
     Ok(())
+}
+
+/// What of `batch`, crawls another node published, this node keeps: the
+/// crawls for the inbox and the feed checks for the headlines, in that
+/// order, without what its denylist takes off.
+pub(super) fn delivered(
+    inner: &Inner,
+    mut batch: Vec<SiteRecord>,
+) -> (Vec<SiteRecord>, Vec<SiteRecord>) {
+    // Crawling only, other nodes' crawls are not kept: they would only
+    // grow the records this node crawls from.
+    if inner.config.crawl_only {
+        batch.clear();
+    }
+    inner.drop_denied_records(&mut batch);
+    // Feed checks and raw crawls have separate durable destinations.
+    let (news, mut batch): (Vec<_>, Vec<_>) = batch.into_iter().partition(|r| !r.news.is_empty());
+    if !inner.config.take_new_sites {
+        held_only(inner, &mut batch);
+    }
+    (batch, news)
 }
 
 /// Stops the network side, if running.
@@ -473,22 +483,7 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
             } else {
                 0
             };
-            // Read a record at a time, the journal folded in first.
-            let _records = inner.hold_records();
-            let budget = crate::records::records_budget(&path, inner.storage.as_ref())?;
-            RecordStore::open(&path).with_budget(budget).fold()?;
-            let mut crawled: Vec<SiteRecord> = Vec::new();
-            crate::outline::for_each_record(&path, |record| {
-                if record
-                    .crawled_at
-                    .is_some_and(|at| at > after && at >= oldest)
-                {
-                    crawled.push(crawl_facts(&record));
-                }
-            })?;
-            crawled.sort_by_key(|r| r.crawled_at);
-            inner.drop_denied_records(&mut crawled);
-            anyhow::Ok(crawled)
+            to_publish(&inner, &path, after, oldest)
         })
         .await
         .context("the publishing task failed")??
@@ -523,6 +518,34 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
         tokio::time::sleep(PUBLISH_PAUSE).await;
     }
     Ok(published)
+}
+
+/// The homepages the records file at `path` holds crawled after `after`
+/// and not before `oldest`, as [`publish_new_records`] publishes them:
+/// what each crawl saw ([`crawl_facts`]), oldest first, without what the
+/// denylist takes off.
+pub(super) fn to_publish(
+    inner: &Inner,
+    path: &Path,
+    after: u64,
+    oldest: u64,
+) -> Result<Vec<SiteRecord>> {
+    // Read a record at a time, the journal folded in first.
+    let _records = inner.hold_records();
+    let budget = crate::records::records_budget(path, inner.storage.as_ref())?;
+    RecordStore::open(path).with_budget(budget).fold()?;
+    let mut crawled: Vec<SiteRecord> = Vec::new();
+    crate::outline::for_each_record(path, |record| {
+        if record
+            .crawled_at
+            .is_some_and(|at| at > after && at >= oldest)
+        {
+            crawled.push(crawl_facts(&record));
+        }
+    })?;
+    crawled.sort_by_key(|r| r.crawled_at);
+    inner.drop_denied_records(&mut crawled);
+    Ok(crawled)
 }
 
 /// What a crawl saw of a site's homepage, without the ranks, seed data and
