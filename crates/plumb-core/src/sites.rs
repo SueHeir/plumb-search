@@ -330,6 +330,12 @@ impl SiteList {
         self.held.retain(|held| keep(&held.item()));
     }
 
+    /// Keeps only the sites of the domains for which `keep` is true, in
+    /// order, without reading any site.
+    pub fn retain_domains(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.held.retain(|held| keep(held.domain()));
+    }
+
     /// Keeps the sites `keep` says to, in order, each read from its line
     /// and written again as `keep` leaves it.
     pub fn retain_mut(&mut self, mut keep: impl FnMut(&mut Item) -> bool) {
@@ -1122,6 +1128,9 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(kept.iter().collect::<Vec<_>>(), want);
+        let mut by_domain = list.clone();
+        by_domain.retain_domains(|domain| domain != items[0].id);
+        assert_eq!(by_domain.iter().collect::<Vec<_>>(), items[1..]);
 
         let mut changed = list.clone();
         changed.retain_mut(|site| {

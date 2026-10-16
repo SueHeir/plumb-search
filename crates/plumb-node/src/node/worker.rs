@@ -568,7 +568,11 @@ async fn complete_seed_from_network(inner: &Arc<Inner>) -> Result<bool> {
     };
     let n = records.len() as u64;
     blocking(inner, move |inner| {
-        super::network::append_inbox(inner, &records)?;
+        let sites: SiteList = records
+            .into_iter()
+            .map(SiteRecord::stored_item_as_is)
+            .collect();
+        super::network::append_inbox(inner, &sites)?;
         inner.update_saved(|saved| {
             saved.wikidata_missing = false;
             saved.quick_start = false;
@@ -1176,9 +1180,9 @@ impl Fetcher for NodeFetcher<'_> {
             if let Some(net) = net {
                 // Shared before it is saved here: a batch the offline
                 // check throws away holds few records anyway.
-                let mut records = published_crawl(&results);
-                inner.drop_denied_records(&mut records);
-                if let Err(err) = net.publish(records).await {
+                let mut sites = published_crawl(&results);
+                inner.drop_denied_sites(&mut sites);
+                if let Err(err) = net.publish(sites).await {
                     warn!("cannot publish crawl results to the network: {err:#}");
                 }
             }
@@ -1190,12 +1194,12 @@ impl Fetcher for NodeFetcher<'_> {
 
 /// What a node shares of a batch's results with the network, before the
 /// denylist: the sites [`plumb_crawl::to_items`] makes of them, each
-/// fetched homepage with its icon ([`crate::icons::attach`]), as the
-/// records the network still takes ([`crate::crawl::to_record`]).
-pub(super) fn published_crawl(results: &[CrawlResult]) -> Vec<SiteRecord> {
+/// fetched homepage with its icon ([`crate::icons::attach`]), held as
+/// their lines.
+pub(super) fn published_crawl(results: &[CrawlResult]) -> SiteList {
     let mut sites = plumb_crawl::to_items(results);
     crate::icons::attach(&mut sites, results);
-    sites.iter().map(crate::crawl::to_record).collect()
+    sites.into_iter().collect()
 }
 
 /// Crawls the rest of the round under way, then puts an index of the result

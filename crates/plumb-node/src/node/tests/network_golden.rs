@@ -219,7 +219,8 @@ async fn the_node_takes_in_the_golden_sites() {
     let mut seen = 0;
 
     // A batch of crawls another node published.
-    let (crawls, news) = network::delivered(&inner, delivery(now_unix()));
+    // As plumb-net hands them over: the stored items of the sites.
+    let (crawls, news) = network::delivered(&inner, listed(&delivery(now_unix())));
     network::persist_delivery(inner.clone(), crawls, news, None, None).await;
     inbox(&mut out, &inner, "a published batch", &mut seen);
     let headlines: serde_json::Value =
@@ -316,7 +317,7 @@ async fn the_node_takes_in_the_golden_sites() {
     ] {
         let mut records = filled();
         super::fill::keep_filled(&inner, &mut records, topics.as_ref());
-        network::append_inbox(&inner, &records).unwrap();
+        network::append_inbox(&inner, &listed(&records)).unwrap();
         inbox(&mut out, &inner, what, &mut seen);
     }
 
@@ -382,9 +383,9 @@ async fn the_node_takes_in_the_golden_sites() {
     let to_publish =
         network::to_publish(&inner, &published, CRAWLED - 1_000, CRAWLED - 500).unwrap();
     writeln!(out, "## published: {} sites", to_publish.len()).unwrap();
-    for record in &to_publish {
-        writeln!(out, "signed {}", record.to_line().unwrap()).unwrap();
-        writeln!(out, "inbox {}", line(record)).unwrap();
+    for (site, inbox) in to_publish.iter().zip(to_publish.lines()) {
+        writeln!(out, "signed {}", plumb_core::site::to_line(&site).unwrap()).unwrap();
+        writeln!(out, "inbox {}", String::from_utf8_lossy(inbox)).unwrap();
     }
 
     // What folding the inbox in leaves in the records and icons.

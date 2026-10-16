@@ -34,7 +34,7 @@ use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::agree::{agree, QUORUM};
+use crate::agree::{agree, facts_agree, QUORUM};
 use crate::batch::MAX_RECORD_BYTES;
 use crate::bucket::{bucket_of, matches, query_keys, search_buckets};
 use crate::cache::BucketCache;
@@ -688,7 +688,7 @@ pub(crate) fn check_answer(
         // answer is not to be trusted.
         if let Some(proof) = item.proof.as_ref().filter(|p| !p.header.expired(now)) {
             match proof.verify(now) {
-                Ok((signed, crawler)) if signed.domain == site.record.domain => {
+                Ok((signed, crawler)) if signed.id == site.record.domain => {
                     // Other crawlers' proofs must check out too, and count
                     // only when they agree with the first.
                     let mut agreeing = Vec::new();
@@ -699,7 +699,7 @@ pub(crate) fn check_answer(
                         .take(MAX_EXTRA_PROOFS)
                     {
                         match other.verify(now) {
-                            Ok((theirs, by)) if theirs.domain == signed.domain => {
+                            Ok((theirs, by)) if theirs.id == signed.id => {
                                 if agree(&signed, &theirs) {
                                     agreeing.push(by.to_string());
                                 }
@@ -711,6 +711,9 @@ pub(crate) fn check_answer(
                             }
                         }
                     }
+                    let Ok(signed) = SiteRecord::from_stored_item(&signed) else {
+                        continue;
+                    };
                     site.record.url = signed.url.clone();
                     site.record.title = signed.title.clone();
                     site.record.description = signed.description.clone();
@@ -776,7 +779,17 @@ fn merge_site(existing: &mut FoundSite, other: FoundSite) {
         .is_none()
         .then(|| other.proof.clone())
         .flatten();
-    if other.verified && existing.verified && agree(&existing.record, &other.record) {
+    fn facts(r: &SiteRecord) -> [Option<&str>; 3] {
+        [
+            r.url.as_deref(),
+            r.title.as_deref(),
+            r.description.as_deref(),
+        ]
+    }
+    if other.verified
+        && existing.verified
+        && facts_agree(facts(&existing.record), facts(&other.record))
+    {
         for crawler in other.crawlers {
             existing.add_crawler(crawler);
         }
@@ -1095,6 +1108,13 @@ mod tests {
     use crate::assign::{epoch_of, is_assigned, EPOCH_SECS, MAX_SHARE_PPM};
     use crate::batch::Batch;
     use crate::proto::BucketRecord;
+    use plumb_core::sites::SiteList;
+
+    /// `records` as a node holds its crawls to sign: their stored items.
+    fn listed(records: &[SiteRecord]) -> SiteList {
+        let item = |record: &SiteRecord| record.clone().stored_item_as_is();
+        records.iter().map(item).collect()
+    }
 
     fn item(record: &SiteRecord) -> BucketRecord {
         BucketRecord {
@@ -1149,7 +1169,7 @@ mod tests {
         record.crawled_at = Some(now);
         let batch = Batch::sign(
             &key,
-            std::slice::from_ref(&record),
+            &listed(std::slice::from_ref(&record)),
             epoch_of(now),
             MAX_SHARE_PPM,
             now,
@@ -1228,7 +1248,7 @@ mod tests {
                 let mut record = SiteRecord::new(domain.as_str());
                 record.title = Some(title.to_string());
                 record.crawled_at = Some(now);
-                Batch::sign(key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+                Batch::sign(key, &listed(&[record]), epoch_of(now), MAX_SHARE_PPM, now)
                     .unwrap()
                     .unwrap()
             })
@@ -1340,7 +1360,7 @@ mod tests {
         let mut record = SiteRecord::new(domain.as_str());
         record.title = Some("Real Bank".into());
         record.crawled_at = Some(now);
-        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+        let batch = Batch::sign(&key, &listed(&[record]), epoch_of(now), MAX_SHARE_PPM, now)
             .unwrap()
             .unwrap();
         let unassigned = BucketRecord {

@@ -6,7 +6,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use plumb_core::sites::{SiteList, Sites};
-use plumb_core::RecordSet;
+use plumb_core::{RecordSet, SiteRecord};
 use plumb_crawl::{CrawledPage, OutLink, PageMeta};
 
 use super::*;

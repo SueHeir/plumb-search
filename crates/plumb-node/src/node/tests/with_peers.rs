@@ -152,7 +152,10 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     // from its own index.
     let mut published = None;
     for _ in 0..100 {
-        published = peer.publish(vec![crawled.clone()]).await.unwrap();
+        published = peer
+            .publish(listed(std::slice::from_ref(&crawled)))
+            .await
+            .unwrap();
         let (_, _, body) = get(addr, "/api/status").await;
         let status: serde_json::Value = serde_json::from_str(&body).unwrap();
         if status["network"]["agreement"]["pending_sites"] == 1 {
@@ -182,7 +185,10 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         .await
         .unwrap();
     for _ in 0..100 {
-        second.publish(vec![crawled.clone()]).await.unwrap();
+        second
+            .publish(listed(std::slice::from_ref(&crawled)))
+            .await
+            .unwrap();
         if dir.path().join("net/inbox.jsonl").exists() {
             break;
         }
@@ -272,7 +278,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     .await;
     // Signed, so its answers carry the proof. One crawler is not enough
     // for the node to take the crawl from gossip.
-    assert!(peer.publish(vec![crawled.clone()]).await.unwrap().is_some());
+    assert!(peer
+        .publish(listed(std::slice::from_ref(&crawled)))
+        .await
+        .unwrap()
+        .is_some());
 
     // The node's own result shows the network's signed text, untinted.
     let mut body = String::new();

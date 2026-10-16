@@ -20,6 +20,8 @@ use std::sync::Mutex;
 
 use libp2p::identity::Keypair;
 use libp2p::PeerId;
+use plumb_core::site::Item;
+use plumb_core::sites::SiteList;
 use plumb_core::{linker_bit, Headline, KeyPage, LinkText, Redirect, SiteRecord};
 use sha2::{Digest, Sha256};
 
@@ -47,6 +49,23 @@ fn key(seed: u8) -> Keypair {
 /// holds it.
 fn line(record: &SiteRecord) -> String {
     String::from_utf8(plumb_core::stored::line(record).unwrap()).unwrap()
+}
+
+/// [`line`] of a site's stored item.
+fn item_line(site: &Item) -> String {
+    String::from_utf8(plumb_core::stored::item_as_line(site).unwrap()).unwrap()
+}
+
+/// The stored lines of the sites a list holds, as the inbox gets them.
+fn lines(sites: &SiteList) -> Vec<String> {
+    let line = |line: &[u8]| String::from_utf8(line.to_vec()).unwrap();
+    sites.lines().map(line).collect()
+}
+
+/// `records` as the node holds them to publish: their stored items.
+fn list(records: &[SiteRecord]) -> SiteList {
+    let item = |record: &SiteRecord| record.clone().stored_item_as_is();
+    records.iter().map(item).collect()
 }
 
 fn sha(bytes: &[u8]) -> String {
@@ -264,7 +283,7 @@ impl Sites {
 }
 
 fn sign(key: &Keypair, records: &[SiteRecord]) -> Batch {
-    Batch::sign(key, records, epoch_of(NOW), MAX_SHARE_PPM, NOW)
+    Batch::sign(key, &list(records), epoch_of(NOW), MAX_SHARE_PPM, NOW)
         .unwrap()
         .unwrap()
 }
@@ -371,9 +390,9 @@ fn the_network_sends_and_takes_in_the_golden_bytes() {
         ("news", accept_news(&batch_a, NOW)),
         ("other b", accept_batch(&batch_b, &b_id, NOW)),
     ];
-    for (name, records) in &kept {
-        for record in records {
-            writeln!(text, "accept {name} {}", line(record)).unwrap();
+    for (name, sites) in &kept {
+        for line in lines(sites) {
+            writeln!(text, "accept {name} {line}").unwrap();
         }
     }
     writeln!(
@@ -387,13 +406,13 @@ fn the_network_sends_and_takes_in_the_golden_bytes() {
     // What agreement confirms: two crawlers this node counts, then a
     // crawler this node trusts.
     let mut agreement = Agreement::new(me_id, []);
-    for (name, crawler, records) in [
+    for (name, crawler, sites) in [
         ("a", a_id, kept[0].1.clone()),
         ("b", b_id, kept[4].1.clone()),
     ] {
-        let confirmed = agreement.observe(crawler, records, NOW);
-        for record in &confirmed {
-            writeln!(text, "confirmed after {name} {}", line(record)).unwrap();
+        let confirmed = agreement.observe(crawler, sites, NOW);
+        for line in lines(&confirmed) {
+            writeln!(text, "confirmed after {name} {line}").unwrap();
         }
         writeln!(
             text,
@@ -404,11 +423,11 @@ fn the_network_sends_and_takes_in_the_golden_bytes() {
     }
     let mut trusting = Agreement::new(me_id, [a_id]);
     let confirmed = trusting.observe(a_id, kept[1].1.clone(), NOW);
-    for record in &confirmed {
-        writeln!(text, "confirmed trusted {}", line(record)).unwrap();
+    for line in lines(&confirmed) {
+        writeln!(text, "confirmed trusted {line}").unwrap();
     }
     let mut delivered = confirmed;
-    delivered.extend(kept[3].1.clone());
+    delivered.extend(kept[3].1.clone().into_lines());
     writeln!(
         text,
         "confirmed trusted delivery bytes {}",
@@ -419,8 +438,8 @@ fn the_network_sends_and_takes_in_the_golden_bytes() {
     // Single crawls, by their proofs.
     for i in 0..batch_a.records.len() {
         let proof = batch_a.proof(i);
-        let verified = proof.verify(NOW).map(|(record, _)| line(&record));
-        let trusted = proof.verify_trusted(NOW).map(|(record, _)| line(&record));
+        let verified = proof.verify(NOW).map(|(site, _)| item_line(&site));
+        let trusted = proof.verify_trusted(NOW).map(|(site, _)| item_line(&site));
         for (name, got) in [("verify", verified), ("verify_trusted", trusted)] {
             let got = got.unwrap_or_else(|_| "refused".into());
             writeln!(text, "proof {i} {name} {got}").unwrap();
@@ -436,9 +455,9 @@ fn the_network_sends_and_takes_in_the_golden_bytes() {
     future.crawled_at = Some(NOW + 2 * EPOCH_SECS);
     published.extend([yesterday, future]);
     let assigned = |epoch, domain: &str| is_assigned(epoch, &a_id, domain, MAX_SHARE_PPM);
-    for (epoch, records) in by_crawl_epoch(published, NOW, assigned) {
-        let chunks: Vec<usize> = batch_chunks(&records).iter().map(|c| c.len()).collect();
-        let domains: Vec<&str> = records.iter().map(|r| r.domain.as_str()).collect();
+    for (epoch, sites) in by_crawl_epoch(list(&published), NOW, assigned) {
+        let domains: Vec<String> = sites.domains().map(str::to_string).collect();
+        let chunks: Vec<usize> = batch_chunks(sites).iter().map(SiteList::len).collect();
         writeln!(text, "publish epoch {epoch} {domains:?} chunks {chunks:?}").unwrap();
     }
 

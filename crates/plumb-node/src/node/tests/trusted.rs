@@ -122,7 +122,7 @@ async fn shows_the_recent_headlines_a_trusted_node_shares() {
     ];
     let mut body = String::new();
     for _ in 0..100 {
-        peer.publish(shared.clone()).await.unwrap();
+        peer.publish(listed(&shared)).await.unwrap();
         body = get(addr, "/api/recent?q=spring+tides").await.2;
         if body.contains("tidetables.net") {
             break;

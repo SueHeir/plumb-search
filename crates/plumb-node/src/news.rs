@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use plumb_core::news::{merge_headlines, NEWS_PUBLISHERS as PUBLISHERS, NEWS_WINDOW_SECS};
+use plumb_core::site::{self, Item};
+use plumb_core::sites::SiteList;
 use plumb_core::Headline;
 use plumb_crawl::{CrawlOutcome, CrawlResult, CrawlTarget, FeedCheck, FeedOutcome, FeedTarget};
 use serde::{Deserialize, Serialize};
@@ -326,9 +328,9 @@ impl NewsStore {
     }
 
     /// Takes in what checks of watched feeds found at `now`, and returns
-    /// the sites with new headlines, as records carrying all their recent
-    /// headlines ([`plumb_core::SiteRecord::news`]) to share.
-    pub fn apply(&self, checks: Vec<FeedCheck>, now: u64) -> Vec<plumb_core::SiteRecord> {
+    /// the sites with new headlines, as sites carrying all their recent
+    /// headlines ([`site::news`]) and nothing else, to share.
+    pub fn apply(&self, checks: Vec<FeedCheck>, now: u64) -> SiteList {
         let mut state = self.write();
         let mut changed = Vec::new();
         let mut new_items: HashMap<String, (Vec<Headline>, Option<String>)> = HashMap::new();
@@ -397,24 +399,25 @@ impl NewsStore {
             .into_iter()
             .filter_map(|domain| {
                 let news = state.headlines.get(&domain)?.clone();
-                let mut record = plumb_core::SiteRecord::new(domain);
-                record.news = news;
-                Some(record)
+                let mut shared = site::new(domain);
+                site::set_news(&mut shared, news);
+                Some(shared)
             })
             .collect()
     }
 
-    /// Takes in headlines trusted nodes shared ([`plumb_core::SiteRecord::news`]),
-    /// and each site's language ([`plumb_core::SiteRecord::language`]).
-    pub fn put_shared(&self, records: Vec<plumb_core::SiteRecord>, now: u64) {
+    /// Takes in headlines trusted nodes shared ([`site::news`]), and each
+    /// site's language (its item's `lang`).
+    pub fn put_shared(&self, sites: Vec<Item>, now: u64) {
         let mut state = self.write();
-        for record in records {
-            if record.news.is_empty() {
+        for shared in sites {
+            let news = site::news(&shared);
+            if news.is_empty() {
                 continue;
             }
-            state.note_language(&record.domain, record.language);
-            let kept = state.headlines.entry(record.domain).or_default();
-            merge_headlines(kept, record.news, now);
+            state.note_language(&shared.id, shared.lang);
+            let kept = state.headlines.entry(shared.id).or_default();
+            merge_headlines(kept, news, now);
         }
         state.forget_gone();
         state.words = None;
@@ -1022,10 +1025,10 @@ mod tests {
         }
     }
 
-    fn shared(site: &str, headlines: Vec<Headline>) -> plumb_core::SiteRecord {
-        let mut record = plumb_core::SiteRecord::new(site);
-        record.news = headlines;
-        record
+    fn shared(domain: &str, headlines: Vec<Headline>) -> Item {
+        let mut shared = site::new(domain);
+        site::set_news(&mut shared, headlines);
+        shared
     }
 
     fn store() -> (tempfile::TempDir, NewsStore) {
@@ -1084,9 +1087,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = NewsStore::open(dir.path().join("news"));
         let in_language = |site: &str, language: Option<&str>, title: &str, ago: u64| {
-            let mut record = shared(site, vec![headline(site, title, ago)]);
-            record.language = language.map(str::to_string);
-            record
+            let mut shared = shared(site, vec![headline(site, title, ago)]);
+            shared.lang = language.map(str::to_string);
+            shared
         };
         store.put_shared(
             vec![
@@ -1501,8 +1504,9 @@ mod tests {
             NOW,
         );
         assert_eq!(shared.len(), 1);
-        assert_eq!(shared[0].domain, "a.com");
-        assert_eq!(shared[0].news.len(), 1);
+        let shared: Vec<Item> = shared.iter().collect();
+        assert_eq!(shared[0].id, "a.com");
+        assert_eq!(site::news(&shared[0]).len(), 1);
         let checked = store.recent("news from a", None, NOW, None).unwrap();
         assert_eq!(checked.sources[0].checked_at, Some(NOW));
         assert_eq!(checked.sources[0].status, "read");

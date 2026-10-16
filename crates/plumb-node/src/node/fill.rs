@@ -1138,7 +1138,11 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         };
         if n > 0 {
             let inner2 = inner.clone();
-            tokio::task::spawn_blocking(move || network::append_inbox(&inner2, &records))
+            let sites: plumb_core::sites::SiteList = records
+                .into_iter()
+                .map(SiteRecord::stored_item_as_is)
+                .collect();
+            tokio::task::spawn_blocking(move || network::append_inbox(&inner2, &sites))
                 .await
                 .context("keeping filled sites")??;
             let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
