@@ -575,11 +575,40 @@ fn after_leading(
 /// A record the query names by its identifier is not read, as the model
 /// never saw one, and stays first ([`crate::pages::keep_page_rules`]).
 pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec<PlacedPage>) {
+    reorder_moving(model, query, hits, placed, true);
+}
+
+/// What `cfg` does to the first rows once pages are placed among the
+/// sites: [`reorder`] with the built-in model when
+/// [`crate::RankConfig::learned`] is on. With
+/// [`crate::RankConfig::learned_sites`] too, the site model has put the
+/// sites in order already, and this model only places the pages listed on
+/// their own among them. It learned from the hand-made order, and moving
+/// the site model's sites again undid much of its work: in a replay of the
+/// test searches, typo searches with their site first fell from 90% to 78%.
+pub fn reorder_results(
+    cfg: &crate::RankConfig,
+    query: &str,
+    hits: &mut Vec<Hit>,
+    placed: &mut Vec<PlacedPage>,
+) {
+    if cfg.learned {
+        reorder_moving(Model::builtin(), query, hits, placed, !cfg.learned_sites);
+    }
+}
+
+fn reorder_moving(
+    model: &Model,
+    query: &str,
+    hits: &mut Vec<Hit>,
+    placed: &mut Vec<PlacedPage>,
+    move_sites: bool,
+) {
     let (records, rest): (Vec<PlacedPage>, Vec<PlacedPage>) = std::mem::take(placed)
         .into_iter()
         .partition(|page| crate::pages::is_record(&page.hit));
     *placed = rest;
-    reorder_rows(model, query, hits, placed, LEARNED_ROWS);
+    reorder_rows(model, query, hits, placed, LEARNED_ROWS, move_sites);
     placed.splice(0..0, records);
 }
 
@@ -589,7 +618,7 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
 /// ranking found but listed far down: "photo sharing app" has
 /// instagram.com, with every word and the most links, below the tenth.
 pub fn reorder_sites(model: &Model, query: &str, hits: &mut Vec<Hit>) {
-    reorder_rows(model, query, hits, &mut Vec::new(), LEARNED_SITES);
+    reorder_rows(model, query, hits, &mut Vec::new(), LEARNED_SITES, true);
 }
 
 fn reorder_rows(
@@ -598,6 +627,7 @@ fn reorder_rows(
     hits: &mut Vec<Hit>,
     placed: &mut Vec<PlacedPage>,
     depth: usize,
+    move_sites: bool,
 ) {
     let rows = listed(hits, placed);
     if rows.len() < 2 {
@@ -630,6 +660,10 @@ fn reorder_rows(
         .copied()
         .filter(|&row| matches!(rows[row], Listed::Site(_)))
         .collect();
+    // Sites another model put in order fill the site slots in that order.
+    if !move_sites {
+        sites.sort_unstable();
+    }
     sites.sort_by_key(|&row| {
         std::cmp::Reverse(match rows[row] {
             Listed::Site(i) => {
@@ -847,6 +881,36 @@ mod tests {
         assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
         // The model nodes use reads.
         assert_eq!(Model::sites().features.len(), FEATURES.len());
+    }
+
+    #[test]
+    fn after_the_site_model_the_learned_order_only_places_pages() {
+        // The model would put the named page first, then swap the named
+        // site above the one the site model put first. With the site
+        // model on, it only places the page.
+        for move_sites in [true, false] {
+            let mut hits = vec![site("a.example", 1.0, false), site("b.example", 0.9, true)];
+            let mut placed = vec![PlacedPage {
+                hit: article("Some Page", true),
+                at: 2,
+                under: None,
+            }];
+            reorder_moving(
+                &named_first_model(),
+                "some page",
+                &mut hits,
+                &mut placed,
+                move_sites,
+            );
+            let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
+            let expected = if move_sites {
+                ["b.example", "a.example"]
+            } else {
+                ["a.example", "b.example"]
+            };
+            assert_eq!(domains, expected, "move_sites={move_sites}");
+            assert_eq!(placed[0].at, 0, "move_sites={move_sites}");
+        }
     }
 
     #[test]

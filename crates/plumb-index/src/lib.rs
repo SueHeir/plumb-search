@@ -288,11 +288,13 @@ pub struct RankConfig {
     /// worse), the described ones most of all.
     pub drop_namesakes: bool,
     /// Put the first results in the order the learned ranking gives
-    /// ([`learned::reorder`]), once pages are placed among the sites.
+    /// ([`learned::reorder_results`]), once pages are placed among the
+    /// sites.
     pub learned: bool,
     /// Put the first [`learned::LEARNED_SITES`] sites in the order the
     /// site model gives ([`learned::reorder_sites`]) before anything else
-    /// moves them. Off until it is measured with pages.
+    /// moves them. The learned order then only places pages among them.
+    /// Off until it is measured with pages.
     pub learned_sites: bool,
     /// Rank typo corrections by the spelling model learned from the
     /// index's words ([`spell_model`]): what the edits cost against how

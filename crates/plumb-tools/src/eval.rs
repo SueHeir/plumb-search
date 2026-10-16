@@ -842,13 +842,8 @@ fn evaluate(
                 let mut placed = place_pages(&searched, &lifted, found);
                 // --features-out writes the hand-made order the learned
                 // ranking is trained to improve.
-                if cfg.learned && features.is_none() {
-                    plumb_index::learned::reorder(
-                        plumb_index::learned::Model::builtin(),
-                        &searched,
-                        &mut lifted,
-                        &mut placed,
-                    );
+                if features.is_none() {
+                    plumb_index::learned::reorder_results(cfg, &searched, &mut lifted, &mut placed);
                 }
                 if let Some(spelling) = &results.spelling {
                     pages.list_suggested_page(spelling, &options, &mut placed)?;

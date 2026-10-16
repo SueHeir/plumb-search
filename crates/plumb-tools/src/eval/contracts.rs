@@ -563,13 +563,8 @@ fn observe(
         .iter()
         .map(|p| p.hit.page.url.clone())
         .collect::<Vec<_>>();
-    if cfg.learned && typed.is_none() && !ops.any() {
-        plumb_index::learned::reorder(
-            plumb_index::learned::Model::builtin(),
-            words,
-            &mut found.hits,
-            &mut placed,
-        );
+    if typed.is_none() && !ops.any() {
+        plumb_index::learned::reorder_results(cfg, words, &mut found.hits, &mut placed);
     }
     let learned = rows(&found.hits, &placed);
     let now = args.eval_time.expect("report requires fixed time");
