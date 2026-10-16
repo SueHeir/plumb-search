@@ -9,7 +9,7 @@
 //! keeps, for every bucket, the best [`KEY_CAP`] sites of every key in it
 //! ([`BucketTable`]). Its index build writes them a site at a time from
 //! each site's stored item ([`BucketWriter`], [`plumb_core::site`]),
-//! filed under [`site_keys`], the keys [`record_keys`] gives its record.
+//! filed under its keys ([`site_keys`]).
 //!
 //! To search the network, a node works out the keys of its query, and asks
 //! for their buckets, never the query: [`BUCKETS_PER_SEARCH`] buckets every
@@ -26,8 +26,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 pub use plumb_core::keys::{
-    bucket_of, matches, query_keys, record_keys, site_keys, site_matches, BUCKETS,
-    BUCKETS_PER_SEARCH, KEY_CAP,
+    bucket_of, query_keys, site_keys, site_matches, BUCKETS, BUCKETS_PER_SEARCH, KEY_CAP,
 };
 use plumb_core::site::{self, Item};
 use rand_core::RngCore;

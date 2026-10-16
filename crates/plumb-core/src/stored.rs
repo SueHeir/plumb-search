@@ -28,7 +28,8 @@
 //!
 //! What a node sends is not stored and does not come through here: crawl
 //! batches and bucket answers carry items ([`SiteRecord::to_line`]), and
-//! private search hands a browser trimmed records. Only `/plumb/fill/1`
+//! private search hands a browser trimmed items
+//! ([`crate::keys::slim_site`]). Only `/plumb/fill/1`
 //! sends what it stores, as the record's own JSON ([`record_json`]) and
 //! never the stored item, since every node reads a fill answer as a
 //! record's JSON.

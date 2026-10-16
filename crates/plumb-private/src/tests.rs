@@ -1,4 +1,5 @@
-use plumb_core::keys::{pick_buckets, query_keys, record_keys};
+use plumb_core::keys::{pick_buckets, query_keys, site_keys, slim_site};
+use plumb_core::site::{self, Item};
 use plumb_core::{LinkText, SafeSearch, Signals, SiteRecord};
 use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
 
@@ -13,6 +14,15 @@ fn site(domain: &str, title: &str, tranco: Option<u32>, linking: u32) -> SiteRec
         ..Signals::default()
     };
     r
+}
+
+/// The items of `records`, each as it is
+/// ([`SiteRecord::stored_item_as_is`]): the sites ranked here.
+fn items(records: &[SiteRecord]) -> Vec<Item> {
+    records
+        .iter()
+        .map(|record| record.clone().stored_item_as_is())
+        .collect()
 }
 
 fn corpus() -> Vec<SiteRecord> {
@@ -111,7 +121,7 @@ fn index_top_with_relevance(
 }
 
 fn private_top(records: &[SiteRecord], query: &str, options: &Options, n: usize) -> Vec<String> {
-    rank(query, records, options, n)
+    rank(query, &items(records), options, n)
         .into_iter()
         .map(|hit| hit.domain)
         .collect()
@@ -123,7 +133,7 @@ fn experimental_rank(
     options: &Options,
     n: usize,
 ) -> Vec<Ranked> {
-    rank::rank_with_whole_query_relevance(query, records, options, n, true)
+    rank::rank_with_whole_query_relevance(query, &items(records), options, n, true)
 }
 
 fn experimental_private_top(
@@ -174,10 +184,10 @@ fn default_off_keeps_native_partial_name_blend_and_explicit_opt_in() {
         site("nimbus.example", "Aster refund information", None, 0),
     ];
     let options = Options::default();
-    let legacy = rank("aster refund", &records, &options, 2);
+    let legacy = rank("aster refund", &items(&records), &options, 2);
     assert_eq!(
         legacy,
-        rank::rank_with_whole_query_relevance("aster refund", &records, &options, 2, false)
+        rank::rank_with_whole_query_relevance("aster refund", &items(&records), &options, 2, false)
     );
     assert_eq!(
         private_top(&records, "aster refund", &options, 1),
@@ -294,14 +304,11 @@ fn every_substantive_field_can_support_a_partial_names_task() {
             "private {field}"
         );
         // Bucket trimming preserves this evidence for browser searches.
-        let records: Vec<_> = records
-            .into_iter()
-            .map(plumb_core::keys::slim_record)
-            .collect();
+        let sites: Vec<_> = items(&records).into_iter().map(slim_site).collect();
         let hits = search(
             "aster refund",
             &query_keys("aster refund"),
-            vec![records],
+            vec![sites],
             &Options::default(),
             1,
         );
@@ -670,7 +677,7 @@ fn search_keeps_only_sites_with_the_query_keys_once_each() {
     let records = corpus();
     let (_, keys) = pick_buckets("us bank", || 3);
     // The same site in two buckets, and a site the keys do not find.
-    let answers = vec![records.clone(), records[..2].to_vec()];
+    let answers = vec![items(&records), items(&records[..2])];
     let hits = search("us bank", &keys, answers, &Options::default(), 10);
     assert_eq!(hits[0].domain, "usbank.com");
     let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
@@ -679,25 +686,56 @@ fn search_keeps_only_sites_with_the_query_keys_once_each() {
     unique.sort();
     unique.dedup();
     assert_eq!(unique.len(), domains.len());
+    let sites = items(&records);
     for hit in &hits {
-        let record = records.iter().find(|r| r.domain == hit.domain).unwrap();
+        let site = sites.iter().find(|s| s.id == hit.domain).unwrap();
         assert!(query_keys("us bank")
             .iter()
-            .any(|k| record_keys(record).contains(k)));
+            .any(|k| site_keys(site).contains(k)));
     }
 }
 
+/// A bucket holds trimmed items, or, as a browser may still have cached
+/// it from a node of an earlier version, trimmed records' JSON; either
+/// ranks the same.
 #[test]
-fn buckets_read_back_and_skip_bad_records() {
+fn buckets_read_back_in_either_form_and_skip_bad_sites() {
+    let records = corpus();
+    let slim: Vec<Item> = items(&records).into_iter().map(slim_site).collect();
+    let page = r#"{"id": "page.example", "kind": "page"}"#;
     let json = format!(
-        "[{}, {{\"domain\": 5}}, {}]",
-        serde_json::to_string(&corpus()[0]).unwrap(),
-        serde_json::to_string(&corpus()[1]).unwrap()
+        "[{}, {{\"domain\": 5}}, {{\"id\": 5}}, {page}, {}]",
+        serde_json::to_string(&slim[0]).unwrap(),
+        serde_json::to_string(&records[1]).unwrap()
     );
     let sites = read_bucket(&json).unwrap();
-    assert_eq!(sites.len(), 2);
+    let domains: Vec<&str> = sites.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(domains, ["usbank.com", "chase.com"]);
+    assert_eq!(sites[1], records[1].clone().stored_item_as_is());
     assert!(read_bucket("not json").is_err());
     assert!(read_bucket(&" ".repeat(MAX_BUCKET_BYTES + 1)).is_err());
+
+    let as_items = serde_json::to_string(&slim).unwrap();
+    let as_records = serde_json::to_string(&records).unwrap();
+    let (_, keys) = pick_buckets("us bank", || 3);
+    let found = |json: &str| {
+        let answers = vec![read_bucket(json).unwrap()];
+        search("us bank", &keys, answers, &Options::default(), 10)
+    };
+    let (of_items, of_records) = (found(&as_items), found(&as_records));
+    assert_eq!(of_items.len(), of_records.len());
+    assert_eq!(of_items[0].domain, "usbank.com");
+    for (a, b) in of_items.iter().zip(&of_records) {
+        // Scores may differ in their last bit from one ranking to the next.
+        assert!((a.score - b.score).abs() < 1e-5, "{a:?} {b:?}");
+        let rounded = |r: &Ranked| Ranked {
+            score: 0.0,
+            text_score: 0.0,
+            link_score: 0.0,
+            ..r.clone()
+        };
+        assert_eq!(rounded(a), rounded(b));
+    }
 }
 
 #[test]
@@ -751,12 +789,13 @@ fn copies_keep_the_less_favorable_popularity() {
     let mut boosted = site("phish.example", "US Bank", Some(1), 90_000);
     boosted.signals.official_site = true;
     let honest = site("phish.example", "Other text", Some(800_000), 2);
-    let merged = rank::merge_copies(vec![boosted, honest]);
+    let merged = rank::merge_copies(items(&[boosted, honest]));
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].title.as_deref(), Some("US Bank"));
-    assert_eq!(merged[0].signals.tranco_rank, Some(800_000));
-    assert_eq!(merged[0].signals.linking_domains, 2);
-    assert!(!merged[0].signals.official_site);
+    let signals = site::signals(&merged[0]);
+    assert_eq!(signals.tranco_rank, Some(800_000));
+    assert_eq!(signals.linking_domains, 2);
+    assert!(!signals.official_site);
 }
 
 #[test]

@@ -10,25 +10,23 @@
 //! A search works out the keys of its query and asks for their buckets,
 //! never the query: [`BUCKETS_PER_SEARCH`] buckets every time, padded with
 //! random ones. Whoever answers learns bucket numbers, each shared by a few
-//! hundred keys. The searcher then keeps the sites that [`matches`] its keys
-//! and ranks them itself.
+//! hundred keys. The searcher then keeps the sites that [`site_matches`]
+//! its keys and ranks them itself.
 //!
 //! Nodes searching each other (`plumb_net`) and browsers searching a site
 //! privately (`plumb-private`) both use these, so they live here, with no
 //! dependency that keeps them from compiling to WebAssembly.
 //!
-//! A site's keys come from its record ([`record_keys`]) or from its stored
-//! item ([`site_keys`]), the same either way: a node's index build files
-//! its sites as items, PIR tables and the tools cut items down
-//! ([`slim_site`], [`lean_site`]), and private search still works on
-//! records until it moves onto items too.
+//! A site's keys come from its stored item ([`crate::site`], [`site_keys`]):
+//! a node's index build files its sites as items, and private search, PIR
+//! tables and the tools cut items down ([`slim_site`], [`lean_site`]).
 
 use std::collections::BTreeSet;
 
 use plumb_format::Item;
 use sha2::{Digest, Sha256};
 
-use crate::{domain_label, is_function_word, joined, normalize_text, site, LinkText, SiteRecord};
+use crate::{domain_label, is_function_word, joined, normalize_text, site, LinkText};
 
 /// Buckets keys are spread over.
 pub const BUCKETS: u32 = 16_384;
@@ -88,18 +86,7 @@ fn add_keys(keys: &mut BTreeSet<String>, text: &str) {
     }
 }
 
-/// Every key a site can be found by.
-pub fn record_keys(record: &SiteRecord) -> BTreeSet<String> {
-    name_keys(
-        &record.domain,
-        record.title.as_deref(),
-        &record.aliases,
-        &record.link_texts,
-    )
-}
-
-/// Every key the site of a stored item ([`crate::site`]) can be found by:
-/// what [`record_keys`] gives for the same site.
+/// Every key the site of a stored item ([`crate::site`]) can be found by.
 pub fn site_keys(site: &Item) -> BTreeSet<String> {
     let link_texts = crate::site::link_texts(site);
     name_keys(&site.id, site.title.as_deref(), &site.names, &link_texts)
@@ -197,68 +184,22 @@ pub fn pick_buckets(query: &str, mut random: impl FnMut() -> u64) -> (Vec<u32>, 
     (buckets, used)
 }
 
-/// Whether a site can be found by any of `keys`.
-pub fn matches(record: &SiteRecord, keys: &[String]) -> bool {
-    let mine = record_keys(record);
-    keys.iter().any(|k| mine.contains(k))
-}
-
-/// [`matches`] of a site's item ([`crate::site`]), by its [`site_keys`].
+/// Whether the site of an item ([`crate::site`]) can be found by any of
+/// `keys`, its [`site_keys`].
 pub fn site_matches(site: &Item, keys: &[String]) -> bool {
     let mine = site_keys(site);
     keys.iter().any(|k| mine.contains(k))
 }
 
-/// `record` cut down to what finding and ranking it by its keys needs: the
-/// [`KEY_LINK_TEXTS`] link texts whose keys count, without the sets of
-/// sites that use them, and none of the crawler's bookkeeping. What a
-/// browser downloads for a private search.
-pub fn slim_record(mut record: SiteRecord) -> SiteRecord {
-    record
-        .link_texts
-        .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.text.cmp(&b.text)));
-    record.link_texts.truncate(KEY_LINK_TEXTS);
-    for lt in &mut record.link_texts {
-        lt.linkers = 0;
-    }
-    record.crawled_at = None;
-    record.crawl_attempted_at = None;
-    record.crawl_failures = 0;
-    record.gone_at = None;
-    record.icon = None;
-    record.news = Vec::new();
-    record.key_pages.clear();
-    record.links_to.clear();
-    record
-}
-
-/// Characters of a description a [`lean_record`] keeps.
+/// Characters of a description a [`lean_site`] keeps.
 pub const LEAN_DESCRIPTION_CHARS: usize = 200;
 
-/// A [`slim_record`] without the homepage's text and headings, the
-/// Wikipedia intro and key pages, and with the description cut to
-/// [`LEAN_DESCRIPTION_CHARS`]: what a PIR table holds. On a node with 1.3M sites
-/// it ranked name and description searches the same as full records
-/// (without vectors), at a third of the size.
-pub fn lean_record(record: SiteRecord) -> SiteRecord {
-    let mut record = slim_record(record);
-    record.body_text = None;
-    record.terms.clear();
-    record.headings.clear();
-    record.intro = None;
-    record.key_pages.clear();
-    record.description = record
-        .description
-        .map(|d| d.chars().take(LEAN_DESCRIPTION_CHARS).collect());
-    record
-}
-
-/// [`slim_record`] of a site's item ([`crate::site`]): the item cut down
-/// to what finding and ranking it by its keys needs. It keeps the
-/// [`KEY_LINK_TEXTS`] link texts whose keys count, without the sets of
-/// sites that use them, and none of the node's own fields (the crawl time
-/// and marks, the icon and headlines) or edges (key pages, sites linked
-/// to). It is the item of what [`slim_record`] makes of the site's record.
+/// A site's item ([`crate::site`]) cut down to what finding and ranking it
+/// by its keys needs: what a browser downloads for a private search. It
+/// keeps the [`KEY_LINK_TEXTS`] link texts whose keys count, without the
+/// sets of sites that use them, and none of the node's own fields (the
+/// crawl time and marks, the icon and headlines) or edges (key pages,
+/// sites linked to).
 pub fn slim_site(mut site: Item) -> Item {
     let mut link_texts = site::link_texts(&site);
     link_texts.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.text.cmp(&b.text)));
@@ -276,9 +217,11 @@ pub fn slim_site(mut site: Item) -> Item {
     site
 }
 
-/// [`lean_record`] of a site's item: a [`slim_site`] without the
-/// homepage's text, terms and headings and the Wikipedia intro, and with
-/// the description cut to [`LEAN_DESCRIPTION_CHARS`].
+/// A [`slim_site`] without the homepage's text, terms and headings and
+/// the Wikipedia intro, and with the description cut to
+/// [`LEAN_DESCRIPTION_CHARS`]: what a PIR table holds. On a node with 1.3M
+/// sites it ranked name and description searches the same as full sites
+/// (without vectors), at a third of the size.
 pub fn lean_site(site: Item) -> Item {
     let mut site = slim_site(site);
     site.text = None;
@@ -294,6 +237,54 @@ pub fn lean_site(site: Item) -> Item {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SiteRecord;
+
+    /// The keys of a site's record, as `record_keys` gave them before
+    /// private search and the tools moved onto items: what [`site_keys`]
+    /// gives of the site's item.
+    fn record_keys(record: &SiteRecord) -> BTreeSet<String> {
+        name_keys(
+            &record.domain,
+            record.title.as_deref(),
+            &record.aliases,
+            &record.link_texts,
+        )
+    }
+
+    /// A record cut down as `slim_record` cut it then: what [`slim_site`]
+    /// does to the record's item.
+    fn slim_record(mut record: SiteRecord) -> SiteRecord {
+        record
+            .link_texts
+            .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.text.cmp(&b.text)));
+        record.link_texts.truncate(KEY_LINK_TEXTS);
+        for lt in &mut record.link_texts {
+            lt.linkers = 0;
+        }
+        record.crawled_at = None;
+        record.crawl_attempted_at = None;
+        record.crawl_failures = 0;
+        record.gone_at = None;
+        record.icon = None;
+        record.news = Vec::new();
+        record.key_pages.clear();
+        record.links_to.clear();
+        record
+    }
+
+    /// A record cut down as `lean_record` cut it then: what [`lean_site`]
+    /// does to the record's item.
+    fn lean_record(record: SiteRecord) -> SiteRecord {
+        let mut record = slim_record(record);
+        record.body_text = None;
+        record.terms.clear();
+        record.headings.clear();
+        record.intro = None;
+        record.description = record
+            .description
+            .map(|d| d.chars().take(LEAN_DESCRIPTION_CHARS).collect());
+        record
+    }
 
     #[test]
     fn buckets_never_change() {
@@ -339,10 +330,10 @@ mod tests {
             vec!["bankofamerica", "america", "bank"]
         );
         assert_eq!(query_keys("in the"), vec!["inthe", "the", "in"]);
-        let mut spain = SiteRecord::new("seg-social.es");
+        let mut spain = site::new("seg-social.es");
         spain.title = Some("Social Security in Spain".into());
-        assert!(record_keys(&spain).contains("in"));
-        assert!(!matches(&spain, &query_keys("weather in denver")));
+        assert!(site_keys(&spain).contains("in"));
+        assert!(!site_matches(&spain, &query_keys("weather in denver")));
     }
 
     #[test]
@@ -395,19 +386,26 @@ mod tests {
     }
 
     #[test]
-    fn slim_records_keep_their_keys() {
-        let mut r = SiteRecord::new("usbank.com");
-        r.title = Some("U.S. Bank".into());
-        r.crawl_failures = 3;
-        r.crawled_at = Some(5);
-        r.link_texts = (0..20)
+    fn slim_sites_keep_their_keys() {
+        let mut usbank = site::new("usbank.com");
+        usbank.title = Some("U.S. Bank".into());
+        let marks = site::CrawlMarks {
+            failures: 3,
+            ..Default::default()
+        };
+        site::set_crawl_marks(&mut usbank, marks);
+        site::set_crawled(&mut usbank, Some(5));
+        let link_texts: Vec<LinkText> = (0..20)
             .map(|i| LinkText::from_linkers(format!("text {i}"), (1u64 << i) - 1))
             .collect();
-        let slim = slim_record(r.clone());
-        assert_eq!(record_keys(&slim), record_keys(&r));
-        assert_eq!(slim.link_texts.len(), KEY_LINK_TEXTS);
-        assert!(slim.link_texts.iter().all(|lt| lt.linkers == 0));
-        assert_eq!(slim.link_texts[0].text, "text 19");
-        assert_eq!((slim.crawl_failures, slim.crawled_at), (0, None));
+        site::set_link_texts(&mut usbank, &link_texts);
+        let slim = slim_site(usbank.clone());
+        assert_eq!(site_keys(&slim), site_keys(&usbank));
+        let link_texts = site::link_texts(&slim);
+        assert_eq!(link_texts.len(), KEY_LINK_TEXTS);
+        assert!(link_texts.iter().all(|lt| lt.linkers == 0));
+        assert_eq!(link_texts[0].text, "text 19");
+        assert_eq!(site::crawl_marks(&slim), site::CrawlMarks::default());
+        assert_eq!(site::crawled(&slim), None);
     }
 }
