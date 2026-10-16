@@ -1062,7 +1062,7 @@ fn same_site(domain: &str, outline: &Outline) -> Result<()> {
 /// ([`outline`]). Each line is copied as the file holds it, never read as a
 /// record and written again. With a storage `budget`, room for the new
 /// file (the lines and their line breaks) is admitted first, as
-/// [`crate::records::replace_records_with_budget`] admits it. Returns how
+/// [`crate::records::replace_sites_with_budget`] admits it. Returns how
 /// many records were written.
 pub(crate) fn replace_lines(
     path: &Path,

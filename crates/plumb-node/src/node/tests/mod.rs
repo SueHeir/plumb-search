@@ -58,7 +58,8 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Site records from every fixture, as `plumb ingest` makes them.
+/// Site records from every fixture, as `plumb ingest` makes them, each
+/// the record its stored item holds.
 fn fixture_records() -> Vec<SiteRecord> {
     let mut builder = Builder::new();
     builder.add_tranco(&load_tranco(&fixture("tranco.csv"), None).unwrap());
@@ -69,7 +70,11 @@ fn fixture_records() -> Vec<SiteRecord> {
     builder.add_official_sites(
         &load_wikidata_official_sites(&fixture("wikidata-official-sites.tsv")).unwrap(),
     );
-    builder.finish(None)
+    let sites = builder.finish(None);
+    sites
+        .iter()
+        .map(|site| SiteRecord::from_stored_item(site).unwrap())
+        .collect()
 }
 
 /// A data directory holding the fixture records, as if put there by hand.

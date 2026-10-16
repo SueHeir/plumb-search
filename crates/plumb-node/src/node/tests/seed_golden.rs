@@ -28,7 +28,7 @@ use plumb_core::{stored, Signals};
 
 use super::*;
 use crate::cli::IngestArgs;
-use crate::records::{journal_path, load_records, Change, RecordStore};
+use crate::records::{journal_path, load_records, load_sites, Change, RecordStore};
 
 /// The lines of the file at `path`, as they are.
 fn lines_of(path: &Path) -> Vec<String> {
@@ -465,7 +465,7 @@ async fn plumb_ingest_writes_what_the_golden_file_holds() {
 /// The hash of the text the node embeds of `domain`'s site, as the records
 /// file at `path` holds it with its journal.
 fn text_hash_of(path: &Path, domain: &str) -> plumb_embed::TextHash {
-    let set = load_records(path).unwrap();
+    let set = load_sites(path).unwrap();
     plumb_embed::text_hash(&plumb_embed::site_text(set.get(domain).unwrap()))
 }
 
@@ -592,7 +592,7 @@ fn the_sites_embedded_are_what_the_golden_file_holds() {
     // plumb-tools embed: the whole file, loaded with its journal.
     for words in [100, 5] {
         let vectors = make();
-        let all = crate::meaning::sites_to_embed(&vectors, load_records(&records).unwrap(), words);
+        let all = crate::meaning::sites_to_embed(&vectors, load_sites(&records).unwrap(), words);
         section(
             &mut out,
             &format!("plumb-tools embed, {words} words"),

@@ -904,29 +904,31 @@ pub(crate) fn delete_journal(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Node-managed full replacements hold peak room before creating their temp file.
-pub(crate) fn replace_records_with_budget<'a, I>(
+/// [`replace_sites`] for the node, which holds room for the new file in
+/// its storage `budget` before it creates the file: node-managed full
+/// replacements hold their peak room first.
+pub(crate) fn replace_sites_with_budget<'a, I>(
     path: &Path,
-    records: I,
+    sites: I,
     budget: Option<&std::sync::Arc<plumb_core::storage::StorageBudget>>,
 ) -> Result<usize>
 where
-    I: IntoIterator<Item = &'a SiteRecord>,
+    I: IntoIterator<Item = &'a Item>,
     I::IntoIter: Clone,
 {
-    let records = records.into_iter();
+    let sites = sites.into_iter();
     let Some(budget) = budget else {
-        return replace_records(path, records);
+        return replace_sites(path, sites);
     };
     let mut size = plumb_core::storage::ByteCount {
         bytes: 0,
         limit: u64::MAX,
     };
-    for record in records.clone() {
-        plumb_core::stored::write(&mut size, record)?;
+    for site in sites.clone() {
+        plumb_core::stored::write_item(&mut size, site)?;
         size.bytes = size.bytes.saturating_add(1);
     }
-    RecordStore::open(path).admitted_rewrite(budget, size.bytes, || replace_records(path, records))
+    RecordStore::open(path).admitted_rewrite(budget, size.bytes, || replace_sites(path, sites))
 }
 
 /// Opens a journal for appending. The directory entry of a new journal is

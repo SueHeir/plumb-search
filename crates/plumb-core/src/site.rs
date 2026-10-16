@@ -29,7 +29,7 @@
 use anyhow::Result;
 use plumb_format::refs::is_domain;
 use plumb_format::value::{is_language, unix_seconds};
-use plumb_format::{Item, Ref};
+use plumb_format::Ref;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -45,6 +45,10 @@ use crate::{
     sort_and_cap_link_texts, truncate_chars, AdultLevel, Headline, KeyPage, LinkText, Redirect,
     Signals, MAX_ALIASES, MAX_KEY_PAGES, MAX_KINDS, MAX_LINKS_TO, MAX_TEXT_CHARS,
 };
+
+/// The item a site is, as these functions read and change it: code that
+/// works on sites through this module names it here.
+pub use plumb_format::Item;
 
 /// A new site's item, holding nothing but its domain, which must already
 /// be canonical ([`canonical_domain`]).
