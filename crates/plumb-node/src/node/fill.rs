@@ -797,11 +797,7 @@ pub(super) async fn seed_from_network(
         state.peer = Some(page.source);
         state.next = page.next;
         state.total = page.total;
-        let mut records = page.records;
-        inner.drop_denied_records(&mut records);
-        for record in records {
-            set.upsert(record);
-        }
+        take_seed_page(inner, &mut set, page.records);
     }
     let deadline = Instant::now() + SEED_PEER_WAIT;
     while set.len() < want && state.peer.as_deref() != Some(SITES) {
@@ -841,11 +837,7 @@ pub(super) async fn seed_from_network(
         state.total = page.total;
         bytes += page.downloaded;
         done = page.done();
-        let mut records = page.records;
-        inner.drop_denied_records(&mut records);
-        for record in records {
-            set.upsert(record);
-        }
+        take_seed_page(inner, &mut set, page.records);
         inner.set_step(
             Step::Downloading,
             "Taking in sites from a trusted node in the network",
@@ -901,6 +893,25 @@ pub(super) async fn seed_from_network(
         records.len()
     ));
     Ok(Some((records, bytes)))
+}
+
+/// Adds the sites of a page a node setting up took ([`seed_from_network`])
+/// to `set`, without what the denylist takes off.
+pub(super) fn take_seed_page(inner: &Inner, set: &mut RecordSet, mut records: Vec<SiteRecord>) {
+    inner.drop_denied_records(&mut records);
+    for record in records {
+        set.upsert(record);
+    }
+}
+
+/// What of `records`, a page of crawled sites, filling keeps: only those
+/// about `topics` when it keeps only those ([`FillState::focus_from`]),
+/// and not what the denylist takes off.
+pub(super) fn keep_filled(inner: &Inner, records: &mut Vec<SiteRecord>, topics: Option<&Topics>) {
+    if let Some(topics) = topics {
+        records.retain(|record| topics.matches(record));
+    }
+    inner.drop_denied_records(records);
 }
 
 /// One round: pages of crawled sites, from the set of sites held or a
@@ -1117,10 +1128,7 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         let done = page.done();
         let scanned = page.records.len() as u64;
         let mut records = page.records;
-        if focus {
-            records.retain(|record| topics.matches(record));
-        }
-        inner.drop_denied_records(&mut records);
+        keep_filled(inner, &mut records, focus.then_some(&topics));
         let n = records.len() as u64;
         // The disk the sites kept take: all of the page, or the share kept.
         let bytes = if focus {
