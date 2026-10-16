@@ -1,6 +1,7 @@
 //! Records files read a site at a time, for nodes that cannot hold every
-//! site in memory: a million sites take over a gigabyte as a
-//! [`plumb_core::RecordSet`], about twice the size of the file.
+//! site in memory: a whole set of sites ([`plumb_core::sites::Sites`])
+//! holds each site's line, about as much as the file takes on disk, and a
+//! million crawled sites take well over a gigabyte.
 //!
 //! [`outline`] folds the journal into the records file the way
 //! [`crate::records::load_sites`] replays it, one site at a time, and
@@ -23,10 +24,10 @@
 //! canonical, is something only a whole set can merge: [`outline`] returns
 //! `None` for it. The index build, trimming and making room for new topics
 //! get the outlines of the file from [`outline_merged`], which loads such a
-//! file as a set once, writes it again with each site on one line, and
-//! outlines that; they then read the file a record at a time like any
-//! other. A crawl round, which reads whole records, merges it the same way
-//! when it finds a site twice as it reads them.
+//! file as a set of sites once ([`crate::records::load_sites`]), writes it
+//! again with each site on one line, and outlines that; they then read the
+//! file a site at a time like any other. A crawl round merges it the same
+//! way when it finds a site twice as it reads them.
 //!
 //! Every search index a node builds, and the buckets other nodes take with
 //! it, is built from the file this way ([`build_index`]), whatever wrote
@@ -99,8 +100,8 @@ impl Outline {
     }
 }
 
-/// Sorts outlines the way [`crate::records::sorted_by_link_score`] sorts
-/// records: best link score first, ties by domain.
+/// Sorts outlines the way [`Sites::by_link_score`] orders sites: best link
+/// score first, ties by domain.
 pub(crate) fn sort(outlines: &mut [Outline]) {
     outlines.sort_by(|a, b| {
         b.score
@@ -419,7 +420,7 @@ pub(crate) fn outline_with_budget(
 /// The outlines of the records file at `path`, with its journal folded in
 /// ([`outline_with_budget`]): how an index build, trimming and making room
 /// for new topics get them. A file that only a whole set can merge (see the module docs) is first
-/// loaded once ([`crate::records::load_records`]) and written again with
+/// loaded once ([`crate::records::load_sites`]) and written again with
 /// each site on one line, under the storage `budget` when there is one
 /// ([`crate::records::RecordStore::compact`]); the set is dropped before
 /// the file is outlined again. Fails, rather than load it again and
@@ -435,11 +436,11 @@ pub(crate) fn outline_merged(
         "{} holds a site more than once: reading it whole to merge them",
         path.display()
     );
-    let set = crate::records::load_records(path)?;
+    let sites = crate::records::load_sites(path)?;
     crate::records::RecordStore::open(path)
         .with_budget(budget.clone())
-        .compact(&set)?;
-    drop(set);
+        .compact(&sites)?;
+    drop(sites);
     outline_with_budget(path, budget)?.with_context(|| {
         format!(
             "{} still holds a site more than once after merging",
@@ -600,7 +601,7 @@ fn scan(path: &Path) -> Result<Option<Vec<Outline>>> {
 
 /// [`outline`] of a file with `pending` changes from its journal: writes
 /// the changed file next to it, then puts it in place and deletes the
-/// journal, as [`crate::records::replace_records`] does.
+/// journal, as [`crate::records::replace_sites`] does.
 /// Returns how many records the file holds then, and their outlines when
 /// `outlines` (none otherwise).
 fn fold(
@@ -1426,6 +1427,14 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(outline(&path).unwrap(), None);
         let loaded = load_records(&path).unwrap().into_sorted_vec();
+        // What loading it whole as records and compacting them writes.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let of_records = elsewhere.path().join("records.jsonl");
+        fs::copy(&path, &of_records).unwrap();
+        fs::copy(journal_path(&path), journal_path(&of_records)).unwrap();
+        RecordStore::open(&of_records)
+            .compact_records(&load_records(&of_records).unwrap())
+            .unwrap();
         let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
 
         let outlines = outline_merged(&path, Some(budget.clone())).unwrap();
@@ -1433,6 +1442,7 @@ pub(crate) mod tests {
         domains.sort_unstable();
         assert_eq!(domains, ["a.com", "b.com", "c.org", "d.net"]);
         assert_eq!(read_all(&path, &outlines), loaded);
+        assert_eq!(fs::read(&path).unwrap(), fs::read(&of_records).unwrap());
         // Written again with each site on one line and the journal folded
         // in, so it is outlined as it is from now on.
         assert!(!journal_path(&path).exists());

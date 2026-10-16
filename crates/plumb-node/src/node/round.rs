@@ -26,7 +26,7 @@ use tracing::info;
 use crate::about::Topics;
 use crate::crawl::{CrawlSet, CrawlSite};
 use crate::outline::Folded;
-use crate::records::{load_records, Change, RecordStore};
+use crate::records::{load_sites, Change, RecordStore};
 
 use super::trim::Keep;
 
@@ -247,8 +247,7 @@ impl RoundSites {
                 "{} holds a site more than once: reading it whole to merge them",
                 path.display()
             );
-            let set = load_records(path)?;
-            store.compact(&set)?;
+            store.compact(&load_sites(path)?)?;
         }
         let mut sites = RoundSites {
             focus,
@@ -268,9 +267,7 @@ impl RoundSites {
                 "{} holds a site more than once: reading it whole to merge them",
                 path.display()
             );
-            let set = load_records(path)?;
-            store.compact(&set)?;
-            drop(set);
+            store.compact(&load_sites(path)?)?;
             let RoundSites { focus, keep, .. } = sites;
             return Self::load_with_budget(path, focus, keep, budget);
         }
@@ -535,7 +532,7 @@ mod tests {
         let sites = RoundSites::load(&path, Topics::default(), Keep::default()).unwrap();
         assert_eq!(sites.len(), 1);
         assert!(sites.get("example.com").unwrap().titled());
-        assert_eq!(load_records(&path).unwrap().len(), 1);
+        assert_eq!(load_sites(&path).unwrap().len(), 1);
         let lines = std::fs::read_to_string(&path).unwrap();
         assert_eq!(lines.lines().count(), 1, "rewritten once");
     }

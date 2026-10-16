@@ -25,7 +25,7 @@
 //! node keeps, judged on each site's stored item ([`Keep::keeps`]), not
 //! their whole records. The file is then written again
 //! without the sites dropped, the other lines copied as they are, and the
-//! index built from it a record at a time. A file that holds a site twice,
+//! index built from it a site at a time. A file that holds a site twice,
 //! which only a whole set can merge, is first read whole once and written
 //! again with each site on one line ([`outline::outline_merged`]); the
 //! sites to drop are then chosen from it in the same way.
