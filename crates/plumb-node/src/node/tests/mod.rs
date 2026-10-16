@@ -2,8 +2,11 @@
 //! directory and driven over HTTP. Nothing here reaches the internet: seed
 //! data comes from the fixtures, served by a stand-in host on a loopback
 //! port, and the tests that run a node with records leave nothing to crawl.
+//! `crawl_golden` checks a crawl round, run on its own, against a golden
+//! file.
 
 mod agents;
+mod crawl_golden;
 mod indexes_and_rounds;
 mod meaning;
 mod owner;

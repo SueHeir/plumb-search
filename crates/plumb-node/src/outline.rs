@@ -1421,7 +1421,7 @@ pub(crate) mod tests {
 
     /// Checks `text` against the golden file at `path`, or writes it there
     /// when `PLUMB_WRITE_GOLDEN` is set, as plumb-index's golden test does.
-    fn check_golden(path: &Path, text: &str) {
+    pub(crate) fn check_golden(path: &Path, text: &str) {
         if std::env::var_os("PLUMB_WRITE_GOLDEN").is_some() {
             fs::write(path, text).unwrap();
             return;

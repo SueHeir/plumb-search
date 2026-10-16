@@ -1158,8 +1158,7 @@ impl Fetcher for NodeFetcher<'_> {
             if let Some(net) = net {
                 // Shared before it is saved here: a batch the offline
                 // check throws away holds few records anyway.
-                let mut records = plumb_crawl::to_records(&results);
-                crate::icons::attach(&mut records, &results);
+                let mut records = published_crawl(&results);
                 inner.drop_denied_records(&mut records);
                 if let Err(err) = net.publish(records).await {
                     warn!("cannot publish crawl results to the network: {err:#}");
@@ -1169,6 +1168,15 @@ impl Fetcher for NodeFetcher<'_> {
             Some((done, results))
         })
     }
+}
+
+/// What a node shares of a batch's results with the network, before the
+/// denylist: the sites [`plumb_crawl::to_records`] makes of them, each
+/// fetched homepage with its icon ([`crate::icons::attach`]).
+pub(super) fn published_crawl(results: &[CrawlResult]) -> Vec<SiteRecord> {
+    let mut records = plumb_crawl::to_records(results);
+    crate::icons::attach(&mut records, results);
+    records
 }
 
 /// Crawls the rest of the round under way, then puts an index of the result
