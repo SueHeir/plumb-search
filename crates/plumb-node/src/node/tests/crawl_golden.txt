@@ -1,0 +1,182 @@
+# A crawl round over the made-up sites of crawl_golden.rs: what it
+# holds of each site and picks, how it ends, its journal read back,
+# what it shares (each site as the network carries it, then the
+# bytes and lines of each batch), what it holds after, and the
+# records file with the journal folded in. Written by the round on
+# records; see crawl_golden.rs before writing it again.
+round RoundSite { domain: "s00.com", url: None, score: 0.9, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+round RoundSite { domain: "s01.com", url: Some("https://www.s01.com/"), score: 0.4851244, crawled_at: 1788544000, crawl_attempted_at: 1788544000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 25 }
+round RoundSite { domain: "s02.com", url: Some("https://www.s02.com/"), score: 0.53914505, crawled_at: 1791136000, crawl_attempted_at: 1791136000, gone_at: 0, crawl_failures: 0, crawl_version: 1, flags: 8 }
+round RoundSite { domain: "s03.com", url: Some("https://www.s03.com/"), score: 0.49259537, crawled_at: 1787680000, crawl_attempted_at: 1791740800, gone_at: 0, crawl_failures: 4, crawl_version: 2, flags: 26 }
+round RoundSite { domain: "s04.com", url: None, score: 0.4837608, crawled_at: 0, crawl_attempted_at: 1791568000, gone_at: 0, crawl_failures: 7, crawl_version: 0, flags: 0 }
+round RoundSite { domain: "s05.com", url: None, score: 0.59704334, crawled_at: 1600000005, crawl_attempted_at: 1786816000, gone_at: 1786816000, crawl_failures: 7, crawl_version: 0, flags: 1 }
+round RoundSite { domain: "s06.com", url: None, score: 0.49736878, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+round RoundSite { domain: "s07.com", url: Some("https://www.s07.com/"), score: 0.69155014, crawled_at: 1788544000, crawl_attempted_at: 1788544000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 8 }
+round RoundSite { domain: "s08.com", url: Some("https://www.s08.com/"), score: 0.46436414, crawled_at: 1791136000, crawl_attempted_at: 1791136000, gone_at: 0, crawl_failures: 0, crawl_version: 1, flags: 24 }
+round RoundSite { domain: "s09.com", url: Some("https://www.s09.com/"), score: 0.50373995, crawled_at: 1787680000, crawl_attempted_at: 1791913600, gone_at: 0, crawl_failures: 2, crawl_version: 2, flags: 9 }
+round RoundSite { domain: "s10.com", url: None, score: 0.58178747, crawled_at: 0, crawl_attempted_at: 1791568000, gone_at: 0, crawl_failures: 7, crawl_version: 0, flags: 4 }
+round RoundSite { domain: "s11.com", url: None, score: 0.4495883, crawled_at: 1600000011, crawl_attempted_at: 1786816000, gone_at: 1786816000, crawl_failures: 7, crawl_version: 0, flags: 2 }
+round RoundSite { domain: "s12.com", url: None, score: 0.5133169, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+round RoundSite { domain: "s13.com", url: Some("https://www.s13.com/"), score: 0.4807774, crawled_at: 1788544000, crawl_attempted_at: 1788544000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 25 }
+round RoundSite { domain: "s14.com", url: Some("https://www.s14.com/"), score: 0.6612928, crawled_at: 1791136000, crawl_attempted_at: 1791136000, gone_at: 0, crawl_failures: 0, crawl_version: 1, flags: 8 }
+round RoundSite { domain: "s15.com", url: Some("https://www.s15.com/"), score: 0.5326859, crawled_at: 1787680000, crawl_attempted_at: 1791740800, gone_at: 0, crawl_failures: 4, crawl_version: 2, flags: 10 }
+round RoundSite { domain: "s16.com", url: None, score: 0.63206995, crawled_at: 0, crawl_attempted_at: 1791568000, gone_at: 0, crawl_failures: 7, crawl_version: 0, flags: 4 }
+round RoundSite { domain: "s17.com", url: None, score: 0.5229389, crawled_at: 1600000017, crawl_attempted_at: 1786816000, gone_at: 1786816000, crawl_failures: 7, crawl_version: 0, flags: 1 }
+round RoundSite { domain: "s18.com", url: None, score: 0.48869896, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+round RoundSite { domain: "s19.com", url: Some("https://www.s19.com/"), score: 0.48189256, crawled_at: 1788544000, crawl_attempted_at: 1788544000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 10 }
+round RoundSite { domain: "s20.com", url: Some("https://www.s20.com/"), score: 0.54486275, crawled_at: 1791136000, crawl_attempted_at: 1791136000, gone_at: 0, crawl_failures: 0, crawl_version: 1, flags: 10 }
+round RoundSite { domain: "s21.com", url: Some("https://www.s21.com/"), score: 0.6425077, crawled_at: 1787680000, crawl_attempted_at: 1791913600, gone_at: 0, crawl_failures: 2, crawl_version: 2, flags: 25 }
+round RoundSite { domain: "s22.com", url: None, score: 0.47299454, crawled_at: 0, crawl_attempted_at: 1791568000, gone_at: 0, crawl_failures: 7, crawl_version: 0, flags: 0 }
+round RoundSite { domain: "s23.com", url: None, score: 0.78010297, crawled_at: 1600000023, crawl_attempted_at: 1786816000, gone_at: 1786816000, crawl_failures: 7, crawl_version: 0, flags: 0 }
+pick focused s19.com https://www.s19.com/
+pick focused s11.com -
+pick rest s00.com -
+pick rest s23.com -
+pick rest s07.com https://www.s07.com/
+pick rest s14.com https://www.s14.com/
+pick rest s21.com https://www.s21.com/
+pick rest s12.com -
+pick rest s06.com -
+pick rest s18.com -
+totals RunTotals { attempted: 15, outcomes: CrawlSummary { fetched: 6, robots_disallowed: 1, http_status: 1, not_html: 0, bot_check: 0, offsite_redirect: 6, failed: 1, unreachable: 1 }, discovered: 5, end: Finished }
+journal {"op":"mark","domain":"s01.com","attempted_at":1792000000,"failures":1}
+journal {"op":"mark","domain":"s02.com","attempted_at":1792000000,"failures":1}
+journal {"op":"mark","domain":"s03.com","attempted_at":1792000000,"failures":5}
+journal {"op":"mark","domain":"s04.com","attempted_at":1792000000,"failures":8}
+journal {"op":"mark","domain":"s05.com","attempted_at":1792000000,"failures":8}
+journal {"op":"merge","record":{"id":"foo_bar.com","kind":"site","weight":1.0,"fields":{"link_texts":[{"count":1,"linkers":"0000000200000000","text":"foo bar"}]}}}
+journal {"op":"merge","record":{"id":"hub.org","kind":"site","weight":1.0}}
+journal {"op":"merge","record":{"id":"new2.org","kind":"site","weight":2.0,"fields":{"link_texts":[{"count":1,"linkers":"0000000200000000","text":"new 2"},{"count":1,"linkers":"0100000000000000","text":"néw"}]}}}
+journal {"op":"merge","record":{"id":"s01.com","kind":"site","weight":1.0,"fields":{"redirect":{"at":"2026-10-14T17:46:40Z","to":"s02.com"}}}}
+journal {"op":"merge","record":{"id":"s02.com","kind":"site","title":"S2 Bank & Trust","url":"https://www.s02.com/","names":["S2 Bank","S2 Bank Inc."],"about":"Banking for s2.","text":"Open an account today.","lang":"en","weight":1.0,"edges":[{"rel":"key_page","to":"url:https://www.s02.com/accounts","text":"Accounts"},{"rel":"key_page","to":"url:https://www.s02.com/help.html","text":"Help"},{"rel":"links_to","to":"site:s04.com"},{"rel":"links_to","to":"site:s03.com"},{"rel":"links_to","to":"site:new2.org"},{"rel":"links_to","to":"site:s01.com"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:02Z","headings":["Personal","Business"],"link_texts":[{"count":1,"linkers":"0100000000000000","text":"s4 bank"}],"search_url":"https://s02.com/search?q={searchTerms}","terms":["bank","accounts"]}}}
+journal {"op":"merge","record":{"id":"s03.com","kind":"site","weight":1.0,"fields":{"redirect":{"at":"2026-10-14T17:46:40Z","inner":true,"to":"s02.com"}}}}
+journal {"op":"merge","record":{"id":"s04.com","kind":"site","title":"S4 Chess","url":"https://www.s04.com/","names":["Ban\u0007k Four","Résumé"],"weight":1.0,"edges":[{"rel":"links_to","to":"site:s02.com"},{"rel":"links_to","to":"site:s05.com"},{"rel":"links_to","to":"site:new2.org"},{"rel":"links_to","to":"site:hub.org"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:04Z","link_texts":[{"count":1,"linkers":"0000000200000000","text":"partner"},{"count":1,"linkers":"0000000200000000","text":"s2 partner"}]}}}
+journal {"op":"merge","record":{"id":"s05.com","kind":"site","weight":1.0}}
+journal {"op":"mark","domain":"s01.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s02.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s03.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s04.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s05.com","attempted_at":1792000000,"failures":8}
+journal {"op":"mark","domain":"s06.com","attempted_at":1792000000,"failures":1}
+journal {"op":"mark","domain":"s07.com","attempted_at":1792000000,"failures":1}
+journal {"op":"mark","domain":"s08.com","attempted_at":1792000000,"failures":1}
+journal {"op":"mark","domain":"s09.com","attempted_at":1792000000,"failures":3}
+journal {"op":"mark","domain":"s10.com","attempted_at":1792000000,"failures":8}
+journal {"op":"merge","record":{"id":"foo_bar.com","kind":"site","weight":2.0,"fields":{"link_texts":[{"count":1,"linkers":"0100000000000000","text":"foo bar"}]}}}
+journal {"op":"merge","record":{"id":"hub.org","kind":"site","weight":2.0}}
+journal {"op":"merge","record":{"id":"new7.org","kind":"site","weight":2.0,"fields":{"link_texts":[{"count":1,"linkers":"0100000000000000","text":"new 7"},{"count":1,"linkers":"0000001000000000","text":"néw"}]}}}
+journal {"op":"merge","record":{"id":"s03.com","kind":"site","weight":2.0}}
+journal {"op":"merge","record":{"id":"s06.com","kind":"site","weight":1.0,"fields":{"redirect":{"at":"2026-10-14T17:46:40Z","to":"s07.com"}}}}
+journal {"op":"merge","record":{"id":"s07.com","kind":"site","title":"S7 Bank & Trust","url":"https://www.s07.com/","names":["Café Bank","S7 Bank Inc.","s7 bank"],"about":"Banking for s7.","text":"Open an account today.","lang":"en","weight":1.0,"edges":[{"rel":"key_page","to":"url:https://www.s07.com/accounts","text":"Accounts"},{"rel":"key_page","to":"url:https://www.s07.com/help.html","text":"Help"},{"rel":"links_to","to":"site:s09.com"},{"rel":"links_to","to":"site:s03.com"},{"rel":"links_to","to":"site:new7.org"},{"rel":"links_to","to":"site:s06.com"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:07Z","headings":["Personal","Business"],"link_texts":[{"count":1,"linkers":"0000001000000000","text":"s9 bank"}],"search_url":"https://s07.com/search?q={searchTerms}","terms":["bank","accounts"]}}}
+journal {"op":"merge","record":{"id":"s08.com","kind":"site","fields":{"redirect":{"at":"2026-10-14T17:46:40Z","inner":true,"to":"s07.com"}}}}
+journal {"op":"merge","record":{"id":"s09.com","kind":"site","title":"S09 \u001b$B%5%$%H\u001b(B","url":"https://www.s09.com/","names":["S9 Chess","Résumé"],"weight":1.0,"edges":[{"rel":"links_to","to":"site:s07.com"},{"rel":"links_to","to":"site:s10.com"},{"rel":"links_to","to":"site:new7.org"},{"rel":"links_to","to":"site:hub.org"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:09Z","link_texts":[{"count":1,"linkers":"0100000000000000","text":"partner"},{"count":1,"linkers":"0100000000000000","text":"s7 partner"}]}}}
+journal {"op":"merge","record":{"id":"s10.com","kind":"site","weight":1.0}}
+journal {"op":"mark","domain":"s06.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s07.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s08.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s09.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s10.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s11.com","attempted_at":1792000000,"failures":8}
+journal {"op":"mark","domain":"s12.com","attempted_at":1792000000,"failures":1}
+journal {"op":"mark","domain":"s13.com","attempted_at":1792000000,"failures":1}
+journal {"op":"mark","domain":"s14.com","attempted_at":1792000000,"failures":1}
+journal {"op":"mark","domain":"s15.com","attempted_at":1792000000,"failures":5}
+journal {"op":"merge","record":{"id":"foo_bar.com","kind":"site","weight":3.0,"fields":{"link_texts":[{"count":1,"linkers":"0000008000000000","text":"foo bar"}]}}}
+journal {"op":"merge","record":{"id":"hub.org","kind":"site","weight":3.0}}
+journal {"op":"merge","record":{"id":"new12.org","kind":"site","weight":2.0,"fields":{"link_texts":[{"count":1,"linkers":"0000008000000000","text":"new 12"},{"count":1,"linkers":"0000000002000000","text":"néw"}]}}}
+journal {"op":"merge","record":{"id":"s03.com","kind":"site","weight":3.0}}
+journal {"op":"merge","record":{"id":"s11.com","kind":"site","weight":1.0,"fields":{"redirect":{"at":"2026-10-14T17:46:40Z","to":"s12.com"}}}}
+journal {"op":"merge","record":{"id":"s12.com","kind":"site","title":"S12 Bank & Trust","url":"https://www.s12.com/","names":["S12 Bank","S12 Bank Inc."],"about":"Banking for s12.","text":"Open an account today.","lang":"en","weight":1.0,"edges":[{"rel":"key_page","to":"url:https://www.s12.com/accounts","text":"Accounts"},{"rel":"key_page","to":"url:https://www.s12.com/help.html","text":"Help"},{"rel":"links_to","to":"site:s14.com"},{"rel":"links_to","to":"site:s03.com"},{"rel":"links_to","to":"site:new12.org"},{"rel":"links_to","to":"site:s11.com"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:12Z","headings":["Personal","Business"],"link_texts":[{"count":1,"linkers":"0000000002000000","text":"s14 bank"}],"search_url":"https://s12.com/search?q={searchTerms}","terms":["bank","accounts"]}}}
+journal {"op":"merge","record":{"id":"s14.com","kind":"site","title":"S14 Chess","url":"https://www.s14.com/","names":["S14 Chess","Résumé"],"weight":1.0,"edges":[{"rel":"links_to","to":"site:s12.com"},{"rel":"links_to","to":"site:s15.com"},{"rel":"links_to","to":"site:new12.org"},{"rel":"links_to","to":"site:hub.org"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:14Z","link_texts":[{"count":1,"linkers":"0000008000000000","text":"partner"},{"count":1,"linkers":"0000008000000000","text":"s12 partner"}]}}}
+journal {"op":"merge","record":{"id":"s15.com","kind":"site","weight":1.0}}
+journal {"op":"mark","domain":"s11.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s12.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s13.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s14.com","attempted_at":1792000000,"failures":0}
+journal {"op":"mark","domain":"s15.com","attempted_at":1792000000,"failures":0}
+shared 0 {"id":"foo_bar.com","kind":"site","weight":1.0,"fields":{"link_texts":[{"count":1,"linkers":"0000000200000000","text":"foo bar"}]}}
+shared 0 {"id":"hub.org","kind":"site","site":"hub.org","weight":1.0}
+shared 0 {"id":"new2.org","kind":"site","site":"new2.org","weight":2.0,"fields":{"link_texts":[{"count":1,"linkers":"0000000200000000","text":"new 2"},{"count":1,"linkers":"0100000000000000","text":"néw"}]}}
+shared 0 {"id":"s01.com","kind":"site","site":"s01.com","weight":1.0,"fields":{"redirect":{"at":"2026-10-14T17:46:40Z","to":"s02.com"}}}
+shared 0 {"id":"s02.com","kind":"site","title":"S2 Bank & Trust","url":"https://www.s02.com/","names":["S2 Bank","S2 Bank Inc."],"about":"Banking for s2.","text":"Open an account today.","lang":"en","weight":1.0,"edges":[{"rel":"key_page","to":"url:https://www.s02.com/accounts","text":"Accounts"},{"rel":"key_page","to":"url:https://www.s02.com/help.html","text":"Help"},{"rel":"links_to","to":"site:s04.com"},{"rel":"links_to","to":"site:s03.com"},{"rel":"links_to","to":"site:new2.org"},{"rel":"links_to","to":"site:s01.com"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:02Z","headings":["Personal","Business"],"link_texts":[{"count":1,"linkers":"0100000000000000","text":"s4 bank"}],"search_url":"https://s02.com/search?q={searchTerms}","terms":["bank","accounts"]}}
+shared 0 {"id":"s03.com","kind":"site","site":"s03.com","weight":1.0,"fields":{"redirect":{"at":"2026-10-14T17:46:40Z","inner":true,"to":"s02.com"}}}
+shared 0 {"id":"s04.com","kind":"site","title":"S4 Chess","url":"https://www.s04.com/","names":["Ban k Four","Résumé"],"weight":1.0,"edges":[{"rel":"links_to","to":"site:s02.com"},{"rel":"links_to","to":"site:s05.com"},{"rel":"links_to","to":"site:new2.org"},{"rel":"links_to","to":"site:hub.org"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:04Z","link_texts":[{"count":1,"linkers":"0000000200000000","text":"partner"},{"count":1,"linkers":"0000000200000000","text":"s2 partner"}]}}
+shared 0 {"id":"s05.com","kind":"site","site":"s05.com","weight":1.0}
+shared 0 bytes 1641 lines 9
+shared 1 {"id":"foo_bar.com","kind":"site","weight":1.0,"fields":{"link_texts":[{"count":1,"linkers":"0100000000000000","text":"foo bar"}]}}
+shared 1 {"id":"hub.org","kind":"site","site":"hub.org","weight":1.0}
+shared 1 {"id":"new7.org","kind":"site","site":"new7.org","weight":2.0,"fields":{"link_texts":[{"count":1,"linkers":"0100000000000000","text":"new 7"},{"count":1,"linkers":"0000001000000000","text":"néw"}]}}
+shared 1 {"id":"s03.com","kind":"site","site":"s03.com","weight":1.0}
+shared 1 {"id":"s06.com","kind":"site","site":"s06.com","weight":1.0,"fields":{"redirect":{"at":"2026-10-14T17:46:40Z","to":"s07.com"}}}
+shared 1 {"id":"s07.com","kind":"site","title":"S7 Bank & Trust","url":"https://www.s07.com/","names":["Café Bank","S7 Bank Inc.","s7 bank"],"about":"Banking for s7.","text":"Open an account today.","lang":"en","weight":1.0,"edges":[{"rel":"key_page","to":"url:https://www.s07.com/accounts","text":"Accounts"},{"rel":"key_page","to":"url:https://www.s07.com/help.html","text":"Help"},{"rel":"links_to","to":"site:s09.com"},{"rel":"links_to","to":"site:s03.com"},{"rel":"links_to","to":"site:new7.org"},{"rel":"links_to","to":"site:s06.com"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:07Z","headings":["Personal","Business"],"link_texts":[{"count":1,"linkers":"0000001000000000","text":"s9 bank"}],"search_url":"https://s07.com/search?q={searchTerms}","terms":["bank","accounts"]}}
+shared 1 {"id":"s08.com","kind":"site","site":"s08.com","fields":{"redirect":{"at":"2026-10-14T17:46:40Z","inner":true,"to":"s07.com"}}}
+shared 1 {"id":"s09.com","kind":"site","title":"S09  $B%5%$%H (B","url":"https://www.s09.com/","names":["S9 Chess","Résumé"],"weight":1.0,"edges":[{"rel":"links_to","to":"site:s07.com"},{"rel":"links_to","to":"site:s10.com"},{"rel":"links_to","to":"site:new7.org"},{"rel":"links_to","to":"site:hub.org"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:09Z","link_texts":[{"count":1,"linkers":"0100000000000000","text":"partner"},{"count":1,"linkers":"0100000000000000","text":"s7 partner"}]}}
+shared 1 {"id":"s10.com","kind":"site","site":"s10.com","weight":1.0}
+shared 1 bytes 1716 lines 10
+shared 2 {"id":"foo_bar.com","kind":"site","weight":1.0,"fields":{"link_texts":[{"count":1,"linkers":"0000008000000000","text":"foo bar"}]}}
+shared 2 {"id":"hub.org","kind":"site","site":"hub.org","weight":1.0}
+shared 2 {"id":"new12.org","kind":"site","site":"new12.org","weight":2.0,"fields":{"link_texts":[{"count":1,"linkers":"0000008000000000","text":"new 12"},{"count":1,"linkers":"0000000002000000","text":"néw"}]}}
+shared 2 {"id":"s03.com","kind":"site","site":"s03.com","weight":1.0}
+shared 2 {"id":"s11.com","kind":"site","site":"s11.com","weight":1.0,"fields":{"redirect":{"at":"2026-10-14T17:46:40Z","to":"s12.com"}}}
+shared 2 {"id":"s12.com","kind":"site","title":"S12 Bank & Trust","url":"https://www.s12.com/","names":["S12 Bank","S12 Bank Inc."],"about":"Banking for s12.","text":"Open an account today.","lang":"en","weight":1.0,"edges":[{"rel":"key_page","to":"url:https://www.s12.com/accounts","text":"Accounts"},{"rel":"key_page","to":"url:https://www.s12.com/help.html","text":"Help"},{"rel":"links_to","to":"site:s14.com"},{"rel":"links_to","to":"site:s03.com"},{"rel":"links_to","to":"site:new12.org"},{"rel":"links_to","to":"site:s11.com"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:12Z","headings":["Personal","Business"],"link_texts":[{"count":1,"linkers":"0000000002000000","text":"s14 bank"}],"search_url":"https://s12.com/search?q={searchTerms}","terms":["bank","accounts"]}}
+shared 2 {"id":"s14.com","kind":"site","title":"S14 Chess","url":"https://www.s14.com/","names":["S14 Chess","Résumé"],"weight":1.0,"edges":[{"rel":"links_to","to":"site:s12.com"},{"rel":"links_to","to":"site:s15.com"},{"rel":"links_to","to":"site:new12.org"},{"rel":"links_to","to":"site:hub.org"}],"fields":{"crawl_version":3,"crawled":"2026-10-14T17:30:14Z","link_texts":[{"count":1,"linkers":"0000008000000000","text":"partner"},{"count":1,"linkers":"0000008000000000","text":"s12 partner"}]}}
+shared 2 {"id":"s15.com","kind":"site","site":"s15.com","weight":1.0}
+shared 2 bytes 1579 lines 9
+after RoundSite { domain: "s00.com", url: None, score: 0.9, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+after RoundSite { domain: "s01.com", url: Some("https://www.s01.com/"), score: 0.4851244, crawled_at: 1788544000, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 25 }
+after RoundSite { domain: "s02.com", url: Some("https://www.s02.com/"), score: 0.53914505, crawled_at: 1791999002, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 9 }
+after RoundSite { domain: "s03.com", url: Some("https://www.s03.com/"), score: 0.49259537, crawled_at: 1787680000, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 2, flags: 26 }
+after RoundSite { domain: "s04.com", url: Some("https://www.s04.com/"), score: 0.4837608, crawled_at: 1791999004, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 8 }
+after RoundSite { domain: "s05.com", url: None, score: 0.59704334, crawled_at: 1600000005, crawl_attempted_at: 1792000000, gone_at: 1786816000, crawl_failures: 8, crawl_version: 0, flags: 1 }
+after RoundSite { domain: "s06.com", url: None, score: 0.49736878, crawled_at: 0, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+after RoundSite { domain: "s07.com", url: Some("https://www.s07.com/"), score: 0.69155014, crawled_at: 1791999007, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 9 }
+after RoundSite { domain: "s08.com", url: Some("https://www.s08.com/"), score: 0.46436414, crawled_at: 1791136000, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 1, flags: 24 }
+after RoundSite { domain: "s09.com", url: Some("https://www.s09.com/"), score: 0.50373995, crawled_at: 1791999009, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 9 }
+after RoundSite { domain: "s10.com", url: None, score: 0.58178747, crawled_at: 0, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 4 }
+after RoundSite { domain: "s11.com", url: None, score: 0.4495883, crawled_at: 1600000011, crawl_attempted_at: 1792000000, gone_at: 1786816000, crawl_failures: 0, crawl_version: 0, flags: 2 }
+after RoundSite { domain: "s12.com", url: Some("https://www.s12.com/"), score: 0.5133169, crawled_at: 1791999012, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 9 }
+after RoundSite { domain: "s13.com", url: Some("https://www.s13.com/"), score: 0.4807774, crawled_at: 1788544000, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 25 }
+after RoundSite { domain: "s14.com", url: Some("https://www.s14.com/"), score: 0.6612928, crawled_at: 1791999014, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 8 }
+after RoundSite { domain: "s15.com", url: Some("https://www.s15.com/"), score: 0.5326859, crawled_at: 1787680000, crawl_attempted_at: 1792000000, gone_at: 0, crawl_failures: 0, crawl_version: 2, flags: 10 }
+after RoundSite { domain: "s16.com", url: None, score: 0.63206995, crawled_at: 0, crawl_attempted_at: 1791568000, gone_at: 0, crawl_failures: 7, crawl_version: 0, flags: 4 }
+after RoundSite { domain: "s17.com", url: None, score: 0.5229389, crawled_at: 1600000017, crawl_attempted_at: 1786816000, gone_at: 1786816000, crawl_failures: 7, crawl_version: 0, flags: 1 }
+after RoundSite { domain: "s18.com", url: None, score: 0.48869896, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+after RoundSite { domain: "s19.com", url: Some("https://www.s19.com/"), score: 0.48189256, crawled_at: 1788544000, crawl_attempted_at: 1788544000, gone_at: 0, crawl_failures: 0, crawl_version: 3, flags: 10 }
+after RoundSite { domain: "s20.com", url: Some("https://www.s20.com/"), score: 0.54486275, crawled_at: 1791136000, crawl_attempted_at: 1791136000, gone_at: 0, crawl_failures: 0, crawl_version: 1, flags: 10 }
+after RoundSite { domain: "s21.com", url: Some("https://www.s21.com/"), score: 0.6425077, crawled_at: 1787680000, crawl_attempted_at: 1791913600, gone_at: 0, crawl_failures: 2, crawl_version: 2, flags: 25 }
+after RoundSite { domain: "s22.com", url: None, score: 0.47299454, crawled_at: 0, crawl_attempted_at: 1791568000, gone_at: 0, crawl_failures: 7, crawl_version: 0, flags: 0 }
+after RoundSite { domain: "s23.com", url: None, score: 0.78010297, crawled_at: 1600000023, crawl_attempted_at: 1786816000, gone_at: 1786816000, crawl_failures: 7, crawl_version: 0, flags: 0 }
+after RoundSite { domain: "foo_bar.com", url: None, score: 0.015051487, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+after RoundSite { domain: "hub.org", url: None, score: 0.015051487, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+after RoundSite { domain: "new2.org", url: None, score: 0.023856042, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+after RoundSite { domain: "new7.org", url: None, score: 0.023856042, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+after RoundSite { domain: "new12.org", url: None, score: 0.023856042, crawled_at: 0, crawl_attempted_at: 0, gone_at: 0, crawl_failures: 0, crawl_version: 0, flags: 0 }
+folded {"id":"s00.com","kind":"site","fields":{"ranks":{"tranco":1},"wikidata":{"official_site":true}}}
+folded {"id":"s01.com","kind":"site","title":"S1  $B%3%_%C%H (B","url":"https://www.s01.com/","about":"All about s1.","weight":3.0,"edges":[{"rel":"key_page","to":"url:https://www.s01.com/about","text":"About"}],"fields":{"crawl":{"tried":1792000000},"crawl_version":3,"crawled":"2026-09-04T17:46:40Z","headings":["News","Trust 1"],"ranks":{"tranco":1401},"redirect":{"at":"2026-10-14T17:46:40Z","to":"s02.com"}}}
+folded {"id":"s02.com","kind":"site","title":"S2 Bank & Trust","url":"https://www.s02.com/","names":["S2 Bank","S2 Bank Inc."],"about":"Banking for s2.","text":"Open an account today.","lang":"en","weight":6.0,"edges":[{"rel":"key_page","to":"url:https://www.s02.com/accounts","text":"Accounts"},{"rel":"key_page","to":"url:https://www.s02.com/help.html","text":"Help"},{"rel":"links_to","to":"site:s04.com"},{"rel":"links_to","to":"site:s03.com"},{"rel":"links_to","to":"site:new2.org"},{"rel":"links_to","to":"site:s01.com"}],"fields":{"crawl":{"tried":1792000000},"crawl_version":3,"crawled":"2026-10-14T17:30:02Z","headings":["Personal","Business"],"link_texts":[{"count":1,"linkers":"0100000000000000","text":"s4 bank"}],"ranks":{"tranco":501},"search_url":"https://s02.com/search?q={searchTerms}","terms":["bank","accounts"]}}
+folded {"id":"s03.com","kind":"site","title":"S3 Café �","url":"https://www.s03.com/","names":["S3 Trust","Stéphane"],"about":"All about s3.","weight":9.0,"fields":{"crawl":{"tried":1792000000},"crawl_version":2,"crawled":"2026-08-25T17:46:40Z","headings":["News","Trust 3"],"kinds":["bank"],"link_texts":[{"count":1,"linkers":"0080000000000000","text":"s three"}],"ranks":{"tranco":1901},"redirect":{"at":"2026-10-14T17:46:40Z","inner":true,"to":"s02.com"},"wikidata":{"about":"a bank"}}}
+folded {"id":"s04.com","kind":"site","title":"S4 Chess","url":"https://www.s04.com/","names":["Ban k Four","Résumé"],"weight":1.0,"edges":[{"rel":"links_to","to":"site:s02.com"},{"rel":"links_to","to":"site:s05.com"},{"rel":"links_to","to":"site:new2.org"},{"rel":"links_to","to":"site:hub.org"}],"fields":{"crawl":{"tried":1792000000},"crawl_version":3,"crawled":"2026-10-14T17:30:04Z","link_texts":[{"count":1,"linkers":"0000000200000000","text":"partner"},{"count":1,"linkers":"0000000200000000","text":"s2 partner"}],"ranks":{"tranco":1001}}}
+folded {"id":"s05.com","kind":"site","weight":4.0,"edges":[{"rel":"key_page","to":"url:https://www.s05.com/about","text":"About"}],"fields":{"crawl":{"failures":8,"gone":1786816000,"tried":1792000000},"crawled":"2020-09-13T12:26:45Z","ranks":{"tranco":101}}}
+folded {"id":"s06.com","kind":"site","weight":7.0,"fields":{"crawl":{"tried":1792000000},"ranks":{"tranco":1501},"redirect":{"at":"2026-10-14T17:46:40Z","to":"s07.com"}}}
+folded {"id":"s07.com","kind":"site","title":"S7 Bank & Trust","url":"https://www.s07.com/","names":["Café Bank","S7 Bank Inc.","s7 bank"],"about":"Banking for s7.","text":"Open an account today.","lang":"en","weight":10.0,"edges":[{"rel":"key_page","to":"url:https://www.s07.com/accounts","text":"Accounts"},{"rel":"key_page","to":"url:https://www.s07.com/help.html","text":"Help"},{"rel":"links_to","to":"site:s09.com"},{"rel":"links_to","to":"site:s03.com"},{"rel":"links_to","to":"site:new7.org"},{"rel":"links_to","to":"site:s06.com"}],"fields":{"crawl":{"tried":1792000000},"crawl_version":3,"crawled":"2026-10-14T17:30:07Z","headings":["Personal","Business"],"link_texts":[{"count":1,"linkers":"0000001000000000","text":"s9 bank"}],"ranks":{"tranco":601},"search_url":"https://s07.com/search?q={searchTerms}","terms":["bank","accounts"],"wikidata":{"official_site":true}}}
+folded {"id":"s08.com","kind":"site","title":"S8 Café �","url":"https://www.s08.com/","about":"All about s8.","weight":2.0,"fields":{"crawl":{"tried":1792000000},"crawl_version":1,"crawled":"2026-10-04T17:46:40Z","headings":["News","Trust 8"],"ranks":{"tranco":2001},"redirect":{"at":"2026-10-14T17:46:40Z","inner":true,"to":"s07.com"}}}
+folded {"id":"s09.com","kind":"site","title":"S09  $B%5%$%H (B","url":"https://www.s09.com/","names":["S9 Chess","Résumé"],"about":"All about s9.","weight":5.0,"edges":[{"rel":"links_to","to":"site:s07.com"},{"rel":"links_to","to":"site:s10.com"},{"rel":"links_to","to":"site:new7.org"},{"rel":"links_to","to":"site:hub.org"}],"fields":{"crawl":{"tried":1792000000},"crawl_version":3,"crawled":"2026-10-14T17:30:09Z","link_texts":[{"count":1,"linkers":"0100000000000000","text":"partner"},{"count":1,"linkers":"0100000000000000","text":"s7 partner"}],"ranks":{"tranco":1101}}}
+folded {"id":"s10.com","kind":"site","weight":8.0,"fields":{"crawl":{"tried":1792000000},"ranks":{"tranco":201}}}
+folded {"id":"s11.com","kind":"site","names":["S11 Trust","Stéphane"],"weight":1.0,"fields":{"crawl":{"gone":1786816000,"tried":1792000000},"crawled":"2020-09-13T12:26:51Z","kinds":["bank"],"link_texts":[{"count":1,"linkers":"0080000000000000","text":"s three"}],"ranks":{"tranco":1601},"wikidata":{"about":"a bank"}}}
+folded {"id":"s12.com","kind":"site","title":"S12 Bank & Trust","url":"https://www.s12.com/","names":["S12 Bank","S12 Bank Inc."],"about":"Banking for s12.","text":"Open an account today.","lang":"en","weight":3.0,"edges":[{"rel":"key_page","to":"url:https://www.s12.com/accounts","text":"Accounts"},{"rel":"key_page","to":"url:https://www.s12.com/help.html","text":"Help"},{"rel":"links_to","to":"site:s14.com"},{"rel":"links_to","to":"site:s03.com"},{"rel":"links_to","to":"site:new12.org"},{"rel":"links_to","to":"site:s11.com"}],"fields":{"crawl":{"tried":1792000000},"crawl_version":3,"crawled":"2026-10-14T17:30:12Z","headings":["Personal","Business"],"link_texts":[{"count":1,"linkers":"0000000002000000","text":"s14 bank"}],"ranks":{"tranco":701},"search_url":"https://s12.com/search?q={searchTerms}","terms":["bank","accounts"]}}
+folded {"id":"s13.com","kind":"site","title":"S13 Café �","url":"https://www.s13.com/","about":"All about s13.","weight":6.0,"edges":[{"rel":"key_page","to":"url:https://www.s13.com/about","text":"About"}],"fields":{"crawl":{"tried":1792000000},"crawl_version":3,"crawled":"2026-09-04T17:46:40Z","headings":["News","Trust 13"],"ranks":{"tranco":2101}}}
+folded {"id":"s14.com","kind":"site","title":"S14 Chess","url":"https://www.s14.com/","names":["S14 Chess","Résumé"],"about":"All about s14.","weight":9.0,"edges":[{"rel":"links_to","to":"site:s12.com"},{"rel":"links_to","to":"site:s15.com"},{"rel":"links_to","to":"site:new12.org"},{"rel":"links_to","to":"site:hub.org"}],"fields":{"crawl":{"tried":1792000000},"crawl_version":3,"crawled":"2026-10-14T17:30:14Z","link_texts":[{"count":1,"linkers":"0000008000000000","text":"partner"},{"count":1,"linkers":"0000008000000000","text":"s12 partner"}],"ranks":{"tranco":1201},"wikidata":{"official_site":true}}}
+folded {"id":"s15.com","kind":"site","title":"S15 Bank","url":"https://www.s15.com/","about":"All about s15.","weight":1.0,"fields":{"crawl":{"tried":1792000000},"crawl_version":2,"crawled":"2026-08-25T17:46:40Z","headings":["News","Trust 15"],"ranks":{"tranco":301}}}
+folded {"id":"s16.com","kind":"site","weight":4.0,"fields":{"crawl":{"failures":7,"tried":1791568000},"ranks":{"tranco":1701},"wikidata":{"official_site":true}}}
+folded {"id":"s17.com","kind":"site","weight":7.0,"edges":[{"rel":"key_page","to":"url:https://www.s17.com/about","text":"About"}],"fields":{"crawl":{"failures":7,"gone":1786816000,"tried":1786816000},"crawled":"2020-09-13T12:26:57Z","ranks":{"tranco":801}}}
+folded {"id":"s18.com","kind":"site","weight":10.0,"fields":{"ranks":{"tranco":2201}}}
+folded {"id":"s19.com","kind":"site","title":"S19 Chess Club","url":"https://www.s19.com/","names":["S19 Trust","Stéphane"],"about":"All about s19.","weight":2.0,"fields":{"crawl":{"tried":1788544000},"crawl_version":3,"crawled":"2026-09-04T17:46:40Z","headings":["News","Trust 19"],"kinds":["bank"],"link_texts":[{"count":1,"linkers":"0080000000000000","text":"s three"}],"ranks":{"tranco":1301},"wikidata":{"about":"a bank"}}}
+folded {"id":"s20.com","kind":"site","title":"S20 Bank","url":"https://www.s20.com/","about":"All about s20.","weight":5.0,"fields":{"crawl":{"tried":1791136000},"crawl_version":1,"crawled":"2026-10-04T17:46:40Z","headings":["News","Trust 20"],"ranks":{"tranco":401},"redirect":{"at":"2026-08-05T17:46:40Z","to":"s21.com"}}}
+folded {"id":"s21.com","kind":"site","title":"S21  $B%3%_%C%H (B","url":"https://www.s21.com/","about":"All about s21.","weight":8.0,"edges":[{"rel":"key_page","to":"url:https://www.s21.com/about","text":"About"}],"fields":{"crawl":{"failures":2,"tried":1791913600},"crawl_version":2,"crawled":"2026-08-25T17:46:40Z","headings":["News","Trust 21"],"ranks":{"tranco":1801},"wikidata":{"official_site":true}}}
+folded {"id":"s22.com","kind":"site","fields":{"crawl":{"failures":7,"tried":1791568000},"ranks":{"tranco":901}}}
+folded {"id":"s23.com","kind":"site","weight":3.0,"fields":{"crawl":{"failures":7,"gone":1786816000,"tried":1786816000},"crawled":"2020-09-13T12:27:03Z","ranks":{"tranco":1}}}
+folded {"id":"foo_bar.com","kind":"site","weight":3.0,"fields":{"link_texts":[{"count":3,"linkers":"0100008200000000","text":"foo bar"}]}}
+folded {"id":"hub.org","kind":"site","weight":3.0}
+folded {"id":"new12.org","kind":"site","weight":2.0,"fields":{"link_texts":[{"count":1,"linkers":"0000008000000000","text":"new 12"},{"count":1,"linkers":"0000000002000000","text":"néw"}]}}
+folded {"id":"new2.org","kind":"site","weight":2.0,"fields":{"link_texts":[{"count":1,"linkers":"0000000200000000","text":"new 2"},{"count":1,"linkers":"0100000000000000","text":"néw"}]}}
+folded {"id":"new7.org","kind":"site","weight":2.0,"fields":{"link_texts":[{"count":1,"linkers":"0100000000000000","text":"new 7"},{"count":1,"linkers":"0000001000000000","text":"néw"}]}}

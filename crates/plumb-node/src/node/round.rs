@@ -1,23 +1,26 @@
 //! What a node keeps of each site during a crawl round: the little that
 //! choosing homepages and saving crawl marks need, about a tenth of a whole
-//! record. A round used to hold every record ([`plumb_core::RecordSet`]),
+//! site. A round used to hold every record ([`plumb_core::RecordSet`]),
 //! well over a gigabyte for two million sites, next to everything else a
 //! node holds; the crawl results go to the records' journal as before, and
-//! the index is built from the file a record at a time
+//! the index is built from the file a site at a time
 //! ([`super::worker::build_from_file`]).
 //!
 //! The sites are read from the records file once its journal is folded in
-//! ([`crate::outline`]). Changes made during the round keep each site's
-//! crawl marks up to date and add the sites a crawl finds; the rest of a
-//! site (its score, its name) is as it was when the round read it, which
-//! is all a round reads: it picks its homepages when it starts, and the
-//! next part of the round reads the file again.
+//! ([`crate::outline`]), each as its stored item ([`plumb_core::site`]),
+//! which is what a round reads its crawl marks, score and flags off.
+//! Changes made during the round keep each site's crawl marks up to date
+//! and add the sites a crawl finds; the rest of a site (its score, its
+//! name) is as it was when the round read it, which is all a round reads:
+//! it picks its homepages when it starts, and the next part of the round
+//! reads the file again.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
-use plumb_core::{canonical_domain, now_unix, SiteRecord};
+use plumb_core::{canonical_domain, now_unix, site};
+use plumb_format::{Item, Ref};
 use tracing::info;
 
 use crate::about::Topics;
@@ -42,7 +45,7 @@ pub(super) struct RoundSite {
     flags: u8,
 }
 
-/// The site has key pages ([`SiteRecord::key_pages`]).
+/// The site has key pages ([`site::key_pages`]).
 const HAS_KEY_PAGES: u8 = 1;
 /// The site is about one of the node's focus topics.
 const FOCUSED: u8 = 2;
@@ -52,6 +55,9 @@ const FOCUSED: u8 = 2;
 const KEPT: u8 = 4;
 /// The site has a homepage title.
 const TITLED: u8 = 8;
+/// The site's title or description has a `�` or an escape byte: its page
+/// was read in the wrong charset ([`plumb_crawl::CHARSETS_READ_SINCE`]).
+const MISREAD: u8 = 16;
 
 fn seconds(at: Option<u64>) -> u32 {
     at.map_or(0, |at| u32::try_from(at).unwrap_or(u32::MAX).max(1))
@@ -61,33 +67,51 @@ fn at(seconds: u32) -> Option<u64> {
     (seconds > 0).then_some(u64::from(seconds))
 }
 
+/// Whether the site has key pages ([`site::key_pages`]), without copying
+/// them.
+fn has_key_pages(site: &Item) -> bool {
+    site.edges
+        .iter()
+        .any(|edge| edge.rel == "key_page" && edge.text.is_some() && matches!(edge.to, Ref::Url(_)))
+}
+
 impl RoundSite {
-    pub(super) fn of(record: &SiteRecord, focus: &Topics, keep: &Keep) -> RoundSite {
+    /// What a round keeps of `site`, its stored item.
+    pub(super) fn of(site: &Item, focus: &Topics, keep: &Keep) -> RoundSite {
+        let marks = site::crawl_marks(site);
+        let crawled_at = site::crawled(site);
         let mut flags = 0;
         for (flag, set) in [
-            (HAS_KEY_PAGES, !record.key_pages.is_empty()),
-            (FOCUSED, focus.matches(record)),
+            (HAS_KEY_PAGES, has_key_pages(site)),
+            (FOCUSED, focus.matches_site(site)),
             // Only ever asked of sites that look dead; matching topics
             // against every site would take a while.
             (
                 KEPT,
-                crate::dead::looks_dead(record, now_unix()) && keep.keeps(record),
+                crate::dead::looks_dead(site, now_unix()) && keep.keeps(site),
             ),
-            (TITLED, record.title.is_some()),
+            (TITLED, site.title.is_some()),
+            (
+                MISREAD,
+                [&site.title, &site.about]
+                    .into_iter()
+                    .flatten()
+                    .any(|text| text.contains(['\u{FFFD}', '\u{1B}'])),
+            ),
         ] {
             if set {
                 flags |= flag;
             }
         }
         RoundSite {
-            domain: record.domain.as_str().into(),
-            url: record.url.as_deref().map(Into::into),
-            score: record.link_score(),
-            crawled_at: seconds(record.crawled_at),
-            crawl_attempted_at: seconds(record.crawl_attempted_at),
-            gone_at: seconds(record.gone_at),
-            crawl_failures: record.crawl_failures,
-            crawl_version: record.crawl_version,
+            domain: site.id.as_str().into(),
+            url: site.url.as_deref().map(Into::into),
+            score: site::link_score(site),
+            crawled_at: seconds(crawled_at),
+            crawl_attempted_at: seconds(marks.tried),
+            gone_at: seconds(marks.gone),
+            crawl_failures: marks.failures,
+            crawl_version: site::crawl_version(site),
             flags,
         }
     }
@@ -116,28 +140,30 @@ impl RoundSite {
         self.has(TITLED)
     }
 
+    pub(super) fn misread(&self) -> bool {
+        self.has(MISREAD)
+    }
+
     pub(super) fn crawl_version(&self) -> u32 {
         self.crawl_version
     }
 
-    /// Takes in a crawl of the site merged into its record: its new crawl
-    /// marks, and whether it has key pages and a title now.
-    fn merge(&mut self, record: &SiteRecord) {
-        if record
-            .crawled_at
-            .is_some_and(|at| at > u64::from(self.crawled_at))
-        {
-            self.crawled_at = seconds(record.crawled_at);
-            self.crawl_version = record.crawl_version;
+    /// Takes in a crawl of the site merged into it: its new crawl marks,
+    /// and whether it has key pages and a title now.
+    fn merge(&mut self, site: &Item) {
+        let crawled_at = site::crawled(site);
+        if crawled_at.is_some_and(|at| at > u64::from(self.crawled_at)) {
+            self.crawled_at = seconds(crawled_at);
+            self.crawl_version = site::crawl_version(site);
             self.gone_at = 0;
-            if record.url.is_some() {
-                self.url = record.url.as_deref().map(Into::into);
+            if site.url.is_some() {
+                self.url = site.url.as_deref().map(Into::into);
             }
         }
-        if !record.key_pages.is_empty() {
+        if has_key_pages(site) {
             self.flags |= HAS_KEY_PAGES;
         }
-        if record.title.is_some() {
+        if site.title.is_some() {
             self.flags |= TITLED;
         }
     }
@@ -230,10 +256,10 @@ impl RoundSites {
             ..RoundSites::default()
         };
         let mut merged = false;
-        crate::outline::for_each_record(path, |record| {
-            merged |= canonical_domain(&record.domain).as_deref() != Some(record.domain.as_str())
-                || sites.position(&record.domain).is_some();
-            sites.add(&record);
+        crate::outline::for_each_site(path, |site| {
+            merged |= canonical_domain(&site.id).as_deref() != Some(site.id.as_str())
+                || sites.position(&site.id).is_some();
+            sites.add(&site);
         })?;
         if merged {
             // Only loading merges a site the file holds twice, or under
@@ -252,23 +278,23 @@ impl RoundSites {
         Ok(sites)
     }
 
-    /// The sites of `records`, for tests.
+    /// The sites of `records`, each as its stored item, for tests.
     #[cfg(test)]
-    pub(super) fn of(records: impl IntoIterator<Item = SiteRecord>) -> RoundSites {
+    pub(super) fn of(records: impl IntoIterator<Item = plumb_core::SiteRecord>) -> RoundSites {
         let mut sites = RoundSites::default();
         for record in records {
-            sites.add(&record);
+            sites.add(&record.stored_item_as_is());
         }
         sites
     }
 
-    /// Adds `record`, or takes it into the site already held.
-    fn add(&mut self, record: &SiteRecord) {
-        if let Some(i) = self.position(&record.domain) {
-            self.sites[i].merge(record);
+    /// Adds `site`, or takes it into the one already held.
+    fn add(&mut self, site: &Item) {
+        if let Some(i) = self.position(&site.id) {
+            self.sites[i].merge(site);
             return;
         }
-        let site = RoundSite::of(record, &self.focus, &self.keep);
+        let site = RoundSite::of(site, &self.focus, &self.keep);
         let i = u32::try_from(self.sites.len()).expect("fewer than 4 billion sites");
         match self.by_hash.entry(hash(&site.domain)) {
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -327,6 +353,8 @@ impl CrawlSet for RoundSites {
     }
 
     fn apply(&mut self, change: Change) {
+        // The journal's changes carry records until the store keeps items;
+        // a round reads each as its stored item, as it reads the file.
         match change {
             Change::Merge { record }
             | Change::MergeShared { record }
@@ -334,14 +362,14 @@ impl CrawlSet for RoundSites {
                 if let Some(domain) = canonical_domain(&record.domain) {
                     let mut record = record;
                     record.domain = domain;
-                    self.add(&record);
+                    self.add(&record.stored_item_as_is());
                 }
             }
             Change::RefreshShared { mut record } => {
                 if let Some(domain) = canonical_domain(&record.domain) {
                     record.domain = domain;
                     if let Some(site) = self.get_mut(&record.domain) {
-                        site.merge(&record);
+                        site.merge(&record.stored_item_as_is());
                     }
                 }
             }
@@ -385,7 +413,7 @@ impl CrawlSet for RoundSites {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::write_jsonl;
+    use plumb_core::{write_jsonl, SiteRecord};
 
     use super::*;
     use crate::records::journal_path;

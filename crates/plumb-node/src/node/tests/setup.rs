@@ -92,7 +92,8 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
             "x-domain-ranks-top50.txt"
         ]
     );
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let records: Vec<SiteRecord> =
+        plumb_core::stored::read_file(&dir.path().join("records.jsonl")).unwrap();
     assert_eq!(records.len(), 50);
     let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
     assert!(usbank.signals.official_site);
@@ -284,7 +285,8 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     let err = status.wikidata_error.unwrap();
     assert!(err.message.contains("HTTP 403"), "{}", err.message);
     assert!(err.retry_at.is_some());
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let records: Vec<SiteRecord> =
+        plumb_core::stored::read_file(&dir.path().join("records.jsonl")).unwrap();
     assert_eq!(records.len(), 50);
     assert!(records.iter().all(|r| !r.signals.official_site));
     let paths = store::Paths::new(dir.path());
@@ -312,7 +314,8 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     node.shutdown().await.unwrap();
 
     assert!(!store::load_state(&paths).unwrap().wikidata_missing);
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let records: Vec<SiteRecord> =
+        plumb_core::stored::read_file(&dir.path().join("records.jsonl")).unwrap();
     assert!(records.len() >= 50, "{}", records.len());
     let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
     assert!(usbank.signals.official_site);
@@ -327,7 +330,8 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     // Records made before a change to how seed data is read are folded
     // again on request, from the seed files on disk, without downloading,
     // and a disambiguation page's claim is taken back off them.
-    let mut records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let mut records: Vec<SiteRecord> =
+        plumb_core::stored::read_file(&dir.path().join("records.jsonl")).unwrap();
     for record in &mut records {
         record.signals.official_site = false;
         record.aliases.clear();
@@ -360,7 +364,8 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     .await;
     node.shutdown().await.unwrap();
     assert_eq!(offline.requests.lock().unwrap().len(), 0);
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let records: Vec<SiteRecord> =
+        plumb_core::stored::read_file(&dir.path().join("records.jsonl")).unwrap();
     let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
     assert!(usbank.signals.official_site);
     assert!(usbank.aliases.iter().any(|alias| alias == "U.S. Bancorp"));
@@ -383,7 +388,8 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
         "http://www.wikidata.org/entity/Q90000098\tCOE, Moro\thttps://mailto:coe@google.com\n",
     );
     std::fs::write(&wikidata, tsv).unwrap();
-    let mut records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let mut records: Vec<SiteRecord> =
+        plumb_core::stored::read_file(&dir.path().join("records.jsonl")).unwrap();
     let google = records
         .iter_mut()
         .find(|r| r.domain == "google.com")
@@ -537,7 +543,8 @@ async fn the_full_seed_replaces_a_quick_start_but_keeps_what_crawls_added() {
 
     let saved = store::load_state(&paths).unwrap();
     assert!(!saved.quick_start && !saved.wikidata_missing);
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let records: Vec<SiteRecord> =
+        plumb_core::stored::read_file(&dir.path().join("records.jsonl")).unwrap();
     let domains: Vec<&str> = records.iter().map(|r| r.domain.as_str()).collect();
     assert_eq!(records.len(), 52, "{domains:?}");
     assert!(!domains.contains(&"quick-only.example"));
@@ -734,4 +741,34 @@ async fn a_new_node_that_trusts_no_one_still_sets_up_from_the_seed_downloads() {
     let error = status.last_error.unwrap().message;
     assert!(error.contains("Tranco"), "{error}");
     node.shutdown().await.unwrap();
+}
+
+/// Crawling only, a node sets up from the Tranco list without building an
+/// index, and counts the sites it saved, as filling counts an index's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_that_only_crawls_sets_up_without_an_index() {
+    let tranco = std::fs::read(fixture("tranco.csv")).unwrap();
+    let host = SeedHost::start(move |request, _| match request {
+        "GET /tranco.csv" => http("200 OK", &tranco),
+        _ => http("404 Not Found", b"no such file"),
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.sources = host.sources();
+    config.sites = 50;
+    config.crawl_only = true;
+    let node = start(config).await.unwrap();
+    let status = wait_for(node.addr(), "setup", |s| {
+        s.step == Step::Idle && s.last_refresh.is_some()
+    })
+    .await;
+    assert_eq!(status.last_error, None, "{status:#?}");
+    assert_eq!(status.index, None);
+    assert_eq!(node.inner.held_sites(), 50);
+    node.shutdown().await.unwrap();
+    let records: Vec<SiteRecord> =
+        plumb_core::stored::read_file(&dir.path().join("records.jsonl")).unwrap();
+    assert_eq!(records.len(), 50);
+    assert!(names(&dir.path().join("indexes")).is_empty());
 }

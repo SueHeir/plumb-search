@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
-use plumb_core::{read_jsonl, SiteRecord};
+use plumb_core::SiteRecord;
 use plumb_index::{build_index, Hit, RankConfig, Searcher};
 use plumb_node::web::{escape_html, router, IndexBackend};
 use tower::ServiceExt;
@@ -72,7 +72,7 @@ fn build_fixture_index(dir: &Path) -> (PathBuf, String) {
     let (copy, outlines) = plumb_node::outline::outline_copy(&records, &outlined)
         .unwrap()
         .expect("one record a site");
-    plumb_node::outline::build_index(copy, outlines, &index, None, 0, None, &mut |_| Ok(()))
+    plumb_node::outline::build_index(copy, outlines, &index, None, 0, None, None, &mut |_| Ok(()))
         .unwrap();
     (index, ingest)
 }
@@ -90,7 +90,8 @@ fn ingest_merges_every_fixture() {
     }
 
     // Every source reached the merged record.
-    let records: Vec<SiteRecord> = read_jsonl(&tmp.path().join("records.jsonl")).unwrap();
+    let records: Vec<SiteRecord> =
+        plumb_core::stored::read_file(&tmp.path().join("records.jsonl")).unwrap();
     let usbank = records
         .iter()
         .find(|r| r.domain == "usbank.com")
@@ -177,7 +178,12 @@ async fn web_app_escapes_text_from_the_web() {
     let mut plain = SiteRecord::new("example.org");
     plain.url = Some("https://example.org/?a=1&b=2".into());
     plain.title = Some("Example Org".into());
-    build_index(&index, &[evil, plain]).unwrap();
+    // The index is built from stored items, whose cleaning drops a URL
+    // that is not the web's; put it back, since this is about what the web
+    // app makes of whatever text the index holds.
+    let mut evil = evil.to_stored_item();
+    evil.url = Some("javascript:alert(document.cookie)".into());
+    build_index(&index, &[evil, plain.to_stored_item()]).unwrap();
 
     // The index hands the raw text back, so escaping is up to the web app.
     let searcher = Searcher::open(&index).unwrap();

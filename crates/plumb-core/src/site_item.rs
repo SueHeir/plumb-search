@@ -181,31 +181,7 @@ impl SiteRecord {
 
     /// [`SiteRecord::to_item`] of a clean record.
     fn clean_to_item(self) -> Result<Item> {
-        let mut item = self.whole_item();
-        item.text = item
-            .text
-            .map(|text| match text.char_indices().nth(MAX_TEXT_CHARS) {
-                Some((cut, _)) => text[..cut].trim_end().to_string(),
-                None => text,
-            });
-        let unnamed = |redirect: &Value| !redirect["to"].as_str().is_some_and(is_domain);
-        if item.fields.get("redirect").is_some_and(unnamed) {
-            item.fields.remove("redirect");
-        }
-        if item.url.is_none() && is_domain(&item.id) {
-            item.site = Some(item.id.clone());
-        }
-        while too_big(&item) {
-            if let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) {
-                item.fields.remove(*field);
-            } else if item.edges.iter().any(|edge| edge.rel == "links_to") {
-                item.edges.retain(|edge| edge.rel != "links_to");
-            } else {
-                bail!("{} is over {MAX_ITEM_BYTES} bytes as an item", item.id);
-            }
-        }
-        item.check()?;
-        Ok(item)
+        sent_item(self.whole_item())
     }
 
     /// This site as a node stores it ([`crate::stored`]): its item with all
@@ -217,21 +193,27 @@ impl SiteRecord {
     /// and headlines a crawl from another node brings into the inbox
     /// (`"icon"`, and `"news"` as the record's [`crate::Headline`]s). Never
     /// sent, so never checked against the format's rules.
-    pub(crate) fn to_stored_item(&self) -> Item {
+    pub fn to_stored_item(&self) -> Item {
         let mut site = self.clone();
         site.clean();
+        site.stored_item_as_is()
+    }
+
+    /// [`SiteRecord::to_stored_item`] of the record as it is, not cleaned:
+    /// the item a stored line holds of it ([`crate::stored`]).
+    pub fn stored_item_as_is(mut self) -> Item {
         let mut crawl = Map::new();
-        if let Some(tried) = site.crawl_attempted_at {
+        if let Some(tried) = self.crawl_attempted_at {
             crawl.insert("tried".into(), json!(tried));
         }
-        if site.crawl_failures > 0 {
-            crawl.insert("failures".into(), json!(site.crawl_failures));
+        if self.crawl_failures > 0 {
+            crawl.insert("failures".into(), json!(self.crawl_failures));
         }
-        if let Some(gone) = site.gone_at {
+        if let Some(gone) = self.gone_at {
             crawl.insert("gone".into(), json!(gone));
         }
-        let (icon, news) = (site.icon.take(), std::mem::take(&mut site.news));
-        let mut item = site.whole_item();
+        let (icon, news) = (self.icon.take(), std::mem::take(&mut self.news));
+        let mut item = self.whole_item();
         if !crawl.is_empty() {
             item.fields.insert("crawl".into(), Value::Object(crawl));
         }
@@ -244,8 +226,11 @@ impl SiteRecord {
         item
     }
 
-    /// The site a stored item holds ([`SiteRecord::to_stored_item`]).
-    pub(crate) fn from_stored_item(item: &Item) -> Result<SiteRecord> {
+    /// The site a stored item holds ([`SiteRecord::to_stored_item`]), as
+    /// it is: the record of [`SiteRecord::stored_item_as_is`]. Code that
+    /// makes sites as items hands them on this way to what still takes
+    /// records, such as the journal's changes.
+    pub fn from_stored_item(item: &Item) -> Result<SiteRecord> {
         let mut record = SiteRecord::read_item(item, true)?;
         if let Some(crawl) = item.fields.get("crawl") {
             record.crawl_attempted_at = crawl.get("tried").and_then(Value::as_u64);
@@ -475,7 +460,39 @@ impl SiteRecord {
     }
 }
 
-fn edge(rel: &str, to: Ref, text: Option<String>) -> Edge {
+/// The item a clean site sends of the item with all it holds and nothing
+/// of the node's own ([`SiteRecord::to_item`], [`crate::site::to_item`]):
+/// its text cut to the format's 1,000 characters, a redirect to a site no
+/// item can name left out, and fields shed until it fits. Errors when it
+/// would not be a valid item.
+pub(crate) fn sent_item(mut item: Item) -> Result<Item> {
+    item.text = item
+        .text
+        .map(|text| match text.char_indices().nth(MAX_TEXT_CHARS) {
+            Some((cut, _)) => text[..cut].trim_end().to_string(),
+            None => text,
+        });
+    let unnamed = |redirect: &Value| !redirect["to"].as_str().is_some_and(is_domain);
+    if item.fields.get("redirect").is_some_and(unnamed) {
+        item.fields.remove("redirect");
+    }
+    if item.url.is_none() && is_domain(&item.id) {
+        item.site = Some(item.id.clone());
+    }
+    while too_big(&item) {
+        if let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) {
+            item.fields.remove(*field);
+        } else if item.edges.iter().any(|edge| edge.rel == "links_to") {
+            item.edges.retain(|edge| edge.rel != "links_to");
+        } else {
+            bail!("{} is over {MAX_ITEM_BYTES} bytes as an item", item.id);
+        }
+    }
+    item.check()?;
+    Ok(item)
+}
+
+pub(crate) fn edge(rel: &str, to: Ref, text: Option<String>) -> Edge {
     Edge {
         rel: rel.into(),
         to,
@@ -488,7 +505,7 @@ fn edge(rel: &str, to: Ref, text: Option<String>) -> Edge {
 /// `url` in canonical form, `None` when it has none. A URL whose canonical
 /// form canonicalizes differently again (`%%41`) is left out too, since
 /// the format would refuse it.
-fn canonical_owned(url: String) -> Option<String> {
+pub(crate) fn canonical_owned(url: String) -> Option<String> {
     if plainly_canonical(&url) {
         return Some(url);
     }
@@ -503,7 +520,7 @@ fn canonical_owned(url: String) -> Option<String> {
 /// letter, no port, and a path and query of characters a URL keeps as
 /// they are, with no `%`, no dot segments and no fragment. `false` says
 /// nothing: the URL may be canonical all the same.
-fn plainly_canonical(url: &str) -> bool {
+pub(crate) fn plainly_canonical(url: &str) -> bool {
     let Some(rest) = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
@@ -556,7 +573,7 @@ pub(crate) fn tidy(text: String) -> Option<String> {
 }
 
 /// `text` as a keyword: [`tidy`], on one line.
-fn tidy_keyword(text: String) -> Option<String> {
+pub(crate) fn tidy_keyword(text: String) -> Option<String> {
     if text.contains('\n') {
         tidy(text.replace('\n', " "))
     } else {
@@ -564,16 +581,16 @@ fn tidy_keyword(text: String) -> Option<String> {
     }
 }
 
-fn tidy_all(list: Vec<String>) -> Vec<String> {
+pub(crate) fn tidy_all(list: Vec<String>) -> Vec<String> {
     list.into_iter().filter_map(tidy).collect()
 }
 
-fn tidy_keywords(list: Vec<String>) -> Vec<String> {
+pub(crate) fn tidy_keywords(list: Vec<String>) -> Vec<String> {
     list.into_iter().filter_map(tidy_keyword).collect()
 }
 
 /// `list` with each text kept the first time it comes.
-fn once(list: Vec<String>) -> Vec<String> {
+pub(crate) fn once(list: Vec<String>) -> Vec<String> {
     let mut kept: Vec<String> = Vec::with_capacity(list.len());
     for text in list {
         if !kept.contains(&text) {
@@ -583,17 +600,17 @@ fn once(list: Vec<String>) -> Vec<String> {
     kept
 }
 
-fn string(value: Option<&Value>) -> Option<String> {
+pub(crate) fn string(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_string)
 }
 
-fn strings(value: Option<&Value>) -> Vec<String> {
+pub(crate) fn strings(value: Option<&Value>) -> Vec<String> {
     let list = value.and_then(Value::as_array).into_iter().flatten();
     list.filter_map(|value| string(Some(value))).collect()
 }
 
 /// A whole number that fits `T`, `None` for anything else.
-fn number<T: TryFrom<u64>>(value: Option<&Value>) -> Option<T> {
+pub(crate) fn number<T: TryFrom<u64>>(value: Option<&Value>) -> Option<T> {
     T::try_from(value?.as_u64()?).ok()
 }
 
@@ -603,7 +620,7 @@ fn too_big(item: &Item) -> bool {
 
 /// `unix` seconds as a UTC timestamp, `YYYY-MM-DDTHH:MM:SSZ`, the other
 /// way from [`unix_seconds`]; `None` past the year 9999.
-fn timestamp(unix: u64) -> Option<String> {
+pub(crate) fn timestamp(unix: u64) -> Option<String> {
     let (days, seconds) = (i64::try_from(unix / 86_400).ok()?, unix % 86_400);
     // The date `days` after 1970-01-01, in the proleptic Gregorian calendar.
     let days = days + 719_468;
@@ -625,13 +642,13 @@ fn timestamp(unix: u64) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{Headline, Redirect, Signals};
 
     /// A site with every member a site item carries, and the ones it
     /// leaves out.
-    fn full_record() -> SiteRecord {
+    pub(crate) fn full_record() -> SiteRecord {
         SiteRecord {
             domain: "python.org".into(),
             url: Some("https://www.python.org/".into()),

@@ -25,7 +25,6 @@
 //! fetches of a crawl are simply dropped. Crawls pick homepages and save
 //! their results as `plumb-tools crawl` does ([`crate::crawl`]).
 
-use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -37,7 +36,6 @@ use anyhow::{bail, Context, Result};
 use plumb_core::SITES_VERSION;
 use plumb_core::{now_unix, parent_domain, RecordSet, SiteRecord, SUBDOMAIN_SITE_NAMES};
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
-use plumb_index::build_index_with_budget;
 use plumb_ingest::{
     attach_facts, attach_intros, crowded_front_pages, download, facts, intros, kind_sites,
     load_cc_domain_ranks, load_intros, load_misread_official_sites, load_site_facts, load_tranco,
@@ -196,21 +194,7 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         && inner.settings().storage_limit_mb > 0
         && inner.saved().crawl_left == 0
     {
-        let built = blocking(inner, |inner| {
-            let _records = inner.hold_records();
-            inner.set_step(Step::Indexing, "Making room for sites about new topics");
-            let mut set = load_records(&inner.paths.records)?;
-            inner.check_stop()?;
-            if inner.prune_for_new_topics(&mut set)? > 0 {
-                replace_records_with_budget(
-                    &inner.paths.records,
-                    sorted_by_link_score(&set),
-                    inner.storage.as_ref(),
-                )?;
-            }
-            build(inner, &sorted_by_link_score(&set))
-        })
-        .await?;
+        let built = blocking(inner, make_room_for_new_topics).await?;
         put_in_service(inner, Some(built), false).await?;
         return Ok(Next::Continue);
     }
@@ -334,6 +318,29 @@ fn network_rebuild_gap(took: u64) -> u64 {
 /// the time.
 const BUILD_GAP_PER_BUILD: u64 = 3;
 
+/// Drops the sites kept for topics the node no longer has from the records
+/// ([`Inner::prune_records_for_new_topics`]) and builds an index without
+/// them. Reads the records file a record at a time
+/// ([`crate::outline::outline_merged`]), holding an outline of each site
+/// and the domains of those about the topics, then writes it again with
+/// the lines of the sites left copied as they are. A file only a whole set
+/// can merge (a site on two lines) is first written again with each site
+/// on one line. The index is then built from the file
+/// ([`build_from_file`]).
+pub(super) fn make_room_for_new_topics(inner: &Inner) -> Result<ServingIndex> {
+    let _records = inner.hold_records();
+    inner.set_step(Step::Indexing, "Making room for sites about new topics");
+    let path = &inner.paths.records;
+    let mut outlines = crate::outline::outline_merged(path, inner.storage.clone())?;
+    inner.check_stop()?;
+    if inner.prune_records_for_new_topics(&mut outlines)? > 0 {
+        crate::outline::replace_lines(path, &outlines, inner.storage.as_ref())?;
+    }
+    // The build reads its own outlines.
+    drop(outlines);
+    build_from_file(inner)
+}
+
 fn idle_detail(config: &NodeConfig) -> &'static str {
     if config.crawl_only {
         "Crawling only; up to date until the next crawl round"
@@ -364,9 +371,7 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
                 saved.start_over(fresh);
                 saved.add_downloaded(downloaded, now_unix());
             })?;
-            save_seed_records(inner, &records)?;
-            inner.check_stop()?;
-            build_unless_crawling_only(inner, &records)
+            save_and_build_seed(inner, records)
         })
         .await?;
         return put_in_service(inner, built, true).await;
@@ -391,27 +396,27 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
             saved.start_over(fresh);
             saved.add_downloaded(downloaded, now_unix());
         })?;
-        save_seed_records(inner, &records)?;
-        inner.check_stop()?;
-        build_unless_crawling_only(inner, &records)
+        save_and_build_seed(inner, records)
     })
     .await?;
     put_in_service(inner, built, true).await
 }
 
-/// [`build`], or crawling only ([`NodeConfig::crawl_only`]), no index:
-/// `None`, noting how many sites the records hold.
-fn build_unless_crawling_only<R: Borrow<SiteRecord>>(
-    inner: &Inner,
-    records: &[R],
-) -> Result<Option<ServingIndex>> {
+/// Saves the records of a setup as the records file ([`save_seed_records`])
+/// and, once they are dropped, builds an index from the file
+/// ([`build_from_file`]), so the two never take memory at once. Crawling
+/// only ([`NodeConfig::crawl_only`]), no index: `None`, noting how many
+/// sites were saved.
+fn save_and_build_seed(inner: &Inner, records: Vec<SiteRecord>) -> Result<Option<ServingIndex>> {
+    let _records = inner.hold_records();
+    let sites = save_seed_records(inner, &records)?;
+    drop(records);
+    inner.check_stop()?;
     if inner.config.crawl_only {
-        inner
-            .round_sites
-            .store(records.len() as u64, Ordering::SeqCst);
+        inner.round_sites.store(sites as u64, Ordering::SeqCst);
         return Ok(None);
     }
-    build(inner, records).map(Some)
+    build_from_file(inner).map(Some)
 }
 
 /// [`build_from_file`], or crawling only ([`NodeConfig::crawl_only`]),
@@ -531,8 +536,11 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             "folded the seed data into the records: {} sites (there were {before})",
             records.len(),
         );
+        // The build reads the file, a record at a time.
+        drop(records);
+        drop(set);
         inner.check_stop()?;
-        build(inner, &records)
+        build_from_file(inner)
     })
     .await?;
     // Not put_in_service: this is no refresh, and a round under way goes on.
@@ -1020,8 +1028,9 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<(Vec<SiteRecord>, Ve
     Ok((records, void))
 }
 
-/// Saves the records of a setup as the records file.
-pub(super) fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
+/// Saves the records of a setup as the records file. Returns how many it
+/// wrote.
+pub(super) fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<usize> {
     inner.set_step(
         Step::Ingesting,
         format!(
@@ -1029,13 +1038,14 @@ pub(super) fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result
             group_thousands(records.len() as u64)
         ),
     );
-    replace_records_with_budget(&inner.paths.records, records, inner.storage.as_ref())?;
+    let written =
+        replace_records_with_budget(&inner.paths.records, records, inner.storage.as_ref())?;
     info!(
         "saved {} site records in {}",
         records.len(),
         inner.paths.records.display()
     );
-    Ok(())
+    Ok(written)
 }
 
 /// Whether the index being served lacks the buckets this node needs, as an
@@ -1148,8 +1158,7 @@ impl Fetcher for NodeFetcher<'_> {
             if let Some(net) = net {
                 // Shared before it is saved here: a batch the offline
                 // check throws away holds few records anyway.
-                let mut records = plumb_crawl::to_records(&results);
-                crate::icons::attach(&mut records, &results);
+                let mut records = published_crawl(&results);
                 inner.drop_denied_records(&mut records);
                 if let Err(err) = net.publish(records).await {
                     warn!("cannot publish crawl results to the network: {err:#}");
@@ -1159,6 +1168,16 @@ impl Fetcher for NodeFetcher<'_> {
             Some((done, results))
         })
     }
+}
+
+/// What a node shares of a batch's results with the network, before the
+/// denylist: the sites [`plumb_crawl::to_items`] makes of them, each
+/// fetched homepage with its icon ([`crate::icons::attach`]), as the
+/// records the network still takes ([`crate::crawl::to_record`]).
+pub(super) fn published_crawl(results: &[CrawlResult]) -> Vec<SiteRecord> {
+    let mut sites = plumb_crawl::to_items(results);
+    crate::icons::attach(&mut sites, results);
+    sites.iter().map(crate::crawl::to_record).collect()
 }
 
 /// Crawls the rest of the round under way, then puts an index of the result
@@ -1317,7 +1336,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     let focused_domains: HashSet<&str> = focused.iter().map(|t| t.domain.as_str()).collect();
     // Sites crawled before nodes kept icons or key pages are due again for
     // them, and so are sites read by a much older crawler (see
-    // plumb_crawl::REREAD_BELOW).
+    // plumb_crawl::REREAD_BELOW) or in the wrong charset.
     let icons = IconStore::new(&inner.paths.icons).with_budget(inner.storage.clone());
     let noted = icons.noted();
     let rest = select_targets_with(
@@ -1561,9 +1580,14 @@ fn local_catch_up<'a>(
 }
 
 /// Whether a site was last read by a crawler older than
-/// [`plumb_crawl::REREAD_BELOW`], so it is due again to be read anew.
+/// [`plumb_crawl::REREAD_BELOW`], or misread in the wrong charset by one
+/// older than [`plumb_crawl::CHARSETS_READ_SINCE`], so it is due again to
+/// be read anew.
 fn due_for_rereading(record: &RoundSite) -> bool {
-    last_crawl_answered(record) && record.crawl_version() < plumb_crawl::REREAD_BELOW
+    let version = record.crawl_version();
+    last_crawl_answered(record)
+        && (version < plumb_crawl::REREAD_BELOW
+            || record.misread() && version < plumb_crawl::CHARSETS_READ_SINCE)
 }
 
 /// Counts the sites that look dead ([`crate::dead`]) and, with
@@ -1703,87 +1727,23 @@ fn save_icons(icons: &IconStore, results: &[CrawlResult]) {
     }
 }
 
-/// Builds an index of `records` in a new numbered directory and opens it.
-pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingIndex> {
-    // Sites judged dead stay in the records, out of the index and the
-    // buckets other nodes take. So do what the denylist denies.
-    let denylist = inner.denylist();
-    let records: Vec<std::borrow::Cow<'_, SiteRecord>> = records
-        .iter()
-        .map(Borrow::borrow)
-        .filter(|record| record.gone_at.is_none())
-        .filter_map(|record| match &denylist {
-            Some(list) => super::denylist::allowed_record(list, record),
-            None => Some(std::borrow::Cow::Borrowed(record)),
-        })
-        .collect();
-    let records: Vec<&SiteRecord> = records.iter().map(AsRef::as_ref).collect();
-    let records = records.as_slice();
-    let id = store::next_index_id(&inner.paths);
-    let dir = inner.paths.index(id);
-    inner.set_step(
-        Step::Indexing,
-        format!(
-            "Building the search index of {} sites",
-            group_thousands(records.len() as u64)
-        ),
-    );
-    watch_feeds(inner, records);
-    let buckets = network::wants_buckets(inner);
-    let steps = if buckets { 2 } else { 1 };
-    inner.set_progress(0, steps, "steps");
-    let started = Instant::now();
-    let stats = build_index_with_budget(&dir, records, inner.storage.clone())
-        .with_context(|| format!("building the index in {}", dir.display()))?;
-    if buckets {
-        inner.set_step(Step::Indexing, "Writing the buckets other nodes search");
-        inner.set_progress(1, steps, "steps");
-    }
-    network::build_buckets(inner, &dir, records);
-    let index = match ServingIndex::open(id, &dir, inner.rank) {
-        Ok(index) => index,
-        Err(err) => {
-            let _ = store::remove_index(&dir);
-            return Err(err.context(format!("opening the new index in {}", dir.display())));
-        }
-    };
-    inner.journal.info(format!(
-        "Search index rebuilt: {} sites in {}",
-        group_thousands(stats.docs),
-        duration_words(started.elapsed().as_secs().max(1))
-    ));
-    info!(
-        "built the index in {} ({} sites) in {:.1} s",
-        dir.display(),
-        stats.docs,
-        started.elapsed().as_secs_f64()
-    );
-    Ok(index)
-}
-
 /// Builds an index of the records file in a new numbered directory and
-/// opens it, reading the file a record at a time ([`crate::outline`]): the
-/// journal is folded into the file first, and no more than an outline of
-/// each site is held at once, where loading the file would hold every
-/// record. The same index as [`build`] of the whole set. A file that only a
-/// whole set can merge (a site on two lines) is loaded and rewritten once.
+/// opens it, reading the file a site at a time as its stored item
+/// ([`crate::outline`]): the journal is folded into the file first, and no
+/// more than an outline of each site is held at once, where loading the
+/// file would hold every record. Every index the node builds is built this
+/// way, from the file the step before it wrote. A file that only a whole
+/// set can merge (a site on two lines) is loaded once and written again
+/// with each site on one line ([`crate::outline::outline_merged`]), then
+/// read a site at a time like any other. Sites judged dead stay in the
+/// records, out of the index and the buckets other nodes take, and so does
+/// what the denylist denies ([`super::denylist::allow`]): a denied site,
+/// and the key pages and headlines it denies of the rest.
 /// Call it holding the records ([`Inner::hold_records`]).
 pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
     inner.set_step(Step::Indexing, "Reading the site records");
-    let Some(outlines) =
-        crate::outline::outline_with_budget(&inner.paths.records, inner.storage.clone())?
-    else {
-        info!(
-            "{} holds a site more than once: reading it whole to merge them",
-            inner.paths.records.display()
-        );
-        let set = load_records(&inner.paths.records)?;
-        RecordStore::open(&inner.paths.records)
-            .with_budget(inner.storage.clone())
-            .compact(&set)?;
-        inner.check_stop()?;
-        return build(inner, &sorted_by_link_score(&set));
-    };
+    let path = &inner.paths.records;
+    let outlines = crate::outline::outline_merged(path, inner.storage.clone())?;
     inner.check_stop()?;
     let id = store::next_index_id(&inner.paths);
     let dir = inner.paths.index(id);
@@ -1793,6 +1753,12 @@ pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
         .paths
         .indexes
         .join(format!(".{}-buckets", store::index_name(id)));
+    let denylist = inner.denylist();
+    let allowed = |site: &mut plumb_format::Item| {
+        denylist
+            .as_deref()
+            .is_none_or(|list| super::denylist::allow(list, site))
+    };
     let started = Instant::now();
     let built = crate::outline::build_index(
         &inner.paths.records,
@@ -1800,6 +1766,7 @@ pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
         &dir,
         network::wants_buckets(inner).then_some(buckets_dir.as_path()),
         inner.config.news_feeds,
+        denylist.is_some().then_some(&allowed),
         inner.storage.clone(),
         &mut |step| {
             match step {
@@ -1862,24 +1829,6 @@ pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
         started.elapsed().as_secs_f64()
     );
     Ok(index)
-}
-
-/// Has the node watch the feeds of its best-ranked sites, the first of
-/// `records` (see [`NodeConfig::news_feeds`](super::NodeConfig)): sites
-/// that answered their last crawl and redirect nowhere.
-fn watch_feeds<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) {
-    let wanted = inner.config.news_feeds;
-    if wanted == 0 {
-        return;
-    }
-    let sites = records
-        .iter()
-        .map(Borrow::borrow)
-        .filter(|r| crate::outline::wants_feed(r))
-        .take(wanted)
-        .map(crate::outline::feed_of)
-        .collect();
-    inner.news.watch(sites);
 }
 
 /// Swaps in a freshly built index and notes that the records file holds no
@@ -2198,9 +2147,10 @@ mod tests {
         assert_eq!(network_rebuild_gap(1_500), 4_500);
     }
 
-    /// What a round keeps of `record`.
+    /// What a round keeps of `record`, read as its stored item.
     fn round(record: SiteRecord) -> RoundSite {
-        RoundSite::of(&record, &crate::about::Topics::default(), &Keep::default())
+        let site = record.stored_item_as_is();
+        RoundSite::of(&site, &crate::about::Topics::default(), &Keep::default())
     }
 
     #[test]
@@ -2308,6 +2258,22 @@ mod tests {
                 "not reached on its last try"
             );
         }
+    }
+
+    #[test]
+    fn sites_read_in_the_wrong_charset_are_read_anew() {
+        let mut record = SiteRecord::new("smbc.co.jp");
+        record.crawled_at = Some(10);
+        record.crawl_version = plumb_crawl::CHARSETS_READ_SINCE - 1;
+        assert!(!due_for_rereading(&round(record.clone())));
+        record.description = Some("\u{FFFD}T\u{FFFD}[\u{FFFD}r\u{FFFD}X".into());
+        assert!(due_for_rereading(&round(record.clone())));
+        record.description = None;
+        record.title = Some("\u{1B}$B%3%_%C%/%^!<%1%C%H\u{1B}(B".into());
+        assert!(due_for_rereading(&round(record.clone())));
+        // Read in its charset already: the page itself has the `�`.
+        record.crawl_version = plumb_crawl::CHARSETS_READ_SINCE;
+        assert!(!due_for_rereading(&round(record)));
     }
 
     #[test]

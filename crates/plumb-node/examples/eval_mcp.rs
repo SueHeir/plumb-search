@@ -534,7 +534,8 @@ mod tests {
                 title: Some("Python".into()),
                 description: Some("Python programming language".into()),
                 ..SiteRecord::default()
-            }],
+            }
+            .to_stored_item()],
         )
         .unwrap();
         let pages_dir = dir.path().join("pages");
@@ -737,11 +738,14 @@ mod tests {
         // fourth while this server called every word common.
         let (dir, _) = fixture();
         let index = dir.path().join("health");
-        let site = |domain: &str, title: &str| SiteRecord {
-            domain: domain.into(),
-            title: Some(title.into()),
-            description: Some(format!("{title} health information")),
-            ..SiteRecord::default()
+        let site = |domain: &str, title: &str| {
+            SiteRecord {
+                domain: domain.into(),
+                title: Some(title.into()),
+                description: Some(format!("{title} health information")),
+                ..SiteRecord::default()
+            }
+            .to_stored_item()
         };
         plumb_index::build_index(
             &index,

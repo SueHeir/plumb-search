@@ -722,7 +722,7 @@ mod tests {
     fn unmarked_indexes_must_hold_only_tantivy_files() {
         let root = TempDir::new().unwrap();
         let dir = root.path().join("index");
-        crate::build_index(&dir, &[SiteRecord::new("example.com")]).unwrap();
+        crate::build_index(&dir, &[SiteRecord::new("example.com").to_stored_item()]).unwrap();
         // Like an index built before the marker: Tantivy's files only, its
         // segment files among them (listed in `.managed.json`).
         fs::remove_file(dir.join(MARKER)).unwrap();

@@ -14,30 +14,33 @@
 //!
 //! What the list denies is also left out of what the node keeps and
 //! builds: the page index ([`super::pages`], built again when the list
-//! changes), the search index and the buckets other nodes take
-//! ([`super::worker`]), crawls and headlines other nodes send or fill
-//! with, and its own feed checks. It passes none of it on: its own crawls
-//! and headlines are published without it ([`Inner::drop_denied_records`]),
-//! it keeps and lists no lead for a denied page, and it relays no stored
-//! batch that names one, since a signed batch can't be passed on without
-//! it ([`plumb_net::bucket::BucketSource::denies`]). Buckets take a new
-//! entry at the next build of the search index.
+//! changes), the search index, the buckets other nodes take and the feeds
+//! watched, as each site is read as its stored item ([`allow`],
+//! [`super::worker::build_from_file`]), crawls and headlines other nodes
+//! send or fill with, and its own feed checks. Records, which the node
+//! still keeps and passes on, go through the same rule ([`allow_record`]). It passes none of it on: its own crawls and headlines are
+//! published without it ([`Inner::drop_denied_records`]), it keeps and
+//! lists no lead for a denied page, and it relays no stored batch that
+//! names one, since a signed batch can't be passed on without it
+//! ([`plumb_net::bucket::BucketSource::denies`]). Buckets take a new entry
+//! at the next build of the search index.
 //!
 //! The owner can turn the list off ([`NodeConfig::project_denylist`]); its
 //! `csam` entries apply anyway. A result a `csam` entry takes off is
-//! logged by the entry's id, never by its address.
+//! logged by the entry's id, never by its address. A site the index left
+//! out comes back in it, and in the buckets, at the next build after its
+//! entry goes or the list is turned off.
 //!
 //! [`NodeConfig::project_denylist`]: super::NodeConfig::project_denylist
 
 use plumb_core::locks::RwLocked;
-use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use plumb_core::SiteRecord;
+use plumb_core::{site, SiteRecord};
 use plumb_format::deny::{Denylist, Switch};
-use plumb_format::PublicKey;
+use plumb_format::{Item, PublicKey};
 use plumb_index::pages::{Page, PageHit};
 use plumb_index::places::PlaceResults;
 use plumb_index::{Hit, SearchResults};
@@ -173,21 +176,22 @@ impl Inner {
     }
 
     /// Takes off `records` the sites the denylist denies, and off the rest
-    /// the key pages and headlines it denies ([`allowed_record`]), before
+    /// the key pages and headlines it denies ([`allow_record`]), before
     /// they are kept or passed on. How many sites it took off.
     pub(super) fn drop_denied_records(&self, records: &mut Vec<SiteRecord>) -> usize {
         let Some(list) = self.denylist() else {
             return 0;
         };
         let before = records.len();
-        records.retain_mut(|record| allow(&list, record));
+        records.retain_mut(|record| allow_record(&list, record));
         before - records.len()
     }
 
     /// False when the denylist denies the site `record` describes; else
     /// true, with the key pages and headlines it denies taken off it.
     pub(super) fn allows_record(&self, record: &mut SiteRecord) -> bool {
-        self.denylist().is_none_or(|list| allow(&list, record))
+        self.denylist()
+            .is_none_or(|list| allow_record(&list, record))
     }
 
     /// `hit`, unless the denylist denies its site, without the key pages
@@ -214,16 +218,62 @@ impl Inner {
     }
 }
 
-/// False when `list` denies the site `record` describes; else true, with
-/// the key pages and headlines it denies taken off `record`.
-fn allow(list: &Denylist, record: &mut SiteRecord) -> bool {
-    let trimmed = match allowed_record(list, record) {
-        None => return false,
-        Some(Cow::Borrowed(_)) => return true,
-        Some(Cow::Owned(trimmed)) => trimmed,
-    };
-    *record = trimmed;
+/// False when `list` denies the site of the stored item `site`, by its
+/// domain or homepage; else true, with the key pages and headlines it
+/// denies taken off `site` ([`site::set_key_pages`], [`site::set_news`]).
+/// What an index build asks of each site ([`super::worker::build_from_file`]);
+/// [`allow_record`] asks the same of a record.
+pub(super) fn allow(list: &Denylist, site: &mut Item) -> bool {
+    if denies_site(list, site::domain(site), site.url.as_deref()) {
+        return false;
+    }
+    if let Some(pages) = without_denied(list, &site::key_pages(site), |page| &page.url) {
+        site::set_key_pages(site, pages);
+    }
+    if let Some(news) = without_denied(list, &site::news(site), |headline| &headline.url) {
+        site::set_news(site, news);
+    }
     true
+}
+
+/// False when `list` denies the site `record` describes, by its domain or
+/// homepage; else true, with the key pages and headlines it denies taken
+/// off `record`: [`allow`] for a record, which the node keeps and passes
+/// on, and which other nodes answer to a network search.
+pub(super) fn allow_record(list: &Denylist, record: &mut SiteRecord) -> bool {
+    if denies_site(list, &record.domain, record.url.as_deref()) {
+        return false;
+    }
+    if let Some(pages) = without_denied(list, &record.key_pages, |page| &page.url) {
+        record.key_pages = pages;
+    }
+    if let Some(news) = without_denied(list, &record.news, |headline| &headline.url) {
+        record.news = news;
+    }
+    true
+}
+
+/// True when `list` denies the site of `domain`, or its homepage `url`.
+fn denies_site(list: &Denylist, domain: &str, url: Option<&str>) -> bool {
+    denies(list, &format!("https://{domain}/")) || url.is_some_and(|url| denies(list, url))
+}
+
+/// `items` without those whose page (`url_of`) `list` denies; `None` when
+/// it denies none of them. Each page is looked up once.
+fn without_denied<T: Clone>(
+    list: &Denylist,
+    items: &[T],
+    url_of: impl Fn(&T) -> &String,
+) -> Option<Vec<T>> {
+    let denied: Vec<bool> = items
+        .iter()
+        .map(|item| denies(list, url_of(item)))
+        .collect();
+    if !denied.contains(&true) {
+        return None;
+    }
+    let kept = items.iter().zip(denied).filter(|(_, denied)| !denied);
+    Some(kept.map(|(item, _)| item.clone()).collect())
 }
 
 /// Places whose website `list` denies taken off `found`.
@@ -234,32 +284,6 @@ fn drop_denied_places(list: &Denylist, found: &mut PlaceResults) {
             .as_deref()
             .is_some_and(|url| denies(list, url))
     });
-}
-
-/// `record` as the node may index or pass it on by `list`: `None` when
-/// the list denies its site or homepage, else without the key pages and
-/// headlines it denies (borrowed when it denies none).
-pub(super) fn allowed_record<'a>(
-    list: &Denylist,
-    record: &'a SiteRecord,
-) -> Option<Cow<'a, SiteRecord>> {
-    let site = format!("https://{}/", record.domain);
-    if denies(list, &site) || record.url.as_deref().is_some_and(|url| denies(list, url)) {
-        return None;
-    }
-    let denied_page = |url: &str| denies(list, url);
-    if !record.key_pages.iter().any(|page| denied_page(&page.url))
-        && !record
-            .news
-            .iter()
-            .any(|headline| denied_page(&headline.url))
-    {
-        return Some(Cow::Borrowed(record));
-    }
-    let mut trimmed = record.clone();
-    trimmed.key_pages.retain(|page| !denied_page(&page.url));
-    trimmed.news.retain(|headline| !denied_page(&headline.url));
-    Some(Cow::Owned(trimmed))
 }
 
 /// Sites the list denies taken off `hits`, and denied key pages off the
@@ -354,12 +378,12 @@ mod tests {
                      {"title": "Taken off", "url": "https://example.com/news/2", "at": 2}],
         }))
         .unwrap();
-        let kept = |targets: &[&str]| allowed_record(&list(targets), &record).map(Cow::into_owned);
+        let kept = |targets: &[&str]| {
+            let mut kept = record.clone();
+            allow_record(&list(targets), &mut kept).then_some(kept)
+        };
 
-        assert!(matches!(
-            allowed_record(&list(&["site:other.org"]), &record),
-            Some(Cow::Borrowed(_))
-        ));
+        assert_eq!(kept(&["site:other.org"]).as_ref(), Some(&record));
         assert_eq!(kept(&["site:example.com"]), None, "a denied site");
         assert_eq!(
             kept(&["url:https://www.example.com/"]),
@@ -388,5 +412,40 @@ mod tests {
             record,
             "nothing else changes"
         );
+    }
+
+    #[test]
+    fn a_site_s_item_is_allowed_as_its_record_is() {
+        let record: SiteRecord = serde_json::from_value(json!({
+            "domain": "example.com", "url": "https://www.example.com/", "title": "Example",
+            "links_to": ["other.org"],
+            "key_pages": [{"label": "Docs", "url": "https://example.com/docs"},
+                          {"label": "Shop", "url": "https://example.com/shop"}],
+            "news": [{"title": "Kept", "url": "https://example.com/news/1", "at": 1},
+                     {"title": "Taken off", "url": "https://example.com/news/2", "at": 2}],
+        }))
+        .unwrap();
+        let cases: [&[&str]; 6] = [
+            &["site:other.org"],
+            &["site:example.com"],
+            &["url:https://www.example.com/"],
+            &["url:https://example.com/shop"],
+            &["url:https://example.com/news/2"],
+            &[
+                "url:https://example.com/docs",
+                "url:https://example.com/news/1",
+                "url:https://example.com/news/2",
+            ],
+        ];
+        for targets in cases {
+            let list = list(targets);
+            let mut kept = record.clone();
+            let allowed = allow_record(&list, &mut kept);
+            let mut site = record.to_stored_item();
+            assert_eq!(allow(&list, &mut site), allowed, "{targets:?}");
+            if allowed {
+                assert_eq!(site, kept.to_stored_item(), "{targets:?}");
+            }
+        }
     }
 }

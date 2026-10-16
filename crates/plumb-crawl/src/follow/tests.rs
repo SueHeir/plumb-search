@@ -81,8 +81,8 @@ fn health_site(requested: Arc<Mutex<Vec<String>>>) -> Router {
             get(page(
                 r#"<title>Dengue and severe dengue</title>
                 <meta name="description" content="Key facts about dengue.">
-                <a href="http://other.example/dengue">Dengue elsewhere</a>
-                <a href="http://other.example/news">News</a>"#,
+                <a href="http://other.example.org/dengue">Dengue elsewhere</a>
+                <a href="http://other.example.org/news">News</a>"#,
             )),
         )
         .route(
@@ -157,7 +157,7 @@ async fn follows_a_hub_to_the_page_with_the_words() {
         .iter()
         .map(|(l, _)| l.url.as_str())
         .collect();
-    assert_eq!(elsewhere, ["http://other.example/dengue"]);
+    assert_eq!(elsewhere, ["http://other.example.org/dengue"]);
     assert_eq!(followed.fetched, 4);
 }
 

@@ -2,8 +2,11 @@
 //! directory and driven over HTTP. Nothing here reaches the internet: seed
 //! data comes from the fixtures, served by a stand-in host on a loopback
 //! port, and the tests that run a node with records leave nothing to crawl.
+//! `crawl_golden` checks a crawl round, run on its own, against a golden
+//! file.
 
 mod agents;
+mod crawl_golden;
 mod indexes_and_rounds;
 mod meaning;
 mod owner;
@@ -20,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use plumb_core::{now_unix, read_jsonl, write_jsonl, SiteRecord};
+use plumb_core::{now_unix, write_jsonl, SiteRecord};
 use plumb_index::Hit;
 use plumb_ingest::{
     kind_sites, load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat,

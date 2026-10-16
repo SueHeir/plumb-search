@@ -8,7 +8,7 @@ fn main() -> Result<()> {
     let queries: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
-    let records: Vec<SiteRecord> = input
+    let sites: Vec<_> = input
         .lines()
         .map(|line| {
             let row: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -38,11 +38,11 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            record
+            record.to_stored_item()
         })
         .collect();
     let dir = tempfile::tempdir()?;
-    build_index(dir.path(), &records)?;
+    build_index(dir.path(), &sites)?;
     let searcher = Searcher::open(dir.path())?;
     for (mode, terms_boost) in [
         ("default", RankConfig::default().terms_boost),

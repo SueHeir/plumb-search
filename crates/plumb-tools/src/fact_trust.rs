@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use plumb_core::article::articles_of;
 use plumb_core::facts::{FactKind, KINDS};
-use plumb_core::{canonical_domain, fact_accuracy, registrable_domain, Signals};
+use plumb_core::{canonical_domain, fact_accuracy, registrable_domain, site, Signals};
 
 use plumb_node::web::group_thousands;
 
@@ -533,19 +533,21 @@ fn apply_to(records: &Path, apply: &Path, found: &Found) -> Result<()> {
     );
     let (mut written, mut counted, mut scored) = (0u64, 0u64, 0u64);
     let mut failed = None;
-    plumb_node::outline::for_each_record(&read_from, |mut record| {
+    plumb_node::outline::for_each_site(&read_from, |mut site| {
         if failed.is_some() {
             return;
         }
         written += 1;
-        let tally = canonical_domain(&record.domain).and_then(|domain| found.sites.get(&domain));
+        let tally = canonical_domain(&site.id).and_then(|domain| found.sites.get(&domain));
         if let Some(tally) = tally {
-            record.signals.fact_checks = tally.checks;
-            record.signals.fact_agrees = tally.agrees;
+            let mut signals = site::signals(&site);
+            signals.fact_checks = tally.checks;
+            signals.fact_agrees = tally.agrees;
+            site::set_signals(&mut site, &signals);
             counted += 1;
-            scored += u64::from(fact_accuracy(&record.signals).is_some());
+            scored += u64::from(fact_accuracy(&signals).is_some());
         }
-        let line = plumb_core::stored::write(&mut file, &record)
+        let line = plumb_core::stored::write_item(&mut file, &site)
             .and_then(|()| file.write_all(b"\n").map_err(anyhow::Error::from));
         if let Err(err) = line {
             failed = Some(err);
@@ -617,5 +619,46 @@ mod tests {
         assert!(around(&text, "Albert Einstein").starts_with("xxxxxxxxxx"));
         assert!(around(&text, "Albert Einstein").contains("born in 1879"));
         assert_eq!(around("é Albert", "Albert"), "é Albert");
+    }
+
+    #[test]
+    fn applying_counts_writes_each_record_as_it_was_with_its_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        crate::test_sites::write(&path, &crate::test_sites::records());
+        let mut found = Found::default();
+        for (domain, checks, agrees) in [
+            ("python.org", 40, 39),
+            ("example.com", 3, 1),
+            ("xn--mnchen-3ya.de", 7, 7),
+            ("rust-lang.org", 1, 0),
+            ("nowhere.org", 9, 9),
+        ] {
+            let tally = Tally {
+                checks,
+                agrees,
+                ..Tally::default()
+            };
+            found.sites.insert(domain.to_string(), tally);
+        }
+        let apply = dir.path().join("apply.jsonl");
+        apply_to(&path, &apply, &found).unwrap();
+
+        // The records read off the file with their counts set.
+        let mut expected = Vec::new();
+        plumb_node::outline::for_each_record(&path, |mut record| {
+            let tally = canonical_domain(&record.domain).and_then(|d| found.sites.get(&d));
+            if let Some(tally) = tally {
+                record.signals.fact_checks = tally.checks;
+                record.signals.fact_agrees = tally.agrees;
+            }
+            expected.extend(plumb_core::stored::line(&record).unwrap());
+            expected.push(b'\n');
+        })
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(std::fs::read(&apply).unwrap()).unwrap(),
+            String::from_utf8(expected).unwrap()
+        );
     }
 }

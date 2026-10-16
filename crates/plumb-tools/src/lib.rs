@@ -39,6 +39,8 @@ pub mod storage;
 pub mod subpage_sites;
 pub mod summaries;
 pub mod terms;
+#[cfg(test)]
+mod test_sites;
 pub mod top_sites;
 pub mod train_rank;
 

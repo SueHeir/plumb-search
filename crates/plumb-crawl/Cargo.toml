@@ -9,11 +9,13 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
+chardetng = "1.0.0"
 encoding_rs = "0.8.42"
 futures = "0.3.34"
 html5ever = "0.39.0"
 image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg", "gif", "webp", "bmp"] }
-plumb-core = { version = "0.3.1", path = "../plumb-core" }
+plumb-core = { version = "0.4.0", path = "../plumb-core" }
+plumb-format = { version = "0.4.0", path = "../plumb-format" }
 psl = "2.1.238"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "gzip", "brotli"] }
 roxmltree = "0.21.1"

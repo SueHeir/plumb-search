@@ -44,17 +44,17 @@ flowchart LR
 | [node.rs](src/node.rs) | `NodeConfig`, `NodeSettings`, `Status`, `start`, `NodeHandle`, `supervise` and the shared state `Inner` |
 | [node/worker.rs](src/node/worker.rs) | Setup, crawl rounds, index builds and the refresh schedule, with retries |
 | [node/store.rs](src/node/store.rs) | Data folder paths, the folder lock, `state.json`, numbered index folders |
-| [node/round.rs](src/node/round.rs), [node/schedule.rs](src/node/schedule.rs) | The slim view of each site a crawl round holds; workload presets and crawl hours |
+| [node/round.rs](src/node/round.rs), [node/schedule.rs](src/node/schedule.rs) | The slim view of each site a crawl round holds, read off its stored item; workload presets and crawl hours |
 | [node/network.rs](src/node/network.rs) | Joining plumb-net: the records inbox, buckets, popularity, `--publish-records` |
 | [node/fill.rs](src/node/fill.rs), [node/site_set.rs](src/node/site_set.rs), [node/trim.rs](src/node/trim.rs) | Filling free space from the set of sites or trusted nodes (and first setup from them); fetching the parts of the set it reads; staying under the storage limit |
 | [node/pages.rs](src/node/pages.rs), [node/places.rs](src/node/places.rs), [node/newer.rs](src/node/newer.rs) | Page set and places files and their indexes; newer files from trusted nodes |
-| [node/signed_sets.rs](src/node/signed_sets.rs), [node/denylist.rs](src/node/denylist.rs), [node/adult.rs](src/node/adult.rs) | Signed sets taken from the network; the project's denylist; the adult blocklist |
+| [node/signed_sets.rs](src/node/signed_sets.rs), [node/denylist.rs](src/node/denylist.rs), [node/adult.rs](src/node/adult.rs) | Signed sets taken from the network; the project's denylist, applied to sites' stored items as an index is built and to records kept or passed on; the adult blocklist |
 | [node/embedding.rs](src/node/embedding.rs), [node/shared_vectors.rs](src/node/shared_vectors.rs) | Search by meaning: the model, embedding after each build, vectors from other nodes |
 | [node/news.rs](src/node/news.rs), [node/wanted_pages.rs](src/node/wanted_pages.rs) | Feed checks; following links toward the pages searches wanted |
 | [node/features.rs](src/node/features.rs), [node/backup.rs](src/node/backup.rs), [node/control.rs](src/node/control.rs), [node/journal.rs](src/node/journal.rs) | `features.json`; backups; the remote control token; the activity log |
 | **Records and crawling** | |
-| [records.rs](src/records.rs), [outline.rs](src/outline.rs) | `records.jsonl` and its journal; reading it a record at a time and building an index from it that way |
-| [crawl.rs](src/crawl.rs), [dead.rs](src/dead.rs), [icons.rs](src/icons.rs) | Which homepages a round fetches and how results merge (shared with `plumb-tools crawl`); dead sites; site icons |
+| [records.rs](src/records.rs), [outline.rs](src/outline.rs) | `records.jsonl` and its journal, loaded as records or as sites' stored items; reading it a site at a time and building an index, buckets and feeds from each site's stored item that way |
+| [crawl.rs](src/crawl.rs), [dead.rs](src/dead.rs), [icons.rs](src/icons.rs) | Which homepages a round fetches and how results merge (shared with `plumb-tools crawl`): a crawl's results are sites' stored items, made records for the journal and the network in one place (`crawl::to_record`); dead sites; site icons |
 | [sets.rs](src/sets.rs), [site_rules.rs](src/site_rules.rs) | Checking and reading `plumb-format` sets; signed site rules |
 | **Search features** | |
 | [meaning.rs](src/meaning.rs) | Search by meaning: models, vectors files, query embedding |
@@ -161,7 +161,7 @@ Everything a node keeps is under `--data DIR`. Paths are defined in [node/store.
 | `state.json` | Progress that survives restarts: homepages left, last refresh, downloads counted |
 | `settings.json` | The panel's settings (`NodeSettings`) |
 | `features.json` | The panel's optional features, applied at start ([node/features.rs](src/node/features.rs)) |
-| `records.jsonl`, `records.jsonl.journal` | Every known site, one JSON line each; crawl results not yet folded in ([records.rs](src/records.rs)) |
+| `records.jsonl`, `records.jsonl.journal` | Every known site, one JSON line each, its stored item (`plumb_core::stored`; lines versions up to 0.4 wrote hold the record's JSON and are read as well); crawl results not yet folded in ([records.rs](src/records.rs)) |
 | `seed/` | First-start downloads: Tranco, Wikidata, Wikipedia intros, Common Crawl ranks |
 | `indexes/NNNNNN/` | Numbered search indexes, the newest that opens is searched; `buckets/` inside for the network and private search |
 | `icons/xx/<domain>.png` | Site icons for results pages ([icons.rs](src/icons.rs)) |
@@ -231,6 +231,7 @@ These come from [CLAUDE.md](../../CLAUDE.md), which has the full list.
 - `node::start(NodeConfig) -> NodeHandle`, with `NodeConfig::server` and `NodeConfig::desktop` as defaults: the desktop app embeds a node this way. `NodeHandle` has `addr`, `status`, `refresh_now`, `restart_signal` and `shutdown`.
 - `web::router`, `web::node_router_with`: the router over any `SearchBackend`, for tests and `plumb serve`.
 - `crawl::{select_targets, crawl_rolling}`, `records::{load_records, RecordStore}`, `outline`, `meaning`: used by `plumb-tools crawl`, `index`, `embed` and `search`.
+- `records::{load_sites, replace_sites, sites_by_link_score}`, `outline::for_each_site`, `dead::find_dead`, `about::Topics`: used by the `plumb-tools` commands that read or rewrite a records file as sites' stored items (`summaries`, `terms`, `fetch-text`, `top-sites`, `link-rank`, `fact-trust`, `dead-sites`, `set sites`, and `index` for a file it merges).
 
 ## Tests
 
@@ -242,6 +243,7 @@ cargo test -p plumb-node
 - [src/web/tests/](src/web/tests/mod.rs), [src/mcp/tests/](src/mcp/tests.rs): pages, the JSON API and the MCP tools, driven through the router.
 - [tests/end_to_end.rs](tests/end_to_end.rs): runs the `plumb` binary over [fixtures/](../../fixtures) and drives the router with `tower`.
 - Private search with its script built in: `PLUMB_PRIVATE_DIR=../../target/private cargo test -p plumb-node private`, after building it as [CONTRIBUTING.md](../../CONTRIBUTING.md) says.
+- `a_build_of_the_golden_sites_makes_the_golden_buckets_and_feeds` ([outline.rs](src/outline.rs)) builds plumb-index's golden sites from a records file and checks the buckets and feeds against [outline_golden.txt](src/outline_golden.txt), written once and again when the bucket table's lines became stored items (only `records.dat` and `records.idx` changed, each line reading back as the record it was), and never to make a test pass.
 - `exact_fold_rename_failure_preserves_inputs_and_charges_leftover_output` ([records.rs](src/records.rs)) fails when run as root.
 - `cargo test -p plumb-tools --test conventions` counts what the rules above ask node code to avoid.
 - `cargo run -p plumb-node --example ui_preview` shows the web pages with made-up results and no crawler.
