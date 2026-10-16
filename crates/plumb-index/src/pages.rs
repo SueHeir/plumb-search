@@ -31,6 +31,7 @@ use tantivy::IndexReader;
 
 mod building;
 mod docs;
+mod dump;
 mod linking;
 mod named_site;
 mod page;
