@@ -359,7 +359,7 @@ fn idle_detail(config: &NodeConfig) -> &'static str {
 /// service, so search works within a minute or two. The rest of the seed
 /// data, whose downloads take many minutes (Wikidata's above all), is
 /// folded in right after by [`complete_seed`].
-async fn set_up(inner: &Arc<Inner>) -> Result<()> {
+pub(super) async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     let from_network = tokio::select! {
         records = super::fill::seed_from_network(inner) => records?,
         () = inner.stopped() => return Err(Stopped.into()),
@@ -437,7 +437,7 @@ fn build_from_file_unless_crawling_only(inner: &Inner) -> Result<Option<ServingI
 ///
 /// A failure of Wikidata only sets the time of the next try: it is shown in
 /// the status, but does not hold up other work.
-async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
+pub(super) async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     let from_network = tokio::select! {
         done = complete_seed_from_network(inner) => done?,
         () = inner.stopped() => return Err(Stopped.into()),
@@ -599,7 +599,7 @@ async fn complete_seed_from_network(inner: &Arc<Inner>) -> Result<bool> {
 /// items with 3 sitelinks or more, so it holds [`Inner::one_big_job`]. A
 /// node stopped part way does it again on its next start: the changes come
 /// out the same.
-async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
+pub(super) async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
     info!("the lists of sites changed: updating the records from the seed data");
     blocking(inner, |inner| {
         let changes = {

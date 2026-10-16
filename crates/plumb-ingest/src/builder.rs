@@ -1216,4 +1216,320 @@ mod tests {
             assert_eq!(builder().finish(Some(n)), full[..n.min(60)], "top {n}");
         }
     }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures")
+            .join(name)
+    }
+
+    /// A site as a stored line ([`plumb_core::stored`]), as a records
+    /// file holds it.
+    fn line(site: &SiteRecord) -> String {
+        String::from_utf8(plumb_core::stored::line(site).unwrap()).unwrap()
+    }
+
+    /// What [`builds_what_the_golden_file_holds`] adds: the fixtures, and
+    /// seed data made by hand that differs in what building reads.
+    struct Golden {
+        tranco: Vec<TrancoEntry>,
+        cc_ranks: Vec<CcRank>,
+        wat: WatExtract,
+        official: Vec<OfficialSite>,
+        records: Vec<SiteRecord>,
+    }
+
+    impl Golden {
+        fn new() -> Self {
+            let mut tranco = load_tranco(&fixture("tranco.csv"), None).unwrap();
+            for (rank, domain) in [
+                (0, "zero.com"),
+                (3, "WWW.Example.COM"),
+                (7, "example.com"),
+                (9, ""),
+                (12, "acme.com"),
+                (15, "ycombinator.com"),
+                (16, "münchen.de"),
+                (18, "nba.com"),
+                (19, "co.uk"),
+            ] {
+                tranco.push(TrancoEntry {
+                    rank,
+                    domain: domain.into(),
+                });
+            }
+            let mut cc_ranks = load_cc_domain_ranks(&fixture("cc-domain-ranks.txt"), None).unwrap();
+            for (harmonic_rank, pagerank_rank, domain) in [
+                (2, Some(1), "acme.com"),
+                (0, Some(3), "zero.com"),
+                (4, None, "example.com"),
+                (6, Some(0), "stephane.fr"),
+                (8, Some(9), "Example.COM"),
+            ] {
+                cc_ranks.push(CcRank {
+                    domain: domain.into(),
+                    harmonic_rank,
+                    pagerank_rank,
+                    n_hosts: None,
+                });
+            }
+            let mut wat = WatExtract::new();
+            parse_wat(&fixture("sample.wat"), &mut wat).unwrap();
+            let homepage =
+                |domain: &str, title: &str, site_name: Option<&str>| crate::HomepageMeta {
+                    domain: domain.into(),
+                    url: format!("https://www.{domain}/"),
+                    title: Some(title.into()),
+                    description: Some(format!("  All about {domain}\u{7} ")),
+                    site_name: site_name.map(str::to_string),
+                };
+            for (domain, title, site_name) in [
+                ("acme.com", " Acme\u{7} Anvils ", Some("ACME  Corp")),
+                ("stephane.fr", "Ste\u{301}phane", Some("Ste\u{301}phane")),
+                ("example.com", "Example Domain", None),
+                ("usbank.com", "Sorry...", Some("U.S. Bank")),
+            ] {
+                wat.homepages
+                    .insert(domain.into(), homepage(domain, title, site_name));
+            }
+            let anchors = wat.anchors.entry("acme.com".into()).or_default();
+            anchors.insert("acme".into(), linker_bit("a.com") | linker_bit("b.com"));
+            anchors.insert("Acme Corp".into(), linker_bit("c.com"));
+            anchors.insert(String::new(), linker_bit("d.com"));
+            wat.linking_domains
+                .entry("acme.com".into())
+                .or_default()
+                .extend(["a.com", "b.com", "c.com"].map(String::from));
+
+            let mut official =
+                load_wikidata_official_sites(&fixture("wikidata-official-sites.tsv")).unwrap();
+            let claim =
+                |item: &str, label: &str, url: &str| OfficialSite::new(item, label, url).unwrap();
+            let mut acme = claim("Q9001", " Acme\u{7} Corporation ", "https://www.acme.com/");
+            acme.names = vec![
+                "ACME".into(),
+                "Acme  Corp".into(),
+                "acme corporation".into(),
+                "Ste\u{301}phane Acme".into(),
+            ];
+            acme.country = Some("US".into());
+            acme.kinds = vec![
+                "Anvil maker".into(),
+                "anvil makers".into(),
+                "business".into(),
+                "Caf\u{e9}\u{301}".into(),
+            ];
+            acme.about = Some("  maker of\tanvils\u{7} ".into());
+            acme.intro = Some("Acme is a\u{85}company.".into());
+            acme.sitelinks = 40;
+            official.push(acme.clone());
+            // The same item claiming the same front page again.
+            official.push(acme);
+            let mut stephane = claim("Q9002", "Ste\u{301}phane", "https://stephane.fr/");
+            stephane.country = Some("FR".into());
+            stephane.sitelinks = 3;
+            official.push(stephane);
+            // A label that is only the item's id.
+            official.push(claim("Q9003", "Q9003", "https://example.com/"));
+            // Six items claim a front page, one far better known than the
+            // others and named by the domain; six no better known than each
+            // other claim another.
+            let mut nba = claim(
+                "Q9010",
+                "National Basketball Association",
+                "https://www.nba.com/",
+            );
+            nba.names = vec!["NBA".into()];
+            nba.sitelinks = 300;
+            nba.kinds = vec!["sports league".into()];
+            nba.about = Some("North American professional basketball league".into());
+            official.push(nba);
+            for i in 1..=5 {
+                let mut season = claim(
+                    &format!("Q901{i}"),
+                    &format!("2020{i} NBA season"),
+                    "https://www.nba.com/",
+                );
+                season.sitelinks = 10 + i;
+                official.push(season);
+                let mut user = claim(
+                    &format!("Q902{i}"),
+                    &format!("User {i}"),
+                    "https://shared.example.com/",
+                );
+                user.sitelinks = 5;
+                official.push(user);
+            }
+            official.push(claim("Q9026", "User 6", "https://shared.example.com/"));
+            // Two items of one front page, neither far better known: only
+            // what they agree on counts.
+            for (item, label, country, kinds) in [
+                (
+                    "Q9031",
+                    "X Corp.",
+                    "US",
+                    ["social media company", "company"],
+                ),
+                ("Q9032", "X.com", "US", ["online bank", "company"]),
+            ] {
+                let mut x = claim(item, label, "https://x.com/");
+                x.country = Some(country.into());
+                x.kinds = kinds.map(String::from).to_vec();
+                x.about = Some(format!("{label}, a company"));
+                x.sitelinks = 20;
+                official.push(x);
+            }
+            // An inner page naming its site, and one that does not.
+            official.push(claim(
+                "Q9041",
+                "Perplexity AI",
+                "https://www.perplexity.ai/hub/",
+            ));
+            official.push(claim("Q9042", "Rocky", "https://bit.ly/RockyCollection"));
+            // Sites on subdomains, one with its parent here.
+            let mut news = claim("Q9051", "Hacker News", "https://news.ycombinator.com/");
+            news.about = Some("social news website".into());
+            official.push(news);
+            official.push(claim(
+                "Q9052",
+                "Y Combinator",
+                "https://www.ycombinator.com/",
+            ));
+            official.push(claim(
+                "Q9053",
+                "Google Scholar",
+                "https://scholar.google.com/",
+            ));
+            // A disambiguation page, which claims nothing.
+            let mut nothing = claim("Q9061", "Acme", "https://www.acme.com/");
+            nothing.kinds = vec!["Wikimedia disambiguation page".into()];
+            official.push(nothing);
+            // An international domain name.
+            official.push(claim("Q9071", "München", "https://www.münchen.de/"));
+
+            let mut records = Vec::new();
+            let mut crawled = SiteRecord::new("Acme.COM");
+            crawled.url = Some("HTTPS://WWW.Acme.com/index%2ehtml?".into());
+            crawled.title = Some("  Acme\u{7} Anvils, crawled ".into());
+            crawled.aliases = vec!["Acme Corporation".into(), "Acme\u{a0}Inc".into()];
+            crawled.headings = vec!["Anvils".into(), " ".into()];
+            crawled.crawled_at = Some(1_791_605_520);
+            crawled.crawl_attempted_at = Some(1_791_605_600);
+            crawled.crawl_version = 7;
+            crawled.add_link_text("acme", "e.com");
+            crawled.signals.linking_domains = 9;
+            records.push(crawled);
+            let mut stale = SiteRecord::new("example.com");
+            stale.signals.tranco_rank = Some(1);
+            stale.signals.official_site = true;
+            stale.aliases = vec!["Example".into()];
+            stale.kinds = vec!["domain".into()];
+            stale.about = Some("reserved domain".into());
+            records.push(stale);
+            let mut check = SiteRecord::new("usbank.com");
+            check.url = Some("https://www.google.com/sorry/index".into());
+            check.title = Some("Sorry...".into());
+            check.crawled_at = Some(1_791_605_520);
+            records.push(check);
+            let mut munich = SiteRecord::new("xn--mnchen-3ya.de");
+            munich.title = Some("München".into());
+            munich.crawled_at = Some(1_791_000_000);
+            records.push(munich);
+            records.push(SiteRecord::new("not a domain"));
+            let mut gone = SiteRecord::new("gone.example");
+            gone.signals.harmonic_rank = Some(50);
+            gone.crawl_attempted_at = Some(1_791_000_000);
+            gone.crawl_failures = 7;
+            gone.gone_at = Some(1_791_000_000);
+            records.push(gone);
+            Golden {
+                tranco,
+                cc_ranks,
+                wat,
+                official,
+                records,
+            }
+        }
+
+        /// A builder given everything, in the order `plumb ingest` adds
+        /// it, or the other way round.
+        fn builder(&self, reversed: bool) -> Builder {
+            let mut builder = Builder::new();
+            if reversed {
+                builder.add_records(self.records.iter().cloned());
+                builder.add_official_sites(&self.official);
+                builder.add_wat(&self.wat);
+                builder.add_cc_ranks(&self.cc_ranks);
+                builder.add_tranco(&self.tranco);
+            } else {
+                builder.add_tranco(&self.tranco);
+                builder.add_cc_ranks(&self.cc_ranks);
+                builder.add_wat(&self.wat);
+                builder.add_official_sites(&self.official);
+                builder.add_records(self.records.iter().cloned());
+            }
+            builder
+        }
+    }
+
+    /// What the builder makes of the fixtures and of seed data made by hand
+    /// ([`Golden`]), added in the order `plumb ingest` adds them and the
+    /// other way round, whole and cut to the best few, each site as a
+    /// stored line, against `builder_golden.txt` beside this file. Written
+    /// when the builder made site records, before it made sites' items
+    /// (step 7c of the data format plan), so that the builder on items is
+    /// checked against it byte for byte. Never written again to make a test
+    /// pass: `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-ingest golden`
+    /// writes it.
+    #[test]
+    fn builds_what_the_golden_file_holds() {
+        use std::fmt::Write as _;
+        let golden = Golden::new();
+        let mut out = String::from(
+            "# What plumb-ingest's Builder makes of the fixtures and of seed data made\n\
+             # by hand, each site as a stored line. Written by\n\
+             # `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-ingest golden`.\n",
+        );
+        for (what, reversed, top) in [
+            ("in order", false, None),
+            ("reversed", true, None),
+            ("in order, the best 12", false, Some(12)),
+            ("reversed, the best 12", true, Some(12)),
+        ] {
+            let builder = golden.builder(reversed);
+            let held = builder.len();
+            let sites = builder.finish(top);
+            writeln!(out, "## {what}: {held} held, {} kept", sites.len()).unwrap();
+            for site in &sites {
+                writeln!(out, "{}", line(site)).unwrap();
+            }
+        }
+        // Each source alone.
+        for what in ["tranco", "cc ranks", "wat", "official sites", "records"] {
+            let mut builder = Builder::new();
+            match what {
+                "tranco" => builder.add_tranco(&golden.tranco),
+                "cc ranks" => builder.add_cc_ranks(&golden.cc_ranks),
+                "wat" => builder.add_wat(&golden.wat),
+                "official sites" => builder.add_official_sites(&golden.official),
+                _ => builder.add_records(golden.records.iter().cloned()),
+            }
+            let sites = builder.finish(None);
+            writeln!(out, "## {what} alone: {}", sites.len()).unwrap();
+            for site in &sites {
+                writeln!(out, "{}", line(site)).unwrap();
+            }
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/builder_golden.txt");
+        if std::env::var_os("PLUMB_WRITE_GOLDEN").is_some() {
+            std::fs::write(&path, &out).unwrap();
+            return;
+        }
+        let want = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        for (n, (want, got)) in want.lines().zip(out.lines()).enumerate() {
+            assert_eq!(want, got, "{}:{} differs", path.display(), n + 1);
+        }
+        assert_eq!(want.lines().count(), out.lines().count());
+    }
 }

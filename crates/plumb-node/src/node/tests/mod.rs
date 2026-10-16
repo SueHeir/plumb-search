@@ -3,13 +3,15 @@
 //! data comes from the fixtures, served by a stand-in host on a loopback
 //! port, and the tests that run a node with records leave nothing to crawl.
 //! `crawl_golden` checks a crawl round, run on its own, against a golden
-//! file.
+//! file, and `seed_golden` setup and the seed, `plumb ingest` and the
+//! sites a node embeds.
 
 mod agents;
 mod crawl_golden;
 mod indexes_and_rounds;
 mod meaning;
 mod owner;
+mod seed_golden;
 mod sets;
 mod setup;
 mod storage;

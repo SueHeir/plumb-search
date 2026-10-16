@@ -70,7 +70,204 @@ pub fn text_hash(text: &str) -> TextHash {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+    use std::path::Path;
+
+    use plumb_core::{KeyPage, LinkText, Signals};
+
     use super::*;
+
+    /// A site as a node reads it from its records file to embed it: as
+    /// the file holds it, not cleaned.
+    fn as_read(record: SiteRecord) -> SiteRecord {
+        record
+    }
+
+    /// Sites that differ in what their text is made of: every part and
+    /// none, parts the same but for case, Unicode form or whitespace,
+    /// control characters, a summary beside each text that hides it, more
+    /// link texts than are kept, text longer than is embedded and text with
+    /// no spaces, and parts that say nothing.
+    fn golden_sites() -> Vec<SiteRecord> {
+        let mut sites = vec![SiteRecord::new("empty.com")];
+
+        let mut tesla = SiteRecord::new("tesla.com");
+        tesla.aliases = vec!["Tesla".into(), "Tesla, Inc.".into()];
+        tesla.title = Some("Electric  Cars,\tSolar & Clean Energy | Tesla".into());
+        tesla.description = Some("tesla".into());
+        tesla.about = Some("American electric vehicle and clean energy company".into());
+        tesla.headings = vec!["Model 3".into(), "Model Y".into(), "MODEL 3".into()];
+        sites.push(tesla);
+
+        let mut cafe = SiteRecord::new("cafe.fr");
+        cafe.aliases = vec!["Caf\u{e9} de Flore".into()];
+        cafe.title = Some("Cafe\u{301} de Flore".into());
+        cafe.description = Some("Le caf\u{e9}\u{7} historique de Saint-Germain".into());
+        cafe.body_text = Some("Ouvert\u{1B}$B tous les jours\u{0}.".into());
+        sites.push(cafe);
+
+        let summary = |domain: &str| {
+            let mut record = SiteRecord::new(domain);
+            record.title = Some(format!("The {domain} homepage"));
+            record.summary = Some("A model's one-sentence summary of the site.".into());
+            record
+        };
+        sites.push(summary("summary-only.org"));
+        let mut described = summary("summary-description.org");
+        described.description = Some("The homepage's own description.".into());
+        sites.push(described);
+        let mut about = summary("summary-about.org");
+        about.about = Some("what Wikidata says it is".into());
+        sites.push(about);
+        let mut intro = summary("summary-intro.org");
+        intro.intro = Some("Summary Intro is an organization.".into());
+        sites.push(intro);
+
+        let mut linked = SiteRecord::new("chicagotribune.com");
+        linked.title = Some("Chicago Tribune".into());
+        linked.link_texts = [
+            "chicago tribune",
+            "chicago news",
+            "",
+            "Trib",
+            "  ",
+            "the tribune",
+            "news from chicago",
+            "seventh",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, text)| LinkText::from_linkers(*text, (1 << (8 - i)) - 1))
+        .collect();
+        sites.push(linked);
+
+        let mut long = SiteRecord::new("long.org");
+        long.title = Some("A long page".into());
+        long.headings = (1..=12).map(|i| format!("Heading {i}")).collect();
+        long.body_text = Some(
+            (1..=150)
+                .map(|i| format!("word{i}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        sites.push(long);
+
+        let mut chinese = SiteRecord::new("gov.cn");
+        chinese.title = Some("中华人民共和国中央人民政府门户网站".into());
+        chinese.body_text = Some("国务院".repeat(700));
+        sites.push(chinese);
+
+        let mut blank = SiteRecord::new("blank.net");
+        blank.aliases = vec!["".into(), "  ".into(), "\u{a0}".into(), "Blank".into()];
+        blank.title = Some("".into());
+        blank.description = Some("\u{3000}\t\n".into());
+        blank.about = Some("".into());
+        blank.summary = Some("A blank site.".into());
+        blank.headings = vec!["".into(), " blank ".into()];
+        blank.body_text = Some(" ".into());
+        sites.push(blank);
+
+        let mut untidy = SiteRecord::new("untidy.de");
+        untidy.aliases = vec![" Untidy GmbH ".into(), "Untidy\u{a0}GmbH".into()];
+        untidy.title = Some("\u{1B}$B%3%_%C%H\u{1B}(B Untidy\u{7}".into());
+        untidy.headings = vec!["First\nline".into(), "Caf\u{e9}\r\n".into()];
+        untidy.intro = Some("Untidy GmbH is a\u{85}company.".into());
+        sites.push(untidy);
+
+        let mut hindi = SiteRecord::new("aajtak.in");
+        hindi.aliases = vec!["\u{91c}\u{93c}\u{93e}\u{928}".into()];
+        hindi.title = Some("\u{95b}\u{93e}\u{928}".into());
+        hindi.description = Some("ज़माना".into());
+        sites.push(hindi);
+
+        let mut vietnamese = SiteRecord::new("nchmf.gov.vn");
+        vietnamese.title = Some("Dư\u{323} ba\u{301}o thời tiết".into());
+        vietnamese.about = Some("Dự báo thời tiết".into());
+        sites.push(vietnamese);
+
+        let mut full = SiteRecord::new("python.org");
+        full.url = Some("https://www.python.org/".into());
+        full.title = Some("Welcome to Python.org".into());
+        full.description = Some("The official home of the Python Programming Language".into());
+        full.aliases = vec!["Python".into(), "Python Software Foundation".into()];
+        full.about = Some("general-purpose programming language".into());
+        full.intro = Some("Python is a high-level programming language.".into());
+        full.summary = Some("Python's home.".into());
+        full.headings = vec!["Get Started".into(), "Download".into()];
+        full.terms = vec!["python".into(), "download".into()];
+        full.kinds = vec!["programming language".into()];
+        full.country = Some("US".into());
+        full.language = Some("en".into());
+        full.search_url = Some("https://www.python.org/search/?q={searchTerms}".into());
+        full.body_text =
+            Some("Python is a programming language that lets you work quickly.".into());
+        full.add_link_text("python", "example.org");
+        full.add_link_text("Python", "other.org");
+        full.add_link_text("the python language", "example.org");
+        full.key_pages = vec![KeyPage {
+            label: "Docs".into(),
+            url: "https://docs.python.org/".into(),
+        }];
+        full.links_to = vec!["pypi.org".into()];
+        full.signals = Signals {
+            tranco_rank: Some(400),
+            harmonic_rank: Some(300),
+            pagerank_rank: Some(250),
+            linking_domains: 12,
+            official_site: true,
+            sitelinks: 150,
+            fact_checks: 3,
+            fact_agrees: 2,
+        };
+        full.crawled_at = Some(1_791_605_520);
+        full.crawl_version = 7;
+        full.crawl_attempted_at = Some(1_791_605_600);
+        full.icon = Some("https://www.python.org/favicon.ico".into());
+        sites.push(full);
+        sites
+    }
+
+    /// The text embedded of each site of [`golden_sites`], as a node reads
+    /// it ([`as_read`]), at [`MAX_TEXT_WORDS`] and at fewer and more words,
+    /// with its hash, against `text_golden.txt` beside this file. Written
+    /// when the text was made of site records, before it was made of
+    /// sites' items (step 7c of the data format plan): nodes compare the
+    /// hashes of each other's texts, so the text may not change. Never
+    /// written again to make a test pass: `PLUMB_WRITE_GOLDEN=1 cargo test
+    /// -p plumb-embed golden` writes it.
+    #[test]
+    fn site_texts_match_the_golden_file() {
+        let mut out = String::from(
+            "# The text plumb-embed embeds of each site: its domain, the most words\n\
+             # embedded, the text's SHA-256 and the text as JSON. Written by\n\
+             # `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-embed golden`.\n",
+        );
+        for record in golden_sites() {
+            let domain = record.domain.clone();
+            let site = as_read(record);
+            for words in [MAX_TEXT_WORDS, 3, 400] {
+                let text = site_text_words(&site, words);
+                let hash: String = text_hash(&text)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                let json = serde_json::to_string(&text).unwrap();
+                writeln!(out, "{domain}\t{words}\t{hash}\t{json}").unwrap();
+            }
+            assert_eq!(site_text(&site), site_text_words(&site, MAX_TEXT_WORDS));
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/text_golden.txt");
+        if std::env::var_os("PLUMB_WRITE_GOLDEN").is_some() {
+            std::fs::write(&path, &out).unwrap();
+            return;
+        }
+        let golden = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        for (n, (want, got)) in golden.lines().zip(out.lines()).enumerate() {
+            assert_eq!(want, got, "{}:{} differs", path.display(), n + 1);
+        }
+        assert_eq!(golden.lines().count(), out.lines().count());
+    }
 
     #[test]
     fn site_text_is_fixed_and_short() {
