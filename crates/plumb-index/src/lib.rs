@@ -291,10 +291,10 @@ pub struct RankConfig {
     /// ([`learned::reorder_results`]), once pages are placed among the
     /// sites.
     pub learned: bool,
-    /// Put the first [`learned::LEARNED_SITES`] sites in the order the
-    /// site model gives ([`learned::reorder_sites`]) before anything else
-    /// moves them. The learned order then only places pages among them.
-    /// Off until it is measured with pages.
+    /// With [`RankConfig::learned`] and a [`Meaning`], put the first
+    /// [`learned::LEARNED_SITES`] sites in the order the site model gives
+    /// ([`learned::reorder_sites`]) before anything else moves them. The
+    /// learned order then only places pages among them.
     pub learned_sites: bool,
     /// Rank typo corrections by the spelling model learned from the
     /// index's words ([`spell_model`]): what the edits cost against how
@@ -361,7 +361,7 @@ impl Default for RankConfig {
             add_named_site: true,
             drop_namesakes: false,
             learned: true,
-            learned_sites: false,
+            learned_sites: true,
             spelling_channel: true,
             real_word_weight: None,
             context_weight: None,

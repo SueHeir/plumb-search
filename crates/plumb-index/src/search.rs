@@ -225,13 +225,17 @@ impl Searcher {
         let query_text = without_www(query_text);
         let ops = Operators::parse(query_text);
         if !ops.any() {
-            let depth = if cfg.learned_sites {
+            // The site model learned from searches with closeness in
+            // meaning for nearly every site; without a meaning it would
+            // read every site as far from the query.
+            let site_model = cfg.learned && cfg.learned_sites && meaning.is_some();
+            let depth = if site_model {
                 limit.max(learned::LEARNED_SITES)
             } else {
                 limit
             };
             let mut results = self.search_words(query_text, depth, cfg, options, meaning)?;
-            if cfg.learned_sites {
+            if site_model {
                 learned::reorder_sites(learned::Model::sites(), query_text, &mut results.hits);
                 results.hits.truncate(limit);
             }

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Search
+
+- A second learned model puts the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first: a site for "workout app", "apartment rentals" or "currency converter" that was eighth to tenth is now first, as is chipotle.com for "chiptole". The first learned model then only places pages among the sites, as moving them again undid part of the second's work.
+
 ### Running a node
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.

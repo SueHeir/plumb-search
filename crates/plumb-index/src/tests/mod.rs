@@ -293,9 +293,12 @@ fn with_facts(mut record: SiteRecord, country: Option<&str>, kinds: &[&str]) -> 
 /// A [`Meaning`] with fixed closeness per domain.
 struct FixedMeaning(Vec<(&'static str, f32)>);
 
+/// The whole-query relevance experiment's own rules, without the site
+/// model reordering what they give.
 fn experimental_rank_config() -> RankConfig {
     RankConfig {
         whole_query_relevance: true,
+        learned_sites: false,
         ..RankConfig::default()
     }
 }

@@ -368,11 +368,14 @@ fn big_sites_far_in_meaning_do_not_fill_a_weak_search() {
             .find(|hit| hit.domain == domain)
             .map_or(0.0, |hit| hit.score)
     };
+    // The rules alone: with the partial-closeness cut off, the site model
+    // would lift stripe.com again.
     let before = RankConfig {
         meaning_only_relevance: None,
         question_relevance: None,
         partial_closeness: None,
         whole_query_relevance: false,
+        learned_sites: false,
         ..RankConfig::default()
     };
     // On popularity alone it would have come before the plumbers...
@@ -380,6 +383,7 @@ fn big_sites_far_in_meaning_do_not_fill_a_weak_search() {
     // ...but nothing of the query's speaks for it.
     let now = RankConfig {
         partial_closeness: None,
+        learned_sites: false,
         ..RankConfig::default()
     };
     assert!(score(&now, "stripe.com") < score(&now, "plumbers.org"));

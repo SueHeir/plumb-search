@@ -575,17 +575,18 @@ fn after_leading(
 /// A record the query names by its identifier is not read, as the model
 /// never saw one, and stays first ([`crate::pages::keep_page_rules`]).
 pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec<PlacedPage>) {
-    reorder_moving(model, query, hits, placed, true);
+    reorder_moving(model, query, hits, placed, Moves::Rows);
 }
 
 /// What `cfg` does to the first rows once pages are placed among the
 /// sites: [`reorder`] with the built-in model when
 /// [`crate::RankConfig::learned`] is on. With
-/// [`crate::RankConfig::learned_sites`] too, the site model has put the
-/// sites in order already, and this model only places the pages listed on
-/// their own among them. It learned from the hand-made order, and moving
-/// the site model's sites again undid much of its work: in a replay of the
-/// test searches, typo searches with their site first fell from 90% to 78%.
+/// [`crate::RankConfig::learned_sites`] too (the default), the site model
+/// has put the sites in order already, and this model only places the
+/// pages listed on their own among them. It learned from the hand-made
+/// order, and moving the site model's sites again undid much of its work:
+/// in a replay of the test searches, typo searches with their site first
+/// fell from 90% to 78%.
 pub fn reorder_results(
     cfg: &crate::RankConfig,
     query: &str,
@@ -593,8 +594,25 @@ pub fn reorder_results(
     placed: &mut Vec<PlacedPage>,
 ) {
     if cfg.learned {
-        reorder_moving(Model::builtin(), query, hits, placed, !cfg.learned_sites);
+        let moves = if cfg.learned_sites {
+            Moves::Pages
+        } else {
+            Moves::Rows
+        };
+        reorder_moving(Model::builtin(), query, hits, placed, moves);
     }
+}
+
+/// What a model moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Moves {
+    /// The first [`LEARNED_ROWS`] rows, sites and pages.
+    Rows,
+    /// The pages among the first [`LEARNED_ROWS`] rows; the sites keep
+    /// their order.
+    Pages,
+    /// The first [`LEARNED_SITES`] sites.
+    Sites,
 }
 
 fn reorder_moving(
@@ -602,13 +620,13 @@ fn reorder_moving(
     query: &str,
     hits: &mut Vec<Hit>,
     placed: &mut Vec<PlacedPage>,
-    move_sites: bool,
+    moves: Moves,
 ) {
     let (records, rest): (Vec<PlacedPage>, Vec<PlacedPage>) = std::mem::take(placed)
         .into_iter()
         .partition(|page| crate::pages::is_record(&page.hit));
     *placed = rest;
-    reorder_rows(model, query, hits, placed, LEARNED_ROWS, move_sites);
+    reorder_rows(model, query, hits, placed, moves);
     placed.splice(0..0, records);
 }
 
@@ -618,42 +636,23 @@ fn reorder_moving(
 /// ranking found but listed far down: "photo sharing app" has
 /// instagram.com, with every word and the most links, below the tenth.
 pub fn reorder_sites(model: &Model, query: &str, hits: &mut Vec<Hit>) {
-    reorder_rows(model, query, hits, &mut Vec::new(), LEARNED_SITES, true);
+    reorder_rows(model, query, hits, &mut Vec::new(), Moves::Sites);
 }
 
-fn reorder_rows(
-    model: &Model,
-    query: &str,
-    hits: &mut Vec<Hit>,
-    placed: &mut Vec<PlacedPage>,
-    depth: usize,
-    move_sites: bool,
-) {
-    let rows = listed(hits, placed);
-    if rows.len() < 2 {
-        return;
-    }
-    let signals: Vec<RowSignals> = rows
-        .iter()
-        .map(|row| match *row {
-            Listed::Site(i) => {
-                let under: Vec<&PageHit> = placed
-                    .iter()
-                    .filter(|p| p.under.as_deref() == Some(hits[i].domain.as_str()))
-                    .map(|p| &p.hit)
-                    .collect();
-                RowSignals::site(&hits[i], &under)
-            }
-            Listed::Page(i) => RowSignals::page(&placed[i].hit),
-        })
-        .collect();
-    let mut order = model.order_first(query, &signals, depth);
+/// The site rows of the model's `order`, in the order they fill its site
+/// slots under the guards.
+fn site_order(
+    order: &[usize],
+    rows: &[Listed],
+    hits: &[Hit],
+    placed: &[PlacedPage],
+    moves: Moves,
+) -> Vec<usize> {
     // The model may reorder within a relevance tier, but an unsupported
     // domain word cannot regain top placement because it is popular.
     // A named page's corroborated official-site identity is also query
     // evidence. Account for it without rewriting the original site-query
     // diagnostics or adding learned input features.
-    // Sites and pages keep their model slots; only who fills them changes.
     let page_site = crate::pages::named_page_site(hits, placed.iter().map(|page| &page.hit));
     let mut sites: Vec<_> = order
         .iter()
@@ -661,7 +660,7 @@ fn reorder_rows(
         .filter(|&row| matches!(rows[row], Listed::Site(_)))
         .collect();
     // Sites another model put in order fill the site slots in that order.
-    if !move_sites {
+    if moves == Moves::Pages {
         sites.sort_unstable();
     }
     sites.sort_by_key(|&row| {
@@ -694,7 +693,58 @@ fn reorder_rows(
     };
     let partial = |row: usize| site(row).is_some_and(|hit| hit.missing_words);
     let named = |row: usize| site(row).is_some_and(|hit| hit.named);
-    let mut sites = after_leading(sites, partial, named).into_iter();
+    let mut sites = after_leading(sites, partial, named);
+    // Nor, in the site model's order, past a site that has every word but
+    // no vector, as one crawled after the vectors were made: the model
+    // reads its missing closeness in meaning as far.
+    if moves == Moves::Sites {
+        let unembedded = |row: usize| {
+            site(row).is_some_and(|hit| {
+                !hit.missing_words
+                    && hit
+                        .query_evidence
+                        .as_ref()
+                        .is_some_and(|e| e.semantic_closeness.is_none())
+            })
+        };
+        sites = after_leading(sites, partial, unembedded);
+    }
+    sites
+}
+
+fn reorder_rows(
+    model: &Model,
+    query: &str,
+    hits: &mut Vec<Hit>,
+    placed: &mut Vec<PlacedPage>,
+    moves: Moves,
+) {
+    let depth = if moves == Moves::Sites {
+        LEARNED_SITES
+    } else {
+        LEARNED_ROWS
+    };
+    let rows = listed(hits, placed);
+    if rows.len() < 2 {
+        return;
+    }
+    let signals: Vec<RowSignals> = rows
+        .iter()
+        .map(|row| match *row {
+            Listed::Site(i) => {
+                let under: Vec<&PageHit> = placed
+                    .iter()
+                    .filter(|p| p.under.as_deref() == Some(hits[i].domain.as_str()))
+                    .map(|p| &p.hit)
+                    .collect();
+                RowSignals::site(&hits[i], &under)
+            }
+            Listed::Page(i) => RowSignals::page(&placed[i].hit),
+        })
+        .collect();
+    let mut order = model.order_first(query, &signals, depth);
+    // Sites and pages keep their model slots; only who fills them changes.
+    let mut sites = site_order(&order, &rows, hits, placed, moves).into_iter();
     // Nor can popularity alone lift a site's inner page the query does not
     // name past a page listed above it: such a page's popularity is its
     // site's weight, which the model reads as the page being much read. "wolfram code" put MathWorld's
@@ -888,7 +938,7 @@ mod tests {
         // The model would put the named page first, then swap the named
         // site above the one the site model put first. With the site
         // model on, it only places the page.
-        for move_sites in [true, false] {
+        for moves in [Moves::Rows, Moves::Pages] {
             let mut hits = vec![site("a.example", 1.0, false), site("b.example", 0.9, true)];
             let mut placed = vec![PlacedPage {
                 hit: article("Some Page", true),
@@ -900,16 +950,16 @@ mod tests {
                 "some page",
                 &mut hits,
                 &mut placed,
-                move_sites,
+                moves,
             );
             let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
-            let expected = if move_sites {
+            let expected = if moves == Moves::Rows {
                 ["b.example", "a.example"]
             } else {
                 ["a.example", "b.example"]
             };
-            assert_eq!(domains, expected, "move_sites={move_sites}");
-            assert_eq!(placed[0].at, 0, "move_sites={move_sites}");
+            assert_eq!(domains, expected, "{moves:?}");
+            assert_eq!(placed[0].at, 0, "{moves:?}");
         }
     }
 
@@ -1113,6 +1163,32 @@ mod tests {
         // ranked above the library by hand keeps its place.
         assert_eq!(order_of(false, 1.1)[0], "denvergov.org");
         assert_eq!(order_of(true, 0.4)[0], "denvergov.org");
+    }
+
+    #[test]
+    fn the_site_model_lifts_no_site_lacking_words_past_one_with_no_vector() {
+        let order_of = |vector: Option<f32>| {
+            // schwab.com has every word but, crawled after the vectors
+            // were made, maybe no vector; wsj.com is popular and near in
+            // meaning but lacks the words.
+            let mut schwab = site("schwab.com", 1.0, false);
+            schwab.link_score = 0.4;
+            let mut noted = evidence("schwab.com", 0);
+            noted.semantic_closeness = vector;
+            schwab.query_evidence = Some(noted);
+            let mut wsj = site("wsj.com", 0.8, false);
+            wsj.link_score = 0.9;
+            wsj.missing_words = true;
+            let mut noted = evidence("wsj.com", 0);
+            noted.semantic_closeness = Some(1.0);
+            wsj.query_evidence = Some(noted);
+            let mut hits = vec![schwab, wsj];
+            reorder_sites(&popular_first_model(), "charles schwab", &mut hits);
+            hits.into_iter().map(|hit| hit.domain).collect::<Vec<_>>()
+        };
+        assert_eq!(order_of(None), ["schwab.com", "wsj.com"]);
+        // With a vector, the model may judge them.
+        assert_eq!(order_of(Some(0.2)), ["wsj.com", "schwab.com"]);
     }
 
     #[test]
