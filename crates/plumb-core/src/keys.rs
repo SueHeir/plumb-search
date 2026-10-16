@@ -19,15 +19,16 @@
 //!
 //! A site's keys come from its record ([`record_keys`]) or from its stored
 //! item ([`site_keys`]), the same either way: a node's index build files
-//! its sites as items, and private search, PIR tables and the tools still
-//! work on records until they move onto items too.
+//! its sites as items, PIR tables and the tools cut items down
+//! ([`slim_site`], [`lean_site`]), and private search still works on
+//! records until it moves onto items too.
 
 use std::collections::BTreeSet;
 
 use plumb_format::Item;
 use sha2::{Digest, Sha256};
 
-use crate::{domain_label, is_function_word, joined, normalize_text, LinkText, SiteRecord};
+use crate::{domain_label, is_function_word, joined, normalize_text, site, LinkText, SiteRecord};
 
 /// Buckets keys are spread over.
 pub const BUCKETS: u32 = 16_384;
@@ -252,6 +253,44 @@ pub fn lean_record(record: SiteRecord) -> SiteRecord {
     record
 }
 
+/// [`slim_record`] of a site's item ([`crate::site`]): the item cut down
+/// to what finding and ranking it by its keys needs. It keeps the
+/// [`KEY_LINK_TEXTS`] link texts whose keys count, without the sets of
+/// sites that use them, and none of the node's own fields (the crawl time
+/// and marks, the icon and headlines) or edges (key pages, sites linked
+/// to). It is the item of what [`slim_record`] makes of the site's record.
+pub fn slim_site(mut site: Item) -> Item {
+    let mut link_texts = site::link_texts(&site);
+    link_texts.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.text.cmp(&b.text)));
+    link_texts.truncate(KEY_LINK_TEXTS);
+    for lt in &mut link_texts {
+        lt.linkers = 0;
+    }
+    site::set_link_texts(&mut site, &link_texts);
+    site::set_crawled(&mut site, None);
+    // The crawl marks whole, keys this version does not know among them.
+    site.fields.remove("crawl");
+    site::set_icon(&mut site, None);
+    site::set_news(&mut site, Vec::new());
+    site.edges.clear();
+    site
+}
+
+/// [`lean_record`] of a site's item: a [`slim_site`] without the
+/// homepage's text, terms and headings and the Wikipedia intro, and with
+/// the description cut to [`LEAN_DESCRIPTION_CHARS`].
+pub fn lean_site(site: Item) -> Item {
+    let mut site = slim_site(site);
+    site.text = None;
+    site::set_terms(&mut site, Vec::new());
+    site::set_headings(&mut site, Vec::new());
+    site::set_intro(&mut site, None);
+    site.about = site
+        .about
+        .map(|about| about.chars().take(LEAN_DESCRIPTION_CHARS).collect());
+    site
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +371,27 @@ mod tests {
         });
         assert!(keys.is_empty());
         assert_eq!(buckets.len(), BUCKETS_PER_SEARCH);
+    }
+
+    /// [`slim_site`] and [`lean_site`] cut a site's item down as
+    /// [`slim_record`] and [`lean_record`] cut its record.
+    #[test]
+    fn a_site_s_item_is_cut_down_as_its_record() {
+        let mut records = crate::site::tests::variants();
+        records.push(crate::site_item::tests::full_record());
+        let mut usbank = SiteRecord::new("usbank.com");
+        usbank.description = Some("Checking and savings. ".repeat(20));
+        usbank.link_texts = (0..20)
+            .map(|i| LinkText::from_linkers(format!("text {i}"), (1u64 << (i % 5)) - 1))
+            .collect();
+        records.push(usbank);
+        for record in records {
+            let site = record.clone().stored_item_as_is();
+            let slim = slim_record(record.clone()).stored_item_as_is();
+            assert_eq!(slim_site(site.clone()), slim, "{}", record.domain);
+            let lean = lean_record(record.clone()).stored_item_as_is();
+            assert_eq!(lean_site(site), lean, "{}", record.domain);
+        }
     }
 
     #[test]

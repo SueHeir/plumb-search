@@ -278,3 +278,79 @@ pub(crate) fn write_sorted(path: &Path, set: &RecordSet) {
     }
     std::fs::write(path, out).unwrap();
 }
+
+/// Records of more sites for the tools that size private search's
+/// buckets and PIR tables, with what trimming them reads and cuts: a long
+/// description and page text, headings, terms, Wikipedia's and Wikidata's
+/// text, more link texts than a bucket keeps, and the node's own fields.
+pub(crate) fn bucket_records() -> Vec<SiteRecord> {
+    let mut usbank = SiteRecord::new("usbank.com");
+    usbank.url = Some("https://www.usbank.com/".into());
+    usbank.title = Some("U.S. Bank | Checking & Savings".into());
+    usbank.description = Some(format!(
+        "Checking and savings. {}",
+        "Bank with us. ".repeat(30)
+    ));
+    usbank.headings = vec!["Personal banking".into(), "Business banking".into()];
+    usbank.body_text = Some("Open an account today. ".repeat(20));
+    usbank.terms = vec!["bank".into(), "bank".into(), "checking".into()];
+    usbank.aliases = vec!["U.S. Bancorp".into()];
+    usbank.link_texts = (0..12)
+        .map(|i| LinkText::from_linkers(format!("us bank {i}"), (1u64 << i) - 1))
+        .collect();
+    usbank.signals.tranco_rank = Some(900);
+    usbank.signals.linking_domains = 4000;
+    usbank.signals.official_site = true;
+    usbank.country = Some("US".into());
+    usbank.kinds = vec!["bank".into()];
+    usbank.about = Some("American bank holding company".into());
+    usbank.intro = Some("U.S. Bancorp is an American bank holding company.".into());
+    usbank.crawled_at = Some(1_791_605_520);
+    usbank.crawl_attempted_at = Some(1_791_605_600);
+    usbank.crawl_failures = 2;
+    usbank.key_pages = vec![KeyPage {
+        label: "Log in".into(),
+        url: "https://www.usbank.com/login".into(),
+    }];
+    usbank.links_to = vec!["visa.com".into()];
+    let mut chase = SiteRecord::new("chase.com");
+    chase.title = Some("Chase Bank".into());
+    chase.description = Some("Credit cards, mortgages and banking.".into());
+    chase.signals.tranco_rank = Some(200);
+    chase.link_texts = vec![LinkText::with_count("chase", 30)];
+    let mut banks: Vec<SiteRecord> = (0..40u32)
+        .map(|n| {
+            let mut bank = SiteRecord::new(format!("bank{n}.example"));
+            bank.title = Some(format!("Bank number {n}"));
+            bank.description = Some(format!("The {n}th bank. ").repeat(n as usize % 7 + 1));
+            bank.signals.tranco_rank = Some(10_000 + n);
+            bank
+        })
+        .collect();
+    banks.extend([usbank, chase]);
+    banks
+}
+
+/// Checks `text` against the golden file at `path`, or writes it there
+/// when `PLUMB_WRITE_GOLDEN` is set, as plumb-node's golden tests do.
+pub(crate) fn check_golden(path: &Path, text: &str) {
+    if std::env::var_os("PLUMB_WRITE_GOLDEN").is_some() {
+        std::fs::write(path, text).unwrap();
+        return;
+    }
+    let golden = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+    let (mut want, mut got) = (golden.lines(), text.lines());
+    for n in 1.. {
+        match (want.next(), got.next()) {
+            (None, None) => break,
+            (want, got) if want == got => continue,
+            (want, got) => panic!(
+                "{}:{n} differs\n  golden: {}\n  now:    {}",
+                path.display(),
+                want.unwrap_or("(the end)"),
+                got.unwrap_or("(the end)")
+            ),
+        }
+    }
+}

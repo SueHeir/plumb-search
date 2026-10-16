@@ -675,7 +675,11 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
     std::fs::rename(&inner.paths.inbox, &inner.paths.absorbing).unwrap();
     let absorbing = std::fs::read(&inner.paths.absorbing).unwrap();
     let source = Arc::new(
-        plumb_net::BucketTable::build::<SiteRecord>(&dir.path().join("net/buckets"), &[]).unwrap(),
+        plumb_net::BucketTable::build::<plumb_core::site::Item>(
+            &dir.path().join("net/buckets"),
+            &[],
+        )
+        .unwrap(),
     );
     let mut net_config = plumb_net::NetConfig::new(dir.path().join("net"));
     net_config.listen.clear();
@@ -1141,7 +1145,11 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
     ));
     let raw = std::fs::read(&inner.paths.records).unwrap();
     let table = Arc::new(
-        plumb_net::BucketTable::build::<SiteRecord>(&inner.paths.net.join("buckets"), &[]).unwrap(),
+        plumb_net::BucketTable::build::<plumb_core::site::Item>(
+            &inner.paths.net.join("buckets"),
+            &[],
+        )
+        .unwrap(),
     );
     let mut net_config = plumb_net::NetConfig::new(inner.paths.net.clone());
     net_config.listen.clear();
@@ -1290,8 +1298,11 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
         source_config.round_every = None;
         source_config.fill = false;
         let source_table = Arc::new(
-            plumb_net::BucketTable::build::<SiteRecord>(&source_dir.path().join("buckets"), &[])
-                .unwrap(),
+            plumb_net::BucketTable::build::<plumb_core::site::Item>(
+                &source_dir.path().join("buckets"),
+                &[],
+            )
+            .unwrap(),
         );
         let (source, _source_records) =
             plumb_net::start(source_config, source_table).await.unwrap();
@@ -1322,8 +1333,11 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
         ));
         let raw = std::fs::read(&inner.paths.records).unwrap();
         let table = Arc::new(
-            plumb_net::BucketTable::build::<SiteRecord>(&inner.paths.net.join("buckets"), &[])
-                .unwrap(),
+            plumb_net::BucketTable::build::<plumb_core::site::Item>(
+                &inner.paths.net.join("buckets"),
+                &[],
+            )
+            .unwrap(),
         );
         let mut net_config = plumb_net::NetConfig::new(inner.paths.net.clone());
         net_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -1573,9 +1587,11 @@ async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_t
     source_config.upnp = false;
     source_config.local_discovery = false;
     source_config.round_every = None;
-    let table =
-        plumb_net::BucketTable::build::<SiteRecord>(&source_dir.path().join("buckets"), &[])
-            .unwrap();
+    let table = plumb_net::BucketTable::build::<plumb_core::site::Item>(
+        &source_dir.path().join("buckets"),
+        &[],
+    )
+    .unwrap();
     let (source, _source_records) = plumb_net::start(source_config, Arc::new(table))
         .await
         .unwrap();
@@ -1726,9 +1742,11 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
         source_config.upnp = false;
         source_config.local_discovery = false;
         source_config.round_every = None;
-        let table =
-            plumb_net::BucketTable::build::<SiteRecord>(&source_dir.path().join("buckets"), &[])
-                .unwrap();
+        let table = plumb_net::BucketTable::build::<plumb_core::site::Item>(
+            &source_dir.path().join("buckets"),
+            &[],
+        )
+        .unwrap();
         let (source, _source_records) = plumb_net::start(source_config, Arc::new(table))
             .await
             .unwrap();

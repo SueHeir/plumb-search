@@ -1,0 +1,86 @@
+# What plumb-tools storage reports of its test sites: see storage_golden
+# in storage.rs before writing it again. Written on records.
+{
+  "bucket_tables": [
+    {
+      "buckets": 16384,
+      "directory": "indexes/000001/buckets",
+      "empty_buckets": 16220,
+      "object_array_payload": {
+        "bytes_per_bucket": {
+          "max": 7392,
+          "mean": 7.6600341796875,
+          "median": 2,
+          "min": 2,
+          "p95": 2,
+          "p99": 37
+        },
+        "layout": "Prospective UTF-8 [record_json,...], assuming valid JSON records. Excludes current HTTP string escaping, proof envelopes and cryptographic overhead. PIR estimate uses one equal row size across all 16,384 buckets; no public size classes or shards.",
+        "pir_length_prefix_bytes": 8,
+        "pir_padded_database_bytes": 121241600,
+        "pir_padded_row_bytes": 7400,
+        "total_bytes": 125502
+      },
+      "record_memberships": 233,
+      "records": 54,
+      "records_json_payload_bytes": 12894,
+      "records_per_bucket": {
+        "max": 32,
+        "mean": 0.01422119140625,
+        "median": 0,
+        "min": 0,
+        "p95": 0,
+        "p99": 1
+      }
+    }
+  ],
+  "categories": {
+    "buckets": {
+      "files": 4,
+      "logical_bytes": 145346
+    },
+    "history": {
+      "files": 0,
+      "logical_bytes": 0
+    },
+    "icons": {
+      "files": 0,
+      "logical_bytes": 0
+    },
+    "indexes": {
+      "files": 0,
+      "logical_bytes": 0
+    },
+    "models_vectors": {
+      "files": 0,
+      "logical_bytes": 0
+    },
+    "network_cache": {
+      "files": 0,
+      "logical_bytes": 0
+    },
+    "other": {
+      "files": 0,
+      "logical_bytes": 0
+    },
+    "records_journals": {
+      "files": 1,
+      "logical_bytes": 12028
+    }
+  },
+  "complete": true,
+  "excluded_special_files": 0,
+  "excluded_symlinks": 0,
+  "measurement": "logical regular-file bytes; symlinks and special files excluded",
+  "omission_count": 0,
+  "omissions": [],
+  "records": {
+    "full_json_payload_bytes": 11888,
+    "invalid_records": 0,
+    "oversized_records": 0,
+    "slim_json_payload_bytes": 10627,
+    "source": "records.jsonl",
+    "valid_records": 54
+  },
+  "total_logical_bytes": 157374
+}

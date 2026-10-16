@@ -86,6 +86,11 @@ fn listed(records: &[SiteRecord]) -> SiteList {
     records.iter().map(item).collect()
 }
 
+/// The stored items of `records`, cleaned as a node's sets hold them.
+fn stored_items(records: &[SiteRecord]) -> Vec<plumb_core::site::Item> {
+    records.iter().map(SiteRecord::to_stored_item).collect()
+}
+
 /// A data directory holding the fixture records, as if put there by hand.
 fn seeded_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();

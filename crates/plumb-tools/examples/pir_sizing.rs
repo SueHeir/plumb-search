@@ -1,6 +1,7 @@
 //! How big a PIR table made from a node's real buckets would be, for a few
-//! ways of cutting records down. Read-only; prints totals and
-//! distributions, never a record or a bucket number.
+//! ways of cutting sites down. Read-only; prints totals and distributions,
+//! never a site or a bucket number. Each site is measured as its record's
+//! JSON, the shape these sizes were first measured in.
 //!
 //! ```text
 //! cargo run --release -p plumb-tools --example pir_sizing -- DATA/indexes/ID/buckets
@@ -12,8 +13,8 @@
 //! `--build-lean OUT` instead builds the lean PIR snapshot itself
 //! ([`plumb_tools::pir::lean`]) in `OUT`, a 512 MiB table.
 //!
-//! `--write-records VARIANT FILE` instead writes the records file, cut
-//! down, to build an index from and compare search quality.
+//! `--write-records VARIANT FILE` instead writes the records file, each
+//! site cut down, to build an index from and compare search quality.
 //!
 //! With `--probe-db VARIANT FILE` it also writes the buckets of that
 //! variant, compressed, as the fixed rows `tools/pir-probe --database`
@@ -23,16 +24,15 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
-use plumb_core::keys::{
-    bucket_of, lean_record, piece_of, record_keys, slim_record, PIECES_PER_BUCKET,
-};
-use plumb_core::SiteRecord;
+use plumb_core::keys::{bucket_of, lean_site, piece_of, site_keys, slim_site, PIECES_PER_BUCKET};
+use plumb_core::site::{self, Item};
+use plumb_core::{stored, SiteRecord};
 use plumb_net::BucketTable;
 use plumb_tools::pir::snapshot::Layout;
 use serde_json::json;
@@ -46,11 +46,11 @@ const ROW_SIZES: [u32; 5] = [4_096, 8_192, 16_384, 32_768, 65_536];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Variant {
-    /// Whole records, as their own JSON.
+    /// Whole sites.
     Full,
-    /// [`slim_record`]: what a browser downloads for private search.
+    /// [`slim_site`]: what a browser downloads for private search.
     Slim,
-    /// [`lean_record`]: what a PIR table holds.
+    /// [`lean_site`]: what a PIR table holds.
     Lean,
     /// Lean without description, about and intro: names, links, signals.
     Names,
@@ -64,20 +64,45 @@ const VARIANTS: [(Variant, &str); 4] = [
 ];
 
 impl Variant {
-    fn apply(self, record: SiteRecord) -> SiteRecord {
+    fn apply(self, site: Item) -> Item {
         if self == Variant::Full {
-            return record;
+            return site;
         }
         if self == Variant::Slim {
-            return slim_record(record);
+            return slim_site(site);
         }
-        let mut record = lean_record(record);
+        let mut site = lean_site(site);
         if self == Variant::Names {
-            record.description = None;
-            record.about = None;
+            site.about = None;
+            site::set_wikidata_about(&mut site, None);
         }
-        record
+        site
     }
+
+    /// `sites` cut down, each as its record, whose JSON is measured.
+    fn records<'a>(self, sites: impl IntoIterator<Item = &'a Item>) -> Result<Vec<SiteRecord>> {
+        sites
+            .into_iter()
+            .map(|site| SiteRecord::from_stored_item(&self.apply(site.clone())))
+            .collect()
+    }
+}
+
+/// Every site of a records file, each line read as its stored item.
+fn read_sites(path: &Path) -> Result<Vec<Item>> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut sites = Vec::new();
+    for (i, line) in BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let site = stored::read_item(line.as_bytes())
+            .with_context(|| format!("{}:{}: invalid JSON line", path.display(), i + 1))?;
+        sites.push(site);
+    }
+    Ok(sites)
 }
 
 fn deflate(bytes: &[u8]) -> Result<Vec<u8>> {
@@ -145,8 +170,7 @@ fn main() -> Result<()> {
             let out = PathBuf::from(args.next().context("--build-lean needs a directory")?);
             let scratch = tempfile::tempdir()?;
             let table = if dir.is_file() {
-                let records = plumb_core::stored::read_file(&dir)?;
-                BucketTable::build(&scratch.path().join("buckets"), &records)?
+                BucketTable::build(&scratch.path().join("buckets"), &read_sites(&dir)?)?
             } else {
                 BucketTable::open(&dir)?
             };
@@ -175,10 +199,9 @@ fn main() -> Result<()> {
             };
             let path = PathBuf::from(args.next().context("--write-records needs a file")?);
             ensure!(!path.exists(), "{} already exists", path.display());
-            let records = plumb_core::stored::read_file(&dir)?;
             let mut out = BufWriter::new(File::create(&path)?);
-            for record in records {
-                plumb_core::stored::write(&mut out, &variant.apply(record))?;
+            for site in read_sites(&dir)? {
+                stored::write_item(&mut out, &variant.apply(site))?;
                 out.write_all(b"\n")?;
             }
             out.flush()?;
@@ -198,8 +221,7 @@ fn main() -> Result<()> {
 
     let scratch = tempfile::tempdir()?;
     let table = if dir.is_file() {
-        let records = plumb_core::stored::read_file(&dir)?;
-        BucketTable::build(&scratch.path().join("buckets"), &records)?
+        BucketTable::build(&scratch.path().join("buckets"), &read_sites(&dir)?)?
     } else {
         BucketTable::open(&dir)?
     };
@@ -219,23 +241,23 @@ fn main() -> Result<()> {
     let mut pieces: Vec<Vec<u64>> = vec![Vec::new(); even_variants.len()];
     let mut memberships = 0u64;
     for bucket in 0..buckets {
-        let records: Vec<SiteRecord> = table
+        let sites: Vec<Item> = table
             .get(bucket)?
             .iter()
-            .map(|line| plumb_core::stored::read(line.as_bytes()))
+            .map(|line| stored::read_item(line.as_bytes()))
             .collect::<Result<_>>()
-            .context("records.dat holds a record that does not parse")?;
-        memberships += records.len() as u64;
-        let mut by_piece: Vec<Vec<&SiteRecord>> = vec![Vec::new(); PIECES_PER_BUCKET as usize];
-        for record in &records {
+            .context("records.dat holds a site that does not parse")?;
+        memberships += sites.len() as u64;
+        let mut by_piece: Vec<Vec<&Item>> = vec![Vec::new(); PIECES_PER_BUCKET as usize];
+        for site in &sites {
             let mut wanted = [false; PIECES_PER_BUCKET as usize];
-            for key in record_keys(record) {
+            for key in site_keys(site) {
                 if bucket_of(&key) == bucket {
                     wanted[(piece_of(&key) % PIECES_PER_BUCKET) as usize] = true;
                 }
             }
             for (piece, _) in wanted.iter().enumerate().filter(|(_, w)| **w) {
-                by_piece[piece].push(record);
+                by_piece[piece].push(site);
             }
         }
         for (i, &variant) in even_variants.iter().enumerate() {
@@ -243,13 +265,12 @@ fn main() -> Result<()> {
                 if piece.is_empty() {
                     continue;
                 }
-                let cut: Vec<SiteRecord> =
-                    piece.iter().map(|&r| variant.apply(r.clone())).collect();
+                let cut = variant.records(piece.iter().copied())?;
                 pieces[i].push(deflate(&serde_json::to_vec(&cut)?)?.len() as u64);
             }
         }
         for (i, &(variant, _)) in VARIANTS.iter().enumerate() {
-            let cut: Vec<SiteRecord> = records.iter().cloned().map(|r| variant.apply(r)).collect();
+            let cut = variant.records(&sites)?;
             let bytes = serde_json::to_vec(&cut)?;
             let small = deflate(&bytes)?;
             plain[i].push(bytes.len() as u64);

@@ -49,7 +49,7 @@ async fn serve_sets(
         .to_peer_id();
     let table = plumb_net::BucketTable::build(
         &peer_dir.join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.to_path_buf());
@@ -331,7 +331,9 @@ async fn a_new_node_sets_up_and_fills_from_the_set_of_sites() {
     let mut own = SiteRecord::new("trustedonly.org");
     own.url = Some("https://trustedonly.org/".into());
     own.crawled_at = Some(now - 600);
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[own]).unwrap();
+    let table =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&[own]))
+            .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
     peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -490,7 +492,7 @@ async fn a_node_takes_the_map_as_a_set_going_on_from_what_it_fetched() {
 
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -615,7 +617,7 @@ async fn a_node_takes_signed_sets_from_any_node_but_only_from_trusted_publishers
 
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -849,7 +851,7 @@ async fn a_node_searches_the_pages_it_has_while_a_download_waits() {
         .to_peer_id();
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let (asked_tx, asked) = std::sync::mpsc::channel();

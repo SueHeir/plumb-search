@@ -281,7 +281,7 @@ async fn bucket(
 
 /// A bucket's records, trimmed to what a browser needs, as one JSON list.
 /// Records that do not read are left out.
-fn slim_bucket(records: &[String]) -> String {
+pub(super) fn slim_bucket(records: &[String]) -> String {
     let slim: Vec<SiteRecord> = records
         .iter()
         .filter_map(|line| plumb_core::stored::read(line.as_bytes()).ok())

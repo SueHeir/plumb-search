@@ -32,7 +32,9 @@ async fn a_node_fills_its_free_space_with_a_trusted_node_s_crawls() {
     peer_config.upnp = false;
     peer_config.local_discovery = false;
     peer_config.round_every = None;
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &sites).unwrap();
+    let table =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&sites))
+            .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -183,7 +185,9 @@ async fn crawled_peer(
     peer_config.upnp = false;
     peer_config.local_discovery = false;
     peer_config.round_every = None;
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &sites).unwrap();
+    let table =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&sites))
+            .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -289,7 +293,7 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     write_articles_file(&set_file, &articles).unwrap();
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -434,7 +438,7 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
     ]);
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -524,7 +528,7 @@ async fn a_node_takes_the_adult_blocklist_from_a_trusted_node_before_its_source(
     std::fs::write(&list_file, "adult.example\nother.example\n").unwrap();
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &[SiteRecord::new("lighthouses.org")],
+        &[plumb_core::site::new("lighthouses.org")],
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
