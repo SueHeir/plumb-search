@@ -670,6 +670,39 @@ mod tests {
         assert!(!json.contains("example.com"));
     }
 
+    /// What `plumb-tools storage` reports of a data directory holding the
+    /// tools' test sites and their bucket table, against
+    /// `storage_golden.txt` beside this file: every figure of the report,
+    /// with the directory's own path and the report's notes, fixed text,
+    /// left out. Written while the sizing read records, before it moved
+    /// onto sites' items (step 10 of the data format plan), so that the
+    /// sizing of items is checked against it. Never written again to make
+    /// a test pass: `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-tools
+    /// storage_golden` writes it.
+    #[test]
+    fn storage_golden() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut records = crate::test_sites::records();
+        records.extend(crate::test_sites::bucket_records());
+        let file = dir.path().join("records.jsonl");
+        crate::test_sites::write(&file, &records);
+        let table = dir.path().join("indexes/000001/buckets");
+        plumb_net::BucketTable::build(&table, &plumb_core::stored::read_file(&file).unwrap())
+            .unwrap();
+        let report = inspect(dir.path()).unwrap();
+        let mut json = serde_json::to_value(&report).unwrap();
+        let report = json.as_object_mut().unwrap();
+        report.remove("data");
+        report.remove("notes");
+        let text = format!(
+            "# What plumb-tools storage reports of its test sites: see storage_golden\n\
+             # in storage.rs before writing it again. Written on records.\n{}\n",
+            serde_json::to_string_pretty(&json).unwrap()
+        );
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage_golden.txt");
+        crate::test_sites::check_golden(&path, &text);
+    }
+
     #[test]
     fn bucket_statistics_match_real_table() {
         let dir = tempfile::tempdir().unwrap();

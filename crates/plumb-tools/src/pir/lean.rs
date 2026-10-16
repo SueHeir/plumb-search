@@ -322,6 +322,71 @@ mod tests {
         assert_eq!(reopened.pieces().unwrap(), snapshot.pieces().unwrap());
     }
 
+    /// The lean PIR snapshot of the tools' test sites, against
+    /// `lean_golden.txt` beside this file: the build's report, each file's
+    /// size and SHA-256, the manifest, and the sites of every piece as the
+    /// rows hold them. Written while the snapshot was made of records,
+    /// before it moved onto sites' items (step 10 of the data format plan),
+    /// so that the snapshot made of items is checked against it byte for
+    /// byte. Never written again to make a test pass:
+    /// `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-tools lean_golden` writes
+    /// it.
+    #[test]
+    fn lean_golden() {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut records = crate::test_sites::records();
+        records.extend(crate::test_sites::bucket_records());
+        let table = BucketTable::build(&dir.path().join("buckets"), &records).unwrap();
+        let pir = dir.path().join("pir");
+        let (snapshot, report) =
+            build_rows(&pir, &table, TEST_ROW_BYTES, "test", NOW, DAY).unwrap();
+        let mut out = String::from(
+            "# The lean PIR snapshot of plumb-tools' test sites: see lean_golden in\n\
+             # lean.rs before writing it again. Written on records.\n",
+        );
+        writeln!(
+            out,
+            "pieces {} largest_row {} total_bytes {}",
+            report.pieces, report.largest_row, report.total_bytes
+        )
+        .unwrap();
+        for file in ["manifest.json", "pieces.bin", "rows.bin"] {
+            let bytes = fs::read(pir.join(file)).unwrap();
+            let hash: String = Sha256::digest(&bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            writeln!(out, "{file} {} bytes {hash}", bytes.len()).unwrap();
+        }
+        let manifest = fs::read_to_string(pir.join("manifest.json")).unwrap();
+        writeln!(out, "manifest {manifest}").unwrap();
+        let map = snapshot.pieces().unwrap();
+        for (row, pieces) in map.pieces_by_row().into_iter().enumerate() {
+            if pieces.is_empty() {
+                continue;
+            }
+            let row = row as u32;
+            let rows = [snapshot.row(u64::from(row)).unwrap()];
+            let payload = assemble_bucket(snapshot.manifest(), row, &rows).unwrap();
+            let mut rest = payload.as_slice();
+            while !rest.is_empty() {
+                let piece = u32::from_le_bytes(rest[..4].try_into().unwrap());
+                let len = u32::from_le_bytes(rest[4..8].try_into().unwrap()) as usize;
+                let mut json = String::new();
+                DeflateDecoder::new(&rest[FRAME_BYTES..FRAME_BYTES + len])
+                    .read_to_string(&mut json)
+                    .unwrap();
+                writeln!(out, "row {row} piece {piece} {json}").unwrap();
+                rest = &rest[FRAME_BYTES + len..];
+            }
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pir/lean_golden.txt");
+        crate::test_sites::check_golden(&path, &out);
+    }
+
     #[test]
     fn a_damaged_piece_map_or_payload_fails() {
         let dir = tempfile::tempdir().unwrap();

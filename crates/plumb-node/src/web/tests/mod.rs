@@ -7,6 +7,7 @@ mod opensearch;
 mod pages;
 mod places;
 mod plugins;
+mod private_golden;
 mod results;
 mod settings_and_network;
 
