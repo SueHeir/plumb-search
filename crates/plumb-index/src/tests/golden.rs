@@ -1,6 +1,7 @@
 //! The site index's golden file, `golden.txt` next to this one: what the
 //! index makes of a fixed set of sites. For each site it holds the line a
-//! records file holds of it, its document ([`schema::document`]), the
+//! records file of versions up to 0.4 holds of it, the record's own JSON,
+//! which nodes still read, its document ([`schema::document`]), the
 //! texts the spelling model counts in it ([`schema::spelling_texts`]) and
 //! the keys it is filed under in the buckets other nodes take
 //! ([`plumb_core::keys::site_keys`]), each made from the site's stored item
@@ -19,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use plumb_core::{stored, KeyPage, Redirect};
+use plumb_core::{KeyPage, Redirect};
 use tantivy::schema::{OwnedValue, Value as _};
 
 use super::*;
@@ -328,7 +329,7 @@ fn golden_text(sites: &[SiteRecord]) -> String {
     );
     for (i, record) in sites.iter().enumerate() {
         let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
-        let line = String::from_utf8(stored::line(record).unwrap()).unwrap();
+        let line = json(record);
         writeln!(out, "\nsite {}\nline {line}", record.domain).unwrap();
         if !names.is_empty() {
             writeln!(out, "redirect_names {}", json(names)).unwrap();
