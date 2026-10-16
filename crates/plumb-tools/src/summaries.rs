@@ -230,8 +230,8 @@ fn run_apply(args: &ApplyArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{LinkText, SiteRecord};
-    use plumb_node::records::{load_records, replace_records, sorted_by_link_score};
+    use plumb_core::{site, LinkText, SiteRecord};
+    use plumb_node::records::{load_sites, replace_sites};
 
     use super::*;
 
@@ -296,12 +296,11 @@ mod tests {
         let records = dir.path().join("records.jsonl");
         let out = dir.path().join("out.jsonl");
         let summaries = dir.path().join("summaries.jsonl");
-        replace_records(
+        replace_sites(
             &records,
-            [
-                &SiteRecord::new("allrecipes.com"),
-                &SiteRecord::new("x.com"),
-            ],
+            &[site::new("allrecipes.com"), site::new("x.com")]
+                .into_iter()
+                .collect(),
         )
         .unwrap();
         std::fs::write(
@@ -317,18 +316,16 @@ mod tests {
             out: out.clone(),
         })
         .unwrap();
-        let set = load_records(&out).unwrap();
+        let sites = load_sites(&out).unwrap();
+        let summary = |sites: &plumb_core::sites::Sites, domain: &str| {
+            site::summary(&sites.get(domain).unwrap()).map(str::to_owned)
+        };
         assert_eq!(
-            set.get("allrecipes.com").unwrap().summary.as_deref(),
+            summary(&sites, "allrecipes.com").as_deref(),
             Some("A recipe-sharing site.")
         );
-        assert_eq!(set.get("x.com").unwrap().summary, None);
-        assert!(load_records(&records)
-            .unwrap()
-            .get("allrecipes.com")
-            .unwrap()
-            .summary
-            .is_none());
+        assert_eq!(summary(&sites, "x.com"), None);
+        assert!(summary(&load_sites(&records).unwrap(), "allrecipes.com").is_none());
     }
 
     #[test]
@@ -414,12 +411,12 @@ mod tests {
         .unwrap();
 
         // What a record set made of the same file and journal writes.
-        let mut set = load_records(&records).unwrap();
+        let mut set = crate::test_sites::load_records(&records);
         set.entry("acer.com").summary = Some("Acer makes laptops.".into());
         set.entry("late.org").summary = Some("A late site.".into());
         set.entry("xn--mnchen-3ya.de").summary = Some("The city of Munich.".into());
         let expected = dir.path().join("expected.jsonl");
-        replace_records(&expected, sorted_by_link_score(&set)).unwrap();
+        crate::test_sites::write_sorted(&expected, &set);
         assert_eq!(
             String::from_utf8(std::fs::read(&out).unwrap()).unwrap(),
             String::from_utf8(std::fs::read(&expected).unwrap()).unwrap()

@@ -1319,7 +1319,7 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::{load_records, replace_records, sorted_by_link_score};
+    use crate::records::reference::{load_records, replace_records, sorted_by_link_score};
 
     #[test]
     fn fills_up_to_ninety_percent_of_the_storage_limit() {

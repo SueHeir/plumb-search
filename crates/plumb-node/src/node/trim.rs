@@ -333,7 +333,7 @@ mod tests {
     use plumb_core::{RecordSet, SiteRecord};
 
     use super::*;
-    use crate::records::{load_records, replace_records, sorted_by_link_score};
+    use crate::records::reference::{load_records, replace_records, sorted_by_link_score};
 
     fn set_of(n: usize) -> RecordSet {
         let mut set = RecordSet::new();

@@ -53,7 +53,7 @@ flowchart LR
 | [node/news.rs](src/node/news.rs), [node/wanted_pages.rs](src/node/wanted_pages.rs) | Feed checks; following links toward the pages searches wanted |
 | [node/features.rs](src/node/features.rs), [node/backup.rs](src/node/backup.rs), [node/control.rs](src/node/control.rs), [node/journal.rs](src/node/journal.rs) | `features.json`; backups; the remote control token; the activity log |
 | **Records and crawling** | |
-| [records.rs](src/records.rs), [outline.rs](src/outline.rs) | `records.jsonl` and its journal, loaded whole as sites' stored items and compacted from them (`plumb-tools crawl` still loads them as records); reading it a site at a time and building an index, buckets and feeds from each site's stored item that way |
+| [records.rs](src/records.rs), [outline.rs](src/outline.rs) | `records.jsonl` and its journal, loaded whole as sites' stored items and compacted from them; reading it a site at a time and building an index, buckets and feeds from each site's stored item that way |
 | [crawl.rs](src/crawl.rs), [dead.rs](src/dead.rs), [icons.rs](src/icons.rs) | Which homepages a round fetches and how results merge (shared with `plumb-tools crawl`): a crawl's results are sites' stored items, which the journal's changes carry, and only the crawls shared with the network become records, in one place (`crawl::to_record`); dead sites; site icons |
 | [sets.rs](src/sets.rs), [site_rules.rs](src/site_rules.rs) | Checking and reading `plumb-format` sets; signed site rules |
 | **Search features** | |
@@ -230,7 +230,7 @@ These come from [CLAUDE.md](../../CLAUDE.md), which has the full list.
 - `plumb_node::run(cli)`: runs one subcommand; `main.rs` is a thin wrapper.
 - `node::start(NodeConfig) -> NodeHandle`, with `NodeConfig::server` and `NodeConfig::desktop` as defaults: the desktop app embeds a node this way. `NodeHandle` has `addr`, `status`, `refresh_now`, `restart_signal` and `shutdown`.
 - `web::router`, `web::node_router_with`: the router over any `SearchBackend`, for tests and `plumb serve`.
-- `crawl::{select_targets, crawl_rolling}`, `records::{load_records, RecordStore}`, `outline`, `meaning`: used by `plumb-tools crawl`, `index` and `search`.
+- `crawl::{select_site_targets, crawl_rolling}`, `records::{load_sites, RecordStore}`, `outline`, `meaning`: used by `plumb-tools crawl`, `index` and `search`.
 - `records::{load_sites, replace_sites}`, `outline::for_each_site`, `dead::find_dead`, `about::Topics`: used by the `plumb-tools` commands that read or rewrite a records file as sites' stored items (`summaries`, `terms`, `fetch-text`, `top-sites`, `link-rank`, `fact-trust`, `dead-sites`, `set sites`, `embed` with `meaning::embed_all`, and `index` for a file it merges).
 
 ## Tests

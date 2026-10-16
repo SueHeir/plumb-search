@@ -1946,8 +1946,9 @@ mod tests {
         let (_, items) = plumb_node::sets::read_items(&dir).unwrap();
 
         // The items of the records loaded, best first, the gone left out.
-        let set = plumb_node::records::load_records(&file).unwrap();
-        let sent: Vec<_> = plumb_node::records::sorted_by_link_score(&set)
+        let set = crate::test_sites::load_records(&file);
+        let sent: Vec<_> = set
+            .into_sorted_vec()
             .into_iter()
             .filter(|record| record.gone_at.is_none())
             .map(|record| record.to_item().ok())

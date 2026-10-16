@@ -1093,8 +1093,8 @@ fn same_site(domain: &str, outline: &Outline) -> Result<()> {
 }
 
 /// Replaces the records file at `path` with the sites of it that `outlines`
-/// gives, in their order, as [`crate::records::replace_records`] replaces it
-/// with records: by way of a file next to it flushed to disk before the
+/// gives, in their order, as [`crate::records::replace_sites`] replaces it
+/// with a list of sites: by way of a file next to it flushed to disk before the
 /// rename, then deleting the journal, which must be folded in already
 /// ([`outline`]). Each line is copied as the file holds it, never read as a
 /// record and written again. With a storage `budget`, room for the new
@@ -1138,7 +1138,8 @@ pub(crate) mod tests {
     use plumb_core::{write_jsonl, LinkText, Redirect};
 
     use super::*;
-    use crate::records::{load_records, RecordStore};
+    use crate::records::reference::{self, load_records};
+    use crate::records::RecordStore;
 
     fn record(domain: &str, tranco: u32) -> SiteRecord {
         let mut r = SiteRecord::new(domain);
@@ -1432,9 +1433,7 @@ pub(crate) mod tests {
         let of_records = elsewhere.path().join("records.jsonl");
         fs::copy(&path, &of_records).unwrap();
         fs::copy(journal_path(&path), journal_path(&of_records)).unwrap();
-        RecordStore::open(&of_records)
-            .compact_records(&load_records(&of_records).unwrap())
-            .unwrap();
+        reference::compact(&of_records, &load_records(&of_records).unwrap()).unwrap();
         let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
 
         let outlines = outline_merged(&path, Some(budget.clone())).unwrap();
