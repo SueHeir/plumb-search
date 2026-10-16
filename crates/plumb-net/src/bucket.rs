@@ -483,7 +483,7 @@ mod tests {
             .get(bucket_of("bank"))
             .unwrap()
             .iter()
-            .map(|j| serde_json::from_str(j).unwrap())
+            .map(|j| plumb_core::stored::read(j.as_bytes()).unwrap())
             .filter(|r: &SiteRecord| record_keys(r).contains("bank"))
             .collect();
         // Capped, best first.

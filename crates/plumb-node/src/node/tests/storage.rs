@@ -154,7 +154,8 @@ async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
     // The limit is a target, as in 0.2.0: the rewrites and folds a node
     // makes, those that trim it back under the limit among them, run past
     // it rather than leave the node stuck over it.
-    crate::node::worker::save_seed_records(&node.inner, std::slice::from_ref(&large)).unwrap();
+    let seed = [large.clone().stored_item_as_is()];
+    crate::node::worker::save_seed_sites(&node.inner, &seed).unwrap();
     crate::node::round::RoundSites::load_with_budget(
         &node.inner.paths.records,
         crate::about::Topics::default(),
@@ -231,9 +232,10 @@ fn two_inbox_absorptions_cross_the_real_fold_threshold_under_receiving_contentio
         record.crawled_at = Some(at);
         record
     };
+    // Written as the node writes it, so that the fold's output is as long.
     let mut raw = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
     for i in 0..RECORDS {
-        serde_json::to_writer(&mut raw, &record(i, 1)).unwrap();
+        plumb_core::stored::write(&mut raw, &record(i, 1)).unwrap();
         raw.write_all(b"\n").unwrap();
     }
     raw.into_inner().unwrap().sync_all().unwrap();
@@ -422,9 +424,10 @@ fn a_fold_past_the_limit_installs_its_output_and_keeps_the_old_reader_charged() 
         r.crawled_at = Some(at);
         r
     };
+    // Written as the node writes it, so that the fold's output is as long.
     let mut raw = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
     for i in 0..32_768 {
-        serde_json::to_writer(&mut raw, &record(i, 1)).unwrap();
+        plumb_core::stored::write(&mut raw, &record(i, 1)).unwrap();
         raw.write_all(b"\n").unwrap();
     }
     raw.into_inner().unwrap().sync_all().unwrap();
@@ -489,13 +492,13 @@ fn a_fold_past_the_limit_installs_its_output_and_keeps_the_old_reader_charged() 
         std::io::BufReader::new(reader.try_clone().unwrap())
             .read_line(&mut line)
             .unwrap();
-        let old: SiteRecord = serde_json::from_str(&line).unwrap();
+        let old = plumb_core::stored::read(line.as_bytes()).unwrap();
         assert_eq!(old.crawled_at, Some(1));
         line.clear();
         std::io::BufReader::new(std::fs::File::open(&path).unwrap())
             .read_line(&mut line)
             .unwrap();
-        let new: SiteRecord = serde_json::from_str(&line).unwrap();
+        let new = plumb_core::stored::read(line.as_bytes()).unwrap();
         assert_eq!(new.crawled_at, Some(2));
     }
     drop(reader);
@@ -569,7 +572,7 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
             // the receiver writes them.
             let bytes = records
                 .iter()
-                .map(|record| serde_json::to_vec(record).unwrap().len() as u64 + 1)
+                .map(|record| plumb_core::stored::line(record).unwrap().len() as u64 + 1)
                 .sum::<u64>();
             initial_delivery_bytes.push(plumb_core::storage::allocation_for(bytes + 1));
         }
@@ -829,7 +832,7 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
             .read_line(&mut line)
             .unwrap();
         assert_eq!(
-            serde_json::from_str::<SiteRecord>(&line)
+            plumb_core::stored::read(line.as_bytes())
                 .unwrap()
                 .crawled_at,
             Some(1)
@@ -1233,7 +1236,9 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
                 .join(format!("{following_id}.delivered-trusted"))
                 .exists());
             assert_eq!(
-                read_jsonl::<SiteRecord>(&inner.paths.inbox).unwrap().len(),
+                plumb_core::stored::read_file(&inner.paths.inbox)
+                    .unwrap()
+                    .len(),
                 1
             );
             assert_eq!(inner.news.headline_count(), 1);
@@ -1390,7 +1395,9 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
                 .unwrap();
             assert_eq!(budget.status().rejected_writes, rejected);
             assert_eq!(
-                read_jsonl::<SiteRecord>(&inner.paths.inbox).unwrap().len(),
+                plumb_core::stored::read_file(&inner.paths.inbox)
+                    .unwrap()
+                    .len(),
                 1
             );
             assert_eq!(inner.inbox_records.load(Ordering::SeqCst), 1);
@@ -1431,7 +1438,9 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
             .await;
             assert!(marker.is_file());
             assert_eq!(
-                read_jsonl::<SiteRecord>(&inner.paths.inbox).unwrap().len(),
+                plumb_core::stored::read_file(&inner.paths.inbox)
+                    .unwrap()
+                    .len(),
                 1
             );
         } else {
@@ -1496,7 +1505,7 @@ async fn a_pending_network_delivery_survives_inbox_io_failure_without_restart() 
         .await
         .unwrap()
         .unwrap();
-    let inbox: Vec<SiteRecord> = read_jsonl(&node.inner.paths.inbox).unwrap();
+    let inbox: Vec<SiteRecord> = plumb_core::stored::read_file(&node.inner.paths.inbox).unwrap();
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].domain, "retry-inbox.example");
     assert_eq!(node.inner.inbox_records.load(Ordering::SeqCst), 1);
@@ -1657,7 +1666,7 @@ async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_t
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let inbox: Vec<SiteRecord> = read_jsonl(&inbox_path).unwrap();
+    let inbox: Vec<SiteRecord> = plumb_core::stored::read_file(&inbox_path).unwrap();
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].domain, "restart-inbox.example");
     assert_eq!(
@@ -1800,7 +1809,8 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 1);
-        let inbox: Vec<SiteRecord> = read_jsonl(&receiver.inner.paths.inbox).unwrap_or_default();
+        let inbox: Vec<SiteRecord> =
+            plumb_core::stored::read_file(&receiver.inner.paths.inbox).unwrap_or_default();
         let held = crate::records::load_records(&receiver.inner.paths.records).unwrap();
         let durable_raw = inbox
             .iter()
@@ -1886,7 +1896,7 @@ fn new_topics_make_room_in_the_records_file() {
 
         let built = crate::node::worker::make_room_for_new_topics(&inner).unwrap();
         assert_eq!(built.docs, 4, "twice: {twice}");
-        let mut left: Vec<String> = read_jsonl(&path)
+        let mut left: Vec<String> = plumb_core::stored::read_file(&path)
             .unwrap()
             .into_iter()
             .map(|r: SiteRecord| r.domain)

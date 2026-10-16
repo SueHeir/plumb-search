@@ -181,31 +181,7 @@ impl SiteRecord {
 
     /// [`SiteRecord::to_item`] of a clean record.
     fn clean_to_item(self) -> Result<Item> {
-        let mut item = self.whole_item();
-        item.text = item
-            .text
-            .map(|text| match text.char_indices().nth(MAX_TEXT_CHARS) {
-                Some((cut, _)) => text[..cut].trim_end().to_string(),
-                None => text,
-            });
-        let unnamed = |redirect: &Value| !redirect["to"].as_str().is_some_and(is_domain);
-        if item.fields.get("redirect").is_some_and(unnamed) {
-            item.fields.remove("redirect");
-        }
-        if item.url.is_none() && is_domain(&item.id) {
-            item.site = Some(item.id.clone());
-        }
-        while too_big(&item) {
-            if let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) {
-                item.fields.remove(*field);
-            } else if item.edges.iter().any(|edge| edge.rel == "links_to") {
-                item.edges.retain(|edge| edge.rel != "links_to");
-            } else {
-                bail!("{} is over {MAX_ITEM_BYTES} bytes as an item", item.id);
-            }
-        }
-        item.check()?;
-        Ok(item)
+        sent_item(self.whole_item())
     }
 
     /// This site as a node stores it ([`crate::stored`]): its item with all
@@ -223,8 +199,9 @@ impl SiteRecord {
         site.stored_item_as_is()
     }
 
-    /// [`SiteRecord::to_stored_item`] of the record as it is, not cleaned.
-    pub(crate) fn stored_item_as_is(mut self) -> Item {
+    /// [`SiteRecord::to_stored_item`] of the record as it is, not cleaned:
+    /// the item a stored line holds of it ([`crate::stored`]).
+    pub fn stored_item_as_is(mut self) -> Item {
         let mut crawl = Map::new();
         if let Some(tried) = self.crawl_attempted_at {
             crawl.insert("tried".into(), json!(tried));
@@ -249,8 +226,11 @@ impl SiteRecord {
         item
     }
 
-    /// The site a stored item holds ([`SiteRecord::to_stored_item`]).
-    pub(crate) fn from_stored_item(item: &Item) -> Result<SiteRecord> {
+    /// The site a stored item holds ([`SiteRecord::to_stored_item`]), as
+    /// it is: the record of [`SiteRecord::stored_item_as_is`]. Code that
+    /// makes sites as items hands them on this way to what still takes
+    /// records, such as the journal's changes.
+    pub fn from_stored_item(item: &Item) -> Result<SiteRecord> {
         let mut record = SiteRecord::read_item(item, true)?;
         if let Some(crawl) = item.fields.get("crawl") {
             record.crawl_attempted_at = crawl.get("tried").and_then(Value::as_u64);
@@ -480,6 +460,38 @@ impl SiteRecord {
     }
 }
 
+/// The item a clean site sends of the item with all it holds and nothing
+/// of the node's own ([`SiteRecord::to_item`], [`crate::site::to_item`]):
+/// its text cut to the format's 1,000 characters, a redirect to a site no
+/// item can name left out, and fields shed until it fits. Errors when it
+/// would not be a valid item.
+pub(crate) fn sent_item(mut item: Item) -> Result<Item> {
+    item.text = item
+        .text
+        .map(|text| match text.char_indices().nth(MAX_TEXT_CHARS) {
+            Some((cut, _)) => text[..cut].trim_end().to_string(),
+            None => text,
+        });
+    let unnamed = |redirect: &Value| !redirect["to"].as_str().is_some_and(is_domain);
+    if item.fields.get("redirect").is_some_and(unnamed) {
+        item.fields.remove("redirect");
+    }
+    if item.url.is_none() && is_domain(&item.id) {
+        item.site = Some(item.id.clone());
+    }
+    while too_big(&item) {
+        if let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) {
+            item.fields.remove(*field);
+        } else if item.edges.iter().any(|edge| edge.rel == "links_to") {
+            item.edges.retain(|edge| edge.rel != "links_to");
+        } else {
+            bail!("{} is over {MAX_ITEM_BYTES} bytes as an item", item.id);
+        }
+    }
+    item.check()?;
+    Ok(item)
+}
+
 pub(crate) fn edge(rel: &str, to: Ref, text: Option<String>) -> Edge {
     Edge {
         rel: rel.into(),
@@ -508,7 +520,7 @@ pub(crate) fn canonical_owned(url: String) -> Option<String> {
 /// letter, no port, and a path and query of characters a URL keeps as
 /// they are, with no `%`, no dot segments and no fragment. `false` says
 /// nothing: the URL may be canonical all the same.
-fn plainly_canonical(url: &str) -> bool {
+pub(crate) fn plainly_canonical(url: &str) -> bool {
     let Some(rest) = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))

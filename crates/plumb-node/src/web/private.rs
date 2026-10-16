@@ -332,4 +332,51 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].crawl_failures, 0);
     }
+
+    /// A browser gets the same trimmed records, byte for byte, whether the
+    /// bucket table's lines are the records' JSON, as versions up to 0.4
+    /// wrote them, or stored items, and none of the node's own fields.
+    #[test]
+    fn buckets_are_the_same_whatever_the_shape_of_the_stored_lines() {
+        let mut record = SiteRecord::new("python.org");
+        record.url = Some("https://www.python.org/".into());
+        record.title = Some("Welcome to Python.org".into());
+        record.body_text = Some("Python lets you work quickly. ".repeat(60));
+        record.link_texts = vec![plumb_core::LinkText::from_linkers("python", 0b101)];
+        record.signals.tranco_rank = Some(512);
+        record.crawled_at = Some(1_791_605_520);
+        record.crawl_attempted_at = Some(1_791_605_600);
+        record.crawl_failures = 1;
+        record.gone_at = Some(1_791_605_700);
+        record.icon = Some("iVBORw0KGgo=".into());
+        record.news = vec![plumb_core::Headline {
+            title: "Python 3.15 is out".into(),
+            url: "https://www.python.org/news/".into(),
+            at: 1_791_605_520,
+        }];
+        record.links_to = vec!["pypi.org".into()];
+        record.clean();
+        let ranked = SiteRecord::new("ranked.com");
+        let old: Vec<String> = [&record, &ranked]
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect();
+        let new: Vec<String> = [&record, &ranked]
+            .iter()
+            .map(|record| String::from_utf8(plumb_core::stored::line(record).unwrap()).unwrap())
+            .collect();
+        assert!(new.iter().all(|line| line.starts_with("{\"id\":")));
+        let json = slim_bucket(&new);
+        assert_eq!(json, slim_bucket(&old));
+        for field in [
+            "crawl_failures",
+            "gone_at",
+            "icon",
+            "news",
+            "links_to",
+            "\"crawl\"",
+        ] {
+            assert!(!json.contains(field), "{field}: {json}");
+        }
+    }
 }

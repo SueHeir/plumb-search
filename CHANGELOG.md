@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Running a node
+
+- A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
+- Such a node can go back to 0.4.0, which reads either form, but not to 0.3.1, which can't read the new lines.
+
 ## 0.4.0
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.4.0), and the Docker image is `ghcr.io/sueheir/plumb-search:0.4.0` (also `:0.4` and `:latest`). This release changes what nodes send each other: crawl batches and the answers to network searches now carry each site in Plumb's data format, the `site` item that signed sets already hold. A 0.4.0 node shares crawls and network searches only with other 0.4.0 nodes, so every node should move to it. The release also reads pages in their real character set, links a part of a search to the article it usually means, and trims a node's sites without holding them all in memory.
@@ -29,6 +36,7 @@ Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/relea
 ### Running a node
 
 - Trimming a node to its storage limit and making room for new topics read its records file a site at a time, holding about 90 bytes for each site rather than the whole record (about 3.7 KB). A node of 2.8 million sites needs up to 10 GB less memory for either. Every index build also reads the file a site at a time.
+- The sites' index is built from each site in Plumb's data format rather than from its record. The index, the buckets other nodes ask for and the feeds come out the same, byte for byte, but a full build takes about 12 to 16% longer (measured on 100,000 sites; about 8 to 9 more minutes for 2.8 million). It uses no more memory.
 - Network search results now go through the node's denylist before they are kept, ranked or shown, and every index build leaves out the sites it denies, with the buckets other nodes ask for. Before, only some builds did. A site the list left out comes back at the next build once its entry goes or the list is turned off.
 - A plugin's fetch of a name on the web is looked up through the crawler's resolver and goes only to a public address, so a name in a plugin's hosts can no longer point it at the node's own machine or network. Local names (`localhost`, `nas`, `media.lan`, names under `home.arpa`) and addresses written as numbers still reach what they name, so the Zotero plugin still works. Plugin requests no longer go through a system proxy.
 - With `--set-updates` off, or with a list that leaves a page set out, a node no longer takes the project's signed version of a page set it holds no file of.

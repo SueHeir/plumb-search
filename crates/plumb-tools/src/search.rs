@@ -11,7 +11,7 @@ use plumb_index::{build_index, Hit, SearchOptions, Searcher};
 use plumb_node::cli::{parse_alpha, parse_country, parse_positive, MeaningArgs};
 use plumb_node::meaning::MeaningIndex;
 use plumb_node::rank_config;
-use plumb_node::records::load_records;
+use plumb_node::records::load_sites;
 
 #[derive(Debug, Args)]
 pub struct IndexArgs {
@@ -127,13 +127,10 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     }
     drop(copy);
     // Merging makes hand-made or concatenated files safe to index too.
-    // Each record goes in as its stored item, as the records file holds it.
-    let sites: Vec<_> = load_records(&args.records)
+    // Each site goes in as its stored item, as the records file holds it.
+    let sites = load_sites(&args.records)
         .with_context(|| format!("loading records {}", args.records.display()))?
-        .into_sorted_vec()
-        .into_iter()
-        .map(|record| record.to_stored_item())
-        .collect();
+        .into_sorted_vec();
     let stats = build_index(&args.index, &sites)
         .with_context(|| format!("building the index in {}", args.index.display()))?;
     println!(

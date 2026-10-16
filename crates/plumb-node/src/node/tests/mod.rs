@@ -2,11 +2,16 @@
 //! directory and driven over HTTP. Nothing here reaches the internet: seed
 //! data comes from the fixtures, served by a stand-in host on a loopback
 //! port, and the tests that run a node with records leave nothing to crawl.
+//! `crawl_golden` checks a crawl round, run on its own, against a golden
+//! file, and `seed_golden` setup and the seed, `plumb ingest` and the
+//! sites a node embeds.
 
 mod agents;
+mod crawl_golden;
 mod indexes_and_rounds;
 mod meaning;
 mod owner;
+mod seed_golden;
 mod sets;
 mod setup;
 mod storage;
@@ -20,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use plumb_core::{now_unix, read_jsonl, write_jsonl, SiteRecord};
+use plumb_core::{now_unix, write_jsonl, SiteRecord};
 use plumb_index::Hit;
 use plumb_ingest::{
     kind_sites, load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat,
@@ -53,7 +58,8 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Site records from every fixture, as `plumb ingest` makes them.
+/// Site records from every fixture, as `plumb ingest` makes them, each
+/// the record its stored item holds.
 fn fixture_records() -> Vec<SiteRecord> {
     let mut builder = Builder::new();
     builder.add_tranco(&load_tranco(&fixture("tranco.csv"), None).unwrap());
@@ -64,7 +70,11 @@ fn fixture_records() -> Vec<SiteRecord> {
     builder.add_official_sites(
         &load_wikidata_official_sites(&fixture("wikidata-official-sites.tsv")).unwrap(),
     );
-    builder.finish(None)
+    let sites = builder.finish(None);
+    sites
+        .iter()
+        .map(|site| SiteRecord::from_stored_item(site).unwrap())
+        .collect()
 }
 
 /// A data directory holding the fixture records, as if put there by hand.

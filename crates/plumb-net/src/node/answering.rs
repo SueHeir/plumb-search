@@ -21,7 +21,11 @@ use crate::store::BatchStore;
 
 /// Bucket `bucket` of `source`, each site as its item, with the proof of
 /// its signed crawl when `store` holds one.
-fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> BucketResponse {
+pub(super) fn lookup(
+    source: &dyn BucketSource,
+    store: &Mutex<BatchStore>,
+    bucket: u32,
+) -> BucketResponse {
     let records = source.bucket(bucket).map(|lines| {
         let now = now_unix();
         let sites: Vec<(String, String)> = lines

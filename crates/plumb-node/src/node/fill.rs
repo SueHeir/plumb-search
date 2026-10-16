@@ -1214,7 +1214,7 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
 /// Drops the sites of the records file at `path` below its best
 /// `keep_best` (by link score) that are about none of `topics`: those kept
 /// for topics the node no longer has. The file, whose sites `outlines`
-/// gives ([`crate::outline::outline_merged`]), is read a record at a time:
+/// gives ([`crate::outline::outline_merged`]), is read a site at a time:
 /// of each site only its outline is held, and the domains of those about
 /// one of `topics`. Leaves in `outlines` the sites kept, best link score
 /// first, when any went; the caller writes the file again with only them
@@ -1228,7 +1228,7 @@ pub(super) fn prune_outlines_for_topics(
     if outlines.len() <= keep_best {
         return Ok(0);
     }
-    let about = crate::outline::domains_where(path, |record| topics.matches(record))?;
+    let about = crate::outline::domains_where(path, |site| topics.matches_site(site))?;
     crate::outline::sort(outlines);
     let before = outlines.len();
     let mut at = 0;

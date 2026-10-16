@@ -153,7 +153,7 @@ fn crawl_file_with(
 mod tests {
     use std::path::Path;
 
-    use plumb_core::{read_jsonl, write_jsonl, SiteRecord};
+    use plumb_core::{write_jsonl, SiteRecord};
     use plumb_crawl::{CrawlOutcome, CrawlResult, CrawlTarget, CrawledPage, PageMeta};
     use plumb_node::records::{journal_path, Change};
 
@@ -249,7 +249,7 @@ mod tests {
         })
         .unwrap();
         assert!(!journal_path(&path).exists());
-        let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+        let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
         assert_eq!(file.iter().filter(|r| r.crawled_at.is_some()).count(), 10);
 
         // To another file, which starts from the records read.
@@ -260,9 +260,9 @@ mod tests {
         })
         .unwrap();
         assert!(!journal_path(&out).exists());
-        let copy: Vec<SiteRecord> = read_jsonl(&out).unwrap();
+        let copy: Vec<SiteRecord> = plumb_core::stored::read_file(&out).unwrap();
         assert_eq!(copy.iter().filter(|r| r.crawled_at.is_some()).count(), 15);
-        let input: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+        let input: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
         assert_eq!(input, file, "the input is left alone");
 
         // An interrupted crawl's journal is picked up and folded in.
@@ -273,7 +273,7 @@ mod tests {
         drop(store);
         crawl_file(&crawl_args(&path, None, 0), |_| unreachable!()).unwrap();
         assert!(!journal_path(&path).exists());
-        let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+        let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
         assert!(file.iter().any(|r| r.domain == "late.com"));
     }
 
@@ -297,7 +297,7 @@ mod tests {
         assert!(err.contains("--use-system-proxy"), "{err}");
         // Nothing was marked, and the file is whole.
         assert!(!journal_path(&path).exists());
-        let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+        let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
         assert_eq!(file, sites(30));
 
         let mut args = crawl_args(&path, None, 30);

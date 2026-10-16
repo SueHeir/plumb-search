@@ -1,4 +1,5 @@
-//! `plumb ingest`: folds seed data and earlier records into one records file.
+//! `plumb ingest`: folds seed data and earlier records files into one
+//! records file, each site its stored item ([`plumb_core::site`]).
 //!
 //! Two rules keep a large or repeated ingest safe:
 //!
@@ -19,7 +20,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use plumb_core::SiteRecord;
+use plumb_core::site;
+use plumb_format::Item;
 use plumb_ingest::{
     attach_facts, attach_intros, load_cc_domain_ranks, load_intros, load_site_facts, load_tranco,
     load_wikidata_official_sites, parse_wat, Builder, WatExtract, WatStats,
@@ -27,7 +29,7 @@ use plumb_ingest::{
 use tracing::{info, warn};
 
 use crate::cli::IngestArgs;
-use crate::records::{load_records, replace_records};
+use crate::records::{load_sites, replace_sites};
 
 /// Common Crawl rank rows read for each record `--top` keeps, when
 /// `--limit-per-source` is not given. The file is sorted by harmonic
@@ -168,26 +170,26 @@ pub fn run(args: IngestArgs) -> Result<()> {
         }
     }
     for path in &args.records {
-        let mut records = load_records(path)
+        let mut sites = load_sites(path)
             .with_context(|| format!("loading records {}", path.display()))?
             .into_sorted_vec();
         if let Some(n) = limit {
-            records.truncate(n);
+            sites.truncate(n);
         }
-        for record in &mut records {
-            fresh.strip(record);
+        for site in &mut sites {
+            fresh.strip(site);
         }
         println!(
             "records   {:>9} records         ({})",
-            records.len(),
+            sites.len(),
             path.display()
         );
-        builder.add_records(records);
+        builder.add_sites(sites);
     }
 
-    let records = builder.finish(args.top);
-    let written = replace_records(&args.out, &records)?;
-    let summary = RecordSummary::of(&records);
+    let sites = builder.finish(args.top);
+    let written = replace_sites(&args.out, &sites)?;
+    let summary = RecordSummary::of(&sites);
     println!(
         "wrote {written} records to {} ({} with a homepage title, {} with link text, {} official sites)",
         args.out.display(),
@@ -237,20 +239,20 @@ impl FreshSeeds {
         }
     }
 
-    /// Drops from `record` the signals of the seed kinds read afresh:
+    /// Drops from `site` the signals of the seed kinds read afresh:
     ///
     /// - Tranco: `tranco_rank`.
     /// - Common Crawl ranks: `harmonic_rank` and `pagerank_rank`.
-    /// - Wikidata: `official_site`, and every alias of a record that had it.
-    ///   Aliases do not say where they came from, but Wikidata labels only go
-    ///   to official sites, so the aliases of other records (`og:site_name`
+    /// - Wikidata: `official_site`, and every name of a site that had it.
+    ///   Names do not say where they came from, but Wikidata labels only go
+    ///   to official sites, so the names of other sites (`og:site_name`
     ///   from WAT files and crawls) are kept. An official site's own
     ///   `og:site_name` comes back on its next crawl, and its current
     ///   Wikidata label straight away if Wikidata still lists it.
     ///
     /// Page fields, link texts, `linking_domains` and crawl times stay.
-    fn strip(self, record: &mut SiteRecord) {
-        let signals = &mut record.signals;
+    fn strip(self, site: &mut Item) {
+        let mut signals = site::signals(site);
         if self.tranco {
             signals.tranco_rank = None;
         }
@@ -261,14 +263,15 @@ impl FreshSeeds {
         if self.wikidata && signals.official_site {
             signals.official_site = false;
             signals.sitelinks = 0;
-            record.aliases.clear();
+            site.names.clear();
         }
+        site::set_signals(site, &signals);
         if self.wikidata {
             // These come only from Wikidata.
-            record.country = None;
-            record.kinds.clear();
-            record.about = None;
-            record.intro = None;
+            site::set_country(site, None);
+            site::set_kinds(site, Vec::new());
+            site::set_wikidata_about(site, None);
+            site::set_intro(site, None);
         }
     }
 
@@ -326,12 +329,12 @@ struct RecordSummary {
 }
 
 impl RecordSummary {
-    fn of(records: &[SiteRecord]) -> Self {
+    fn of(sites: &[Item]) -> Self {
         let mut summary = RecordSummary::default();
-        for record in records {
-            summary.with_title += usize::from(record.title.is_some());
-            summary.with_link_text += usize::from(!record.link_texts.is_empty());
-            summary.official += usize::from(record.signals.official_site);
+        for held in sites {
+            summary.with_title += usize::from(held.title.is_some());
+            summary.with_link_text += usize::from(!site::link_texts(held).is_empty());
+            summary.official += usize::from(site::signals(held).official_site);
         }
         summary
     }
@@ -339,10 +342,10 @@ impl RecordSummary {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{read_jsonl, write_jsonl};
+    use plumb_core::{write_jsonl, SiteRecord};
 
     use super::*;
-    use crate::records::{journal_path, Change, RecordStore};
+    use crate::records::{journal_path, load_records, Change, RecordStore};
 
     /// Arguments that read nothing and write to `out`; tests fill in the rest.
     fn writing_to(out: PathBuf) -> IngestArgs {
@@ -394,7 +397,7 @@ mod tests {
     fn ingest(args: IngestArgs) -> Vec<SiteRecord> {
         let out = args.out.clone();
         run(args).unwrap();
-        read_jsonl(&out).unwrap()
+        plumb_core::stored::read_file(&out).unwrap()
     }
 
     fn find<'a>(records: &'a [SiteRecord], domain: &str) -> &'a SiteRecord {
@@ -448,7 +451,11 @@ mod tests {
         a.signals.official_site = true;
         let mut b = SiteRecord::new("b.com");
         b.add_link_text("Bee", "a.com");
-        let summary = RecordSummary::of(&[a, b, SiteRecord::new("c.com")]);
+        let sites: Vec<Item> = [a, b, SiteRecord::new("c.com")]
+            .into_iter()
+            .map(SiteRecord::stored_item_as_is)
+            .collect();
+        let summary = RecordSummary::of(&sites);
         assert_eq!(
             summary,
             RecordSummary {
@@ -529,9 +536,9 @@ mod tests {
     fn only_the_seed_kinds_read_afresh_are_dropped() {
         let stale = stale_official_site();
         let stripped = |fresh: FreshSeeds| {
-            let mut record = stale.clone();
-            fresh.strip(&mut record);
-            record
+            let mut site = stale.clone().stored_item_as_is();
+            fresh.strip(&mut site);
+            SiteRecord::from_stored_item(&site).unwrap()
         };
 
         assert_eq!(stripped(FreshSeeds::default()), stale);
@@ -577,10 +584,78 @@ mod tests {
 
         // A site Wikidata never listed keeps its aliases: they can only be
         // og:site_name from WAT files or crawls.
+        let mut fans = site::new("fans.net");
+        fans.names = vec!["Acme Fans".into()];
+        all.strip(&mut fans);
+        assert_eq!(fans.names, ["Acme Fans"]);
+    }
+
+    /// [`FreshSeeds::strip`] as it was on records, before it stripped
+    /// sites' items: what the item version is checked against.
+    fn strip_record(fresh: FreshSeeds, record: &mut SiteRecord) {
+        let signals = &mut record.signals;
+        if fresh.tranco {
+            signals.tranco_rank = None;
+        }
+        if fresh.cc_ranks {
+            signals.harmonic_rank = None;
+            signals.pagerank_rank = None;
+        }
+        if fresh.wikidata && signals.official_site {
+            signals.official_site = false;
+            signals.sitelinks = 0;
+            record.aliases.clear();
+        }
+        if fresh.wikidata {
+            record.country = None;
+            record.kinds.clear();
+            record.about = None;
+            record.intro = None;
+        }
+    }
+
+    #[test]
+    fn strip_does_to_a_site_what_it_did_to_its_record() {
+        let mut full = stale_official_site();
+        full.signals.sitelinks = 40;
+        full.signals.fact_checks = 2;
+        full.signals.fact_agrees = 1;
+        full.country = Some("US".into());
+        full.kinds = vec!["company".into(), "anvil maker".into()];
+        full.about = Some("maker of anvils".into());
+        full.intro = Some("Acme is a company.".into());
+        full.description = Some("Anvils since 1949".into());
+        let mut unlisted = full.clone();
+        unlisted.domain = "unlisted.com".into();
+        unlisted.signals.official_site = false;
         let mut fans = SiteRecord::new("fans.net");
         fans.add_alias("Acme Fans");
-        all.strip(&mut fans);
-        assert_eq!(fans.aliases, ["Acme Fans"]);
+        let records = [
+            stale_official_site(),
+            full,
+            unlisted,
+            fans,
+            SiteRecord::new("empty.com"),
+        ];
+        for record in records {
+            for bits in 0..8 {
+                let fresh = FreshSeeds {
+                    tranco: bits & 1 != 0,
+                    cc_ranks: bits & 2 != 0,
+                    wikidata: bits & 4 != 0,
+                };
+                let mut want = record.clone();
+                strip_record(fresh, &mut want);
+                let mut site = record.clone().stored_item_as_is();
+                fresh.strip(&mut site);
+                assert_eq!(
+                    site,
+                    want.stored_item_as_is(),
+                    "{} {fresh:?}",
+                    record.domain
+                );
+            }
+        }
     }
 
     #[test]
@@ -766,7 +841,7 @@ mod tests {
             ..writing_to(records.clone())
         });
         assert!(!journal_path(&records).exists());
-        let file: Vec<SiteRecord> = read_jsonl(&records).unwrap();
+        let file: Vec<SiteRecord> = plumb_core::stored::read_file(&records).unwrap();
         assert_eq!(find(&file, "found.com").title.as_deref(), Some("Found"));
     }
 }

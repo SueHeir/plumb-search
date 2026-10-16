@@ -350,7 +350,8 @@ fn confirmed_delivery_sizing_releases_only_its_owned_surplus() {
     record.description = Some("quoted \" text\n".repeat(100));
     let records = vec![record];
     let mut owned = Some(budget.reserve(max_delivery_bytes(1), false).unwrap());
-    let encoded = serde_json::to_vec(&records[0]).unwrap();
+    // The line the inbox holds of it.
+    let encoded = plumb_core::stored::line(&records[0]).unwrap();
     // One line break plus a possible recovery line break on append.
     let expected = allocation_for(encoded.len() as u64 + 2);
     release_delivery_slack_with(&mut owned, || delivery_bytes(&records)).unwrap();
@@ -875,4 +876,143 @@ fn circuits_are_matched_by_their_relay() {
     assert!(!is_circuit_through(&through(other), &relay));
     let direct: Multiaddr = format!("/ip4/1.2.3.4/tcp/1/p2p/{relay}").parse().unwrap();
     assert!(!is_circuit_through(&direct, &relay));
+}
+
+/// Sites as a node's bucket table holds them, clean as an index build
+/// writes them: one with every field, including the node's own crawl
+/// marks, an icon and headlines, a whole page text longer than an item
+/// carries and a redirect to a site no item can name; one never crawled;
+/// one too big to send as a record; and a gone site.
+fn stored_sites() -> Vec<SiteRecord> {
+    use plumb_core::{Headline, KeyPage, LinkText, Redirect};
+    let mut full = SiteRecord::new("python.org");
+    full.url = Some("https://www.python.org/".into());
+    full.title = Some("Welcome to Python.org".into());
+    full.description = Some("The official home of the Python Programming Language".into());
+    full.headings = vec!["Get Started".into()];
+    full.body_text = Some("Python lets you work quickly. ".repeat(60));
+    full.terms = vec!["python".into(), "download python".into()];
+    full.link_texts = vec![
+        LinkText::from_linkers("python", 0x00a1_b2c3_d4e5_f607),
+        LinkText::with_count("python.org", 3),
+    ];
+    full.aliases = vec!["Python".into()];
+    full.signals.tranco_rank = Some(512);
+    full.signals.linking_domains = 412;
+    full.signals.official_site = true;
+    full.signals.sitelinks = 150;
+    full.signals.fact_checks = 12;
+    full.signals.fact_agrees = 11;
+    full.crawled_at = Some(1_791_605_520);
+    full.crawl_attempted_at = Some(1_791_605_600);
+    full.crawl_failures = 1;
+    full.crawl_version = 7;
+    full.country = Some("US".into());
+    full.kinds = vec!["programming language".into()];
+    full.about = Some("general-purpose programming language".into());
+    full.intro = Some("Python is a high-level programming language.".into());
+    full.search_url = Some("https://www.python.org/search/?q={searchTerms}".into());
+    full.language = Some("en".into());
+    full.key_pages = vec![KeyPage {
+        label: "Downloads".into(),
+        url: "https://www.python.org/downloads/".into(),
+    }];
+    full.links_to = vec!["psf.org".into(), "pypi.org".into()];
+    full.redirect = Some(Redirect {
+        to: "foo_bar.com".into(),
+        at: 1_791_605_520,
+        inner: false,
+    });
+    full.icon = Some("iVBORw0KGgo=".into());
+    full.news = vec![Headline {
+        title: "Python 3.15 is out".into(),
+        url: "https://www.python.org/news/".into(),
+        at: 1_791_605_520,
+    }];
+    let mut uncrawled = SiteRecord::new("ranked.com");
+    uncrawled.signals.tranco_rank = Some(900);
+    uncrawled.aliases = vec!["Ranked".into()];
+    let mut big = SiteRecord::new("big.com");
+    big.title = Some("Big".into());
+    big.crawled_at = Some(1_791_000_000);
+    big.terms = (0..100)
+        .map(|i| format!("term {i} {}", "x".repeat(150)))
+        .collect();
+    let mut gone = SiteRecord::new("gone.com");
+    gone.signals.tranco_rank = Some(100);
+    gone.crawled_at = Some(1_780_000_000);
+    gone.crawl_failures = 6;
+    gone.gone_at = Some(1_791_000_000);
+    let mut sites = vec![full, uncrawled, big, gone];
+    for site in &mut sites {
+        site.clean();
+    }
+    sites
+}
+
+/// What a node answers of its bucket table, the sites of a bucket (and so
+/// of an oblivious request) and a fill's records, is the same, byte for
+/// byte, whether the table's lines are the records' JSON, as versions up
+/// to 0.4 wrote them, or stored items: no stored item leaves as it is.
+#[test]
+fn answers_are_the_same_whatever_the_shape_of_the_stored_lines() {
+    struct Table(Vec<String>);
+    impl BucketSource for Table {
+        fn bucket(&self, _bucket: u32) -> Option<Vec<String>> {
+            Some(self.0.clone())
+        }
+        fn ranked(&self, from: usize, count: usize) -> Option<(Vec<String>, usize)> {
+            let end = from.saturating_add(count).min(self.0.len());
+            let lines = self.0.get(from..end).unwrap_or_default();
+            Some((lines.to_vec(), self.0.len()))
+        }
+        fn icon(&self, domain: &str) -> Option<String> {
+            (domain == "big.com" || domain == "gone.com").then(|| "cG5n".into())
+        }
+    }
+    let sites = stored_sites();
+    let old = Table(
+        sites
+            .iter()
+            .map(|site| serde_json::to_string(site).unwrap())
+            .collect(),
+    );
+    let new = Table(
+        sites
+            .iter()
+            .map(|site| String::from_utf8(plumb_core::stored::line(site).unwrap()).unwrap())
+            .collect(),
+    );
+    assert!(new.0.iter().all(|line| line.starts_with("{\"id\":")));
+    assert!(new.0[0].contains("\"crawl\":") && new.0[0].contains("\"news\":"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Mutex::new(BatchStore::open(dir.path()).unwrap());
+    let answer = super::answering::lookup(&new, &store, 0);
+    assert_eq!(answer, super::answering::lookup(&old, &store, 0));
+    let sent = answer.records.unwrap();
+    assert_eq!(sent.len(), sites.len());
+    for (sent, site) in sent.iter().zip(&sites) {
+        // The item sent elsewhere, with none of the node's own fields and
+        // its text cut to the format's.
+        assert_eq!(sent.record, site.to_line().unwrap());
+        let item: plumb_format::Item = serde_json::from_str(&sent.record).unwrap();
+        for field in ["crawl", "icon", "news"] {
+            assert!(!item.fields.contains_key(field), "{field}");
+        }
+        let text = item.text.as_deref().unwrap_or_default();
+        assert!(text.chars().count() <= plumb_format::item::MAX_TEXT_CHARS);
+    }
+
+    for all in [false, true] {
+        for (from, count) in [(0, 100), (1, 2)] {
+            let answer = crate::fill::answer(&new, from, count, all);
+            assert_eq!(answer, crate::fill::answer(&old, from, count, all));
+            assert!(!answer.records.is_empty());
+            // The records' JSON, as every node reads a fill answer.
+            for line in &answer.records {
+                assert!(line.starts_with("{\"domain\":"), "{line}");
+            }
+        }
+    }
 }

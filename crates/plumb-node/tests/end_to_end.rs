@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
-use plumb_core::{read_jsonl, SiteRecord};
+use plumb_core::SiteRecord;
 use plumb_index::{build_index, Hit, RankConfig, Searcher};
 use plumb_node::web::{escape_html, router, IndexBackend};
 use tower::ServiceExt;
@@ -90,7 +90,8 @@ fn ingest_merges_every_fixture() {
     }
 
     // Every source reached the merged record.
-    let records: Vec<SiteRecord> = read_jsonl(&tmp.path().join("records.jsonl")).unwrap();
+    let records: Vec<SiteRecord> =
+        plumb_core::stored::read_file(&tmp.path().join("records.jsonl")).unwrap();
     let usbank = records
         .iter()
         .find(|r| r.domain == "usbank.com")

@@ -1,0 +1,90 @@
+# What a node makes of hand-made seed files: the records file a quick
+# start saves, the records file after the rest of the seed is folded in
+# (after the quick start, and again later), and the changes bringing
+# the records up to date write to the journal. Written by
+# `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-node --lib seed_golden`.
+## quick start: 14 lines
+{"id":"news.ycombinator.com","kind":"site","names":["Hacker News"],"fields":{"ranks":{"tranco":4},"wikidata":{"official_site":true}}}
+{"id":"google.com","kind":"site","fields":{"ranks":{"tranco":1}}}
+{"id":"wikipedia.org","kind":"site","fields":{"ranks":{"tranco":2}}}
+{"id":"x.com","kind":"site","fields":{"ranks":{"tranco":3}}}
+{"id":"ycombinator.com","kind":"site","fields":{"ranks":{"tranco":4}}}
+{"id":"usbank.com","kind":"site","fields":{"ranks":{"tranco":5}}}
+{"id":"acme.com","kind":"site","fields":{"ranks":{"tranco":6}}}
+{"id":"nba.com","kind":"site","fields":{"ranks":{"tranco":7}}}
+{"id":"quick-only.example","kind":"site","fields":{"ranks":{"tranco":8}}}
+{"id":"crawled.example","kind":"site","fields":{"ranks":{"tranco":9}}}
+{"id":"linked.example","kind":"site","fields":{"ranks":{"tranco":10}}}
+{"id":"example.com","kind":"site","fields":{"ranks":{"tranco":11}}}
+{"id":"xn--mnchen-3ya.de","kind":"site","fields":{"ranks":{"tranco":12}}}
+{"id":"shop.example","kind":"site","fields":{"ranks":{"tranco":13}}}
+## the seed folded in after the quick start: 18 lines
+{"id":"google.com","kind":"site","title":"Google","url":"https://www.google.com/","names":["Google Inc.","Google"],"fields":{"crawl":{"tried":1791605600},"crawl_version":7,"crawled":"2026-10-10T04:13:20Z","intro":"Google is a search engine.","kinds":["search engine"],"ranks":{"harmonic":1,"pagerank":1,"tranco":1},"wikidata":{"about":"American search engine","country":"US","official_site":true,"sitelinks":300}}}
+{"id":"wikipedia.org","kind":"site","names":["Wikipedia","Wikipedia community"],"fields":{"kinds":["online encyclopedia"],"ranks":{"harmonic":2,"pagerank":3,"tranco":2},"wikidata":{"official_site":true,"sitelinks":300}}}
+{"id":"scholar.google.com","kind":"site","names":["Google Scholar"],"fields":{"intro":"Google Scholar is a search engine for scholarly literature.","kinds":["search engine"],"ranks":{"harmonic":1,"pagerank":1,"tranco":1},"wikidata":{"about":"academic search engine","official_site":true}}}
+{"id":"x.com","kind":"site","names":["X Corp.","X.com"],"fields":{"crawl":{"failures":1,"tried":1791606000},"ranks":{"tranco":3},"wikidata":{"country":"US","official_site":true,"sitelinks":20}}}
+{"id":"acme.com","kind":"site","title":"Acme  Anvils","url":"https://www.acme.com/","names":["Acmé","Acme Corporation","ACME","Acme Corp"],"text":"Anvils since 1949.","fields":{"crawl":{"tried":1791605800},"crawl_version":7,"crawled":"2026-10-10T04:16:40Z","intro":"Acme is a company.","kinds":["Anvil maker"],"ranks":{"harmonic":4,"pagerank":5,"tranco":6},"wikidata":{"about":"maker of anvils","country":"US","official_site":true,"sitelinks":40}}}
+{"id":"news.ycombinator.com","kind":"site","names":["Hacker News"],"fields":{"intro":"Hacker News is a social news website.","ranks":{"harmonic":3,"pagerank":2,"tranco":4},"wikidata":{"about":"social news website","official_site":true}}}
+{"id":"ycombinator.com","kind":"site","names":["Y Combinator"],"fields":{"ranks":{"harmonic":3,"pagerank":2,"tranco":4},"wikidata":{"official_site":true}}}
+{"id":"nba.com","kind":"site","names":["National Basketball Association","NBA"],"fields":{"ranks":{"tranco":7},"wikidata":{"about":"North American basketball league","official_site":true,"sitelinks":300}}}
+{"id":"usbank.com","kind":"site","title":"U.S. Bank | Personal Banking","url":"https://www.usbank.com/","names":["U.S. Bank","U.S. Bancorp"],"fields":{"crawl":{"tried":1791605700},"crawl_version":7,"crawled":"2026-10-10T04:15:00Z","kinds":["bank holding company"],"ranks":{"tranco":5},"wikidata":{"about":"American bank holding company","country":"US","official_site":true}}}
+{"id":"xn--mnchen-3ya.de","kind":"site","names":["München"],"fields":{"ranks":{"tranco":12},"wikidata":{"official_site":true}}}
+{"id":"stephane.fr","kind":"site","names":["Stéphane"],"fields":{"ranks":{"tranco":14},"wikidata":{"country":"FR","official_site":true}}}
+{"id":"firstcu.example","kind":"site","names":["First Credit Union"],"fields":{"kinds":["credit union"],"ranks":{"tranco":16},"wikidata":{"official_site":true}}}
+{"id":"cc-only.com","kind":"site","fields":{"ranks":{"harmonic":5,"pagerank":4}}}
+{"id":"linked.example","kind":"site","weight":1.0,"fields":{"link_texts":[{"count":1,"linkers":"0000000000002000","text":"linked"}],"ranks":{"tranco":10}}}
+{"id":"quick-only.example","kind":"site","fields":{"ranks":{"tranco":8}}}
+{"id":"crawled.example","kind":"site","title":"Crawled  Site","url":"https://www.crawled.example/","names":["Crawled","Crawled Site"],"fields":{"crawl":{"tried":1791605520},"crawl_version":7,"crawled":"2026-10-10T04:12:00Z","link_texts":[{"count":1,"linkers":"0000000000000020","text":"crawled"}],"ranks":{"tranco":9}}}
+{"id":"example.com","kind":"site","fields":{"crawl":{"failures":2,"tried":1791605900},"ranks":{"tranco":11}}}
+{"id":"plumbsearch.org","kind":"site","title":"Plumb Search","url":"https://plumbsearch.org/","names":["Plumb Search"],"about":"Free, open-source search engine run by a peer-to-peer network of nodes anyone can host.","fields":{"wikidata":{"official_site":true}}}
+## the seed folded in again: 18 lines
+{"id":"google.com","kind":"site","title":"Google","url":"https://www.google.com/","names":["Google Inc.","Google"],"fields":{"crawl":{"tried":1791605600},"crawl_version":7,"crawled":"2026-10-10T04:13:20Z","intro":"Google is a search engine.","kinds":["search engine"],"ranks":{"harmonic":1,"pagerank":1,"tranco":1},"wikidata":{"about":"American search engine","country":"US","official_site":true,"sitelinks":300}}}
+{"id":"wikipedia.org","kind":"site","names":["Wikipedia","Wikipedia community"],"fields":{"kinds":["online encyclopedia"],"ranks":{"harmonic":2,"pagerank":3,"tranco":2},"wikidata":{"official_site":true,"sitelinks":300}}}
+{"id":"scholar.google.com","kind":"site","names":["Google Scholar"],"fields":{"intro":"Google Scholar is a search engine for scholarly literature.","kinds":["search engine"],"ranks":{"harmonic":1,"pagerank":1,"tranco":1},"wikidata":{"about":"academic search engine","official_site":true}}}
+{"id":"x.com","kind":"site","names":["X Corp.","X.com"],"fields":{"crawl":{"failures":1,"tried":1791606000},"ranks":{"tranco":3},"wikidata":{"country":"US","official_site":true,"sitelinks":20}}}
+{"id":"acme.com","kind":"site","title":"Acme  Anvils","url":"https://www.acme.com/","names":["Acmé","Acme Corporation","ACME","Acme Corp"],"text":"Anvils since 1949.","fields":{"crawl":{"tried":1791605800},"crawl_version":7,"crawled":"2026-10-10T04:16:40Z","intro":"Acme is a company.","kinds":["Anvil maker"],"ranks":{"harmonic":4,"pagerank":5,"tranco":6},"wikidata":{"about":"maker of anvils","country":"US","official_site":true,"sitelinks":40}}}
+{"id":"news.ycombinator.com","kind":"site","names":["Hacker News"],"fields":{"intro":"Hacker News is a social news website.","ranks":{"harmonic":3,"pagerank":2,"tranco":4},"wikidata":{"about":"social news website","official_site":true}}}
+{"id":"ycombinator.com","kind":"site","names":["Y Combinator"],"fields":{"ranks":{"harmonic":3,"pagerank":2,"tranco":4},"wikidata":{"official_site":true}}}
+{"id":"nba.com","kind":"site","names":["National Basketball Association","NBA"],"fields":{"ranks":{"tranco":7},"wikidata":{"about":"North American basketball league","official_site":true,"sitelinks":300}}}
+{"id":"usbank.com","kind":"site","title":"U.S. Bank | Personal Banking","url":"https://www.usbank.com/","names":["U.S. Bank","U.S. Bancorp"],"fields":{"crawl":{"tried":1791605700},"crawl_version":7,"crawled":"2026-10-10T04:15:00Z","kinds":["bank holding company"],"ranks":{"tranco":5},"wikidata":{"about":"American bank holding company","country":"US","official_site":true}}}
+{"id":"xn--mnchen-3ya.de","kind":"site","names":["München"],"fields":{"ranks":{"tranco":12},"wikidata":{"official_site":true}}}
+{"id":"stephane.fr","kind":"site","title":"Stéphane","url":"https://www.stephane.fr/","names":["Stéphane"],"fields":{"crawl":{"tried":1791700100},"crawl_version":7,"crawled":"2026-10-11T06:28:20Z","ranks":{"tranco":14},"wikidata":{"country":"FR","official_site":true}}}
+{"id":"firstcu.example","kind":"site","names":["First Credit Union"],"fields":{"kinds":["credit union"],"ranks":{"tranco":16},"wikidata":{"official_site":true}}}
+{"id":"cc-only.com","kind":"site","fields":{"ranks":{"harmonic":5,"pagerank":4}}}
+{"id":"linked.example","kind":"site","weight":1.0,"fields":{"crawl":{"gone":1791700200},"ranks":{"tranco":10}}}
+{"id":"quick-only.example","kind":"site","fields":{"ranks":{"tranco":8}}}
+{"id":"crawled.example","kind":"site","title":"Crawled  Site","url":"https://www.crawled.example/","names":["Crawled","Crawled Site"],"fields":{"crawl":{"tried":1791605520},"crawl_version":7,"crawled":"2026-10-10T04:12:00Z","link_texts":[{"count":1,"linkers":"0000000000000020","text":"crawled"}],"ranks":{"tranco":9}}}
+{"id":"example.com","kind":"site","title":"Example  Domain","url":"https://www.example.com/","names":["Example"],"fields":{"crawl":{"tried":1791700000},"crawl_version":7,"crawled":"2026-10-11T06:26:40Z","ranks":{"tranco":11}}}
+{"id":"plumbsearch.org","kind":"site","title":"Plumb Search","url":"https://plumbsearch.org/","names":["Plumb Search"],"about":"Free, open-source search engine run by a peer-to-peer network of nodes anyone can host.","fields":{"wikidata":{"official_site":true}}}
+## the journal after bringing the records up to date: 11 lines
+{"op":"merge","record":{"id":"google.com","kind":"site","names":["Google Maps","COE, Moro"],"fields":{"kinds":["college"]}}}
+{"op":"merge","record":{"id":"acme.com","kind":"site","names":["Acme Mail"]}}
+{"op":"take_back","domain":"google.com","names":["COE, Moro"]}
+{"op":"take_back","domain":"acme.com","names":["Acme Mail"]}
+{"op":"merge","record":{"id":"google.com","kind":"site","names":["Google"],"fields":{"intro":"Google is a search engine.","kinds":["search engine"],"wikidata":{"about":"American search engine","country":"US","official_site":true,"sitelinks":300}}}}
+{"op":"merge","record":{"id":"nba.com","kind":"site","names":["National Basketball Association","NBA"],"fields":{"wikidata":{"about":"North American basketball league","official_site":true,"sitelinks":300}}}}
+{"op":"merge","record":{"id":"acme.com","kind":"site","names":["Acme\u0007 Corporation","ACME","Acme Corp"],"fields":{"intro":"Acme is acompany.","kinds":["Anvil maker"],"wikidata":{"about":"maker of anvils\u0007","country":"US","official_site":true,"sitelinks":40}}}}
+{"op":"subdomain_site","record":{"id":"maps.google.com","kind":"site","names":["Google Maps"],"fields":{"wikidata":{"official_site":true}}}}
+{"op":"subdomain_site","record":{"id":"news.ycombinator.com","kind":"site","names":["Hacker News"],"fields":{"intro":"Hacker News is a social news website.","wikidata":{"about":"social news website","official_site":true}}}}
+{"op":"subdomain_site","record":{"id":"scholar.google.com","kind":"site","names":["Google Scholar"],"fields":{"intro":"Google Scholar is a search engine for scholarly literature.","kinds":["search engine"],"wikidata":{"about":"academic search engine","official_site":true}}}}
+{"op":"subdomain_site","record":{"id":"news.ycombinator.com","kind":"site","names":["Hacker News"],"fields":{"wikidata":{"official_site":true}}}}
+## the records then: 19 lines
+{"id":"google.com","kind":"site","title":"Google","url":"https://www.google.com/","names":["Google Inc.","Google"],"fields":{"crawl":{"tried":1791605600},"crawl_version":7,"crawled":"2026-10-10T04:13:20Z","intro":"Google is a search engine.","kinds":["search engine"],"ranks":{"harmonic":1,"pagerank":1,"tranco":1},"wikidata":{"about":"American search engine","country":"US","official_site":true,"sitelinks":300}}}
+{"id":"wikipedia.org","kind":"site","names":["Wikipedia","Wikipedia community"],"fields":{"kinds":["online encyclopedia"],"ranks":{"harmonic":2,"pagerank":3,"tranco":2},"wikidata":{"official_site":true,"sitelinks":300}}}
+{"id":"maps.google.com","kind":"site","names":["Google Maps"],"fields":{"ranks":{"harmonic":1,"pagerank":1,"tranco":1},"wikidata":{"official_site":true}}}
+{"id":"scholar.google.com","kind":"site","names":["Google Scholar"],"fields":{"intro":"Google Scholar is a search engine for scholarly literature.","kinds":["search engine"],"ranks":{"harmonic":1,"pagerank":1,"tranco":1},"wikidata":{"about":"academic search engine","official_site":true}}}
+{"id":"x.com","kind":"site","names":["X Corp.","X.com"],"fields":{"crawl":{"failures":1,"tried":1791606000},"ranks":{"tranco":3},"wikidata":{"country":"US","official_site":true,"sitelinks":20}}}
+{"id":"acme.com","kind":"site","title":"Acme  Anvils","url":"https://www.acme.com/","names":["Acmé","Acme Corporation","ACME","Acme Corp"],"text":"Anvils since 1949.","fields":{"crawl":{"tried":1791605800},"crawl_version":7,"crawled":"2026-10-10T04:16:40Z","intro":"Acme is a company.","kinds":["Anvil maker"],"ranks":{"harmonic":4,"pagerank":5,"tranco":6},"wikidata":{"about":"maker of anvils","country":"US","official_site":true,"sitelinks":40}}}
+{"id":"news.ycombinator.com","kind":"site","names":["Hacker News"],"fields":{"intro":"Hacker News is a social news website.","ranks":{"harmonic":3,"pagerank":2,"tranco":4},"wikidata":{"about":"social news website","official_site":true}}}
+{"id":"ycombinator.com","kind":"site","names":["Y Combinator"],"fields":{"ranks":{"harmonic":3,"pagerank":2,"tranco":4},"wikidata":{"official_site":true}}}
+{"id":"nba.com","kind":"site","names":["National Basketball Association","NBA"],"fields":{"ranks":{"tranco":7},"wikidata":{"about":"North American basketball league","official_site":true,"sitelinks":300}}}
+{"id":"usbank.com","kind":"site","title":"U.S. Bank | Personal Banking","url":"https://www.usbank.com/","names":["U.S. Bank","U.S. Bancorp"],"fields":{"crawl":{"tried":1791605700},"crawl_version":7,"crawled":"2026-10-10T04:15:00Z","kinds":["bank holding company"],"ranks":{"tranco":5},"wikidata":{"about":"American bank holding company","country":"US","official_site":true}}}
+{"id":"xn--mnchen-3ya.de","kind":"site","names":["München"],"fields":{"ranks":{"tranco":12},"wikidata":{"official_site":true}}}
+{"id":"stephane.fr","kind":"site","title":"Stéphane","url":"https://www.stephane.fr/","names":["Stéphane"],"fields":{"crawl":{"tried":1791700100},"crawl_version":7,"crawled":"2026-10-11T06:28:20Z","ranks":{"tranco":14},"wikidata":{"country":"FR","official_site":true}}}
+{"id":"firstcu.example","kind":"site","names":["First Credit Union"],"fields":{"kinds":["credit union"],"ranks":{"tranco":16},"wikidata":{"official_site":true}}}
+{"id":"cc-only.com","kind":"site","fields":{"ranks":{"harmonic":5,"pagerank":4}}}
+{"id":"linked.example","kind":"site","weight":1.0,"fields":{"crawl":{"gone":1791700200},"ranks":{"tranco":10}}}
+{"id":"quick-only.example","kind":"site","fields":{"ranks":{"tranco":8}}}
+{"id":"crawled.example","kind":"site","title":"Crawled  Site","url":"https://www.crawled.example/","names":["Crawled","Crawled Site"],"fields":{"crawl":{"tried":1791605520},"crawl_version":7,"crawled":"2026-10-10T04:12:00Z","link_texts":[{"count":1,"linkers":"0000000000000020","text":"crawled"}],"ranks":{"tranco":9}}}
+{"id":"example.com","kind":"site","title":"Example  Domain","url":"https://www.example.com/","names":["Example"],"fields":{"crawl":{"tried":1791700000},"crawl_version":7,"crawled":"2026-10-11T06:26:40Z","ranks":{"tranco":11}}}
+{"id":"plumbsearch.org","kind":"site","title":"Plumb Search","url":"https://plumbsearch.org/","names":["Plumb Search"],"about":"Free, open-source search engine run by a peer-to-peer network of nodes anyone can host.","fields":{"wikidata":{"official_site":true}}}

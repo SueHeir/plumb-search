@@ -4,7 +4,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use plumb_core::{read_jsonl, write_jsonl};
+use plumb_core::write_jsonl;
 use plumb_crawl::{CrawledPage, OutLink, PageMeta};
 
 use super::*;
@@ -187,6 +187,49 @@ fn targets_fall_back_to_where_a_site_was_last_reached() {
 }
 
 #[test]
+fn a_site_s_item_is_picked_as_its_record_is() {
+    let now = 1_000;
+    let window = 500;
+    let mut moved = record("moved.com", 1, Some(10), Some(800));
+    moved.url = Some("https://www.moved.com/en/".into());
+    moved.crawl_failures = 2;
+    let mut gone = record("gone.com", 3, None, Some(100));
+    gone.crawl_failures = 6;
+    gone.make_gone(100);
+    let records = [
+        moved,
+        gone,
+        record("c.com", 30, None, None),
+        record("a.com", 10, Some(1_000), None),
+        record("b.com", 20, Some(10), None),
+        record("h.com", 25, None, Some(50)),
+        record("d.com", 40, None, None),
+        record("e.com", 40, None, None),
+    ];
+    let items: Vec<Item> = records.iter().map(SiteRecord::to_stored_item).collect();
+    for (record, item) in records.iter().zip(&items) {
+        assert_eq!(CrawlSite::domain(item), record.domain);
+        assert_eq!(CrawlSite::url(item), record.url.as_deref());
+        assert_eq!(CrawlSite::link_score(item), record.link_score());
+        assert_eq!(CrawlSite::crawled_at(item), record.crawled_at);
+        assert_eq!(
+            CrawlSite::crawl_attempted_at(item),
+            record.crawl_attempted_at
+        );
+        assert_eq!(CrawlSite::crawl_failures(item), record.crawl_failures);
+        assert_eq!(CrawlSite::gone_at(item), record.gone_at);
+        assert_eq!(due_at(item, window), due_at(record, window));
+        assert_eq!(target_for(item), target_for(record));
+    }
+    for budget in [0, 1, 3, 100] {
+        assert_eq!(
+            select_targets(items.iter(), budget, now, window),
+            select_targets(records.iter(), budget, now, window)
+        );
+    }
+}
+
+#[test]
 fn the_budget_is_split_between_new_sites_and_due_ones() {
     let now = 100 * DAY;
     // Due sites rank better than the new ones, which would take every
@@ -342,7 +385,7 @@ fn linking_domains_count_over_the_whole_run() {
         fetched("b.com", 1, &["hub.com"]),
         fetched("c.com", 1, &["hub.com", "other.com"]),
     ];
-    let unbatched: RecordSet = to_records(&results).into_iter().collect();
+    let unbatched: RecordSet = to_items(&results).iter().map(to_record).collect();
     assert_eq!(unbatched.get("hub.com").unwrap().signals.linking_domains, 3);
 
     let mut set = RecordSet::new();
@@ -439,11 +482,11 @@ fn every_batch_is_saved_before_and_after_it_is_fetched() {
     );
 
     // The file itself waits for the journal to be folded in.
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+    let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
     assert_eq!(file, sites(5));
     store.compact(&set).unwrap();
     assert!(!journal_path(&path).exists());
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+    let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
     let order: Vec<&str> = file.iter().map(|r| r.domain.as_str()).collect();
     assert_eq!(
         order,
@@ -798,7 +841,7 @@ fn the_journal_is_folded_in_as_it_grows() {
     .unwrap();
     // Each batch's marks go to a fresh journal before it is fetched.
     assert_eq!(journal_seen, [true, true, true]);
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+    let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
     assert!(file.iter().all(|r| r.crawled_at.is_some()));
 }
 

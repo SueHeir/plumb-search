@@ -30,15 +30,20 @@
 //! each line as the site's stored item ([`RecordReader::read_item`],
 //! [`plumb_core::site`]), and the index, the buckets, the feeds watched and
 //! the node's denylist all work on that item; what the denylist denies is
-//! left out as each site is read. The fold and the steps that drop sites
-//! still read records, until the records file itself moves onto items.
+//! left out as each site is read. The fold still reads records, until the
+//! records file itself moves onto items.
 //!
 //! The steps that drop sites from the file (trimming to the storage limit,
 //! making room for new topics) work the same way. They pick the sites to
 //! drop from the outlines, with the little else the choice needs read off
-//! each record once ([`domains_where`]), and write the file again without
-//! them by copying the lines kept as the file holds them
+//! each site's stored item once ([`domains_where`]), and write the file
+//! again without them by copying the lines kept as the file holds them
 //! ([`replace_lines`]), never reading those as records.
+//!
+//! A node's crawl round reads each line as the site's stored item too
+//! ([`for_each_site`]), and so do the tools that read a file a site at a
+//! time, from a copy with the journal folded in ([`outline_copy`]) when
+//! there is one.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -485,22 +490,41 @@ pub fn for_each_record(path: &Path, mut each: impl FnMut(SiteRecord)) -> Result<
     Ok(())
 }
 
+/// [`for_each_record`] of the sites' stored items: calls `each` with every
+/// site of the records file at `path`, in file order, read as its stored
+/// item ([`stored::read_item`]) as the file holds it, not cleaned, and
+/// without replaying the journal. Written back with
+/// [`stored::write_item`], a site makes the line its record makes, but for
+/// a crawl or redirect time past the year 9999, which no item holds.
+pub fn for_each_site(path: &Path, mut each: impl FnMut(Item)) -> Result<()> {
+    let mut lines = Lines::open(path)?;
+    let mut line_no = 0usize;
+    while let Some((_, line)) = lines.next()? {
+        line_no += 1;
+        let site = stored::read_item(line)
+            .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
+        each(site);
+    }
+    Ok(())
+}
+
 /// The domains of the sites of the records file at `path` that `wanted`
-/// says yes to, read a record at a time ([`for_each_record`]) and cleaned
-/// as loading the file cleans them ([`RecordSet::upsert`]), so that each
-/// is judged as a whole set holds it. This is what a step that picks sites
-/// to drop holds of them besides their [`Outline`]s. The journal is not
-/// replayed: fold it in first ([`outline`]).
+/// says yes to, read a site at a time as its stored item
+/// ([`for_each_site`]) and cleaned as loading the file cleans them
+/// ([`plumb_core::sites::Sites::upsert`]), so that each is judged as a
+/// whole set holds it. This is what a step that picks sites to drop holds
+/// of them besides their [`Outline`]s. The journal is not replayed: fold
+/// it in first ([`outline`]).
 pub(crate) fn domains_where(
     path: &Path,
-    mut wanted: impl FnMut(&SiteRecord) -> bool,
+    mut wanted: impl FnMut(&Item) -> bool,
 ) -> Result<HashSet<Box<str>>> {
     let mut domains = HashSet::new();
-    for_each_record(path, |mut record| {
-        record.clean();
-        record.drop_bot_check();
-        if wanted(&record) {
-            domains.insert(record.domain.into_boxed_str());
+    for_each_site(path, |mut site| {
+        site::clean(&mut site);
+        site::drop_bot_check(&mut site);
+        if wanted(&site) {
+            domains.insert(site.id.into_boxed_str());
         }
     })?;
     Ok(domains)
@@ -1038,7 +1062,7 @@ fn same_site(domain: &str, outline: &Outline) -> Result<()> {
 /// ([`outline`]). Each line is copied as the file holds it, never read as a
 /// record and written again. With a storage `budget`, room for the new
 /// file (the lines and their line breaks) is admitted first, as
-/// [`crate::records::replace_records_with_budget`] admits it. Returns how
+/// [`crate::records::replace_sites_with_budget`] admits it. Returns how
 /// many records were written.
 pub(crate) fn replace_lines(
     path: &Path,
@@ -1073,7 +1097,7 @@ fn write_lines(path: &Path, outlines: &[Outline]) -> Result<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use plumb_core::{write_jsonl, LinkText, Redirect};
 
     use super::*;
@@ -1138,7 +1162,7 @@ mod tests {
     }
 
     /// A records file and a journal that make every kind of change.
-    fn file_and_journal(path: &Path) -> Vec<Change> {
+    pub(crate) fn file_and_journal(path: &Path) -> Vec<Change> {
         let mut parent = record("google.com", 3);
         parent.add_alias("Google Scholar");
         parent.about = Some("search engine".into());
@@ -1384,8 +1408,7 @@ mod tests {
         // A file that holds each site once comes back as it was, byte for
         // byte, whatever the shape of its lines and their order.
         let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
-        let item =
-            String::from_utf8(stored::item_line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        let item = String::from_utf8(stored::line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
         let clean = format!(
             "{}\n\n{}\r\n{item}\n",
             line(&record("quiet.net", 5000)),
@@ -1400,7 +1423,7 @@ mod tests {
 
     /// Checks `text` against the golden file at `path`, or writes it there
     /// when `PLUMB_WRITE_GOLDEN` is set, as plumb-index's golden test does.
-    fn check_golden(path: &Path, text: &str) {
+    pub(crate) fn check_golden(path: &Path, text: &str) {
         if std::env::var_os("PLUMB_WRITE_GOLDEN").is_some() {
             fs::write(path, text).unwrap();
             return;
@@ -1426,9 +1449,12 @@ mod tests {
     /// beside the index, against `outline_golden.txt` next to this file:
     /// the buckets other nodes take, byte for byte, and the feeds watched;
     /// and a bucket table of the same sites built in memory
-    /// ([`plumb_net::BucketTable::build`]). Written once by the build that
-    /// read records, before it moved onto items; never written again to
-    /// make a test pass (see plumb-index's `tests/golden.rs`).
+    /// ([`plumb_net::BucketTable::build`]). Written by the build that read
+    /// records, before it moved onto items, and again when the bucket
+    /// table's lines became stored items: only `records.dat` and
+    /// `records.idx` changed then, each line reading back as the record it
+    /// was. Never written again to make a test pass (see plumb-index's
+    /// `tests/golden.rs`).
     #[test]
     fn a_build_of_the_golden_sites_makes_the_golden_buckets_and_feeds() {
         use sha2::{Digest, Sha256};
@@ -1533,12 +1559,104 @@ mod tests {
     }
 
     #[test]
+    fn a_site_at_a_time_is_each_line_s_record_as_its_stored_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
+        let item = String::from_utf8(stored::line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        // Records not yet clean, under a domain not canonical, twice, and
+        // under one that is none; a stored item; a blank line.
+        let mut untidy = crawled("Cafe.COM", " Cafe\u{301}\u{7} ", 5);
+        untidy.url = Some("HTTPS://WWW.Cafe.com/index%2ehtml?".into());
+        untidy.aliases = vec![" Cafe".into(), String::new()];
+        untidy.crawl_failures = 2;
+        untidy.gone_at = Some(9);
+        let lines = [
+            line(&untidy),
+            line(&record("cafe.com", 1)),
+            String::new(),
+            item,
+            line(&record("not a domain", 2)),
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let mut records = Vec::new();
+        for_each_record(&path, |record| records.push(record)).unwrap();
+        let mut sites = Vec::new();
+        for_each_site(&path, |site| sites.push(site)).unwrap();
+        assert_eq!(sites.len(), 4);
+        for (site, record) in sites.iter().zip(&records) {
+            assert_eq!(site::domain(site), record.domain);
+            assert_eq!(site::link_score(site), record.link_score());
+            assert_eq!(site.title, record.title);
+            assert_eq!(site::crawl_marks(site).gone, record.gone_at);
+            assert_eq!(
+                stored::item_as_line(site).unwrap(),
+                stored::line(record).unwrap()
+            );
+        }
+        fs::write(&path, "{\"domain\":\"a.com\"}\nnot json\n").unwrap();
+        let err = for_each_site(&path, |_| {}).unwrap_err();
+        assert!(format!("{err:#}").contains("records.jsonl:2"), "{err:#}");
+    }
+
+    #[test]
+    fn the_sites_a_step_keeps_are_the_ones_it_kept_as_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
+        // About banks with an untidy title, through a link text or a
+        // name, or not at all; an official website; a bank's page read on
+        // another site, which counts for nothing; in both shapes.
+        let mut untidy = crawled("tidy.com", " Cafe\u{301}\u{7}  Bank ", 5);
+        untidy.crawl_failures = 3;
+        let mut named = record("named.com", 9);
+        named.aliases = vec!["First Bank".into()];
+        let mut official = record("official.org", 4);
+        official.signals.official_site = true;
+        let mut elsewhere = crawled("elsewhere.com", "Bank", 6);
+        elsewhere.url = Some("https://other.org/".into());
+        elsewhere.link_texts.clear();
+        let item = |r: SiteRecord| String::from_utf8(stored::line(&r).unwrap()).unwrap();
+        let lines = [
+            line(&untidy),
+            item(crawled("linked.com", "Savings bank", 7)),
+            line(&named),
+            item(official),
+            line(&elsewhere),
+            item(crawled("quiet.net", "Gardening", 8)),
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        // How the steps judged each site when they read records.
+        let records_where = |wanted: &dyn Fn(&SiteRecord) -> bool| {
+            let mut domains = HashSet::new();
+            for_each_record(&path, |mut record| {
+                record.clean();
+                record.drop_bot_check();
+                if wanted(&record) {
+                    domains.insert(record.domain.into_boxed_str());
+                }
+            })
+            .unwrap();
+            domains
+        };
+        let topics = crate::about::Topics::new(&["bank".to_string()]);
+        let about = domains_where(&path, |site| topics.matches_site(site)).unwrap();
+        assert_eq!(about, records_where(&|record| topics.matches(record)));
+        let mut sorted: Vec<&str> = about.iter().map(|domain| &**domain).collect();
+        sorted.sort_unstable();
+        assert_eq!(sorted, ["linked.com", "named.com", "tidy.com"]);
+        let official = domains_where(&path, |site| site::signals(site).official_site).unwrap();
+        let official_records = records_where(&|record| record.signals.official_site);
+        assert_eq!(official, official_records);
+        assert_eq!(official.len(), 1);
+    }
+
+    #[test]
     fn replacing_lines_copies_them_as_the_file_holds_them() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
         let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
-        let item =
-            String::from_utf8(stored::item_line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        let item = String::from_utf8(stored::line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
         // A record not yet clean, a stored item, a line break of two bytes
         // and a blank line: copied as they are.
         let raw = line(&crawled("cafe.com", "Cafe\u{301}", 5));

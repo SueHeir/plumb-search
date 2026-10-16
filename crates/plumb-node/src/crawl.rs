@@ -1,7 +1,11 @@
 //! Crawling: fetches homepages and merges what they say into the records,
 //! including links that discover new domains. A long-running node
 //! ([`crate::node`]) crawls through [`select_targets`] and
-//! [`crawl_rolling`], and so does `plumb-tools crawl`, by hand.
+//! [`crawl_rolling`], and so does `plumb-tools crawl`, by hand. What a
+//! crawl reads of its homepages are sites, each its stored item
+//! ([`plumb_crawl::to_items`]), and choosing homepages reads a site's
+//! crawl marks as its item holds them ([`CrawlSite`]); the journal still
+//! takes records, which they become in one place ([`to_record`]).
 //!
 //! # Which homepages
 //!
@@ -23,7 +27,7 @@
 //!
 //! Each homepage is fetched at `https://<domain>/` first. When that gets no
 //! answer, the crawler tries the URL the site was last reached at (the
-//! record's `url`), then the `www.` host and plain http.
+//! site's `url`), then the `www.` host and plain http.
 //!
 //! # Saving
 //!
@@ -58,8 +62,9 @@ use std::fmt;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use plumb_core::{now_unix, RecordSet, SiteRecord};
-use plumb_crawl::{to_records, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
+use plumb_core::{now_unix, site, RecordSet, SiteRecord};
+use plumb_crawl::{to_items, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
+use plumb_format::Item;
 use tracing::{info, warn};
 
 use crate::records::{Change, RecordStore};
@@ -88,8 +93,8 @@ pub(crate) const OFFLINE_MIN_EXPECTED: usize = 20;
 pub(crate) const OFFLINE_FAILED_PERCENT: usize = 90;
 
 /// What choosing homepages to crawl reads of a site: a whole
-/// [`SiteRecord`], or the little a node keeps of each site during a crawl
-/// round (see `crate::node`).
+/// [`SiteRecord`] or its stored item ([`plumb_core::site`]), or the little
+/// a node keeps of each site during a crawl round (see `crate::node`).
 pub trait CrawlSite {
     /// The canonical domain.
     fn domain(&self) -> &str;
@@ -129,6 +134,38 @@ impl CrawlSite for SiteRecord {
 
     fn gone_at(&self) -> Option<u64> {
         self.gone_at
+    }
+}
+
+/// A site's stored item reads as its record does: its crawl marks are the
+/// item's `crawl` field ([`site::crawl_marks`]).
+impl CrawlSite for Item {
+    fn domain(&self) -> &str {
+        &self.id
+    }
+
+    fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    fn link_score(&self) -> f32 {
+        site::link_score(self)
+    }
+
+    fn crawled_at(&self) -> Option<u64> {
+        site::crawled(self)
+    }
+
+    fn crawl_attempted_at(&self) -> Option<u64> {
+        site::crawl_marks(self).tried
+    }
+
+    fn crawl_failures(&self) -> u32 {
+        site::crawl_marks(self).failures
+    }
+
+    fn gone_at(&self) -> Option<u64> {
+        site::crawl_marks(self).gone
     }
 }
 
@@ -652,11 +689,23 @@ fn offline_batch(before: &[Mark], outcomes: &HashMap<&str, &CrawlOutcome>) -> Op
     })
 }
 
+/// A site a crawl read, as the record the journal's changes and the
+/// network's shared crawls still take: the one place where a crawl's
+/// sites become records ([`SiteRecord::from_stored_item`]), until the
+/// store keeps items (step 7a-2 of the data format plan) and the network
+/// shares them (step 9). It reads back every field a crawl sets, so the
+/// record is the one crawls made before they made items.
+pub(crate) fn to_record(site: &Item) -> SiteRecord {
+    // Only an item that is not a site, or headlines that do not read,
+    // fail; a crawl's sites are made by `site::new` and have none.
+    SiteRecord::from_stored_item(site).expect("a crawl's site reads as a record")
+}
+
 /// Turns crawl batches into changes to a record set.
 #[derive(Debug, Default)]
 struct BatchMerger {
     /// Distinct crawled domains linking to each domain, over the whole run.
-    /// [`to_records`] counts the linking domains of one batch only, and
+    /// [`to_items`] counts the linking domains of one batch only, and
     /// merging keeps the larger of two counts, so without this a site linked
     /// from several batches would keep only the count of its best batch.
     /// Domains are kept as hashes ([`domain_hash`]): a round's links
@@ -673,15 +722,16 @@ fn domain_hash(domain: &str) -> u64 {
 }
 
 impl BatchMerger {
-    /// The records [`to_records`] makes of a batch's results, with
-    /// `linking_domains` counted over the whole run, as changes to merge.
+    /// The sites [`to_items`] makes of a batch's results, with
+    /// `linking_domains` counted over the whole run, as changes to merge
+    /// ([`to_record`]).
     fn changes(&mut self, results: &[CrawlResult]) -> Vec<Change> {
         for result in results {
             let CrawlOutcome::Fetched(page) = &result.outcome else {
                 continue;
             };
             for link in &page.meta.links {
-                // The links `to_records` counts: self-links are not inbound.
+                // The links `to_items` counts: self-links are not inbound.
                 if link.target_domain.is_empty() || link.target_domain == page.domain {
                     continue;
                 }
@@ -691,15 +741,18 @@ impl BatchMerger {
                     .insert(domain_hash(&page.domain));
             }
         }
-        to_records(results)
+        to_items(results)
             .into_iter()
-            .map(|mut record| {
-                if let Some(linkers) = self.linkers.get(&domain_hash(&record.domain)) {
+            .map(|mut site| {
+                if let Some(linkers) = self.linkers.get(&domain_hash(&site.id)) {
                     let count = u32::try_from(linkers.len()).unwrap_or(u32::MAX);
-                    let signals = &mut record.signals;
+                    let mut signals = site::signals(&site);
                     signals.linking_domains = signals.linking_domains.max(count);
+                    site::set_signals(&mut site, &signals);
                 }
-                Change::Merge { record }
+                Change::Merge {
+                    record: to_record(&site),
+                }
             })
             .collect()
     }

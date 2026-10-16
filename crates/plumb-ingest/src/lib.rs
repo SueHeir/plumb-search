@@ -1,5 +1,5 @@
 //! Loads the public datasets that seed a Plumb Search index and folds them
-//! into [`plumb_core::SiteRecord`]s.
+//! into sites, each its stored item ([`plumb_core::site`]).
 //!
 //! Seed sources (used once to bootstrap; the network grows from its own crawls after that):
 //! - Tranco top-1M list ([`tranco`])

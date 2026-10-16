@@ -37,7 +37,7 @@ plumb-e2e uses it in its tests too. The only Plumb crate plumb-core depends on i
 | Module | What it does |
 | --- | --- |
 | [lib.rs](src/lib.rs) | `SiteRecord`, `Signals`, `LinkText`, `Redirect`, `RecordSet`; `link_score`; domain helpers (`registrable_domain`, `canonical_domain`, `host_of`, `is_homepage_path`); text helpers (`normalize_text`, `joined`, `site_language`, `unmangled`); `read_jsonl` and `write_jsonl` |
-| [site.rs](src/site.rs) | A site's stored item, read and set a part at a time (`signals`, `crawl_marks`, `link_texts` and the rest). Merging, cleaning, gone sites, bot checks, its country (`site_country`) and adult level work on it as on a `SiteRecord`, which code moves off |
+| [site.rs](src/site.rs) | A site's stored item, read and set a part at a time (`signals`, `crawl_marks`, `link_texts` and the rest). Merging, cleaning, gone sites, bot checks, the item it sends (`to_item`), its country (`site_country`) and adult level work on it as on a `SiteRecord`, which code moves off |
 | [sites.rs](src/sites.rs) | `Sites`: sites' stored items by domain, merged on insert, which does for items what `RecordSet` does for records (`upsert`, `split_subdomain_sites`, `take_back_official_site`, `into_sorted_vec`), and `sort_by_link_score` for items |
 | [site_item.rs](src/site_item.rs) | A `SiteRecord` as an item of the data format, kind `site` (`to_item`, `from_item`), as the line of JSON crawl batches and bucket answers carry (`to_line`, `from_line`, `crawl_of_line`), and the fields of a set of sites (`site_fields`) |
 | [subsites.rs](src/subsites.rs) | Subdomains that are sites of their own (`SUBDOMAIN_SITES`, `UMBRELLA_DOMAINS`), the built-in site rules with the Public Suffix List in [data/](data/public_suffix_list.dat), and `use_site_rules` to swap in signed ones |
@@ -74,7 +74,7 @@ plumb-e2e uses it in its tests too. The only Plumb crate plumb-core depends on i
 | --- | --- |
 | [locks.rs](src/locks.rs) | `Locked` and `RwLocked`: take a std lock whatever happened to its last holder |
 | [storage.rs](src/storage.rs) | The storage budget and the write helpers that charge it |
-| [stored.rs](src/stored.rs) | A site as a node keeps it on disk (records file, journal, inbox, bucket table): every read and write of those goes through `write`, `line`, `read`, `read_file` and `head`, so their shape can change in one place. `read_item`, `write_item`, `item_as_line` and `stored::item` do the same for a site's stored item, still writing the record's JSON |
+| [stored.rs](src/stored.rs) | A site as a node keeps it on disk (records file, journal, inbox, bucket table): every read and write of those goes through `write`, `line`, `read`, `read_file` and `head`, so their shape can change in one place. A line is the site's stored item, written as it is; versions up to 0.4 wrote the record's JSON, which is still read, so a file can hold both. `read_item`, `write_item`, `item_as_line` and `stored::item` do the same for a site's stored item. `record_json` is the record's JSON of a line, which `/plumb/fill/1` sends |
 | [oblivious.rs](src/oblivious.rs) | The asker's half of sealed bucket requests (feature `oblivious`) |
 
 ## How it works

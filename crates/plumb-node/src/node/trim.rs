@@ -19,10 +19,11 @@
 //!   About page always puts first or a searcher opened from the results,
 //!   official websites (Wikidata), and the network's own site.
 //!
-//! Choosing the sites to drop reads the records file a record at a time
+//! Choosing the sites to drop reads the records file a site at a time
 //! ([`crate::outline`]): what is held of each site is its outline (where
 //! its line is, its link score, its domain), and the domains of those the
-//! node keeps, not their whole records. The file is then written again
+//! node keeps, judged on each site's stored item ([`Keep::keeps`]), not
+//! their whole records. The file is then written again
 //! without the sites dropped, the other lines copied as they are, and the
 //! index built from it a record at a time. A file that holds a site twice,
 //! which only a whole set can merge, is first read whole once and written
@@ -42,7 +43,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use plumb_core::storage::StorageBudget;
-use plumb_core::{now_unix, SiteRecord};
+use plumb_core::{now_unix, site, SiteRecord};
+use plumb_format::Item;
 use tracing::info;
 
 use super::fill::FILL_UP_TO_PERCENT;
@@ -163,10 +165,13 @@ impl Keep {
         }
     }
 
-    pub(super) fn keeps(&self, record: &SiteRecord) -> bool {
-        record.signals.official_site
-            || self.domains.contains(&record.domain)
-            || self.topics.matches(record)
+    /// Whether the node keeps `site`, its stored item, whatever the room:
+    /// an official website, one of [`Keep::domains`], or one about its
+    /// topics.
+    pub(super) fn keeps(&self, site: &Item) -> bool {
+        site::signals(site).official_site
+            || self.domains.contains(&site.id)
+            || self.topics.matches_site(site)
     }
 }
 
@@ -275,7 +280,7 @@ fn drop_sites(
 }
 
 /// [`drop_sites`] of the records file at `path`, whose sites `outlines`
-/// gives ([`outline::outline_merged`]), read a record at a time: of each
+/// gives ([`outline::outline_merged`]), read a site at a time: of each
 /// site only its outline is held, and the domains of those `keep` keeps.
 /// The lines of the sites left are copied as the file holds them
 /// ([`outline::replace_lines`]).
@@ -287,7 +292,7 @@ fn drop_from_file(
     keep: &Keep,
     budget: Option<&Arc<StorageBudget>>,
 ) -> Result<Vec<String>> {
-    let kept = outline::domains_where(path, |record| keep.keeps(record))?;
+    let kept = outline::domains_where(path, |site| keep.keeps(site))?;
     let per_site = sites / (outlines.len() as u64).max(1);
     outline::sort(&mut outlines);
     let drops = pick_outline_drops(&outlines, free, per_site, &kept);

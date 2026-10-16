@@ -1,11 +1,15 @@
-//! Folds every seed source into one set of [`SiteRecord`]s.
+//! Folds every seed source into one set of sites, each its stored item
+//! ([`plumb_core::site`]).
 
 use std::cmp::Ordering;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
+use plumb_core::site::{self, Item};
+use plumb_core::sites::Sites;
 use plumb_core::{
-    canonical_domain, kind_key, linker_count, parent_domain, subdomain_sites, RecordSet,
-    SiteRecord, MAX_LINK_TEXTS, SUBDOMAIN_SITE_NAMES,
+    canonical_domain, collapse_whitespace, is_generic_kind, kind_key, link_score, linker_count,
+    normalize_text, parent_domain, subdomain_sites, truncate_chars, Signals, MAX_ALIASES,
+    MAX_KINDS, MAX_LINK_TEXTS, MAX_TEXT_CHARS, SUBDOMAIN_SITE_NAMES,
 };
 use tracing::{info, warn};
 
@@ -18,11 +22,57 @@ const MAX_ITEMS_PER_HOMEPAGE: usize = 5;
 /// an item needs for its facts alone to be the site's.
 const DOMINANT_SITELINKS: u32 = 3;
 
-/// Collects seed data into site records. Each `add_*` call merges into the
-/// records already collected, so sources can be added in any order.
+/// Collects seed data into sites, each its stored item, as a node holds
+/// them ([`Sites`]). Each `add_*` call merges into the sites already
+/// collected, so sources can be added in any order.
+///
+/// What the seed names a site and what kind it is go in as records took
+/// them (`add_name`, `add_kind`): with their whitespace collapsed, but not
+/// tidied as [`site::add_alias`] tidies them, so that what a node and
+/// `plumb ingest` write of the seed stays byte for byte what it was when
+/// the builder made records.
+///
+/// Most sites of the rank lists are nothing but their ranks, and a site's
+/// item holds those in nested fields: about 2.2 kB a site, against 0.75 kB
+/// for its record. So a site the builder knows only the ranks of is held
+/// as those ranks (`Ranks`, about 0.16 kB), and becomes the item they
+/// stand for once anything else is added to it or it is kept.
 #[derive(Debug, Default)]
 pub struct Builder {
-    records: RecordSet,
+    sites: Sites,
+    /// The sites known by their ranks alone, by domain. A domain is here or
+    /// in `sites`, never in both.
+    ranked: HashMap<String, Ranks>,
+}
+
+/// The ranks of a site the rank lists are all the builder knows of: the
+/// item they stand for is a new site's ([`site::new`]) given these
+/// [`Signals`], as adding each rank to the site's item made it.
+#[derive(Debug, Clone, Copy, Default)]
+struct Ranks {
+    tranco: Option<u32>,
+    harmonic: Option<u64>,
+    pagerank: Option<u64>,
+}
+
+impl Ranks {
+    fn of(signals: &Signals) -> Self {
+        Ranks {
+            tranco: signals.tranco_rank,
+            harmonic: signals.harmonic_rank,
+            pagerank: signals.pagerank_rank,
+        }
+    }
+
+    /// The signals of the site these ranks are all that is known of.
+    fn signals(self) -> Signals {
+        Signals {
+            tranco_rank: self.tranco,
+            harmonic_rank: self.harmonic,
+            pagerank_rank: self.pagerank,
+            ..Signals::default()
+        }
+    }
 }
 
 impl Builder {
@@ -32,11 +82,66 @@ impl Builder {
 
     /// Number of distinct domains collected so far.
     pub fn len(&self) -> usize {
-        self.records.len()
+        self.sites.len() + self.ranked.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+        self.sites.is_empty() && self.ranked.is_empty()
+    }
+
+    /// Whether a site of `domain` is held, as an item or by its ranks.
+    fn holds(&self, domain: &str) -> bool {
+        self.sites.get(domain).is_some() || self.ranked.contains_key(domain)
+    }
+
+    /// The signals of `domain`'s site, which must be held.
+    fn signals_of(&self, domain: &str) -> Signals {
+        match self.ranked.get(domain) {
+            Some(ranks) => ranks.signals(),
+            None => self
+                .sites
+                .get(domain)
+                .map(site::signals)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The item of `domain`'s site, made of its ranks when they are all
+    /// that is known of it, or new ([`Sites::entry`]).
+    fn entry(&mut self, domain: &str) -> &mut Item {
+        let ranks = self.ranked.remove(domain);
+        let held = self.sites.entry(domain);
+        if let Some(ranks) = ranks {
+            site::set_signals(held, &ranks.signals());
+        }
+        held
+    }
+
+    /// Merges `site` into the one held for its domain, as a node's sites
+    /// take it ([`Sites::upsert`]).
+    fn upsert(&mut self, site: Item) {
+        if let Some(domain) = canonical_domain(&site.id) {
+            if self.ranked.contains_key(&domain) {
+                self.entry(&domain);
+            }
+        }
+        self.sites.upsert(site);
+    }
+
+    /// Changes the ranks of `domain`'s site, made new when it is not held:
+    /// `change` changes only ranks.
+    fn change_ranks(&mut self, domain: String, change: impl FnOnce(&mut Signals)) {
+        if self.sites.get(&domain).is_some() {
+            let held = self.sites.entry(&domain);
+            let mut signals = site::signals(held);
+            change(&mut signals);
+            site::set_signals(held, &signals);
+        } else {
+            let ranks = self.ranked.entry(domain).or_default();
+            let mut signals = ranks.signals();
+            change(&mut signals);
+            *ranks = Ranks::of(&signals);
+        }
     }
 
     /// Sets `signals.tranco_rank`.
@@ -55,8 +160,9 @@ impl Builder {
                 invalid += 1;
                 continue;
             };
-            let signals = &mut self.records.entry(&domain).signals;
-            signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
+            self.change_ranks(domain, |signals| {
+                signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
+            });
         }
         warn_invalid("Tranco entries", invalid);
     }
@@ -76,22 +182,23 @@ impl Builder {
                 invalid += 1;
                 continue;
             };
-            let signals = &mut self.records.entry(&domain).signals;
-            signals.harmonic_rank = best_rank(signals.harmonic_rank, Some(rank.harmonic_rank));
-            signals.pagerank_rank =
-                best_rank(signals.pagerank_rank, rank.pagerank_rank.filter(|&r| r > 0));
+            self.change_ranks(domain, |signals| {
+                signals.harmonic_rank = best_rank(signals.harmonic_rank, Some(rank.harmonic_rank));
+                signals.pagerank_rank =
+                    best_rank(signals.pagerank_rank, rank.pagerank_rank.filter(|&r| r > 0));
+            });
         }
         warn_invalid("Common Crawl ranks", invalid);
     }
 
-    /// Adds homepage title/description/url (and `og:site_name` as an alias),
+    /// Adds homepage title/description/url (and `og:site_name` as a name),
     /// inbound link texts, and `signals.linking_domains`. Target domains that
-    /// only appear as link targets get new records, which is how WAT data
+    /// only appear as link targets get new sites, which is how WAT data
     /// discovers sites missing from the rank lists.
     ///
     /// Link texts come only from links to a site's front page (see
     /// [`WatExtract::add_document`]). WAT pages carry no crawl time, so they
-    /// only fill page fields that are still empty (see [`SiteRecord::merge`]);
+    /// only fill page fields that are still empty (see [`site::merge`]);
     /// link text counts add up, and `linking_domains` keeps the larger count.
     pub fn add_wat(&mut self, extract: &WatExtract) {
         let domains: HashSet<&String> = extract
@@ -104,38 +211,40 @@ impl Builder {
             if domain.is_empty() {
                 continue;
             }
-            let mut record = SiteRecord::new(domain.as_str());
+            let mut site = site::new(domain.as_str());
             if let Some(meta) = extract.homepages.get(domain) {
-                record.url = Some(meta.url.clone());
-                record.title = meta.title.clone();
-                record.description = meta.description.clone();
+                site.url = Some(meta.url.clone());
+                site.title = meta.title.clone();
+                site.about = meta.description.clone();
                 if let Some(site_name) = &meta.site_name {
-                    record.add_alias(site_name);
+                    add_name(&mut site, site_name);
                 }
             }
             if let Some(texts) = extract.anchors.get(domain) {
                 // Only the most used texts can survive the cap, so skip
-                // re-sorting the record's list for all the others.
+                // re-sorting the site's list for all the others.
                 let mut texts: Vec<(&String, u64, u32)> = texts
                     .iter()
                     .map(|(text, &linkers)| (text, linkers, linker_count(linkers)))
                     .collect();
                 texts.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(b.0)));
                 for (text, linkers, _) in texts.into_iter().take(MAX_LINK_TEXTS) {
-                    record.add_link_text_linkers(text, linkers);
+                    site::add_link_text_linkers(&mut site, text, linkers);
                 }
             }
             if let Some(linkers) = extract.linking_domains.get(domain) {
-                record.signals.linking_domains = u32::try_from(linkers.len()).unwrap_or(u32::MAX);
+                let mut signals = site::signals(&site);
+                signals.linking_domains = u32::try_from(linkers.len()).unwrap_or(u32::MAX);
+                site::set_signals(&mut site, &signals);
             }
-            self.records.upsert(record);
+            self.upsert(site);
         }
     }
 
     /// Marks the official websites listed in Wikidata: sets
-    /// `signals.official_site`, adds the item's label and other names as
-    /// aliases and, when
-    /// the record has none yet, sets its `country`, and adds its kinds (see
+    /// `signals.official_site`, adds the item's label and other names to the
+    /// site's names and, when
+    /// the site has none yet, sets its `country`, and adds its kinds (see
     /// [`crate::attach_facts`]). When several items claim a front page, an
     /// item with [`DOMINANT_SITELINKS`] times the sitelinks of each other
     /// one gives the facts (wikipedia.org is Wikipedia's, an online
@@ -158,7 +267,7 @@ impl Builder {
     /// then it is that item's site alone.
     ///
     /// A label that is just the item id (what Wikidata's label service
-    /// returns for items without an English label) is not added as an alias.
+    /// returns for items without an English label) is not added as a name.
     pub fn add_official_sites(&mut self, sites: &[OfficialSite]) {
         // Front page claims by domain, in input order, and named inner page
         // claims, which count for a domain without front page claims.
@@ -210,20 +319,22 @@ impl Builder {
             }
             let claims = &claims;
             official += 1;
-            let record = self.records.entry(domain);
-            record.signals.official_site = true;
+            let held = self.entry(domain);
+            let mut signals = site::signals(held);
+            signals.official_site = true;
             let sitelinks = claims.iter().map(|site| site.sitelinks).max().unwrap_or(0);
-            record.signals.sitelinks = record.signals.sitelinks.max(sitelinks);
+            signals.sitelinks = signals.sitelinks.max(sitelinks);
+            site::set_signals(held, &signals);
             for site in claims {
                 let label = site.label.trim();
                 if label != site.item {
-                    record.add_alias(label);
+                    add_name(held, label);
                 }
             }
             // Then their other names, after every main name.
             for site in claims {
                 for name in &site.names {
-                    record.add_alias(name);
+                    add_name(held, name);
                 }
             }
             // When several items claim the front page, the facts are those
@@ -258,21 +369,21 @@ impl Builder {
                         .any(|other| kind_key(other) == kind_key(kind))
                 });
             }
-            if record.country.is_none() {
-                record.country = country;
+            if site::country(held).is_none() {
+                site::set_country(held, country);
             }
             // A description only says what the site is when one item claims
             // it, or one is far better known.
             if items.len() == 1 || dominant.is_some() {
-                if record.about.is_none() {
-                    record.about.clone_from(&first.about);
+                if site::wikidata_about(held).is_none() {
+                    site::set_wikidata_about(held, first.about.clone());
                 }
-                if record.intro.is_none() {
-                    record.intro.clone_from(&first.intro);
+                if site::intro(held).is_none() {
+                    site::set_intro(held, first.intro.clone());
                 }
             }
             for kind in &kinds {
-                record.add_kind(kind);
+                add_kind(held, kind);
             }
         }
         warn_invalid("Wikidata official sites", invalid);
@@ -281,73 +392,124 @@ impl Builder {
         );
     }
 
-    /// Merges ready-made records, e.g. from a previous run or a crawl.
-    pub fn add_records<I: IntoIterator<Item = SiteRecord>>(&mut self, records: I) {
-        self.records.extend(records);
+    /// Merges ready-made sites, e.g. from a previous run or a crawl, as a
+    /// node's sites take them ([`Sites::upsert`]).
+    pub fn add_sites<I: IntoIterator<Item = Item>>(&mut self, sites: I) {
+        for held in sites {
+            self.upsert(held);
+        }
     }
 
-    /// All records, best link score first (ties broken by domain), cut to
+    /// All sites, best link score first (ties broken by domain), cut to
     /// the best `top_n` when given.
     ///
-    /// With a cut, each record is scored once, only the kept ones are
+    /// With a cut, each site is scored once, only the kept ones are
     /// sorted, and they are moved out of the set rather than copied.
-    pub fn finish(mut self, top_n: Option<usize>) -> Vec<SiteRecord> {
+    pub fn finish(mut self, top_n: Option<usize>) -> Vec<Item> {
         self.rank_subdomain_sites();
-        let total = self.records.len();
+        let total = self.len();
         let n = match top_n {
             Some(n) if n < total => n,
-            _ => return self.records.into_sorted_vec(),
+            _ => {
+                for (domain, ranks) in std::mem::take(&mut self.ranked) {
+                    site::set_signals(self.sites.entry(&domain), &ranks.signals());
+                }
+                return self.sites.into_sorted_vec();
+            }
         };
-        fn best_first(a: &(f32, &SiteRecord), b: &(f32, &SiteRecord)) -> Ordering {
-            b.0.total_cmp(&a.0)
-                .then_with(|| a.1.domain.cmp(&b.1.domain))
+        fn best_first(a: &(f32, &str), b: &(f32, &str)) -> Ordering {
+            b.0.total_cmp(&a.0).then_with(|| a.1.cmp(b.1))
         }
-        let mut scored: Vec<(f32, &SiteRecord)> = self
-            .records
+        let held = self
+            .sites
             .iter()
-            .map(|record| (record.link_score(), record))
-            .collect();
+            .map(|held| (site::link_score(held), held.id.as_str()));
+        let ranked = self
+            .ranked
+            .iter()
+            .map(|(domain, ranks)| (link_score(&ranks.signals()), domain.as_str()));
+        let mut scored: Vec<(f32, &str)> = held.chain(ranked).collect();
         scored.select_nth_unstable_by(n, best_first);
         scored.truncate(n);
         scored.sort_unstable_by(best_first);
         let kept: Vec<String> = scored
             .into_iter()
-            .map(|(_, record)| record.domain.clone())
+            .map(|(_, domain)| domain.to_string())
             .collect();
         info!("kept the top {n} of {total} records by link score");
         kept.iter()
-            .map(|domain| std::mem::take(self.records.entry(domain)))
+            .map(|domain| std::mem::take(self.entry(domain)))
             .collect()
     }
 }
 
 impl Builder {
     /// Gives each subdomain that is a site of its own
-    /// ([`plumb_core::subdomain_sites`]) and has a record, such as
+    /// ([`plumb_core::subdomain_sites`]) and is held, such as
     /// news.ycombinator.com from Wikidata, the ranks of its domain that it
     /// lacks: the rank lists only rank registrable domains. Subdomain sites
-    /// with no record are not made, so they take no room under a cap, but
-    /// for the few the seed data may not name ([`SUBDOMAIN_SITE_NAMES`]).
+    /// the seed does not name are not made, so they take no room under a
+    /// cap, but for the few the seed data may not name
+    /// ([`SUBDOMAIN_SITE_NAMES`]).
     fn rank_subdomain_sites(&mut self) {
-        for (site, name) in SUBDOMAIN_SITE_NAMES {
-            let parent = parent_domain(site).and_then(|domain| self.records.get(domain));
-            if parent.is_some() && self.records.get(site).is_none() {
-                let record = self.records.entry(site);
-                record.signals.official_site = true;
-                record.add_alias(name);
+        for (subsite, name) in SUBDOMAIN_SITE_NAMES {
+            let parent = parent_domain(subsite).is_some_and(|domain| self.holds(domain));
+            if parent && !self.holds(subsite) {
+                let held = self.sites.entry(subsite);
+                let mut signals = site::signals(held);
+                signals.official_site = true;
+                site::set_signals(held, &signals);
+                add_name(held, name);
             }
         }
-        for (site, domain) in subdomain_sites() {
-            let (Some(_), Some(parent)) = (self.records.get(site), self.records.get(domain)) else {
+        for (subsite, domain) in subdomain_sites() {
+            if !(self.holds(subsite) && self.holds(domain)) {
                 continue;
-            };
-            let parent = parent.signals.clone();
-            let signals = &mut self.records.entry(site).signals;
-            signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
-            signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
-            signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
+            }
+            let parent = self.signals_of(domain);
+            self.change_ranks(subsite.to_string(), |signals| {
+                signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
+                signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
+                signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
+            });
         }
     }
+}
+
+/// Adds `name` to the site's names as the seed has it (whitespace
+/// collapsed, cut to [`MAX_TEXT_CHARS`]), unless one the same once
+/// normalized is there or it has [`MAX_ALIASES`], as
+/// [`plumb_core::SiteRecord::add_alias`] adds one. Unlike
+/// [`site::add_alias`], it leaves the name's Unicode form and control
+/// characters as they are: see [`Builder`].
+fn add_name(site: &mut Item, name: &str) {
+    let name = truncate_chars(&collapse_whitespace(name), MAX_TEXT_CHARS);
+    let key = normalize_text(&name);
+    if key.is_empty() || site.names.len() >= MAX_ALIASES {
+        return;
+    }
+    if site.names.iter().any(|known| normalize_text(known) == key) {
+        return;
+    }
+    site.names.push(name);
+}
+
+/// Adds `kind` ("bank") to what the site is, as the seed has it, unless it
+/// is generic ([`is_generic_kind`]), the same kind is there already
+/// (plurals and case aside) or the site has [`MAX_KINDS`], as
+/// [`plumb_core::SiteRecord::add_kind`] adds one: see [`Builder`].
+fn add_kind(site: &mut Item, kind: &str) {
+    let kind = truncate_chars(&collapse_whitespace(kind), MAX_TEXT_CHARS);
+    let mut kinds = site::kinds(site);
+    if kinds.len() >= MAX_KINDS || is_generic_kind(&kind) {
+        return;
+    }
+    let key = kind_key(&kind);
+    if kinds.iter().any(|known| kind_key(known) == key) {
+        return;
+    }
+    kinds.push(kind);
+    site::set_kinds(site, kinds);
 }
 
 /// Logs seed entries a `Builder::add_*` call dropped for an invalid domain.
@@ -408,13 +570,22 @@ fn front_page_owner<'a>(claims: &[&'a OfficialSite]) -> Option<&'a str> {
 mod tests {
     use std::path::Path;
 
-    use plumb_core::{linker_bit, LinkText, Signals, MAX_LINKER_ESTIMATE};
+    use plumb_core::{linker_bit, LinkText, Signals, SiteRecord, MAX_LINKER_ESTIMATE};
 
     use super::*;
     use crate::{
         load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat, WatPage,
         WatWriter,
     };
+
+    /// The sites [`Builder::finish`] gives, each as its record, which these
+    /// tests read.
+    fn records_of(sites: Vec<Item>) -> Vec<SiteRecord> {
+        sites
+            .iter()
+            .map(|site| SiteRecord::from_stored_item(site).unwrap())
+            .collect()
+    }
 
     fn linking(url: &str, links: &[(&str, &str)]) -> WatPage {
         WatPage {
@@ -452,7 +623,7 @@ mod tests {
             .collect();
         let mut builder = Builder::new();
         builder.add_official_sites(&sites);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         assert!(records.iter().all(|r| r.signals.official_site));
         let mut out: Vec<(String, Vec<String>)> =
             records.into_iter().map(|r| (r.domain, r.aliases)).collect();
@@ -534,7 +705,7 @@ mod tests {
 
         // google, facebook, usbank, plus a.com, c.net (homepages) and newsite.io (link target).
         assert_eq!(builder.len(), 6);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
         assert_eq!(usbank.url.as_deref(), Some("https://www.usbank.com/"));
         assert_eq!(
@@ -623,7 +794,7 @@ mod tests {
             },
         ]);
         assert_eq!(builder.len(), 1);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         assert_eq!(
             records[0].signals,
             Signals {
@@ -658,7 +829,7 @@ mod tests {
             site("Q1", "Y Combinator", "www.ycombinator.com"),
             site("Q2", "Hacker News", "news.ycombinator.com"),
         ]);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         let get = |domain: &str| records.iter().find(|r| r.domain == domain).unwrap();
         let (yc, news) = (get("ycombinator.com"), get("news.ycombinator.com"));
         assert_eq!(news.signals.tranco_rank, Some(900));
@@ -677,7 +848,7 @@ mod tests {
             rank: 900,
             domain: "ycombinator.com".into(),
         }]);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         let news = records
             .iter()
             .find(|r| r.domain == "news.ycombinator.com")
@@ -708,7 +879,7 @@ mod tests {
             claim("Q4", "continental.com", Some("US"), &["airlines"]),
             claim("Q5", "usbank.com", Some("US"), &["bank"]),
         ]);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         let get = |domain: &str| records.iter().find(|r| r.domain == domain).unwrap();
         assert_eq!(get("x.com").country.as_deref(), Some("US"));
         assert!(get("x.com").kinds.is_empty());
@@ -736,7 +907,7 @@ mod tests {
                 330,
             ),
         ]);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         assert_eq!(records[0].kinds, ["online encyclopedia", "wiki"]);
         assert_eq!(
             records[0].about.as_deref(),
@@ -754,7 +925,7 @@ mod tests {
                 330,
             ),
         ]);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         assert!(records[0].kinds.is_empty());
         assert_eq!(records[0].about, None);
     }
@@ -814,7 +985,7 @@ mod tests {
             ),
             claim("Q2", ".KTW", "ktw.com.pl", "magazine", "Polish magazine"),
         ]);
-        let mut records = builder.finish(None);
+        let mut records = records_of(builder.finish(None));
         records.sort_by(|a, b| a.domain.cmp(&b.domain));
         let domains: Vec<&str> = records
             .iter()
@@ -834,7 +1005,7 @@ mod tests {
         nyt.names = vec!["NYT".into(), "New York Times".into()];
         let mut builder = Builder::new();
         builder.add_official_sites(&[nyt, site("Q2", "NYT Company", "nytimes.com")]);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         assert_eq!(
             records[0].aliases,
             ["The New York Times", "NYT Company", "NYT", "New York Times"]
@@ -876,7 +1047,7 @@ mod tests {
         let mut builder = Builder::new();
         builder.add_official_sites(&sites);
         assert_eq!(builder.len(), 2);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         let five = records.iter().find(|r| r.domain == "five.com").unwrap();
         assert!(five.signals.official_site);
         assert_eq!(
@@ -943,7 +1114,7 @@ mod tests {
         }
         let mut builder = Builder::new();
         builder.add_official_sites(&sites);
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         let get = |domain: &str| records.iter().find(|r| r.domain == domain);
         let nba = get("nba.com").unwrap();
         assert!(nba.signals.official_site);
@@ -1086,7 +1257,7 @@ mod tests {
             .insert("good.com".into());
         builder.add_wat(&extract);
 
-        let records = builder.finish(None);
+        let records = records_of(builder.finish(None));
         assert_eq!(records.len(), 1, "{records:?}");
         assert_eq!(records[0].domain, "good.com");
         assert_eq!(records[0].signals.tranco_rank, Some(2));
@@ -1114,12 +1285,12 @@ mod tests {
             let mut builder = Builder::new();
             if wat_first {
                 builder.add_wat(&extract);
-                builder.add_records([crawled.clone()]);
+                builder.add_sites([crawled.clone().stored_item_as_is()]);
             } else {
-                builder.add_records([crawled.clone()]);
+                builder.add_sites([crawled.clone().stored_item_as_is()]);
                 builder.add_wat(&extract);
             }
-            let record = builder.finish(None).remove(0);
+            let record = records_of(builder.finish(None)).remove(0);
             assert_eq!(record.title.as_deref(), Some("From crawl"), "{wat_first}");
             assert_eq!(record.description.as_deref(), Some("WAT description"));
             assert_eq!(record.url.as_deref(), Some("https://x.com/"));
@@ -1143,7 +1314,7 @@ mod tests {
         let mut builder = Builder::new();
         builder.add_wat(&extract);
         builder.add_wat(&extract);
-        let record = builder.finish(None).remove(0);
+        let record = records_of(builder.finish(None)).remove(0);
         assert_eq!(record.link_texts.len(), MAX_LINK_TEXTS);
         assert_eq!(record.link_texts[0].text, "text 99");
         // Adding the same WAT data twice counts its sites once.
@@ -1171,7 +1342,7 @@ mod tests {
         let top: Vec<String> = builder
             .finish(Some(2))
             .into_iter()
-            .map(|r| r.domain)
+            .map(|site| site.id)
             .collect();
         assert_eq!(top, ["a.com", "b.com"]);
     }
@@ -1215,5 +1386,446 @@ mod tests {
         for n in [0, 1, 5, 13, 30, 59, 60, 1000] {
             assert_eq!(builder().finish(Some(n)), full[..n.min(60)], "top {n}");
         }
+    }
+
+    #[test]
+    fn names_and_kinds_go_in_as_a_record_takes_them() {
+        let long = "x".repeat(MAX_TEXT_CHARS + 10);
+        let mut names = vec![
+            "Acme\u{7} Corporation",
+            "  Ste\u{301}phane \t Inc ",
+            "St\u{e9}phane Inc",
+            "",
+            " \u{a0} ",
+            "ACME corporation",
+            "a\u{85}b",
+            &long,
+        ];
+        let more: Vec<String> = (0..MAX_ALIASES).map(|i| format!("Name {i}")).collect();
+        names.extend(more.iter().map(String::as_str));
+        let mut kinds = vec![
+            "bank",
+            "Banks",
+            "",
+            "website",
+            "sports\u{a0} league",
+            "Sports league",
+            "maker of\u{7} anvils",
+            &long,
+        ];
+        let more: Vec<String> = (0..MAX_KINDS).map(|i| format!("kind {i}")).collect();
+        kinds.extend(more.iter().map(String::as_str));
+        let mut record = SiteRecord::new("acme.com");
+        let mut held = site::new("acme.com");
+        for name in &names {
+            record.add_alias(name);
+            add_name(&mut held, name);
+        }
+        for kind in &kinds {
+            record.add_kind(kind);
+            add_kind(&mut held, kind);
+        }
+        assert_eq!(held, record.stored_item_as_is());
+    }
+
+    /// What the builder made of `tranco` and `sites` while it held every
+    /// site as its item: each rank set on the site's item as it came
+    /// ([`Sites::entry`]), and each site merged in ([`Sites::upsert`]).
+    fn held_as_items(tranco: &[TrancoEntry], sites: &[Item], ranks_first: bool) -> Vec<Item> {
+        let rank = |held: &mut Sites| {
+            for entry in tranco {
+                let domain = canonical_domain(&entry.domain).unwrap();
+                let site = held.entry(&domain);
+                let mut signals = site::signals(site);
+                signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
+                site::set_signals(site, &signals);
+            }
+        };
+        let mut held = Sites::new();
+        if ranks_first {
+            rank(&mut held);
+        }
+        held.extend(sites.iter().cloned());
+        if !ranks_first {
+            rank(&mut held);
+        }
+        held.into_sorted_vec()
+    }
+
+    #[test]
+    fn sites_known_by_their_ranks_alone_are_the_items_they_were() {
+        let tranco: Vec<TrancoEntry> = [
+            (5, "gone.example"),
+            (3, "crawled.example"),
+            (9, "Ranked.EXAMPLE"),
+            (4, "bot.example"),
+            (2, "crawled.example"),
+        ]
+        .into_iter()
+        .map(|(rank, domain)| TrancoEntry {
+            rank,
+            domain: domain.into(),
+        })
+        .collect();
+        let mut gone = SiteRecord::new("gone.example");
+        gone.title = Some("Gone".into());
+        gone.aliases = vec!["Gone Inc".into()];
+        gone.crawl_attempted_at = Some(1_791_000_000);
+        gone.crawl_failures = 3;
+        gone.gone_at = Some(1_791_000_000);
+        let mut crawled = SiteRecord::new("crawled.example");
+        crawled.title = Some("Crawled".into());
+        crawled.aliases = vec!["Cra\u{301}wled  Co\u{7}".into()];
+        crawled.crawled_at = Some(1_791_605_520);
+        crawled.signals.tranco_rank = Some(7);
+        crawled.add_link_text("crawled", "a.example");
+        let mut check = SiteRecord::new("bot.example");
+        check.title = Some("Just a moment...".into());
+        check.crawled_at = Some(1_791_605_520);
+        let mut page = SiteRecord::new("page.example");
+        page.description = Some("A page no list ranks".into());
+        let sites: Vec<Item> = [gone, crawled, check, page]
+            .into_iter()
+            .map(SiteRecord::stored_item_as_is)
+            .collect();
+        for ranks_first in [true, false] {
+            let want = held_as_items(&tranco, &sites, ranks_first);
+            for top in [None, Some(0), Some(2), Some(4), Some(9)] {
+                let mut builder = Builder::new();
+                if ranks_first {
+                    builder.add_tranco(&tranco);
+                }
+                builder.add_sites(sites.iter().cloned());
+                if !ranks_first {
+                    builder.add_tranco(&tranco);
+                }
+                assert_eq!(builder.len(), want.len());
+                let kept = top.unwrap_or(want.len()).min(want.len());
+                assert_eq!(builder.finish(top), want[..kept], "{ranks_first} {top:?}");
+            }
+        }
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures")
+            .join(name)
+    }
+
+    /// A site as a stored line ([`plumb_core::stored`]), as a records
+    /// file holds it.
+    fn line(site: &Item) -> String {
+        String::from_utf8(plumb_core::stored::item_as_line(site).unwrap()).unwrap()
+    }
+
+    /// What [`builds_what_the_golden_file_holds`] adds: the fixtures, and
+    /// seed data made by hand that differs in what building reads.
+    struct Golden {
+        tranco: Vec<TrancoEntry>,
+        cc_ranks: Vec<CcRank>,
+        wat: WatExtract,
+        official: Vec<OfficialSite>,
+        records: Vec<SiteRecord>,
+    }
+
+    impl Golden {
+        fn new() -> Self {
+            let mut tranco = load_tranco(&fixture("tranco.csv"), None).unwrap();
+            for (rank, domain) in [
+                (0, "zero.com"),
+                (3, "WWW.Example.COM"),
+                (7, "example.com"),
+                (9, ""),
+                (12, "acme.com"),
+                (15, "ycombinator.com"),
+                (16, "münchen.de"),
+                (18, "nba.com"),
+                (19, "co.uk"),
+            ] {
+                tranco.push(TrancoEntry {
+                    rank,
+                    domain: domain.into(),
+                });
+            }
+            let mut cc_ranks = load_cc_domain_ranks(&fixture("cc-domain-ranks.txt"), None).unwrap();
+            for (harmonic_rank, pagerank_rank, domain) in [
+                (2, Some(1), "acme.com"),
+                (0, Some(3), "zero.com"),
+                (4, None, "example.com"),
+                (6, Some(0), "stephane.fr"),
+                (8, Some(9), "Example.COM"),
+            ] {
+                cc_ranks.push(CcRank {
+                    domain: domain.into(),
+                    harmonic_rank,
+                    pagerank_rank,
+                    n_hosts: None,
+                });
+            }
+            let mut wat = WatExtract::new();
+            parse_wat(&fixture("sample.wat"), &mut wat).unwrap();
+            let homepage =
+                |domain: &str, title: &str, site_name: Option<&str>| crate::HomepageMeta {
+                    domain: domain.into(),
+                    url: format!("https://www.{domain}/"),
+                    title: Some(title.into()),
+                    description: Some(format!("  All about {domain}\u{7} ")),
+                    site_name: site_name.map(str::to_string),
+                };
+            for (domain, title, site_name) in [
+                ("acme.com", " Acme\u{7} Anvils ", Some("ACME  Corp")),
+                ("stephane.fr", "Ste\u{301}phane", Some("Ste\u{301}phane")),
+                ("example.com", "Example Domain", None),
+                ("usbank.com", "Sorry...", Some("U.S. Bank")),
+            ] {
+                wat.homepages
+                    .insert(domain.into(), homepage(domain, title, site_name));
+            }
+            let anchors = wat.anchors.entry("acme.com".into()).or_default();
+            anchors.insert("acme".into(), linker_bit("a.com") | linker_bit("b.com"));
+            anchors.insert("Acme Corp".into(), linker_bit("c.com"));
+            anchors.insert(String::new(), linker_bit("d.com"));
+            wat.linking_domains
+                .entry("acme.com".into())
+                .or_default()
+                .extend(["a.com", "b.com", "c.com"].map(String::from));
+
+            let mut official =
+                load_wikidata_official_sites(&fixture("wikidata-official-sites.tsv")).unwrap();
+            let claim =
+                |item: &str, label: &str, url: &str| OfficialSite::new(item, label, url).unwrap();
+            let mut acme = claim("Q9001", " Acme\u{7} Corporation ", "https://www.acme.com/");
+            acme.names = vec![
+                "ACME".into(),
+                "Acme  Corp".into(),
+                "acme corporation".into(),
+                "Ste\u{301}phane Acme".into(),
+            ];
+            acme.country = Some("US".into());
+            acme.kinds = vec![
+                "Anvil maker".into(),
+                "anvil makers".into(),
+                "business".into(),
+                "Caf\u{e9}\u{301}".into(),
+            ];
+            acme.about = Some("  maker of\tanvils\u{7} ".into());
+            acme.intro = Some("Acme is a\u{85}company.".into());
+            acme.sitelinks = 40;
+            official.push(acme.clone());
+            // The same item claiming the same front page again.
+            official.push(acme);
+            let mut stephane = claim("Q9002", "Ste\u{301}phane", "https://stephane.fr/");
+            stephane.country = Some("FR".into());
+            stephane.sitelinks = 3;
+            official.push(stephane);
+            // A label that is only the item's id.
+            official.push(claim("Q9003", "Q9003", "https://example.com/"));
+            // Six items claim a front page, one far better known than the
+            // others and named by the domain; six no better known than each
+            // other claim another.
+            let mut nba = claim(
+                "Q9010",
+                "National Basketball Association",
+                "https://www.nba.com/",
+            );
+            nba.names = vec!["NBA".into()];
+            nba.sitelinks = 300;
+            nba.kinds = vec!["sports league".into()];
+            nba.about = Some("North American professional basketball league".into());
+            official.push(nba);
+            for i in 1..=5 {
+                let mut season = claim(
+                    &format!("Q901{i}"),
+                    &format!("2020{i} NBA season"),
+                    "https://www.nba.com/",
+                );
+                season.sitelinks = 10 + i;
+                official.push(season);
+                let mut user = claim(
+                    &format!("Q902{i}"),
+                    &format!("User {i}"),
+                    "https://shared.example.com/",
+                );
+                user.sitelinks = 5;
+                official.push(user);
+            }
+            official.push(claim("Q9026", "User 6", "https://shared.example.com/"));
+            // Two items of one front page, neither far better known: only
+            // what they agree on counts.
+            for (item, label, country, kinds) in [
+                (
+                    "Q9031",
+                    "X Corp.",
+                    "US",
+                    ["social media company", "company"],
+                ),
+                ("Q9032", "X.com", "US", ["online bank", "company"]),
+            ] {
+                let mut x = claim(item, label, "https://x.com/");
+                x.country = Some(country.into());
+                x.kinds = kinds.map(String::from).to_vec();
+                x.about = Some(format!("{label}, a company"));
+                x.sitelinks = 20;
+                official.push(x);
+            }
+            // An inner page naming its site, and one that does not.
+            official.push(claim(
+                "Q9041",
+                "Perplexity AI",
+                "https://www.perplexity.ai/hub/",
+            ));
+            official.push(claim("Q9042", "Rocky", "https://bit.ly/RockyCollection"));
+            // Sites on subdomains, one with its parent here.
+            let mut news = claim("Q9051", "Hacker News", "https://news.ycombinator.com/");
+            news.about = Some("social news website".into());
+            official.push(news);
+            official.push(claim(
+                "Q9052",
+                "Y Combinator",
+                "https://www.ycombinator.com/",
+            ));
+            official.push(claim(
+                "Q9053",
+                "Google Scholar",
+                "https://scholar.google.com/",
+            ));
+            // A disambiguation page, which claims nothing.
+            let mut nothing = claim("Q9061", "Acme", "https://www.acme.com/");
+            nothing.kinds = vec!["Wikimedia disambiguation page".into()];
+            official.push(nothing);
+            // An international domain name.
+            official.push(claim("Q9071", "München", "https://www.münchen.de/"));
+
+            let mut records = Vec::new();
+            let mut crawled = SiteRecord::new("Acme.COM");
+            crawled.url = Some("HTTPS://WWW.Acme.com/index%2ehtml?".into());
+            crawled.title = Some("  Acme\u{7} Anvils, crawled ".into());
+            crawled.aliases = vec!["Acme Corporation".into(), "Acme\u{a0}Inc".into()];
+            crawled.headings = vec!["Anvils".into(), " ".into()];
+            crawled.crawled_at = Some(1_791_605_520);
+            crawled.crawl_attempted_at = Some(1_791_605_600);
+            crawled.crawl_version = 7;
+            crawled.add_link_text("acme", "e.com");
+            crawled.signals.linking_domains = 9;
+            records.push(crawled);
+            let mut stale = SiteRecord::new("example.com");
+            stale.signals.tranco_rank = Some(1);
+            stale.signals.official_site = true;
+            stale.aliases = vec!["Example".into()];
+            stale.kinds = vec!["domain".into()];
+            stale.about = Some("reserved domain".into());
+            records.push(stale);
+            let mut check = SiteRecord::new("usbank.com");
+            check.url = Some("https://www.google.com/sorry/index".into());
+            check.title = Some("Sorry...".into());
+            check.crawled_at = Some(1_791_605_520);
+            records.push(check);
+            let mut munich = SiteRecord::new("xn--mnchen-3ya.de");
+            munich.title = Some("München".into());
+            munich.crawled_at = Some(1_791_000_000);
+            records.push(munich);
+            records.push(SiteRecord::new("not a domain"));
+            let mut gone = SiteRecord::new("gone.example");
+            gone.signals.harmonic_rank = Some(50);
+            gone.crawl_attempted_at = Some(1_791_000_000);
+            gone.crawl_failures = 7;
+            gone.gone_at = Some(1_791_000_000);
+            records.push(gone);
+            Golden {
+                tranco,
+                cc_ranks,
+                wat,
+                official,
+                records,
+            }
+        }
+
+        /// The records, each as its stored item, as a records file holds
+        /// it.
+        fn sites(&self) -> Vec<Item> {
+            let records = self.records.iter().cloned();
+            records.map(SiteRecord::stored_item_as_is).collect()
+        }
+
+        /// A builder given everything, in the order `plumb ingest` adds
+        /// it, or the other way round.
+        fn builder(&self, reversed: bool) -> Builder {
+            let mut builder = Builder::new();
+            if reversed {
+                builder.add_sites(self.sites());
+                builder.add_official_sites(&self.official);
+                builder.add_wat(&self.wat);
+                builder.add_cc_ranks(&self.cc_ranks);
+                builder.add_tranco(&self.tranco);
+            } else {
+                builder.add_tranco(&self.tranco);
+                builder.add_cc_ranks(&self.cc_ranks);
+                builder.add_wat(&self.wat);
+                builder.add_official_sites(&self.official);
+                builder.add_sites(self.sites());
+            }
+            builder
+        }
+    }
+
+    /// What the builder makes of the fixtures and of seed data made by hand
+    /// ([`Golden`]), added in the order `plumb ingest` adds them and the
+    /// other way round, whole and cut to the best few, each site as a
+    /// stored line, against `builder_golden.txt` beside this file. Written
+    /// when the builder made site records, before it made sites' items
+    /// (step 7c of the data format plan), so that the builder on items is
+    /// checked against it byte for byte. Never written again to make a test
+    /// pass: `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-ingest golden`
+    /// writes it.
+    #[test]
+    fn builds_what_the_golden_file_holds() {
+        use std::fmt::Write as _;
+        let golden = Golden::new();
+        let mut out = String::from(
+            "# What plumb-ingest's Builder makes of the fixtures and of seed data made\n\
+             # by hand, each site as a stored line. Written by\n\
+             # `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-ingest golden`.\n",
+        );
+        for (what, reversed, top) in [
+            ("in order", false, None),
+            ("reversed", true, None),
+            ("in order, the best 12", false, Some(12)),
+            ("reversed, the best 12", true, Some(12)),
+        ] {
+            let builder = golden.builder(reversed);
+            let held = builder.len();
+            let sites = builder.finish(top);
+            writeln!(out, "## {what}: {held} held, {} kept", sites.len()).unwrap();
+            for site in &sites {
+                writeln!(out, "{}", line(site)).unwrap();
+            }
+        }
+        // Each source alone.
+        for what in ["tranco", "cc ranks", "wat", "official sites", "records"] {
+            let mut builder = Builder::new();
+            match what {
+                "tranco" => builder.add_tranco(&golden.tranco),
+                "cc ranks" => builder.add_cc_ranks(&golden.cc_ranks),
+                "wat" => builder.add_wat(&golden.wat),
+                "official sites" => builder.add_official_sites(&golden.official),
+                _ => builder.add_sites(golden.sites()),
+            }
+            let sites = builder.finish(None);
+            writeln!(out, "## {what} alone: {}", sites.len()).unwrap();
+            for site in &sites {
+                writeln!(out, "{}", line(site)).unwrap();
+            }
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/builder_golden.txt");
+        if std::env::var_os("PLUMB_WRITE_GOLDEN").is_some() {
+            std::fs::write(&path, &out).unwrap();
+            return;
+        }
+        let want = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        for (n, (want, got)) in want.lines().zip(out.lines()).enumerate() {
+            assert_eq!(want, got, "{}:{} differs", path.display(), n + 1);
+        }
+        assert_eq!(want.lines().count(), out.lines().count());
     }
 }

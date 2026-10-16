@@ -3,6 +3,12 @@
 
 use super::*;
 
+/// The text a node embeds of `record`'s site, read from the records file
+/// as the line it is: its stored item as it is.
+fn text_of(record: &SiteRecord) -> String {
+    plumb_embed::site_text(&record.clone().stored_item_as_is())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_by_meaning_embeds_sites_in_the_background() {
     let dir = seeded_dir();
@@ -26,7 +32,7 @@ async fn search_by_meaning_embeds_sites_in_the_background() {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let with_text = fixture_records()
         .iter()
-        .filter(|r| !plumb_embed::site_text(r).is_empty())
+        .filter(|r| !text_of(r).is_empty())
         .count();
     while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) < with_text {
         assert!(std::time::Instant::now() < deadline, "vectors not saved");
@@ -117,14 +123,12 @@ async fn takes_site_vectors(as_set: bool) {
     // The trusted node's vectors: one for a site's very text, one for
     // other text, one for a site this node does not know.
     let records = fixture_records();
-    let mut with_text = records
-        .iter()
-        .filter(|r| !plumb_embed::site_text(r).is_empty());
+    let mut with_text = records.iter().filter(|r| !text_of(r).is_empty());
     let same = with_text.next().unwrap();
     let other = with_text.next().unwrap();
     let marker = [7i8; 32];
     let mut theirs = plumb_embed::Vectors::new(model, 32);
-    let hash = plumb_embed::text_hash(&plumb_embed::site_text(same));
+    let hash = plumb_embed::text_hash(&text_of(same));
     theirs.insert(&same.domain, hash, &marker).unwrap();
     theirs.insert(&other.domain, [9; 32], &marker).unwrap();
     theirs.insert("unknown-to-it.org", hash, &marker).unwrap();
@@ -208,10 +212,7 @@ async fn takes_site_vectors(as_set: bool) {
     // Every site with text ends with a vector: the one sent for its text
     // kept as sent, the others made here.
     let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
-    let wanted = records
-        .iter()
-        .filter(|r| !plumb_embed::site_text(r).is_empty())
-        .count();
+    let wanted = records.iter().filter(|r| !text_of(r).is_empty()).count();
     let deadline = Instant::now() + Duration::from_secs(60);
     let vectors = loop {
         if let Ok(vectors) = plumb_embed::Vectors::load(&vectors_path) {
