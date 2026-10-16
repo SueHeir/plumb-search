@@ -7,6 +7,10 @@
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
 - Such a node can go back to 0.4.0, which reads either form, but not to 0.3.1, which can't read the new lines.
 
+### Private search
+
+- The private search page now gets each site of a bucket as its item in Plumb's data format, trimmed, in place of the site's trimmed record (`GET /api/buckets/{table}/{n}`). Buckets come out the same size (measured on 64 buckets of a live node), and searches find and rank the same sites. The page reads both forms, so buckets a browser kept from before the upgrade still work. A private search tab left open across the upgrade can find nothing until it is reloaded.
+
 ## 0.4.0
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.4.0), and the Docker image is `ghcr.io/sueheir/plumb-search:0.4.0` (also `:0.4` and `:latest`). This release changes what nodes send each other: crawl batches and the answers to network searches now carry each site in Plumb's data format, the `site` item that signed sets already hold. A 0.4.0 node shares crawls and network searches only with other 0.4.0 nodes, so every node should move to it. The release also reads pages in their real character set, links a part of a search to the article it usually means, and trims a node's sites without holding them all in memory.
