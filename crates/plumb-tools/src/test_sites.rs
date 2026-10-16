@@ -169,18 +169,18 @@ pub(crate) fn records() -> Vec<SiteRecord> {
 }
 
 /// Writes `records` to `path` as a records file, each on a line of its
-/// own as the record's JSON, as nodes write them today, but for
-/// `rust-lang.org`, written as its stored item
-/// ([`stored::item_line`]) as a later version will write it.
+/// own as the record's JSON, as nodes up to version 0.4 wrote them, but
+/// for `rust-lang.org`, written as its stored item ([`stored::line`]) as
+/// nodes write them now.
 pub(crate) fn write(path: &Path, records: &[SiteRecord]) {
     let mut file = std::fs::File::create(path).unwrap();
     for record in records {
         let line = if record.domain == WRITTEN_AS_ITEM {
-            stored::item_line(record)
+            stored::line(record).unwrap()
         } else {
-            stored::line(record)
+            serde_json::to_vec(record).unwrap()
         };
-        file.write_all(&line.unwrap()).unwrap();
+        file.write_all(&line).unwrap();
         file.write_all(b"\n").unwrap();
     }
 }

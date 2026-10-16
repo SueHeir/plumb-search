@@ -1406,8 +1406,7 @@ pub(crate) mod tests {
         // A file that holds each site once comes back as it was, byte for
         // byte, whatever the shape of its lines and their order.
         let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
-        let item =
-            String::from_utf8(stored::item_line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        let item = String::from_utf8(stored::line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
         let clean = format!(
             "{}\n\n{}\r\n{item}\n",
             line(&record("quiet.net", 5000)),
@@ -1448,9 +1447,12 @@ pub(crate) mod tests {
     /// beside the index, against `outline_golden.txt` next to this file:
     /// the buckets other nodes take, byte for byte, and the feeds watched;
     /// and a bucket table of the same sites built in memory
-    /// ([`plumb_net::BucketTable::build`]). Written once by the build that
-    /// read records, before it moved onto items; never written again to
-    /// make a test pass (see plumb-index's `tests/golden.rs`).
+    /// ([`plumb_net::BucketTable::build`]). Written by the build that read
+    /// records, before it moved onto items, and again when the bucket
+    /// table's lines became stored items: only `records.dat` and
+    /// `records.idx` changed then, each line reading back as the record it
+    /// was. Never written again to make a test pass (see plumb-index's
+    /// `tests/golden.rs`).
     #[test]
     fn a_build_of_the_golden_sites_makes_the_golden_buckets_and_feeds() {
         use sha2::{Digest, Sha256};
@@ -1559,8 +1561,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
         let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
-        let item =
-            String::from_utf8(stored::item_line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        let item = String::from_utf8(stored::line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
         // Records not yet clean, under a domain not canonical, twice, and
         // under one that is none; a stored item; a blank line.
         let mut untidy = crawled("Cafe.COM", " Cafe\u{301}\u{7} ", 5);
@@ -1601,8 +1602,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
         let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
-        let item =
-            String::from_utf8(stored::item_line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        let item = String::from_utf8(stored::line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
         // A record not yet clean, a stored item, a line break of two bytes
         // and a blank line: copied as they are.
         let raw = line(&crawled("cafe.com", "Cafe\u{301}", 5));

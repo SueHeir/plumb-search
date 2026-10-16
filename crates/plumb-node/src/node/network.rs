@@ -1100,4 +1100,51 @@ mod tests {
         assert_eq!(other[0].domain, "delta.org");
         assert_eq!(other[1].score, 0.9);
     }
+
+    /// The crawls a node publishes are read off its records file a record
+    /// at a time, and come out the same, byte for byte as the network
+    /// carries them, whether the file's lines are the records' JSON, as
+    /// versions up to 0.4 wrote them, or stored items.
+    #[test]
+    fn published_crawls_are_the_same_whatever_the_shape_of_the_stored_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = SiteRecord::new("python.org");
+        record.url = Some("https://www.python.org/".into());
+        record.title = Some(" Welcome\u{7} to Python.org ".into());
+        record.body_text = Some("Python lets you work quickly. ".repeat(60));
+        record.key_pages = vec![plumb_core::KeyPage {
+            label: "Downloads".into(),
+            url: "https://www.python.org/downloads/".into(),
+        }];
+        record.links_to = vec!["pypi.org".into()];
+        record.signals.tranco_rank = Some(512);
+        record.crawled_at = Some(1_791_605_520);
+        record.crawl_attempted_at = Some(1_791_605_600);
+        record.crawl_failures = 1;
+        record.icon = Some("iVBORw0KGgo=".into());
+        let records = [record, SiteRecord::new("ranked.com")];
+        let read = |name: &str, line: &dyn Fn(&SiteRecord) -> Vec<u8>| {
+            let path = dir.path().join(name);
+            let mut file = Vec::new();
+            for record in &records {
+                file.extend(line(record));
+                file.push(b'\n');
+            }
+            fs::write(&path, file).unwrap();
+            let mut read = Vec::new();
+            crate::outline::for_each_record(&path, |record| read.push(record)).unwrap();
+            read
+        };
+        let old = read("old.jsonl", &|record| serde_json::to_vec(record).unwrap());
+        let new = read("new.jsonl", &|record| {
+            plumb_core::stored::line(record).unwrap()
+        });
+        assert_eq!(new, old);
+        assert_eq!(new, records);
+        let sent = |records: &[SiteRecord]| -> Vec<String> {
+            let facts = records.iter().map(crawl_facts);
+            facts.map(|facts| facts.to_line().unwrap()).collect()
+        };
+        assert_eq!(sent(&new), sent(&old));
+    }
 }

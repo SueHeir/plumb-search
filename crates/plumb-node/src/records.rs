@@ -871,8 +871,8 @@ where
 }
 
 /// [`replace_records`] with sites' stored items ([`plumb_core::site`]),
-/// each written as [`plumb_core::stored::write_item`] writes it: for now
-/// as its record's JSON, the line [`replace_records`] writes of that record.
+/// each written as [`plumb_core::stored::write_item`] writes it: the line
+/// [`replace_records`] writes of the site's record.
 pub fn replace_sites<'a, I>(path: &Path, sites: I) -> Result<usize>
 where
     I: IntoIterator<Item = &'a Item>,
@@ -1014,7 +1014,7 @@ fn canonical_file_path(path: &Path) -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{read_jsonl, write_jsonl};
+    use plumb_core::write_jsonl;
 
     use super::*;
 
@@ -1202,8 +1202,7 @@ mod tests {
                 .fold_with_check(|| {
                     checks += 1;
                     let written = folded_temp(dir.path()).is_some_and(|temp| {
-                        fs::read(temp)
-                            .is_ok_and(|bytes| serde_json::from_slice::<SiteRecord>(&bytes).is_ok())
+                        fs::read(temp).is_ok_and(|bytes| plumb_core::stored::read(&bytes).is_ok())
                     });
                     if (cancel_after_writing && written) || (!cancel_after_writing && checks == 4) {
                         anyhow::bail!("injected stop request");
@@ -1379,7 +1378,10 @@ mod tests {
         assert!(installed.get());
         assert_eq!(budget.status().reader_held_bytes, old_bytes);
         assert_fold_ledger(&budget);
-        assert_eq!(read_jsonl::<SiteRecord>(&store.path).unwrap(), expected);
+        assert_eq!(
+            plumb_core::stored::read_file(&store.path).unwrap(),
+            expected
+        );
         drop(old_reader);
         drop(lease);
         assert_fold_ledger(&budget);
@@ -1542,7 +1544,14 @@ mod tests {
         assert_eq!(set.get("held.com").unwrap().title.as_deref(), Some("Fresh"));
         assert_eq!(
             serde_json::to_string(&shared("a.com")).unwrap(),
-            r#"{"op":"refresh_shared","record":{"domain":"a.com","title":"Fresh","signals":{}}}"#
+            r#"{"op":"refresh_shared","record":{"id":"a.com","kind":"site","title":"Fresh"}}"#
+        );
+        // As versions up to 0.4 wrote it.
+        let old =
+            r#"{"op":"refresh_shared","record":{"domain":"a.com","title":"Fresh","signals":{}}}"#;
+        assert_eq!(
+            serde_json::from_str::<Change>(old).unwrap(),
+            shared("a.com")
         );
     }
 
@@ -1568,13 +1577,75 @@ mod tests {
             serde_json::to_string(&mark("a.com", None, 0)).unwrap(),
             r#"{"op":"mark","domain":"a.com","attempted_at":null,"failures":0}"#
         );
+        let merge = Change::Merge {
+            record: SiteRecord::new("a.com"),
+        };
         assert_eq!(
-            serde_json::to_string(&Change::Merge {
-                record: SiteRecord::new("a.com")
-            })
-            .unwrap(),
-            r#"{"op":"merge","record":{"domain":"a.com","signals":{}}}"#
+            serde_json::to_string(&merge).unwrap(),
+            r#"{"op":"merge","record":{"id":"a.com","kind":"site"}}"#
         );
+        // As versions up to 0.4 wrote it, the record as its own JSON.
+        let old = r#"{"op":"merge","record":{"domain":"a.com","signals":{}}}"#;
+        assert_eq!(serde_json::from_str::<Change>(old).unwrap(), merge);
+        assert_eq!(old, old_journal_line(&merge));
+    }
+
+    /// A journal's line for `change` as versions up to 0.4 wrote it, with
+    /// the change's record as the record's own JSON.
+    fn old_journal_line(change: &Change) -> String {
+        let (op, record) = match change {
+            Change::Merge { record } => ("merge", record),
+            Change::MergeShared { record } => ("merge_shared", record),
+            Change::RefreshShared { record } => ("refresh_shared", record),
+            Change::SubdomainSite { record } => ("subdomain_site", record),
+            _ => return serde_json::to_string(change).unwrap(),
+        };
+        let record = serde_json::to_string(record).unwrap();
+        format!(r#"{{"op":"{op}","record":{record}}}"#)
+    }
+
+    /// A journal written by versions up to 0.4, its records as their own
+    /// JSON, replays as one written now, with stored items, and so does
+    /// one that holds both, as a journal does that a node goes on with
+    /// once it is upgraded: loading the file as records or as sites, and
+    /// folding the journal in, come to the same.
+    #[test]
+    fn a_journal_replays_the_same_whatever_the_shape_of_its_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let changes = crate::outline::tests::file_and_journal(&path);
+        let file = fs::read(&path).unwrap();
+        RecordStore::open(&path).save(&changes).unwrap();
+        let new: Vec<String> = fs::read_to_string(journal_path(&path))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let old: Vec<String> = changes.iter().map(old_journal_line).collect();
+        assert!(new[0].starts_with(r#"{"op":"merge","record":{"id":"a.com","#));
+        assert!(old[0].starts_with(r#"{"op":"merge","record":{"domain":"a.com","#));
+        assert_eq!(new.len(), old.len());
+        let mixed: Vec<String> = (0..new.len())
+            .map(|i| if i % 2 == 0 { &old[i] } else { &new[i] }.clone())
+            .collect();
+        let replayed = |lines: &[String]| {
+            fs::write(&path, &file).unwrap();
+            fs::write(journal_path(&path), lines.join("\n") + "\n").unwrap();
+            let records = load_records(&path).unwrap().into_sorted_vec();
+            let sites = load_sites(&path).unwrap().into_sorted_vec();
+            crate::outline::outline(&path).unwrap().unwrap();
+            assert!(!journal_path(&path).exists());
+            (records, sites, fs::read_to_string(&path).unwrap())
+        };
+        let now = replayed(&new);
+        assert_eq!(now.0.len(), 8);
+        assert_eq!(replayed(&old), now);
+        assert_eq!(replayed(&mixed), now);
+        // The fold writes every site as its stored item.
+        assert!(now.2.lines().all(|line| line.starts_with(r#"{"id":"#)));
+        let mut folded = plumb_core::stored::read_file(&path).unwrap();
+        plumb_core::sort_by_link_score(&mut folded);
+        assert_eq!(folded, now.0);
     }
 
     #[test]
@@ -1656,7 +1727,7 @@ mod tests {
         let a = set.get("a.com").unwrap();
         assert_eq!((a.crawl_attempted_at, a.crawl_failures), (Some(6), 0));
         // The file itself is untouched until the journal is folded in.
-        let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+        let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
         assert_eq!(file, vec![record("a.com", 10), record("b.com", 20)]);
     }
 
@@ -1703,7 +1774,7 @@ mod tests {
 
         assert_eq!(store.compact(&set).unwrap(), 3);
         assert_eq!(names(dir.path()), ["records.jsonl"]);
-        let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+        let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
         assert_eq!(file, sorted(set.clone()));
         assert_eq!(
             file.iter().map(|r| r.domain.as_str()).collect::<Vec<_>>(),
@@ -1822,11 +1893,14 @@ mod tests {
         munich.title = Some("München".into());
         munich.signals.harmonic_rank = Some(5_000);
         let mut lines = fs::read(&path).unwrap();
+        // The record's JSON, as versions up to 0.4 wrote it, and a stored
+        // item.
+        let record_line = |record: &SiteRecord| serde_json::to_vec(record).unwrap();
         for line in [
-            plumb_core::stored::line(&check).unwrap(),
-            plumb_core::stored::line(&bank).unwrap(),
-            plumb_core::stored::line(&SiteRecord::new("not a domain")).unwrap(),
-            plumb_core::stored::item_line(&munich).unwrap(),
+            record_line(&check),
+            record_line(&bank),
+            record_line(&SiteRecord::new("not a domain")),
+            plumb_core::stored::line(&munich).unwrap(),
         ] {
             lines.extend(line);
             lines.extend(b"\n\n");

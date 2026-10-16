@@ -5,9 +5,9 @@
 //! shapes, the time to read them, and the memory a sample of sites takes
 //! held in each. And how many sites cleaning changes
 //! ([`SiteRecord::clean`]), and the time it takes, first and once clean;
-//! and the bytes of the stored items a node would write
-//! ([`plumb_core::stored::item_line`]), the time to read them, and how many
-//! do not read back as their clean site.
+//! and the bytes of the stored items a node writes of the clean sites
+//! ([`plumb_core::stored::line`]), the time to read them, and how many do
+//! not read back as their clean site.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -133,14 +133,20 @@ pub fn run(args: &SiteItemsArgs) -> Result<()> {
 impl Report {
     fn add(&mut self, line: &str, args: &SiteItemsArgs) {
         let examples = args.examples;
-        let started = Instant::now();
         let Ok(record) = plumb_core::stored::read(line.as_bytes()) else {
             self.unreadable += 1;
             return;
         };
+        // As the record's JSON, whatever the shape of the file's line.
+        let Ok(json) = serde_json::to_vec(&record) else {
+            self.unreadable += 1;
+            return;
+        };
+        let started = Instant::now();
+        std::hint::black_box(serde_json::from_slice::<SiteRecord>(&json).ok());
         self.record_read += started.elapsed();
         self.sites += 1;
-        self.record_bytes += line.len() as u64 + 1;
+        self.record_bytes += json.len() as u64 + 1;
         let mut clean = record.clone();
         let started = Instant::now();
         clean.clean();
@@ -149,7 +155,7 @@ impl Report {
         let started = Instant::now();
         clean.clean();
         self.clean_again_time += started.elapsed();
-        if let Ok(stored) = plumb_core::stored::item_line(&record) {
+        if let Ok(stored) = plumb_core::stored::line(&clean) {
             self.stored_bytes += stored.len() as u64 + 1;
             let started = Instant::now();
             let back = plumb_core::stored::read(&stored);

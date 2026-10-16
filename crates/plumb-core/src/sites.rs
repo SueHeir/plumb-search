@@ -230,7 +230,7 @@ mod tests {
             let site = site.unwrap_or_else(|| panic!("{what}: {domain} is missing"));
             assert_eq!(site, &record.to_stored_item(), "{what}: {domain}");
             let line = serde_json::to_vec(site).unwrap();
-            assert_eq!(line, stored::item_line(record).unwrap(), "{what}: {domain}");
+            assert_eq!(line, stored::line(record).unwrap(), "{what}: {domain}");
         }
     }
 

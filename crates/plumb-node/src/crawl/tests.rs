@@ -4,7 +4,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use plumb_core::{read_jsonl, write_jsonl};
+use plumb_core::write_jsonl;
 use plumb_crawl::{CrawledPage, OutLink, PageMeta};
 
 use super::*;
@@ -482,11 +482,11 @@ fn every_batch_is_saved_before_and_after_it_is_fetched() {
     );
 
     // The file itself waits for the journal to be folded in.
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+    let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
     assert_eq!(file, sites(5));
     store.compact(&set).unwrap();
     assert!(!journal_path(&path).exists());
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+    let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
     let order: Vec<&str> = file.iter().map(|r| r.domain.as_str()).collect();
     assert_eq!(
         order,
@@ -841,7 +841,7 @@ fn the_journal_is_folded_in_as_it_grows() {
     .unwrap();
     // Each batch's marks go to a fresh journal before it is fetched.
     assert_eq!(journal_seen, [true, true, true]);
-    let file: Vec<SiteRecord> = read_jsonl(&path).unwrap();
+    let file: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
     assert!(file.iter().all(|r| r.crawled_at.is_some()));
 }
 

@@ -5,12 +5,12 @@
 # `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-node --lib golden`; see
 # plumb-index's tests/golden.rs before writing it again.
 docs 175
-buckets records.dat 25973 bytes de367985bc36873bcdf1d7feb7d75ab9d96d4d4cc05e9bf47cec3be84dc23ad1
-buckets records.idx 1416 bytes 59a4267bdcf2d7dbd08d84c10b82661778b5e6b96357ec72445c9b7190ab9ba9
+buckets records.dat 27480 bytes 6381e942b914a757c7d9267ffe0ac013e0717969d000c7eda7cfe637bbb39d71
+buckets records.idx 1416 bytes 3ba5197348c649a3d6148b094a782cf095cb0d23d847035ec8d9ce43d49d50fe
 buckets buckets.idx 131080 bytes 6a2c5b9d13aaa7a3dbea8c9c098fd5fceb1fed5db38a54df8f8c99c44bf4f6ab
 buckets buckets.dat 3780 bytes d7d96544889baa7f0ae5d11efd7eb6e5ac8071a8a2b396ef3fe8c56b59d772f9
-table records.dat 26365 bytes c33dfb6f97a77c601549b5845088ba72767765e4ce4ad4c22d96427f474ccec2
-table records.idx 1416 bytes f3f597154238c6aee92be49c4c71ce8c6daa03c632883b3b9b5b31c71845002f
+table records.dat 27861 bytes 161cce031004a23b4128629122474e28403bc41f8103f8ebf99ec43c98587e3b
+table records.idx 1416 bytes 96f7e58a4c5fd94207ba361e0d22d00a26130b3a8e5cf635706350a7a167aedd
 table buckets.idx 131080 bytes cd9f8081fc3442dcf58925156ef40579e7e15c6d821ce8544d5949b8accc6d1c
 table buckets.dat 3796 bytes ec80e93eaacbe742a09fc64e3f5aa1d5a8ccf6b7aee65ceb5c2f50b1b8c5b605
 feed {"domain":"google.com","homepage":"https://google.com/","next_at":0,"gap":0}
