@@ -438,8 +438,9 @@ impl Model {
     }
 
     /// The model that puts a search's first [`LEARNED_SITES`] sites in
-    /// order ([`reorder_sites`]), trained on the sites `eval/` lists
-    /// (`plumb-tools train-rank --rows 100`).
+    /// order ([`reorder_sites`]), trained on the sites `eval/` lists and
+    /// on an LLM's grades of the sites other searches list (`plumb-tools
+    /// train-rank --rows 100`).
     pub fn sites() -> &'static Model {
         static MODEL: OnceLock<Model> = OnceLock::new();
         MODEL.get_or_init(|| {
