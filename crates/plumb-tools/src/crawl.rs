@@ -269,7 +269,11 @@ mod tests {
         let mut store = RecordStore::open(&path);
         let mut late = SiteRecord::new("late.com");
         late.title = Some("Saved before a crash".into());
-        store.save(&[Change::Merge { record: late }]).unwrap();
+        store
+            .save(&[Change::Merge {
+                site: late.stored_item_as_is(),
+            }])
+            .unwrap();
         drop(store);
         crawl_file(&crawl_args(&path, None, 0), |_| unreachable!()).unwrap();
         assert!(!journal_path(&path).exists());

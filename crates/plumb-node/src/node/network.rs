@@ -58,6 +58,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use plumb_core::{now_unix, SiteRecord};
+use plumb_format::Item;
 use plumb_index::Hit;
 use plumb_net::popularity::report_epoch;
 use plumb_net::{BucketSource, NetHandle, PickLog, PopularityTable, Report};
@@ -65,7 +66,7 @@ use tracing::{debug, info, warn};
 
 use super::{Inner, MB};
 use crate::icons::{self, IconStore};
-use crate::records::{Change, RecordStore};
+use crate::records::{Change, ChangeLines, RecordStore};
 
 /// Records from other nodes that make a node rebuild its index before the
 /// next refresh.
@@ -689,6 +690,10 @@ fn append_inbox_reserved(
         bytes: Vec::new(),
         limit: MAX_INBOX_PAYLOAD,
     };
+    // The network hands the node records until it carries items (step 9
+    // of the data format plan): here they enter the store, each written as
+    // its stored item as it is (`stored::write`), the line the inbox is
+    // read back from as the site's item (`read_inbox`).
     for record in records {
         plumb_core::stored::write(&mut lines, record).context(UnsupportedInboxPayload)?;
         lines.write_all(b"\n").context(UnsupportedInboxPayload)?;
@@ -813,26 +818,26 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     // its topics and official websites (see super::trim).
     let topics = (!super::trim::takes_new_sites(inner)).then(|| inner.keep_topics());
     // Saved a part at a time, so an inbox of many thousand records is never
-    // all in memory.
-    let mut changes = Vec::with_capacity(ABSORB_CHUNK);
+    // all in memory, and each change held as the journal's line.
+    let mut changes = ChangeLines::default();
     let mut n = 0;
-    read_inbox(BufReader::new(file), |mut record| {
-        keep_shared_icon(&icons, &mut record);
-        changes.push(match &topics {
-            Some(topics) if !super::trim::keeps_new_site(&record, topics) => {
-                Change::RefreshShared { record }
+    read_inbox(BufReader::new(file), |mut site| {
+        keep_shared_icon(&icons, &mut site);
+        changes.push(&match &topics {
+            Some(topics) if !super::trim::keeps_new_site(&site, topics) => {
+                Change::RefreshShared { site }
             }
-            _ => Change::MergeShared { record },
-        });
+            _ => Change::MergeShared { site },
+        })?;
         if changes.len() >= ABSORB_CHUNK {
-            store.save(&changes)?;
+            store.save_lines(&changes)?;
             n += changes.len() as u64;
             changes.clear();
         }
         Ok(())
     })
     .with_context(|| format!("reading {}", paths.absorbing.display()))?;
-    store.save(&changes)?;
+    store.save_lines(&changes)?;
     n += changes.len() as u64;
     drop(changes);
     if store.wants_compaction() {
@@ -848,13 +853,11 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     Ok(n)
 }
 
-/// Calls `each` with every record in the inbox `reader` reads, one a
-/// line. A line that is not one (cut short by a crash, or not even UTF-8)
-/// is skipped, so it never holds up the records after it.
-fn read_inbox(
-    mut reader: impl BufRead,
-    mut each: impl FnMut(SiteRecord) -> Result<()>,
-) -> Result<()> {
+/// Calls `each` with every site in the inbox `reader` reads, one a line,
+/// as its stored item ([`plumb_core::stored::read_item`]). A line that is
+/// not one (cut short by a crash, or not even UTF-8) is skipped, so it
+/// never holds up the sites after it.
+fn read_inbox(mut reader: impl BufRead, mut each: impl FnMut(Item) -> Result<()>) -> Result<()> {
     let (mut damaged, mut line) = (0usize, Vec::new());
     loop {
         line.clear();
@@ -864,8 +867,8 @@ fn read_inbox(
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match plumb_core::stored::read(&line) {
-            Ok(record) => each(record)?,
+        match plumb_core::stored::read_item(&line) {
+            Ok(site) => each(site)?,
             Err(_) => damaged += 1,
         }
     }
@@ -938,12 +941,17 @@ pub(super) fn keep_found(inner: &Inner, records: Vec<SiteRecord>) {
 
 /// Moves the icon a shared crawl carries into the icon store: icons are
 /// never kept in the records file.
-fn keep_shared_icon(icons: &IconStore, record: &mut SiteRecord) {
-    let Some(icon) = record.icon.take().as_deref().and_then(icons::from_shared) else {
+fn keep_shared_icon(icons: &IconStore, site: &mut Item) {
+    let shared = plumb_core::site::icon(site).map(str::to_owned);
+    if shared.is_none() {
+        return;
+    }
+    plumb_core::site::set_icon(site, None);
+    let Some(icon) = shared.as_deref().and_then(icons::from_shared) else {
         return;
     };
-    if let Err(err) = icons.put(&record.domain, Some(&icon)) {
-        warn!("cannot save the icon of {}: {err}", record.domain);
+    if let Err(err) = icons.put(&site.id, Some(&icon)) {
+        warn!("cannot save the icon of {}: {err}", site.id);
     }
 }
 
@@ -1000,15 +1008,17 @@ mod tests {
         // A 1x1 PNG is too small to be an icon: dropped, but still not kept.
         let mut tiny = SiteRecord::new("tiny.com");
         tiny.icon = Some("iVBORw0KGgo=".into());
+        let mut tiny = tiny.stored_item_as_is();
         keep_shared_icon(&icons, &mut tiny);
-        assert!(tiny.icon.is_none());
+        assert_eq!(tiny, plumb_core::site::new("tiny.com"));
         assert_eq!(icons.get("tiny.com"), None);
 
         let png = plumb_crawl::normalize_icon(&crate::icons::tests::bmp()).unwrap();
         let mut record = SiteRecord::new("a.com");
         record.icon = Some(base64::engine::general_purpose::STANDARD.encode(&png));
-        keep_shared_icon(&icons, &mut record);
-        assert!(record.icon.is_none());
+        let mut site = record.stored_item_as_is();
+        keep_shared_icon(&icons, &mut site);
+        assert_eq!(site, plumb_core::site::new("a.com"));
         assert!(icons.get("a.com").unwrap().starts_with(b"\x89PNG"));
     }
 
@@ -1027,8 +1037,8 @@ mod tests {
         inbox.extend(line("b.com"));
         inbox.extend_from_slice(b"\n");
         let mut domains = Vec::new();
-        read_inbox(inbox.as_slice(), |record| {
-            domains.push(record.domain);
+        read_inbox(inbox.as_slice(), |site| {
+            domains.push(site.id);
             Ok(())
         })
         .unwrap();

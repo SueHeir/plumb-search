@@ -249,12 +249,24 @@ fn crawls() -> Vec<Change> {
     unreached.crawl_attempted_at = Some(1_791_605_900);
     unreached.crawl_failures = 2;
     vec![
-        Change::Merge { record: site },
-        Change::Merge { record: linked },
-        Change::Merge { record: google },
-        Change::Merge { record: usbank },
-        Change::Merge { record: acme },
-        Change::Merge { record: unreached },
+        Change::Merge {
+            site: site.stored_item_as_is(),
+        },
+        Change::Merge {
+            site: linked.stored_item_as_is(),
+        },
+        Change::Merge {
+            site: google.stored_item_as_is(),
+        },
+        Change::Merge {
+            site: usbank.stored_item_as_is(),
+        },
+        Change::Merge {
+            site: acme.stored_item_as_is(),
+        },
+        Change::Merge {
+            site: unreached.stored_item_as_is(),
+        },
         Change::Mark {
             domain: "x.com".into(),
             attempted_at: Some(1_791_606_000),
@@ -312,8 +324,12 @@ async fn setup_and_the_seed_make_what_the_golden_file_holds() {
     stephane.add_alias("Ste\u{301}phane");
     RecordStore::open(&records)
         .save(&[
-            Change::Merge { record: again },
-            Change::Merge { record: stephane },
+            Change::Merge {
+                site: again.stored_item_as_is(),
+            },
+            Change::Merge {
+                site: stephane.stored_item_as_is(),
+            },
             Change::Gone {
                 domain: "linked.example".into(),
                 at: 1_791_700_200,
@@ -339,8 +355,12 @@ async fn setup_and_the_seed_make_what_the_golden_file_holds() {
     acme.aliases = vec!["Acme Mail".into()];
     RecordStore::open(&records)
         .save(&[
-            Change::Merge { record: google },
-            Change::Merge { record: acme },
+            Change::Merge {
+                site: google.stored_item_as_is(),
+            },
+            Change::Merge {
+                site: acme.stored_item_as_is(),
+            },
         ])
         .unwrap();
     super::worker::refold_seed(&inner).await.unwrap();
@@ -423,7 +443,9 @@ async fn plumb_ingest_writes_what_the_golden_file_holds() {
     found.add_link_text("found", "fans.net");
     RecordStore::open(&records)
         .save(&[
-            Change::Merge { record: found },
+            Change::Merge {
+                site: found.stored_item_as_is(),
+            },
             Change::Mark {
                 domain: "fans.net".into(),
                 attempted_at: Some(1_791_605_700),
@@ -555,12 +577,16 @@ fn write_to_embed(path: &Path) {
     let fresh = crawled("new.example", "A new site", 1_791_700_000);
     RecordStore::open(path)
         .save(&[
-            Change::Merge { record: cafe },
+            Change::Merge {
+                site: cafe.stored_item_as_is(),
+            },
             Change::Gone {
                 domain: "gone.example".into(),
                 at: 1_791_700_000,
             },
-            Change::Merge { record: fresh },
+            Change::Merge {
+                site: fresh.stored_item_as_is(),
+            },
         ])
         .unwrap();
 }

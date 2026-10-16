@@ -141,7 +141,7 @@ async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
     large.description = Some("large protected journal ".repeat(50_000));
     crate::records::RecordStore::open(&node.inner.paths.records)
         .save(&[crate::records::Change::Merge {
-            record: large.clone(),
+            site: large.clone().stored_item_as_is(),
         }])
         .unwrap();
     plumb_core::storage::create_directory(&node.inner.paths.net, Some(&budget)).unwrap();
@@ -435,7 +435,7 @@ fn a_fold_past_the_limit_installs_its_output_and_keeps_the_old_reader_charged() 
     write_jsonl(
         &journal,
         &[crate::records::Change::MergeShared {
-            record: record(0, 2),
+            site: record(0, 2).stored_item_as_is(),
         }],
     )
     .unwrap();
@@ -538,7 +538,7 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         serde_json::to_writer(
             &mut pending,
             &crate::records::Change::MergeShared {
-                record: record(i, 2),
+                site: record(i, 2).stored_item_as_is(),
             },
         )
         .unwrap();
@@ -1874,7 +1874,7 @@ fn new_topics_make_room_in_the_records_file() {
         write_jsonl(&path, &records).unwrap();
         crate::records::RecordStore::open(&path)
             .save(&[crate::records::Change::Merge {
-                record: site("seriouseats.com", 7_000, "Serious Eats cooking"),
+                site: site("seriouseats.com", 7_000, "Serious Eats cooking").stored_item_as_is(),
             }])
             .unwrap();
         assert_eq!(

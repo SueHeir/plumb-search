@@ -321,9 +321,12 @@ fn steady_change(change: Change, started: u64) -> Change {
             attempted_at: attempted_at.map(|at| steady(at, started)),
             failures,
         },
-        Change::Merge { mut record } => {
-            steady_record(&mut record, started);
-            Change::Merge { record }
+        Change::Merge { mut site } => {
+            if let Some(mut redirect) = plumb_core::site::redirect(&site) {
+                redirect.at = steady(redirect.at, started);
+                plumb_core::site::set_redirect(&mut site, Some(redirect));
+            }
+            Change::Merge { site }
         }
         change => change,
     }
