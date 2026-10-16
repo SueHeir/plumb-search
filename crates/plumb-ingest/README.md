@@ -75,7 +75,7 @@ flowchart LR
 - **`finish(top_n)`** gives each subdomain site (`news.ycombinator.com`) the ranks of its parent domain, which the rank lists only know, then keeps the `top_n` sites with the best `link_score`, best first.
 
 > [!NOTE]
-> The builder holds every record in memory. Common Crawl's ranks file lists over 100 million domains, and each million rows read takes about 0.9 GB until the records are written, so `load_cc_domain_ranks` stops at `DEFAULT_CC_RANKS_LIMIT` (1,000,000) rows unless given a limit, and `plumb ingest` reads twice `--top` rows unless `--limit-per-source` says otherwise.
+> The builder holds every site in memory, those it knows only the ranks of as their ranks and the others as their items. Common Crawl's ranks file lists over 100 million domains, and each million rows read takes about 0.9 GB until the sites are written, so `load_cc_domain_ranks` stops at `DEFAULT_CC_RANKS_LIMIT` (1,000,000) rows unless given a limit, and `plumb ingest` reads twice `--top` rows unless `--limit-per-source` says otherwise.
 
 ### Downloads
 

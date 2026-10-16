@@ -7,9 +7,9 @@ use std::collections::{hash_map::Entry, HashMap, HashSet};
 use plumb_core::site::{self, Item};
 use plumb_core::sites::Sites;
 use plumb_core::{
-    canonical_domain, collapse_whitespace, is_generic_kind, kind_key, linker_count, normalize_text,
-    parent_domain, subdomain_sites, truncate_chars, MAX_ALIASES, MAX_KINDS, MAX_LINK_TEXTS,
-    MAX_TEXT_CHARS, SUBDOMAIN_SITE_NAMES,
+    canonical_domain, collapse_whitespace, is_generic_kind, kind_key, link_score, linker_count,
+    normalize_text, parent_domain, subdomain_sites, truncate_chars, Signals, MAX_ALIASES,
+    MAX_KINDS, MAX_LINK_TEXTS, MAX_TEXT_CHARS, SUBDOMAIN_SITE_NAMES,
 };
 use tracing::{info, warn};
 
@@ -27,13 +27,52 @@ const DOMINANT_SITELINKS: u32 = 3;
 /// collected, so sources can be added in any order.
 ///
 /// What the seed names a site and what kind it is go in as records took
-/// them ([`add_name`], [`add_kind`]): with their whitespace collapsed, but
-/// not tidied as [`site::add_alias`] tidies them, so that what a node and
+/// them (`add_name`, `add_kind`): with their whitespace collapsed, but not
+/// tidied as [`site::add_alias`] tidies them, so that what a node and
 /// `plumb ingest` write of the seed stays byte for byte what it was when
 /// the builder made records.
+///
+/// Most sites of the rank lists are nothing but their ranks, and a site's
+/// item holds those in nested fields: about 2.2 kB a site, against 0.75 kB
+/// for its record. So a site the builder knows only the ranks of is held
+/// as those ranks (`Ranks`, about 0.16 kB), and becomes the item they
+/// stand for once anything else is added to it or it is kept.
 #[derive(Debug, Default)]
 pub struct Builder {
     sites: Sites,
+    /// The sites known by their ranks alone, by domain. A domain is here or
+    /// in `sites`, never in both.
+    ranked: HashMap<String, Ranks>,
+}
+
+/// The ranks of a site the rank lists are all the builder knows of: the
+/// item they stand for is a new site's ([`site::new`]) given these
+/// [`Signals`], as adding each rank to the site's item made it.
+#[derive(Debug, Clone, Copy, Default)]
+struct Ranks {
+    tranco: Option<u32>,
+    harmonic: Option<u64>,
+    pagerank: Option<u64>,
+}
+
+impl Ranks {
+    fn of(signals: &Signals) -> Self {
+        Ranks {
+            tranco: signals.tranco_rank,
+            harmonic: signals.harmonic_rank,
+            pagerank: signals.pagerank_rank,
+        }
+    }
+
+    /// The signals of the site these ranks are all that is known of.
+    fn signals(self) -> Signals {
+        Signals {
+            tranco_rank: self.tranco,
+            harmonic_rank: self.harmonic,
+            pagerank_rank: self.pagerank,
+            ..Signals::default()
+        }
+    }
 }
 
 impl Builder {
@@ -43,11 +82,66 @@ impl Builder {
 
     /// Number of distinct domains collected so far.
     pub fn len(&self) -> usize {
-        self.sites.len()
+        self.sites.len() + self.ranked.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sites.is_empty()
+        self.sites.is_empty() && self.ranked.is_empty()
+    }
+
+    /// Whether a site of `domain` is held, as an item or by its ranks.
+    fn holds(&self, domain: &str) -> bool {
+        self.sites.get(domain).is_some() || self.ranked.contains_key(domain)
+    }
+
+    /// The signals of `domain`'s site, which must be held.
+    fn signals_of(&self, domain: &str) -> Signals {
+        match self.ranked.get(domain) {
+            Some(ranks) => ranks.signals(),
+            None => self
+                .sites
+                .get(domain)
+                .map(site::signals)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The item of `domain`'s site, made of its ranks when they are all
+    /// that is known of it, or new ([`Sites::entry`]).
+    fn entry(&mut self, domain: &str) -> &mut Item {
+        let ranks = self.ranked.remove(domain);
+        let held = self.sites.entry(domain);
+        if let Some(ranks) = ranks {
+            site::set_signals(held, &ranks.signals());
+        }
+        held
+    }
+
+    /// Merges `site` into the one held for its domain, as a node's sites
+    /// take it ([`Sites::upsert`]).
+    fn upsert(&mut self, site: Item) {
+        if let Some(domain) = canonical_domain(&site.id) {
+            if self.ranked.contains_key(&domain) {
+                self.entry(&domain);
+            }
+        }
+        self.sites.upsert(site);
+    }
+
+    /// Changes the ranks of `domain`'s site, made new when it is not held:
+    /// `change` changes only ranks.
+    fn change_ranks(&mut self, domain: String, change: impl FnOnce(&mut Signals)) {
+        if self.sites.get(&domain).is_some() {
+            let held = self.sites.entry(&domain);
+            let mut signals = site::signals(held);
+            change(&mut signals);
+            site::set_signals(held, &signals);
+        } else {
+            let ranks = self.ranked.entry(domain).or_default();
+            let mut signals = ranks.signals();
+            change(&mut signals);
+            *ranks = Ranks::of(&signals);
+        }
     }
 
     /// Sets `signals.tranco_rank`.
@@ -66,10 +160,9 @@ impl Builder {
                 invalid += 1;
                 continue;
             };
-            let site = self.sites.entry(&domain);
-            let mut signals = site::signals(site);
-            signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
-            site::set_signals(site, &signals);
+            self.change_ranks(domain, |signals| {
+                signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
+            });
         }
         warn_invalid("Tranco entries", invalid);
     }
@@ -89,12 +182,11 @@ impl Builder {
                 invalid += 1;
                 continue;
             };
-            let site = self.sites.entry(&domain);
-            let mut signals = site::signals(site);
-            signals.harmonic_rank = best_rank(signals.harmonic_rank, Some(rank.harmonic_rank));
-            signals.pagerank_rank =
-                best_rank(signals.pagerank_rank, rank.pagerank_rank.filter(|&r| r > 0));
-            site::set_signals(site, &signals);
+            self.change_ranks(domain, |signals| {
+                signals.harmonic_rank = best_rank(signals.harmonic_rank, Some(rank.harmonic_rank));
+                signals.pagerank_rank =
+                    best_rank(signals.pagerank_rank, rank.pagerank_rank.filter(|&r| r > 0));
+            });
         }
         warn_invalid("Common Crawl ranks", invalid);
     }
@@ -145,7 +237,7 @@ impl Builder {
                 signals.linking_domains = u32::try_from(linkers.len()).unwrap_or(u32::MAX);
                 site::set_signals(&mut site, &signals);
             }
-            self.sites.upsert(site);
+            self.upsert(site);
         }
     }
 
@@ -227,7 +319,7 @@ impl Builder {
             }
             let claims = &claims;
             official += 1;
-            let held = self.sites.entry(domain);
+            let held = self.entry(domain);
             let mut signals = site::signals(held);
             signals.official_site = true;
             let sitelinks = claims.iter().map(|site| site.sitelinks).max().unwrap_or(0);
@@ -303,7 +395,9 @@ impl Builder {
     /// Merges ready-made sites, e.g. from a previous run or a crawl, as a
     /// node's sites take them ([`Sites::upsert`]).
     pub fn add_sites<I: IntoIterator<Item = Item>>(&mut self, sites: I) {
-        self.sites.extend(sites);
+        for held in sites {
+            self.upsert(held);
+        }
     }
 
     /// All sites, best link score first (ties broken by domain), cut to
@@ -313,29 +407,38 @@ impl Builder {
     /// sorted, and they are moved out of the set rather than copied.
     pub fn finish(mut self, top_n: Option<usize>) -> Vec<Item> {
         self.rank_subdomain_sites();
-        let total = self.sites.len();
+        let total = self.len();
         let n = match top_n {
             Some(n) if n < total => n,
-            _ => return self.sites.into_sorted_vec(),
+            _ => {
+                for (domain, ranks) in std::mem::take(&mut self.ranked) {
+                    site::set_signals(self.sites.entry(&domain), &ranks.signals());
+                }
+                return self.sites.into_sorted_vec();
+            }
         };
-        fn best_first(a: &(f32, &Item), b: &(f32, &Item)) -> Ordering {
-            b.0.total_cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id))
+        fn best_first(a: &(f32, &str), b: &(f32, &str)) -> Ordering {
+            b.0.total_cmp(&a.0).then_with(|| a.1.cmp(b.1))
         }
-        let mut scored: Vec<(f32, &Item)> = self
+        let held = self
             .sites
             .iter()
-            .map(|held| (site::link_score(held), held))
-            .collect();
+            .map(|held| (site::link_score(held), held.id.as_str()));
+        let ranked = self
+            .ranked
+            .iter()
+            .map(|(domain, ranks)| (link_score(&ranks.signals()), domain.as_str()));
+        let mut scored: Vec<(f32, &str)> = held.chain(ranked).collect();
         scored.select_nth_unstable_by(n, best_first);
         scored.truncate(n);
         scored.sort_unstable_by(best_first);
         let kept: Vec<String> = scored
             .into_iter()
-            .map(|(_, held)| held.id.clone())
+            .map(|(_, domain)| domain.to_string())
             .collect();
         info!("kept the top {n} of {total} records by link score");
         kept.iter()
-            .map(|domain| std::mem::take(self.sites.entry(domain)))
+            .map(|domain| std::mem::take(self.entry(domain)))
             .collect()
     }
 }
@@ -350,8 +453,8 @@ impl Builder {
     /// ([`SUBDOMAIN_SITE_NAMES`]).
     fn rank_subdomain_sites(&mut self) {
         for (subsite, name) in SUBDOMAIN_SITE_NAMES {
-            let parent = parent_domain(subsite).and_then(|domain| self.sites.get(domain));
-            if parent.is_some() && self.sites.get(subsite).is_none() {
+            let parent = parent_domain(subsite).is_some_and(|domain| self.holds(domain));
+            if parent && !self.holds(subsite) {
                 let held = self.sites.entry(subsite);
                 let mut signals = site::signals(held);
                 signals.official_site = true;
@@ -360,16 +463,15 @@ impl Builder {
             }
         }
         for (subsite, domain) in subdomain_sites() {
-            let (Some(_), Some(parent)) = (self.sites.get(subsite), self.sites.get(domain)) else {
+            if !(self.holds(subsite) && self.holds(domain)) {
                 continue;
-            };
-            let parent = site::signals(parent);
-            let held = self.sites.entry(subsite);
-            let mut signals = site::signals(held);
-            signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
-            signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
-            signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
-            site::set_signals(held, &signals);
+            }
+            let parent = self.signals_of(domain);
+            self.change_ranks(subsite.to_string(), |signals| {
+                signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
+                signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
+                signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
+            });
         }
     }
 }
@@ -1324,6 +1426,84 @@ mod tests {
             add_kind(&mut held, kind);
         }
         assert_eq!(held, record.stored_item_as_is());
+    }
+
+    /// What the builder made of `tranco` and `sites` while it held every
+    /// site as its item: each rank set on the site's item as it came
+    /// ([`Sites::entry`]), and each site merged in ([`Sites::upsert`]).
+    fn held_as_items(tranco: &[TrancoEntry], sites: &[Item], ranks_first: bool) -> Vec<Item> {
+        let rank = |held: &mut Sites| {
+            for entry in tranco {
+                let domain = canonical_domain(&entry.domain).unwrap();
+                let site = held.entry(&domain);
+                let mut signals = site::signals(site);
+                signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
+                site::set_signals(site, &signals);
+            }
+        };
+        let mut held = Sites::new();
+        if ranks_first {
+            rank(&mut held);
+        }
+        held.extend(sites.iter().cloned());
+        if !ranks_first {
+            rank(&mut held);
+        }
+        held.into_sorted_vec()
+    }
+
+    #[test]
+    fn sites_known_by_their_ranks_alone_are_the_items_they_were() {
+        let tranco: Vec<TrancoEntry> = [
+            (5, "gone.example"),
+            (3, "crawled.example"),
+            (9, "Ranked.EXAMPLE"),
+            (4, "bot.example"),
+            (2, "crawled.example"),
+        ]
+        .into_iter()
+        .map(|(rank, domain)| TrancoEntry {
+            rank,
+            domain: domain.into(),
+        })
+        .collect();
+        let mut gone = SiteRecord::new("gone.example");
+        gone.title = Some("Gone".into());
+        gone.aliases = vec!["Gone Inc".into()];
+        gone.crawl_attempted_at = Some(1_791_000_000);
+        gone.crawl_failures = 3;
+        gone.gone_at = Some(1_791_000_000);
+        let mut crawled = SiteRecord::new("crawled.example");
+        crawled.title = Some("Crawled".into());
+        crawled.aliases = vec!["Cra\u{301}wled  Co\u{7}".into()];
+        crawled.crawled_at = Some(1_791_605_520);
+        crawled.signals.tranco_rank = Some(7);
+        crawled.add_link_text("crawled", "a.example");
+        let mut check = SiteRecord::new("bot.example");
+        check.title = Some("Just a moment...".into());
+        check.crawled_at = Some(1_791_605_520);
+        let mut page = SiteRecord::new("page.example");
+        page.description = Some("A page no list ranks".into());
+        let sites: Vec<Item> = [gone, crawled, check, page]
+            .into_iter()
+            .map(SiteRecord::stored_item_as_is)
+            .collect();
+        for ranks_first in [true, false] {
+            let want = held_as_items(&tranco, &sites, ranks_first);
+            for top in [None, Some(0), Some(2), Some(4), Some(9)] {
+                let mut builder = Builder::new();
+                if ranks_first {
+                    builder.add_tranco(&tranco);
+                }
+                builder.add_sites(sites.iter().cloned());
+                if !ranks_first {
+                    builder.add_tranco(&tranco);
+                }
+                assert_eq!(builder.len(), want.len());
+                let kept = top.unwrap_or(want.len()).min(want.len());
+                assert_eq!(builder.finish(top), want[..kept], "{ranks_first} {top:?}");
+            }
+        }
     }
 
     fn fixture(name: &str) -> std::path::PathBuf {
