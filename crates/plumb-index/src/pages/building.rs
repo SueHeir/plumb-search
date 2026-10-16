@@ -13,7 +13,9 @@ use tantivy::TantivyDocument;
 
 use super::docs::{docs_overview, docs_symbols};
 use super::sites::{base_title, short_titles};
-use super::{Fields, Page, PageIndexStats, DOCS_SET, PAPERS_SET, POPULARITY_SCALE, WIKTIONARY_SET};
+use super::{
+    Fields, Page, PageIndexStats, SetItem, DOCS_SET, PAPERS_SET, POPULARITY_SCALE, WIKTIONARY_SET,
+};
 use crate::analysis::{self, JOINED_ANALYZER, STEMMED_ANALYZER, WORDS_ANALYZER};
 use crate::replace::Staging;
 
@@ -104,25 +106,31 @@ pub(crate) fn schema() -> (Schema, Fields) {
     )
 }
 
-/// Builds the page index of `pages` in `dir`, replacing any there.
+/// Builds the page index of `pages` in `dir`, replacing any there, each
+/// kept as its item ([`SetItem::of_page`]).
 pub fn build_page_index(
     dir: &Path,
     pages: impl IntoIterator<Item = Page>,
 ) -> Result<PageIndexStats> {
-    build_page_index_with_budget(dir, pages, None, &mut || Ok(()))
+    let items = pages.into_iter().map(|page| SetItem::of_page(&page));
+    build_page_index_with_budget(dir, items, None, &|_| true, &mut || Ok(()))
 }
 
 /// How many pages [`build_page_index_with_budget`] adds between asking
 /// whether to go on.
 pub const GO_ON_EVERY: u64 = 10_000;
 
-/// [`build_page_index`], counting against `budget`. `go_on` is asked every
-/// [`GO_ON_EVERY`] pages, and its error ends the build with `dir` as it
-/// was, so a node that stops doesn't wait for the rest.
+/// Builds the page index of the pages `items` are in `dir`, replacing any
+/// there, counting against `budget`. Each page is indexed as its item
+/// gives it ([`SetItem::page`]), and kept as the item. A page `keep`
+/// refuses is left out. `go_on` is asked every [`GO_ON_EVERY`] pages, and
+/// its error ends the build with `dir` as it was, so a node that stops
+/// doesn't wait for the rest.
 pub fn build_page_index_with_budget(
     dir: &Path,
-    pages: impl IntoIterator<Item = Page>,
+    items: impl IntoIterator<Item = SetItem>,
     budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
+    keep: &dyn Fn(&Page) -> bool,
     go_on: &mut dyn FnMut() -> Result<()>,
 ) -> Result<PageIndexStats> {
     let staging = Staging::new_with_budget(dir, budget.clone())?;
@@ -137,7 +145,10 @@ pub fn build_page_index_with_budget(
     // Sets come most read first, so the first page of a set is its most
     // read.
     let mut most_by_set: std::collections::HashMap<String, u64> = Default::default();
-    for page in pages {
+    for kept in items {
+        let Some(page) = kept.page().filter(|page| keep(page)) else {
+            continue;
+        };
         if stats.pages > 0 && stats.pages % GO_ON_EVERY == 0 {
             go_on()?;
         }
@@ -219,7 +230,7 @@ pub fn build_page_index_with_budget(
         );
         if page.set == WIKTIONARY_SET {
             document.add_text(fields.word, &page.title);
-            document.add_text(fields.page, serde_json::to_string(&page)?);
+            document.add_text(fields.page, kept.stored()?);
             writer.add_document(document)?;
             stats.pages += 1;
             continue;
@@ -281,7 +292,7 @@ pub fn build_page_index_with_budget(
         if let Some(site) = page.site.as_deref().filter(|_| page.is_article()) {
             document.add_text(fields.site, site);
         }
-        document.add_text(fields.page, serde_json::to_string(&page)?);
+        document.add_text(fields.page, kept.stored()?);
         writer.add_document(document)?;
         stats.pages += 1;
         stats.most_views = stats.most_views.max(page.views);

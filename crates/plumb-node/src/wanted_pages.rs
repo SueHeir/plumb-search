@@ -37,7 +37,7 @@ use plumb_core::article::Article;
 use plumb_core::locks::{Locked, RwLocked};
 use plumb_core::{adult_level, domain_label, registrable_domain, AdultLevel, Operators};
 use plumb_crawl::{match_words, FollowTarget, Followed, Lead, WantedPage};
-use plumb_index::pages::{Page, PageSearcher, WANTED_SET};
+use plumb_index::pages::{Page, PageSearcher, SetItem, WANTED_SET};
 use plumb_index::SearchResults;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -584,8 +584,9 @@ impl WantedPages {
         });
         plumb_index::pages::build_page_index_with_budget(
             &dir,
-            pages,
+            pages.map(|page| SetItem::of_page(&page)),
             self.budget.clone(),
+            &|_| true,
             &mut || Ok(()),
         )?;
         PageSearcher::open(&dir)

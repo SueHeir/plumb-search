@@ -73,13 +73,15 @@ About 43,000 lines, tests included.
 | Module | What it does |
 | --- | --- |
 | [pages.rs](src/pages.rs) | the page index: `Page`, `PageHit`, `PlacedPage`, `PageSearcher`, and the page score |
-| [pages/building.rs](src/pages/building.rs) | `build_page_index` from page sets |
+| [pages/building.rs](src/pages/building.rs) | `build_page_index` from page sets' items |
+| [pages/stored.rs](src/pages/stored.rs) | what the index keeps of each page, its item (`SetItem`), and reading the page back from it |
 | [pages/page.rs](src/pages/page.rs) | reading each set's rows as pages (`Page::from_set`) |
 | [pages/search.rs](src/pages/search.rs), [pages/scoring.rs](src/pages/scoring.rs) | searching pages, entities, definitions and songs, and scoring them |
 | [pages/placing.rs](src/pages/placing.rs) | `place_pages`: where each page goes among the sites, and `keep_page_rules` |
 | [pages/sites.rs](src/pages/sites.rs), [pages/named_site.rs](src/pages/named_site.rs) | pages and the sites they are about; the inner page a query names with its site |
 | [pages/docs.rs](src/pages/docs.rs), [pages/papers.rs](src/pages/papers.rs), [pages/records.rs](src/pages/records.rs), [pages/repos.rs](src/pages/repos.rs) | documentation pages, papers, records named by identifier ("rfc 3339"), repositories |
 | [items.rs](src/items.rs) | data format items read back as pages |
+| [page_items.rs](src/page_items.rs) | pages written as items (`page_item`), for `plumb-tools set from-pages` and the page index |
 | [places.rs](src/places.rs) | the places index: `parse_place_query`, `PlaceSearcher`, `build_place_index` |
 | [learned.rs](src/learned.rs), [learned/net.rs](src/learned/net.rs) | the learned ranking: features, trees or a small net, `reorder` |
 | [learned_model.json](src/learned_model.json) | the built-in model nodes use |
@@ -135,7 +137,7 @@ The page index is searched next to the sites: a page is found by name (some kind
 - **The model matches the features.** `learned_model.json` names the features it was trained on, and `Model::from_json` refuses a model whose features are not the first of `FEATURES`, in order. Add a feature at the end; renaming, reordering or removing one means training the model again.
 - **The browser ranks alike.** [plumb-private's rank.rs](../plumb-private/src/rank.rs) copies the formula and constants. A change to either needs the same change there; its tests compare the two.
 - **Ranking refactors change nothing.** A refactor must leave eval results identical on the same index. A change that moves results goes through the evals in [eval/](../../eval/README.md).
-- **The page index version.** Change `pages::PAGE_INDEX_VERSION` when the page index's fields or analysis change. A node names its page index by a key that includes it, so a new version makes nodes build the page index again.
+- **The page index version.** Change `pages::PAGE_INDEX_VERSION` when the page index's fields or analysis change, or what it keeps of a page. A node names its page index by a key that includes it, so a new version makes nodes build the page index again.
 - **The JSON shape.** `Hit`, `PlacedPage` and `SearchResults` are serialized into `/api/search`, which the Zotero plugin reads (`assembled.rows`, `pages`, `hits`). Keep them readable by it, or change both.
 - **A `Searcher` sees the index it opened.** After a rebuild, open a new one.
 
