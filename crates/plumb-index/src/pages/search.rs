@@ -1076,13 +1076,9 @@ impl PageSearcher {
             return Ok(false);
         };
         let document: TantivyDocument = searcher.doc(address)?;
-        let Some(stored) = document
-            .get_first(self.fields.page)
-            .and_then(|v| v.as_str())
-        else {
+        let Some(page) = self.read_page(&document)? else {
             return Ok(false);
         };
-        let page: Page = serde_json::from_str(stored)?;
         let title = analysis::tokens(&self.words, &page.title);
         Ok(title.iter().any(|t| t == fix) && !title.iter().any(|t| t == word))
     }
@@ -1344,13 +1340,9 @@ impl PageSearcher {
                 break;
             }
             let document: TantivyDocument = searcher.doc(address)?;
-            let Some(stored) = document
-                .get_first(self.fields.page)
-                .and_then(|v| v.as_str())
-            else {
+            let Some(page) = self.read_page(&document)? else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
             if !page.is_article() {
                 continue;
             }
@@ -1400,13 +1392,9 @@ impl PageSearcher {
             .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
         for (_, address) in searcher.search(term(self.fields.keys, word).as_ref(), &top)? {
             let document: TantivyDocument = searcher.doc(address)?;
-            let Some(stored) = document
-                .get_first(self.fields.page)
-                .and_then(|v| v.as_str())
-            else {
+            let Some(page) = self.read_page(&document)? else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
             let title = analysis::tokens(&self.joined, base_title(&page.title))
                 .pop()
                 .unwrap_or_default();
@@ -1466,13 +1454,9 @@ impl PageSearcher {
             )?;
             for (_, address) in found {
                 let document: TantivyDocument = searcher.doc(address)?;
-                let Some(stored) = document
-                    .get_first(self.fields.page)
-                    .and_then(|v| v.as_str())
-                else {
+                let Some(mut page) = self.read_page(&document)? else {
                     continue;
                 };
-                let mut page: Page = serde_json::from_str(stored)?;
                 if !page.is_article() || !page.item.as_deref().is_some_and(is_item_id) {
                     continue;
                 }
@@ -1869,13 +1853,9 @@ impl PageSearcher {
         let mut best: Option<Page> = None;
         for (_, address) in searcher.search(&named, &top)? {
             let document: TantivyDocument = searcher.doc(address)?;
-            let Some(stored) = document
-                .get_first(self.fields.page)
-                .and_then(|v| v.as_str())
-            else {
+            let Some(page) = self.read_page(&document)? else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
             if page.set != WIKTIONARY_SET || !page.title.eq_ignore_ascii_case(&wanted) {
                 continue;
             }
@@ -1946,13 +1926,9 @@ impl PageSearcher {
                 searcher.search(self.language_query(&keyed).as_ref(), &top)?
             {
                 let document: TantivyDocument = searcher.doc(address)?;
-                let Some(stored) = document
-                    .get_first(self.fields.page)
-                    .and_then(|v| v.as_str())
-                else {
+                let Some(page) = self.read_page(&document)? else {
                     continue;
                 };
-                let page: Page = serde_json::from_str(stored)?;
                 let titled = analysis::tokens(&self.joined, &page.title).pop();
                 if !page.is_article() || titled.as_deref() != Some(joined.as_str()) {
                     continue;
@@ -1994,13 +1970,9 @@ impl PageSearcher {
         let mut songs = Vec::new();
         for (_, address) in searcher.search(&named, &top)? {
             let document: TantivyDocument = searcher.doc(address)?;
-            let Some(stored) = document
-                .get_first(self.fields.page)
-                .and_then(|v| v.as_str())
-            else {
+            let Some(page) = self.read_page(&document)? else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
             if page.set == MUSIC_SET {
                 songs.push(page);
             }

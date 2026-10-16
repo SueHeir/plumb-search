@@ -399,11 +399,7 @@ impl PageSearcher {
                 // The stems are not enough: "liverpool schedule" is not
                 // said by a "scheduled monument in Liverpool".
                 let document: TantivyDocument = searcher.doc(address)?;
-                let page: Option<Page> = document
-                    .get_first(self.fields.page)
-                    .and_then(|v| v.as_str())
-                    .map(serde_json::from_str)
-                    .transpose()?;
+                let page = self.read_page(&document)?;
                 let said = page.as_ref().and_then(|page| self.said(page));
                 if said.is_some_and(|said| !described.iter().all(|word| said.says(word))) {
                     continue;
@@ -455,13 +451,9 @@ impl PageSearcher {
         let mut described_repos = super::repos::DescribedRepos::default();
         for address in addresses {
             let document: TantivyDocument = searcher.doc(address)?;
-            let Some(stored) = document
-                .get_first(self.fields.page)
-                .and_then(|v| v.as_str())
-            else {
+            let Some(mut page) = self.read_page(&document)? else {
                 continue;
             };
-            let mut page: Page = serde_json::from_str(stored)?;
             page.drop_borrowed_site();
             let popularity = document
                 .get_first(self.fields.popularity)

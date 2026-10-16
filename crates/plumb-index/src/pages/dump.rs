@@ -9,7 +9,7 @@ use tantivy::postings::Postings;
 use tantivy::schema::{FieldType, IndexRecordOption, Value};
 use tantivy::{DocSet, TantivyDocument, TERMINATED};
 
-use super::{Page, PageSearcher};
+use super::PageSearcher;
 
 impl PageSearcher {
     /// Every document of the index as text, the documents in the order of
@@ -75,13 +75,5 @@ impl PageSearcher {
             }
         }
         Ok(out)
-    }
-
-    /// The page `document` holds, as a search reads it.
-    pub(crate) fn read_page(&self, document: &TantivyDocument) -> Result<Option<Page>> {
-        let stored = document
-            .get_first(self.fields.page)
-            .and_then(|v| v.as_str());
-        Ok(stored.map(serde_json::from_str).transpose()?)
     }
 }
