@@ -23,10 +23,11 @@
 //! * Crawl sharing: [`NetHandle::publish`] signs a batch of crawl results,
 //!   keeps it and announces its header on the gossip topic. A node that
 //!   hears of a batch it lacks fetches it from the node that passed the
-//!   header on (or the crawler), checks it, keeps it, and hands the records
+//!   header on (or the crawler), checks it, keeps it, and hands the sites
 //!   it accepts ([`accept_batch`](crate::batch::accept_batch)) to the
-//!   [`Agreement`] step, which hands a record to the receiver returned by
-//!   [`start`] only once two crawlers agree on it (see [`crate::agree`]).
+//!   [`Agreement`] step, which hands a site to the receiver returned by
+//!   [`start`] only once two crawlers agree on it (see [`crate::agree`]),
+//!   each as its stored item, held as its line ([`RecordDelivery`]).
 //!   On meeting a node, it asks for the batches of the last
 //!   [`CATCH_UP_EPOCHS`] epochs it missed, and every [`RELIST_MINUTES`]
 //!   asks the nodes it is connected to again for recent ones.
@@ -74,6 +75,7 @@ use libp2p::{
     Multiaddr, PeerId, Swarm,
 };
 use plumb_core::locks::Locked;
+use plumb_core::sites::SiteList;
 use plumb_core::{now_unix, SiteRecord};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -511,7 +513,7 @@ type ProfileReply = oneshot::Sender<Result<ProfileResponse>>;
 
 enum Command {
     Publish {
-        records: Vec<SiteRecord>,
+        sites: SiteList,
         reply: oneshot::Sender<Result<Option<Hash>>>,
     },
     Peers(Serving, oneshot::Sender<Vec<BucketPeer>>),
@@ -944,6 +946,9 @@ fn keep_trusted_crawls(found: &mut NetSearch, trusted: &[PeerId], now: u64) {
         let Ok((signed, _)) = proof.verify_trusted(now) else {
             continue;
         };
+        let Ok(signed) = SiteRecord::from_stored_item(&signed) else {
+            continue;
+        };
         if signed.domain != site.record.domain {
             continue;
         }
@@ -1054,8 +1059,8 @@ enum Answer {
         from: PeerId,
         made: u64,
         lines: usize,
-        accepted: Vec<SiteRecord>,
-        news: Vec<SiteRecord>,
+        accepted: SiteList,
+        news: SiteList,
         permit: Option<mpsc::OwnedPermit<RecordDelivery>>,
         saved: Result<(bool, Option<Reservation>)>,
     },

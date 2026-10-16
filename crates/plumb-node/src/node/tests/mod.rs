@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use plumb_core::sites::SiteList;
 use plumb_core::{now_unix, write_jsonl, SiteRecord};
 use plumb_index::Hit;
 use plumb_ingest::{
@@ -76,6 +77,13 @@ fn fixture_records() -> Vec<SiteRecord> {
         .iter()
         .map(|site| SiteRecord::from_stored_item(&site).unwrap())
         .collect()
+}
+
+/// `records` as the node holds the sites it publishes and takes in from
+/// the network: their stored items, each as its line.
+fn listed(records: &[SiteRecord]) -> SiteList {
+    let item = |record: &SiteRecord| record.clone().stored_item_as_is();
+    records.iter().map(item).collect()
 }
 
 /// A data directory holding the fixture records, as if put there by hand.

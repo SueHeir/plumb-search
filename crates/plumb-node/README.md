@@ -54,7 +54,7 @@ flowchart LR
 | [node/features.rs](src/node/features.rs), [node/backup.rs](src/node/backup.rs), [node/control.rs](src/node/control.rs), [node/journal.rs](src/node/journal.rs) | `features.json`; backups; the remote control token; the activity log |
 | **Records and crawling** | |
 | [records.rs](src/records.rs), [outline.rs](src/outline.rs) | `records.jsonl` and its journal, loaded whole as sites' stored items and compacted from them; reading it a site at a time and building an index, buckets and feeds from each site's stored item that way |
-| [crawl.rs](src/crawl.rs), [dead.rs](src/dead.rs), [icons.rs](src/icons.rs) | Which homepages a round fetches and how results merge (shared with `plumb-tools crawl`): a crawl's results are sites' stored items, which the journal's changes carry, and only the crawls shared with the network become records, in one place (`crawl::to_record`); dead sites; site icons |
+| [crawl.rs](src/crawl.rs), [dead.rs](src/dead.rs), [icons.rs](src/icons.rs) | Which homepages a round fetches and how results merge (shared with `plumb-tools crawl`): a crawl's results are sites' stored items, which the journal's changes carry and the crawls shared with the network are signed from; dead sites; site icons |
 | [sets.rs](src/sets.rs), [site_rules.rs](src/site_rules.rs) | Checking and reading `plumb-format` sets; signed site rules |
 | **Search features** | |
 | [meaning.rs](src/meaning.rs) | Search by meaning: models, vectors files, query embedding |

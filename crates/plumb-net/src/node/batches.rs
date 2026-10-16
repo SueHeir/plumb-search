@@ -1,5 +1,6 @@
 //! Crawl batches: publishing them, hearing of them, fetching them, and
-//! handing on the records two crawlers agree on.
+//! handing on the sites two crawlers agree on, each as its stored item
+//! held as its line ([`SiteList`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -9,7 +10,9 @@ use anyhow::Result;
 use libp2p::request_response::{self};
 use libp2p::{gossipsub, PeerId};
 use plumb_core::locks::Locked;
-use plumb_core::{now_unix, SiteRecord};
+use plumb_core::now_unix;
+use plumb_core::site;
+use plumb_core::sites::SiteList;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -29,16 +32,15 @@ use crate::proto::*;
 use crate::storage::{allocation_for, Reservation};
 use crate::store::{read_held_with_budget, BatchStore, CrawlerView};
 
-/// Starts the network side of a node. Returns its handle and the records
-/// accepted from other nodes' batches, one batch at a time. Records that
-/// carry headlines ([`SiteRecord::news`]) carry nothing else: they are
-/// trusted crawlers' feed checks, for the node's headline store.
+/// The sites accepted from one of other nodes' batches, each as its stored
+/// item. Sites that carry headlines ([`site::news`]) carry nothing else:
+/// they are trusted crawlers' feed checks, for the node's headline store.
 /// One bounded delivery with disk room held until the receiver has saved it.
 /// Call `acknowledgment.acknowledge()` after durable persistence. Unacknowledged
 /// held batches replay after restart; replay never awards credits again.
 #[derive(Debug)]
 pub struct RecordDelivery {
-    pub records: Vec<SiteRecord>,
+    pub sites: SiteList,
     pub reservation: Option<Reservation>,
     pub acknowledgment: crate::store::DeliveryAck,
 }
@@ -58,15 +60,16 @@ pub(super) fn max_delivery_bytes(records: usize) -> u64 {
 
 /// Queue only the serialized payload's allocation, including the append's
 /// possible recovery newline. News admits its complete rewrite separately.
-pub(super) fn delivery_bytes(records: &[SiteRecord]) -> Result<u64> {
-    delivery_bytes_up_to(records, u64::MAX)
+/// The payload is the sites' stored lines, as the list holds them.
+pub(super) fn delivery_bytes(sites: &SiteList) -> Result<u64> {
+    delivery_bytes_up_to(sites, u64::MAX)
 }
 
-fn delivery_bytes_up_to(records: &[SiteRecord], limit: u64) -> Result<u64> {
+fn delivery_bytes_up_to(sites: &SiteList, limit: u64) -> Result<u64> {
     use std::io::Write;
     let mut size = plumb_core::storage::ByteCount { bytes: 0, limit };
-    for record in records {
-        plumb_core::stored::write(&mut size, record)?;
+    for line in sites.lines() {
+        size.write_all(line)?;
         size.write_all(b"\n")?;
     }
     Ok(allocation_for(size.bytes.saturating_add(1)))
@@ -78,10 +81,10 @@ fn delivery_bytes_up_to(records: &[SiteRecord], limit: u64) -> Result<u64> {
 pub(super) fn queue_confirmed_delivery(
     permit: mpsc::OwnedPermit<RecordDelivery>,
     mut delivery: RecordDelivery,
-    measured: impl FnOnce(&[SiteRecord]) -> Result<u64>,
+    measured: impl FnOnce(&SiteList) -> Result<u64>,
 ) {
     if let Err(err) =
-        release_delivery_slack_with(&mut delivery.reservation, || measured(&delivery.records))
+        release_delivery_slack_with(&mut delivery.reservation, || measured(&delivery.sites))
     {
         warn!(
             "cannot reduce confirmed delivery, retaining its admission for receiver retry: {err:#}"
@@ -224,22 +227,30 @@ impl BatchRetries {
     }
 }
 
-/// `records` in runs that fit one batch each: [`MAX_BATCH_RECORDS`] lines,
-/// a record with an icon taking two (see [`Batch::sign`]).
-pub(super) fn batch_chunks(records: &[SiteRecord]) -> Vec<&[SiteRecord]> {
-    let mut chunks = Vec::new();
-    let (mut start, mut lines) = (0, 0);
-    for (i, record) in records.iter().enumerate() {
-        let need = 1 + usize::from(record.icon.is_some()) + usize::from(!record.news.is_empty());
+/// `sites` in runs that fit one batch each: [`MAX_BATCH_RECORDS`] lines,
+/// a site with an icon or headlines taking one more for each (see
+/// [`Batch::sign`]). The lines are moved, not written again.
+pub(super) fn batch_chunks(mut sites: SiteList) -> Vec<SiteList> {
+    let mut starts = Vec::new();
+    let mut lines = 0;
+    for (i, site) in sites.iter().enumerate() {
+        let need = 1
+            + usize::from(site::icon(&site).is_some())
+            + usize::from(!site::news(&site).is_empty());
         if lines + need > MAX_BATCH_RECORDS {
-            chunks.push(&records[start..i]);
-            (start, lines) = (i, 0);
+            starts.push(i);
+            lines = 0;
         }
         lines += need;
     }
-    if start < records.len() {
-        chunks.push(&records[start..]);
+    let mut chunks = Vec::with_capacity(starts.len() + 1);
+    for start in starts.into_iter().rev() {
+        chunks.push(sites.split_off(start));
     }
+    if !sites.is_empty() {
+        chunks.push(sites);
+    }
+    chunks.reverse();
     chunks
 }
 
@@ -290,15 +301,15 @@ pub(super) fn replay_agreement(
             continue;
         };
         let is_trusted = trusted.contains(&crawler);
-        let records = if crawler == me {
+        let sites = if crawler == me {
             accept_own_batch(&batch, &crawler, made)
         } else if is_trusted {
             accept_trusted_batch(&batch, &crawler, made)
         } else {
             accept_batch(&batch, &crawler, made)
         };
-        let confirmed = agreement.observe(crawler, records, made);
-        // Records resend_pending would send again.
+        let confirmed = agreement.observe(crawler, sites, made);
+        // Sites resend_pending would send again.
         if crawler != me
             && !store.delivery_ack(id, is_trusted).acknowledged()
             && (!confirmed.is_empty() || (is_trusted && !accept_news(&batch, made).is_empty()))
@@ -360,7 +371,7 @@ pub(super) fn resend_pending(
             continue;
         }
         if is_trusted {
-            confirmed.extend(accept_news(&batch, made));
+            confirmed.extend(accept_news(&batch, made).into_lines());
         }
         let acknowledgment = store.locked().delivery_ack(id, is_trusted);
         if confirmed.is_empty() || acknowledgment.acknowledged() {
@@ -403,7 +414,7 @@ pub(super) fn resend_pending(
             }
         };
         let mut delivery = RecordDelivery {
-            records: confirmed,
+            sites: confirmed,
             reservation,
             acknowledgment,
         };
@@ -423,53 +434,49 @@ pub(super) fn resend_pending(
     }
 }
 
-/// `records` by the epoch their homepage was crawled in (records not
-/// crawled, such as linked sites, in the current one), leaving out crawls
+/// `sites` by the epoch their homepage was crawled in (sites not crawled,
+/// such as linked sites, in the current one), leaving out crawls
 /// too old for other nodes to take and ones from the future. A crawl goes
 /// with the epoch before its own when it was this node's to crawl then
 /// (`assigned`) and not in its own: a crawl round picks its sites by the
 /// epoch it starts in and can run on past midnight, and a batch of an
-/// epoch takes crawls until the end of the next ([`crate::batch`]).
+/// epoch takes crawls until the end of the next ([`crate::batch`]). The
+/// sites' lines are moved, not written again.
 pub(super) fn by_crawl_epoch(
-    records: Vec<SiteRecord>,
+    sites: SiteList,
     now: u64,
     assigned: impl Fn(u64, &str) -> bool,
-) -> BTreeMap<u64, Vec<SiteRecord>> {
+) -> BTreeMap<u64, SiteList> {
     let current = epoch_of(now);
-    let mut by_epoch: BTreeMap<u64, Vec<SiteRecord>> = BTreeMap::new();
-    for record in records {
-        let epoch = match record.crawled_at.map(epoch_of) {
+    let mut by_epoch: BTreeMap<u64, SiteList> = BTreeMap::new();
+    for line in sites.into_lines() {
+        let domain = line.domain();
+        let epoch = match site::crawled(&line.item()).map(epoch_of) {
             None => current,
-            Some(own)
-                if own > 0
-                    && !assigned(own, &record.domain)
-                    && assigned(own - 1, &record.domain) =>
-            {
-                own - 1
-            }
+            Some(own) if own > 0 && !assigned(own, domain) && assigned(own - 1, domain) => own - 1,
             Some(own) => own,
         };
         if epoch + MAX_BATCH_AGE_EPOCHS > current && epoch <= current {
-            by_epoch.entry(epoch).or_default().push(record);
+            by_epoch.entry(epoch).or_default().push_line(line);
         }
     }
     by_epoch
 }
 
 impl Task {
-    /// Signs and announces `records` as batches of this node's crawls: one
-    /// per epoch the homepages were crawled in (records not crawled go with
+    /// Signs and announces `sites` as batches of this node's crawls: one
+    /// per epoch the homepages were crawled in (sites not crawled go with
     /// the current one), at most [`MAX_BATCH_RECORDS`] each. Crawls too old
     /// for other nodes to take are left out. Returns the last batch's id.
-    pub(super) fn publish(&mut self, records: Vec<SiteRecord>) -> Result<Option<Hash>> {
+    pub(super) fn publish(&mut self, sites: SiteList) -> Result<Option<Hash>> {
         let now = now_unix();
         let me = *self.swarm.local_peer_id();
         let share = self.config.share_ppm;
         let assigned = |epoch, domain: &str| is_assigned(epoch, &me, domain, share);
         let mut last = None;
-        for (epoch, records) in by_crawl_epoch(records, now, assigned) {
-            for chunk in batch_chunks(&records) {
-                if let Some(id) = self.publish_batch(chunk, epoch, now)? {
+        for (epoch, sites) in by_crawl_epoch(sites, now, assigned) {
+            for chunk in batch_chunks(sites) {
+                if let Some(id) = self.publish_batch(&chunk, epoch, now)? {
                     last = Some(id);
                 }
             }
@@ -477,22 +484,25 @@ impl Task {
         Ok(last)
     }
 
-    fn publish_batch(
-        &mut self,
-        records: &[SiteRecord],
-        epoch: u64,
-        now: u64,
-    ) -> Result<Option<Hash>> {
-        // Fresh crawls reserve their headroom before signing. This
-        // reservation remains held while the store writes, so the ledger
-        // counts it meanwhile.
+    fn publish_batch(&mut self, sites: &SiteList, epoch: u64, now: u64) -> Result<Option<Hash>> {
+        // Fresh crawls reserve their headroom before signing, by their
+        // stored lines as a JSON list. This reservation remains held while
+        // the store writes, so the ledger counts it meanwhile.
         let budget = self.storage.clone();
         let _headroom = if let Some(budget) = budget {
+            use std::io::Write;
             let mut size = crate::storage::ByteCount {
                 bytes: 0,
                 limit: crate::batch::MAX_BATCH_BYTES as u64,
             };
-            serde_json::to_writer(&mut size, records)?;
+            size.write_all(b"[")?;
+            for (i, line) in sites.lines().enumerate() {
+                if i > 0 {
+                    size.write_all(b",")?;
+                }
+                size.write_all(line)?;
+            }
+            size.write_all(b"]")?;
             Some(budget.reserve(
                 allocation_for(size.bytes.saturating_mul(2).saturating_add(4096)),
                 false,
@@ -501,7 +511,7 @@ impl Task {
             None
         };
         let share = self.config.share_ppm.min(MAX_SHARE_PPM);
-        let Some(batch) = Batch::sign(&self.key, records, epoch, share, now)? else {
+        let Some(batch) = Batch::sign(&self.key, sites, epoch, share, now)? else {
             return Ok(None);
         };
         let id = batch.id();
@@ -870,11 +880,11 @@ impl Task {
         }
         // Headlines skip agreement, as icons do: only trusted crawlers'
         // are taken, and they go to the node's headline store, not its
-        // records (records carrying only headlines; see `accept_news`).
+        // records (sites carrying only headlines; see `accept_news`).
         let news = if trusted {
             accept_news(&batch, now)
         } else {
-            Vec::new()
+            SiteList::new()
         };
         let lines = batch.records.len();
         let made = batch.header.header.created_at;

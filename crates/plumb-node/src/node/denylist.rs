@@ -19,7 +19,7 @@
 //! [`super::worker::build_from_file`]), crawls and headlines other nodes
 //! send or fill with, and its own feed checks. Records, which the node
 //! still keeps and passes on, go through the same rule ([`allow_record`]). It passes none of it on: its own crawls and headlines are
-//! published without it ([`Inner::drop_denied_records`]), it keeps and
+//! published without it ([`Inner::drop_denied_sites`]), it keeps and
 //! lists no lead for a denied page, and it relays no stored batch that
 //! names one, since a signed batch can't be passed on without it
 //! ([`plumb_net::bucket::BucketSource::denies`]). Buckets take a new entry
@@ -38,6 +38,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
+use plumb_core::sites::SiteList;
 use plumb_core::{site, SiteRecord};
 use plumb_format::deny::{Denylist, Switch};
 use plumb_format::{Item, PublicKey};
@@ -185,6 +186,19 @@ impl Inner {
         let before = records.len();
         records.retain_mut(|record| allow_record(&list, record));
         before - records.len()
+    }
+
+    /// Takes off `sites` the sites the denylist denies, and off the rest
+    /// the key pages and headlines it denies ([`allow`]), before they are
+    /// kept or passed on, each read from its line and written again
+    /// ([`SiteList::retain_mut`]). How many sites it took off.
+    pub(super) fn drop_denied_sites(&self, sites: &mut SiteList) -> usize {
+        let Some(list) = self.denylist() else {
+            return 0;
+        };
+        let before = sites.len();
+        sites.retain_mut(|site| allow(&list, site));
+        before - sites.len()
     }
 
     /// False when the denylist denies the site `record` describes; else

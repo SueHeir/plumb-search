@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{ensure, Context, Result};
 use libp2p::identity::PublicKey;
+use plumb_core::site::{self, Item};
 use plumb_core::site_item::crawl_of_line;
-use plumb_core::SiteRecord;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -165,13 +165,13 @@ impl BatchReader {
     /// [`BatchStore::proofs`] from the `sources` [`BatchStore::proof_sources`]
     /// gave.
     pub fn proofs(&mut self, sources: &[(Hash, usize)], max: usize) -> Result<Vec<RecordProof>> {
-        let mut crawls: Vec<(SiteRecord, RecordProof)> = Vec::new();
+        let mut crawls: Vec<(Item, RecordProof)> = Vec::new();
         for (id, index) in sources {
             let Some(proof) = self.proof(id, *index)? else {
                 continue;
             };
-            if let Ok(record) = SiteRecord::from_line(&proof.record) {
-                crawls.push((record, proof));
+            if let Ok(site) = site::from_line(&proof.record) {
+                crawls.push((site, proof));
             }
         }
         let group = |i: usize| -> Vec<usize> {
@@ -843,6 +843,8 @@ fn is_not_found(err: &anyhow::Error) -> bool {
 mod tests {
     use libp2p::identity::Keypair;
 
+    use plumb_core::sites::SiteList;
+
     use super::*;
     use crate::assign::{is_assigned, EPOCH_SECS, MAX_SHARE_PPM};
     use crate::batch::MAX_BATCH_AGE_EPOCHS;
@@ -853,12 +855,18 @@ mod tests {
             .map(|i| format!("q{serial}-{i}.example"))
             .find(|domain| is_assigned(epoch_of(now), &crawler, domain, MAX_SHARE_PPM))
             .unwrap();
-        let mut record = SiteRecord::new(domain);
-        record.crawled_at = Some(now);
-        record.body_text = Some("Signed crawl retained verbatim".into());
-        Batch::sign(key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-            .unwrap()
-            .unwrap()
+        let mut site = site::new(domain);
+        site::set_crawled(&mut site, Some(now));
+        site.text = Some("Signed crawl retained verbatim".into());
+        Batch::sign(
+            key,
+            &SiteList::from_iter([site]),
+            epoch_of(now),
+            MAX_SHARE_PPM,
+            now,
+        )
+        .unwrap()
+        .unwrap()
     }
 
     fn limits(
@@ -1069,12 +1077,18 @@ mod tests {
             .map(|i| format!("s{i}.com"))
             .find(|d| is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
             .unwrap();
-        let mut record = SiteRecord::new(domain.as_str());
-        record.title = Some("Hello".into());
-        record.crawled_at = Some(now - 5);
-        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-            .unwrap()
-            .unwrap();
+        let mut site = site::new(domain.as_str());
+        site.title = Some("Hello".into());
+        site::set_crawled(&mut site, Some(now - 5));
+        let batch = Batch::sign(
+            &key,
+            &SiteList::from_iter([site]),
+            epoch_of(now),
+            MAX_SHARE_PPM,
+            now,
+        )
+        .unwrap()
+        .unwrap();
 
         let mut store = BatchStore::open(dir.path()).unwrap();
         store.insert(&batch).unwrap();
@@ -1097,11 +1111,17 @@ mod tests {
         let me = Keypair::generate_ed25519();
         let other = Keypair::generate_ed25519();
         let sign = |key: &Keypair, i: u64| {
-            let mut record = SiteRecord::new(format!("s{i}.com"));
-            record.crawled_at = Some(now - 5);
-            Batch::sign(key, &[record], epoch_of(now), MAX_SHARE_PPM, now + i)
-                .unwrap()
-                .unwrap()
+            let mut site = site::new(format!("s{i}.com"));
+            site::set_crawled(&mut site, Some(now - 5));
+            Batch::sign(
+                key,
+                &SiteList::from_iter([site]),
+                epoch_of(now),
+                MAX_SHARE_PPM,
+                now + i,
+            )
+            .unwrap()
+            .unwrap()
         };
         let mine = sign(&me, 0);
         let older = sign(&other, 1);
@@ -1137,11 +1157,17 @@ mod tests {
             .map(|i| format!("site{i}.example"))
             .find(|d| is_assigned(epoch_of(now), &crawler, d, MAX_SHARE_PPM))
             .unwrap();
-        let mut record = SiteRecord::new(domain.as_str());
-        record.crawled_at = Some(now - 5);
-        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-            .unwrap()
-            .unwrap();
+        let mut site = site::new(domain.as_str());
+        site::set_crawled(&mut site, Some(now - 5));
+        let batch = Batch::sign(
+            &key,
+            &SiteList::from_iter([site]),
+            epoch_of(now),
+            MAX_SHARE_PPM,
+            now,
+        )
+        .unwrap()
+        .unwrap();
         let mut store = BatchStore::open_following(dir.path(), false).unwrap();
         store.insert(&batch).unwrap();
         assert!(store.contains(&batch.id()));
@@ -1161,14 +1187,14 @@ mod tests {
         let busy = Keypair::generate_ed25519();
         let quiet = Keypair::generate_ed25519();
         let batch = |key: &Keypair, n: usize, at: u64| {
-            let records: Vec<SiteRecord> = (0..n)
+            let sites: SiteList = (0..n)
                 .map(|i| {
-                    let mut record = SiteRecord::new(format!("s{i}-{at}.com").as_str());
-                    record.crawled_at = Some(at);
-                    record
+                    let mut site = site::new(format!("s{i}-{at}.com").as_str());
+                    site::set_crawled(&mut site, Some(at));
+                    site
                 })
                 .collect();
-            Batch::sign(key, &records, epoch_of(at), MAX_SHARE_PPM, at)
+            Batch::sign(key, &sites, epoch_of(at), MAX_SHARE_PPM, at)
                 .unwrap()
                 .unwrap()
         };
@@ -1218,11 +1244,17 @@ mod tests {
             .map(|i| format!("s{i}.com"))
             .find(|d| !is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
             .unwrap();
-        let mut record = SiteRecord::new(domain.as_str());
-        record.crawled_at = Some(now - 5);
-        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-            .unwrap()
-            .unwrap();
+        let mut site = site::new(domain.as_str());
+        site::set_crawled(&mut site, Some(now - 5));
+        let batch = Batch::sign(
+            &key,
+            &SiteList::from_iter([site]),
+            epoch_of(now),
+            MAX_SHARE_PPM,
+            now,
+        )
+        .unwrap()
+        .unwrap();
         let mut store = BatchStore::open(dir.path()).unwrap();
         store.insert(&batch).unwrap();
         assert!(store.contains(&batch.id()));
@@ -1239,12 +1271,18 @@ mod tests {
             .map(|i| format!("s{i}.com"))
             .find(|d| is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
             .unwrap();
-        let mut record = SiteRecord::new(domain.as_str());
+        let mut site = site::new(domain.as_str());
         // Crawled three days before the epoch the batch is signed in.
-        record.crawled_at = Some(now - 3 * EPOCH_SECS);
-        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-            .unwrap()
-            .unwrap();
+        site::set_crawled(&mut site, Some(now - 3 * EPOCH_SECS));
+        let batch = Batch::sign(
+            &key,
+            &SiteList::from_iter([site]),
+            epoch_of(now),
+            MAX_SHARE_PPM,
+            now,
+        )
+        .unwrap()
+        .unwrap();
         assert!(
             batch.proof(0).verify(now).is_err(),
             "a searcher would refuse it"
@@ -1273,13 +1311,19 @@ mod tests {
             .zip(["Hello there", "Hello there!", "Buy pills"])
             .enumerate()
         {
-            let mut record = SiteRecord::new(domain.as_str());
-            record.title = Some(title.into());
-            record.crawled_at = Some(now - 5);
+            let mut site = site::new(domain.as_str());
+            site.title = Some(title.into());
+            site::set_crawled(&mut site, Some(now - 5));
             let made = now - 100 + i as u64;
-            let batch = Batch::sign(key, &[record], epoch_of(now), MAX_SHARE_PPM, made)
-                .unwrap()
-                .unwrap();
+            let batch = Batch::sign(
+                key,
+                &SiteList::from_iter([site]),
+                epoch_of(now),
+                MAX_SHARE_PPM,
+                made,
+            )
+            .unwrap()
+            .unwrap();
             store.insert(&batch).unwrap();
         }
         let proofs = store.proofs(&domain, 2, now).unwrap();
@@ -1306,11 +1350,17 @@ mod tests {
             .map(|i| format!("s{i}.com"))
             .find(|d| is_assigned(epoch_of(made), &peer, d, MAX_SHARE_PPM))
             .unwrap();
-        let mut record = SiteRecord::new(domain.as_str());
-        record.crawled_at = Some(made - 5);
-        let batch = Batch::sign(&key, &[record], epoch_of(made), MAX_SHARE_PPM, made)
-            .unwrap()
-            .unwrap();
+        let mut site = site::new(domain.as_str());
+        site::set_crawled(&mut site, Some(made - 5));
+        let batch = Batch::sign(
+            &key,
+            &SiteList::from_iter([site]),
+            epoch_of(made),
+            MAX_SHARE_PPM,
+            made,
+        )
+        .unwrap()
+        .unwrap();
         let mut store = BatchStore::open(dir.path()).unwrap();
         store.insert(&batch).unwrap();
         let week = made + MAX_BATCH_AGE_EPOCHS * EPOCH_SECS;

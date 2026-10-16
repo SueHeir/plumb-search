@@ -1,9 +1,9 @@
-//! Crawl batches: the records one node's crawl produced, signed by that
+//! Crawl batches: the sites one node's crawl produced, signed by that
 //! node, so that any other node can check them whoever it got them from.
 //!
-//! A batch is a list of site records, each a `site` item of the data format
-//! ([`SiteRecord::to_line`]) kept as the exact JSON bytes that were hashed,
-//! and a [`SignedHeader`]: the crawler's public key, the epoch
+//! A batch is a list of records, each a site's `site` item of the data
+//! format ([`site::to_line`]) kept as the exact JSON bytes that were
+//! hashed, and a [`SignedHeader`]: the crawler's public key, the epoch
 //! the crawl was assigned in, the number of records and the Merkle root over
 //! them, signed with the crawler's key. Because the header commits to every
 //! record, a node can relay a batch it did not make, and a search answer can
@@ -20,14 +20,21 @@
 //! ([`accept_trusted_batch`]), like the node's own crawls, is not held to
 //! its daily assignment, and its homepages' headings and text are kept too,
 //! so search by meaning has text for them.
+//!
+//! A node signs its sites and takes in another's as their items
+//! ([`plumb_core::site`]), held as a [`SiteList`] of stored lines: what it
+//! keeps of a batch is the stored item of each site
+//! ([`plumb_core::stored`]).
 
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, ensure, Context, Result};
 use libp2p::identity::{Keypair, PublicKey};
 use libp2p::PeerId;
+use plumb_core::site::{self, Item};
 use plumb_core::site_item::SITE;
-use plumb_core::{canonical_domain, linker_bit, registrable_domain, SiteRecord};
+use plumb_core::sites::SiteList;
+use plumb_core::{canonical_domain, linker_bit, registrable_domain, LinkText};
 use serde::{Deserialize, Serialize};
 
 use crate::assign::{epoch_of, is_assigned, EPOCH_SECS, MAX_SHARE_PPM};
@@ -160,17 +167,18 @@ pub struct Batch {
 }
 
 impl Batch {
-    /// Signs `records` with `key`, each as its item. Records with invalid
-    /// domains, or that make no item, are left out, and at most
-    /// [`MAX_BATCH_RECORDS`] lines are kept, within [`MAX_BATCH_BYTES`];
-    /// `None` when none are. A record's icon ([`SiteRecord::icon`]) goes on
-    /// a line of its own after the records ([`IconLine`]), while there is
-    /// room, so proofs of the record never carry it; so do its headlines
-    /// ([`SiteRecord::news`], [`NewsLine`]), after the icons. A record
-    /// that carries nothing but headlines gets only the headlines' line.
+    /// Signs `sites` with `key`, each as the item sent of it
+    /// ([`site::to_line`]). Sites with invalid domains, or that make no
+    /// item, are left out, and at most [`MAX_BATCH_RECORDS`] lines are
+    /// kept, within [`MAX_BATCH_BYTES`]; `None` when none are. A site's
+    /// icon ([`site::icon`]) goes on a line of its own after the sites
+    /// ([`IconLine`]), while there is room, so proofs of the site never
+    /// carry it; so do its headlines ([`site::news`], [`NewsLine`]), after
+    /// the icons. A site that carries nothing but headlines gets only the
+    /// headlines' line.
     pub fn sign(
         key: &Keypair,
-        records: &[SiteRecord],
+        sites: &SiteList,
         epoch: u64,
         share_ppm: u32,
         now: u64,
@@ -179,24 +187,24 @@ impl Batch {
         let mut icons = Vec::new();
         let mut news = Vec::new();
         let mut bytes = 0;
-        for record in records.iter().take(MAX_BATCH_RECORDS) {
-            if canonical_domain(&record.domain).as_deref() != Some(record.domain.as_str()) {
+        for mut site in sites.iter().take(MAX_BATCH_RECORDS) {
+            if canonical_domain(&site.id).as_deref() != Some(site.id.as_str()) {
                 continue;
             }
-            let mut record = std::borrow::Cow::Borrowed(record);
-            if !record.news.is_empty() {
-                let items = std::mem::take(&mut record.to_mut().news);
+            let items = site::news(&site);
+            if !items.is_empty() {
+                site::set_news(&mut site, Vec::new());
                 news.push(NewsLine {
-                    news_of: record.domain.clone(),
+                    news_of: site.id.clone(),
                     items,
                 });
                 // A feed check alone says nothing else about the site.
-                if *record == SiteRecord::new(record.domain.as_str()) {
+                if site == site::new(site.id.as_str()) {
                     continue;
                 }
             }
             // An item is never over MAX_RECORD_BYTES, and holds no icon.
-            let Ok(line) = record.to_line() else {
+            let Ok(line) = site::to_line(&site) else {
                 continue;
             };
             if bytes + line.len() > MAX_BATCH_BYTES {
@@ -204,10 +212,10 @@ impl Batch {
             }
             bytes += line.len();
             lines.push(line);
-            if let Some(png) = &record.icon {
+            if let Some(png) = site::icon(&site) {
                 icons.push(IconLine {
-                    icon_of: record.domain.clone(),
-                    png: png.clone(),
+                    icon_of: site.id.clone(),
+                    png: png.to_string(),
                 });
             }
         }
@@ -321,29 +329,29 @@ pub struct RecordProof {
 
 impl RecordProof {
     /// Checks the signature and Merkle path, and that the record is a
-    /// homepage crawl of a site the crawler was assigned. Returns the
-    /// record as [`accept_batch`] would keep it, and the crawler.
-    pub fn verify(&self, now: u64) -> Result<(SiteRecord, PeerId)> {
+    /// homepage crawl of a site the crawler was assigned. Returns the site
+    /// as [`accept_batch`] would keep it, its stored item, and the crawler.
+    pub fn verify(&self, now: u64) -> Result<(Item, PeerId)> {
         let crawler = self.check_signed(now)?;
         let h = &self.header.header;
-        let record = parse_record(&self.record)?;
-        let Some(record) = accept_crawled(record, &crawler, h, now, Source::Other) else {
+        let site = parse_site(&self.record)?;
+        let Some(site) = accept_crawled(site, &crawler, h, now, Source::Other) else {
             bail!("the record is not a homepage crawl the crawler was assigned");
         };
-        Ok((record, crawler))
+        Ok((site, crawler))
     }
 
-    /// [`RecordProof::verify`] for a crawler this node trusts: the record
-    /// need not be a site the crawler was assigned, and is kept as
+    /// [`RecordProof::verify`] for a crawler this node trusts: the site
+    /// need not be one the crawler was assigned, and is kept as
     /// [`accept_trusted_batch`] would keep it, headings and text included.
-    pub fn verify_trusted(&self, now: u64) -> Result<(SiteRecord, PeerId)> {
+    pub fn verify_trusted(&self, now: u64) -> Result<(Item, PeerId)> {
         let crawler = self.check_signed(now)?;
         let h = &self.header.header;
-        let record = parse_record(&self.record)?;
-        let Some(record) = accept_crawled(record, &crawler, h, now, Source::Trusted) else {
+        let site = parse_site(&self.record)?;
+        let Some(site) = accept_crawled(site, &crawler, h, now, Source::Trusted) else {
             bail!("the record is not a homepage crawl of the batch's epoch");
         };
-        Ok((record, crawler))
+        Ok((site, crawler))
     }
 
     /// Checks only that the crawler signed the record, in a batch recent
@@ -363,10 +371,11 @@ impl RecordProof {
 }
 
 /// What a node keeps of a batch from another node, once [`Batch::check`]
-/// has passed: the records a crawl of its assigned sites could have
-/// produced, cut down to the fields a crawl can see.
+/// has passed: the sites a crawl of its assigned sites could have
+/// produced, cut down to the fields a crawl can see, each as its stored
+/// item.
 ///
-/// * A crawled homepage (a record with `crawled_at`) is kept only for sites
+/// * A crawled homepage (a site with a crawl time) is kept only for sites
 ///   the crawler was assigned in the batch's epoch, with a URL on the site
 ///   and a crawl time inside that epoch: URL, title, description, aliases
 ///   and crawl time.
@@ -378,7 +387,7 @@ impl RecordProof {
 ///
 /// Everything else (ranks, Wikidata status, crawl attempts and failures) is
 /// dropped: those come from public seed data or local bookkeeping.
-pub fn accept_batch(batch: &Batch, crawler: &PeerId, now: u64) -> Vec<SiteRecord> {
+pub fn accept_batch(batch: &Batch, crawler: &PeerId, now: u64) -> SiteList {
     accept(batch, crawler, now, Source::Other)
 }
 
@@ -386,7 +395,7 @@ pub fn accept_batch(batch: &Batch, crawler: &PeerId, now: u64) -> Vec<SiteRecord
 /// [`accept_batch`], except that its homepages need not be ones it was
 /// assigned (the operator vouches for it, so its whole crawl counts), and
 /// their headings and text are kept as well.
-pub fn accept_trusted_batch(batch: &Batch, crawler: &PeerId, now: u64) -> Vec<SiteRecord> {
+pub fn accept_trusted_batch(batch: &Batch, crawler: &PeerId, now: u64) -> SiteList {
     accept(batch, crawler, now, Source::Trusted)
 }
 
@@ -394,7 +403,7 @@ pub fn accept_trusted_batch(batch: &Batch, crawler: &PeerId, now: u64) -> Vec<Si
 /// [`accept_batch`], except that its homepages need not be ones it was
 /// assigned, since a node may fetch a disputed site to settle it (see
 /// [`crate::agree`]). Other nodes still ignore those.
-pub fn accept_own_batch(batch: &Batch, me: &PeerId, now: u64) -> Vec<SiteRecord> {
+pub fn accept_own_batch(batch: &Batch, me: &PeerId, now: u64) -> SiteList {
     accept(batch, me, now, Source::Trusted)
 }
 
@@ -407,13 +416,8 @@ enum Source {
     Trusted,
 }
 
-fn accept(batch: &Batch, crawler: &PeerId, now: u64, source: Source) -> Vec<SiteRecord> {
+fn accept(batch: &Batch, crawler: &PeerId, now: u64, source: Source) -> SiteList {
     let h = &batch.header.header;
-    let parsed: Vec<SiteRecord> = batch
-        .records
-        .iter()
-        .filter_map(|line| parse_record(line).ok())
-        .collect();
     let mut icons: HashMap<String, String> = HashMap::new();
     if source == Source::Trusted {
         for line in &batch.records {
@@ -425,60 +429,69 @@ fn accept(batch: &Batch, crawler: &PeerId, now: u64, source: Source) -> Vec<Site
             }
         }
     }
-    // Crawled homepages, each with the links other homepages of the batch
-    // made to it, and the rest.
-    let mut crawled = Vec::new();
-    let mut others = Vec::new();
-    for record in parsed {
-        if record.crawled_at.is_some() {
-            let links = (record.link_texts.clone(), record.signals.linking_domains);
-            if let Some(kept) = accept_crawled(record, crawler, h, now, source) {
-                crawled.push((kept, links));
+    // Crawled homepages, held as their lines, each with the links other
+    // homepages of the batch made to it, and of the rest only those links.
+    let mut crawled = SiteList::new();
+    let mut crawled_links: Vec<Links> = Vec::new();
+    let mut others: Vec<(String, Links)> = Vec::new();
+    for line in &batch.records {
+        let Ok(site) = parse_site(line) else {
+            continue;
+        };
+        let links = (
+            site::link_texts(&site),
+            site::signals(&site).linking_domains,
+        );
+        if site::crawled(&site).is_some() {
+            if let Some(kept) = accept_crawled(site, crawler, h, now, source) {
+                crawled.push(kept);
+                crawled_links.push(links);
             }
         } else {
-            others.push(record);
+            others.push((site.id, links));
         }
     }
     let crawled_bits: u64 = crawled
-        .iter()
-        .fold(0, |bits, (r, _)| bits | linker_bit(&r.domain));
-    let crawled_domains: HashSet<String> = crawled.iter().map(|(r, _)| r.domain.clone()).collect();
+        .domains()
+        .fold(0, |bits, domain| bits | linker_bit(domain));
+    let crawled_domains: HashSet<&str> = crawled.domains().collect();
     let max_linkers = crawled.len() as u32;
     let cap = crawled.len() * MAX_LINKED_PER_CRAWLED;
-    let mut kept: Vec<SiteRecord> = Vec::with_capacity(crawled.len());
-    for (mut record, (texts, linking)) in crawled {
-        keep_links(&mut record, &texts, linking, crawled_bits, max_linkers);
-        record.icon = icons.remove(&record.domain);
-        kept.push(record);
-    }
     let mut linked = 0;
-    for record in others {
+    let mut bare = SiteList::new();
+    for (domain, (texts, linking)) in others {
         if linked >= cap {
             break;
         }
-        if crawled_domains.contains(&record.domain) {
+        if crawled_domains.contains(domain.as_str()) {
             continue;
         }
-        let mut site = SiteRecord::new(record.domain);
-        keep_links(
-            &mut site,
-            &record.link_texts,
-            record.signals.linking_domains,
-            crawled_bits,
-            max_linkers,
-        );
-        kept.push(site);
+        let mut site = site::new(domain);
+        keep_links(&mut site, &texts, linking, crawled_bits, max_linkers);
+        bare.push(site);
         linked += 1;
     }
+    let mut kept = SiteList::new();
+    for (mut site, (texts, linking)) in crawled.into_iter().zip(crawled_links) {
+        keep_links(&mut site, &texts, linking, crawled_bits, max_linkers);
+        let icon = icons.remove(&site.id);
+        site::set_icon(&mut site, icon);
+        kept.push(site);
+    }
+    kept.extend(bare.into_lines());
     kept
 }
 
+/// The links a batch's homepages made to a site: the link text, and the
+/// count of sites linking.
+type Links = (Vec<LinkText>, u32);
+
 /// Whether a batch from a crawler this node does not trust is worth
 /// holding, given what [`accept_batch`] kept of it: at least half its lines
-/// are about a site it kept (the record, its icon or its headlines, each
-/// counted once a site). Otherwise one record it keeps would get a batch of
+/// are about a site it kept (the site, its icon or its headlines, each
+/// counted once a site). Otherwise one site it keeps would get a batch of
 /// up to [`MAX_BATCH_BYTES`] of lines it does not keep onto its disk.
-pub fn mostly_kept(batch: &Batch, kept: &[SiteRecord]) -> bool {
+pub fn mostly_kept(batch: &Batch, kept: &SiteList) -> bool {
     /// The fields naming the site, whatever the line is.
     #[derive(Deserialize)]
     struct Line {
@@ -487,7 +500,7 @@ pub fn mostly_kept(batch: &Batch, kept: &[SiteRecord]) -> bool {
         icon_of: Option<String>,
         news_of: Option<String>,
     }
-    let kept_domains: HashSet<&str> = kept.iter().map(|r| r.domain.as_str()).collect();
+    let kept_domains: HashSet<&str> = kept.domains().collect();
     let mut counted: HashSet<(u8, String)> = HashSet::new();
     for line in &batch.records {
         if line.len() > MAX_RECORD_BYTES {
@@ -535,14 +548,14 @@ pub struct NewsLine {
     pub items: Vec<plumb_core::Headline>,
 }
 
-/// The headlines a batch carries, as records holding only the site's
-/// domain and [`SiteRecord::news`]: each headline checked as a feed's are
+/// The headlines a batch carries, as sites holding only their domain and
+/// headlines ([`site::news`]): each headline checked as a feed's are
 /// ([`plumb_core::Headline::checked`]: on the site, recent, short), at
 /// most [`plumb_core::news::MAX_HEADLINES_PER_SITE`] per site. Whether to
 /// keep them is the caller's choice: a node takes them from its own and
 /// trusted crawlers only, as it does icons.
-pub fn accept_news(batch: &Batch, now: u64) -> Vec<SiteRecord> {
-    let mut out: Vec<SiteRecord> = Vec::new();
+pub fn accept_news(batch: &Batch, now: u64) -> SiteList {
+    let mut out = SiteList::new();
     for line in &batch.records {
         if line.len() > MAX_RECORD_BYTES || !line.starts_with("{\"news_of\"") {
             continue;
@@ -562,61 +575,60 @@ pub fn accept_news(batch: &Batch, now: u64) -> Vec<SiteRecord> {
         if items.is_empty() {
             continue;
         }
-        let mut record = SiteRecord::new(domain);
-        record.news = items;
-        out.push(record);
+        let mut site = site::new(domain);
+        site::set_news(&mut site, items);
+        out.push(site);
     }
     out
 }
 
-/// Reads one record from another node, with its domain made canonical.
-fn parse_record(line: &str) -> Result<SiteRecord> {
+/// Reads one site from another node, as the node takes it in
+/// ([`site::from_line`]), with its domain made canonical.
+fn parse_site(line: &str) -> Result<Item> {
     ensure!(line.len() <= MAX_RECORD_BYTES, "a record is too long");
-    let mut record = SiteRecord::from_line(line).context("a record does not read")?;
-    let Some(domain) = canonical_domain(&record.domain) else {
-        bail!("{:?} is not a registrable domain", record.domain);
+    let mut site = site::from_line(line).context("a record does not read")?;
+    let Some(domain) = canonical_domain(&site.id) else {
+        bail!("{:?} is not a registrable domain", site.id);
     };
-    record.domain = domain;
-    Ok(record)
+    site.id = domain;
+    Ok(site)
 }
 
 /// A crawled homepage from another node, cut down to what a crawl sees, or
 /// `None` when it was not the crawler's to crawl.
 fn accept_crawled(
-    record: SiteRecord,
+    mut site: Item,
     crawler: &PeerId,
     header: &BatchHeader,
     now: u64,
     source: Source,
-) -> Option<SiteRecord> {
-    let crawled_at = record.crawled_at?;
+) -> Option<Item> {
+    let crawled_at = site::crawled(&site)?;
     let in_epoch = in_crawl_window(crawled_at, header.epoch) && crawled_at <= now + EPOCH_SECS / 24;
-    let assigned = || is_assigned(header.epoch, crawler, &record.domain, header.share_ppm);
+    let assigned = || is_assigned(header.epoch, crawler, &site.id, header.share_ppm);
     if !in_epoch || (source == Source::Other && !assigned()) {
         return None;
     }
-    let url = record
-        .url
-        .filter(|url| registrable_domain(url).as_deref() == Some(record.domain.as_str()));
-    let mut kept = SiteRecord::new(record.domain);
+    let url = (site.url.take())
+        .filter(|url| registrable_domain(url).as_deref() == Some(site.id.as_str()));
+    let mut kept = site::new(site.id.as_str());
     kept.url = url;
-    kept.title = record.title;
-    kept.description = record.description;
-    kept.language = record
-        .language
-        .as_deref()
-        .and_then(plumb_core::language_code);
-    for alias in &record.aliases {
-        kept.add_alias(alias);
+    kept.title = site.title.take();
+    kept.about = site.about.take();
+    kept.lang = site.lang.as_deref().and_then(plumb_core::language_code);
+    for alias in &site.names {
+        site::add_sent_alias(&mut kept, alias);
     }
     if source == Source::Trusted {
-        kept.headings = record.headings;
-        kept.body_text = record.body_text;
-        kept.terms = record.terms;
-        kept.key_pages = plumb_core::key_pages::valid_key_pages(record.key_pages, &kept.domain);
-        kept.links_to = plumb_core::valid_links_to(record.links_to, &kept.domain);
+        site::set_headings(&mut kept, site::headings(&site));
+        kept.text = site.text.take();
+        site::set_terms(&mut kept, site::terms(&site));
+        let pages = plumb_core::key_pages::valid_key_pages(site::key_pages(&site), &kept.id);
+        site::set_key_pages(&mut kept, pages);
+        let links = plumb_core::valid_links_to(site::links_to(&site), &kept.id);
+        site::set_links_to(&mut kept, links);
     }
-    kept.crawled_at = Some(crawled_at);
+    site::set_crawled(&mut kept, Some(crawled_at));
     Some(kept)
 }
 
@@ -628,18 +640,19 @@ pub(crate) fn in_crawl_window(crawled_at: u64, epoch: u64) -> bool {
 }
 
 fn keep_links(
-    kept: &mut SiteRecord,
-    texts: &[plumb_core::LinkText],
+    kept: &mut Item,
+    texts: &[LinkText],
     linking_domains: u32,
     crawled_bits: u64,
     max_linkers: u32,
 ) {
     for lt in texts {
         if lt.linkers != 0 && lt.linkers & !crawled_bits == 0 {
-            kept.add_link_text_linkers(&lt.text, lt.linkers);
+            site::add_link_text_linkers(kept, &lt.text, lt.linkers);
         }
     }
-    kept.signals.linking_domains = linking_domains.min(max_linkers);
+    let linking = linking_domains.min(max_linkers);
+    kept.weight = (linking > 0).then(|| f64::from(linking));
 }
 
 /// Bytes as lowercase hex in JSON and CBOR.
@@ -673,7 +686,8 @@ pub(crate) mod bytes_hex {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::LinkText;
+    use plumb_core::site::CrawlMarks;
+    use plumb_core::Signals;
 
     use super::*;
 
@@ -702,21 +716,35 @@ mod tests {
             .collect()
     }
 
-    fn crawled(domain: &str) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
-        r.url = Some(format!("https://www.{domain}/"));
-        r.title = Some(format!("{domain} home"));
-        r.crawled_at = Some(NOW - 60);
-        r.signals.tranco_rank = Some(1);
-        r.signals.official_site = true;
-        r.crawl_failures = 3;
-        r
+    fn crawled(domain: &str) -> Item {
+        let mut site = site::new(domain);
+        site.url = Some(format!("https://www.{domain}/"));
+        site.title = Some(format!("{domain} home"));
+        site::set_crawled(&mut site, Some(NOW - 60));
+        let signals = Signals {
+            tranco_rank: Some(1),
+            official_site: true,
+            ..Signals::default()
+        };
+        site::set_signals(&mut site, &signals);
+        let marks = CrawlMarks {
+            failures: 3,
+            ..CrawlMarks::default()
+        };
+        site::set_crawl_marks(&mut site, marks);
+        site
     }
 
-    fn sign(key: &Keypair, records: &[SiteRecord]) -> Batch {
-        Batch::sign(key, records, epoch_of(NOW), MAX_SHARE_PPM, NOW)
+    fn sign(key: &Keypair, sites: &[Item]) -> Batch {
+        let sites: SiteList = sites.iter().cloned().collect();
+        Batch::sign(key, &sites, epoch_of(NOW), MAX_SHARE_PPM, NOW)
             .unwrap()
             .unwrap()
+    }
+
+    /// The sites of a list, each read from its line.
+    fn items(sites: &SiteList) -> Vec<Item> {
+        sites.iter().collect()
     }
 
     #[test]
@@ -733,23 +761,21 @@ mod tests {
     fn a_signed_batch_checks_out_and_survives_json() {
         let key = Keypair::generate_ed25519();
         let peer = key.public().to_peer_id();
-        let records: Vec<_> = assigned_domains(&peer, 5)
+        let sites: Vec<_> = assigned_domains(&peer, 5)
             .iter()
             .map(|d| crawled(d))
             .collect();
-        let batch = sign(&key, &records);
+        let batch = sign(&key, &sites);
         let json = serde_json::to_string(&batch).unwrap();
         let back: Batch = serde_json::from_str(&json).unwrap();
         assert_eq!(back.check(NOW).unwrap(), peer);
         assert_eq!(back.id(), batch.id());
-        // Each record goes as its item, and comes back the same but for
-        // the node's own bookkeeping.
-        for (line, record) in batch.records.iter().zip(&records) {
-            let carried = SiteRecord {
-                crawl_failures: 0,
-                ..record.clone()
-            };
-            assert_eq!(SiteRecord::from_line(line).unwrap(), carried);
+        // Each site goes as its item, and comes back the same but for the
+        // node's own bookkeeping.
+        for (line, site) in batch.records.iter().zip(&sites) {
+            let mut carried = site.clone();
+            site::set_crawl_marks(&mut carried, CrawlMarks::default());
+            assert_eq!(site::from_line(line).unwrap(), carried);
         }
     }
 
@@ -760,7 +786,7 @@ mod tests {
         let domains = assigned_domains(&peer, 2);
         // An honest batch: homepages and their icons.
         let mut with_icon = crawled(&domains[0]);
-        with_icon.icon = Some("iVBORw0KGgo=".into());
+        site::set_icon(&mut with_icon, Some("iVBORw0KGgo=".into()));
         let honest = sign(&key, &[with_icon, crawled(&domains[1])]);
         assert!(mostly_kept(&honest, &accept_batch(&honest, &peer, NOW)));
         // One assigned homepage, padded with sites not assigned and copies
@@ -774,11 +800,11 @@ mod tests {
                 .map(|d| crawled(&d)),
         );
         let mut copy = crawled(&domains[0]);
-        copy.description = Some("x".repeat(1000));
+        copy.about = Some("x".repeat(1000));
         padded.push(copy);
         let padded = sign(&key, &padded);
         let kept = accept_batch(&padded, &peer, NOW);
-        assert!(kept.iter().all(|r| r.domain == domains[0]));
+        assert!(kept.domains().all(|d| d == domains[0]));
         assert!(!mostly_kept(&padded, &kept));
     }
 
@@ -788,7 +814,7 @@ mod tests {
         let peer = key.public().to_peer_id();
         let domains = assigned_domains(&peer, 2);
         let mut with_icon = crawled(&domains[0]);
-        with_icon.icon = Some("iVBORw0KGgo=".into());
+        site::set_icon(&mut with_icon, Some("iVBORw0KGgo=".into()));
         let batch = sign(&key, &[with_icon, crawled(&domains[1])]);
         assert_eq!(batch.records.len(), 3);
         assert!(!batch.records[0].contains("iVBOR"), "{}", batch.records[0]);
@@ -801,9 +827,10 @@ mod tests {
         // A proof of the homepage carries no icon.
         assert!(!batch.proof(0).record.contains("iVBOR"));
 
-        let trusted = accept_trusted_batch(&batch, &peer, NOW);
-        let icon_of = |records: &[SiteRecord], d: &str| {
-            records.iter().find(|r| r.domain == d).unwrap().icon.clone()
+        let trusted = items(&accept_trusted_batch(&batch, &peer, NOW));
+        let icon_of = |sites: &[Item], d: &str| {
+            let site = sites.iter().find(|s| s.id == d).unwrap();
+            site::icon(site).map(str::to_string)
         };
         assert_eq!(
             icon_of(&trusted, &domains[0]).as_deref(),
@@ -812,7 +839,7 @@ mod tests {
         assert_eq!(icon_of(&trusted, &domains[1]), None);
         let other = accept_batch(&batch, &peer, NOW);
         assert_eq!(other.len(), 2);
-        assert!(other.iter().all(|r| r.icon.is_none()));
+        assert!(other.iter().all(|s| site::icon(&s).is_none()));
     }
 
     #[test]
@@ -824,36 +851,46 @@ mod tests {
             url: url.into(),
             at: NOW - 600,
         };
-        let mut checked = SiteRecord::new("news.com");
-        checked.news = vec![
-            headline("https://www.news.com/big"),
-            headline("https://elsewhere.com/x"),
-        ];
+        let mut checked = site::new("news.com");
+        site::set_news(
+            &mut checked,
+            vec![
+                headline("https://www.news.com/big"),
+                headline("https://elsewhere.com/x"),
+            ],
+        );
         let batch = sign(&key, &[checked]);
         // A feed check alone is only its headlines' line.
         assert_eq!(batch.records.len(), 1);
         assert!(batch.records[0].starts_with("{\"news_of\""));
         assert!(batch.check(NOW).is_ok());
 
-        let news = accept_news(&batch, NOW);
+        let news = items(&accept_news(&batch, NOW));
         assert_eq!(news.len(), 1);
-        assert_eq!(news[0].domain, "news.com");
+        assert_eq!(news[0].id, "news.com");
         // Only headlines on the site itself count.
-        assert_eq!(news[0].news, vec![headline("https://www.news.com/big")]);
+        assert_eq!(
+            site::news(&news[0]),
+            vec![headline("https://www.news.com/big")]
+        );
         // Too old by the time it is read.
         assert!(accept_news(&batch, NOW + 8 * 24 * 3600).is_empty());
-        // Records are never made of it.
+        // Sites are never made of it.
         assert!(accept_trusted_batch(&batch, &peer, NOW).is_empty());
         assert!(accept_batch(&batch, &peer, NOW).is_empty());
 
         // A crawled homepage keeps its record line, the headlines go after.
         let domain = &assigned_domains(&peer, 1)[0];
         let mut crawled = crawled(domain);
-        crawled.news = vec![headline(&format!("https://{domain}/post"))];
+        site::set_news(
+            &mut crawled,
+            vec![headline(&format!("https://{domain}/post"))],
+        );
         let batch = sign(&key, &[crawled]);
         assert_eq!(batch.records.len(), 2);
         assert!(!batch.records[0].contains("news"), "{}", batch.records[0]);
-        assert_eq!(accept_news(&batch, NOW)[0].domain, *domain);
+        let news = accept_news(&batch, NOW);
+        assert_eq!(news.domains().next(), Some(domain.as_str()));
         assert_eq!(accept_trusted_batch(&batch, &peer, NOW).len(), 1);
     }
 
@@ -863,9 +900,9 @@ mod tests {
         let peer = key.public().to_peer_id();
         let domains = assigned_domains(&peer, 1_100);
         let long = |d: &String, len: usize| {
-            let mut record = crawled(d);
-            record.title = Some("x".repeat(len));
-            record
+            let mut site = crawled(d);
+            site.title = Some("x".repeat(len));
+            site
         };
         let batch = sign(
             &key,
@@ -900,11 +937,11 @@ mod tests {
     fn tampering_with_a_record_or_the_header_is_caught() {
         let key = Keypair::generate_ed25519();
         let peer = key.public().to_peer_id();
-        let records: Vec<_> = assigned_domains(&peer, 3)
+        let sites: Vec<_> = assigned_domains(&peer, 3)
             .iter()
             .map(|d| crawled(d))
             .collect();
-        let batch = sign(&key, &records);
+        let batch = sign(&key, &sites);
 
         let mut changed = batch.clone();
         changed.records[1] = changed.records[1].replace("home", "phish");
@@ -931,26 +968,26 @@ mod tests {
             .map(|i| format!("other{i}.org"))
             .find(|d| !is_assigned(epoch_of(NOW), &peer, d, MAX_SHARE_PPM))
             .unwrap();
-        let records = vec![crawled(&mine[0]), crawled(&mine[1]), crawled(&not_mine)];
-        let batch = sign(&key, &records);
+        let sites = vec![crawled(&mine[0]), crawled(&mine[1]), crawled(&not_mine)];
+        let batch = sign(&key, &sites);
         let kept = accept_batch(&batch, &batch.check(NOW).unwrap(), NOW);
-        let domains: Vec<_> = kept.iter().map(|r| r.domain.as_str()).collect();
+        let domains: Vec<_> = kept.domains().collect();
         assert_eq!(domains, vec![mine[0].as_str(), mine[1].as_str()]);
-        let first = &kept[0];
+        let first = &items(&kept)[0];
         assert_eq!(
             first.title.as_deref(),
             Some(format!("{} home", mine[0]).as_str())
         );
         assert_eq!(
-            first.signals,
-            Default::default(),
+            site::signals(first),
+            Signals::default(),
             "ranks are never taken from peers"
         );
-        assert_eq!(first.crawl_failures, 0);
+        assert_eq!(site::crawl_marks(first), CrawlMarks::default());
         // A node's own batch keeps the site it fetched to settle a dispute.
         let own = accept_own_batch(&batch, &peer, NOW);
         assert_eq!(own.len(), 3);
-        assert_eq!(own[2].domain, not_mine);
+        assert_eq!(own.domains().nth(2), Some(not_mine.as_str()));
     }
 
     #[test]
@@ -962,55 +999,59 @@ mod tests {
             .map(|i| format!("other{i}.org"))
             .find(|d| !is_assigned(epoch_of(NOW), &peer, d, MAX_SHARE_PPM))
             .unwrap();
-        let mut records = vec![crawled(&mine[0]), crawled(&not_mine)];
-        for record in &mut records {
-            record.headings = vec!["Widgets for everyone".into()];
-            record.body_text = Some("We make widgets for homes and offices.".into());
-            record.key_pages = vec![
+        let mut sites = vec![crawled(&mine[0]), crawled(&not_mine)];
+        for site in &mut sites {
+            let domain = site.id.clone();
+            site::set_headings(site, vec!["Widgets for everyone".into()]);
+            site.text = Some("We make widgets for homes and offices.".into());
+            let pages = vec![
                 plumb_core::KeyPage {
                     label: "Sign in".into(),
-                    url: format!("https://{}/login", record.domain),
+                    url: format!("https://{domain}/login"),
                 },
                 plumb_core::KeyPage {
                     label: "Log in".into(),
                     url: "https://phish.example/login".into(),
                 },
             ];
-            record.links_to = vec![
+            site::set_key_pages(site, pages);
+            let links = vec![
                 "www.partner.org".into(),
-                record.domain.clone(),
+                domain.clone(),
                 "partner.org".into(),
                 "not a domain".into(),
                 "news.example".into(),
             ];
+            site::set_links_to(site, links);
         }
-        let batch = sign(&key, &records);
+        let batch = sign(&key, &sites);
         let crawler = batch.check(NOW).unwrap();
 
-        let trusted = accept_trusted_batch(&batch, &crawler, NOW);
-        let domains: Vec<_> = trusted.iter().map(|r| r.domain.as_str()).collect();
+        let trusted = items(&accept_trusted_batch(&batch, &crawler, NOW));
+        let domains: Vec<_> = trusted.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(domains, vec![mine[0].as_str(), not_mine.as_str()]);
         assert!(trusted
             .iter()
-            .all(|r| r.body_text.is_some() && !r.headings.is_empty()));
+            .all(|s| s.text.is_some() && !site::headings(s).is_empty()));
+        assert!(trusted.iter().all(|s| {
+            let pages = site::key_pages(s);
+            pages.len() == 1 && pages[0].label == "Sign in"
+        }));
         assert!(trusted
             .iter()
-            .all(|r| r.key_pages.len() == 1 && r.key_pages[0].label == "Sign in"));
-        assert!(trusted
-            .iter()
-            .all(|r| r.links_to == ["partner.org", "news.example"]));
-        assert_eq!(trusted[0].signals, Default::default());
-        assert_eq!(trusted[0].crawl_failures, 0);
+            .all(|s| site::links_to(s) == ["partner.org", "news.example"]));
+        assert_eq!(site::signals(&trusted[0]), Signals::default());
+        assert_eq!(site::crawl_marks(&trusted[0]), CrawlMarks::default());
 
         // Anyone else: the assigned site only, without its text.
-        let other = accept_batch(&batch, &crawler, NOW);
+        let other = items(&accept_batch(&batch, &crawler, NOW));
         assert_eq!(other.len(), 1);
         assert_eq!(
-            (other[0].body_text.as_deref(), other[0].headings.len()),
+            (other[0].text.as_deref(), site::headings(&other[0]).len()),
             (None, 0)
         );
-        assert!(other[0].key_pages.is_empty());
-        assert!(other[0].links_to.is_empty());
+        assert!(site::key_pages(&other[0]).is_empty());
+        assert!(site::links_to(&other[0]).is_empty());
     }
 
     #[test]
@@ -1018,36 +1059,31 @@ mod tests {
         let key = Keypair::generate_ed25519();
         let peer = key.public().to_peer_id();
         let mine = assigned_domains(&peer, 1);
-        let mut target = SiteRecord::new("usbank.com");
-        target.link_texts = vec![
+        let mut target = site::new("usbank.com");
+        let texts = [
             LinkText::from_linkers("us bank", linker_bit(&mine[0])),
             LinkText::from_linkers("free money", linker_bit("someone-else-entirely.net") | 1),
         ];
-        target.signals.linking_domains = 500;
+        site::set_link_texts(&mut target, &texts);
+        target.weight = Some(500.0);
         let batch = sign(&key, &[crawled(&mine[0]), target]);
         let kept = accept_batch(&batch, &peer, NOW);
-        let usbank = kept.iter().find(|r| r.domain == "usbank.com").unwrap();
-        let texts: Vec<_> = usbank
-            .link_texts
-            .iter()
-            .map(|lt| lt.text.as_str())
-            .collect();
+        let usbank = kept.iter().find(|s| s.id == "usbank.com").unwrap();
+        let link_texts = site::link_texts(&usbank);
+        let texts: Vec<_> = link_texts.iter().map(|lt| lt.text.as_str()).collect();
         // The second text claims a linker bit the batch's homepages lack,
         // unless the hash happens to collide; both were OR-ed with bit 0 too.
         if linker_bit(&mine[0]) != 1 {
             assert_eq!(texts, vec!["us bank"]);
         }
-        assert_eq!(usbank.signals.linking_domains, 1);
+        assert_eq!(site::signals(&usbank).linking_domains, 1);
     }
 
     #[test]
     fn a_batch_with_no_valid_homepage_names_no_other_sites() {
         let key = Keypair::generate_ed25519();
         let peer = key.public().to_peer_id();
-        let batch = sign(
-            &key,
-            &[SiteRecord::new("spam1.com"), SiteRecord::new("spam2.com")],
-        );
+        let batch = sign(&key, &[site::new("spam1.com"), site::new("spam2.com")]);
         assert!(accept_batch(&batch, &peer, NOW).is_empty());
     }
 
@@ -1055,15 +1091,15 @@ mod tests {
     fn a_record_proof_verifies_alone() {
         let key = Keypair::generate_ed25519();
         let peer = key.public().to_peer_id();
-        let records: Vec<_> = assigned_domains(&peer, 9)
+        let sites: Vec<_> = assigned_domains(&peer, 9)
             .iter()
             .map(|d| crawled(d))
             .collect();
-        let batch = sign(&key, &records);
+        let batch = sign(&key, &sites);
         let proof = batch.proof(4);
-        let (record, crawler) = proof.verify(NOW).unwrap();
+        let (site, crawler) = proof.verify(NOW).unwrap();
         assert_eq!(crawler, peer);
-        assert_eq!(record.domain, records[4].domain);
+        assert_eq!(site.id, sites[4].id);
 
         let mut forged = proof.clone();
         forged.record = forged.record.replace("home", "login");

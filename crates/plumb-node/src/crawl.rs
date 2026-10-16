@@ -5,10 +5,9 @@
 //! whole file as a set of sites ([`plumb_core::sites::Sites`]) and choosing
 //! from it with [`select_site_targets`]. What a crawl reads of its
 //! homepages are sites, each its stored item ([`plumb_crawl::to_items`]),
-//! which the journal's changes carry, and choosing homepages reads a site's
-//! crawl marks as its item holds them ([`CrawlSite`]). Only the crawls a
-//! node shares with the network still become records, in one place
-//! ([`to_record`]).
+//! which the journal's changes carry and the crawls a node shares with the
+//! network are signed from, and choosing homepages reads a site's crawl
+//! marks as its item holds them ([`CrawlSite`]).
 //!
 //! # Which homepages
 //!
@@ -66,7 +65,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use plumb_core::sites::Sites;
-use plumb_core::{now_unix, site, SiteRecord};
+use plumb_core::{now_unix, site};
 use plumb_crawl::{to_items, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_format::Item;
 use tracing::{info, warn};
@@ -149,7 +148,7 @@ impl CrawlSite for Item {
 /// their stored items: kept for the tests, which check that a site's item
 /// is picked, and judged dead ([`crate::dead`]), as its record was.
 #[cfg(test)]
-impl CrawlSite for SiteRecord {
+impl CrawlSite for plumb_core::SiteRecord {
     fn domain(&self) -> &str {
         &self.domain
     }
@@ -159,7 +158,7 @@ impl CrawlSite for SiteRecord {
     }
 
     fn link_score(&self) -> f32 {
-        SiteRecord::link_score(self)
+        plumb_core::SiteRecord::link_score(self)
     }
 
     fn crawled_at(&self) -> Option<u64> {
@@ -775,17 +774,6 @@ fn offline_batch(before: &[Mark], outcomes: &HashMap<&str, &CrawlOutcome>) -> Op
         failed,
         expected: expected.len(),
     })
-}
-
-/// A site a crawl read, as the record the network's shared crawls still
-/// take: the one place where a crawl's sites become records
-/// ([`SiteRecord::from_stored_item`]), until the network shares items
-/// (step 9 of the data format plan). It reads back every field a crawl
-/// sets, so the record is the one crawls made before they made items.
-pub(crate) fn to_record(site: &Item) -> SiteRecord {
-    // Only an item that is not a site, or headlines that do not read,
-    // fail; a crawl's sites are made by `site::new` and have none.
-    SiteRecord::from_stored_item(site).expect("a crawl's site reads as a record")
 }
 
 /// Turns crawl batches into changes to a set of sites.

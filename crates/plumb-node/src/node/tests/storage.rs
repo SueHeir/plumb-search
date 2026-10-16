@@ -67,7 +67,7 @@ async fn the_inbox_past_the_storage_limit_still_takes_records() {
     budget.set_limit(budget.status().used_bytes);
     // The limit is a target, as in 0.2.0: records peers sent are kept.
     let record = SiteRecord::new("waiting.example");
-    crate::node::network::append_inbox(&node.inner, &[record]).unwrap();
+    crate::node::network::append_inbox(&node.inner, &listed(&[record])).unwrap();
     let inbox = std::fs::read(&node.inner.paths.inbox).unwrap();
     assert!(inbox.starts_with(prefix));
     assert!(String::from_utf8_lossy(&inbox).contains("waiting.example"));
@@ -145,8 +145,11 @@ async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
         }])
         .unwrap();
     plumb_core::storage::create_directory(&node.inner.paths.net, Some(&budget)).unwrap();
-    crate::node::network::append_inbox(&node.inner, &[SiteRecord::new("protected-inbox.example")])
-        .unwrap();
+    crate::node::network::append_inbox(
+        &node.inner,
+        &listed(&[SiteRecord::new("protected-inbox.example")]),
+    )
+    .unwrap();
     let inbox = std::fs::read(&node.inner.paths.inbox).unwrap();
     budget.recount(dir.path()).unwrap();
     let used = budget.status().used_bytes;
@@ -201,7 +204,8 @@ fn absorbing_the_inbox_waits_for_whoever_holds_the_records() {
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let inner = Arc::new(Inner::new(config, rank, opened, stopped, None));
     std::fs::create_dir_all(&inner.paths.net).unwrap();
-    crate::node::network::append_inbox(&inner, &[SiteRecord::new("sent.example")]).unwrap();
+    crate::node::network::append_inbox(&inner, &listed(&[SiteRecord::new("sent.example")]))
+        .unwrap();
     // The embedding job holds them while it folds the journal away.
     let held = inner.hold_records();
     let absorbing = {
@@ -260,7 +264,7 @@ fn two_inbox_absorptions_cross_the_real_fold_threshold_under_receiving_contentio
     let append = |at| {
         for first in (0..RECORDS).step_by(512) {
             let records: Vec<_> = (first..first + 512).map(|i| record(i, at)).collect();
-            crate::node::network::append_inbox(&inner, &records).unwrap();
+            crate::node::network::append_inbox(&inner, &listed(&records)).unwrap();
         }
     };
     append(2);
@@ -562,7 +566,7 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         let records: Vec<_> = (n * PER_BATCH..(n + 1) * PER_BATCH)
             .map(|i| record(i, made))
             .collect();
-        let batch = Batch::sign(&key, &records, epoch_of(made), MAX_SHARE_PPM, made)
+        let batch = Batch::sign(&key, &listed(&records), epoch_of(made), MAX_SHARE_PPM, made)
             .unwrap()
             .unwrap();
         assert_eq!(batch.records.len(), PER_BATCH);
@@ -667,7 +671,7 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         stopped,
         Some(budget.clone()),
     ));
-    crate::node::network::append_inbox(&inner, &[record(RECORDS - 1, 3)]).unwrap();
+    crate::node::network::append_inbox(&inner, &listed(&[record(RECORDS - 1, 3)])).unwrap();
     std::fs::rename(&inner.paths.inbox, &inner.paths.absorbing).unwrap();
     let absorbing = std::fs::read(&inner.paths.absorbing).unwrap();
     let source = Arc::new(
@@ -713,7 +717,7 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let first = records.recv().await.unwrap();
-    assert_eq!(first.records.len(), PER_BATCH);
+    assert_eq!(first.sites.len(), PER_BATCH);
     let first_bytes = first
         .reservation
         .as_ref()
@@ -737,8 +741,8 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
     let first_consumer = tokio::spawn(async move {
         crate::node::network::persist_delivery(
             first_writer,
-            first.records,
-            Vec::new(),
+            first.sites,
+            SiteList::new(),
             first.reservation,
             Some(first.acknowledgment),
         )
@@ -852,11 +856,11 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
     let consumer = tokio::spawn(async move {
         for _ in 1..BATCHES {
             let delivery = records.recv().await.unwrap();
-            assert_eq!(delivery.records.len(), PER_BATCH);
+            assert_eq!(delivery.sites.len(), PER_BATCH);
             crate::node::network::persist_delivery(
                 receiver.clone(),
-                delivery.records,
-                Vec::new(),
+                delivery.sites,
+                SiteList::new(),
                 delivery.reservation,
                 Some(delivery.acknowledgment),
             )
@@ -1046,7 +1050,7 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
                     ..earlier.clone()
                 })
                 .collect();
-            let batch = Batch::sign(key, &records, epoch, MAX_SHARE_PPM, made)
+            let batch = Batch::sign(key, &listed(&records), epoch, MAX_SHARE_PPM, made)
                 .unwrap()
                 .unwrap();
             assert_eq!(batch.records.len(), records.len());
@@ -1082,7 +1086,7 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
             record
         })
         .collect();
-    let trigger = Batch::sign(&trigger_key, &thin, epoch, MAX_SHARE_PPM, made)
+    let trigger = Batch::sign(&trigger_key, &listed(&thin), epoch, MAX_SHARE_PPM, made)
         .unwrap()
         .unwrap();
     assert_eq!(trigger.records.len(), thin.len());
@@ -1103,7 +1107,7 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
         now,
     )
     .unwrap()];
-    let following = Batch::sign(&good_key, &[good], epoch, MAX_SHARE_PPM, made + 1)
+    let following = Batch::sign(&good_key, &listed(&[good]), epoch, MAX_SHARE_PPM, made + 1)
         .unwrap()
         .unwrap();
     let following_id = following.id();
@@ -1174,16 +1178,15 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
         assert!(!batches
             .join(format!("{trigger_id}.delivered-agreed"))
             .exists());
-        let (news, records): (Vec<_>, Vec<_>) = oversized
-            .records
-            .into_iter()
-            .partition(|r| !r.news.is_empty());
+        let (news, records) = oversized
+            .sites
+            .partition(|site| !plumb_core::site::news(site).is_empty());
         let mut count = plumb_core::storage::ByteCount {
             bytes: 0,
             limit: u64::MAX,
         };
-        for record in &records {
-            serde_json::to_writer(&mut count, record).unwrap();
+        for line in records.lines() {
+            std::io::Write::write_all(&mut count, line).unwrap();
             std::io::Write::write_all(&mut count, b"\n").unwrap();
         }
         assert_eq!(records.len(), 2 * SITES);
@@ -1214,10 +1217,9 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
                 .unwrap()
                 .unwrap();
             assert!(delivery.reservation.is_some());
-            let (news, records): (Vec<_>, Vec<_>) = delivery
-                .records
-                .into_iter()
-                .partition(|r| !r.news.is_empty());
+            let (news, records) = delivery
+                .sites
+                .partition(|site| !plumb_core::site::news(site).is_empty());
             assert_eq!(news.len(), 1);
             assert_eq!(records.len(), 1);
             tokio::time::timeout(
@@ -1340,7 +1342,7 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
         record.title = Some("Confirmed output survives admission failure".into());
         record.description = Some("x".repeat(12 * 1024));
         record.crawled_at = Some(now_unix());
-        let id = source.publish(vec![record]).await.unwrap().unwrap();
+        let id = source.publish(listed(&[record])).await.unwrap().unwrap();
         let mut delivery = tokio::time::timeout(Duration::from_secs(20), received.recv())
             .await
             .unwrap()
@@ -1368,13 +1370,17 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
         let cap = budget.status().used_bytes + budget.status().reserved_bytes;
         budget.set_limit(cap);
         if unsupported {
-            delivery.records[0].description = Some("x".repeat(65 * 1024 * 1024));
+            // The delivery's one site.
+            delivery.sites.retain_mut(|site| {
+                site.about = Some("x".repeat(65 * 1024 * 1024));
+                true
+            });
         }
         let rejected = budget.status().rejected_writes;
         let pending = tokio::spawn(crate::node::network::persist_delivery(
             inner.clone(),
-            delivery.records,
-            Vec::new(),
+            delivery.sites,
+            SiteList::new(),
             delivery.reservation,
             Some(delivery.acknowledgment),
         ));
@@ -1430,8 +1436,8 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
                 .unwrap();
             crate::node::network::persist_delivery(
                 inner.clone(),
-                delivery.records,
-                Vec::new(),
+                delivery.sites,
+                SiteList::new(),
                 delivery.reservation,
                 Some(delivery.acknowledgment),
             )
@@ -1480,8 +1486,8 @@ async fn a_pending_network_delivery_survives_inbox_io_failure_without_restart() 
     plumb_core::storage::create_directory(&node.inner.paths.inbox, Some(&budget)).unwrap();
     let delivery = tokio::spawn(crate::node::network::persist_delivery(
         node.inner.clone(),
-        vec![SiteRecord::new("retry-inbox.example")],
-        Vec::new(),
+        listed(&[SiteRecord::new("retry-inbox.example")]),
+        SiteList::new(),
         None,
         None,
     ));
@@ -1607,7 +1613,7 @@ async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_t
         url: "https://restart-inbox.example/receiver-restart".into(),
         at: now_unix(),
     }];
-    let id = source.publish(vec![record]).await.unwrap().unwrap();
+    let id = source.publish(listed(&[record])).await.unwrap().unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     while receiver
         .inner
@@ -1764,7 +1770,7 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
             record.title = Some("A raw crawl with its headline".into());
             record.crawled_at = Some(now_unix());
         }
-        let id = source.publish(vec![record]).await.unwrap().unwrap();
+        let id = source.publish(listed(&[record])).await.unwrap().unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
         while receiver
             .inner
