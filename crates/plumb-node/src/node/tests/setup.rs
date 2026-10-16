@@ -427,17 +427,19 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     // the records a record at a time.
     assert!(!crate::records::journal_path(&dir.path().join("records.jsonl")).exists());
     let check = || {
-        let set = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
-        let scholar = set.get("scholar.google.com").unwrap();
-        assert_eq!(scholar.aliases, ["Google Scholar"]);
-        assert_eq!(scholar.signals.tranco_rank, Some(1));
-        let google = set.get("google.com").unwrap();
-        assert_eq!(google.aliases, ["Google"]);
-        assert!(!google.kinds.iter().any(|kind| kind == "college"));
-        assert!(google.signals.official_site);
+        let sites = crate::records::load_sites(&dir.path().join("records.jsonl")).unwrap();
+        let scholar = sites.get("scholar.google.com").unwrap();
+        assert_eq!(scholar.names, ["Google Scholar"]);
+        assert_eq!(plumb_core::site::signals(&scholar).tranco_rank, Some(1));
+        let google = sites.get("google.com").unwrap();
+        assert_eq!(google.names, ["Google"]);
+        assert!(!plumb_core::site::kinds(&google)
+            .iter()
+            .any(|kind| kind == "college"));
+        assert!(plumb_core::site::signals(&google).official_site);
         // Hacker News needs a record for ycombinator.com, which this has not.
-        assert!(set.get("news.ycombinator.com").is_none());
-        set.len()
+        assert!(!sites.contains("news.ycombinator.com"));
+        sites.len()
     };
     let sites = check();
 
@@ -704,15 +706,15 @@ async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
     .await;
     let hits = search(addr, "uncrawledbuoys").await;
     assert_eq!(hits[0].domain, "uncrawledbuoys.org");
-    let records = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
-    assert_eq!(records.len(), 5);
-    let buoys = records.get("uncrawledbuoys.org").unwrap();
-    assert_eq!(buoys.signals.tranco_rank, Some(5));
+    let sites = crate::records::load_sites(&dir.path().join("records.jsonl")).unwrap();
+    assert_eq!(sites.len(), 5);
+    let buoys = sites.get("uncrawledbuoys.org").unwrap();
+    assert_eq!(plumb_core::site::signals(&buoys).tranco_rank, Some(5));
     assert_eq!(
-        buoys.about.as_deref(),
+        plumb_core::site::wikidata_about(&buoys),
         Some("keepers of uncrawledbuoys.org")
     );
-    assert!(buoys.crawled_at.is_none());
+    assert!(plumb_core::site::crawled(&buoys).is_none());
     // Nothing came from outside the network.
     assert!(names(&dir.path().join("seed")).is_empty());
 

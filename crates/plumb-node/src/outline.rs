@@ -1,15 +1,20 @@
-//! Records files read a record at a time, for nodes that cannot hold every
-//! record in memory: a million sites take over a gigabyte as a
-//! [`RecordSet`], about twice the size of the file.
+//! Records files read a site at a time, for nodes that cannot hold every
+//! site in memory: a whole set of sites ([`plumb_core::sites::Sites`])
+//! holds each site's line, about as much as the file takes on disk, and a
+//! million crawled sites take well over a gigabyte.
 //!
 //! [`outline`] folds the journal into the records file the way
-//! [`crate::records::load_records`] replays it, one record at a time, and
+//! [`crate::records::load_sites`] replays it, one site at a time, and
 //! returns an [`Outline`] of each site: where its line is in the file and
 //! the little an index build needs to put the sites in order and fold
 //! redirects. [`RecordReader`] then reads the sites back one at a time.
 //!
-//! Only the journal's changes are held in memory meanwhile, grouped by the
-//! site they change. A change to a site on a subdomain
+//! Only the journal's changes are held in memory meanwhile, each as its
+//! line of the journal, grouped by the site they change. The fold reads
+//! each line of the file as the site's stored item ([`stored::read_item`],
+//! [`plumb_core::site`]), makes the site's changes to it as a set of sites
+//! would ([`plumb_core::sites::Sites`]), and writes it as a stored line
+//! ([`stored::write_item`]). A change to a site on a subdomain
 //! ([`Change::SubdomainSite`]) takes its parent's ranks: the parent's as the
 //! journal leaves it, where replaying the journal into a whole set takes them
 //! as they are when the change comes (ranks come from seed data, which a
@@ -19,10 +24,10 @@
 //! canonical, is something only a whole set can merge: [`outline`] returns
 //! `None` for it. The index build, trimming and making room for new topics
 //! get the outlines of the file from [`outline_merged`], which loads such a
-//! file as a set once, writes it again with each site on one line, and
-//! outlines that; they then read the file a record at a time like any
-//! other. A crawl round, which reads whole records, merges it the same way
-//! when it finds a site twice as it reads them.
+//! file as a set of sites once ([`crate::records::load_sites`]), writes it
+//! again with each site on one line, and outlines that; they then read the
+//! file a site at a time like any other. A crawl round merges it the same
+//! way when it finds a site twice as it reads them.
 //!
 //! Every search index a node builds, and the buckets other nodes take with
 //! it, is built from the file this way ([`build_index`]), whatever wrote
@@ -30,8 +35,7 @@
 //! each line as the site's stored item ([`RecordReader::read_item`],
 //! [`plumb_core::site`]), and the index, the buckets, the feeds watched and
 //! the node's denylist all work on that item; what the denylist denies is
-//! left out as each site is read. The fold still reads records, until the
-//! records file itself moves onto items.
+//! left out as each site is read.
 //!
 //! The steps that drop sites from the file (trimming to the storage limit,
 //! making room for new topics) work the same way. They pick the sites to
@@ -51,7 +55,8 @@ use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use plumb_core::{canonical_domain, parent_domain, site, stored, RecordSet, Signals, SiteRecord};
+use plumb_core::sites::Sites;
+use plumb_core::{canonical_domain, parent_domain, site, stored, Signals, SiteRecord};
 use plumb_format::Item;
 use tracing::{info, warn};
 
@@ -65,7 +70,7 @@ pub struct Outline {
     pub(crate) offset: u64,
     /// The length of the line, without its line break.
     pub(crate) len: u32,
-    /// [`SiteRecord::link_score`].
+    /// [`site::link_score`].
     pub(crate) score: f32,
     /// The canonical domain.
     pub(crate) domain: Box<str>,
@@ -73,29 +78,30 @@ pub struct Outline {
     /// ([`plumb_core::Redirect::folds_into`]); empty when it redirects to no valid
     /// domain, as [`plumb_index::redirect_targets`] takes it.
     pub(crate) redirect_to: Option<Box<str>>,
-    /// Judged dead ([`SiteRecord::gone_at`]).
+    /// Judged dead ([`site::CrawlMarks::gone`]).
     pub(crate) gone: bool,
 }
 
 impl Outline {
-    fn of(record: &SiteRecord, offset: u64, len: u32) -> Outline {
+    /// The outline of `site`, its stored item, written at `offset` in a
+    /// line of `len` bytes.
+    fn of(site: &Item, offset: u64, len: u32) -> Outline {
+        let domain = site::domain(site);
         Outline {
             offset,
             len,
-            score: record.link_score(),
-            domain: record.domain.as_str().into(),
-            redirect_to: record
-                .redirect
-                .as_ref()
-                .and_then(|redirect| redirect.folds_into(&record.domain))
+            score: site::link_score(site),
+            domain: domain.into(),
+            redirect_to: site::redirect(site)
+                .and_then(|redirect| redirect.folds_into(domain))
                 .map(Into::into),
-            gone: record.gone_at.is_some(),
+            gone: site::crawl_marks(site).gone.is_some(),
         }
     }
 }
 
-/// Sorts outlines the way [`crate::records::sorted_by_link_score`] sorts
-/// records: best link score first, ties by domain.
+/// Sorts outlines the way [`Sites::by_link_score`] orders sites: best link
+/// score first, ties by domain.
 pub(crate) fn sort(outlines: &mut [Outline]) {
     outlines.sort_by(|a, b| {
         b.score
@@ -104,18 +110,36 @@ pub(crate) fn sort(outlines: &mut [Outline]) {
     });
 }
 
-/// A change from the journal, as [`outline`] makes it to one site.
+/// A change from the journal, as [`outline`] makes it to one site. Each
+/// holds the change's line as the journal holds it, and reads it again
+/// when it makes the change: a site's item takes several times its line in
+/// memory (see [`plumb_core::sites`]), and a fold holds every change of
+/// the journal at once.
 enum Op {
-    Change(Change),
+    Change(Box<[u8]>),
     /// [`Change::SubdomainSite`], on the site itself: merged with its
     /// parent's ranks.
     Subsite {
-        record: SiteRecord,
+        line: Box<[u8]>,
         parent: String,
     },
     /// [`Change::SubdomainSite`], on its parent: what the parent got from
-    /// the subdomain site comes off ([`RecordSet::split_subdomain_sites`]).
-    Split(SiteRecord),
+    /// the subdomain site comes off ([`Sites::split_subdomain_sites`]).
+    Split(Box<[u8]>),
+}
+
+/// The change a journal's line holds, read again ([`Op`]): it read when
+/// the journal was read, so it reads now.
+fn change_of(line: &[u8]) -> Change {
+    serde_json::from_slice(line).expect("a journal line that read once reads again")
+}
+
+/// The site a [`Change::SubdomainSite`]'s line brings.
+fn subsite_of(line: &[u8]) -> Item {
+    match change_of(line) {
+        Change::SubdomainSite { site } => site,
+        _ => unreachable!("the line of a subdomain site's change"),
+    }
 }
 
 /// The journal's changes, by the site each changes, in journal order.
@@ -161,7 +185,7 @@ impl Pending {
             // Damaged lines are skipped, as replaying the journal does.
             match serde_json::from_slice::<Change>(&line) {
                 Ok(change) => {
-                    pending.add(change);
+                    pending.add(change, &line);
                     changes += 1;
                 }
                 Err(_) => damaged += 1,
@@ -181,66 +205,79 @@ impl Pending {
         self.ops.entry(site).or_default().push(op);
     }
 
-    fn add(&mut self, change: Change) {
+    /// Adds `change`, read off the journal's `line`.
+    fn add(&mut self, change: Change, line: &[u8]) {
+        let line = || Box::from(trim_end(line));
         match change {
-            Change::Merge { ref record }
-            | Change::MergeShared { ref record }
-            | Change::RefreshShared { ref record } => {
-                if let Some(site) = canonical_domain(&record.domain) {
-                    self.push(site, Op::Change(change));
+            Change::Merge { site }
+            | Change::MergeShared { site }
+            | Change::RefreshShared { site } => {
+                if let Some(domain) = canonical_domain(site::domain(&site)) {
+                    self.push(domain, Op::Change(line()));
                 }
             }
-            Change::Mark { ref domain, .. }
-            | Change::Gone { ref domain, .. }
-            | Change::TakeBack { ref domain, .. } => {
-                let site = domain.clone();
-                self.push(site, Op::Change(change));
+            Change::Mark { domain, .. }
+            | Change::Gone { domain, .. }
+            | Change::TakeBack { domain, .. } => {
+                self.push(domain, Op::Change(line()));
             }
-            Change::SubdomainSite { record } => {
-                let (Some(parent), Some(site)) = (
-                    parent_domain(&record.domain).map(str::to_owned),
-                    canonical_domain(&record.domain),
+            Change::SubdomainSite { site } => {
+                let (Some(parent), Some(domain)) = (
+                    parent_domain(site::domain(&site)).map(str::to_owned),
+                    canonical_domain(site::domain(&site)),
                 ) else {
                     return;
                 };
                 self.parents.insert(parent.clone());
-                self.push(parent.clone(), Op::Split(record.clone()));
-                self.push(site, Op::Subsite { record, parent });
+                self.push(parent.clone(), Op::Split(line()));
+                self.push(
+                    domain,
+                    Op::Subsite {
+                        line: line(),
+                        parent,
+                    },
+                );
             }
         }
     }
 
-    /// The record of `site` once its changes are made: `record` as the
-    /// file holds it (`None` when it does not), changed and left out of
-    /// the pending changes. `ranks` holds the parents' ranks for
+    /// The site of `domain` once its changes are made: `held` as the file
+    /// holds it (`None` when it does not), changed and left out of the
+    /// pending changes, and cleaned as a set cleans what it takes
+    /// ([`Sites::upsert`]). `ranks` holds the parents' ranks for
     /// [`Op::Subsite`]; a site whose parent has none is left as it was.
     fn apply(
         &mut self,
-        site: &str,
-        record: Option<SiteRecord>,
+        domain: &str,
+        held: Option<Item>,
         ranks: &HashMap<String, Signals>,
-    ) -> Option<SiteRecord> {
-        let mut set = RecordSet::new();
-        if let Some(record) = record {
-            set.upsert(record);
+    ) -> Option<Item> {
+        let Some(ops) = self.ops.remove(domain) else {
+            // What upserting it into a set of its own would do.
+            let mut site = held?;
+            site::clean(&mut site);
+            site::drop_bot_check(&mut site);
+            return Some(site);
+        };
+        let mut sites = Sites::new();
+        if let Some(site) = held {
+            sites.upsert(site);
         }
-        for op in self.ops.remove(site).unwrap_or_default() {
+        for op in ops {
             match op {
-                Op::Change(change) => change.apply(&mut set),
-                Op::Subsite { mut record, parent } => {
+                Op::Change(line) => change_of(&line).apply(&mut sites),
+                Op::Subsite { line, parent } => {
                     let Some(parent) = ranks.get(&parent) else {
                         continue;
                     };
-                    let signals = &mut record.signals;
-                    signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
-                    signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
-                    signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
-                    set.upsert(record);
+                    let mut subsite = subsite_of(&line);
+                    crate::records::take_parent_ranks(&mut subsite, parent);
+                    sites.upsert(subsite);
                 }
-                Op::Split(record) => set.split_subdomain_sites(std::slice::from_ref(&record)),
+                Op::Split(line) => sites.split_subdomain_sites([subsite_of(&line)]),
             }
         }
-        set.into_iter().next()
+        sites.into_iter().next()
     }
 
     /// The ranks of each parent site an [`Op::Subsite`] takes them from,
@@ -267,9 +304,9 @@ impl Pending {
             if !self.parents.contains(&head.domain) || ranks.contains_key(&head.domain) {
                 continue;
             }
-            let record = stored::read(line)
+            let site = stored::read_item(line)
                 .with_context(|| format!("{}: invalid JSON line", path.display()))?;
-            if let Some(signals) = self.parent_signals(&head.domain, Some(record)) {
+            if let Some(signals) = self.parent_signals(&head.domain, Some(site)) {
                 ranks.insert(head.domain, signals);
             }
         }
@@ -286,17 +323,17 @@ impl Pending {
         Ok(ranks)
     }
 
-    fn parent_signals(&self, site: &str, record: Option<SiteRecord>) -> Option<Signals> {
-        let mut set = RecordSet::new();
-        if let Some(record) = record {
-            set.upsert(record);
+    fn parent_signals(&self, domain: &str, held: Option<Item>) -> Option<Signals> {
+        let mut sites = Sites::new();
+        if let Some(site) = held {
+            sites.upsert(site);
         }
-        for op in self.ops.get(site).into_iter().flatten() {
-            if let Op::Change(change) = op {
-                change.clone().apply(&mut set);
+        for op in self.ops.get(domain).into_iter().flatten() {
+            if let Op::Change(line) = op {
+                change_of(line).apply(&mut sites);
             }
         }
-        set.get(site).map(|record| record.signals.clone())
+        sites.get(domain).map(|site| site::signals(&site))
     }
 }
 
@@ -383,7 +420,7 @@ pub(crate) fn outline_with_budget(
 /// The outlines of the records file at `path`, with its journal folded in
 /// ([`outline_with_budget`]): how an index build, trimming and making room
 /// for new topics get them. A file that only a whole set can merge (see the module docs) is first
-/// loaded once ([`crate::records::load_records`]) and written again with
+/// loaded once ([`crate::records::load_sites`]) and written again with
 /// each site on one line, under the storage `budget` when there is one
 /// ([`crate::records::RecordStore::compact`]); the set is dropped before
 /// the file is outlined again. Fails, rather than load it again and
@@ -399,11 +436,11 @@ pub(crate) fn outline_merged(
         "{} holds a site more than once: reading it whole to merge them",
         path.display()
     );
-    let set = crate::records::load_records(path)?;
+    let sites = crate::records::load_sites(path)?;
     crate::records::RecordStore::open(path)
         .with_budget(budget.clone())
-        .compact(&set)?;
-    drop(set);
+        .compact(&sites)?;
+    drop(sites);
     outline_with_budget(path, budget)?.with_context(|| {
         format!(
             "{} still holds a site more than once after merging",
@@ -564,7 +601,7 @@ fn scan(path: &Path) -> Result<Option<Vec<Outline>>> {
 
 /// [`outline`] of a file with `pending` changes from its journal: writes
 /// the changed file next to it, then puts it in place and deletes the
-/// journal, as [`crate::records::replace_records`] does.
+/// journal, as [`crate::records::replace_sites`] does.
 /// Returns how many records the file holds then, and their outlines when
 /// `outlines` (none otherwise).
 fn fold(
@@ -721,30 +758,30 @@ fn write_folded_into<W: Write>(
         if line_no.is_multiple_of(1_000) {
             check()?;
         }
-        let record = stored::read(line)
+        let site = stored::read_item(line)
             .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
-        let Some(domain) = canonical_domain(&record.domain) else {
+        let Some(domain) = canonical_domain(site::domain(&site)) else {
             continue;
         };
-        if domain != record.domain || !seen.insert(domain.clone()) {
+        if domain != site::domain(&site) || !seen.insert(domain.clone()) {
             return Ok(false);
         }
-        if let Some(record) = pending.apply(&domain, Some(record), &ranks) {
-            written.write(&record)?;
+        if let Some(site) = pending.apply(&domain, Some(site), &ranks) {
+            written.write(&site)?;
         }
     }
     // Sites the file does not hold yet, in a fixed order.
     let mut rest: Vec<String> = pending.ops.keys().cloned().collect();
     rest.sort_unstable();
-    for (i, site) in rest.into_iter().enumerate() {
+    for (i, domain) in rest.into_iter().enumerate() {
         if i.is_multiple_of(1_000) {
             check()?;
         }
-        if let Some(record) = pending.apply(&site, None, &ranks) {
+        if let Some(site) = pending.apply(&domain, None, &ranks) {
             // A change may name a site the file holds under its canonical
             // domain only through another change.
-            if seen.insert(record.domain.clone()) {
-                written.write(&record)?;
+            if seen.insert(site.id.clone()) {
+                written.write(&site)?;
             }
         }
     }
@@ -958,9 +995,9 @@ impl<W: Write> Written<W> {
         }
     }
 
-    fn write(&mut self, record: &SiteRecord) -> Result<()> {
+    fn write(&mut self, site: &Item) -> Result<()> {
         self.line.clear();
-        stored::write(&mut self.line, record)?;
+        stored::write_item(&mut self.line, site)?;
         let len = u32::try_from(self.line.len()).context("a record line is too long")?;
         anyhow::ensure!(
             (self.line.len() as u64) < self.limit.saturating_sub(self.at),
@@ -968,7 +1005,7 @@ impl<W: Write> Written<W> {
         );
         self.count += 1;
         if self.outline {
-            self.outlines.push(Outline::of(record, self.at, len));
+            self.outlines.push(Outline::of(site, self.at, len));
         }
         self.line.push(b'\n');
         self.out.write_all(&self.line)?;
@@ -1056,8 +1093,8 @@ fn same_site(domain: &str, outline: &Outline) -> Result<()> {
 }
 
 /// Replaces the records file at `path` with the sites of it that `outlines`
-/// gives, in their order, as [`crate::records::replace_records`] replaces it
-/// with records: by way of a file next to it flushed to disk before the
+/// gives, in their order, as [`crate::records::replace_sites`] replaces it
+/// with a list of sites: by way of a file next to it flushed to disk before the
 /// rename, then deleting the journal, which must be folded in already
 /// ([`outline`]). Each line is copied as the file holds it, never read as a
 /// record and written again. With a storage `budget`, room for the new
@@ -1101,7 +1138,8 @@ pub(crate) mod tests {
     use plumb_core::{write_jsonl, LinkText, Redirect};
 
     use super::*;
-    use crate::records::{load_records, RecordStore};
+    use crate::records::reference::{self, load_records};
+    use crate::records::RecordStore;
 
     fn record(domain: &str, tranco: u32) -> SiteRecord {
         let mut r = SiteRecord::new(domain);
@@ -1191,16 +1229,18 @@ pub(crate) mod tests {
         shared.body_text = None;
         vec![
             Change::Merge {
-                record: crawled("a.com", "A", 60),
+                site: crawled("a.com", "A", 60).stored_item_as_is(),
             },
-            Change::MergeShared { record: shared },
+            Change::MergeShared {
+                site: shared.stored_item_as_is(),
+            },
             Change::Mark {
                 domain: "b.org".into(),
                 attempted_at: Some(80),
                 failures: 2,
             },
             Change::Merge {
-                record: crawled("WWW.New.COM", "New", 90),
+                site: crawled("WWW.New.COM", "New", 90).stored_item_as_is(),
             },
             Change::Mark {
                 domain: "never.com".into(),
@@ -1208,10 +1248,10 @@ pub(crate) mod tests {
                 failures: 1,
             },
             Change::RefreshShared {
-                record: crawled("unheld.com", "Unheld", 95),
+                site: crawled("unheld.com", "Unheld", 95).stored_item_as_is(),
             },
             Change::RefreshShared {
-                record: crawled("b.org", "B again", 96),
+                site: crawled("b.org", "B again", 96).stored_item_as_is(),
             },
             Change::Gone {
                 domain: "quiet.net".into(),
@@ -1221,9 +1261,11 @@ pub(crate) mod tests {
                 domain: "pnc.com".into(),
                 names: vec!["Nothing".into()],
             },
-            Change::SubdomainSite { record: scholar },
+            Change::SubdomainSite {
+                site: scholar.stored_item_as_is(),
+            },
             Change::Merge {
-                record: crawled("new.com", "New again", 110),
+                site: crawled("new.com", "New again", 110).stored_item_as_is(),
             },
         ]
     }
@@ -1355,7 +1397,7 @@ pub(crate) mod tests {
         // With a journal, too, which is left for loading to replay.
         RecordStore::open(&path)
             .save(&[Change::Merge {
-                record: record("b.com", 3),
+                site: record("b.com", 3).stored_item_as_is(),
             }])
             .unwrap();
         assert_eq!(outline(&path).unwrap(), None);
@@ -1381,11 +1423,17 @@ pub(crate) mod tests {
         .unwrap();
         RecordStore::open(&path)
             .save(&[Change::Merge {
-                record: crawled("d.net", "D", 6),
+                site: crawled("d.net", "D", 6).stored_item_as_is(),
             }])
             .unwrap();
         assert_eq!(outline(&path).unwrap(), None);
         let loaded = load_records(&path).unwrap().into_sorted_vec();
+        // What loading it whole as records and compacting them writes.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let of_records = elsewhere.path().join("records.jsonl");
+        fs::copy(&path, &of_records).unwrap();
+        fs::copy(journal_path(&path), journal_path(&of_records)).unwrap();
+        reference::compact(&of_records, &load_records(&of_records).unwrap()).unwrap();
         let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
 
         let outlines = outline_merged(&path, Some(budget.clone())).unwrap();
@@ -1393,6 +1441,7 @@ pub(crate) mod tests {
         domains.sort_unstable();
         assert_eq!(domains, ["a.com", "b.com", "c.org", "d.net"]);
         assert_eq!(read_all(&path, &outlines), loaded);
+        assert_eq!(fs::read(&path).unwrap(), fs::read(&of_records).unwrap());
         // Written again with each site on one line and the journal folded
         // in, so it is outlined as it is from now on.
         assert!(!journal_path(&path).exists());

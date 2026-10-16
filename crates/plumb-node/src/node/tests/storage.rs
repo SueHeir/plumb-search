@@ -141,7 +141,7 @@ async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
     large.description = Some("large protected journal ".repeat(50_000));
     crate::records::RecordStore::open(&node.inner.paths.records)
         .save(&[crate::records::Change::Merge {
-            record: large.clone(),
+            site: large.clone().stored_item_as_is(),
         }])
         .unwrap();
     plumb_core::storage::create_directory(&node.inner.paths.net, Some(&budget)).unwrap();
@@ -154,7 +154,7 @@ async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
     // The limit is a target, as in 0.2.0: the rewrites and folds a node
     // makes, those that trim it back under the limit among them, run past
     // it rather than leave the node stuck over it.
-    let seed = [large.clone().stored_item_as_is()];
+    let seed = [large.clone().stored_item_as_is()].into_iter().collect();
     crate::node::worker::save_seed_sites(&node.inner, &seed).unwrap();
     crate::node::round::RoundSites::load_with_budget(
         &node.inner.paths.records,
@@ -213,8 +213,8 @@ fn absorbing_the_inbox_waits_for_whoever_holds_the_records() {
     assert!(!journal.exists(), "nothing is appended meanwhile");
     drop(held);
     assert_eq!(absorbing.join().unwrap(), 1);
-    let records = crate::records::load_records(&inner.paths.records).unwrap();
-    assert!(records.get("sent.example").is_some());
+    let sites = crate::records::load_sites(&inner.paths.records).unwrap();
+    assert!(sites.contains("sent.example"));
 }
 
 #[test]
@@ -435,7 +435,7 @@ fn a_fold_past_the_limit_installs_its_output_and_keeps_the_old_reader_charged() 
     write_jsonl(
         &journal,
         &[crate::records::Change::MergeShared {
-            record: record(0, 2),
+            site: record(0, 2).stored_item_as_is(),
         }],
     )
     .unwrap();
@@ -538,7 +538,7 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         serde_json::to_writer(
             &mut pending,
             &crate::records::Change::MergeShared {
-                record: record(i, 2),
+                site: record(i, 2).stored_item_as_is(),
             },
         )
         .unwrap();
@@ -1811,12 +1811,12 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
         assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 1);
         let inbox: Vec<SiteRecord> =
             plumb_core::stored::read_file(&receiver.inner.paths.inbox).unwrap_or_default();
-        let held = crate::records::load_records(&receiver.inner.paths.records).unwrap();
+        let held = crate::records::load_sites(&receiver.inner.paths.records).unwrap();
         let durable_raw = inbox
             .iter()
             .filter(|r| r.domain == "headline-persist.example")
             .count()
-            + usize::from(held.get("headline-persist.example").is_some());
+            + usize::from(held.contains("headline-persist.example"));
         assert_eq!(durable_raw, usize::from(with_raw));
         assert_eq!(
             std::fs::read(batches.join(format!("{id}.json"))).unwrap(),
@@ -1874,7 +1874,7 @@ fn new_topics_make_room_in_the_records_file() {
         write_jsonl(&path, &records).unwrap();
         crate::records::RecordStore::open(&path)
             .save(&[crate::records::Change::Merge {
-                record: site("seriouseats.com", 7_000, "Serious Eats cooking"),
+                site: site("seriouseats.com", 7_000, "Serious Eats cooking").stored_item_as_is(),
             }])
             .unwrap();
         assert_eq!(

@@ -1207,10 +1207,11 @@ pub fn sites(args: &SitesArgs) -> Result<Written> {
     let part_ends: Vec<u64> = (0..=sites.len() as u64 / SITES_A_PART)
         .map(|n| FIRST_SITES + n * SITES_A_PART)
         .collect();
-    let items = plumb_node::records::sites_by_link_score(&sites)
+    let items = sites
+        .into_sorted()
         .into_iter()
         .filter(|site| plumb_core::site::crawl_marks(site).gone.is_none())
-        .map(|site| plumb_core::site::to_item(site).ok());
+        .map(|site| plumb_core::site::to_item(&site).ok());
     write_set(
         items,
         plumb_core::site_item::site_fields(),
@@ -1945,8 +1946,9 @@ mod tests {
         let (_, items) = plumb_node::sets::read_items(&dir).unwrap();
 
         // The items of the records loaded, best first, the gone left out.
-        let set = plumb_node::records::load_records(&file).unwrap();
-        let sent: Vec<_> = plumb_node::records::sorted_by_link_score(&set)
+        let set = crate::test_sites::load_records(&file);
+        let sent: Vec<_> = set
+            .into_sorted_vec()
             .into_iter()
             .filter(|record| record.gone_at.is_none())
             .map(|record| record.to_item().ok())

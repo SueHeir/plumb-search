@@ -1319,7 +1319,7 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::{load_records, replace_records, sorted_by_link_score};
+    use crate::records::reference::{load_records, replace_records, sorted_by_link_score};
 
     #[test]
     fn fills_up_to_ninety_percent_of_the_storage_limit() {
@@ -1471,12 +1471,15 @@ mod tests {
         crawled.crawled_at = Some(1_700_000_000);
         RecordStore::open(&path)
             .save(&[
-                Change::Merge { record: crawled },
                 Change::Merge {
-                    record: site("bakery.example", None, Some("Bread and cooking")),
+                    site: crawled.stored_item_as_is(),
                 },
                 Change::Merge {
-                    record: site("quiet.example", None, None),
+                    site: site("bakery.example", None, Some("Bread and cooking"))
+                        .stored_item_as_is(),
+                },
+                Change::Merge {
+                    site: site("quiet.example", None, None).stored_item_as_is(),
                 },
             ])
             .unwrap();

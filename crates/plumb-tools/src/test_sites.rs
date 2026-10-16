@@ -1,12 +1,18 @@
 //! Sites for the tests of the commands that read and write records files:
 //! a file holding them as nodes and hand-made files write them, so that a
 //! test can tell that a command reads and writes each site as it did when
-//! it held records.
+//! it held records. [`load_records`] and [`write_sorted`] are what a
+//! record set made of such a file before the commands held sites' stored
+//! items, the reference their output is checked against.
 
 use std::io::Write;
 use std::path::Path;
 
-use plumb_core::{stored, Headline, KeyPage, LinkText, Redirect, Signals, SiteRecord};
+use plumb_core::{
+    site, stored, Headline, KeyPage, LinkText, RecordSet, Redirect, Signals, SiteRecord,
+};
+use plumb_format::Item;
+use plumb_node::records::{journal_path, Change};
 
 /// The site [`write`] writes as its stored item rather than a record.
 const WRITTEN_AS_ITEM: &str = "rust-lang.org";
@@ -183,4 +189,92 @@ pub(crate) fn write(path: &Path, records: &[SiteRecord]) {
         file.write_all(&line).unwrap();
         file.write_all(b"\n").unwrap();
     }
+}
+
+/// The records of the records file at `path` and its journal, as nodes
+/// loaded them when they held records: each line read as a record and
+/// merged into a record set, then each change the journal holds made to
+/// the records as changes were made then, a damaged line skipped.
+pub(crate) fn load_records(path: &Path) -> RecordSet {
+    let mut set = RecordSet::new();
+    for line in std::fs::read(path).unwrap().split(|&b| b == b'\n') {
+        let line = line.trim_ascii();
+        if !line.is_empty() {
+            set.upsert(stored::read(line).unwrap());
+        }
+    }
+    let journal = std::fs::read(journal_path(path)).unwrap_or_default();
+    for line in journal.split(|&b| b == b'\n') {
+        if let Ok(change) = serde_json::from_slice::<Change>(line.trim_ascii()) {
+            apply(change, &mut set);
+        }
+    }
+    set
+}
+
+/// Makes `change` to a record set, as changes were made when they carried
+/// records: the change's site becomes the record it holds.
+fn apply(change: Change, set: &mut RecordSet) {
+    let record = |site: &Item| SiteRecord::from_stored_item(site).unwrap();
+    match change {
+        Change::Merge { site } => {
+            set.upsert(record(&site));
+        }
+        Change::MergeShared { site } => {
+            set.upsert_shared(record(&site));
+        }
+        Change::RefreshShared { site } => {
+            let held = plumb_core::canonical_domain(site::domain(&site))
+                .is_some_and(|domain| set.get(&domain).is_some());
+            if held {
+                set.upsert_shared(record(&site));
+            }
+        }
+        Change::Mark {
+            domain,
+            attempted_at,
+            failures,
+        } => {
+            if set.get(&domain).is_some() {
+                let record = set.entry(&domain);
+                record.crawl_attempted_at = attempted_at;
+                record.crawl_failures = failures;
+            }
+        }
+        Change::Gone { domain, at } => {
+            if set.get(&domain).is_some() {
+                set.entry(&domain).make_gone(at);
+            }
+        }
+        Change::TakeBack { domain, names } => {
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            set.take_back_official_site(&domain, &names);
+        }
+        Change::SubdomainSite { site } => {
+            let mut record = record(&site);
+            let Some(parent) = plumb_core::parent_domain(&record.domain)
+                .and_then(|parent| set.get(parent))
+                .map(|parent| parent.signals.clone())
+            else {
+                return;
+            };
+            let signals = &mut record.signals;
+            signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
+            signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
+            signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
+            set.split_subdomain_sites(std::slice::from_ref(&record));
+            set.upsert(record);
+        }
+    }
+}
+
+/// Writes `set` to `path` as a node wrote a whole record set: each record
+/// as a stored line ([`stored::line`]), best link score first.
+pub(crate) fn write_sorted(path: &Path, set: &RecordSet) {
+    let mut out = Vec::new();
+    for record in set.clone().into_sorted_vec() {
+        out.extend(stored::line(&record).unwrap());
+        out.push(b'\n');
+    }
+    std::fs::write(path, out).unwrap();
 }

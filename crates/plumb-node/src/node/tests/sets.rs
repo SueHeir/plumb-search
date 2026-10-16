@@ -413,17 +413,17 @@ async fn a_new_node_sets_up_and_fills_from_the_set_of_sites() {
         search(addr, "uncrawledbuoys").await[0].domain,
         "uncrawledbuoys.org"
     );
-    let records = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
-    assert_eq!(records.len(), 5);
-    let buoys = records.get("uncrawledbuoys.org").unwrap();
-    assert_eq!(buoys.signals.tranco_rank, Some(5));
+    let sites = crate::records::load_sites(&dir.path().join("records.jsonl")).unwrap();
+    assert_eq!(sites.len(), 5);
+    let buoys = sites.get("uncrawledbuoys.org").unwrap();
+    assert_eq!(plumb_core::site::signals(&buoys).tranco_rank, Some(5));
     assert_eq!(
-        buoys.about.as_deref(),
+        plumb_core::site::wikidata_about(&buoys),
         Some("keepers of uncrawledbuoys.org")
     );
-    assert!(buoys.crawled_at.is_none());
+    assert!(plumb_core::site::crawled(&buoys).is_none());
     // The trusted node's own list was never asked for.
-    assert!(records.get("trustedonly.org").is_none());
+    assert!(!sites.contains("trustedonly.org"));
     assert_eq!(peer.status().fill_records_served, 0);
     assert!(names(&dir.path().join("seed")).is_empty());
 

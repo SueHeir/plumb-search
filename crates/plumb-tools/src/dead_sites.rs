@@ -49,18 +49,15 @@ pub fn run(args: &DeadSitesArgs) -> Result<()> {
 }
 
 /// What [`run`] prints of the sites of `set` at `now`, naming the best
-/// `show` of the dead ones, none that `keeps`.
+/// `show` of the dead ones, none that `keeps`. Each site is read once.
 fn report(set: &Sites, now: u64, show: usize, keeps: impl Fn(&Item) -> bool) -> String {
-    let dead = find_dead(|| set.iter(), now, keeps);
-    let failing = set
-        .iter()
-        .map(site::crawl_marks)
-        .filter(|marks| marks.gone.is_none() && marks.failures > 0)
-        .count();
-    let gone = set
-        .iter()
-        .filter(|site| site::crawl_marks(site).gone.is_some())
-        .count();
+    let (mut failing, mut gone) = (0, 0);
+    let read = set.iter().inspect(|site| {
+        let marks = site::crawl_marks(site);
+        failing += usize::from(marks.gone.is_none() && marks.failures > 0);
+        gone += usize::from(marks.gone.is_some());
+    });
+    let dead = find_dead(read, now, keeps);
     let never_reached = dead
         .iter()
         .filter(|site| site::crawled(site).is_none())
@@ -101,11 +98,45 @@ fn report(set: &Sites, now: u64, show: usize, keeps: impl Fn(&Item) -> bool) -> 
 #[cfg(test)]
 mod tests {
     use plumb_core::{now_unix, RecordSet, SiteRecord};
-    use plumb_node::records::load_records;
+    use plumb_node::crawl::CrawlSite;
 
     use super::*;
 
     const DAY: u64 = SECONDS_PER_DAY;
+
+    /// A record as judging sites dead read it before sites were their
+    /// stored items.
+    struct Record<'a>(&'a SiteRecord);
+
+    impl CrawlSite for Record<'_> {
+        fn domain(&self) -> &str {
+            &self.0.domain
+        }
+
+        fn url(&self) -> Option<&str> {
+            self.0.url.as_deref()
+        }
+
+        fn link_score(&self) -> f32 {
+            self.0.link_score()
+        }
+
+        fn crawled_at(&self) -> Option<u64> {
+            self.0.crawled_at
+        }
+
+        fn crawl_attempted_at(&self) -> Option<u64> {
+            self.0.crawl_attempted_at
+        }
+
+        fn crawl_failures(&self) -> u32 {
+            self.0.crawl_failures
+        }
+
+        fn gone_at(&self) -> Option<u64> {
+            self.0.gone_at
+        }
+    }
 
     /// [`report`] as it was made of records.
     fn record_report(
@@ -114,7 +145,12 @@ mod tests {
         show: usize,
         keeps: impl Fn(&SiteRecord) -> bool,
     ) -> String {
-        let dead = find_dead(|| set.iter(), now, keeps);
+        let dead: Vec<&SiteRecord> = find_dead(set.iter().map(Record), now, |record: &Record| {
+            keeps(record.0)
+        })
+        .into_iter()
+        .map(|record| record.0)
+        .collect();
         let failing = set
             .iter()
             .filter(|record| record.gone_at.is_none() && record.crawl_failures > 0)
@@ -190,7 +226,7 @@ mod tests {
         let path = dir.path().join("records.jsonl");
         crate::test_sites::write(&path, &records);
         let sites = load_sites(&path).unwrap();
-        let set = load_records(&path).unwrap();
+        let set = crate::test_sites::load_records(&path);
         let topics = plumb_node::about::Topics::new(&["chess".to_owned()]);
         for show in [0, 2, 20] {
             let report = report(&sites, now, show, |site| {
