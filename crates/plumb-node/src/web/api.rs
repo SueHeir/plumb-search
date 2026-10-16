@@ -6,7 +6,7 @@ use axum::extract::{Query, State};
 use axum::http::{header, Extensions, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use plumb_core::SiteRecord;
+use plumb_core::sites::SiteLine;
 use plumb_index::pages::{place_operator_pages, place_pages};
 use plumb_index::{Hit, SearchResults};
 use serde::Serialize;
@@ -363,9 +363,10 @@ pub struct NetworkResult {
     /// How many answers held the site.
     pub answers: usize,
     /// The signed crawl this node may keep, see
-    /// [`FoundSite::shared`](plumb_net::FoundSite::shared).
+    /// [`FoundSite::shared`](plumb_net::FoundSite::shared): its stored
+    /// item, held as its line.
     #[serde(skip)]
-    pub shared: Option<SiteRecord>,
+    pub shared: Option<SiteLine>,
 }
 
 /// `GET /api/status`, routed for nodes only.

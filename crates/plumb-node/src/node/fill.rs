@@ -82,9 +82,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use plumb_core::{now_unix, RecordSet, SiteRecord};
+use plumb_core::now_unix;
+use plumb_core::sites::{SiteList, Sites};
 use plumb_format::Item;
-use plumb_net::fill::{accept_record, FillPage, MAX_FILL_SCAN};
+use plumb_net::fill::{accept_site, FillPage, MAX_FILL_SCAN};
 use plumb_net::{NetHandle, PeerId};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -457,14 +458,15 @@ struct SitesPage {
     source: String,
     /// The trusted node that answered; `None` for the set.
     peer: Option<PeerId>,
-    records: Vec<SiteRecord>,
+    /// The sites kept of it, their stored items held as lines.
+    sites: SiteList,
     /// Where to read from next; `total` once the list is done.
     next: u64,
     /// Sites in the list, crawled or not.
     total: u64,
     /// The trusted node was busy and sent nothing; ask again later.
     busy: bool,
-    /// Bytes of the records, for the disk they take.
+    /// Bytes of the sites as sent, for the disk they take.
     bytes: u64,
     /// Bytes downloaded for them: none from the set, whose parts counted
     /// as they were fetched.
@@ -482,7 +484,7 @@ impl From<FillPage> for SitesPage {
         SitesPage {
             source: page.peer.to_string(),
             peer: Some(page.peer),
-            records: page.records,
+            sites: page.sites,
             next: page.next,
             total: page.total,
             busy: page.busy,
@@ -504,7 +506,7 @@ enum FromSet {
 }
 
 /// Up to `count` sites of the set of sites held, from its `from`th on,
-/// kept as a trusted node's would be ([`accept_record`]): the crawled ones
+/// kept as a trusted node's would be ([`accept_site`]): the crawled ones
 /// among the next [`MAX_FILL_SCAN`], or with `all` every one. It stops
 /// once those kept come to `max_bytes`.
 fn read_set(inner: &Inner, from: u64, count: u64, max_bytes: u64, all: bool) -> FromSet {
@@ -528,7 +530,7 @@ fn read_held(held: &HeldSites, from: u64, count: u64, max_bytes: u64, all: bool)
     let total = held.total();
     let now = now_unix();
     let scan = if all { count } else { MAX_FILL_SCAN as u64 };
-    let (mut records, mut bytes, mut read) = (Vec::new(), 0, 0);
+    let (mut sites, mut bytes, mut read) = (SiteList::new(), 0, 0);
     if from < total {
         for line in held.lines_from(from) {
             let line = match line {
@@ -537,16 +539,16 @@ fn read_held(held: &HeldSites, from: u64, count: u64, max_bytes: u64, all: bool)
             };
             read += 1;
             let item = serde_json::from_str::<Item>(&line).ok();
-            let record = item
+            let site = item
                 .filter(|item| !item.is_extension() && !item.is_deleted())
                 .filter(|item| held.check(item).is_ok())
-                .and_then(|item| SiteRecord::from_item(&item).ok())
-                .and_then(|record| accept_record(record, now, all).ok());
-            if let Some(record) = record {
+                .and_then(|item| plumb_core::site::from_sent(&item).ok())
+                .and_then(|site| accept_site(site, now, all).ok());
+            if let Some(site) = site {
                 bytes += line.len() as u64;
-                records.push(record);
+                sites.push(site);
             }
-            if records.len() as u64 >= count || read >= scan || bytes >= max_bytes {
+            if sites.len() as u64 >= count || read >= scan || bytes >= max_bytes {
                 break;
             }
         }
@@ -559,7 +561,7 @@ fn read_held(held: &HeldSites, from: u64, count: u64, max_bytes: u64, all: bool)
     FromSet::Page(SitesPage {
         source: SITES.into(),
         peer: None,
-        records,
+        sites,
         next,
         total,
         busy: false,
@@ -768,11 +770,10 @@ pub(super) fn can_seed_from_network(inner: &Inner) -> bool {
 /// crawled or not, for the first records file, and leaves the rest to
 /// filling. `None` when no trusted node answered in [`SEED_PEER_WAIT`] or
 /// it sent fewer than [`MIN_SEED_SITES`]: the node downloads the seed data
-/// instead. With the records comes the bytes received from trusted nodes;
-/// the set's parts are counted as they are taken.
-pub(super) async fn seed_from_network(
-    inner: &Arc<Inner>,
-) -> Result<Option<(Vec<SiteRecord>, u64)>> {
+/// instead. The sites come best first, each as its stored item held as
+/// its line, with the bytes received from trusted nodes; the set's parts
+/// are counted as they are taken.
+pub(super) async fn seed_from_network(inner: &Arc<Inner>) -> Result<Option<(SiteList, u64)>> {
     let Some(net) = network::handle(inner).cloned() else {
         return Ok(None);
     };
@@ -785,7 +786,7 @@ pub(super) async fn seed_from_network(
         "Waiting for a trusted node in the network to send its sites",
     );
     let want = inner.config.sites.min(QUICK_SEED_SITES);
-    let mut set = RecordSet::new();
+    let mut set = Sites::new();
     let mut state = FillState::default();
     let mut prefer = None;
     let mut busy = 0;
@@ -797,7 +798,7 @@ pub(super) async fn seed_from_network(
         state.peer = Some(page.source);
         state.next = page.next;
         state.total = page.total;
-        take_seed_page(inner, &mut set, page.records);
+        take_seed_page(inner, &mut set, page.sites);
     }
     let deadline = Instant::now() + SEED_PEER_WAIT;
     while set.len() < want && state.peer.as_deref() != Some(SITES) {
@@ -837,7 +838,7 @@ pub(super) async fn seed_from_network(
         state.total = page.total;
         bytes += page.downloaded;
         done = page.done();
-        take_seed_page(inner, &mut set, page.records);
+        take_seed_page(inner, &mut set, page.sites);
         inner.set_step(
             Step::Downloading,
             "Taking in sites from a trusted node in the network",
@@ -863,12 +864,12 @@ pub(super) async fn seed_from_network(
             .info(format!("Set up from the seed downloads: {why}"));
         return Ok(None);
     }
-    let records = set.into_sorted_vec();
-    state.filled = records.len() as u64;
+    let sites = set.into_sorted();
+    state.filled = sites.len() as u64;
     if done {
         state.done_at = Some(now_unix());
     } else {
-        state.seed = records.len() < inner.config.sites;
+        state.seed = sites.len() < inner.config.sites;
     }
     state.detail = match (state.seed, from_set) {
         (true, true) => "Setting up: taking in the rest of the set of sites",
@@ -886,32 +887,32 @@ pub(super) async fn seed_from_network(
     };
     info!(
         "took {} sites from {source} to set up, without the seed downloads",
-        records.len()
+        sites.len()
     );
     inner.journal.info(format!(
         "Set up from {source}: {} sites, the rest to follow",
-        records.len()
+        sites.len()
     ));
-    Ok(Some((records, bytes)))
+    Ok(Some((sites, bytes)))
 }
 
 /// Adds the sites of a page a node setting up took ([`seed_from_network`])
 /// to `set`, without what the denylist takes off.
-pub(super) fn take_seed_page(inner: &Inner, set: &mut RecordSet, mut records: Vec<SiteRecord>) {
-    inner.drop_denied_records(&mut records);
-    for record in records {
-        set.upsert(record);
+pub(super) fn take_seed_page(inner: &Inner, set: &mut Sites, mut sites: SiteList) {
+    inner.drop_denied_sites(&mut sites);
+    for site in sites {
+        set.upsert(site);
     }
 }
 
-/// What of `records`, a page of crawled sites, filling keeps: only those
+/// What of `sites`, a page of crawled sites, filling keeps: only those
 /// about `topics` when it keeps only those ([`FillState::focus_from`]),
 /// and not what the denylist takes off.
-pub(super) fn keep_filled(inner: &Inner, records: &mut Vec<SiteRecord>, topics: Option<&Topics>) {
+pub(super) fn keep_filled(inner: &Inner, sites: &mut SiteList, topics: Option<&Topics>) {
     if let Some(topics) = topics {
-        records.retain(|record| topics.matches(record));
+        sites.retain(|site| topics.matches_site(site));
     }
-    inner.drop_denied_records(records);
+    inner.drop_denied_sites(sites);
 }
 
 /// One round: pages of crawled sites, from the set of sites held or a
@@ -1126,10 +1127,10 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             }
         }
         let done = page.done();
-        let scanned = page.records.len() as u64;
-        let mut records = page.records;
-        keep_filled(inner, &mut records, focus.then_some(&topics));
-        let n = records.len() as u64;
+        let scanned = page.sites.len() as u64;
+        let mut sites = page.sites;
+        keep_filled(inner, &mut sites, focus.then_some(&topics));
+        let n = sites.len() as u64;
         // The disk the sites kept take: all of the page, or the share kept.
         let bytes = if focus {
             page.bytes.checked_div(scanned).unwrap_or(0) * n
@@ -1138,10 +1139,6 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         };
         if n > 0 {
             let inner2 = inner.clone();
-            let sites: plumb_core::sites::SiteList = records
-                .into_iter()
-                .map(SiteRecord::stored_item_as_is)
-                .collect();
             tokio::task::spawn_blocking(move || network::append_inbox(&inner2, &sites))
                 .await
                 .context("keeping filled sites")??;
@@ -1330,6 +1327,8 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    use plumb_core::{RecordSet, SiteRecord};
+
     use super::*;
     use crate::records::reference::{load_records, replace_records, sorted_by_link_score};
 
@@ -1650,13 +1649,13 @@ mod tests {
         let FromSet::Page(page) = read_held(&held, 0, 10, u64::MAX, true) else {
             panic!("the set is here")
         };
-        assert_eq!((page.records.len(), page.next, page.total), (5, 5, 5));
+        assert_eq!((page.sites.len(), page.next, page.total), (5, 5, 5));
         // One site at least, so filling goes on.
         let FromSet::Page(page) = read_held(&held, 1, 10, 1, true) else {
             panic!("the set is here")
         };
-        assert_eq!((page.records.len(), page.next), (1, 2));
-        assert_eq!(page.records[0].domain, "b.org");
+        assert_eq!((page.sites.len(), page.next), (1, 2));
+        assert_eq!(page.sites.domains().collect::<Vec<_>>(), ["b.org"]);
     }
 
     #[test]

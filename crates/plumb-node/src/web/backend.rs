@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use plumb_core::SiteRecord;
+use plumb_core::sites::SiteList;
+use plumb_format::Item;
 use plumb_index::pages::PageHit;
 use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher};
 use plumb_net::NetHandle;
@@ -321,11 +322,11 @@ pub trait StatusSource: Send + Sync {
         let _ = url;
         false
     }
-    /// False when the node's denylist takes off the site `record`
-    /// describes; else true, with the key pages and headlines it denies
-    /// taken off `record`. For the sites other nodes answer with.
-    fn allows_record(&self, record: &mut SiteRecord) -> bool {
-        let _ = record;
+    /// False when the node's denylist takes off the site of the stored
+    /// item `site`; else true, with the key pages and headlines it denies
+    /// taken off `site`. For the sites other nodes answer with.
+    fn allows_site(&self, site: &mut Item) -> bool {
+        let _ = site;
         true
     }
     /// Told what a person searched for here and what was found, so the
@@ -365,8 +366,10 @@ pub trait StatusSource: Send + Sync {
         false
     }
 
-    fn keep_from_network(&self, records: Vec<SiteRecord>) {
-        let _ = records;
+    /// Keeps the signed crawls a network search found, their stored
+    /// items held as lines.
+    fn keep_from_network(&self, sites: SiteList) {
+        let _ = sites;
     }
 
     /// The icon of `domain` as a small PNG, when a crawl found one.

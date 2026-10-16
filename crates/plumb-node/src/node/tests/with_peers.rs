@@ -143,7 +143,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         from_node
             .found
             .iter()
-            .any(|f| f.record.domain == "usbank.com"),
+            .any(|f| f.site.domain() == "usbank.com"),
         "{from_node:?}"
     );
 
@@ -308,11 +308,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     // A crawl the search may keep (trusted or confirmed, see
     // plumb_net::FoundSite::keeps) goes to the inbox once, and the node's
     // next index has the text.
-    network::keep_found(&node.inner, vec![crawled.clone()]);
+    network::keep_found(&node.inner, listed(std::slice::from_ref(&crawled)));
     let kept = inbox();
     assert_eq!(kept.lines().count(), 1, "{kept}");
     assert!(kept.contains("Communities for every"), "{kept}");
-    network::keep_found(&node.inner, vec![crawled.clone()]);
+    network::keep_found(&node.inner, listed(std::slice::from_ref(&crawled)));
     assert_eq!(inbox(), kept, "kept once");
     node.refresh_now();
     wait_for(addr, "a new index", |s| {

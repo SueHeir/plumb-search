@@ -222,7 +222,7 @@ These come from [CLAUDE.md](../../CLAUDE.md), which has the full list.
 - **Jobs.** Long-running jobs start through `supervise` and check `stopping()` or `check_stop()` in their loops. A job that takes a gigabyte or so holds `one_big_job()`, taken before `hold_records()`, never after, and says roughly how much memory it takes in its doc comment. Stream records (`build_from_file`, `for_each_record`) rather than holding two copies.
 - **Files.** Write through `plumb_core::storage` (`write_atomic`, `write_atomic_private`, `replace_file`, `remove_file`, `create_directory`) so writes are atomic and charged to the storage budget. Read, append to or fold `records.jsonl` and its journal only under `hold_records()`.
 - **Input.** Cap every peer message's size before decoding it, check before keeping or passing on, and fetch caller-chosen URLs only through plumb-crawl's resolver, which drops private addresses.
-- **Output.** Everything shown or returned goes through the denylist (`StatusSource::denies`; for the sites other nodes answer a network search with, `StatusSource::allows_record`, before they are ranked). Links go through `safe_href` and `http_url`. Results pages send `Referrer-Policy: no-referrer`; the panel sends `same-origin`.
+- **Output.** Everything shown or returned goes through the denylist (`StatusSource::denies`; for the sites other nodes answer a network search with, `StatusSource::allows_site`, before they are ranked). Links go through `safe_href` and `http_url`. Results pages send `Referrer-Policy: no-referrer`; the panel sends `same-origin`.
 - **Size.** Functions under 150 lines, files under 3,000.
 
 ## Entry points

@@ -26,7 +26,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 pub use plumb_core::keys::{
-    bucket_of, matches, query_keys, record_keys, site_keys, BUCKETS, BUCKETS_PER_SEARCH, KEY_CAP,
+    bucket_of, matches, query_keys, record_keys, site_keys, site_matches, BUCKETS,
+    BUCKETS_PER_SEARCH, KEY_CAP,
 };
 use plumb_core::SiteRecord;
 use plumb_format::Item;

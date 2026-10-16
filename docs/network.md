@@ -181,7 +181,7 @@ When a trusted node connects, the node asks it on `/plumb/trust/1` which nodes i
 
 ## Filling free space
 
-A node takes in crawls as they are shared, but one that just joined holds only the last few days of them. So every 10 minutes a node with room asks a node it trusts for its crawled sites over `/plumb/fill/1`, 1,000 at a time, best-ranked first, and takes them in like any shared crawl ([fill.rs](../crates/plumb-net/src/fill.rs), plumb-node's [node/fill.rs](../crates/plumb-node/src/node/fill.rs)). It takes at most 50,000 a round and stops at:
+A node takes in crawls as they are shared, but one that just joined holds only the last few days of them. So every 10 minutes a node with room asks a node it trusts for its crawled sites over `/plumb/fill/1`, 1,000 at a time, best-ranked first, and takes them in like any shared crawl ([fill.rs](../crates/plumb-net/src/fill.rs), plumb-node's [node/fill.rs](../crates/plumb-node/src/node/fill.rs)). An answer carries each site as its record's JSON, as every version has, and the asker keeps the stored item of what it accepts of it. It takes at most 50,000 a round and stops at:
 
 - 90% of the storage limit (`FILL_UP_TO_PERCENT`), so its own crawling keeps room;
 - the day's download limit;

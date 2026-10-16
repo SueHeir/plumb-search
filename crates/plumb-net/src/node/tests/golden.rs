@@ -21,7 +21,7 @@ use std::sync::Mutex;
 use libp2p::identity::Keypair;
 use libp2p::PeerId;
 use plumb_core::site::Item;
-use plumb_core::sites::SiteList;
+use plumb_core::sites::{SiteLine, SiteList};
 use plumb_core::{linker_bit, Headline, KeyPage, LinkText, Redirect, SiteRecord};
 use sha2::{Digest, Sha256};
 
@@ -308,11 +308,12 @@ impl BucketSource for Table {
 }
 
 fn found_sites(text: &mut String, label: &str, found: &[FoundSite]) {
+    let line = |site: &SiteLine| String::from_utf8(site.line().to_vec()).unwrap();
     for site in found {
+        let domain = site.site.domain();
         writeln!(
             text,
-            "{label} {} verified {} crawler {} answers {} crawlers {:?} confirmed {} trusted {} proof {}",
-            site.record.domain,
+            "{label} {domain} verified {} crawler {} answers {} crawlers {:?} confirmed {} trusted {} proof {}",
             site.verified,
             site.crawler.as_deref().unwrap_or("-"),
             site.answers,
@@ -322,25 +323,14 @@ fn found_sites(text: &mut String, label: &str, found: &[FoundSite]) {
             site.proof.is_some(),
         )
         .unwrap();
-        writeln!(
-            text,
-            "{label} {} site {}",
-            site.record.domain,
-            line(&site.record)
-        )
-        .unwrap();
+        writeln!(text, "{label} {domain} site {}", line(&site.site)).unwrap();
         match &site.shared {
-            Some(shared) => writeln!(
-                text,
-                "{label} {} shared {}",
-                site.record.domain,
-                line(shared)
-            ),
-            None => writeln!(text, "{label} {} shared -", site.record.domain),
+            Some(shared) => writeln!(text, "{label} {domain} shared {}", line(shared)),
+            None => writeln!(text, "{label} {domain} shared -"),
         }
         .unwrap();
         let keeps = site.keeps().map_or("-".into(), line);
-        writeln!(text, "{label} {} keeps {keeps}", site.record.domain).unwrap();
+        writeln!(text, "{label} {domain} keeps {keeps}").unwrap();
     }
 }
 
@@ -516,7 +506,7 @@ fn the_network_sends_and_takes_in_the_golden_bytes() {
             crate::fill::accept_filled
         };
         for got in &answer.records {
-            let got = accept(got, NOW).map_or("refused".into(), |record| line(&record));
+            let got = accept(got, NOW).map_or("refused".into(), |site| item_line(&site));
             writeln!(text, "fill all {all} kept {got}").unwrap();
         }
     }

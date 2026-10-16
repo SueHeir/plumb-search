@@ -206,7 +206,7 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     }
     let result = result.expect("a verified hit from C");
     let hit = &result.found[0];
-    assert_eq!(hit.record.domain, published[0].domain);
+    assert_eq!(hit.site.domain(), published[0].domain);
     assert_eq!(result.buckets, plumb_net::bucket::BUCKETS_PER_SEARCH);
     let crawlers = [
         a.handle.peer_id().to_string(),
@@ -396,7 +396,7 @@ async fn bucket_requests_go_sealed_through_a_relay() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let result = result.expect("a verified hit through a relay");
-    assert_eq!(result.found[0].record.domain, records[0].domain);
+    assert_eq!(result.found[0].site.domain(), records[0].domain);
     assert_eq!(result.direct, 0, "{result:?}");
     assert_eq!(result.relayed, result.answered, "{result:?}");
     assert!(holder.handle.status().buckets_served > served_before);
@@ -646,7 +646,7 @@ async fn a_busy_node_answers_searches_that_spend_its_tokens() {
     assert!(paid
         .found
         .iter()
-        .any(|s| s.record.domain == sites[0].domain));
+        .any(|s| s.site.domain() == sites[0].domain));
     let spent = paid.priority;
     assert_eq!(a.handle.tokens_held(&r.peer_id()), 8 - spent);
     wait_for(|| (a.handle.status().credits.tokens_spent == spent as u64).then_some(())).await;
@@ -697,7 +697,7 @@ async fn answering_earns_credits_and_a_node_keeps_to_its_daily_limit() {
     assert!(found
         .found
         .iter()
-        .any(|s| s.record.domain == site.domain && s.verified));
+        .any(|s| s.site.domain() == site.domain && s.verified));
 
     // A counts credits for R for each answer holding a signed crawl: R
     // can ask A what it has there. The padding buckets, empty here, earn
@@ -774,7 +774,7 @@ async fn nodes_send_rounds_of_bucket_requests_without_searching() {
     assert!(found
         .found
         .iter()
-        .any(|s| s.record.domain.starts_with("quay")));
+        .any(|s| s.site.domain().starts_with("quay")));
 
     a.handle.shutdown().await;
     h.handle.shutdown().await;
@@ -908,7 +908,7 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
     };
     assert_eq!(first.peer, s_id);
     assert_eq!(first.total, 30);
-    let domains: Vec<&str> = first.records.iter().map(|r| r.domain.as_str()).collect();
+    let domains: Vec<&str> = first.sites.domains().collect();
     assert_eq!(
         domains,
         [
@@ -919,7 +919,10 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
             "filler6.com"
         ]
     );
-    assert!(first.records.iter().all(|r| r.crawled_at.is_some()));
+    assert!(first
+        .sites
+        .iter()
+        .all(|site| plumb_core::site::crawled(&site).is_some()));
     // A node setting up asks for every site, crawled or not.
     let all = f
         .handle
@@ -927,7 +930,7 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
         .await
         .unwrap()
         .unwrap();
-    let domains: Vec<&str> = all.records.iter().map(|r| r.domain.as_str()).collect();
+    let domains: Vec<&str> = all.sites.domains().collect();
     assert_eq!(
         domains,
         [
@@ -938,9 +941,10 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
             "filler4.com"
         ]
     );
-    assert_eq!(all.records[1].signals.tranco_rank, Some(2));
+    let second = all.sites.iter().nth(1).unwrap();
+    assert_eq!(plumb_core::site::signals(&second).tranco_rank, Some(2));
     assert_eq!(all.next, 5);
-    let mut filled = first.records.len();
+    let mut filled = first.sites.len();
     let mut from = first.next;
     loop {
         let page = f
@@ -953,7 +957,7 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
             // Asked too often this minute: S turns F away for now.
             break;
         }
-        filled += page.records.len();
+        filled += page.sites.len();
         from = page.next;
         if page.done() {
             break;

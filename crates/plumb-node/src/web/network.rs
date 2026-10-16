@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use axum::extract::{Query, State};
 use axum::http::{Extensions, HeaderMap, StatusCode, Uri};
 use axum::response::Response;
-use plumb_core::{SafeSearch, SiteRecord};
+use plumb_core::site;
+use plumb_core::sites::SiteList;
+use plumb_core::SafeSearch;
 use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
 use plumb_net::{FoundSite, NetSearch};
 use tracing::error;
@@ -137,16 +139,16 @@ pub(crate) async fn network_search(
 /// neither ranked, shown nor kept, and hands `node` the signed crawls it
 /// keeps of the rest ([`FoundSite::keeps`]).
 pub(crate) fn take_found(node: &dyn StatusSource, found: &mut NetSearch) {
-    found.found.retain_mut(|site| {
-        node.allows_record(&mut site.record)
-            && site
+    found.found.retain_mut(|found| {
+        found.site.update(|site| node.allows_site(site))
+            && found
                 .shared
                 .as_mut()
-                .is_none_or(|shared| node.allows_record(shared))
+                .is_none_or(|shared| shared.update(|site| node.allows_site(site)))
     });
     // Signed crawls of sites this node holds fill in what its own
     // records lack, for its next index and search by meaning.
-    let shared: Vec<SiteRecord> = found
+    let shared: SiteList = found
         .found
         .iter()
         .filter_map(|site| site.keeps().cloned())
@@ -184,7 +186,11 @@ pub(crate) fn rank_found(
     let sites: Vec<_> = found
         .found
         .iter()
-        .map(|f| f.record.to_stored_item())
+        .map(|found| {
+            let mut site = found.site.item();
+            site::clean(&mut site);
+            site
+        })
         .collect();
     build_index(&index, &sites)?;
     // The few sites found are no dictionary to correct typos against: the
@@ -199,7 +205,7 @@ pub(crate) fn rank_found(
     let by_domain: std::collections::HashMap<&str, &FoundSite> = found
         .found
         .iter()
-        .map(|f| (f.record.domain.as_str(), f))
+        .map(|found| (found.site.domain(), found))
         .collect();
     for hit in hits {
         let Some(site) = by_domain.get(hit.domain.as_str()) else {

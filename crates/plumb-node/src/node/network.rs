@@ -58,9 +58,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use plumb_core::now_unix;
 use plumb_core::site;
 use plumb_core::sites::{SiteLine, SiteList};
-use plumb_core::{now_unix, SiteRecord};
 use plumb_format::Item;
 use plumb_index::Hit;
 use plumb_net::popularity::report_epoch;
@@ -918,7 +918,7 @@ const MAX_KEPT_FOUND: usize = 10_000;
 /// of published batches apply (a crawl is kept only from a trusted crawler
 /// or once confirmed, text only from trusted crawlers). Sites this
 /// node does not hold are left out: searching never fills its storage.
-pub(super) fn keep_found(inner: &Inner, records: Vec<SiteRecord>) {
+pub(super) fn keep_found(inner: &Inner, mut sites: SiteList) {
     let Some(index) = inner.current() else {
         return;
     };
@@ -926,36 +926,34 @@ pub(super) fn keep_found(inner: &Inner, records: Vec<SiteRecord>) {
         return;
     };
     let mut kept = inner.kept_found.locked();
-    let new: Vec<SiteRecord> = records
-        .into_iter()
-        .filter(|record| {
-            let Some(at) = record.crawled_at else {
-                return false;
-            };
-            kept.get(&record.domain).is_none_or(|&had| had < at)
-                && backend.has_domain(&record.domain)
-        })
-        .collect();
-    if new.is_empty() {
+    let mut crawled = Vec::new();
+    sites.retain(|site| {
+        let Some(at) = site::crawled(site) else {
+            return false;
+        };
+        let new = kept.get(&site.id).is_none_or(|&had| had < at) && backend.has_domain(&site.id);
+        if new {
+            crawled.push((site.id.clone(), at));
+        }
+        new
+    });
+    if sites.is_empty() {
         return;
     }
-    let n = new.len() as u64;
-    let sites: SiteList = new.iter().map(|r| r.clone().stored_item_as_is()).collect();
+    let n = sites.len() as u64;
     match append_inbox(inner, &sites) {
         Ok(()) => {
-            if kept.len() + new.len() > MAX_KEPT_FOUND {
+            if kept.len() + crawled.len() > MAX_KEPT_FOUND {
                 kept.clear();
             }
-            for record in &new {
-                kept.insert(record.domain.clone(), record.crawled_at.unwrap_or(0));
-            }
+            kept.extend(crawled);
             debug!("kept {n} signed crawls a network search found");
             let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
             if total >= REBUILD_AFTER_RECORDS {
                 inner.wake.notify_one();
             }
         }
-        Err(err) => warn!("cannot keep records a network search found: {err:#}"),
+        Err(err) => warn!("cannot keep the sites a network search found: {err:#}"),
     }
 }
 
@@ -977,6 +975,7 @@ fn keep_shared_icon(icons: &IconStore, site: &mut Item) {
 
 #[cfg(test)]
 mod tests {
+    use plumb_core::SiteRecord;
     use plumb_net::popularity::{Popular, MAX_POPULARITY_BONUS};
 
     use super::*;

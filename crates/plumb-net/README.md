@@ -51,14 +51,14 @@ plumb-node runs the swarm and answers other nodes from its index through `Bucket
 | [hash.rs](src/hash.rs) | SHA-256 and the Merkle tree over a batch's records |
 | [store.rs](src/store.rs) | Batches held on disk, pruning, proofs for search answers, `CrawlerView` |
 | [agree.rs](src/agree.rs) | Agreement between crawlers: quorum, vouching, disputes and rechecks |
-| [fill.rs](src/fill.rs) | `/plumb/fill/1`: a trusted node's crawled sites, best-ranked first; `accept_record`, the checks on a site from elsewhere, which reading the set of sites shares |
+| [fill.rs](src/fill.rs) | `/plumb/fill/1`: a trusted node's crawled sites, best-ranked first, sent as records' JSON and taken in as sites' stored items; `accept_site`, the checks on a site from elsewhere, which reading the set of sites shares |
 
 **Network search**
 
 | Module | What it does |
 | --- | --- |
 | [bucket.rs](src/bucket.rs) | `BucketSource`, and `BucketTable` and `BucketWriter` for the bucket table on disk, written from sites' stored items |
-| [search.rs](src/search.rs) | Asking for buckets under throwaway identities, hedging, checking answers, `NetSearch` |
+| [search.rs](src/search.rs) | Asking for buckets under throwaway identities, hedging, checking answers, `NetSearch` and its `FoundSite`s, each site's stored item held as its line |
 | [oblivious.rs](src/oblivious.rs) | Sealed requests through a relay over `/plumb/oblivious/2`: signed keys and padding |
 | [rounds.rs](src/rounds.rs) | Scheduled background rounds and the queue of buckets they fetch |
 | [cache.rs](src/cache.rs) | The bucket cache that searches read |

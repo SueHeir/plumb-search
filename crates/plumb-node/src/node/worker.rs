@@ -35,7 +35,7 @@ use anyhow::{bail, Context, Result};
 use plumb_core::sites::{SiteList, Sites};
 #[cfg(doc)]
 use plumb_core::SITES_VERSION;
-use plumb_core::{now_unix, parent_domain, site, SiteRecord, SUBDOMAIN_SITE_NAMES};
+use plumb_core::{now_unix, parent_domain, site, SUBDOMAIN_SITE_NAMES};
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_format::Item;
 use plumb_ingest::{
@@ -361,23 +361,16 @@ fn idle_detail(config: &NodeConfig) -> &'static str {
 /// folded in right after by [`complete_seed`].
 pub(super) async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     let from_network = tokio::select! {
-        records = super::fill::seed_from_network(inner) => records?,
+        sites = super::fill::seed_from_network(inner) => sites?,
         () = inner.stopped() => return Err(Stopped.into()),
     };
-    if let Some((records, downloaded)) = from_network {
+    if let Some((sites, downloaded)) = from_network {
         let built = blocking(inner, move |inner| {
             let fresh = SavedState::fresh(inner.config.initial_crawl);
             inner.update_saved(|saved| {
                 saved.start_over(fresh);
                 saved.add_downloaded(downloaded, now_unix());
             })?;
-            // The network still brings records until it carries items
-            // (step 9 of the data format plan): each becomes its stored
-            // item as it is, the line the records file held of it.
-            let sites = records
-                .into_iter()
-                .map(SiteRecord::stored_item_as_is)
-                .collect();
             save_and_build_seed(inner, sites)
         })
         .await?;
@@ -563,15 +556,11 @@ pub(super) async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
 /// sites, facts and intros, as filling does. `false` when no trusted node
 /// answers now either.
 async fn complete_seed_from_network(inner: &Arc<Inner>) -> Result<bool> {
-    let Some((records, downloaded)) = super::fill::seed_from_network(inner).await? else {
+    let Some((sites, downloaded)) = super::fill::seed_from_network(inner).await? else {
         return Ok(false);
     };
-    let n = records.len() as u64;
+    let n = sites.len() as u64;
     blocking(inner, move |inner| {
-        let sites: SiteList = records
-            .into_iter()
-            .map(SiteRecord::stored_item_as_is)
-            .collect();
         super::network::append_inbox(inner, &sites)?;
         inner.update_saved(|saved| {
             saved.wikidata_missing = false;
@@ -2029,6 +2018,8 @@ impl Backoff {
 
 #[cfg(test)]
 mod tests {
+    use plumb_core::SiteRecord;
+
     use super::*;
 
     #[test]
