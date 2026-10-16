@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use plumb_core::{now_unix, read_jsonl, write_jsonl, SiteRecord};
+use plumb_core::{now_unix, write_jsonl, SiteRecord};
 use plumb_index::Hit;
 use plumb_ingest::{
     kind_sites, load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat,

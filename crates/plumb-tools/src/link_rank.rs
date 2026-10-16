@@ -844,7 +844,9 @@ mod tests {
         );
 
         // Each line of the copy is the record read off the file, with only
-        // its ranks and count of linking sites changed, as a record writes it.
+        // its ranks and count of linking sites changed, as a record writes it:
+        // as it is, but for Example.COM, whose link to foo_bar.com would not
+        // read back as it is, which is written clean.
         let mut before = Vec::new();
         plumb_node::outline::for_each_record(&path, |record| before.push(record)).unwrap();
         let copy = std::fs::read_to_string(&apply).unwrap();
@@ -856,6 +858,9 @@ mod tests {
             let mut expected = record.clone();
             expected.signals.pagerank_rank = after.signals.pagerank_rank;
             expected.signals.linking_domains = after.signals.linking_domains;
+            if record.domain == "Example.COM" {
+                expected.clean();
+            }
             assert_eq!(after, expected);
             assert_eq!(
                 line.as_bytes(),

@@ -339,7 +339,7 @@ impl RecordSummary {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{read_jsonl, write_jsonl};
+    use plumb_core::write_jsonl;
 
     use super::*;
     use crate::records::{journal_path, Change, RecordStore};
@@ -394,7 +394,7 @@ mod tests {
     fn ingest(args: IngestArgs) -> Vec<SiteRecord> {
         let out = args.out.clone();
         run(args).unwrap();
-        read_jsonl(&out).unwrap()
+        plumb_core::stored::read_file(&out).unwrap()
     }
 
     fn find<'a>(records: &'a [SiteRecord], domain: &str) -> &'a SiteRecord {
@@ -766,7 +766,7 @@ mod tests {
             ..writing_to(records.clone())
         });
         assert!(!journal_path(&records).exists());
-        let file: Vec<SiteRecord> = read_jsonl(&records).unwrap();
+        let file: Vec<SiteRecord> = plumb_core::stored::read_file(&records).unwrap();
         assert_eq!(find(&file, "found.com").title.as_deref(), Some("Found"));
     }
 }

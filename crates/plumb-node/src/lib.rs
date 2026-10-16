@@ -168,11 +168,11 @@ pub fn rank_config(alpha: Option<f32>) -> RankConfig {
     cfg
 }
 
-/// Writes records as JSON lines to a temporary file next to `path`, flushes
-/// it to disk, renames it over `path` and flushes the directory too (on
-/// Unix), so an interrupted run, a crash or a power cut leaves the old file
-/// or the new one, never a half-written or empty one. Creates the parent
-/// directory when missing.
+/// Writes records as stored lines ([`plumb_core::stored::write`]) to a
+/// temporary file next to `path`, flushes it to disk, renames it over
+/// `path` and flushes the directory too (on Unix), so an interrupted run, a
+/// crash or a power cut leaves the old file or the new one, never a
+/// half-written or empty one. Creates the parent directory when missing.
 pub(crate) fn write_records_atomically<'a, I>(path: &Path, records: I) -> Result<usize>
 where
     I: IntoIterator<Item = &'a SiteRecord>,
@@ -409,7 +409,7 @@ mod tests {
         std::fs::write(&path, "old contents\n").unwrap();
         let records = vec![SiteRecord::new("usbank.com"), SiteRecord::new("chase.com")];
         assert_eq!(write_records_atomically(&path, &records).unwrap(), 2);
-        let back: Vec<SiteRecord> = plumb_core::read_jsonl(&path).unwrap();
+        let back: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
         assert_eq!(back, records);
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()

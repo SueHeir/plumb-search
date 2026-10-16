@@ -516,7 +516,7 @@ pub(crate) fn canonical_owned(url: String) -> Option<String> {
 /// letter, no port, and a path and query of characters a URL keeps as
 /// they are, with no `%`, no dot segments and no fragment. `false` says
 /// nothing: the URL may be canonical all the same.
-fn plainly_canonical(url: &str) -> bool {
+pub(crate) fn plainly_canonical(url: &str) -> bool {
     let Some(rest) = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
