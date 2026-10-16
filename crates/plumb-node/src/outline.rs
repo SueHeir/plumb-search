@@ -1533,11 +1533,11 @@ pub(crate) mod tests {
         .unwrap();
         assert!(built.buckets);
         let table = dir.path().join("table");
-        let records: Vec<SiteRecord> = lines
+        let sites: Vec<Item> = lines
             .iter()
-            .map(|line| stored::read(line.as_bytes()).unwrap())
+            .map(|line| stored::read_item(line.as_bytes()).unwrap())
             .collect();
-        plumb_net::BucketTable::build(&table, &records).unwrap();
+        plumb_net::BucketTable::build(&table, &sites).unwrap();
 
         let mut text = String::from(
             "# What a node's build makes of the sites of plumb-index's golden file\n\

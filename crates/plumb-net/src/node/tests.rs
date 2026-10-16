@@ -151,9 +151,8 @@ async fn startup_replay_shutdown_cancels_the_receiver_wait() {
             .unwrap();
     }
     drop(legacy);
-    let source = Arc::new(
-        crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
-    );
+    let source =
+        Arc::new(crate::BucketTable::build::<Item>(&dir.path().join("buckets"), &[]).unwrap());
     let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
     let mut config = NetConfig::new(dir.path().to_owned());
     config.listen.clear();
@@ -191,9 +190,8 @@ async fn cold_network_startup_accounts_its_directories_before_replay() {
         let dir = tempfile::tempdir().unwrap();
         let net_dir = dir.path().join("net");
         std::fs::create_dir(&net_dir).unwrap();
-        let source = Arc::new(
-            crate::BucketTable::build::<SiteRecord>(&net_dir.join("buckets"), &[]).unwrap(),
-        );
+        let source =
+            Arc::new(crate::BucketTable::build::<Item>(&net_dir.join("buckets"), &[]).unwrap());
         let budget = limit.map(|limit| StorageBudget::open(dir.path(), limit).unwrap());
         let mut config = NetConfig::new(net_dir.clone());
         config.listen.clear();
@@ -250,9 +248,8 @@ async fn cold_network_startup_accounts_its_directories_before_replay() {
 #[tokio::test]
 async fn a_scope_change_past_the_storage_limit_is_saved() {
     let dir = tempfile::tempdir().unwrap();
-    let source = Arc::new(
-        crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
-    );
+    let source =
+        Arc::new(crate::BucketTable::build::<Item>(&dir.path().join("buckets"), &[]).unwrap());
     let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
     let mut config = NetConfig::new(dir.path().to_owned());
     config.listen.clear();

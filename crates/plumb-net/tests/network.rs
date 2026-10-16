@@ -21,9 +21,10 @@ fn listed(records: &[SiteRecord]) -> SiteList {
 }
 
 /// Serves the buckets of the records it was given, as a node with an
-/// index of them would.
+/// index of their stored items would.
 fn table(dir: &std::path::Path, records: &[SiteRecord]) -> Arc<dyn BucketSource> {
-    Arc::new(BucketTable::build(&dir.join("buckets"), records).unwrap())
+    let sites: Vec<Item> = records.iter().map(SiteRecord::to_stored_item).collect();
+    Arc::new(BucketTable::build(&dir.join("buckets"), &sites).unwrap())
 }
 
 struct Node {

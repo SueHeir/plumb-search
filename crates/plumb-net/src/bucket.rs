@@ -29,8 +29,7 @@ pub use plumb_core::keys::{
     bucket_of, matches, query_keys, record_keys, site_keys, site_matches, BUCKETS,
     BUCKETS_PER_SEARCH, KEY_CAP,
 };
-use plumb_core::SiteRecord;
-use plumb_format::Item;
+use plumb_core::site::{self, Item};
 use rand_core::RngCore;
 
 use crate::hash::Hash;
@@ -140,32 +139,35 @@ pub struct BucketTable {
 }
 
 impl BucketTable {
-    /// Writes the table of `records` into `dir`, which must not exist yet,
-    /// each as its stored item ([`SiteRecord::to_stored_item`], which cleans
-    /// it). Takes about as much disk as the
-    /// records file, and memory for about 12 bytes per key and 4 per bucket
-    /// entry while it runs. `records` may be the records themselves or
-    /// references to them.
-    pub fn build<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<BucketTable> {
-        Self::build_with_budget(dir, records, None)
+    /// Writes the table of `sites`, their stored items
+    /// ([`plumb_core::site`]), into `dir`, which must not exist yet: best
+    /// [`site::link_score`] first, ties by domain, each cleaned
+    /// ([`site::clean`]) as a node's sets hold them. Takes about as much
+    /// disk as the records file, and memory for about 12 bytes per key and
+    /// 4 per bucket entry while it runs. `sites` may be the items
+    /// themselves or references to them.
+    pub fn build<S: Borrow<Item>>(dir: &Path, sites: &[S]) -> Result<BucketTable> {
+        Self::build_with_budget(dir, sites, None)
     }
 
-    pub fn build_with_budget<R: Borrow<SiteRecord>>(
+    pub fn build_with_budget<S: Borrow<Item>>(
         dir: &Path,
-        records: &[R],
+        sites: &[S],
         budget: Option<std::sync::Arc<plumb_core::storage::StorageBudget>>,
     ) -> Result<BucketTable> {
-        let records: Vec<&SiteRecord> = records.iter().map(Borrow::borrow).collect();
-        let mut order: Vec<usize> = (0..records.len()).collect();
+        let sites: Vec<&Item> = sites.iter().map(Borrow::borrow).collect();
+        let scores: Vec<f32> = sites.iter().map(|s| site::link_score(s)).collect();
+        let mut order: Vec<usize> = (0..sites.len()).collect();
         order.sort_by(|&a, &b| {
-            records[b]
-                .link_score()
-                .total_cmp(&records[a].link_score())
-                .then_with(|| records[a].domain.cmp(&records[b].domain))
+            scores[b]
+                .total_cmp(&scores[a])
+                .then_with(|| sites[a].id.cmp(&sites[b].id))
         });
         let mut writer = BucketWriter::new_with_budget(dir, budget)?;
         for i in order {
-            writer.add(&records[i].to_stored_item())?;
+            let mut clean = sites[i].clone();
+            site::clean(&mut clean);
+            writer.add(&clean)?;
         }
         writer.finish()
     }
@@ -419,28 +421,32 @@ impl BucketWriter {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::LinkText;
+    use plumb_core::{LinkText, Signals};
 
     use super::*;
 
-    fn site(domain: &str, title: &str, tranco: u32) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
-        r.title = Some(title.to_string());
-        r.signals.tranco_rank = Some(tranco);
-        r
+    fn site(domain: &str, title: &str, tranco: u32) -> Item {
+        let mut site = site::new(domain);
+        site.title = Some(title.to_string());
+        let signals = Signals {
+            tranco_rank: Some(tranco),
+            ..Signals::default()
+        };
+        site::set_signals(&mut site, &signals);
+        site
     }
 
     #[test]
     fn keys_cover_words_and_joined_names() {
-        let mut r = site("usbank.com", "U.S. Bank | Checking & Savings", 500);
-        r.link_texts = vec![LinkText::with_count("US Bank online", 3)];
-        let keys = record_keys(&r);
+        let mut usbank = site("usbank.com", "U.S. Bank | Checking & Savings", 500);
+        site::set_link_texts(&mut usbank, &[LinkText::with_count("US Bank online", 3)]);
+        let keys = site_keys(&usbank);
         for key in ["usbank", "bank", "us", "checking", "usbankonline", "online"] {
             assert!(keys.contains(key), "{key} in {keys:?}");
         }
         assert_eq!(query_keys("U.S. Bank"), vec!["usbank", "bank", "us"]);
-        assert!(matches(&r, &query_keys("us bank")));
-        assert!(!matches(&r, &query_keys("chase")));
+        assert!(site_matches(&usbank, &query_keys("us bank")));
+        assert!(!site_matches(&usbank, &query_keys("chase")));
     }
 
     #[test]
@@ -465,7 +471,7 @@ mod tests {
     #[test]
     fn a_table_returns_each_key_best_sites_and_survives_reopening() {
         let dir = tempfile::tempdir().unwrap();
-        let mut records: Vec<SiteRecord> = (0..100)
+        let mut sites: Vec<Item> = (0..100)
             .map(|i| {
                 site(
                     &format!("bank{i}.com"),
@@ -474,29 +480,29 @@ mod tests {
                 )
             })
             .collect();
-        records.push(site("usbank.com", "U.S. Bank", 10));
+        sites.push(site("usbank.com", "U.S. Bank", 10));
         let path = dir.path().join("buckets");
-        BucketTable::build(&path, &records).unwrap();
+        BucketTable::build(&path, &sites).unwrap();
         let table = BucketTable::open(&path).unwrap();
         assert_eq!(table.len(), 101);
 
-        let bank: Vec<SiteRecord> = table
+        let bank: Vec<Item> = table
             .get(bucket_of("bank"))
             .unwrap()
             .iter()
-            .map(|j| plumb_core::stored::read(j.as_bytes()).unwrap())
-            .filter(|r: &SiteRecord| record_keys(r).contains("bank"))
+            .map(|j| plumb_core::stored::read_item(j.as_bytes()).unwrap())
+            .filter(|site| site_keys(site).contains("bank"))
             .collect();
         // Capped, best first.
         assert_eq!(bank.len(), KEY_CAP);
-        assert_eq!(bank[0].domain, "usbank.com");
-        assert_eq!(bank[1].domain, "bank0.com");
+        assert_eq!(bank[0].id, "usbank.com");
+        assert_eq!(bank[1].id, "bank0.com");
 
         let usbank = table.get(bucket_of("usbank")).unwrap();
         assert!(usbank.iter().any(|j| j.contains("\"usbank.com\"")));
         assert!(table.get(BUCKETS).is_err());
         assert!(
-            BucketTable::build(&path, &records).is_err(),
+            BucketTable::build(&path, &sites).is_err(),
             "never overwritten"
         );
     }

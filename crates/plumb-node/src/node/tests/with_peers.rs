@@ -64,8 +64,11 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     peer_config.bootstrap = vec![node_addr.clone()];
     // The peer trusts the node, so it may fill its space from it.
     peer_config.trusted_peers = vec![net_status.peer_id.parse().unwrap()];
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
-        .unwrap();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &stored_items(&[crawled.clone()]),
+    )
+    .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -178,9 +181,11 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         c.bootstrap = vec![node_addr.clone()];
         c
     };
-    let empty =
-        plumb_net::BucketTable::build(&second_dir.path().join("buckets"), &[] as &[SiteRecord])
-            .unwrap();
+    let empty = plumb_net::BucketTable::build(
+        &second_dir.path().join("buckets"),
+        &[] as &[plumb_core::site::Item],
+    )
+    .unwrap();
     let (second, _records) = plumb_net::start(second_config, Arc::new(empty))
         .await
         .unwrap();
@@ -267,8 +272,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     peer_config.local_discovery = false;
     peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr];
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
-        .unwrap();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &stored_items(&[crawled.clone()]),
+    )
+    .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -399,7 +407,9 @@ async fn network_results_go_through_the_denylist() {
     peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr];
     let records = [keepers, wreckers, facebook];
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &records).unwrap();
+    let table =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&records))
+            .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -486,9 +496,11 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     peer_config.local_discovery = false;
     peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr];
-    let source =
-        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &fixture_records())
-            .unwrap();
+    let source = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &stored_items(&fixture_records()),
+    )
+    .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
         .await
         .unwrap();

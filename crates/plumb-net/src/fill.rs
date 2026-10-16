@@ -252,13 +252,16 @@ mod tests {
     #[test]
     fn answers_crawled_sites_best_ranked_first_a_stretch_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
-        let records = vec![
+        let sites: Vec<Item> = [
             site("third.com", 3, true),
             site("first.com", 1, true),
             site("second.com", 2, false),
             site("fourth.com", 4, true),
-        ];
-        let table = BucketTable::build(&dir.path().join("b"), &records).unwrap();
+        ]
+        .iter()
+        .map(SiteRecord::to_stored_item)
+        .collect();
+        let table = BucketTable::build(&dir.path().join("b"), &sites).unwrap();
         let ranked = table.ranked(1, 2).unwrap();
         assert!(ranked[0].contains("second.com") && ranked[1].contains("third.com"));
         assert!(table.ranked(4, 10).unwrap().is_empty());
@@ -311,12 +314,15 @@ mod tests {
             }
         }
         let dir = tempfile::tempdir().unwrap();
-        let records = vec![
+        let sites: Vec<Item> = [
             site("first.com", 1, true),
             site("second.com", 2, true),
             site("third.com", 3, true),
-        ];
-        let source = WithIcons(BucketTable::build(&dir.path().join("b"), &records).unwrap());
+        ]
+        .iter()
+        .map(SiteRecord::to_stored_item)
+        .collect();
+        let source = WithIcons(BucketTable::build(&dir.path().join("b"), &sites).unwrap());
         let icons: Vec<Option<String>> = answer(&source, 0, 10, false)
             .records
             .iter()
