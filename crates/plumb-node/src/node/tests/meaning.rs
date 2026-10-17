@@ -3,10 +3,10 @@
 
 use super::*;
 
-/// The text a node embeds of `record`'s site, read from the records file
-/// as the line it is: its stored item as it is.
-fn text_of(record: &SiteRecord) -> String {
-    plumb_embed::site_text(&record.clone().stored_item_as_is())
+/// The text a node embeds of `site`, read from the records file as the
+/// line [`seeded_dir`] writes it.
+fn text_of(site: &Item) -> String {
+    plumb_embed::site_text(&plumb_core::stored::read_record_json(&old_line(site)).unwrap())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -30,7 +30,7 @@ async fn search_by_meaning_embeds_sites_in_the_background() {
     assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
     // Every site with text gets a vector, saved for the next start.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let with_text = fixture_records()
+    let with_text = fixture_sites()
         .iter()
         .filter(|r| !text_of(r).is_empty())
         .count();
@@ -122,15 +122,15 @@ async fn takes_site_vectors(as_set: bool) {
 
     // The trusted node's vectors: one for a site's very text, one for
     // other text, one for a site this node does not know.
-    let records = fixture_records();
+    let records = fixture_sites();
     let mut with_text = records.iter().filter(|r| !text_of(r).is_empty());
     let same = with_text.next().unwrap();
     let other = with_text.next().unwrap();
     let marker = [7i8; 32];
     let mut theirs = plumb_embed::Vectors::new(model, 32);
     let hash = plumb_embed::text_hash(&text_of(same));
-    theirs.insert(&same.domain, hash, &marker).unwrap();
-    theirs.insert(&other.domain, [9; 32], &marker).unwrap();
+    theirs.insert(&same.id, hash, &marker).unwrap();
+    theirs.insert(&other.id, [9; 32], &marker).unwrap();
     theirs.insert("unknown-to-it.org", hash, &marker).unwrap();
     let peer_dir = tempfile::tempdir().unwrap();
     let file = peer_dir.path().join(plumb_embed::VECTORS_FILE_NAME);
@@ -216,15 +216,15 @@ async fn takes_site_vectors(as_set: bool) {
     let deadline = Instant::now() + Duration::from_secs(60);
     let vectors = loop {
         if let Ok(vectors) = plumb_embed::Vectors::load(&vectors_path) {
-            if vectors.len() == wanted && vectors.get(&same.domain).is_some() {
+            if vectors.len() == wanted && vectors.get(&same.id).is_some() {
                 break vectors;
             }
         }
         assert!(Instant::now() < deadline, "vectors not saved");
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    assert_eq!(vectors.get(&same.domain), Some((&hash, &marker[..])));
-    assert_ne!(vectors.get(&other.domain).unwrap().1, &marker[..]);
+    assert_eq!(vectors.get(&same.id), Some((&hash, &marker[..])));
+    assert_ne!(vectors.get(&other.id).unwrap().1, &marker[..]);
     assert!(vectors.get("unknown-to-it.org").is_none());
     // Read into the node's own file, the set is not kept.
     let taken = crate::node::signed_sets::set_dir(dir.path(), &set).unwrap();

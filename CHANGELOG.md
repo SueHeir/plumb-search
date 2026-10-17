@@ -17,6 +17,10 @@
 
 - The private search page now gets each site of a bucket as its item in Plumb's data format, trimmed, in place of the site's trimmed record (`GET /api/buckets/{table}/{n}`). Buckets come out the same size (measured on 64 buckets of a live node), and searches find and rank the same sites. The page reads both forms, so buckets a browser kept from before the upgrade still work. A private search tab left open across the upgrade can find nothing until it is reloaded.
 
+### Tools
+
+- `plumb-tools site-items` is gone. It reported what a node's sites would lose or change as items of the data format, and a node now keeps every site as its item.
+
 ## 0.4.0
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.4.0), and the Docker image is `ghcr.io/sueheir/plumb-search:0.4.0` (also `:0.4` and `:latest`). This release changes what nodes send each other: crawl batches and the answers to network searches now carry each site in Plumb's data format, the `site` item that signed sets already hold. A 0.4.0 node shares crawls and network searches only with other 0.4.0 nodes, so every node should move to it. The release also reads pages in their real character set, links a part of a search to the article it usually means, and trims a node's sites without holding them all in memory.

@@ -300,7 +300,6 @@ fn denies(list: &Denylist, url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::SiteRecord;
     use plumb_format::deny::Entry;
     use serde_json::json;
 
@@ -357,16 +356,17 @@ mod tests {
 
     #[test]
     fn a_site_is_kept_or_passed_on_without_what_the_list_denies() {
-        let record: SiteRecord = serde_json::from_value(json!({
+        let record = json!({
             "domain": "example.com", "url": "https://www.example.com/", "title": "Example",
             "links_to": ["other.org"],
             "key_pages": [{"label": "Docs", "url": "https://example.com/docs"},
                           {"label": "Shop", "url": "https://example.com/shop"}],
             "news": [{"title": "Kept", "url": "https://example.com/news/1", "at": 1},
                      {"title": "Taken off", "url": "https://example.com/news/2", "at": 2}],
-        }))
-        .unwrap();
-        let site = record.to_stored_item();
+        });
+        // As a node of version 0.4 kept it.
+        let mut site = plumb_core::stored::read_record_json(&record.to_string()).unwrap();
+        plumb_core::site::clean(&mut site);
         let kept = |targets: &[&str]| {
             let mut kept = site.clone();
             allow(&list(targets), &mut kept).then_some(kept)

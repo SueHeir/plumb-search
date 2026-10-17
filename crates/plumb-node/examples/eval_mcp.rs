@@ -520,7 +520,7 @@ mod tests {
     use plumb_core::article::Article;
     use plumb_core::facts::{Fact, FactKind};
     use plumb_core::packages::PackageInfo;
-    use plumb_core::SiteRecord;
+    use plumb_core::site;
     use plumb_index::pages::{build_page_index, DOCS_SET};
     use tower::ServiceExt;
 
@@ -529,13 +529,11 @@ mod tests {
         let index = dir.path().join("sites");
         plumb_index::build_index(
             &index,
-            &[SiteRecord {
-                domain: "python.org".into(),
+            &[site::Item {
                 title: Some("Python".into()),
-                description: Some("Python programming language".into()),
-                ..SiteRecord::default()
-            }
-            .to_stored_item()],
+                about: Some("Python programming language".into()),
+                ..site::new("python.org")
+            }],
         )
         .unwrap();
         let pages_dir = dir.path().join("pages");
@@ -738,14 +736,10 @@ mod tests {
         // fourth while this server called every word common.
         let (dir, _) = fixture();
         let index = dir.path().join("health");
-        let site = |domain: &str, title: &str| {
-            SiteRecord {
-                domain: domain.into(),
-                title: Some(title.into()),
-                description: Some(format!("{title} health information")),
-                ..SiteRecord::default()
-            }
-            .to_stored_item()
+        let site = |domain: &str, title: &str| site::Item {
+            title: Some(title.into()),
+            about: Some(format!("{title} health information")),
+            ..site::new(domain)
         };
         plumb_index::build_index(
             &index,

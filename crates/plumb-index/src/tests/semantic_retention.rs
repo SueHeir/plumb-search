@@ -560,7 +560,7 @@ fn complete_structured_identity_precedes_partial_scopes_with_borrowed_text() {
         popular(100, 30_000),
     );
     owner.url = Some("https://other.example/".into());
-    owner.about = Some("Research organization".into());
+    site::set_wikidata_about(&mut owner, Some("Research organization".into()));
     let records = [
         owner,
         site(

@@ -32,7 +32,7 @@
 //!   theguardian.com because most links saying "the guardian" go there,
 //!   whatever its own pages call it.
 //! - A query that is a kind of thing ("banks", "airlines") gives every site
-//!   of that kind ([`SiteRecord::kinds`](plumb_core::SiteRecord::kinds)) a
+//!   of that kind ([`plumb_core::site::kinds`]) a
 //!   full text match and [`RankConfig::kind_bonus`], so they are listed by
 //!   popularity.
 //! - `country` is [`RankConfig::country_boost`] for a site of the searcher's
@@ -266,7 +266,7 @@ pub struct RankConfig {
     /// intent parsing remain independent of coverage/tier adjustments.
     pub whole_query_relevance: bool,
     /// BM25 boost of a query word matching a site's search terms
-    /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
+    /// ([`plumb_core::site::terms`]), picked from its whole homepage.
     pub terms_boost: f32,
     /// Words that ask or say what is wanted ([`FILLER_WORDS`]) name no site
     /// in a query of two words or more.

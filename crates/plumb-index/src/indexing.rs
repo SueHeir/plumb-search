@@ -1,8 +1,7 @@
 //! Building the site index from sites as a node stores them, their stored
 //! items ([`plumb_core::site`]): one document a site, items for the same
 //! domain merged and redirecting domains folded into the site they
-//! redirect to. Callers holding records turn them into their items
-//! ([`plumb_core::SiteRecord::to_stored_item`]).
+//! redirect to.
 
 use std::borrow::Borrow;
 use std::collections::hash_map::Entry;

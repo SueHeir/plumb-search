@@ -1872,17 +1872,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (file, dir) = (temp.path().join("records.jsonl"), temp.path().join("set"));
         let site = |domain: &str, tranco: u32| {
-            let mut record = plumb_core::SiteRecord::new(domain);
-            record.url = Some(format!("https://{domain}/"));
-            record.title = Some(format!("{domain} home"));
-            record.signals.tranco_rank = Some(tranco);
-            record.crawled_at = Some(1_791_605_520);
-            record
+            let mut site = plumb_core::site::new(domain);
+            site.url = Some(format!("https://{domain}/"));
+            site.title = Some(format!("{domain} home"));
+            crate::test_sites::ranks(&mut site, |signals| signals.tranco_rank = Some(tranco));
+            plumb_core::site::set_crawled(&mut site, Some(1_791_605_520));
+            site
         };
         let mut gone = site("gone.example", 1);
-        gone.gone_at = Some(1_791_000_000);
+        let marks = plumb_core::site::CrawlMarks {
+            gone: Some(1_791_000_000),
+            ..plumb_core::site::CrawlMarks::default()
+        };
+        plumb_core::site::set_crawl_marks(&mut gone, marks);
         let mut too_big = site("big.example", 5);
-        too_big.aliases = (0..16)
+        too_big.names = (0..16)
             .map(|i| format!("{i} {}", "x".repeat(1_100)))
             .collect();
         let records = [
@@ -1892,7 +1896,7 @@ mod tests {
             too_big,
             site("second.example", 40),
         ];
-        plumb_core::write_jsonl(&file, &records).unwrap();
+        crate::test_sites::write(&file, &records);
         let args = SitesArgs {
             records: file,
             name: "plumb/sites".into(),
@@ -1914,24 +1918,22 @@ mod tests {
             domains,
             ["first.example", "second.example", "third.example"]
         );
-        assert_eq!(
-            plumb_core::SiteRecord::from_item(&items[0]).unwrap(),
-            site("first.example", 2)
-        );
+        let first = plumb_core::site::to_item(&site("first.example", 2)).unwrap();
+        assert_eq!(items[0], first);
     }
 
     #[test]
-    fn a_set_of_sites_holds_the_items_its_records_send() {
+    fn a_set_of_sites_holds_the_items_its_sites_send() {
         let temp = tempfile::tempdir().unwrap();
         let (file, dir) = (temp.path().join("records.jsonl"), temp.path().join("set"));
-        let mut records = crate::test_sites::records();
-        let mut too_big = plumb_core::SiteRecord::new("big.example");
-        too_big.signals.tranco_rank = Some(5);
-        too_big.aliases = (0..16)
+        let mut sites = crate::test_sites::sites();
+        let mut too_big = plumb_core::site::new("big.example");
+        crate::test_sites::ranks(&mut too_big, |signals| signals.tranco_rank = Some(5));
+        too_big.names = (0..16)
             .map(|i| format!("{i} {}", "x".repeat(1_100)))
             .collect();
-        records.push(too_big);
-        crate::test_sites::write(&file, &records);
+        sites.push(too_big);
+        crate::test_sites::write(&file, &sites);
         let args = SitesArgs {
             records: file.clone(),
             name: "plumb/sites".into(),
@@ -1940,18 +1942,17 @@ mod tests {
             attribution: "From a test".into(),
             level: 3,
         };
-        let written = sites(&args).unwrap();
+        let written = super::sites(&args).unwrap();
         let key = SigningKey::from_bytes(&[5; 32]);
         sign_set(&dir, &key, None, None).unwrap();
         let (_, items) = plumb_node::sets::read_items(&dir).unwrap();
 
-        // The items of the records loaded, best first, the gone left out.
-        let set = crate::test_sites::load_records(&file);
-        let sent: Vec<_> = set
-            .into_sorted_vec()
-            .into_iter()
-            .filter(|record| record.gone_at.is_none())
-            .map(|record| record.to_item().ok())
+        // The items of the sites loaded, best first, the gone left out.
+        let loaded = plumb_node::records::load_sites(&file).unwrap();
+        let sent: Vec<_> = loaded
+            .by_link_score()
+            .filter(|site| plumb_core::site::crawl_marks(site).gone.is_none())
+            .map(|site| plumb_core::site::to_item(&site).ok())
             .collect();
         let expected: Vec<Item> = sent.iter().flatten().cloned().collect();
         assert_eq!(written.items, expected.len() as u64);

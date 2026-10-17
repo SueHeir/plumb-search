@@ -9,7 +9,7 @@ use crate::junk::{
 };
 
 /// A site found only by meaning, whose homepage is at `url`.
-fn at(domain: &str, url: &str, title: Option<&str>) -> SiteRecord {
+fn at(domain: &str, url: &str, title: Option<&str>) -> Item {
     let mut record = site(domain, title, None, &[], &[], obscure(400_000, 3));
     record.url = Some(url.to_string());
     record
@@ -44,8 +44,8 @@ fn sign_in_pages_of_sites_the_query_does_not_name_are_left_out() {
             "https://www.wealthscape.com/",
             Some("Wealthscape Login"),
         ),
-        SiteRecord {
-            description: Some("How workplace retirement plans work.".into()),
+        Item {
+            about: Some("How workplace retirement plans work.".into()),
             ..at(
                 "retireguide.example",
                 "https://retireguide.example/",

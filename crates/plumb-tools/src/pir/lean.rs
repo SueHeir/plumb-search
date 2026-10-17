@@ -229,7 +229,7 @@ pub fn read_piece(payload: &[u8], piece: u32) -> Result<Vec<Item>> {
 #[cfg(test)]
 mod tests {
     use plumb_core::keys::{query_keys, site_matches};
-    use plumb_core::{site, LinkText, Signals};
+    use plumb_core::{site, LinkText};
 
     use super::*;
     use crate::pir::snapshot::assemble_bucket;
@@ -239,21 +239,17 @@ mod tests {
     /// Small rows, so tests don't write the full 512 MiB table.
     const TEST_ROW_BYTES: u32 = 2048;
 
-    fn site(domain: &str, title: &str, text_words: usize) -> SiteRecord {
-        SiteRecord {
-            domain: domain.into(),
-            title: Some(title.into()),
-            description: Some("d".repeat(500)),
-            body_text: Some("word ".repeat(text_words)),
-            headings: vec!["Welcome".into()],
-            intro: Some("An intro.".into()),
-            link_texts: vec![LinkText::from_linkers(title.to_lowercase(), 7)],
-            signals: Signals {
-                linking_domains: 3,
-                ..Signals::default()
-            },
-            ..SiteRecord::default()
-        }
+    fn site(domain: &str, title: &str, text_words: usize) -> Item {
+        let mut site = site::new(domain);
+        site.title = Some(title.into());
+        site.about = Some("d".repeat(500));
+        site.text = Some("word ".repeat(text_words));
+        site::set_headings(&mut site, vec!["Welcome".into()]);
+        site::set_intro(&mut site, Some("An intro.".into()));
+        let link_text = LinkText::from_linkers(title.to_lowercase(), 7);
+        site::set_link_texts(&mut site, &[link_text]);
+        crate::test_sites::ranks(&mut site, |signals| signals.linking_domains = 3);
+        site
     }
 
     fn table(dir: &Path) -> BucketTable {
@@ -267,8 +263,11 @@ mod tests {
         BucketTable::build(&dir.join("buckets"), &items(&records)).unwrap()
     }
 
-    fn items(records: &[SiteRecord]) -> Vec<Item> {
-        records.iter().map(SiteRecord::to_stored_item).collect()
+    /// `sites` cleaned, as a node stores them.
+    fn items(sites: &[Item]) -> Vec<Item> {
+        let mut sites = sites.to_vec();
+        sites.iter_mut().for_each(site::clean);
+        sites
     }
 
     /// What a client does: the keys' pieces, their rows, each row checked
@@ -351,9 +350,9 @@ mod tests {
         use std::fmt::Write as _;
 
         let dir = tempfile::tempdir().unwrap();
-        let mut records = crate::test_sites::records();
-        records.extend(crate::test_sites::bucket_records());
-        let table = BucketTable::build(&dir.path().join("buckets"), &items(&records)).unwrap();
+        let mut sites = crate::test_sites::sites();
+        sites.extend(crate::test_sites::bucket_sites());
+        let table = BucketTable::build(&dir.path().join("buckets"), &items(&sites)).unwrap();
         let pir = dir.path().join("pir");
         let (snapshot, report) =
             build_rows(&pir, &table, TEST_ROW_BYTES, "test", NOW, DAY).unwrap();
@@ -430,15 +429,15 @@ mod tests {
     #[test]
     fn rows_too_small_for_the_fullest_fail_without_leftovers() {
         let dir = tempfile::tempdir().unwrap();
-        let mut records: Vec<SiteRecord> = (0..40)
+        let mut records: Vec<Item> = (0..40)
             .map(|n| site(&format!("bank{n}.example"), "Bank", 10))
             .collect();
         // Text that does not compress, in the one piece of the key `bank`.
         for record in &mut records {
             let noise: String = (0u8..4)
-                .map(|i| plumb_net::hash::Hash::of(&[record.domain.as_bytes(), &[i]]).to_hex())
+                .map(|i| plumb_net::hash::Hash::of(&[record.id.as_bytes(), &[i]]).to_hex())
                 .collect();
-            record.description = Some(noise);
+            record.about = Some(noise);
         }
         let table = BucketTable::build(&dir.path().join("buckets"), &items(&records)).unwrap();
         let path = dir.path().join("pir");

@@ -32,7 +32,7 @@ use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use plumb_core::keys::{bucket_of, lean_site, piece_of, site_keys, slim_site, PIECES_PER_BUCKET};
 use plumb_core::site::{self, Item};
-use plumb_core::{stored, SiteRecord};
+use plumb_core::stored;
 use plumb_net::BucketTable;
 use plumb_tools::pir::snapshot::Layout;
 use serde_json::json;
@@ -79,12 +79,14 @@ impl Variant {
         site
     }
 
-    /// `sites` cut down, each as its record, whose JSON is measured.
-    fn records<'a>(self, sites: impl IntoIterator<Item = &'a Item>) -> Result<Vec<SiteRecord>> {
-        sites
+    /// `sites` cut down, as a JSON array of their records' own JSON
+    /// ([`stored::record_json_of`]), which is measured.
+    fn records_json<'a>(self, sites: impl IntoIterator<Item = &'a Item>) -> Result<Vec<u8>> {
+        let records = sites
             .into_iter()
-            .map(|site| SiteRecord::from_stored_item(&self.apply(site.clone())))
-            .collect()
+            .map(|site| stored::record_json_of(&self.apply(site.clone())))
+            .collect::<Result<Vec<String>>>()?;
+        Ok(format!("[{}]", records.join(",")).into_bytes())
     }
 }
 
@@ -265,13 +267,12 @@ fn main() -> Result<()> {
                 if piece.is_empty() {
                     continue;
                 }
-                let cut = variant.records(piece.iter().copied())?;
-                pieces[i].push(deflate(&serde_json::to_vec(&cut)?)?.len() as u64);
+                let cut = variant.records_json(piece.iter().copied())?;
+                pieces[i].push(deflate(&cut)?.len() as u64);
             }
         }
         for (i, &(variant, _)) in VARIANTS.iter().enumerate() {
-            let cut = variant.records(&sites)?;
-            let bytes = serde_json::to_vec(&cut)?;
+            let bytes = variant.records_json(&sites)?;
             let small = deflate(&bytes)?;
             plain[i].push(bytes.len() as u64);
             packed[i].push(small.len() as u64);

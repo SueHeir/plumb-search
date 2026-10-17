@@ -6,11 +6,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use plumb_core::sites::{SiteList, Sites};
-use plumb_core::{RecordSet, SiteRecord};
 use plumb_crawl::{CrawledPage, OutLink, PageMeta};
 
 use super::*;
-use crate::records::reference;
 use crate::records::{journal_path, load_sites, replace_sites};
 
 const DAY: u64 = SECONDS_PER_DAY;
@@ -228,52 +226,76 @@ fn targets_fall_back_to_where_a_site_was_last_reached() {
     );
 }
 
+/// A site's crawl marks, as a stored item holds them, set when its
+/// homepage is next due and which sites are picked.
 #[test]
-fn a_site_s_item_is_picked_as_its_record_is() {
+fn a_site_s_item_is_picked_by_its_marks() {
     let now = 1_000;
     let window = 500;
-    let record = |domain: &str, tranco, crawled_at, attempted_at| {
-        let mut r = SiteRecord::new(domain);
-        r.signals.tranco_rank = Some(tranco);
-        r.crawled_at = crawled_at;
-        r.crawl_attempted_at = attempted_at;
-        r
-    };
-    let mut moved = record("moved.com", 1, Some(10), Some(800));
+    let mut moved = site_with("moved.com", 1, Some(10), Some(800));
     moved.url = Some("https://www.moved.com/en/".into());
-    moved.crawl_failures = 2;
-    let mut gone = record("gone.com", 3, None, Some(100));
-    gone.crawl_failures = 6;
-    gone.make_gone(100);
-    let records = [
+    set_marks(&mut moved, Some(800), 2);
+    let mut gone = site_with("gone.com", 3, None, Some(100));
+    set_marks(&mut gone, Some(100), 6);
+    site::make_gone(&mut gone, 100);
+    let mut items = [
         moved,
         gone,
-        record("c.com", 30, None, None),
-        record("a.com", 10, Some(1_000), None),
-        record("b.com", 20, Some(10), None),
-        record("h.com", 25, None, Some(50)),
-        record("d.com", 40, None, None),
-        record("e.com", 40, None, None),
+        site_with("c.com", 30, None, None),
+        site_with("a.com", 10, Some(1_000), None),
+        site_with("b.com", 20, Some(10), None),
+        site_with("h.com", 25, None, Some(50)),
+        site_with("d.com", 40, None, None),
+        site_with("e.com", 40, None, None),
     ];
-    let items: Vec<Item> = records.iter().map(SiteRecord::to_stored_item).collect();
-    for (record, item) in records.iter().zip(&items) {
-        assert_eq!(CrawlSite::domain(item), record.domain);
-        assert_eq!(CrawlSite::url(item), record.url.as_deref());
-        assert_eq!(CrawlSite::link_score(item), record.link_score());
-        assert_eq!(CrawlSite::crawled_at(item), record.crawled_at);
-        assert_eq!(
-            CrawlSite::crawl_attempted_at(item),
-            record.crawl_attempted_at
-        );
-        assert_eq!(CrawlSite::crawl_failures(item), record.crawl_failures);
-        assert_eq!(CrawlSite::gone_at(item), record.gone_at);
-        assert_eq!(due_at(item, window), due_at(record, window));
-        assert_eq!(target_for(item), target_for(record));
-    }
+    items.iter_mut().for_each(site::clean);
+    let marks: Vec<_> = items
+        .iter()
+        .map(|item| {
+            (
+                CrawlSite::domain(item),
+                CrawlSite::crawled_at(item),
+                CrawlSite::crawl_attempted_at(item),
+                CrawlSite::crawl_failures(item),
+                CrawlSite::gone_at(item),
+                due_at(item, window),
+            )
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            ("moved.com", Some(10), Some(800), 2, None, Some(1_300)),
+            ("gone.com", None, Some(100), 6, Some(100), Some(1_600)),
+            ("c.com", None, None, 0, None, None),
+            ("a.com", Some(1_000), None, 0, None, Some(1_500)),
+            ("b.com", Some(10), None, 0, None, Some(510)),
+            ("h.com", None, Some(50), 0, None, Some(550)),
+            ("d.com", None, None, 0, None, None),
+            ("e.com", None, None, 0, None, None),
+        ]
+    );
+    assert_eq!(
+        target_for(&items[0]),
+        CrawlTarget {
+            known_url: Some("https://www.moved.com/en/".into()),
+            ..CrawlTarget::new("moved.com")
+        }
+    );
+    assert_eq!(target_for(&items[2]), CrawlTarget::new("c.com"));
+    let scores: Vec<f32> = items.iter().map(CrawlSite::link_score).collect();
+    let sites: Vec<f32> = items.iter().map(site::link_score).collect();
+    assert_eq!(scores, sites);
     let set: Sites = items.iter().cloned().collect();
-    for budget in [0, 1, 3, 100] {
-        let picked = select_targets(records.iter(), budget, now, window);
-        assert_eq!(select_targets(items.iter(), budget, now, window), picked);
+    let picks: [(usize, &[&str]); 4] = [
+        (0, &[]),
+        (1, &["c.com"]),
+        (3, &["b.com", "c.com", "d.com"]),
+        (100, &["b.com", "h.com", "c.com", "d.com", "e.com"]),
+    ];
+    for (budget, expected) in picks {
+        let picked = select_targets(items.iter(), budget, now, window);
+        assert_eq!(domains(&picked), expected, "{budget}");
         assert_eq!(select_site_targets(&set, budget, now, window), picked);
     }
 }
@@ -427,36 +449,12 @@ fn a_batch_marks_every_target_by_outcome() {
     );
 }
 
-/// A record set as a crawl held it before it held sites: each change made
-/// to the records as changes were made to them then
-/// ([`reference::apply`]). The reference that a crawl of a whole set of
-/// sites is checked against.
-struct Records(RecordSet);
-
-impl CrawlSet for Records {
-    fn marks(&self, domain: &str) -> (Option<u64>, u32) {
-        let record = self.0.get(domain);
-        (
-            record.and_then(|r| r.crawl_attempted_at),
-            record.map_or(0, |r| r.crawl_failures),
-        )
-    }
-
-    fn apply(&mut self, change: Change) {
-        reference::apply(change, &mut self.0);
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn compact(&self, _store: &mut RecordStore) -> Result<usize> {
-        unreachable!("the journal stays smaller than it is folded in at")
-    }
-}
-
+/// A crawl of a whole set saves each batch's changes to the journal, and
+/// compacting the set writes its sites: the journal and file below.
 #[test]
-fn a_crawl_of_sites_saves_and_writes_what_a_crawl_of_records_did() {
+fn a_crawl_saves_its_changes_and_writes_the_sites_it_made() {
+    /// When the homepages were fetched.
+    const FETCHED: u64 = 1_790_000_000;
     let started = now_unix();
     let mut flaky = site_with("flaky.com", 50, Some(100), Some(200));
     set_marks(&mut flaky, Some(200), 2);
@@ -475,11 +473,11 @@ fn a_crawl_of_sites_saves_and_writes_what_a_crawl_of_records_did() {
         let results = batch
             .iter()
             .map(|t| match t.domain.as_str() {
-                "a.com" => fetched("a.com", started, &["new.com", "b.com", "c.com"]),
+                "a.com" => fetched("a.com", FETCHED, &["new.com", "b.com", "c.com"]),
                 "b.com" => failed("b.com"),
                 "c.com" => refused("c.com"),
                 "d.com" => failed_there("d.com"),
-                domain => fetched(domain, started, &["new.com", "other.org"]),
+                domain => fetched(domain, FETCHED, &["new.com", "other.org"]),
             })
             .collect();
         Some(results)
@@ -490,8 +488,7 @@ fn a_crawl_of_sites_saves_and_writes_what_a_crawl_of_records_did() {
         path
     };
     let targets: Vec<CrawlTarget> = held.iter().map(target_for).collect();
-    // A crawl marks its sites tried when it runs, and the two may run a
-    // second apart.
+    // A crawl marks its sites tried when it runs.
     let at_runtime = |bytes: Vec<u8>| {
         let text = String::from_utf8(bytes).unwrap();
         let mut out = String::new();
@@ -502,7 +499,10 @@ fn a_crawl_of_sites_saves_and_writes_what_a_crawl_of_records_did() {
                 continue;
             }
             if !digits.is_empty() {
-                if digits.parse::<u64>().is_ok_and(|n| n >= started) {
+                if digits
+                    .parse::<u64>()
+                    .is_ok_and(|n| (started..=now_unix()).contains(&n))
+                {
                     out += "NOW";
                 } else {
                     out += &digits;
@@ -519,23 +519,69 @@ fn a_crawl_of_sites_saves_and_writes_what_a_crawl_of_records_did() {
     let mut set = load_sites(&path).unwrap();
     let mut store = RecordStore::open(&path);
     crawl_in_batches(&mut set, &targets, 2, &mut store, results, |_| Ok(())).unwrap();
-    let journal = at_runtime(fs::read(journal_path(&path)).unwrap());
-    store.compact(&set).unwrap();
-    let file = at_runtime(fs::read(&path).unwrap());
-
-    let records_dir = tempfile::tempdir().unwrap();
-    let records_path = write(records_dir.path());
-    let mut records = Records(reference::load_records(&records_path).unwrap());
-    let mut store = RecordStore::open(&records_path);
-    crawl_in_batches(&mut records, &targets, 2, &mut store, results, |_| Ok(())).unwrap();
+    // Each batch's sites marked tried before it is fetched, then what it
+    // found merged in and the marks set again.
+    let journal: Vec<String> = fs::read_to_string(journal_path(&path))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let change: serde_json::Value = serde_json::from_str(line).unwrap();
+            let op = change["op"].as_str().unwrap();
+            match op {
+                "mark" => format!("mark {} {}", change["domain"], change["failures"]),
+                _ => format!("{op} {}", change["record"]["id"]),
+            }
+        })
+        .collect();
     assert_eq!(
         journal,
-        at_runtime(fs::read(journal_path(&records_path)).unwrap())
+        [
+            r#"mark "a.com" 1"#,
+            r#"mark "b.com" 1"#,
+            r#"merge "a.com""#,
+            r#"merge "b.com""#,
+            r#"merge "c.com""#,
+            r#"merge "new.com""#,
+            r#"mark "a.com" 0"#,
+            r#"mark "b.com" 1"#,
+            r#"mark "c.com" 1"#,
+            r#"mark "d.com" 1"#,
+            r#"mark "c.com" 0"#,
+            r#"mark "d.com" 0"#,
+            r#"mark "idle.com" 1"#,
+            r#"mark "flaky.com" 3"#,
+            r#"merge "flaky.com""#,
+            r#"merge "idle.com""#,
+            r#"merge "new.com""#,
+            r#"merge "other.org""#,
+            r#"mark "idle.com" 0"#,
+            r#"mark "flaky.com" 0"#,
+            r#"mark "moved.com" 1"#,
+            r#"merge "moved.com""#,
+            r#"merge "new.com""#,
+            r#"merge "other.org""#,
+            r#"mark "moved.com" 0"#,
+        ]
     );
-    drop(store);
-    reference::compact(&records_path, &records.0).unwrap();
-    assert_eq!(file, at_runtime(fs::read(&records_path).unwrap()));
-    assert!(file.contains("new.com") && file.contains("NOW"), "{file}");
+    // The journal replays to the sites the crawl held.
+    let replayed: Vec<Item> = load_sites(&path).unwrap().by_link_score().collect();
+    assert_eq!(replayed, set.by_link_score().collect::<Vec<_>>());
+    store.compact(&set).unwrap();
+    let file = at_runtime(fs::read(&path).unwrap());
+    assert_eq!(
+        file,
+        r#"{"id":"a.com","kind":"site","title":"a.com home","url":"https://a.com/","edges":[{"rel":"links_to","to":"site:new.com"},{"rel":"links_to","to":"site:b.com"},{"rel":"links_to","to":"site:c.com"}],"fields":{"crawl":{"tried":NOW},"crawl_version":3,"crawled":"2026-09-21T14:13:20Z","ranks":{"tranco":10}}}
+{"id":"b.com","kind":"site","weight":1.0,"fields":{"crawl":{"failures":1,"tried":NOW},"crawled":"1970-01-01T00:01:40Z","link_texts":[{"count":1,"linkers":"1000000000000000","text":"linked site"}],"ranks":{"tranco":20}}}
+{"id":"c.com","kind":"site","weight":1.0,"fields":{"crawl":{"tried":NOW},"link_texts":[{"count":1,"linkers":"1000000000000000","text":"linked site"}],"ranks":{"tranco":30}}}
+{"id":"d.com","kind":"site","fields":{"crawl":{"tried":NOW},"ranks":{"tranco":35}}}
+{"id":"idle.com","kind":"site","title":"idle.com home","url":"https://idle.com/","edges":[{"rel":"links_to","to":"site:new.com"},{"rel":"links_to","to":"site:other.org"}],"fields":{"crawl":{"tried":NOW},"crawl_version":3,"crawled":"2026-09-21T14:13:20Z","ranks":{"tranco":40}}}
+{"id":"flaky.com","kind":"site","title":"flaky.com home","url":"https://flaky.com/","edges":[{"rel":"links_to","to":"site:new.com"},{"rel":"links_to","to":"site:other.org"}],"fields":{"crawl":{"tried":NOW},"crawl_version":3,"crawled":"2026-09-21T14:13:20Z","ranks":{"tranco":50}}}
+{"id":"moved.com","kind":"site","title":"moved.com home","url":"https://moved.com/","edges":[{"rel":"links_to","to":"site:new.com"},{"rel":"links_to","to":"site:other.org"}],"fields":{"crawl":{"tried":NOW},"crawl_version":3,"crawled":"2026-09-21T14:13:20Z","ranks":{"tranco":60}}}
+{"id":"new.com","kind":"site","weight":4.0,"fields":{"link_texts":[{"count":3,"linkers":"1001000020000000","text":"linked site"}]}}
+{"id":"other.org","kind":"site","weight":3.0,"fields":{"link_texts":[{"count":2,"linkers":"0001000020000000","text":"linked site"}]}}
+
+"#
+    );
 }
 
 #[test]

@@ -18,7 +18,7 @@ use std::fmt::Write as _;
 
 use base64::Engine as _;
 use plumb_core::sites::{SiteLine, Sites};
-use plumb_core::{stored, Headline, KeyPage, LinkText};
+use plumb_core::{site, stored, Headline, KeyPage, LinkText};
 use plumb_index::{RankConfig, SearchOptions};
 use plumb_net::{FoundSite, NetSearch};
 
@@ -47,12 +47,12 @@ fn inbox(out: &mut String, inner: &Inner, what: &str, seen: &mut usize) {
     *seen = n;
 }
 
-fn crawl(domain: &str, title: &str) -> SiteRecord {
-    let mut record = SiteRecord::new(domain);
+fn crawl(domain: &str, title: &str) -> Item {
+    let mut record = site::new(domain);
     record.url = Some(format!("https://www.{domain}/"));
     record.title = Some(title.into());
-    record.description = Some(format!("All about {domain}."));
-    record.crawled_at = Some(CRAWLED);
+    record.about = Some(format!("All about {domain}."));
+    site::set_crawled(&mut record, Some(CRAWLED));
     record
 }
 
@@ -77,49 +77,68 @@ fn icon() -> String {
 /// ([`plumb_net::node::RecordDelivery`]): sites the node holds, one with a
 /// key page and one with a headline its denylist takes off, a site it
 /// denies, sites it does not hold, a site only linked to, and feed checks.
-fn delivery(now: u64) -> Vec<SiteRecord> {
+fn delivery(now: u64) -> Vec<Item> {
     let mut chase = crawl("chase.com", "Chase Bank");
-    chase.headings = vec!["Checking".into(), "Savings".into()];
-    chase.body_text = Some("Bank with Chase. ".repeat(30));
-    chase.terms = vec!["bank".into(), "checking".into()];
-    chase.key_pages = vec![
-        KeyPage {
-            label: "Savings".into(),
-            url: "https://www.chase.com/savings".into(),
-        },
-        KeyPage {
-            label: "Denied".into(),
-            url: "https://www.chase.com/denied".into(),
-        },
-    ];
-    chase.link_texts = vec![LinkText::from_linkers(
-        "chase",
-        plumb_core::linker_bit("a.org"),
-    )];
-    chase.signals.linking_domains = 3;
-    chase.icon = Some(icon());
+    site::set_headings(&mut chase, vec!["Checking".into(), "Savings".into()]);
+    chase.text = Some("Bank with Chase. ".repeat(30));
+    site::set_terms(&mut chase, vec!["bank".into(), "checking".into()]);
+    site::set_key_pages(
+        &mut chase,
+        vec![
+            KeyPage {
+                label: "Savings".into(),
+                url: "https://www.chase.com/savings".into(),
+            },
+            KeyPage {
+                label: "Denied".into(),
+                url: "https://www.chase.com/denied".into(),
+            },
+        ],
+    );
+    site::set_link_texts(
+        &mut chase,
+        &[LinkText::from_linkers(
+            "chase",
+            plumb_core::linker_bit("a.org"),
+        )],
+    );
+    let mut signals = site::signals(&chase);
+    signals.linking_domains = 3;
+    site::set_signals(&mut chase, &signals);
+    site::set_icon(&mut chase, Some(icon()));
     let mut reddit = crawl("reddit.com", "Reddit");
-    reddit.aliases = vec!["Reddit".into(), "reddit".into()];
+    reddit.names = vec!["Reddit".into(), "reddit".into()];
     let headline = |title: &str, url: &str| Headline {
         title: title.into(),
         url: url.into(),
         at: now - 600,
     };
-    let mut reddit_news = SiteRecord::new("reddit.com");
-    reddit_news.news = vec![headline("Front page", "https://www.reddit.com/r/news/1")];
-    let mut bbc_news = SiteRecord::new("bbc.com");
-    bbc_news.news = vec![
-        headline("Big news", "https://www.bbc.com/news/1"),
-        headline("Denied news", "https://www.bbc.com/news/denied"),
-    ];
+    let mut reddit_news = site::new("reddit.com");
+    site::set_news(
+        &mut reddit_news,
+        vec![headline("Front page", "https://www.reddit.com/r/news/1")],
+    );
+    let mut bbc_news = site::new("bbc.com");
+    site::set_news(
+        &mut bbc_news,
+        vec![
+            headline("Big news", "https://www.bbc.com/news/1"),
+            headline("Denied news", "https://www.bbc.com/news/denied"),
+        ],
+    );
     let denied = crawl("denied.example", "Denied");
     let new_bank = crawl("new-savings-bank.example", "New Savings Bank");
-    let mut linked = SiteRecord::new("wellsfargo.com");
-    linked.link_texts = vec![LinkText::from_linkers(
-        "wells fargo",
-        plumb_core::linker_bit("chase.com"),
-    )];
-    linked.signals.linking_domains = 1;
+    let mut linked = site::new("wellsfargo.com");
+    site::set_link_texts(
+        &mut linked,
+        &[LinkText::from_linkers(
+            "wells fargo",
+            plumb_core::linker_bit("chase.com"),
+        )],
+    );
+    let mut signals = site::signals(&linked);
+    signals.linking_domains = 1;
+    site::set_signals(&mut linked, &signals);
     vec![
         chase,
         reddit_news,
@@ -132,16 +151,10 @@ fn delivery(now: u64) -> Vec<SiteRecord> {
 }
 
 /// A found site, as a network search hands it to the node: the site as
-/// answered, and the signed crawl when one counts, each the stored item
-/// of the record.
-fn found(
-    record: SiteRecord,
-    shared: Option<SiteRecord>,
-    trusted: bool,
-    confirmed: bool,
-) -> FoundSite {
+/// answered, and the signed crawl when one counts.
+fn found(record: Item, shared: Option<Item>, trusted: bool, confirmed: bool) -> FoundSite {
     let crawler = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5".to_string();
-    let held = |record: SiteRecord| SiteLine::of(record.stored_item_as_is());
+    let held = |record: Item| SiteLine::of(record);
     let shared = shared.map(held);
     FoundSite {
         site: held(record),
@@ -242,24 +255,31 @@ async fn the_node_takes_in_the_golden_sites() {
 
     // What a network search found: what the node keeps, then ranks.
     let mut chase = crawl("chase.com", "Chase Bank, signed");
-    chase.key_pages = vec![
-        KeyPage {
-            label: "Open a savings account".into(),
-            url: "https://www.chase.com/savings/open".into(),
-        },
-        KeyPage {
-            label: "Denied".into(),
-            url: "https://www.chase.com/denied".into(),
-        },
-    ];
-    chase.body_text = Some("Savings accounts at Chase bank. ".repeat(10));
+    site::set_key_pages(
+        &mut chase,
+        vec![
+            KeyPage {
+                label: "Open a savings account".into(),
+                url: "https://www.chase.com/savings/open".into(),
+            },
+            KeyPage {
+                label: "Denied".into(),
+                url: "https://www.chase.com/denied".into(),
+            },
+        ],
+    );
+    chase.text = Some("Savings accounts at Chase bank. ".repeat(10));
     let mut answered = chase.clone();
-    answered.signals.tranco_rank = Some(17);
+    let mut signals = site::signals(&answered);
+    signals.tranco_rank = Some(17);
+    site::set_signals(&mut answered, &signals);
     let mut usbank = crawl("usbank.com", "U.S. Bank savings");
-    usbank.crawled_at = Some(CRAWLED - 60);
-    let mut ranked = SiteRecord::new("ranked-savings-bank.example");
-    ranked.aliases = vec!["Ranked Savings Bank".into()];
-    ranked.signals.tranco_rank = Some(900);
+    site::set_crawled(&mut usbank, Some(CRAWLED - 60));
+    let mut ranked = site::new("ranked-savings-bank.example");
+    ranked.names = vec!["Ranked Savings Bank".into()];
+    let mut signals = site::signals(&ranked);
+    signals.tranco_rank = Some(900);
+    site::set_signals(&mut ranked, &signals);
     let new_bank = crawl("new-savings-bank.example", "New Savings Bank");
     let reddit = crawl("reddit.com", "Reddit savings bank thread");
     let mut search = NetSearch {
@@ -305,9 +325,9 @@ async fn the_node_takes_in_the_golden_sites() {
     // about the node's topics once it keeps only that.
     let filled = || {
         let mut bank = crawl("savings-bank.example", "Savings Bank");
-        bank.description = Some("A savings bank".into());
+        bank.about = Some("A savings bank".into());
         let mut other = crawl("cooking.example", "Cooking");
-        other.link_texts = vec![LinkText::with_count("recipes", 2)];
+        site::set_link_texts(&mut other, &[LinkText::with_count("recipes", 2)]);
         vec![bank, other, crawl("denied.example", "Denied")]
     };
     for (what, topics) in [
@@ -323,15 +343,21 @@ async fn the_node_takes_in_the_golden_sites() {
     // The pages a node sets up from, as the records file it saves.
     let mut set = Sites::new();
     let mut first = crawl("WWW.Setup.Example", " Setup\u{7} Site ");
-    first.aliases = vec!["Setup".into(), "Setup".into()];
-    let mut ranked = SiteRecord::new("setup-ranked.example");
-    ranked.signals.tranco_rank = Some(3);
-    let mut again = SiteRecord::new("setup.example");
-    again.signals.tranco_rank = Some(40);
-    again.link_texts = vec![LinkText::with_count("setup", 4)];
+    first.names = vec!["Setup".into(), "Setup".into()];
+    let mut ranked = site::new("setup-ranked.example");
+    let mut signals = site::signals(&ranked);
+    signals.tranco_rank = Some(3);
+    site::set_signals(&mut ranked, &signals);
+    let mut again = site::new("setup.example");
+    let mut signals = site::signals(&again);
+    signals.tranco_rank = Some(40);
+    site::set_signals(&mut again, &signals);
+    site::set_link_texts(&mut again, &[LinkText::with_count("setup", 4)]);
     let mut bot = crawl("bot-check.example", "Just a moment...");
-    bot.description = None;
-    bot.signals.tranco_rank = Some(5);
+    bot.about = None;
+    let mut signals = site::signals(&bot);
+    signals.tranco_rank = Some(5);
+    site::set_signals(&mut bot, &signals);
     super::fill::take_seed_page(
         &inner,
         &mut set,
@@ -349,35 +375,42 @@ async fn the_node_takes_in_the_golden_sites() {
     // What the node publishes of the crawls in a records file.
     let published = dir.path().join("published.jsonl");
     let mut python = crawl("python.org", " Welcome\u{7} to Python.org ");
-    python.body_text = Some("Python lets you work quickly. ".repeat(60));
-    python.key_pages = vec![
-        KeyPage {
-            label: "Downloads".into(),
-            url: "https://www.python.org/downloads/".into(),
-        },
-        KeyPage {
-            label: "Denied".into(),
-            url: "https://www.chase.com/denied".into(),
-        },
-    ];
-    python.links_to = vec!["pypi.org".into()];
-    python.signals.tranco_rank = Some(512);
-    python.crawl_attempted_at = Some(CRAWLED + 60);
-    python.crawl_failures = 1;
-    python.icon = Some(icon());
+    python.text = Some("Python lets you work quickly. ".repeat(60));
+    site::set_key_pages(
+        &mut python,
+        vec![
+            KeyPage {
+                label: "Downloads".into(),
+                url: "https://www.python.org/downloads/".into(),
+            },
+            KeyPage {
+                label: "Denied".into(),
+                url: "https://www.chase.com/denied".into(),
+            },
+        ],
+    );
+    site::set_links_to(&mut python, vec!["pypi.org".into()]);
+    let mut signals = site::signals(&python);
+    signals.tranco_rank = Some(512);
+    site::set_signals(&mut python, &signals);
+    let mut marks = site::crawl_marks(&python);
+    marks.tried = Some(CRAWLED + 60);
+    marks.failures = 1;
+    site::set_crawl_marks(&mut python, marks);
+    site::set_icon(&mut python, Some(icon()));
     let mut older = crawl("older.example", "Older");
-    older.crawled_at = Some(CRAWLED - 100);
+    site::set_crawled(&mut older, Some(CRAWLED - 100));
     let mut too_old = crawl("too-old.example", "Too old");
-    too_old.crawled_at = Some(CRAWLED - 1_000);
+    site::set_crawled(&mut too_old, Some(CRAWLED - 1_000));
     let mut file = Vec::new();
     for record in [
         python,
-        SiteRecord::new("ranked.example"),
+        site::new("ranked.example"),
         crawl("denied.example", "Denied"),
         older,
         too_old,
     ] {
-        file.extend(stored::line(&record).unwrap());
+        file.extend(item_line(&record).into_bytes());
         file.push(b'\n');
     }
     std::fs::write(&published, file).unwrap();

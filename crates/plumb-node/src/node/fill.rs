@@ -1327,10 +1327,10 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{RecordSet, SiteRecord};
+    use plumb_core::site;
 
     use super::*;
-    use crate::records::reference::{load_records, replace_records, sorted_by_link_score};
+    use crate::records::{load_sites, replace_sites};
 
     #[test]
     fn fills_up_to_ninety_percent_of_the_storage_limit() {
@@ -1387,18 +1387,20 @@ mod tests {
         );
     }
 
-    fn site(domain: &str, tranco: Option<u32>, title: Option<&str>) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
-        r.signals.tranco_rank = tranco;
-        r.title = title.map(Into::into);
-        r
+    fn site(domain: &str, tranco: Option<u32>, title: Option<&str>) -> Item {
+        let mut site = site::new(domain);
+        let mut signals = site::signals(&site);
+        signals.tranco_rank = tranco;
+        site::set_signals(&mut site, &signals);
+        site.title = title.map(Into::into);
+        site
     }
 
-    /// A records file at `path` of `records`, as a node writes it: best
-    /// link score first.
-    fn records_file(path: &Path, records: Vec<SiteRecord>) {
-        let set: RecordSet = records.into_iter().collect();
-        replace_records(path, sorted_by_link_score(&set)).unwrap();
+    /// A records file at `path` of `sites`, as a node writes it: best link
+    /// score first.
+    fn records_file(path: &Path, sites: Vec<Item>) {
+        let set: Sites = sites.into_iter().collect();
+        replace_sites(path, &set.into_sorted()).unwrap();
     }
 
     /// Drops the sites of the records file at `path` below its best
@@ -1417,10 +1419,10 @@ mod tests {
 
     /// The domains of the sites the records file at `path` holds, sorted.
     fn domains_in(path: &Path) -> Vec<String> {
-        let mut domains: Vec<String> = load_records(path)
+        let mut domains: Vec<String> = load_sites(path)
             .unwrap()
             .into_iter()
-            .map(|r| r.domain)
+            .map(|site| site.id)
             .collect();
         domains.sort();
         domains
@@ -1459,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn new_topics_drop_the_same_sites_read_a_record_at_a_time() {
+    fn new_topics_drop_the_same_sites_read_a_site_at_a_time() {
         use crate::records::{journal_path, Change, RecordStore};
 
         // A records file as a node writes it, and a journal still to fold
@@ -1479,23 +1481,20 @@ mod tests {
             ],
         );
         let mut crawled = site("seriouseats.com", None, Some("Serious Eats cooking"));
-        crawled.crawled_at = Some(1_700_000_000);
+        site::set_crawled(&mut crawled, Some(1_700_000_000));
         RecordStore::open(&path)
             .save(&[
+                Change::Merge { site: crawled },
                 Change::Merge {
-                    site: crawled.stored_item_as_is(),
+                    site: site("bakery.example", None, Some("Bread and cooking")),
                 },
                 Change::Merge {
-                    site: site("bakery.example", None, Some("Bread and cooking"))
-                        .stored_item_as_is(),
-                },
-                Change::Merge {
-                    site: site("quiet.example", None, None).stored_item_as_is(),
+                    site: site("quiet.example", None, None),
                 },
             ])
             .unwrap();
         // The sites as loading the file gives them, its journal replayed.
-        let mut left = load_records(&path).unwrap();
+        let mut left = load_sites(&path).unwrap();
         let topics = Topics::new(&["cooking".to_owned()]);
 
         let drops = ["chess.com", "knitting.example", "quiet.example"];
@@ -1512,9 +1511,9 @@ mod tests {
             ]
         );
         // The file a whole set writes of the sites left, line for line.
-        left.retain(|record| !drops.contains(&record.domain.as_str()));
+        left.retain_domains(|domain| !drops.contains(&domain));
         let expected = dir.path().join("expected.jsonl");
-        replace_records(&expected, sorted_by_link_score(&left)).unwrap();
+        replace_sites(&expected, &left.into_sorted()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), fs::read(&expected).unwrap());
         // The best sites stay whatever the topics, and the file is not read
         // when there are no more.

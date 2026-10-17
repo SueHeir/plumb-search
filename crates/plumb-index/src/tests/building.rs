@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn example_site() -> SiteRecord {
+fn example_site() -> Item {
     site(
         "example.com",
         Some("Example Domain"),
@@ -18,16 +18,19 @@ fn hits_carry_the_site_key_pages() {
     let root = TempDir::new().unwrap();
     let dir = root.path().join("index");
     let mut site = example_site();
-    site.key_pages = vec![
-        KeyPage {
-            label: "Docs".into(),
-            url: "https://docs.example.com/".into(),
-        },
-        KeyPage {
-            label: "Elsewhere".into(),
-            url: "https://other.example/".into(),
-        },
-    ];
+    site::set_key_pages(
+        &mut site,
+        vec![
+            KeyPage {
+                label: "Docs".into(),
+                url: "https://docs.example.com/".into(),
+            },
+            KeyPage {
+                label: "Elsewhere".into(),
+                url: "https://other.example/".into(),
+            },
+        ],
+    );
     build_index(&dir, &items(&[site])).unwrap();
     let searcher = Searcher::open(&dir).unwrap();
     let hits = searcher.search("example", 10).unwrap();
@@ -128,7 +131,7 @@ fn gone_sites_are_left_out() {
     let dir = TempDir::new().unwrap();
     let mut records = corpus()[..2].to_vec();
     let mut gone = example_site();
-    gone.make_gone(1);
+    site::make_gone(&mut gone, 1);
     records.push(gone);
     let stats = build_index(dir.path(), &items(&records)).unwrap();
     assert_eq!((stats.docs, stats.skipped), (2, 1));
@@ -205,12 +208,12 @@ fn indexes_built_before_the_marker_are_replaced() {
 fn records_without_a_valid_domain_are_skipped() {
     let dir = TempDir::new().unwrap();
     let records = [
-        SiteRecord::new("  "),
-        SiteRecord::new("not a domain"),
-        SiteRecord::new("localhost"),
-        SiteRecord::new("192.168.1.1"),
-        SiteRecord::new("co.uk"),
-        SiteRecord::new("Example.COM"),
+        site::new("  "),
+        site::new("not a domain"),
+        site::new("localhost"),
+        site::new("192.168.1.1"),
+        site::new("co.uk"),
+        site::new("Example.COM"),
     ];
     let stats = build_index(dir.path(), &items(&records)).unwrap();
     let expected = IndexStats {
@@ -235,7 +238,7 @@ fn records_for_the_same_domain_are_merged() {
         &[("example", 5)],
         obscure(50_000, 10),
     );
-    upper.crawled_at = Some(100);
+    site::set_crawled(&mut upper, Some(100));
     let mut lower = site(
         "www.example.com.",
         Some("Old Example Title"),
@@ -276,19 +279,19 @@ fn records_for_the_same_domain_are_merged() {
     assert_eq!(searcher.num_docs(), 2);
     let hits = searcher.search("example", 10).unwrap();
     assert_eq!(domains(&hits), ["example.com"]);
-    // Merged as `SiteRecord::merge` does: the crawled record's page
-    // fields first, the rest filled in, the best signals of both.
+    // Merged as `site::merge` does: the crawled site's page fields
+    // first, the rest filled in, the best signals of both.
     let mut merged = upper;
-    merged.domain = "example.com".into();
-    lower.domain = "example.com".into();
-    merged.merge(lower);
+    merged.id = "example.com".into();
+    lower.id = "example.com".into();
+    site::merge(&mut merged, lower);
     assert_eq!(hits[0].title.as_deref(), Some("Example Domain"));
     assert_eq!(
         hits[0].description.as_deref(),
         Some("For use in illustrative examples.")
     );
     assert_eq!(hits[0].url, "https://example.com/");
-    assert_eq!(hits[0].link_score, merged.link_score());
+    assert_eq!(hits[0].link_score, site::link_score(&merged));
     assert_eq!(top(&searcher, "illustrative examples"), "example.com");
     assert_eq!(top(&searcher, "example inc"), "example.com");
 
@@ -307,9 +310,9 @@ fn records_for_the_same_domain_are_merged() {
 #[test]
 fn dotted_capital_i_is_found_by_plain_i() {
     // Lowercasing `İ` gives `i` plus a combining dot.
-    let mut airport = SiteRecord::new("istairport.com");
-    airport.add_link_text("İstanbul Havalimanı", "havaist.com");
-    airport.add_link_text("İstanbul Havalimanı", "turkishairlines.com");
+    let mut airport = site::new("istairport.com");
+    site::add_link_text(&mut airport, "İstanbul Havalimanı", "havaist.com");
+    site::add_link_text(&mut airport, "İstanbul Havalimanı", "turkishairlines.com");
     let mut records = corpus();
     records.push(airport);
     let (_dir, searcher) = build(&records);
@@ -334,13 +337,16 @@ fn empty_index_finds_nothing() {
 
 #[test]
 fn unsorted_and_oversized_records_are_tamed() {
-    // Records read from JSON need not respect SiteRecord's own caps.
-    let mut record = SiteRecord::new("example.com");
+    // Sites read from JSON need not respect the caps a clean site keeps.
+    let mut record = site::new("example.com");
     record.title = Some(format!("Example {}", "very long title ".repeat(100)));
-    record.link_texts = (1..=60)
-        .map(|i| LinkText::with_count(format!("anchor {i}"), i))
-        .collect();
-    record.aliases = (100..140).map(|i| format!("alias {i}")).collect();
+    site::set_link_texts(
+        &mut record,
+        &(1..=60)
+            .map(|i| LinkText::with_count(format!("anchor {i}"), i))
+            .collect::<Vec<_>>(),
+    );
+    record.names = (100..140).map(|i| format!("alias {i}")).collect();
     let (_dir, searcher) = build(&[record]);
     let hit = &searcher.search("example", 1).unwrap()[0];
     assert!(hit.title.as_deref().unwrap().chars().count() <= MAX_TEXT_CHARS);
@@ -506,25 +512,28 @@ impl Rng {
     }
 }
 
-fn synthetic_records(n: usize) -> Vec<SiteRecord> {
+fn synthetic_records(n: usize) -> Vec<Item> {
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     (0..n)
         .map(|i| {
             let (a, b, c) = (rng.word(), rng.word(), rng.word());
-            let mut record = SiteRecord::new(format!("{a}{b}{i}.com"));
+            let mut record = site::new(format!("{a}{b}{i}.com"));
             record.title = Some(format!("{a} {b} {i} | {c} {}", rng.word()));
-            record.description = Some((0..12).map(|_| rng.word()).collect::<Vec<_>>().join(" "));
-            for _ in 0..rng.below(5) {
-                let text = format!("{} {}", rng.word(), rng.word());
-                record
-                    .link_texts
-                    .push(LinkText::with_count(text, 1 + rng.below(200) as u32));
-            }
+            record.about = Some((0..12).map(|_| rng.word()).collect::<Vec<_>>().join(" "));
+            let link_texts: Vec<LinkText> = (0..rng.below(5))
+                .map(|_| {
+                    let text = format!("{} {}", rng.word(), rng.word());
+                    LinkText::with_count(text, 1 + rng.below(200) as u32)
+                })
+                .collect();
+            site::set_link_texts(&mut record, &link_texts);
             if rng.below(4) == 0 {
-                record.add_alias(&format!("{a} {b}"));
+                site::add_alias(&mut record, &format!("{a} {b}"));
             }
-            record.signals.harmonic_rank = Some(1_000 + rng.below(50_000_000));
-            record.signals.linking_domains = rng.below(5_000) as u32;
+            let mut signals = site::signals(&record);
+            signals.harmonic_rank = Some(1_000 + rng.below(50_000_000));
+            signals.linking_domains = rng.below(5_000) as u32;
+            site::set_signals(&mut record, &signals);
             record
         })
         .collect()

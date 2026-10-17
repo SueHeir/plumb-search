@@ -585,7 +585,8 @@ fn front_page_owner<'a>(claims: &[&'a OfficialSite]) -> Option<&'a str> {
 mod tests {
     use std::path::Path;
 
-    use plumb_core::{linker_bit, LinkText, Signals, SiteRecord, MAX_LINKER_ESTIMATE};
+    use plumb_core::site::CrawlMarks;
+    use plumb_core::{linker_bit, LinkText, Signals, MAX_LINKER_ESTIMATE};
 
     use super::*;
     use crate::{
@@ -593,13 +594,9 @@ mod tests {
         WatWriter,
     };
 
-    /// The sites [`Builder::finish`] gives, each as its record, which these
-    /// tests read.
-    fn records_of(sites: SiteList) -> Vec<SiteRecord> {
-        sites
-            .into_iter()
-            .map(|site| SiteRecord::from_stored_item(&site).unwrap())
-            .collect()
+    /// The sites [`Builder::finish`] gives, each its stored item.
+    fn sites_of(sites: SiteList) -> Vec<Item> {
+        sites.into_iter().collect()
     }
 
     fn linking(url: &str, links: &[(&str, &str)]) -> WatPage {
@@ -638,10 +635,10 @@ mod tests {
             .collect();
         let mut builder = Builder::new();
         builder.add_official_sites(&sites);
-        let records = records_of(builder.finish(None));
-        assert!(records.iter().all(|r| r.signals.official_site));
+        let sites = sites_of(builder.finish(None));
+        assert!(sites.iter().all(|s| site::signals(s).official_site));
         let mut out: Vec<(String, Vec<String>)> =
-            records.into_iter().map(|r| (r.domain, r.aliases)).collect();
+            sites.into_iter().map(|s| (s.id, s.names)).collect();
         out.sort();
         out
     }
@@ -720,28 +717,28 @@ mod tests {
 
         // google, facebook, usbank, plus a.com, c.net (homepages) and newsite.io (link target).
         assert_eq!(builder.len(), 6);
-        let records = records_of(builder.finish(None));
-        let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
+        let sites = sites_of(builder.finish(None));
+        let usbank = sites.iter().find(|s| s.id == "usbank.com").unwrap();
         assert_eq!(usbank.url.as_deref(), Some("https://www.usbank.com/"));
         assert_eq!(
             usbank.title.as_deref(),
             Some("U.S. Bank | Personal Banking")
         );
         assert_eq!(
-            usbank.description.as_deref(),
+            usbank.about.as_deref(),
             Some("Checking, savings and credit cards")
         );
-        assert_eq!(usbank.aliases, ["U.S. Bank", "U.S. Bancorp"]);
+        assert_eq!(usbank.names, ["U.S. Bank", "U.S. Bancorp"]);
         assert_eq!(
-            usbank.link_texts,
+            site::link_texts(usbank),
             [LinkText::from_linkers(
                 "us bank",
                 linker_bit("a.com") | linker_bit("b.org")
             )]
         );
-        assert_eq!(usbank.link_texts[0].count, 2);
+        assert_eq!(site::link_texts(usbank)[0].count, 2);
         assert_eq!(
-            usbank.signals,
+            site::signals(usbank),
             Signals {
                 harmonic_rank: Some(7),
                 pagerank_rank: Some(9),
@@ -752,25 +749,25 @@ mod tests {
                 ..Signals::default()
             }
         );
-        assert_eq!(usbank.crawled_at, None);
+        assert_eq!(site::crawled(usbank), None);
 
         // Six items claim pages on facebook.com, none its front page, so it is
         // not anyone's official site.
-        let facebook = records.iter().find(|r| r.domain == "facebook.com").unwrap();
-        assert!(!facebook.signals.official_site);
-        assert!(facebook.aliases.is_empty());
+        let facebook = sites.iter().find(|s| s.id == "facebook.com").unwrap();
+        assert!(!site::signals(facebook).official_site);
+        assert!(facebook.names.is_empty());
         // The link to facebook.com/usbank counts, but its "U.S. Bank" text names
         // the profile page, so facebook.com gets no link text for it.
-        assert_eq!(facebook.signals.linking_domains, 1);
-        assert!(facebook.link_texts.is_empty());
+        assert_eq!(site::signals(facebook).linking_domains, 1);
+        assert!(site::link_texts(facebook).is_empty());
 
-        // A domain seen only as a link target still gets a record.
-        let newsite = records.iter().find(|r| r.domain == "newsite.io").unwrap();
+        // A domain seen only as a link target still gets a site.
+        let newsite = sites.iter().find(|s| s.id == "newsite.io").unwrap();
         assert_eq!(newsite.title, None);
-        assert_eq!(newsite.link_texts[0].text, "new site");
+        assert_eq!(site::link_texts(newsite)[0].text, "new site");
 
-        assert_eq!(records[0].domain, "google.com");
-        assert!(records[0].signals.official_site);
+        assert_eq!(sites[0].id, "google.com");
+        assert!(site::signals(&sites[0]).official_site);
     }
 
     #[test]
@@ -809,9 +806,9 @@ mod tests {
             },
         ]);
         assert_eq!(builder.len(), 1);
-        let records = records_of(builder.finish(None));
+        let sites = sites_of(builder.finish(None));
         assert_eq!(
-            records[0].signals,
+            site::signals(&sites[0]),
             Signals {
                 tranco_rank: Some(50),
                 harmonic_rank: Some(900),
@@ -844,33 +841,33 @@ mod tests {
             site("Q1", "Y Combinator", "www.ycombinator.com"),
             site("Q2", "Hacker News", "news.ycombinator.com"),
         ]);
-        let records = records_of(builder.finish(None));
-        let get = |domain: &str| records.iter().find(|r| r.domain == domain).unwrap();
+        let sites = sites_of(builder.finish(None));
+        let get = |domain: &str| sites.iter().find(|s| s.id == domain).unwrap();
         let (yc, news) = (get("ycombinator.com"), get("news.ycombinator.com"));
-        assert_eq!(news.signals.tranco_rank, Some(900));
-        assert_eq!(news.signals.harmonic_rank, Some(300));
-        assert_eq!(news.signals.pagerank_rank, Some(200));
-        assert_eq!(news.aliases, ["Hacker News"]);
-        assert_eq!(yc.aliases, ["Y Combinator"]);
-        // Google's products with no record of their own are not made.
-        assert_eq!(records.len(), 3);
+        assert_eq!(site::signals(news).tranco_rank, Some(900));
+        assert_eq!(site::signals(news).harmonic_rank, Some(300));
+        assert_eq!(site::signals(news).pagerank_rank, Some(200));
+        assert_eq!(news.names, ["Hacker News"]);
+        assert_eq!(yc.names, ["Y Combinator"]);
+        // Google's products with no site of their own are not made.
+        assert_eq!(sites.len(), 3);
     }
 
     #[test]
-    fn hacker_news_gets_a_record_without_wikidata() {
+    fn hacker_news_gets_a_site_without_wikidata() {
         let mut builder = Builder::new();
         builder.add_tranco(&[TrancoEntry {
             rank: 900,
             domain: "ycombinator.com".into(),
         }]);
-        let records = records_of(builder.finish(None));
-        let news = records
+        let sites = sites_of(builder.finish(None));
+        let news = sites
             .iter()
-            .find(|r| r.domain == "news.ycombinator.com")
+            .find(|s| s.id == "news.ycombinator.com")
             .unwrap();
-        assert_eq!(news.aliases, ["Hacker News"]);
-        assert_eq!(news.signals.tranco_rank, Some(900));
-        assert_eq!(records.len(), 2);
+        assert_eq!(news.names, ["Hacker News"]);
+        assert_eq!(site::signals(news).tranco_rank, Some(900));
+        assert_eq!(sites.len(), 2);
     }
 
     #[test]
@@ -894,13 +891,13 @@ mod tests {
             claim("Q4", "continental.com", Some("US"), &["airlines"]),
             claim("Q5", "usbank.com", Some("US"), &["bank"]),
         ]);
-        let records = records_of(builder.finish(None));
-        let get = |domain: &str| records.iter().find(|r| r.domain == domain).unwrap();
-        assert_eq!(get("x.com").country.as_deref(), Some("US"));
-        assert!(get("x.com").kinds.is_empty());
-        assert_eq!(get("continental.com").country, None);
-        assert_eq!(get("continental.com").kinds, ["airline"]);
-        assert_eq!(get("usbank.com").kinds, ["bank"]);
+        let sites = sites_of(builder.finish(None));
+        let get = |domain: &str| sites.iter().find(|s| s.id == domain).unwrap();
+        assert_eq!(site::country(get("x.com")), Some("US"));
+        assert!(site::kinds(get("x.com")).is_empty());
+        assert_eq!(site::country(get("continental.com")), None);
+        assert_eq!(site::kinds(get("continental.com")), ["airline"]);
+        assert_eq!(site::kinds(get("usbank.com")), ["bank"]);
     }
 
     #[test]
@@ -922,10 +919,10 @@ mod tests {
                 330,
             ),
         ]);
-        let records = records_of(builder.finish(None));
-        assert_eq!(records[0].kinds, ["online encyclopedia", "wiki"]);
+        let sites = sites_of(builder.finish(None));
+        assert_eq!(site::kinds(&sites[0]), ["online encyclopedia", "wiki"]);
         assert_eq!(
-            records[0].about.as_deref(),
+            site::wikidata_about(&sites[0]),
             Some("free online encyclopedia")
         );
 
@@ -940,9 +937,9 @@ mod tests {
                 330,
             ),
         ]);
-        let records = records_of(builder.finish(None));
-        assert!(records[0].kinds.is_empty());
-        assert_eq!(records[0].about, None);
+        let sites = sites_of(builder.finish(None));
+        assert!(site::kinds(&sites[0]).is_empty());
+        assert_eq!(site::wikidata_about(&sites[0]), None);
     }
 
     #[test]
@@ -1000,16 +997,13 @@ mod tests {
             ),
             claim("Q2", ".KTW", "ktw.com.pl", "magazine", "Polish magazine"),
         ]);
-        let mut records = records_of(builder.finish(None));
-        records.sort_by(|a, b| a.domain.cmp(&b.domain));
-        let domains: Vec<&str> = records
-            .iter()
-            .map(|record| record.domain.as_str())
-            .collect();
+        let mut sites = sites_of(builder.finish(None));
+        sites.sort_by(|a, b| a.id.cmp(&b.id));
+        let domains: Vec<&str> = sites.iter().map(|site| site.id.as_str()).collect();
         assert_eq!(domains, ["dotnetfoundation.org", "ktw.com.pl", "mayen.de"]);
-        assert_eq!(records[2].aliases, ["Mayen"]);
+        assert_eq!(sites[2].names, ["Mayen"]);
         assert_eq!(
-            records[2].about.as_deref(),
+            site::wikidata_about(&sites[2]),
             Some("town in Rhineland-Palatinate")
         );
     }
@@ -1020,9 +1014,9 @@ mod tests {
         nyt.names = vec!["NYT".into(), "New York Times".into()];
         let mut builder = Builder::new();
         builder.add_official_sites(&[nyt, site("Q2", "NYT Company", "nytimes.com")]);
-        let records = records_of(builder.finish(None));
+        let sites = sites_of(builder.finish(None));
         assert_eq!(
-            records[0].aliases,
+            sites[0].names,
             ["The New York Times", "NYT Company", "NYT", "New York Times"]
         );
     }
@@ -1062,17 +1056,17 @@ mod tests {
         let mut builder = Builder::new();
         builder.add_official_sites(&sites);
         assert_eq!(builder.len(), 2);
-        let records = records_of(builder.finish(None));
-        let five = records.iter().find(|r| r.domain == "five.com").unwrap();
-        assert!(five.signals.official_site);
+        let sites = sites_of(builder.finish(None));
+        let five = sites.iter().find(|s| s.id == "five.com").unwrap();
+        assert!(site::signals(five).official_site);
         assert_eq!(
-            five.aliases,
+            five.names,
             ["Brand 1", "Brand 2", "Brand 3", "Brand 4", "Brand 5"]
         );
-        let plain = records.iter().find(|r| r.domain == "plain.com").unwrap();
-        assert!(plain.signals.official_site);
-        assert!(plain.aliases.is_empty());
-        assert!(records.iter().all(|r| r.domain != "six.com"));
+        let plain = sites.iter().find(|s| s.id == "plain.com").unwrap();
+        assert!(site::signals(plain).official_site);
+        assert!(plain.names.is_empty());
+        assert!(sites.iter().all(|s| s.id != "six.com"));
 
         // Every spelling of a front page is the same front page.
         let got = official(&[
@@ -1129,16 +1123,16 @@ mod tests {
         }
         let mut builder = Builder::new();
         builder.add_official_sites(&sites);
-        let records = records_of(builder.finish(None));
-        let get = |domain: &str| records.iter().find(|r| r.domain == domain);
+        let sites = sites_of(builder.finish(None));
+        let get = |domain: &str| sites.iter().find(|s| s.id == domain);
         let nba = get("nba.com").unwrap();
-        assert!(nba.signals.official_site);
-        assert_eq!(nba.aliases, ["National Basketball Association", "NBA"]);
+        assert!(site::signals(nba).official_site);
+        assert_eq!(nba.names, ["National Basketball Association", "NBA"]);
         assert_eq!(
-            nba.about.as_deref(),
+            site::wikidata_about(nba),
             Some("about National Basketball Association")
         );
-        assert_eq!(get("grammys.example").unwrap().aliases, ["Grammy Awards"]);
+        assert_eq!(get("grammys.example").unwrap().names, ["Grammy Awards"]);
         assert!(get("host.example").is_none());
     }
 
@@ -1272,11 +1266,11 @@ mod tests {
             .insert("good.com".into());
         builder.add_wat(&extract);
 
-        let records = records_of(builder.finish(None));
-        assert_eq!(records.len(), 1, "{records:?}");
-        assert_eq!(records[0].domain, "good.com");
-        assert_eq!(records[0].signals.tranco_rank, Some(2));
-        assert!(!records[0].signals.official_site);
+        let sites = sites_of(builder.finish(None));
+        assert_eq!(sites.len(), 1, "{sites:?}");
+        assert_eq!(sites[0].id, "good.com");
+        assert_eq!(site::signals(&sites[0]).tranco_rank, Some(2));
+        assert!(!site::signals(&sites[0]).official_site);
     }
 
     #[test]
@@ -1292,23 +1286,23 @@ mod tests {
                 site_name: None,
             },
         );
-        let mut crawled = SiteRecord::new("x.com");
+        let mut crawled = site::new("x.com");
         crawled.title = Some("From crawl".into());
-        crawled.crawled_at = Some(1_700_000_000);
+        site::set_crawled(&mut crawled, Some(1_700_000_000));
 
         for wat_first in [true, false] {
             let mut builder = Builder::new();
             if wat_first {
                 builder.add_wat(&extract);
-                builder.add_sites([crawled.clone().stored_item_as_is()]);
+                builder.add_sites([crawled.clone()]);
             } else {
-                builder.add_sites([crawled.clone().stored_item_as_is()]);
+                builder.add_sites([crawled.clone()]);
                 builder.add_wat(&extract);
             }
-            let record = records_of(builder.finish(None)).remove(0);
-            assert_eq!(record.title.as_deref(), Some("From crawl"), "{wat_first}");
-            assert_eq!(record.description.as_deref(), Some("WAT description"));
-            assert_eq!(record.url.as_deref(), Some("https://x.com/"));
+            let site = sites_of(builder.finish(None)).remove(0);
+            assert_eq!(site.title.as_deref(), Some("From crawl"), "{wat_first}");
+            assert_eq!(site.about.as_deref(), Some("WAT description"));
+            assert_eq!(site.url.as_deref(), Some("https://x.com/"));
         }
     }
 
@@ -1329,12 +1323,13 @@ mod tests {
         let mut builder = Builder::new();
         builder.add_wat(&extract);
         builder.add_wat(&extract);
-        let record = records_of(builder.finish(None)).remove(0);
-        assert_eq!(record.link_texts.len(), MAX_LINK_TEXTS);
-        assert_eq!(record.link_texts[0].text, "text 99");
+        let site = sites_of(builder.finish(None)).remove(0);
+        let link_texts = site::link_texts(&site);
+        assert_eq!(link_texts.len(), MAX_LINK_TEXTS);
+        assert_eq!(link_texts[0].text, "text 99");
         // Adding the same WAT data twice counts its sites once.
-        assert_eq!(record.link_texts[0].count, MAX_LINKER_ESTIMATE);
-        assert_eq!(record.signals.linking_domains, 2);
+        assert_eq!(link_texts[0].count, MAX_LINKER_ESTIMATE);
+        assert_eq!(site::signals(&site).linking_domains, 2);
     }
 
     #[test]
@@ -1405,7 +1400,7 @@ mod tests {
     }
 
     #[test]
-    fn names_and_kinds_go_in_as_a_record_takes_them() {
+    fn names_and_kinds_go_in_as_the_page_wrote_them() {
         let long = "x".repeat(MAX_TEXT_CHARS + 10);
         let mut names = vec![
             "Acme\u{7} Corporation",
@@ -1431,17 +1426,32 @@ mod tests {
         ];
         let more: Vec<String> = (0..MAX_KINDS).map(|i| format!("kind {i}")).collect();
         kinds.extend(more.iter().map(String::as_str));
-        let mut record = SiteRecord::new("acme.com");
         let mut held = site::new("acme.com");
         for name in &names {
-            record.add_alias(name);
             add_name(&mut held, name);
         }
         for kind in &kinds {
-            record.add_kind(kind);
             add_kind(&mut held, kind);
         }
-        assert_eq!(held, record.stored_item_as_is());
+        // Whitespace collapsed and cut, but not tidied: one the same once
+        // normalized as one before, and empty ones, are left out, and so
+        // are those past the most a site keeps.
+        let cut = "x".repeat(MAX_TEXT_CHARS);
+        let mut want = vec!["Acme\u{7} Corporation", "Ste\u{301}phane Inc", "a b", &cut];
+        let more: Vec<String> = (0..12).map(|i| format!("Name {i}")).collect();
+        want.extend(more.iter().map(String::as_str));
+        assert_eq!(held.names, want);
+        assert_eq!(
+            site::kinds(&held),
+            [
+                "bank",
+                "sports league",
+                "maker of\u{7} anvils",
+                &cut,
+                "kind 0",
+                "kind 1"
+            ]
+        );
     }
 
     /// What the builder made of `tranco` and `sites` while it held every
@@ -1484,27 +1494,31 @@ mod tests {
             domain: domain.into(),
         })
         .collect();
-        let mut gone = SiteRecord::new("gone.example");
+        let mut gone = site::new("gone.example");
         gone.title = Some("Gone".into());
-        gone.aliases = vec!["Gone Inc".into()];
-        gone.crawl_attempted_at = Some(1_791_000_000);
-        gone.crawl_failures = 3;
-        gone.gone_at = Some(1_791_000_000);
-        let mut crawled = SiteRecord::new("crawled.example");
+        gone.names = vec!["Gone Inc".into()];
+        let marks = CrawlMarks {
+            tried: Some(1_791_000_000),
+            failures: 3,
+            gone: Some(1_791_000_000),
+        };
+        site::set_crawl_marks(&mut gone, marks);
+        let mut crawled = site::new("crawled.example");
         crawled.title = Some("Crawled".into());
-        crawled.aliases = vec!["Cra\u{301}wled  Co\u{7}".into()];
-        crawled.crawled_at = Some(1_791_605_520);
-        crawled.signals.tranco_rank = Some(7);
-        crawled.add_link_text("crawled", "a.example");
-        let mut check = SiteRecord::new("bot.example");
+        crawled.names = vec!["Cra\u{301}wled  Co\u{7}".into()];
+        site::set_crawled(&mut crawled, Some(1_791_605_520));
+        let ranked = Signals {
+            tranco_rank: Some(7),
+            ..Signals::default()
+        };
+        site::set_signals(&mut crawled, &ranked);
+        site::add_link_text(&mut crawled, "crawled", "a.example");
+        let mut check = site::new("bot.example");
         check.title = Some("Just a moment...".into());
-        check.crawled_at = Some(1_791_605_520);
-        let mut page = SiteRecord::new("page.example");
-        page.description = Some("A page no list ranks".into());
-        let sites: Vec<Item> = [gone, crawled, check, page]
-            .into_iter()
-            .map(SiteRecord::stored_item_as_is)
-            .collect();
+        site::set_crawled(&mut check, Some(1_791_605_520));
+        let mut page = site::new("page.example");
+        page.about = Some("A page no list ranks".into());
+        let sites = [gone, crawled, check, page];
         for ranks_first in [true, false] {
             let want = held_as_items(&tranco, &sites, ranks_first);
             for top in [None, Some(0), Some(2), Some(4), Some(9)] {
@@ -1543,7 +1557,7 @@ mod tests {
         cc_ranks: Vec<CcRank>,
         wat: WatExtract,
         official: Vec<OfficialSite>,
-        records: Vec<SiteRecord>,
+        sites: Vec<Item>,
     }
 
     impl Golden {
@@ -1714,55 +1728,72 @@ mod tests {
             // An international domain name.
             official.push(claim("Q9071", "München", "https://www.münchen.de/"));
 
-            let mut records = Vec::new();
-            let mut crawled = SiteRecord::new("Acme.COM");
+            let mut sites = Vec::new();
+            let mut crawled = site::new("Acme.COM");
             crawled.url = Some("HTTPS://WWW.Acme.com/index%2ehtml?".into());
             crawled.title = Some("  Acme\u{7} Anvils, crawled ".into());
-            crawled.aliases = vec!["Acme Corporation".into(), "Acme\u{a0}Inc".into()];
-            crawled.headings = vec!["Anvils".into(), " ".into()];
-            crawled.crawled_at = Some(1_791_605_520);
-            crawled.crawl_attempted_at = Some(1_791_605_600);
-            crawled.crawl_version = 7;
-            crawled.add_link_text("acme", "e.com");
-            crawled.signals.linking_domains = 9;
-            records.push(crawled);
-            let mut stale = SiteRecord::new("example.com");
-            stale.signals.tranco_rank = Some(1);
-            stale.signals.official_site = true;
-            stale.aliases = vec!["Example".into()];
-            stale.kinds = vec!["domain".into()];
-            stale.about = Some("reserved domain".into());
-            records.push(stale);
-            let mut check = SiteRecord::new("usbank.com");
+            crawled.names = vec!["Acme Corporation".into(), "Acme\u{a0}Inc".into()];
+            site::set_headings(&mut crawled, vec!["Anvils".into(), " ".into()]);
+            site::set_crawled(&mut crawled, Some(1_791_605_520));
+            let tried = CrawlMarks {
+                tried: Some(1_791_605_600),
+                ..CrawlMarks::default()
+            };
+            site::set_crawl_marks(&mut crawled, tried);
+            site::set_crawl_version(&mut crawled, 7);
+            site::add_link_text(&mut crawled, "acme", "e.com");
+            let linked = Signals {
+                linking_domains: 9,
+                ..Signals::default()
+            };
+            site::set_signals(&mut crawled, &linked);
+            sites.push(crawled);
+            let mut stale = site::new("example.com");
+            let ranked = Signals {
+                tranco_rank: Some(1),
+                official_site: true,
+                ..Signals::default()
+            };
+            site::set_signals(&mut stale, &ranked);
+            stale.names = vec!["Example".into()];
+            site::set_kinds(&mut stale, vec!["domain".into()]);
+            site::set_wikidata_about(&mut stale, Some("reserved domain".into()));
+            sites.push(stale);
+            let mut check = site::new("usbank.com");
             check.url = Some("https://www.google.com/sorry/index".into());
             check.title = Some("Sorry...".into());
-            check.crawled_at = Some(1_791_605_520);
-            records.push(check);
-            let mut munich = SiteRecord::new("xn--mnchen-3ya.de");
+            site::set_crawled(&mut check, Some(1_791_605_520));
+            sites.push(check);
+            let mut munich = site::new("xn--mnchen-3ya.de");
             munich.title = Some("München".into());
-            munich.crawled_at = Some(1_791_000_000);
-            records.push(munich);
-            records.push(SiteRecord::new("not a domain"));
-            let mut gone = SiteRecord::new("gone.example");
-            gone.signals.harmonic_rank = Some(50);
-            gone.crawl_attempted_at = Some(1_791_000_000);
-            gone.crawl_failures = 7;
-            gone.gone_at = Some(1_791_000_000);
-            records.push(gone);
+            site::set_crawled(&mut munich, Some(1_791_000_000));
+            sites.push(munich);
+            sites.push(site::new("not a domain"));
+            let mut gone = site::new("gone.example");
+            let ranked = Signals {
+                harmonic_rank: Some(50),
+                ..Signals::default()
+            };
+            site::set_signals(&mut gone, &ranked);
+            let marks = CrawlMarks {
+                tried: Some(1_791_000_000),
+                failures: 7,
+                gone: Some(1_791_000_000),
+            };
+            site::set_crawl_marks(&mut gone, marks);
+            sites.push(gone);
             Golden {
                 tranco,
                 cc_ranks,
                 wat,
                 official,
-                records,
+                sites,
             }
         }
 
-        /// The records, each as its stored item, as a records file holds
-        /// it.
+        /// The sites, each its stored item, as a records file holds it.
         fn sites(&self) -> Vec<Item> {
-            let records = self.records.iter().cloned();
-            records.map(SiteRecord::stored_item_as_is).collect()
+            self.sites.clone()
         }
 
         /// A builder given everything, in the order `plumb ingest` adds

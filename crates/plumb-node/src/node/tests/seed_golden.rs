@@ -24,7 +24,7 @@
 use std::fmt::Write as _;
 use std::io::Write as _;
 
-use plumb_core::{stored, Signals};
+use plumb_core::{site, Signals};
 
 use super::*;
 use crate::cli::IngestArgs;
@@ -211,13 +211,15 @@ fn node(dir: &Path) -> (Arc<Inner>, tokio::sync::watch::Sender<bool>) {
 }
 
 /// A crawled site, as a crawl's change brings it.
-fn crawled(domain: &str, title: &str, at: u64) -> SiteRecord {
-    let mut record = SiteRecord::new(domain);
+fn crawled(domain: &str, title: &str, at: u64) -> Item {
+    let mut record = site::new(domain);
     record.url = Some(format!("https://www.{domain}/"));
     record.title = Some(title.into());
-    record.crawled_at = Some(at);
-    record.crawl_attempted_at = Some(at);
-    record.crawl_version = 7;
+    site::set_crawled(&mut record, Some(at));
+    let mut marks = site::crawl_marks(&record);
+    marks.tried = Some(at);
+    site::set_crawl_marks(&mut record, marks);
+    site::set_crawl_version(&mut record, 7);
     record
 }
 
@@ -227,46 +229,43 @@ fn crawled(domain: &str, title: &str, at: u64) -> SiteRecord {
 /// disambiguation page's claim gave other sites.
 fn crawls() -> Vec<Change> {
     let mut site = crawled("crawled.example", " Crawled\u{7} Site ", 1_791_605_520);
-    site.aliases = vec!["Crawled".into(), "Crawled\u{a0}Site".into()];
-    site.add_link_text("crawled", "acme.com");
-    let mut linked = SiteRecord::new("linked.example");
-    linked.add_link_text("Linked", "crawled.example");
-    linked.signals.linking_domains = 1;
+    site.names = vec!["Crawled".into(), "Crawled\u{a0}Site".into()];
+    site::add_link_text(&mut site, "crawled", "acme.com");
+    let mut linked = site::new("linked.example");
+    site::add_link_text(&mut linked, "Linked", "crawled.example");
+    let mut signals = site::signals(&linked);
+    signals.linking_domains = 1;
+    site::set_signals(&mut linked, &signals);
     let mut google = crawled("google.com", "Google", 1_791_605_600);
-    google.aliases = vec!["COE, Moro".into(), "Google".into(), "Google Scholar".into()];
-    google.kinds = vec!["college".into(), "search engine".into()];
-    google.about = Some("academic search engine".into());
-    google.intro = Some("Google Scholar is a search engine for scholarly literature.".into());
-    google.country = Some("US".into());
-    google.signals.official_site = true;
-    google.signals.sitelinks = 300;
+    google.names = vec!["COE, Moro".into(), "Google".into(), "Google Scholar".into()];
+    site::set_kinds(&mut google, vec!["college".into(), "search engine".into()]);
+    site::set_wikidata_about(&mut google, Some("academic search engine".into()));
+    site::set_intro(
+        &mut google,
+        Some("Google Scholar is a search engine for scholarly literature.".into()),
+    );
+    site::set_country(&mut google, Some("US".into()));
+    let mut signals = site::signals(&google);
+    signals.official_site = true;
+    signals.sitelinks = 300;
+    site::set_signals(&mut google, &signals);
     let mut usbank = crawled("usbank.com", "U.S. Bank | Personal Banking", 1_791_605_700);
-    usbank.aliases = vec!["USB".into(), "U.S. Bank".into()];
+    usbank.names = vec!["USB".into(), "U.S. Bank".into()];
     let mut acme = crawled("acme.com", "Acme\u{7} Anvils ", 1_791_605_800);
-    acme.aliases = vec!["Acme\u{301}".into()];
-    acme.body_text = Some("Anvils since 1949.".into());
-    let mut unreached = SiteRecord::new("example.com");
-    unreached.crawl_attempted_at = Some(1_791_605_900);
-    unreached.crawl_failures = 2;
+    acme.names = vec!["Acme\u{301}".into()];
+    acme.text = Some("Anvils since 1949.".into());
+    let mut unreached = site::new("example.com");
+    let mut marks = site::crawl_marks(&unreached);
+    marks.tried = Some(1_791_605_900);
+    marks.failures = 2;
+    site::set_crawl_marks(&mut unreached, marks);
     vec![
-        Change::Merge {
-            site: site.stored_item_as_is(),
-        },
-        Change::Merge {
-            site: linked.stored_item_as_is(),
-        },
-        Change::Merge {
-            site: google.stored_item_as_is(),
-        },
-        Change::Merge {
-            site: usbank.stored_item_as_is(),
-        },
-        Change::Merge {
-            site: acme.stored_item_as_is(),
-        },
-        Change::Merge {
-            site: unreached.stored_item_as_is(),
-        },
+        Change::Merge { site },
+        Change::Merge { site: linked },
+        Change::Merge { site: google },
+        Change::Merge { site: usbank },
+        Change::Merge { site: acme },
+        Change::Merge { site: unreached },
         Change::Mark {
             domain: "x.com".into(),
             attempted_at: Some(1_791_606_000),
@@ -279,10 +278,10 @@ fn crawls() -> Vec<Change> {
 /// line, as a node before 0.5 wrote it: a file that holds a site twice.
 fn add_old_line(path: &Path) {
     let mut google = crawled("google.com", "Google Search", 1_791_000_000);
-    google.aliases = vec!["Google Inc.".into()];
-    google.headings = vec![" Search ".into()];
+    google.names = vec!["Google Inc.".into()];
+    site::set_headings(&mut google, vec![" Search ".into()]);
     let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
-    writeln!(file, "{}", serde_json::to_string(&google).unwrap()).unwrap();
+    writeln!(file, "{}", old_line(&google)).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -319,17 +318,13 @@ async fn setup_and_the_seed_make_what_the_golden_file_holds() {
 
     // Folded in again, as when Wikidata is asked again, over more crawls.
     let mut again = crawled("example.com", " Example\u{7} Domain ", 1_791_700_000);
-    again.aliases = vec!["Example".into(), "Example".into()];
+    again.names = vec!["Example".into(), "Example".into()];
     let mut stephane = crawled("stephane.fr", "Ste\u{301}phane", 1_791_700_100);
-    stephane.add_alias("Ste\u{301}phane");
+    stephane.names = vec!["Ste\u{301}phane".into()];
     RecordStore::open(&records)
         .save(&[
-            Change::Merge {
-                site: again.stored_item_as_is(),
-            },
-            Change::Merge {
-                site: stephane.stored_item_as_is(),
-            },
+            Change::Merge { site: again },
+            Change::Merge { site: stephane },
             Change::Gone {
                 domain: "linked.example".into(),
                 at: 1_791_700_200,
@@ -348,20 +343,13 @@ async fn setup_and_the_seed_make_what_the_golden_file_holds() {
     tsv.push_str("Q9062\tGoogle Maps\thttps://maps.google.com/\n");
     tsv.push_str("Q9082\tAcme Mail\thttps://mailto:info@acme.com\n");
     std::fs::write(&wikidata, tsv).unwrap();
-    let mut google = SiteRecord::new("google.com");
-    google.aliases = vec!["Google Maps".into(), "COE, Moro".into()];
-    google.kinds = vec!["college".into()];
-    let mut acme = SiteRecord::new("acme.com");
-    acme.aliases = vec!["Acme Mail".into()];
+    let mut google = site::new("google.com");
+    google.names = vec!["Google Maps".into(), "COE, Moro".into()];
+    site::set_kinds(&mut google, vec!["college".into()]);
+    let mut acme = site::new("acme.com");
+    acme.names = vec!["Acme Mail".into()];
     RecordStore::open(&records)
-        .save(&[
-            Change::Merge {
-                site: google.stored_item_as_is(),
-            },
-            Change::Merge {
-                site: acme.stored_item_as_is(),
-            },
-        ])
+        .save(&[Change::Merge { site: google }, Change::Merge { site: acme }])
         .unwrap();
     super::worker::refold_seed(&inner).await.unwrap();
     section(
@@ -411,41 +399,45 @@ async fn plumb_ingest_writes_what_the_golden_file_holds() {
     // site, a site twice (once as a record's own JSON), untidy text and a
     // journal.
     let records = dir.path().join("records.jsonl");
-    let mut stale = SiteRecord::new("olddomain.com");
-    stale.signals = Signals {
-        tranco_rank: Some(500),
-        harmonic_rank: Some(700),
-        pagerank_rank: Some(650),
-        official_site: true,
-        sitelinks: 12,
-        linking_domains: 3,
-        ..Signals::default()
-    };
-    stale.aliases = vec!["Acme Corporation".into()];
-    stale.kinds = vec!["company".into()];
-    stale.about = Some("old company".into());
-    stale.intro = Some("Old is a company.".into());
-    stale.country = Some("GB".into());
+    let mut stale = site::new("olddomain.com");
+    site::set_signals(
+        &mut stale,
+        &Signals {
+            tranco_rank: Some(500),
+            harmonic_rank: Some(700),
+            pagerank_rank: Some(650),
+            official_site: true,
+            sitelinks: 12,
+            linking_domains: 3,
+            ..Signals::default()
+        },
+    );
+    stale.names = vec!["Acme Corporation".into()];
+    site::set_kinds(&mut stale, vec!["company".into()]);
+    site::set_wikidata_about(&mut stale, Some("old company".into()));
+    site::set_intro(&mut stale, Some("Old is a company.".into()));
+    site::set_country(&mut stale, Some("GB".into()));
     stale.title = Some(" Old\u{7} Home ".into());
-    stale.add_link_text("acme", "news.example");
-    stale.crawled_at = Some(1_700_000_000);
-    stale.crawl_attempted_at = Some(1_700_000_100);
-    let mut fans = SiteRecord::new("fans.net");
-    fans.add_alias("Acme Fans");
-    fans.signals.tranco_rank = Some(800);
+    site::add_link_text(&mut stale, "acme", "news.example");
+    site::set_crawled(&mut stale, Some(1_700_000_000));
+    let mut marks = site::crawl_marks(&stale);
+    marks.tried = Some(1_700_000_100);
+    site::set_crawl_marks(&mut stale, marks);
+    let mut fans = site::new("fans.net");
+    site::add_alias(&mut fans, "Acme Fans");
+    let mut signals = site::signals(&fans);
+    signals.tranco_rank = Some(800);
+    site::set_signals(&mut fans, &signals);
     let mut usbank = crawled("usbank.com", "U.S. Bank", 1_791_605_520);
-    usbank.aliases = vec!["USB".into()];
-    let lines = [&stale, &fans, &usbank]
-        .map(|record| String::from_utf8(stored::line(record).unwrap()).unwrap());
+    usbank.names = vec!["USB".into()];
+    let lines = [&stale, &fans, &usbank].map(item_line);
     std::fs::write(&records, lines.join("\n") + "\n").unwrap();
     add_old_line(&records);
     let mut found = crawled("found.example", "Found\u{301}", 1_791_605_600);
-    found.add_link_text("found", "fans.net");
+    site::add_link_text(&mut found, "found", "fans.net");
     RecordStore::open(&records)
         .save(&[
-            Change::Merge {
-                site: found.stored_item_as_is(),
-            },
+            Change::Merge { site: found },
             Change::Mark {
                 domain: "fans.net".into(),
                 attempted_at: Some(1_791_605_700),
@@ -517,45 +509,59 @@ fn held(vectors: &std::sync::RwLock<plumb_embed::Vectors>) -> Vec<String> {
 /// Sites of a records file to embed, differing in what their text is made
 /// of: every part and none, a summary, more link texts than are kept,
 /// text longer than is embedded, text that is not tidy, and a gone site.
-fn to_embed_records() -> Vec<SiteRecord> {
+fn to_embed_records() -> Vec<Item> {
     let mut tesla = crawled("tesla.com", "Electric  Cars,\tSolar | Tesla", 1_791_605_520);
-    tesla.aliases = vec!["Tesla".into(), "Tesla, Inc.".into()];
-    tesla.description = Some("tesla".into());
-    tesla.about = Some("American electric vehicle company".into());
-    tesla.headings = vec!["Model 3".into(), "Model Y".into()];
-    tesla.signals.tranco_rank = Some(10);
-    tesla.signals.official_site = true;
+    tesla.names = vec!["Tesla".into(), "Tesla, Inc.".into()];
+    tesla.about = Some("tesla".into());
+    site::set_wikidata_about(&mut tesla, Some("American electric vehicle company".into()));
+    site::set_headings(&mut tesla, vec!["Model 3".into(), "Model Y".into()]);
+    let mut signals = site::signals(&tesla);
+    signals.tranco_rank = Some(10);
+    signals.official_site = true;
+    site::set_signals(&mut tesla, &signals);
     let mut cafe = crawled("cafe.fr", "Cafe\u{301} de Flore", 1_791_605_520);
-    cafe.description = Some("Le caf\u{e9}\u{7} historique".into());
-    cafe.signals.tranco_rank = Some(50);
-    let mut summary = SiteRecord::new("summary.org");
-    summary.summary = Some("A model's summary of the site.".into());
-    summary.signals.official_site = true;
-    let mut linked = SiteRecord::new("linked.com");
+    cafe.about = Some("Le caf\u{e9}\u{7} historique".into());
+    let mut signals = site::signals(&cafe);
+    signals.tranco_rank = Some(50);
+    site::set_signals(&mut cafe, &signals);
+    let mut summary = site::new("summary.org");
+    site::set_summary(&mut summary, Some("A model's summary of the site.".into()));
+    let mut signals = site::signals(&summary);
+    signals.official_site = true;
+    site::set_signals(&mut summary, &signals);
+    let mut linked = site::new("linked.com");
     for (i, text) in ["one", "two", "three", "four", "five", "six", "seven"]
         .iter()
         .enumerate()
     {
         for linker in 0..(7 - i) {
-            linked.add_link_text(text, &format!("l{linker}.example"));
+            site::add_link_text(&mut linked, text, &format!("l{linker}.example"));
         }
     }
-    linked.signals.linking_domains = 7;
-    let mut empty = SiteRecord::new("empty.com");
-    empty.signals.tranco_rank = Some(1);
+    let mut signals = site::signals(&linked);
+    signals.linking_domains = 7;
+    site::set_signals(&mut linked, &signals);
+    let mut empty = site::new("empty.com");
+    let mut signals = site::signals(&empty);
+    signals.tranco_rank = Some(1);
+    site::set_signals(&mut empty, &signals);
     let mut gone = crawled("gone.example", "Gone", 1_700_000_000);
-    gone.signals.harmonic_rank = Some(30);
+    let mut signals = site::signals(&gone);
+    signals.harmonic_rank = Some(30);
+    site::set_signals(&mut gone, &signals);
     let mut long = crawled("long.org", "A long page", 1_791_605_520);
-    long.body_text = Some(
+    long.text = Some(
         (1..=150)
             .map(|i| format!("word{i}"))
             .collect::<Vec<_>>()
             .join(" "),
     );
-    let mut untidy = SiteRecord::new("untidy.de");
-    untidy.aliases = vec![" Untidy GmbH ".into(), "Untidy\u{a0}GmbH".into()];
-    untidy.intro = Some("Untidy GmbH is a\u{85}company.".into());
-    untidy.signals.pagerank_rank = Some(70);
+    let mut untidy = site::new("untidy.de");
+    untidy.names = vec![" Untidy GmbH ".into(), "Untidy\u{a0}GmbH".into()];
+    site::set_intro(&mut untidy, Some("Untidy GmbH is a\u{85}company.".into()));
+    let mut signals = site::signals(&untidy);
+    signals.pagerank_rank = Some(70);
+    site::set_signals(&mut untidy, &signals);
     vec![tesla, cafe, summary, linked, empty, gone, long, untidy]
 }
 
@@ -567,26 +573,22 @@ fn write_to_embed(path: &Path) {
         .iter()
         .enumerate()
         .map(|(i, record)| match i % 2 {
-            0 => String::from_utf8(stored::line(record).unwrap()).unwrap(),
-            _ => serde_json::to_string(record).unwrap(),
+            0 => item_line(record),
+            _ => old_line(record),
         })
         .collect();
     std::fs::write(path, lines.join("\n") + "\n").unwrap();
     let mut cafe = crawled("cafe.fr", "Caf\u{e9} de Flore, Paris", 1_791_700_000);
-    cafe.body_text = Some("Ouvert tous les jours.".into());
+    cafe.text = Some("Ouvert tous les jours.".into());
     let fresh = crawled("new.example", "A new site", 1_791_700_000);
     RecordStore::open(path)
         .save(&[
-            Change::Merge {
-                site: cafe.stored_item_as_is(),
-            },
+            Change::Merge { site: cafe },
             Change::Gone {
                 domain: "gone.example".into(),
                 at: 1_791_700_000,
             },
-            Change::Merge {
-                site: fresh.stored_item_as_is(),
-            },
+            Change::Merge { site: fresh },
         ])
         .unwrap();
 }
@@ -658,17 +660,12 @@ fn the_sites_embedded_are_what_the_golden_file_holds() {
     write_to_embed(&records);
     add_old_line(&records);
     let mut tesla = crawled("tesla.com", "Tesla", 1_791_000_000);
-    tesla.add_alias("Tesla Motors");
+    site::add_alias(&mut tesla, "Tesla Motors");
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(&records)
         .unwrap();
-    writeln!(
-        file,
-        "{}",
-        String::from_utf8(stored::line(&tesla).unwrap()).unwrap()
-    )
-    .unwrap();
+    writeln!(file, "{}", item_line(&tesla)).unwrap();
     let vectors = make();
     let (todo, more) =
         crate::meaning::sites_to_embed_from_file(&vectors, &records, 100, 100, None).unwrap();

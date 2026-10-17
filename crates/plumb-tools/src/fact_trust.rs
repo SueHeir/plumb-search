@@ -622,10 +622,10 @@ mod tests {
     }
 
     #[test]
-    fn applying_counts_writes_each_record_as_it_was_with_its_counts() {
+    fn applying_counts_writes_each_site_as_it_was_with_its_counts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        crate::test_sites::write(&path, &crate::test_sites::records());
+        crate::test_sites::write(&path, &crate::test_sites::sites());
         let mut found = Found::default();
         for (domain, checks, agrees) in [
             ("python.org", 40, 39),
@@ -644,15 +644,17 @@ mod tests {
         let apply = dir.path().join("apply.jsonl");
         apply_to(&path, &apply, &found).unwrap();
 
-        // The records read off the file with their counts set.
+        // The sites read off the file with their counts set.
         let mut expected = Vec::new();
-        plumb_node::outline::for_each_record(&path, |mut record| {
-            let tally = canonical_domain(&record.domain).and_then(|d| found.sites.get(&d));
+        plumb_node::outline::for_each_site(&path, |mut site| {
+            let tally = canonical_domain(&site.id).and_then(|d| found.sites.get(&d));
             if let Some(tally) = tally {
-                record.signals.fact_checks = tally.checks;
-                record.signals.fact_agrees = tally.agrees;
+                let mut signals = plumb_core::site::signals(&site);
+                signals.fact_checks = tally.checks;
+                signals.fact_agrees = tally.agrees;
+                plumb_core::site::set_signals(&mut site, &signals);
             }
-            expected.extend(plumb_core::stored::line(&record).unwrap());
+            expected.extend(plumb_core::stored::item_as_line(&site).unwrap());
             expected.push(b'\n');
         })
         .unwrap();

@@ -131,7 +131,7 @@ fn a_bare_full_query_domain_cannot_outrank_a_corroborated_subject_fallback() {
     }
     assert_eq!(top(&searcher, "asterrefund.test"), "asterrefund.test");
     let mut records = records;
-    records[1].add_alias("Aster refund");
+    site::add_alias(&mut records[1], "Aster refund");
     let (_dir, searcher) = build(&records);
     let pool = searcher
         .candidate_pool(
@@ -449,7 +449,7 @@ fn partial_names_compete_with_indexed_subject_and_semantic_evidence() {
         Some(0.6)
     );
     let mut records = records;
-    records[1].description = Some("Nimbus q9 API reference".into());
+    records[1].about = Some("Nimbus q9 API reference".into());
     let (_dir, searcher) = build(&records);
     let hits = searcher
         .search_meaning(

@@ -599,25 +599,28 @@ pub fn run(args: &LinkRankArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plumb_core::{Redirect, SiteRecord};
+    use plumb_core::Redirect;
 
-    fn site(domain: &str, links: &[&str]) -> SiteRecord {
-        let mut record = SiteRecord::new(domain);
-        record.links_to = links.iter().map(|s| s.to_string()).collect();
+    fn site(domain: &str, links: &[&str]) -> Item {
+        let mut record = plumb_core::site::new(domain);
+        let links = links.iter().map(|s| s.to_string()).collect();
+        plumb_core::site::set_links_to(&mut record, links);
         record
     }
 
-    fn seed(domain: &str, links: &[&str]) -> SiteRecord {
+    fn seed(domain: &str, links: &[&str]) -> Item {
         let mut record = site(domain, links);
-        record.signals.official_site = true;
+        crate::test_sites::ranks(&mut record, |signals| signals.official_site = true);
         record
     }
 
-    fn ranked(records: &[SiteRecord]) -> Ranked {
+    fn ranked(records: &[Item]) -> Ranked {
         // The links file removes itself when the graph goes.
         let mut graph = Graph::new(&std::env::temp_dir()).unwrap();
         for record in records {
-            graph.add(&record.to_stored_item()).unwrap();
+            let mut stored = record.clone();
+            plumb_core::site::clean(&mut stored);
+            graph.add(&stored).unwrap();
         }
         graph.rank(100).unwrap()
     }
@@ -655,11 +658,14 @@ mod tests {
     #[test]
     fn links_to_a_redirecting_site_count_for_where_it_goes() {
         let mut old = site("pncbank.com", &[]);
-        old.redirect = Some(Redirect {
-            to: "pnc.com".into(),
-            at: 1,
-            inner: false,
-        });
+        site::set_redirect(
+            &mut old,
+            Some(Redirect {
+                to: "pnc.com".into(),
+                at: 1,
+                inner: false,
+            }),
+        );
         let ranked = ranked(&[
             old,
             site("a.com", &["pncbank.com"]),
@@ -677,11 +683,14 @@ mod tests {
     #[test]
     fn links_to_a_site_behind_a_bot_check_count_for_it() {
         let mut gated = site("esteri.it", &[]);
-        gated.redirect = Some(Redirect {
-            to: "perfdrive.com".into(),
-            at: 1,
-            inner: false,
-        });
+        site::set_redirect(
+            &mut gated,
+            Some(Redirect {
+                to: "perfdrive.com".into(),
+                at: 1,
+                inner: false,
+            }),
+        );
         let ranked = ranked(&[
             gated,
             site("a.com", &["esteri.it"]),
@@ -695,17 +704,23 @@ mod tests {
     #[test]
     fn a_redirect_loop_stays_put() {
         let mut a = site("a.com", &[]);
-        a.redirect = Some(Redirect {
-            to: "b.com".into(),
-            at: 1,
-            inner: false,
-        });
+        site::set_redirect(
+            &mut a,
+            Some(Redirect {
+                to: "b.com".into(),
+                at: 1,
+                inner: false,
+            }),
+        );
         let mut b = site("b.com", &[]);
-        b.redirect = Some(Redirect {
-            to: "a.com".into(),
-            at: 1,
-            inner: false,
-        });
+        site::set_redirect(
+            &mut b,
+            Some(Redirect {
+                to: "a.com".into(),
+                at: 1,
+                inner: false,
+            }),
+        );
         let ranked = ranked(&[a, b, site("c.com", &["a.com"])]);
         assert_eq!(names(&ranked).len(), 3);
     }
@@ -805,7 +820,7 @@ mod tests {
     fn a_records_file_is_ranked_and_its_copy_changes_only_ranks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        crate::test_sites::write(&path, &crate::test_sites::records());
+        crate::test_sites::write(&path, &crate::test_sites::sites());
         let (apply, out) = (dir.path().join("apply.jsonl"), dir.path().join("ranks.tsv"));
         run(&LinkRankArgs {
             records: path.clone(),
@@ -843,35 +858,37 @@ mod tests {
             ranks.join("\n") + "\n"
         );
 
-        // Each line of the copy is the record read off the file, with only
-        // its ranks and count of linking sites changed, as a record writes it:
-        // as it is, but for Example.COM, whose link to foo_bar.com would not
-        // read back as it is, which is written clean.
+        // Each line of the copy is the site read off the file, with only
+        // its ranks and count of linking sites changed, as it was: as it is,
+        // but for Example.COM, whose link to foo_bar.com would not read back
+        // as it is, which is written clean.
         let mut before = Vec::new();
-        plumb_node::outline::for_each_record(&path, |record| before.push(record)).unwrap();
+        plumb_node::outline::for_each_site(&path, |site| before.push(site)).unwrap();
         let copy = std::fs::read_to_string(&apply).unwrap();
         let lines: Vec<&str> = copy.lines().collect();
         assert_eq!(lines.len(), before.len());
         let mut changed = Vec::new();
-        for (record, line) in before.into_iter().zip(lines) {
-            let after = plumb_core::stored::read(line.as_bytes()).unwrap();
-            let mut expected = record.clone();
-            expected.signals.pagerank_rank = after.signals.pagerank_rank;
-            expected.signals.linking_domains = after.signals.linking_domains;
-            if record.domain == "Example.COM" {
-                expected.clean();
+        for (site, line) in before.into_iter().zip(lines) {
+            let after = plumb_core::stored::read_item(line.as_bytes()).unwrap();
+            let (was, now) = (
+                plumb_core::site::signals(&site),
+                plumb_core::site::signals(&after),
+            );
+            let mut expected = site.clone();
+            let mut signals = was.clone();
+            signals.pagerank_rank = now.pagerank_rank;
+            signals.linking_domains = now.linking_domains;
+            plumb_core::site::set_signals(&mut expected, &signals);
+            if site.id == "Example.COM" {
+                plumb_core::site::clean(&mut expected);
             }
             assert_eq!(after, expected);
             assert_eq!(
                 line.as_bytes(),
-                plumb_core::stored::line(&expected).unwrap()
+                plumb_core::stored::item_as_line(&expected).unwrap()
             );
-            if after.signals != record.signals {
-                changed.push((
-                    record.domain,
-                    after.signals.pagerank_rank,
-                    after.signals.linking_domains,
-                ));
+            if now != was {
+                changed.push((site.id, now.pagerank_rank, now.linking_domains));
             }
         }
         // Each site's place by links, and Example.COM's link from münchen.de,

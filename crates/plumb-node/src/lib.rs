@@ -372,11 +372,51 @@ pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()))
 }
 
+/// Lines of a records file for the tests, in either shape a node reads.
+#[cfg(test)]
+pub(crate) mod test_lines {
+    use std::path::Path;
+
+    use plumb_core::stored;
+    use plumb_format::Item;
+
+    /// The line of `site` as a node writes it now: its stored item.
+    pub(crate) fn item_line(site: &Item) -> String {
+        String::from_utf8(stored::item_as_line(site).unwrap()).unwrap()
+    }
+
+    /// The line of `site` as versions up to 0.4 wrote it: the record's own
+    /// JSON, which a node still reads and `/plumb/fill/1` still sends, of
+    /// the site as it is.
+    pub(crate) fn old_line(site: &Item) -> String {
+        stored::record_json_of(site).unwrap()
+    }
+
+    /// Writes `sites` to `path` as versions up to 0.4 wrote a records
+    /// file, a line of each one's [`old_line`].
+    pub(crate) fn write_old_lines(path: &Path, sites: &[Item]) {
+        let lines: String = sites.iter().map(|site| old_line(site) + "\n").collect();
+        std::fs::write(path, lines).unwrap();
+    }
+
+    /// Every site of the file at `path`, in file order, each line read as
+    /// it is ([`stored::read_item`]): trimmed, and blank ones skipped.
+    pub(crate) fn read_sites(path: &Path) -> Vec<Item> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| stored::read_item(line.as_bytes()).unwrap())
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
 
-    use plumb_core::{site, SiteRecord};
+    use plumb_core::site;
 
     use super::*;
 
@@ -404,11 +444,7 @@ mod tests {
             Ok(sites.len())
         });
         assert_eq!(written.unwrap(), 2);
-        let back: Vec<SiteRecord> = plumb_core::stored::read_file(&path).unwrap();
-        assert_eq!(
-            back,
-            [SiteRecord::new("usbank.com"), SiteRecord::new("chase.com")]
-        );
+        assert_eq!(test_lines::read_sites(&path), sites);
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())

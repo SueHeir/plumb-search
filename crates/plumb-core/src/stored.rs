@@ -168,6 +168,12 @@ pub fn record_json(line: String) -> Result<String> {
     Ok(line)
 }
 
+/// The record's own JSON of a site's stored item, as it is: what
+/// [`record_json`] answers with for the item's line.
+pub fn record_json_of(site: &Item) -> Result<String> {
+    Ok(serde_json::to_string(&SiteRecord::from_stored_item(site)?)?)
+}
+
 /// The stored item of a site sent as the record's own JSON, as a
 /// `/plumb/fill/1` answer carries each ([`record_json`]): the item
 /// [`SiteRecord::stored_item_as_is`] makes of the record read from it, so

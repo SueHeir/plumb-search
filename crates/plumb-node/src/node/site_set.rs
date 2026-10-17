@@ -500,9 +500,11 @@ mod tests {
             unreachable!()
         };
         let items = names.map(|name| {
-            let mut site = plumb_core::SiteRecord::new(format!("{name}.org"));
-            site.signals.tranco_rank = Some(1);
-            Some(site.to_item().unwrap())
+            let mut site = plumb_core::site::new(format!("{name}.org"));
+            let mut signals = plumb_core::site::signals(&site);
+            signals.tranco_rank = Some(1);
+            plumb_core::site::set_signals(&mut site, &signals);
+            Some(plumb_core::site::to_item(&site).unwrap())
         });
         let fields = plumb_core::site_item::site_fields();
         plumb_tools::set::write_set(items.into_iter(), fields, manifest, dir, &[2, 4], 3).unwrap();

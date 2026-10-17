@@ -32,7 +32,6 @@ use std::path::Path;
 use plumb_core::keys::pick_buckets;
 use plumb_core::{
     now_unix, site, stored, Headline, KeyPage, LinkText, Operators, Redirect, SafeSearch, Signals,
-    SiteRecord,
 };
 use plumb_net::oblivious::{seal_response, Gateway, Opened};
 use plumb_net::proto::{BucketRecord, BucketResponse};
@@ -45,62 +44,93 @@ use super::super::private::slim_bucket;
 /// When the sites here were crawled.
 const CRAWLED: u64 = 1_792_000_000;
 
-fn crawled(domain: &str, title: &str, tranco: Option<u32>, linking: u32) -> SiteRecord {
-    let mut record = SiteRecord::new(domain);
+fn crawled(domain: &str, title: &str, tranco: Option<u32>, linking: u32) -> site::Item {
+    let mut record = site::new(domain);
     record.url = Some(format!("https://www.{domain}/"));
     record.title = Some(title.into());
-    record.crawled_at = Some(CRAWLED);
-    record.signals = Signals {
-        tranco_rank: tranco,
-        linking_domains: linking,
-        ..Signals::default()
-    };
+    site::set_crawled(&mut record, Some(CRAWLED));
+    site::set_signals(
+        &mut record,
+        &Signals {
+            tranco_rank: tranco,
+            linking_domains: linking,
+            ..Signals::default()
+        },
+    );
     record
 }
 
 /// The sites the node holds.
-fn sites() -> Vec<SiteRecord> {
+fn sites() -> Vec<site::Item> {
     let mut usbank = crawled(
         "usbank.com",
         "U.S. Bank | Checking & Savings - Personal Banking",
         Some(900),
         4000,
     );
-    usbank.description = Some("Checking, savings and home loans from U.S. Bank.".into());
-    usbank.headings = vec!["Personal banking".into(), "Business banking".into()];
-    usbank.body_text = Some("Bank with us. ".repeat(40));
-    usbank.terms = vec!["bank".into(), "bank".into(), "checking".into()];
-    usbank.aliases = vec!["U.S. Bancorp".into(), "US Bank".into()];
-    usbank.link_texts = (0..12)
-        .map(|i| LinkText::from_linkers(format!("us bank {i}"), (1u64 << i) - 1))
-        .chain([LinkText::from_linkers("us bank", u64::MAX >> 4)])
-        .collect();
-    usbank.signals.harmonic_rank = Some(800);
-    usbank.signals.pagerank_rank = Some(1000);
-    usbank.signals.official_site = true;
-    usbank.signals.sitelinks = 40;
-    usbank.signals.fact_checks = 12;
-    usbank.signals.fact_agrees = 11;
-    usbank.country = Some("US".into());
-    usbank.kinds = vec!["bank".into()];
-    usbank.about = Some("American bank holding company".into());
-    usbank.intro = Some("U.S. Bancorp is an American bank holding company.".into());
-    usbank.search_url = Some("https://www.usbank.com/search?q={searchTerms}".into());
-    usbank.language = Some("en".into());
-    usbank.crawl_attempted_at = Some(CRAWLED + 60);
-    usbank.crawl_failures = 1;
-    usbank.crawl_version = 3;
-    usbank.icon = Some("iVBORw0KGgo=".into());
-    usbank.news = vec![Headline {
-        title: "Rates go up".into(),
-        url: "https://www.usbank.com/news/rates".into(),
-        at: CRAWLED,
-    }];
-    usbank.key_pages = vec![KeyPage {
-        label: "Log in".into(),
-        url: "https://www.usbank.com/login".into(),
-    }];
-    usbank.links_to = vec!["visa.com".into(), "mastercard.com".into()];
+    usbank.about = Some("Checking, savings and home loans from U.S. Bank.".into());
+    site::set_headings(
+        &mut usbank,
+        vec!["Personal banking".into(), "Business banking".into()],
+    );
+    usbank.text = Some("Bank with us. ".repeat(40));
+    site::set_terms(
+        &mut usbank,
+        vec!["bank".into(), "bank".into(), "checking".into()],
+    );
+    usbank.names = vec!["U.S. Bancorp".into(), "US Bank".into()];
+    site::set_link_texts(
+        &mut usbank,
+        &(0..12)
+            .map(|i| LinkText::from_linkers(format!("us bank {i}"), (1u64 << i) - 1))
+            .chain([LinkText::from_linkers("us bank", u64::MAX >> 4)])
+            .collect::<Vec<_>>(),
+    );
+    let mut signals = site::signals(&usbank);
+    signals.harmonic_rank = Some(800);
+    signals.pagerank_rank = Some(1000);
+    signals.official_site = true;
+    signals.sitelinks = 40;
+    signals.fact_checks = 12;
+    signals.fact_agrees = 11;
+    site::set_signals(&mut usbank, &signals);
+    site::set_country(&mut usbank, Some("US".into()));
+    site::set_kinds(&mut usbank, vec!["bank".into()]);
+    site::set_wikidata_about(&mut usbank, Some("American bank holding company".into()));
+    site::set_intro(
+        &mut usbank,
+        Some("U.S. Bancorp is an American bank holding company.".into()),
+    );
+    site::set_search_url(
+        &mut usbank,
+        Some("https://www.usbank.com/search?q={searchTerms}".into()),
+    );
+    usbank.lang = Some("en".into());
+    let mut marks = site::crawl_marks(&usbank);
+    marks.tried = Some(CRAWLED + 60);
+    marks.failures = 1;
+    site::set_crawl_marks(&mut usbank, marks);
+    site::set_crawl_version(&mut usbank, 3);
+    site::set_icon(&mut usbank, Some("iVBORw0KGgo=".into()));
+    site::set_news(
+        &mut usbank,
+        vec![Headline {
+            title: "Rates go up".into(),
+            url: "https://www.usbank.com/news/rates".into(),
+            at: CRAWLED,
+        }],
+    );
+    site::set_key_pages(
+        &mut usbank,
+        vec![KeyPage {
+            label: "Log in".into(),
+            url: "https://www.usbank.com/login".into(),
+        }],
+    );
+    site::set_links_to(
+        &mut usbank,
+        vec!["visa.com".into(), "mastercard.com".into()],
+    );
 
     let mut chase = crawled(
         "chase.com",
@@ -108,17 +138,25 @@ fn sites() -> Vec<SiteRecord> {
         Some(200),
         9000,
     );
-    chase.country = Some("US".into());
-    chase.kinds = vec!["bank".into()];
-    chase.link_texts = vec![
-        LinkText::with_count("chase", 30),
-        LinkText::with_count("chase login", 4),
-    ];
-    chase.key_pages = vec![KeyPage {
-        label: "Sign in".into(),
-        url: "https://www.chase.com/signin".into(),
-    }];
-    chase.signals.official_site = true;
+    site::set_country(&mut chase, Some("US".into()));
+    site::set_kinds(&mut chase, vec!["bank".into()]);
+    site::set_link_texts(
+        &mut chase,
+        &[
+            LinkText::with_count("chase", 30),
+            LinkText::with_count("chase login", 4),
+        ],
+    );
+    site::set_key_pages(
+        &mut chase,
+        vec![KeyPage {
+            label: "Sign in".into(),
+            url: "https://www.chase.com/signin".into(),
+        }],
+    );
+    let mut signals = site::signals(&chase);
+    signals.official_site = true;
+    site::set_signals(&mut chase, &signals);
 
     let mut america = crawled(
         "bankofamerica.com",
@@ -126,30 +164,32 @@ fn sites() -> Vec<SiteRecord> {
         Some(300),
         8000,
     );
-    america.aliases = vec!["Bank of America".into(), "BofA".into()];
-    america.signals.official_site = true;
-    america.country = Some("US".into());
-    america.kinds = vec!["bank".into()];
+    america.names = vec!["Bank of America".into(), "BofA".into()];
+    let mut signals = site::signals(&america);
+    signals.official_site = true;
+    site::set_signals(&mut america, &signals);
+    site::set_country(&mut america, Some("US".into()));
+    site::set_kinds(&mut america, vec!["bank".into()]);
 
     let mut dkb = crawled("dkb.de", "DKB - Das Kundenkonto", Some(5000), 800);
-    dkb.kinds = vec!["bank".into()];
-    dkb.language = Some("de".into());
-    dkb.description = Some("Ihr Girokonto bei der DKB".into());
+    site::set_kinds(&mut dkb, vec!["bank".into()]);
+    dkb.lang = Some("de".into());
+    dkb.about = Some("Ihr Girokonto bei der DKB".into());
 
     let mut deutsche = crawled("deutsche-bank.de", "Deutsche Bank", Some(4000), 900);
-    deutsche.aliases = vec!["Deutsche Bank AG".into()];
-    deutsche.kinds = vec!["bank".into()];
-    deutsche.language = Some("de".into());
-    deutsche.country = Some("DE".into());
-    deutsche.headings = vec!["Konto und Karte".into()];
+    deutsche.names = vec!["Deutsche Bank AG".into()];
+    site::set_kinds(&mut deutsche, vec!["bank".into()]);
+    deutsche.lang = Some("de".into());
+    site::set_country(&mut deutsche, Some("DE".into()));
+    site::set_headings(&mut deutsche, vec!["Konto und Karte".into()]);
 
     let mut irs = crawled("irs.gov", "Internal Revenue Service", Some(300), 7000);
-    irs.description = Some("Get a tax refund and pay taxes".into());
-    irs.about = Some("United States federal tax agency".into());
-    irs.terms = vec!["refund".into(), "taxes".into()];
+    irs.about = Some("Get a tax refund and pay taxes".into());
+    site::set_wikidata_about(&mut irs, Some("United States federal tax agency".into()));
+    site::set_terms(&mut irs, vec!["refund".into(), "taxes".into()]);
 
     let mut tracker = crawled("refundtracker.net", "IRS refund tracker", Some(400_000), 3);
-    tracker.description = Some("Where is my tax refund?".into());
+    tracker.about = Some("Where is my tax refund?".into());
 
     let mut lookalike = crawled(
         "usbank-login-help.com",
@@ -160,14 +200,17 @@ fn sites() -> Vec<SiteRecord> {
     lookalike.url = Some("https://usbank-login-help.com/login".into());
 
     let mut aster = crawled("aster.example", "Aster Observatory", Some(1), 90_000);
-    aster.summary = Some("Aster refund information for visitors".into());
+    site::set_summary(
+        &mut aster,
+        Some("Aster refund information for visitors".into()),
+    );
     let mut nimbus = crawled("nimbus.example", "Aster refund information", None, 0);
     nimbus.url = Some("https://aster.example/refunds".into());
-    nimbus.aliases = vec!["Nimbus Refunds".into()];
+    nimbus.names = vec!["Nimbus Refunds".into()];
 
     let mut munich = crawled("xn--mnchen-3ya.de", "Stadt München", Some(20_000), 300);
-    munich.language = Some("de".into());
-    munich.country = Some("DE".into());
+    munich.lang = Some("de".into());
+    site::set_country(&mut munich, Some("DE".into()));
 
     let mut guardian = crawled(
         "theguardian.com",
@@ -175,28 +218,36 @@ fn sites() -> Vec<SiteRecord> {
         Some(150),
         20_000,
     );
-    guardian.aliases = vec!["The Guardian".into()];
-    guardian.signals.official_site = true;
-    guardian.signals.sitelinks = 120;
+    guardian.names = vec!["The Guardian".into()];
+    let mut signals = site::signals(&guardian);
+    signals.official_site = true;
+    signals.sitelinks = 120;
+    site::set_signals(&mut guardian, &signals);
 
     let mut python = crawled("python.org", "Welcome to Python.org", Some(512), 30_000);
-    python.aliases = vec!["Python".into()];
-    python.headings = vec!["Get Started".into(), "Download".into()];
-    python.terms = vec!["python".into(), "download".into()];
-    python.kinds = vec!["programming language".into()];
-    python.about = Some("general-purpose programming language".into());
-    python.intro = Some("Python is a high-level programming language.".into());
+    python.names = vec!["Python".into()];
+    site::set_headings(&mut python, vec!["Get Started".into(), "Download".into()]);
+    site::set_terms(&mut python, vec!["python".into(), "download".into()]);
+    site::set_kinds(&mut python, vec!["programming language".into()]);
+    site::set_wikidata_about(
+        &mut python,
+        Some("general-purpose programming language".into()),
+    );
+    site::set_intro(
+        &mut python,
+        Some("Python is a high-level programming language.".into()),
+    );
     let mut pypi = crawled(
         "pypi.org",
         "PyPI · The Python Package Index",
         Some(2000),
         6000,
     );
-    pypi.description = Some("Find, install and publish Python packages".into());
+    pypi.about = Some("Find, install and publish Python packages".into());
 
     let mut rakuten = crawled("rakuten.co.jp", "楽天市場", Some(700), 5000);
-    rakuten.language = Some("ja".into());
-    rakuten.aliases = vec!["Rakuten".into()];
+    rakuten.lang = Some("ja".into());
+    rakuten.names = vec!["Rakuten".into()];
 
     let mut adult = crawled(
         "freebankvideos.example",
@@ -204,32 +255,39 @@ fn sites() -> Vec<SiteRecord> {
         Some(3000),
         300,
     );
-    adult.description = Some("Videos of banks".into());
+    adult.about = Some("Videos of banks".into());
     let mut suggestive = crawled("sexybank.example", "Sexy bank videos", Some(3500), 250);
-    suggestive.description = Some("Bank videos".into());
+    suggestive.about = Some("Bank videos".into());
 
     let mut youtube = crawled("youtube.com", "YouTube", Some(2), 100_000);
-    youtube.description = Some("Enjoy the videos and music you love".into());
-    youtube.signals.official_site = true;
+    youtube.about = Some("Enjoy the videos and music you love".into());
+    let mut signals = site::signals(&youtube);
+    signals.official_site = true;
+    site::set_signals(&mut youtube, &signals);
 
-    let mut wells = SiteRecord::new("wellsfargo.com");
-    wells.signals.tranco_rank = Some(203);
-    wells.link_texts = vec![LinkText::from_linkers("wells fargo", 0b1011)];
+    let mut wells = site::new("wellsfargo.com");
+    let mut signals = site::signals(&wells);
+    signals.tranco_rank = Some(203);
+    site::set_signals(&mut wells, &signals);
+    site::set_link_texts(&mut wells, &[LinkText::from_linkers("wells fargo", 0b1011)]);
 
     let mut pncbank = crawled("pncbank.com", "PNC Bank", Some(9000), 50);
-    pncbank.redirect = Some(Redirect {
-        to: "pnc.com".into(),
-        at: CRAWLED,
-        inner: false,
-    });
+    site::set_redirect(
+        &mut pncbank,
+        Some(Redirect {
+            to: "pnc.com".into(),
+            at: CRAWLED,
+            inner: false,
+        }),
+    );
     let mut pnc = crawled(
         "pnc.com",
         "PNC Bank - Personal & Business Banking",
         Some(800),
         3000,
     );
-    pnc.kinds = vec!["bank".into()];
-    pnc.country = Some("US".into());
+    site::set_kinds(&mut pnc, vec!["bank".into()]);
+    site::set_country(&mut pnc, Some("US".into()));
 
     vec![
         usbank,
@@ -318,9 +376,10 @@ fn searches() -> Vec<(&'static str, Options)> {
 }
 
 /// The table of `sites`, as a node's index build writes it: best first,
-/// each as its stored item.
-fn table(dir: &Path, sites: &[SiteRecord]) -> BucketTable {
-    let mut items: Vec<_> = sites.iter().map(SiteRecord::to_stored_item).collect();
+/// each cleaned as a node stores it.
+fn table(dir: &Path, sites: &[site::Item]) -> BucketTable {
+    let mut items = sites.to_vec();
+    items.iter_mut().for_each(site::clean);
     items.sort_by(|a, b| {
         site::link_score(b)
             .total_cmp(&site::link_score(a))

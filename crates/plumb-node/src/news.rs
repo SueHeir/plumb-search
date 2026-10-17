@@ -115,7 +115,7 @@ pub struct Watched {
     pub checked_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_status: Option<String>,
-    /// The language its homepage says it is in ([`plumb_core::SiteRecord::language`]).
+    /// The language its homepage says it is in ([`plumb_format::Item::lang`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
 }
