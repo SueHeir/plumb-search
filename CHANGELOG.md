@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-### Search
-
-- A second learned model puts the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first, as sba.gov does for "sba hubzone certification" and donotcall.gov for "how to get telemarketers to stop calling". It learned from the sites test searches expect and from an LLM's grades of the sites other searches list, so it doesn't push a site that matches a search well below a bigger one. The first learned model then only places pages among the sites, as moving them again undid part of the second's work. A site the search names, by its name, domain label or an alias, stays at least where it was. Nodes without the sites' vectors, and searches that ask only for the news, are ordered as before.
-
 ### Running a node
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
@@ -23,6 +19,8 @@
 
 ### Tools
 
+- A second learned model can put the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first. It is off, since the Batch evals found it no better on a node than today's order: `plumb-tools eval --rank '{"learned_sites": true}'` measures it. It learned from the sites test searches expect and from an LLM's grades of the sites other searches list (`eval --limit 100 --features-out`, `train-rank --rows 100`).
+- `plumb-tools eval --candidates-out FILE` writes each test search's deep site candidates with the raw signals a first stage could score them by, to try first stages and rankings offline.
 - `plumb-tools site-items` is gone. It reported what a node's sites would lose or change as items of the data format, and a node now keeps every site as its item.
 
 ## 0.4.0
