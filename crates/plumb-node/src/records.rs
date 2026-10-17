@@ -191,10 +191,9 @@ pub fn journal_path(records: &Path) -> PathBuf {
 /// ([`plumb_core::site`]), then replays the journal an interrupted crawl
 /// may have left next to it. Each line is read as its site's stored item
 /// ([`plumb_core::stored::read_item`]), and [`Sites`] merges and cleans
-/// them as a record set does records: sites of the same domain are merged,
-/// and ones without a valid domain are dropped. Then the journal's changes
-/// are made to them ([`Change::apply`]). The sites are the stored items of
-/// the records a record set loaded of the same file and journal.
+/// them: sites of the same domain are merged, and ones without a valid
+/// domain are dropped. Then the journal's changes are made to them
+/// ([`Change::apply`]).
 pub fn load_sites(path: &Path) -> Result<Sites> {
     let mut sites = Sites::new();
     let loaded = read_lines(path, |line| {

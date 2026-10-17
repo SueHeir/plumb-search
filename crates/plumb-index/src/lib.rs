@@ -432,7 +432,7 @@ pub struct Hit {
     /// [`pages::place_pages`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placing_text_score: Option<f32>,
-    /// The country the site belongs to ([`plumb_core::site_country`]),
+    /// The country the site belongs to ([`plumb_core::site::site_country`]),
     /// `None` for global sites.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,

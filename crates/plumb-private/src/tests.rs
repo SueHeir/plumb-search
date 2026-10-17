@@ -1,6 +1,7 @@
 use plumb_core::keys::{pick_buckets, query_keys, site_keys, slim_site};
 use plumb_core::site::{self, Item};
-use plumb_core::{LinkText, SafeSearch, Signals, SiteRecord};
+use plumb_core::stored::old_record;
+use plumb_core::{LinkText, SafeSearch, Signals};
 use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
 
 use super::*;
@@ -693,8 +694,8 @@ fn search_keeps_only_sites_with_the_query_keys_once_each() {
 }
 
 /// The record a node of an earlier version sent of `site`.
-fn record(site: &Item) -> SiteRecord {
-    SiteRecord::from_stored_item(site).unwrap()
+fn record(site: &Item) -> old_record::SiteRecord {
+    old_record::of_item(site).unwrap()
 }
 
 /// A bucket holds trimmed items, or, as a browser may still have cached
@@ -718,7 +719,7 @@ fn buckets_read_back_in_either_form_and_skip_bad_sites() {
     assert!(read_bucket(&" ".repeat(MAX_BUCKET_BYTES + 1)).is_err());
 
     let as_items = serde_json::to_string(&slim).unwrap();
-    let as_records: Vec<SiteRecord> = records.iter().map(record).collect();
+    let as_records: Vec<old_record::SiteRecord> = records.iter().map(record).collect();
     let as_records = serde_json::to_string(&as_records).unwrap();
     let (_, keys) = pick_buckets("us bank", || 3);
     let found = |json: &str| {

@@ -12,9 +12,11 @@
 //! the table does not hold. A client trusts the node that signs the
 //! manifest, as it trusts any node answering it.
 //!
-//! A piece holds each site as the JSON of its record ([`SiteRecord`]), the
-//! shape these tables were first built and measured in, and
-//! [`read_piece`] reads them back as the sites' items.
+//! A piece holds each site as the JSON of its old record
+//! ([`old_record::SiteRecord`]), the shape these tables were first built
+//! and measured in, and [`read_piece`] reads them back as the sites'
+//! items. Pieces of items are a new table format, built when the browser
+//! reads one.
 //!
 //! ```text
 //! row payload: for each non-empty piece of the row, in piece order:
@@ -33,7 +35,7 @@ use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use plumb_core::keys::{bucket_of, lean_site, piece_of, site_keys, PIECES, PIECES_PER_BUCKET};
 use plumb_core::site::Item;
-use plumb_core::{stored, SiteRecord};
+use plumb_core::stored::{self, old_record};
 use plumb_net::bucket::{BucketTable, BUCKETS};
 
 use super::pieces::PieceMap;
@@ -151,7 +153,8 @@ fn spill_pieces(table: &BucketTable, path: &Path) -> Result<(Vec<Span>, Vec<u64>
             .map(|line| stored::read_item(line.as_bytes()))
             .collect::<Result<_>>()
             .context("the bucket table holds a site that does not parse")?;
-        let mut by_piece: Vec<Vec<SiteRecord>> = vec![Vec::new(); PIECES_PER_BUCKET as usize];
+        let mut by_piece: Vec<Vec<old_record::SiteRecord>> =
+            vec![Vec::new(); PIECES_PER_BUCKET as usize];
         for site in sites {
             let mut wanted = [false; PIECES_PER_BUCKET as usize];
             for key in site_keys(&site) {
@@ -159,8 +162,8 @@ fn spill_pieces(table: &BucketTable, path: &Path) -> Result<(Vec<Span>, Vec<u64>
                     wanted[(piece_of(&key) % PIECES_PER_BUCKET) as usize] = true;
                 }
             }
-            let lean = SiteRecord::from_stored_item(&lean_site(site))
-                .context("a lean site that is no record")?;
+            let lean =
+                old_record::of_item(&lean_site(site)).context("a lean site that is no record")?;
             for (sub, _) in wanted.iter().enumerate().filter(|(_, w)| **w) {
                 by_piece[sub].push(lean.clone());
             }
@@ -189,7 +192,7 @@ fn deflate(bytes: &[u8]) -> Result<Vec<u8>> {
 
 /// The sites of `piece` in a row's payload (from
 /// [`super::snapshot::assemble_bucket`]), each its record's item as it is
-/// ([`SiteRecord::stored_item_as_is`]); none when the row has no such
+/// ([`old_record::into_item`]); none when the row has no such
 /// piece. Fails for a damaged payload.
 pub fn read_piece(payload: &[u8], piece: u32) -> Result<Vec<Item>> {
     ensure!(piece < PIECES, "there is no piece {piece}");
@@ -216,12 +219,9 @@ pub fn read_piece(payload: &[u8], piece: u32) -> Result<Vec<Item>> {
             json.len() as u64 <= MAX_PIECE_INFLATED,
             "a row's piece inflates too far"
         );
-        let records: Vec<SiteRecord> =
+        let records: Vec<old_record::SiteRecord> =
             serde_json::from_slice(&json).context("reading a row's piece")?;
-        return Ok(records
-            .into_iter()
-            .map(SiteRecord::stored_item_as_is)
-            .collect());
+        return Ok(records.into_iter().map(old_record::into_item).collect());
     }
     Ok(Vec::new())
 }

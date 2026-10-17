@@ -493,10 +493,9 @@ impl Builder {
 
 /// Adds `name` to the site's names as the seed has it (whitespace
 /// collapsed, cut to [`MAX_TEXT_CHARS`]), unless one the same once
-/// normalized is there or it has [`MAX_ALIASES`], as
-/// [`plumb_core::SiteRecord::add_alias`] adds one. Unlike
-/// [`site::add_alias`], it leaves the name's Unicode form and control
-/// characters as they are: see [`Builder`].
+/// normalized is there or it has [`MAX_ALIASES`], as [`site::add_alias`]
+/// adds one, but leaving the name's Unicode form and control characters
+/// as they are: see [`Builder`].
 fn add_name(site: &mut Item, name: &str) {
     let name = truncate_chars(&collapse_whitespace(name), MAX_TEXT_CHARS);
     let key = normalize_text(&name);
@@ -512,7 +511,7 @@ fn add_name(site: &mut Item, name: &str) {
 /// Adds `kind` ("bank") to what the site is, as the seed has it, unless it
 /// is generic ([`is_generic_kind`]), the same kind is there already
 /// (plurals and case aside) or the site has [`MAX_KINDS`], as
-/// [`plumb_core::SiteRecord::add_kind`] adds one: see [`Builder`].
+/// [`site::add_kind`] adds one: see [`Builder`].
 fn add_kind(site: &mut Item, kind: &str) {
     let kind = truncate_chars(&collapse_whitespace(kind), MAX_TEXT_CHARS);
     let mut kinds = site::kinds(site);
