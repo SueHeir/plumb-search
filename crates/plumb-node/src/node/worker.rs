@@ -2018,22 +2018,24 @@ impl Backoff {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::SiteRecord;
-
     use super::*;
 
     #[test]
-    fn named_subdomain_sites_are_the_records_they_were() {
+    fn named_subdomain_sites_are_official_and_named() {
         for (subsite, name) in SUBDOMAIN_SITE_NAMES {
-            // What subdomain_changes made of them on records.
-            let mut record = SiteRecord::new(*subsite);
-            record.signals.official_site = true;
-            record.add_alias(name);
             let held = named_subdomain_site(subsite, name);
-            assert_eq!(held, record.clone().stored_item_as_is(), "{subsite}");
-            // And so the change brings the record the change on records did.
-            let read = SiteRecord::from_stored_item(&held).unwrap();
-            assert_eq!(read, record, "{subsite}");
+            let expected = Item {
+                id: subsite.to_string(),
+                kind: "site".into(),
+                names: vec![name.to_string()],
+                fields: [(
+                    "wikidata".to_string(),
+                    serde_json::json!({"official_site": true}),
+                )]
+                .into(),
+                ..Item::default()
+            };
+            assert_eq!(held, expected, "{subsite}");
         }
     }
 
@@ -2172,21 +2174,24 @@ mod tests {
         assert_eq!(network_rebuild_gap(1_500), 4_500);
     }
 
-    /// What a round keeps of `record`, read as its stored item.
-    fn round(record: SiteRecord) -> RoundSite {
-        let site = record.stored_item_as_is();
+    /// What a round keeps of `site`.
+    fn round(site: Item) -> RoundSite {
         RoundSite::of(&site, &crate::about::Topics::default(), &Keep::default())
     }
 
     #[test]
     fn only_sites_whose_last_crawl_answered_wait_for_an_icon() {
-        let mut record = SiteRecord::new("a.com");
+        let mut record = site::new("a.com");
         assert!(!last_crawl_answered(&record), "never crawled");
-        record.crawled_at = Some(10);
+        site::set_crawled(&mut record, Some(10));
         assert!(last_crawl_answered(&record));
-        record.crawl_attempted_at = Some(10);
+        let mut marks = site::crawl_marks(&record);
+        marks.tried = Some(10);
+        site::set_crawl_marks(&mut record, marks);
         assert!(last_crawl_answered(&record));
-        record.crawl_attempted_at = Some(20);
+        let mut marks = site::crawl_marks(&record);
+        marks.tried = Some(20);
+        site::set_crawl_marks(&mut record, marks);
         assert!(!last_crawl_answered(&record), "the last try failed");
     }
 
@@ -2224,8 +2229,8 @@ mod tests {
     #[test]
     fn only_sites_crawled_before_icons_are_due_for_one() {
         let crawled = |domain: &str, at: u64| {
-            let mut record = SiteRecord::new(domain);
-            record.crawled_at = Some(at);
+            let mut record = site::new(domain);
+            site::set_crawled(&mut record, Some(at));
             record
         };
         let noted: HashSet<String> = ["noted.com".to_string()].into();
@@ -2237,19 +2242,22 @@ mod tests {
             &round(crawled("network.com", ICONS_KEPT_SINCE + 60)),
             &noted
         ));
-        assert!(!due_for_icon(&round(SiteRecord::new("never.com")), &noted));
+        assert!(!due_for_icon(&round(site::new("never.com")), &noted));
     }
 
     #[test]
     fn sites_crawled_before_key_pages_are_due_for_them_once() {
         let crawled = |at: u64, pages: bool| {
-            let mut record = SiteRecord::new("facebook.com");
-            record.crawled_at = Some(at);
+            let mut record = site::new("facebook.com");
+            site::set_crawled(&mut record, Some(at));
             if pages {
-                record.key_pages = vec![plumb_core::KeyPage {
-                    label: "Log in".into(),
-                    url: "https://www.facebook.com/".into(),
-                }];
+                site::set_key_pages(
+                    &mut record,
+                    vec![plumb_core::KeyPage {
+                        label: "Log in".into(),
+                        url: "https://www.facebook.com/".into(),
+                    }],
+                );
             }
             round(record)
         };
@@ -2260,24 +2268,26 @@ mod tests {
             KEY_PAGES_KEPT_SINCE + 60,
             false
         )));
-        assert!(!due_for_key_pages(&round(SiteRecord::new("never.com"))));
+        assert!(!due_for_key_pages(&round(site::new("never.com"))));
     }
 
     #[test]
     fn sites_are_read_anew_only_once_the_crawl_version_goes_up() {
-        let mut record = SiteRecord::new("a.com");
-        record.crawled_at = Some(10);
-        record.crawl_version = plumb_crawl::CRAWL_VERSION;
+        let mut record = site::new("a.com");
+        site::set_crawled(&mut record, Some(10));
+        site::set_crawl_version(&mut record, plumb_crawl::CRAWL_VERSION);
         assert!(!due_for_rereading(&round(record.clone())));
         // What 0.2.0 crawlers stamp: not read again before its turn, so
         // an upgrade from 0.2.0 does not read every site again at once.
-        record.crawl_version = 1;
+        site::set_crawl_version(&mut record, 1);
         assert!(!due_for_rereading(&round(record.clone())));
         if let Some(older) = plumb_crawl::REREAD_BELOW.checked_sub(1) {
-            record.crawl_version = older;
+            site::set_crawl_version(&mut record, older);
             assert!(due_for_rereading(&round(record.clone())));
-            record.crawl_attempted_at = Some(20);
-            record.crawl_failures = 1;
+            let mut marks = site::crawl_marks(&record);
+            marks.tried = Some(20);
+            marks.failures = 1;
+            site::set_crawl_marks(&mut record, marks);
             assert!(
                 !due_for_rereading(&round(record)),
                 "not reached on its last try"
@@ -2287,26 +2297,28 @@ mod tests {
 
     #[test]
     fn sites_read_in_the_wrong_charset_are_read_anew() {
-        let mut record = SiteRecord::new("smbc.co.jp");
-        record.crawled_at = Some(10);
-        record.crawl_version = plumb_crawl::CHARSETS_READ_SINCE - 1;
+        let mut record = site::new("smbc.co.jp");
+        site::set_crawled(&mut record, Some(10));
+        site::set_crawl_version(&mut record, plumb_crawl::CHARSETS_READ_SINCE - 1);
         assert!(!due_for_rereading(&round(record.clone())));
-        record.description = Some("\u{FFFD}T\u{FFFD}[\u{FFFD}r\u{FFFD}X".into());
+        record.about = Some("\u{FFFD}T\u{FFFD}[\u{FFFD}r\u{FFFD}X".into());
         assert!(due_for_rereading(&round(record.clone())));
-        record.description = None;
+        record.about = None;
         record.title = Some("\u{1B}$B%3%_%C%/%^!<%1%C%H\u{1B}(B".into());
         assert!(due_for_rereading(&round(record.clone())));
         // Read in its charset already: the page itself has the `�`.
-        record.crawl_version = plumb_crawl::CHARSETS_READ_SINCE;
+        site::set_crawl_version(&mut record, plumb_crawl::CHARSETS_READ_SINCE);
         assert!(!due_for_rereading(&round(record)));
     }
 
     #[test]
     fn key_pages_are_caught_up_for_the_best_linked_sites_due() {
         let site = |domain: &str, rank: u32, at: u64| {
-            let mut record = SiteRecord::new(domain);
-            record.signals.tranco_rank = Some(rank);
-            record.crawled_at = Some(at);
+            let mut record = site::new(domain);
+            let mut signals = site::signals(&record);
+            signals.tranco_rank = Some(rank);
+            site::set_signals(&mut record, &signals);
+            site::set_crawled(&mut record, Some(at));
             record
         };
         let old = KEY_PAGES_KEPT_SINCE - 1;
@@ -2324,23 +2336,33 @@ mod tests {
         const NOW: u64 = 100 * SECONDS_PER_DAY;
         const WINDOW: u64 = 30 * SECONDS_PER_DAY;
         let site = |domain: &str, rank: u32| {
-            let mut record = SiteRecord::new(domain);
-            record.signals.tranco_rank = Some(rank);
+            let mut record = site::new(domain);
+            let mut signals = site::signals(&record);
+            signals.tranco_rank = Some(rank);
+            site::set_signals(&mut record, &signals);
             record
         };
         let mut crawled = site("crawled.com", 1);
-        crawled.crawled_at = Some(NOW - SECONDS_PER_DAY);
+        site::set_crawled(&mut crawled, Some(NOW - SECONDS_PER_DAY));
         let mut failed_lately = site("failed-lately.com", 2);
-        failed_lately.crawl_attempted_at = Some(NOW - 60);
-        failed_lately.crawl_failures = 1;
+        let mut marks = site::crawl_marks(&failed_lately);
+        marks.tried = Some(NOW - 60);
+        marks.failures = 1;
+        site::set_crawl_marks(&mut failed_lately, marks);
         let mut failed_long_ago = site("failed-long-ago.com", 3);
-        failed_long_ago.crawl_attempted_at = Some(NOW - WINDOW);
-        failed_long_ago.crawl_failures = 1;
+        let mut marks = site::crawl_marks(&failed_long_ago);
+        marks.tried = Some(NOW - WINDOW);
+        marks.failures = 1;
+        site::set_crawl_marks(&mut failed_long_ago, marks);
         let mut gone = site("gone.com", 4);
-        gone.gone_at = Some(NOW - SECONDS_PER_DAY);
-        let mut official = SiteRecord::new("official.com");
-        official.signals.official_site = true;
-        official.signals.tranco_rank = Some(500_000);
+        let mut marks = site::crawl_marks(&gone);
+        marks.gone = Some(NOW - SECONDS_PER_DAY);
+        site::set_crawl_marks(&mut gone, marks);
+        let mut official = site::new("official.com");
+        let mut signals = site::signals(&official);
+        signals.official_site = true;
+        signals.tranco_rank = Some(500_000);
+        site::set_signals(&mut official, &signals);
         let set = RoundSites::of([
             site("obscure.com", 5_000_000),
             site("instacart.com", 2_339),
@@ -2374,9 +2396,9 @@ mod tests {
         let path = dir.path().join("records.jsonl");
         std::fs::write(&path, "").unwrap();
         let mut store = RecordStore::open(&path);
-        let mut crawled = SiteRecord::new("crawled.com");
-        crawled.crawled_at = Some(NOW - SECONDS_PER_DAY);
-        let mut set = RoundSites::of([crawled, SiteRecord::new("known.com")]);
+        let mut crawled = site::new("crawled.com");
+        site::set_crawled(&mut crawled, Some(NOW - SECONDS_PER_DAY));
+        let mut set = RoundSites::of([crawled, site::new("known.com")]);
         let local = ["near.com", "crawled.com", "known.com", "far.com"].map(String::from);
         add_local_sites(&mut set, &mut store, &local).unwrap();
         add_local_sites(&mut set, &mut store, &local).unwrap();
@@ -2394,10 +2416,12 @@ mod tests {
     #[test]
     fn icons_are_caught_up_for_the_best_linked_crawled_sites_not_noted() {
         let site = |domain: &str, rank: u32, crawled: bool| {
-            let mut record = SiteRecord::new(domain);
-            record.signals.tranco_rank = Some(rank);
+            let mut record = site::new(domain);
+            let mut signals = site::signals(&record);
+            signals.tranco_rank = Some(rank);
+            site::set_signals(&mut record, &signals);
             if crawled {
-                record.crawled_at = Some(ICONS_KEPT_SINCE + 60);
+                site::set_crawled(&mut record, Some(ICONS_KEPT_SINCE + 60));
                 record.url = Some(format!("https://www.{domain}/"));
             }
             record

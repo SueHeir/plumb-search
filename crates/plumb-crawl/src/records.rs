@@ -229,7 +229,7 @@ fn upsert(sites: &mut BTreeMap<String, Item>, site: Item) {
 #[cfg(test)]
 mod tests {
     use plumb_core::sites::Sites;
-    use plumb_core::{KeyPage, LinkText, SiteRecord};
+    use plumb_core::{KeyPage, LinkText};
 
     use super::*;
     use crate::{OutLink, PageMeta};
@@ -525,94 +525,6 @@ mod tests {
         assert_eq!(sites.len(), 3);
     }
 
-    /// What crawls made of their results when they made records, as they
-    /// did up to step 7b of the data format plan: [`to_items`] is checked
-    /// against it.
-    fn records_made(results: &[CrawlResult]) -> Vec<SiteRecord> {
-        let mut records: BTreeMap<String, SiteRecord> = BTreeMap::new();
-        let mut inbound: BTreeMap<&str, BTreeMap<&str, BTreeSet<&str>>> = BTreeMap::new();
-        let upsert = |records: &mut BTreeMap<String, SiteRecord>, record: SiteRecord| match records
-            .get_mut(&record.domain)
-        {
-            Some(existing) => existing.merge(record),
-            None => {
-                records.insert(record.domain.clone(), record);
-            }
-        };
-        let now = now_unix();
-        for result in results {
-            match &result.outcome {
-                CrawlOutcome::Fetched(page) => {
-                    let mut record = SiteRecord::new(page.domain.as_str());
-                    record.url = Some(page.final_url.clone());
-                    record.title = page.meta.title.clone();
-                    record.description = page.meta.description.clone();
-                    if let Some(site_name) = &page.meta.site_name {
-                        record.add_alias(site_name);
-                    }
-                    for name in &page.meta.structured_names {
-                        record.add_alias(name);
-                    }
-                    record.search_url = page.meta.search_url.clone();
-                    record.language = page.meta.language.clone();
-                    record.headings = page.meta.headings.clone();
-                    record.body_text = page.meta.body_text.clone();
-                    record.terms = page.meta.terms.clone();
-                    record.key_pages = page.meta.key_pages.clone();
-                    let links = page.meta.links.iter();
-                    let links = links.map(|link| link.target_domain.clone()).collect();
-                    record.links_to = valid_links_to(links, &page.domain);
-                    record.crawled_at = Some(page.fetched_at);
-                    record.crawl_version = CRAWL_VERSION;
-                    upsert(&mut records, record);
-                    for link in &page.meta.links {
-                        if link.target_domain.is_empty() || link.target_domain == page.domain {
-                            continue;
-                        }
-                        let texts = inbound
-                            .entry(link.target_domain.as_str())
-                            .or_default()
-                            .entry(page.domain.as_str())
-                            .or_default();
-                        if has_useful_front_page_text(&link.url, &link.text) {
-                            texts.insert(link.text.as_str());
-                        }
-                    }
-                }
-                CrawlOutcome::OffsiteRedirect { final_url } => {
-                    if let Some(domain) = registrable_domain(final_url) {
-                        if domain != result.domain {
-                            let mut from = SiteRecord::new(result.domain.as_str());
-                            from.redirect = Some(Redirect {
-                                inner: !is_front_page(final_url, &domain),
-                                to: domain.clone(),
-                                at: now,
-                            });
-                            upsert(&mut records, from);
-                            upsert(&mut records, SiteRecord::new(domain));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        for (target, linking) in inbound {
-            let mut record = SiteRecord::new(target);
-            record.signals.linking_domains = u32::try_from(linking.len()).unwrap_or(u32::MAX);
-            let mut text_linkers: BTreeMap<&str, u64> = BTreeMap::new();
-            for (&linker, texts) in &linking {
-                for &text in texts {
-                    *text_linkers.entry(text).or_default() |= linker_bit(linker);
-                }
-            }
-            for (text, linkers) in text_linkers {
-                record.add_link_text_linkers(text, linkers);
-            }
-            upsert(&mut records, record);
-        }
-        records.into_values().collect()
-    }
-
     /// Results that differ in what making sites of them reads: rich and
     /// plain homepages, names and link texts that are not tidy, more
     /// names than a site keeps, a homepage sent to another site read in
@@ -677,10 +589,73 @@ mod tests {
     }
 
     #[test]
-    fn sites_are_the_stored_items_of_the_records_crawls_made() {
+    fn varied_results_make_the_sites_they_name() {
+        // A redirect's time is the clock's.
+        let timeless = |results: &[CrawlResult]| -> Vec<Item> {
+            let mut sites = to_items(results);
+            for site in &mut sites {
+                if let Some(mut redirect) = site::redirect(site) {
+                    redirect.at = 1;
+                    site::set_redirect(site, Some(redirect));
+                }
+            }
+            sites
+        };
         let varied = varied_results();
+        let sites = timeless(&varied);
         let mut reversed = varied.clone();
         reversed.reverse();
+        assert_eq!(timeless(&reversed), sites);
+        let domains: Vec<&str> = sites.iter().map(|site| site.id.as_str()).collect();
+        assert_eq!(
+            domains,
+            [
+                "deep.net",
+                "foo_bar.com",
+                "inner.com",
+                "moved.com",
+                "old-rich.com",
+                "plain.org",
+                "rich.com"
+            ]
+        );
+        let redirect = |domain: &str| {
+            let redirect = site::redirect(get(&sites, domain)).unwrap();
+            (redirect.to, redirect.inner)
+        };
+        assert_eq!(redirect("old-rich.com"), ("rich.com".into(), false));
+        assert_eq!(redirect("inner.com"), ("plain.org".into(), true));
+        // Linked to and sent elsewhere, a site keeps both.
+        assert_eq!(redirect("moved.com"), ("rich.com".into(), false));
+        assert_eq!(texts(get(&sites, "moved.com")), [("moved".into(), 1)]);
+        // The homepage's parts stay as the page wrote them: not cut, not
+        // tidied, its key pages' URLs as they were.
+        let rich = get(&sites, "rich.com");
+        assert_eq!(rich.text.as_ref().map(String::len), Some(1_500));
+        assert_eq!(site::headings(rich), ["Welcome", " Spaced "]);
+        assert_eq!(
+            site::key_pages(rich)[1].url,
+            "HTTPS://WWW.Rich.com/help%2ehtml"
+        );
+        assert_eq!(
+            site::links_to(rich),
+            ["plain.org", "foo_bar.com", "deep.net", "moved.com"]
+        );
+        assert_eq!(texts(rich), [("rich".into(), 1)]);
+        // Link texts are normalized, each counted once a linking site.
+        assert_eq!(
+            texts(get(&sites, "plain.org")),
+            [("plain org".into(), 1), ("pl\u{e1}in".into(), 1)]
+        );
+        // The names stay as the page wrote them.
+        assert_eq!(rich.names[0], "Cafe\u{301}\u{1B} Rich");
+        assert_eq!(rich.names.len(), MAX_ALIASES);
+        let plain = &get(&sites, "plain.org").names;
+        assert_eq!(*plain, ["Ste\u{301}phane", "plain.org Corporation"]);
+        // A redirect alone makes a bare site of where it went.
+        assert_eq!(timeless(&varied[..1])[1], site::new("rich.com"));
+
+        // Homepages in the batch that link to each other.
         let linking = [
             fetched("a.com", &[("https://target.org/", "target")]),
             fetched(
@@ -688,31 +663,10 @@ mod tests {
                 &[("https://target.org/", "Target"), ("https://a.com/", "a")],
             ),
         ];
-        for results in [&varied[..], &reversed, &linking, &varied[..1]] {
-            let records = records_made(results);
-            let mut sites = to_items(results);
-            assert!(sites.len() > 1 || results.len() == 1, "{sites:?}");
-            for (site, record) in sites.iter_mut().zip(&records) {
-                // A redirect's time is the clock's, read by each in turn.
-                if let (Some(mut theirs), Some(mine)) = (site::redirect(site), &record.redirect) {
-                    theirs.at = mine.at;
-                    site::set_redirect(site, Some(theirs));
-                }
-                assert_eq!(
-                    *site,
-                    record.clone().stored_item_as_is(),
-                    "{}",
-                    record.domain
-                );
-                assert_eq!(&SiteRecord::from_stored_item(site).unwrap(), record);
-            }
-            assert_eq!(sites.len(), records.len());
-        }
-        // The names stay as the page wrote them, as records kept them.
-        let sites = to_items(&varied);
-        assert_eq!(get(&sites, "rich.com").names[0], "Cafe\u{301}\u{1B} Rich");
-        assert_eq!(get(&sites, "rich.com").names.len(), MAX_ALIASES);
-        let plain = &get(&sites, "plain.org").names;
-        assert_eq!(*plain, ["Ste\u{301}phane", "plain.org Corporation"]);
+        let sites = to_items(&linking);
+        assert_eq!(texts(get(&sites, "target.org")), [("target".into(), 2)]);
+        assert_eq!(linking_domains(get(&sites, "target.org")), 2);
+        assert_eq!(texts(get(&sites, "a.com")), [("a".into(), 1)]);
+        assert_eq!(get(&sites, "a.com").title.as_deref(), Some("a.com home"));
     }
 }

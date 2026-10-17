@@ -5,7 +5,7 @@ use super::*;
 /// Sites whose titles teach the spelling model: "amtrak" in many,
 /// "amtrack" in some (enough to be a known word), "canon" and "grand
 /// canyon" each in some, and a few slips of other words.
-fn spelling_corpus() -> Vec<SiteRecord> {
+fn spelling_corpus() -> Vec<Item> {
     let mut records = typo_corpus();
     records.push(site(
         "amtrak.com",
@@ -699,7 +699,10 @@ fn the_most_popular_matches_are_ranked_past_the_bm25_cutoff() {
         &[],
         popular(2, 2_000_000),
     );
-    youtube.about = Some("American online video sharing platform".into());
+    site::set_wikidata_about(
+        &mut youtube,
+        Some("American online video sharing platform".into()),
+    );
     let mut records = vec![youtube];
     for i in 0..30 {
         records.push(site(

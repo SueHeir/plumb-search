@@ -22,7 +22,8 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use plumb_core::{KeyPage, SiteRecord};
+use plumb_core::site::{self, CrawlMarks, Item};
+use plumb_core::{KeyPage, Signals};
 use plumb_crawl::{CrawlOutcome, CrawlResult, CrawlTarget, CrawledPage, OutLink, PageMeta};
 
 use crate::about::Topics;
@@ -32,6 +33,7 @@ use crate::crawl::{
 use crate::node::round::RoundSites;
 use crate::node::trim::Keep;
 use crate::records::{journal_path, Change, RecordStore};
+use crate::test_lines::{item_line, old_line};
 
 /// The round's clock, and what clock times the crawl takes read back as.
 const NOW: u64 = 1_792_000_000;
@@ -43,51 +45,52 @@ fn domain(i: u32) -> String {
 }
 
 /// The sites of the records file.
-fn sites() -> Vec<SiteRecord> {
+fn sites() -> Vec<Item> {
     (0..24).map(site).collect()
 }
 
-fn site(i: u32) -> SiteRecord {
-    let mut r = SiteRecord::new(domain(i));
-    r.signals.tranco_rank = Some(1 + i * 37 % 23 * 100);
-    r.signals.linking_domains = i * 3 % 11;
-    r.signals.official_site = i.is_multiple_of(7) || i == 16;
-    match i % 6 {
+fn site(i: u32) -> Item {
+    let mut r = site::new(domain(i));
+    let signals = Signals {
+        tranco_rank: Some(1 + i * 37 % 23 * 100),
+        linking_domains: i * 3 % 11,
+        official_site: i.is_multiple_of(7) || i == 16,
+        ..Signals::default()
+    };
+    site::set_signals(&mut r, &signals);
+    let (crawled, marks, version) = match i % 6 {
         // Never tried.
-        0 => {}
+        0 => (None, CrawlMarks::default(), 0),
         // Read long ago, and due.
         1 => {
-            r.crawled_at = Some(NOW - 40 * DAY);
-            r.crawl_attempted_at = r.crawled_at;
-            r.crawl_version = 3;
+            let at = Some(NOW - 40 * DAY);
+            (at, tried(at, 0), 3)
         }
         // Read lately.
         2 => {
-            r.crawled_at = Some(NOW - 10 * DAY);
-            r.crawl_attempted_at = r.crawled_at;
-            r.crawl_version = 1;
+            let at = Some(NOW - 10 * DAY);
+            (at, tried(at, 0), 1)
         }
         // Unreachable a few times since it was read.
         3 => {
-            r.crawled_at = Some(NOW - 50 * DAY);
-            r.crawl_attempted_at = Some(NOW - u64::from(i % 4) * DAY);
-            r.crawl_failures = 1 + i % 4;
-            r.crawl_version = 2;
+            let tries = tried(Some(NOW - u64::from(i % 4) * DAY), 1 + i % 4);
+            (Some(NOW - 50 * DAY), tries, 2)
         }
         // Looks dead: never reached in many tries.
-        4 => {
-            r.crawl_attempted_at = Some(NOW - 5 * DAY);
-            r.crawl_failures = 6 + i % 3;
-        }
+        4 => (None, tried(Some(NOW - 5 * DAY), 6 + i % 3), 0),
         // Gone, read years ago.
         _ => {
-            r.crawled_at = Some(1_600_000_000 + u64::from(i));
-            r.crawl_attempted_at = Some(NOW - 60 * DAY);
-            r.crawl_failures = 7;
-            r.gone_at = Some(NOW - 60 * DAY);
+            let marks = CrawlMarks {
+                gone: Some(NOW - 60 * DAY),
+                ..tried(Some(NOW - 60 * DAY), 7)
+            };
+            (Some(1_600_000_000 + u64::from(i)), marks, 0)
         }
-    }
-    if r.crawled_at.is_some() && r.gone_at.is_none() {
+    };
+    site::set_crawled(&mut r, crawled);
+    site::set_crawl_marks(&mut r, marks);
+    site::set_crawl_version(&mut r, version);
+    if crawled.is_some() && marks.gone.is_none() {
         r.url = Some(format!("https://www.{}/", domain(i)));
         r.title = Some(match i % 5 {
             0 => format!("S{i} Bank"),
@@ -96,43 +99,54 @@ fn site(i: u32) -> SiteRecord {
             3 => format!("S{i} Caf\u{e9} \u{FFFD}"),
             _ => format!("S{i} Chess Club"),
         });
-        r.description = Some(format!("All about s{i}."));
-        r.headings = vec!["News".into(), format!("Trust {i}")];
+        r.about = Some(format!("All about s{i}."));
+        site::set_headings(&mut r, vec!["News".into(), format!("Trust {i}")]);
     }
     if i % 4 == 1 {
-        r.key_pages = vec![KeyPage {
+        let page = KeyPage {
             label: "About".into(),
             url: format!("https://www.{}/about", domain(i)),
-        }];
+        };
+        site::set_key_pages(&mut r, vec![page]);
     }
     if i % 8 == 3 {
-        r.aliases = vec![format!("S{i} Trust"), "Ste\u{301}phane".into()];
-        r.kinds = vec!["bank".into()];
-        r.about = Some("a bank".into());
-        r.add_link_text("s three", "example.org");
+        r.names = vec![format!("S{i} Trust"), "Ste\u{301}phane".into()];
+        site::set_kinds(&mut r, vec!["bank".into()]);
+        site::set_wikidata_about(&mut r, Some("a bank".into()));
+        site::add_link_text(&mut r, "s three", "example.org");
     }
     if i == 20 {
-        r.redirect = Some(plumb_core::Redirect {
+        let redirect = plumb_core::Redirect {
             to: domain(21),
             at: NOW - 70 * DAY,
             inner: false,
-        });
+        };
+        site::set_redirect(&mut r, Some(redirect));
     }
     r
 }
 
+/// Crawl marks of a last try at `at`, after `failures` in a row.
+fn tried(at: Option<u64>, failures: u32) -> CrawlMarks {
+    CrawlMarks {
+        tried: at,
+        failures,
+        gone: None,
+    }
+}
+
 /// Writes `sites` as a records file, every third line as its stored item
 /// and the rest as the record's JSON, as versions up to 0.4 wrote them.
-fn write_file(path: &Path, sites: &[SiteRecord]) {
-    let mut text = Vec::new();
+fn write_file(path: &Path, sites: &[Item]) {
+    let mut text = String::new();
     for (n, site) in sites.iter().enumerate() {
         let line = if n % 3 == 0 {
-            plumb_core::stored::line(site).unwrap()
+            item_line(site)
         } else {
-            serde_json::to_vec(site).unwrap()
+            old_line(site)
         };
-        text.extend(line);
-        text.push(b'\n');
+        text += &line;
+        text.push('\n');
     }
     std::fs::write(path, text).unwrap();
 }
@@ -419,10 +433,10 @@ fn a_crawl_round_of_the_golden_sites_makes_the_golden_changes() {
         for site in &mut made {
             steady_site(site, started);
         }
-        let records: Vec<SiteRecord> = (made.iter())
-            .map(|site| SiteRecord::from_stored_item(site).unwrap())
-            .collect();
-        let bytes = serde_json::to_vec(&records).unwrap().len();
+        let records: Vec<String> = made.iter().map(old_line).collect();
+        // `[`, the records' JSON split by `,`, and `]`.
+        let bytes =
+            2 + records.iter().map(String::len).sum::<usize>() + records.len().saturating_sub(1);
         let lines: usize = sites
             .iter()
             .map(|site| {

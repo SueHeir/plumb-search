@@ -230,35 +230,43 @@ fn run_apply(args: &ApplyArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{site, LinkText, SiteRecord};
+    use plumb_core::{site, LinkText};
     use plumb_node::records::{load_sites, replace_sites};
 
     use super::*;
 
+    /// `site` cleaned, as a node stores it.
+    fn stored(site: &Item) -> Item {
+        let mut site = site.clone();
+        site::clean(&mut site);
+        site
+    }
+
     #[test]
     fn a_title_alone_is_no_text() {
-        let mut record = SiteRecord::new("acer.com");
-        record.title = Some("Acer".into());
-        assert!(has_no_text(&record.to_stored_item()));
-        record.about = Some("Taiwanese computer maker".into());
-        assert!(!has_no_text(&record.to_stored_item()));
-        let mut record = SiteRecord::new("acer.com");
-        record.terms = vec!["laptops".into()];
-        assert!(!has_no_text(&record.to_stored_item()));
-        let mut record = SiteRecord::new("acer.com");
-        record.summary = Some("Acer makes laptops.".into());
+        let mut acer = site::new("acer.com");
+        acer.title = Some("Acer".into());
+        assert!(has_no_text(&stored(&acer)));
+        site::set_wikidata_about(&mut acer, Some("Taiwanese computer maker".into()));
+        assert!(!has_no_text(&stored(&acer)));
+        let mut acer = site::new("acer.com");
+        site::set_terms(&mut acer, vec!["laptops".into()]);
+        assert!(!has_no_text(&stored(&acer)));
+        let mut acer = site::new("acer.com");
+        site::set_summary(&mut acer, Some("Acer makes laptops.".into()));
         assert!(
-            !has_no_text(&record.to_stored_item()),
+            !has_no_text(&stored(&acer)),
             "a summarized site is not picked again"
         );
     }
 
     #[test]
     fn picks_carry_names_and_link_texts() {
-        let mut record = SiteRecord::new("allrecipes.com");
-        record.aliases = vec!["Allrecipes".into()];
-        record.link_texts = vec![LinkText::from_linkers("recipes", 0b11)];
-        let pick = pick_of(&record.to_stored_item());
+        let mut allrecipes = site::new("allrecipes.com");
+        allrecipes.names = vec!["Allrecipes".into()];
+        let link_text = LinkText::from_linkers("recipes", 0b11);
+        site::set_link_texts(&mut allrecipes, &[link_text]);
+        let pick = pick_of(&stored(&allrecipes));
         assert_eq!(pick.aliases, ["Allrecipes"]);
         assert_eq!(pick.link_texts, ["recipes"]);
         assert_eq!(pick.title, None);
@@ -266,17 +274,19 @@ mod tests {
 
     #[test]
     fn gone_and_redirected_sites_are_not_picked() {
-        let mut record = SiteRecord::new("old.com");
-        assert!(wanted(&record.to_stored_item()));
-        record.redirect = Some(plumb_core::Redirect {
+        let mut old = site::new("old.com");
+        assert!(wanted(&stored(&old)));
+        let mut redirect = plumb_core::Redirect {
             to: "new.com".into(),
             at: 1,
             inner: false,
-        });
-        assert!(!wanted(&record.to_stored_item()));
+        };
+        site::set_redirect(&mut old, Some(redirect.clone()));
+        assert!(!wanted(&stored(&old)));
         // Sent to a sign-in or an inner page, it is still a site of its own.
-        record.redirect.as_mut().unwrap().inner = true;
-        assert!(wanted(&record.to_stored_item()));
+        redirect.inner = true;
+        site::set_redirect(&mut old, Some(redirect));
+        assert!(wanted(&stored(&old)));
     }
 
     #[test]
@@ -332,7 +342,7 @@ mod tests {
     fn picks_are_the_best_sites_with_no_text_as_loaded() {
         let dir = tempfile::tempdir().unwrap();
         let records = dir.path().join("records.jsonl");
-        crate::test_sites::write(&records, &crate::test_sites::records());
+        crate::test_sites::write(&records, &crate::test_sites::sites());
         let out = dir.path().join("picks.jsonl");
         run_pick(&PickArgs {
             records,
@@ -375,17 +385,15 @@ mod tests {
     }
 
     #[test]
-    fn applied_summaries_are_written_as_a_record_set_writes_them() {
+    fn applied_summaries_are_written_into_the_sites_loaded() {
         let dir = tempfile::tempdir().unwrap();
         let records = dir.path().join("records.jsonl");
-        crate::test_sites::write(&records, &crate::test_sites::records());
-        let mut late = SiteRecord::new("late.org");
+        crate::test_sites::write(&records, &crate::test_sites::sites());
+        let mut late = site::new("late.org");
         late.title = Some("Saved to the journal".into());
         plumb_node::records::RecordStore::open(&records)
             .save(&[
-                plumb_node::records::Change::Merge {
-                    site: late.stored_item_as_is(),
-                },
+                plumb_node::records::Change::Merge { site: late },
                 plumb_node::records::Change::Gone {
                     domain: "pncbank.com".into(),
                     at: 1_791_700_000,
@@ -410,13 +418,19 @@ mod tests {
         })
         .unwrap();
 
-        // What a record set made of the same file and journal writes.
-        let mut set = crate::test_sites::load_records(&records);
-        set.entry("acer.com").summary = Some("Acer makes laptops.".into());
-        set.entry("late.org").summary = Some("A late site.".into());
-        set.entry("xn--mnchen-3ya.de").summary = Some("The city of Munich.".into());
+        // The sites of the same file and journal, with the summaries that
+        // are kept, tidied, set: none that says it does not know, or is for
+        // a domain not written canonically.
+        let mut sites = load_sites(&records).unwrap();
+        for (domain, summary) in [
+            ("acer.com", "Acer makes laptops."),
+            ("late.org", "A late site."),
+            ("xn--mnchen-3ya.de", "The city of Munich."),
+        ] {
+            sites.update(domain, |site| site::set_summary(site, Some(summary.into())));
+        }
         let expected = dir.path().join("expected.jsonl");
-        crate::test_sites::write_sorted(&expected, &set);
+        crate::test_sites::write_sorted(&expected, &sites);
         assert_eq!(
             String::from_utf8(std::fs::read(&out).unwrap()).unwrap(),
             String::from_utf8(std::fs::read(&expected).unwrap()).unwrap()

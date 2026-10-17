@@ -1,6 +1,6 @@
 //! Bounded retrieval comparison from boilerplate_probe JSONL, without embeddings.
 use anyhow::Result;
-use plumb_core::SiteRecord;
+use plumb_core::{site, stored};
 use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
 use std::io::{self, Read};
 fn main() -> Result<()> {
@@ -27,18 +27,20 @@ fn main() -> Result<()> {
             } else {
                 format!("https://{domain}/").into()
             };
-            let mut record: SiteRecord = serde_json::from_value(meta).unwrap();
+            // The probe writes a site as a record's JSON.
+            let mut site = stored::read_record_json(&meta.to_string()).unwrap();
             if let Some(name) = row["meta"]["site_name"].as_str() {
-                record.add_alias(name);
+                site::add_alias(&mut site, name);
             }
             if let Some(names) = row["meta"]["structured_names"].as_array() {
                 for name in names {
                     if let Some(name) = name.as_str() {
-                        record.add_alias(name);
+                        site::add_alias(&mut site, name);
                     }
                 }
             }
-            record.to_stored_item()
+            site::clean(&mut site);
+            site
         })
         .collect();
     let dir = tempfile::tempdir()?;

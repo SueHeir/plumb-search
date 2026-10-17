@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use axum::body::Body;
 use axum::http::{header, HeaderMap, Request, StatusCode};
-use plumb_core::{now_unix, site_initial, KeyPage, RecentNews, SafeSearch, SiteRecord};
+use plumb_core::{now_unix, site_initial, KeyPage, RecentNews, SafeSearch};
 use plumb_index::pages::PageHit;
 use plumb_index::{Hit, RankConfig, SiteSearch, Spelling};
 use tower::ServiceExt;

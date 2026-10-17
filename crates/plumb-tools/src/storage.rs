@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 use plumb_core::keys::{slim_site, BUCKETS};
-use plumb_core::{stored, SiteRecord};
+use plumb_core::stored;
 use serde::Serialize;
 
 use crate::cli::StorageArgs;
@@ -416,8 +416,8 @@ fn size_records(path: &Path, source: &Path) -> Result<RecordSizing> {
         // Each site is sized as its record's JSON, the shape these figures
         // have always measured, whole and cut down for private search.
         let sized = stored::read_item(&line).and_then(|site| {
-            let slim = SiteRecord::from_stored_item(&slim_site(site.clone()))?;
-            Ok((SiteRecord::from_stored_item(&site)?, slim))
+            let slim = stored::record_json_of(&slim_site(site.clone()))?;
+            Ok((stored::record_json_of(&site)?, slim))
         });
         let (record, slim) = match sized {
             Ok(sized) => sized,
@@ -427,8 +427,8 @@ fn size_records(path: &Path, source: &Path) -> Result<RecordSizing> {
             }
         };
         sizing.valid_records += 1;
-        sizing.full_json_payload_bytes += serde_json::to_vec(&record)?.len() as u64;
-        sizing.slim_json_payload_bytes += serde_json::to_vec(&slim)?.len() as u64;
+        sizing.full_json_payload_bytes += record.len() as u64;
+        sizing.slim_json_payload_bytes += slim.len() as u64;
     }
     Ok(sizing)
 }
@@ -658,10 +658,8 @@ mod tests {
         ] {
             put(dir.path(), path, b"secret");
         }
-        let mut record = SiteRecord::new("example.com");
-        record.crawled_at = Some(123);
-        let bytes = serde_json::to_vec(&record).unwrap();
-        put(dir.path(), "records.jsonl", &bytes);
+        let bytes = br#"{"domain":"example.com","signals":{},"crawled_at":123}"#;
+        put(dir.path(), "records.jsonl", bytes);
         let report = inspect(dir.path()).unwrap();
         assert!(report.complete);
         assert_eq!(report.categories["indexes"].logical_bytes, 6);
@@ -689,10 +687,10 @@ mod tests {
     #[test]
     fn storage_golden() {
         let dir = tempfile::tempdir().unwrap();
-        let mut records = crate::test_sites::records();
-        records.extend(crate::test_sites::bucket_records());
+        let mut sites = crate::test_sites::sites();
+        sites.extend(crate::test_sites::bucket_sites());
         let file = dir.path().join("records.jsonl");
-        crate::test_sites::write(&file, &records);
+        crate::test_sites::write(&file, &sites);
         let table = dir.path().join("indexes/000001/buckets");
         let sites: Vec<site::Item> = fs::read_to_string(&file)
             .unwrap()

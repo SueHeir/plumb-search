@@ -15,7 +15,6 @@ use crate::popularity::Report;
 use crate::storage::allocation_for;
 use plumb_core::site::{self as site_item, Item};
 use plumb_core::sites::SiteList;
-use plumb_core::SiteRecord;
 
 /// A site crawled at `at` with `title`, as a node signs its crawls.
 fn crawled_at(domain: &str, title: &str, at: u64) -> Item {
@@ -662,10 +661,10 @@ fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
     let answer = || {
         (0..2)
             .map(|i| {
-                let mut bare = SiteRecord::from_line(&batch.records[i]).unwrap();
-                bare.body_text = None;
+                let mut bare = site_item::from_line(&batch.records[i]).unwrap();
+                bare.text = None;
                 BucketRecord {
-                    record: bare.to_line().unwrap(),
+                    record: site_item::to_line(&bare).unwrap(),
                     proof: Some(batch.proof(i)),
                     also: Vec::new(),
                 }
@@ -878,70 +877,102 @@ fn circuits_are_matched_by_their_relay() {
 /// marks, an icon and headlines, a whole page text longer than an item
 /// carries and a redirect to a site no item can name; one never crawled;
 /// one too big to send as a record; and a gone site.
-fn stored_sites() -> Vec<SiteRecord> {
+fn stored_sites() -> Vec<Item> {
     use plumb_core::{Headline, KeyPage, LinkText, Redirect};
-    let mut full = SiteRecord::new("python.org");
+    let mut full = site_item::new("python.org");
     full.url = Some("https://www.python.org/".into());
     full.title = Some("Welcome to Python.org".into());
-    full.description = Some("The official home of the Python Programming Language".into());
-    full.headings = vec!["Get Started".into()];
-    full.body_text = Some("Python lets you work quickly. ".repeat(60));
-    full.terms = vec!["python".into(), "download python".into()];
-    full.link_texts = vec![
-        LinkText::from_linkers("python", 0x00a1_b2c3_d4e5_f607),
-        LinkText::with_count("python.org", 3),
-    ];
-    full.aliases = vec!["Python".into()];
-    full.signals.tranco_rank = Some(512);
-    full.signals.linking_domains = 412;
-    full.signals.official_site = true;
-    full.signals.sitelinks = 150;
-    full.signals.fact_checks = 12;
-    full.signals.fact_agrees = 11;
-    full.crawled_at = Some(1_791_605_520);
-    full.crawl_attempted_at = Some(1_791_605_600);
-    full.crawl_failures = 1;
-    full.crawl_version = 7;
-    full.country = Some("US".into());
-    full.kinds = vec!["programming language".into()];
-    full.about = Some("general-purpose programming language".into());
-    full.intro = Some("Python is a high-level programming language.".into());
-    full.search_url = Some("https://www.python.org/search/?q={searchTerms}".into());
-    full.language = Some("en".into());
-    full.key_pages = vec![KeyPage {
-        label: "Downloads".into(),
-        url: "https://www.python.org/downloads/".into(),
-    }];
-    full.links_to = vec!["psf.org".into(), "pypi.org".into()];
-    full.redirect = Some(Redirect {
-        to: "foo_bar.com".into(),
-        at: 1_791_605_520,
-        inner: false,
-    });
-    full.icon = Some("iVBORw0KGgo=".into());
-    full.news = vec![Headline {
-        title: "Python 3.15 is out".into(),
-        url: "https://www.python.org/news/".into(),
-        at: 1_791_605_520,
-    }];
-    let mut uncrawled = SiteRecord::new("ranked.com");
-    uncrawled.signals.tranco_rank = Some(900);
-    uncrawled.aliases = vec!["Ranked".into()];
-    let mut big = SiteRecord::new("big.com");
+    full.about = Some("The official home of the Python Programming Language".into());
+    site_item::set_headings(&mut full, vec!["Get Started".into()]);
+    full.text = Some("Python lets you work quickly. ".repeat(60));
+    site_item::set_terms(&mut full, vec!["python".into(), "download python".into()]);
+    site_item::set_link_texts(
+        &mut full,
+        &[
+            LinkText::from_linkers("python", 0x00a1_b2c3_d4e5_f607),
+            LinkText::with_count("python.org", 3),
+        ],
+    );
+    full.names = vec!["Python".into()];
+    let mut signals = site_item::signals(&full);
+    signals.tranco_rank = Some(512);
+    signals.linking_domains = 412;
+    signals.official_site = true;
+    signals.sitelinks = 150;
+    signals.fact_checks = 12;
+    signals.fact_agrees = 11;
+    site_item::set_signals(&mut full, &signals);
+    site_item::set_crawled(&mut full, Some(1_791_605_520));
+    let mut marks = site_item::crawl_marks(&full);
+    marks.tried = Some(1_791_605_600);
+    marks.failures = 1;
+    site_item::set_crawl_marks(&mut full, marks);
+    site_item::set_crawl_version(&mut full, 7);
+    site_item::set_country(&mut full, Some("US".into()));
+    site_item::set_kinds(&mut full, vec!["programming language".into()]);
+    site_item::set_wikidata_about(
+        &mut full,
+        Some("general-purpose programming language".into()),
+    );
+    site_item::set_intro(
+        &mut full,
+        Some("Python is a high-level programming language.".into()),
+    );
+    site_item::set_search_url(
+        &mut full,
+        Some("https://www.python.org/search/?q={searchTerms}".into()),
+    );
+    full.lang = Some("en".into());
+    site_item::set_key_pages(
+        &mut full,
+        vec![KeyPage {
+            label: "Downloads".into(),
+            url: "https://www.python.org/downloads/".into(),
+        }],
+    );
+    site_item::set_links_to(&mut full, vec!["psf.org".into(), "pypi.org".into()]);
+    site_item::set_redirect(
+        &mut full,
+        Some(Redirect {
+            to: "foo_bar.com".into(),
+            at: 1_791_605_520,
+            inner: false,
+        }),
+    );
+    site_item::set_icon(&mut full, Some("iVBORw0KGgo=".into()));
+    site_item::set_news(
+        &mut full,
+        vec![Headline {
+            title: "Python 3.15 is out".into(),
+            url: "https://www.python.org/news/".into(),
+            at: 1_791_605_520,
+        }],
+    );
+    let mut uncrawled = site_item::new("ranked.com");
+    let mut signals = site_item::signals(&uncrawled);
+    signals.tranco_rank = Some(900);
+    site_item::set_signals(&mut uncrawled, &signals);
+    uncrawled.names = vec!["Ranked".into()];
+    let mut big = site_item::new("big.com");
     big.title = Some("Big".into());
-    big.crawled_at = Some(1_791_000_000);
-    big.terms = (0..100)
-        .map(|i| format!("term {i} {}", "x".repeat(150)))
-        .collect();
-    let mut gone = SiteRecord::new("gone.com");
-    gone.signals.tranco_rank = Some(100);
-    gone.crawled_at = Some(1_780_000_000);
-    gone.crawl_failures = 6;
-    gone.gone_at = Some(1_791_000_000);
+    site_item::set_crawled(&mut big, Some(1_791_000_000));
+    site_item::set_terms(
+        &mut big,
+        (0..100)
+            .map(|i| format!("term {i} {}", "x".repeat(150)))
+            .collect(),
+    );
+    let mut gone = site_item::new("gone.com");
+    let mut signals = site_item::signals(&gone);
+    signals.tranco_rank = Some(100);
+    site_item::set_signals(&mut gone, &signals);
+    site_item::set_crawled(&mut gone, Some(1_780_000_000));
+    let mut marks = site_item::crawl_marks(&gone);
+    marks.failures = 6;
+    marks.gone = Some(1_791_000_000);
+    site_item::set_crawl_marks(&mut gone, marks);
     let mut sites = vec![full, uncrawled, big, gone];
-    for site in &mut sites {
-        site.clean();
-    }
+    sites.iter_mut().for_each(site_item::clean);
     sites
 }
 
@@ -966,18 +997,19 @@ fn answers_are_the_same_whatever_the_shape_of_the_stored_lines() {
         }
     }
     let sites = stored_sites();
-    let old = Table(
-        sites
-            .iter()
-            .map(|site| serde_json::to_string(site).unwrap())
-            .collect(),
-    );
     let new = Table(
         sites
             .iter()
-            .map(|site| String::from_utf8(plumb_core::stored::line(site).unwrap()).unwrap())
+            .map(|site| String::from_utf8(plumb_core::stored::item_as_line(site).unwrap()).unwrap())
             .collect(),
     );
+    let old = Table(
+        new.0
+            .iter()
+            .map(|line| plumb_core::stored::record_json(line.clone()).unwrap())
+            .collect(),
+    );
+    assert!(old.0.iter().all(|line| line.starts_with("{\"domain\":")));
     assert!(new.0.iter().all(|line| line.starts_with("{\"id\":")));
     assert!(new.0[0].contains("\"crawl\":") && new.0[0].contains("\"news\":"));
 
@@ -993,7 +1025,7 @@ fn answers_are_the_same_whatever_the_shape_of_the_stored_lines() {
     for (sent, site) in sent.iter().zip(&sites) {
         // The item sent elsewhere, with none of the node's own fields and
         // its text cut to the format's.
-        assert_eq!(sent.record, site.to_line().unwrap());
+        assert_eq!(sent.record, site_item::to_line(site).unwrap());
         let item: plumb_format::Item = serde_json::from_str(&sent.record).unwrap();
         for field in ["crawl", "icon", "news"] {
             assert!(!item.fields.contains_key(field), "{field}");

@@ -5,7 +5,7 @@
 //! texts the spelling model counts in it ([`schema::spelling_texts`]) and
 //! the keys it is filed under in the buckets other nodes take
 //! ([`plumb_core::keys::site_keys`]), each made from the site's stored item
-//! ([`SiteRecord::to_stored_item`]) as the build reads it. A node's build
+//! as the build reads it. A node's build
 //! of the same lines, and the buckets it writes, is checked against a
 //! golden file of its own (plumb-node's `outline_golden.txt`).
 //!
@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use plumb_core::{KeyPage, Redirect};
+use plumb_core::{stored, KeyPage, Redirect};
 use tantivy::schema::{OwnedValue, Value as _};
 
 use super::*;
@@ -28,7 +28,7 @@ use crate::schema::{self, Fields};
 
 /// The sites of the golden file: those of the other tests, each domain
 /// once, then [`rich_sites`], clean as a node's build reads them.
-fn golden_sites() -> Vec<SiteRecord> {
+fn golden_sites() -> Vec<Item> {
     let mut seen = HashSet::new();
     let mut sites = Vec::new();
     let all = [
@@ -38,17 +38,17 @@ fn golden_sites() -> Vec<SiteRecord> {
         typo_corpus(),
         rich_sites(),
     ];
-    for mut record in all.into_iter().flatten() {
-        record.clean();
-        if seen.insert(record.domain.clone()) {
-            sites.push(record);
+    for mut site in all.into_iter().flatten() {
+        site::clean(&mut site);
+        if seen.insert(site.id.clone()) {
+            sites.push(site);
         }
     }
     sites
 }
 
 /// Sites that between them use every part of a site a document reads.
-fn rich_sites() -> Vec<SiteRecord> {
+fn rich_sites() -> Vec<Item> {
     let words = |topic: &str| {
         format!(
             "{topic} news every day from reporters around the world with analysis \
@@ -97,27 +97,45 @@ fn rich_sites() -> Vec<SiteRecord> {
         },
     );
     guardian.url = Some("https://www.theguardian.com/international".into());
-    guardian.intro = Some("The Guardian is a British daily newspaper, founded in 1821.".into());
-    guardian.summary = Some("A British newspaper's website.".into());
-    guardian.about = Some("British daily newspaper".into());
-    guardian.country = Some("gb".into());
-    guardian.kinds = vec!["newspaper".into(), "news website".into(), "website".into()];
-    guardian.language = Some("en-GB".into());
-    guardian.headings = (1..=10).map(|i| format!("Headline section {i}")).collect();
-    guardian.terms = vec!["guardian".into(), "news".into(), "opinion".into()];
-    guardian.body_text = Some(words("Guardian"));
-    guardian.search_url = Some("https://www.theguardian.com/search?q={searchTerms}".into());
-    guardian.key_pages = vec![
-        page("theguardian.com", "World", "world"),
-        page("theguardian.com", "Opinion", "commentisfree"),
-        // Not on the site, so not a key page.
-        KeyPage {
-            label: "Shop".into(),
-            url: "https://guardian.example/shop".into(),
-        },
-    ];
-    guardian.links_to = vec!["bbc.co.uk".into()];
-    guardian.crawled_at = Some(1_791_605_520);
+    site::set_intro(
+        &mut guardian,
+        Some("The Guardian is a British daily newspaper, founded in 1821.".into()),
+    );
+    site::set_summary(&mut guardian, Some("A British newspaper's website.".into()));
+    site::set_wikidata_about(&mut guardian, Some("British daily newspaper".into()));
+    site::set_country(&mut guardian, Some("gb".into()));
+    site::set_kinds(
+        &mut guardian,
+        vec!["newspaper".into(), "news website".into(), "website".into()],
+    );
+    guardian.lang = Some("en-GB".into());
+    site::set_headings(
+        &mut guardian,
+        (1..=10).map(|i| format!("Headline section {i}")).collect(),
+    );
+    site::set_terms(
+        &mut guardian,
+        vec!["guardian".into(), "news".into(), "opinion".into()],
+    );
+    guardian.text = Some(words("Guardian"));
+    site::set_search_url(
+        &mut guardian,
+        Some("https://www.theguardian.com/search?q={searchTerms}".into()),
+    );
+    site::set_key_pages(
+        &mut guardian,
+        vec![
+            page("theguardian.com", "World", "world"),
+            page("theguardian.com", "Opinion", "commentisfree"),
+            // Not on the site, so not a key page.
+            KeyPage {
+                label: "Shop".into(),
+                url: "https://guardian.example/shop".into(),
+            },
+        ],
+    );
+    site::set_links_to(&mut guardian, vec!["bbc.co.uk".into()]);
+    site::set_crawled(&mut guardian, Some(1_791_605_520));
 
     // A homepage read on another site's host: its title, description and
     // page text say what that site is, so it goes by its name, and a
@@ -131,9 +149,9 @@ fn rich_sites() -> Vec<SiteRecord> {
         ranked(80_000, 300),
     );
     borrowed.url = Some("https://www.bigbankgroup.example/en/".into());
-    borrowed.summary = Some("A bank in Example.".into());
-    borrowed.body_text = Some(words("Bank"));
-    borrowed.headings = vec!["Accounts".into()];
+    site::set_summary(&mut borrowed, Some("A bank in Example.".into()));
+    borrowed.text = Some(words("Bank"));
+    site::set_headings(&mut borrowed, vec!["Accounts".into()]);
 
     // A title that says nothing, so the site goes by its first name; an
     // official site's names key it as its label does, with and without
@@ -147,10 +165,13 @@ fn rich_sites() -> Vec<SiteRecord> {
         popular(30_000, 500),
     );
     acme.url = Some("https://acmewidgets.example/".into());
-    acme.key_pages = vec![
-        page("acmewidgets.example", "Shop", "shop"),
-        page("acmewidgets.example", "Log in", "login"),
-    ];
+    site::set_key_pages(
+        &mut acme,
+        vec![
+            page("acmewidgets.example", "Shop", "shop"),
+            page("acmewidgets.example", "Log in", "login"),
+        ],
+    );
     // A title spoiled in decoding, and no names to go by.
     let garbled = site(
         "cafedumonde.example",
@@ -181,7 +202,7 @@ fn rich_sites() -> Vec<SiteRecord> {
         &[],
         obscure(900_000, 40),
     );
-    explicit.kinds = vec!["adult website".into()];
+    site::set_kinds(&mut explicit, vec!["adult website".into()]);
     let suggestive = site(
         "lingerieboutique.example",
         Some("Sexy lingerie boutique"),
@@ -201,9 +222,9 @@ fn rich_sites() -> Vec<SiteRecord> {
         &[("Air France", 300)],
         popular(3_000, 9_000),
     );
-    airfrance.country = Some("fr".into());
-    airfrance.language = Some("fr".into());
-    airfrance.kinds = vec!["airline".into()];
+    site::set_country(&mut airfrance, Some("fr".into()));
+    airfrance.lang = Some("fr".into());
+    site::set_kinds(&mut airfrance, vec!["airline".into()]);
     let mut bundesbank = site(
         "bundesbank.de",
         Some("Deutsche Bundesbank"),
@@ -212,8 +233,8 @@ fn rich_sites() -> Vec<SiteRecord> {
         &[],
         popular(9_000, 4_000),
     );
-    bundesbank.language = Some("de".into());
-    bundesbank.kinds = vec!["central bank".into(), "bank".into()];
+    bundesbank.lang = Some("de".into());
+    site::set_kinds(&mut bundesbank, vec!["central bank".into(), "bank".into()]);
     let lenta = site(
         "lenta.ru",
         Some("Лента новостей России и мира сегодня"),
@@ -232,7 +253,10 @@ fn rich_sites() -> Vec<SiteRecord> {
         &[],
         obscure(5_000_000, 3),
     );
-    summary_only.summary = Some("A small site about quiet places.".into());
+    site::set_summary(
+        &mut summary_only,
+        Some("A small site about quiet places.".into()),
+    );
     let mut described = site(
         "describedsite.example",
         Some("Described Site"),
@@ -241,7 +265,10 @@ fn rich_sites() -> Vec<SiteRecord> {
         &[],
         obscure(5_100_000, 3),
     );
-    described.summary = Some("Not used: the site describes itself.".into());
+    site::set_summary(
+        &mut described,
+        Some("Not used: the site describes itself.".into()),
+    );
 
     // A homepage that redirects to another site, which takes its name.
     let mut pnc = site(
@@ -261,11 +288,14 @@ fn rich_sites() -> Vec<SiteRecord> {
         &[("PNC Bank", 40)],
         ranked(90_000, 200),
     );
-    pncbank.redirect = Some(Redirect {
-        to: "pnc.com".into(),
-        at: 1_791_000_000,
-        inner: false,
-    });
+    site::set_redirect(
+        &mut pncbank,
+        Some(Redirect {
+            to: "pnc.com".into(),
+            at: 1_791_000_000,
+            inner: false,
+        }),
+    );
     // To an inner page, which keeps a site of its own.
     let mut inner = site(
         "pncinvest.example",
@@ -275,12 +305,17 @@ fn rich_sites() -> Vec<SiteRecord> {
         &[],
         obscure(2_000_000, 5),
     );
-    inner.redirect = Some(Redirect {
-        to: "pnc.com".into(),
-        at: 1_791_000_000,
-        inner: true,
-    });
-    inner.crawl_failures = 2;
+    site::set_redirect(
+        &mut inner,
+        Some(Redirect {
+            to: "pnc.com".into(),
+            at: 1_791_000_000,
+            inner: true,
+        }),
+    );
+    let mut marks = site::crawl_marks(&inner);
+    marks.failures = 2;
+    site::set_crawl_marks(&mut inner, marks);
 
     vec![
         guardian,
@@ -302,19 +337,19 @@ fn rich_sites() -> Vec<SiteRecord> {
 }
 
 /// What the golden file holds of `sites`.
-fn golden_text(sites: &[SiteRecord]) -> String {
+fn golden_text(sites: &[Item]) -> String {
     let schema = schema::schema();
     let fields = Fields::new(&schema).unwrap();
     // Sites redirecting to another of them name it, as when it is built.
     let targets = redirect_targets(
         sites,
-        |site| site.domain.as_str(),
-        |site| site.redirect.as_ref()?.folds_into(&site.domain),
+        |site| site.id.as_str(),
+        |site| site::redirect(site)?.folds_into(&site.id),
     );
     let mut redirect_names: HashMap<usize, Vec<String>> = HashMap::new();
     for (i, target) in targets.iter().enumerate() {
         if let Some(target) = target {
-            let name = redirect_name(&sites[i].domain);
+            let name = redirect_name(&sites[i].id);
             redirect_names.entry(*target).or_default().push(name);
         }
     }
@@ -327,16 +362,17 @@ fn golden_text(sites: &[SiteRecord]) -> String {
          # `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-index golden`; see\n\
          # golden.rs before writing it again.\n",
     );
-    for (i, record) in sites.iter().enumerate() {
+    for (i, site) in sites.iter().enumerate() {
         let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
-        let line = json(record);
-        writeln!(out, "\nsite {}\nline {line}", record.domain).unwrap();
+        // The record's own JSON, as `/plumb/fill/1` sends it.
+        let line = String::from_utf8(stored::item_as_line(site).unwrap()).unwrap();
+        let line = stored::record_json(line).unwrap();
+        writeln!(out, "\nsite {}\nline {line}", site.id).unwrap();
         if !names.is_empty() {
             writeln!(out, "redirect_names {}", json(names)).unwrap();
         }
         // The index is built from each site's stored item.
-        let site = record.to_stored_item();
-        let doc = schema::document(&fields, &site, names);
+        let doc = schema::document(&fields, site, names);
         let mut values: Vec<(String, usize)> = Vec::new();
         for (field, value) in doc.field_values() {
             let value = OwnedValue::from(value.as_value());
@@ -353,10 +389,10 @@ fn golden_text(sites: &[SiteRecord]) -> String {
                 writeln!(out, "doc {text} x{times}").unwrap();
             }
         }
-        for text in schema::spelling_texts(&site, names) {
+        for text in schema::spelling_texts(site, names) {
             writeln!(out, "spelling {}", json(&text)).unwrap();
         }
-        for key in plumb_core::keys::site_keys(&site) {
+        for key in plumb_core::keys::site_keys(site) {
             writeln!(out, "key {}", json(&key)).unwrap();
         }
     }

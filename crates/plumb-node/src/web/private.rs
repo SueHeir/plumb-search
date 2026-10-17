@@ -297,7 +297,7 @@ pub(super) fn slim_bucket(lines: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{site, SiteRecord};
+    use plumb_core::site;
 
     use super::*;
 
@@ -350,34 +350,43 @@ mod tests {
     /// wrote them, or stored items, and none of the node's own fields.
     #[test]
     fn buckets_are_the_same_whatever_the_shape_of_the_stored_lines() {
-        let mut record = SiteRecord::new("python.org");
-        record.url = Some("https://www.python.org/".into());
-        record.title = Some("Welcome to Python.org".into());
-        record.body_text = Some("Python lets you work quickly. ".repeat(60));
-        record.link_texts = vec![plumb_core::LinkText::from_linkers("python", 0b101)];
-        record.signals.tranco_rank = Some(512);
-        record.crawled_at = Some(1_791_605_520);
-        record.crawl_attempted_at = Some(1_791_605_600);
-        record.crawl_failures = 1;
-        record.gone_at = Some(1_791_605_700);
-        record.icon = Some("iVBORw0KGgo=".into());
-        record.news = vec![plumb_core::Headline {
+        let mut python = site::new("python.org");
+        python.url = Some("https://www.python.org/".into());
+        python.title = Some("Welcome to Python.org".into());
+        python.text = Some("Python lets you work quickly. ".repeat(60));
+        let link_text = plumb_core::LinkText::from_linkers("python", 0b101);
+        site::set_link_texts(&mut python, &[link_text]);
+        let mut signals = site::signals(&python);
+        signals.tranco_rank = Some(512);
+        site::set_signals(&mut python, &signals);
+        site::set_crawled(&mut python, Some(1_791_605_520));
+        let marks = site::CrawlMarks {
+            tried: Some(1_791_605_600),
+            failures: 1,
+            gone: Some(1_791_605_700),
+        };
+        site::set_crawl_marks(&mut python, marks);
+        site::set_icon(&mut python, Some("iVBORw0KGgo=".into()));
+        let news = vec![plumb_core::Headline {
             title: "Python 3.15 is out".into(),
             url: "https://www.python.org/news/".into(),
             at: 1_791_605_520,
         }];
-        record.links_to = vec!["pypi.org".into()];
-        record.clean();
-        let ranked = SiteRecord::new("ranked.com");
-        let old: Vec<String> = [&record, &ranked]
+        site::set_news(&mut python, news);
+        site::set_links_to(&mut python, vec!["pypi.org".into()]);
+        site::clean(&mut python);
+        let ranked = site::new("ranked.com");
+        let new: Vec<String> = [&python, &ranked]
             .iter()
-            .map(|record| serde_json::to_string(record).unwrap())
+            .map(|site| String::from_utf8(stored::item_as_line(site).unwrap()).unwrap())
             .collect();
-        let new: Vec<String> = [&record, &ranked]
+        // The same sites as the lines of a records file of version 0.4.
+        let old: Vec<String> = new
             .iter()
-            .map(|record| String::from_utf8(stored::line(record).unwrap()).unwrap())
+            .map(|line| stored::record_json(line.clone()).unwrap())
             .collect();
         assert!(new.iter().all(|line| line.starts_with("{\"id\":")));
+        assert!(old.iter().all(|line| line.starts_with("{\"domain\":")));
         let json = slim_bucket(&new);
         assert_eq!(json, slim_bucket(&old));
         assert!(

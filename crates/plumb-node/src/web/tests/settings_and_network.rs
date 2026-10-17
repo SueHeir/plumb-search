@@ -329,11 +329,11 @@ fn a_signed_network_crawl_fills_in_this_nodes_copy() {
     // This node holds b.com without text; the network has a signed
     // crawl of it whose text matches the search better.
     let local = vec![scored("a.com", 0.9), scored("b.com", 0.3)];
-    let mut signed = SiteRecord::new("b.com");
+    let mut signed = plumb_core::site::new("b.com");
     signed.title = Some("B Shoes".into());
-    signed.description = Some("Handmade shoes".into());
+    signed.about = Some("Handmade shoes".into());
     let mut network = from_network(scored("b.com", 0.95));
-    network.shared = Some(signed.stored_item_as_is().into());
+    network.shared = Some(signed.into());
     let unsigned = from_network(scored("a.com", 1.0));
     let network = NetOutcome::Answered(NetworkResults {
         hits: vec![network, unsigned],
@@ -398,10 +398,10 @@ fn network_only_sites_lacking_main_words_come_after_this_nodes() {
     );
 
     // Nor does a partial match's score lift this node's copy.
-    let mut signed = SiteRecord::new("krain88.com");
+    let mut signed = plumb_core::site::new("krain88.com");
     signed.title = Some("Weather".into());
     let mut crawl = from_network(partial("krain88.com", 0.9));
-    crawl.shared = Some(signed.stored_item_as_is().into());
+    crawl.shared = Some(signed.into());
     let network = NetOutcome::Answered(NetworkResults {
         hits: vec![crawl],
         ..NetworkResults::default()

@@ -217,14 +217,14 @@ fn megabytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{write_jsonl, SiteRecord};
+    use plumb_core::site::{self, Item};
 
     use super::*;
     use plumb_node::records::load_sites;
 
-    fn site(domain: &str, tranco: u32, title: Option<&str>) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
-        r.signals.tranco_rank = Some(tranco);
+    fn ranked(domain: &str, tranco: u32, title: Option<&str>) -> Item {
+        let mut r = site::new(domain);
+        crate::test_sites::ranks(&mut r, |signals| signals.tranco_rank = Some(tranco));
         r.title = title.map(str::to_string);
         r
     }
@@ -233,21 +233,24 @@ mod tests {
     fn the_best_named_sites_are_cut_out_and_sized() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        let mut gone = site("gone.com", 1, None);
-        gone.gone_at = Some(5);
-        let mut aliased = site("aliased.org", 4, None);
-        aliased.aliases = vec!["Aliased".into()];
-        write_jsonl(
+        let mut gone = ranked("gone.com", 1, None);
+        let marks = site::CrawlMarks {
+            gone: Some(5),
+            ..site::CrawlMarks::default()
+        };
+        site::set_crawl_marks(&mut gone, marks);
+        let mut aliased = ranked("aliased.org", 4, None);
+        aliased.names = vec!["Aliased".into()];
+        crate::test_sites::write(
             &path,
             &[
                 gone,
-                site("best.com", 2, Some("Best")),
-                site("stub.net", 3, None),
+                ranked("best.com", 2, Some("Best")),
+                ranked("stub.net", 3, None),
                 aliased,
-                site("tail.com", 900, Some("Tail")),
+                ranked("tail.com", 900, Some("Tail")),
             ],
-        )
-        .unwrap();
+        );
         let out = dir.path().join("top.jsonl");
         let args = TopSitesArgs {
             records: path.clone(),
@@ -272,26 +275,23 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_holds_each_kept_site_s_line_as_a_record_writes_it() {
+    fn a_cut_holds_each_kept_site_s_line_as_it_was_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        crate::test_sites::write(&path, &crate::test_sites::records());
-        // Each site as the record read off its line, as it was cut before:
-        // its score, domain, whether it is named or gone, and its line.
+        crate::test_sites::write(&path, &crate::test_sites::sites());
+        // Each site as read off its line: its score, domain, whether it is
+        // named or gone, and its line.
         let mut sites = Vec::new();
-        plumb_node::outline::for_each_record(&path, |record| {
-            let named = record
-                .title
-                .as_deref()
-                .is_some_and(|t| !t.trim().is_empty())
-                || !record.aliases.is_empty();
-            let mut line = plumb_core::stored::line(&record).unwrap();
+        plumb_node::outline::for_each_site(&path, |site| {
+            let named = site.title.as_deref().is_some_and(|t| !t.trim().is_empty())
+                || !site.names.is_empty();
+            let mut line = plumb_core::stored::item_as_line(&site).unwrap();
             line.push(b'\n');
             sites.push((
-                record.link_score(),
-                record.domain,
+                site::link_score(&site),
+                site.id.clone(),
                 named,
-                record.gone_at.is_some(),
+                site::crawl_marks(&site).gone.is_some(),
                 line,
             ));
         })

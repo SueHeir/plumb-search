@@ -51,10 +51,10 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
             })
         })
         .unwrap();
-    let mut crawled = SiteRecord::new(domain.as_str());
+    let mut crawled = site::new(domain.as_str());
     crawled.url = Some(format!("https://{domain}/"));
     crawled.title = Some("Lighthouse Keepers Guild".to_string());
-    crawled.crawled_at = Some(now);
+    site::set_crawled(&mut crawled, Some(now));
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
     peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -260,11 +260,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
         }
     };
     let _ = peer_id;
-    let mut crawled = SiteRecord::new("reddit.com");
+    let mut crawled = site::new("reddit.com");
     crawled.url = Some("https://www.reddit.com/".to_string());
     crawled.title = Some("Reddit".to_string());
-    crawled.description = Some("Communities for every interest, from news to hobbies".to_string());
-    crawled.crawled_at = Some(now);
+    crawled.about = Some("Communities for every interest, from news to hobbies".to_string());
+    site::set_crawled(&mut crawled, Some(now));
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
     peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
@@ -380,23 +380,26 @@ async fn network_results_go_through_the_denylist() {
     // Another node holds a site this node's denylist takes off, one with
     // a key page it takes off, and one whose key pages the index fills in
     // (plumb_core::key_pages_or_known), one of them denied.
-    let site = |domain: &str, title: &str| {
-        let mut record = SiteRecord::new(domain);
+    let titled = |domain: &str, title: &str| {
+        let mut record = site::new(domain);
         record.url = Some(format!("https://{domain}/"));
         record.title = Some(title.to_string());
         record
     };
-    let mut keepers = site("lighthouse-keepers.org", "Lighthouse Keepers Guild");
+    let mut keepers = titled("lighthouse-keepers.org", "Lighthouse Keepers Guild");
     let page = |label: &str, path: &str| plumb_core::KeyPage {
         label: label.into(),
         url: format!("https://lighthouse-keepers.org/{path}"),
     };
-    keepers.key_pages = vec![
-        page("Visiting hours", "hours"),
-        page("Wreck maps", "wreck-maps"),
-    ];
-    let wreckers = site("lighthouse-wreckers.org", "Lighthouse Wreckers");
-    let mut facebook = site("facebook.com", "Lighthouse Fans on Facebook");
+    site::set_key_pages(
+        &mut keepers,
+        vec![
+            page("Visiting hours", "hours"),
+            page("Wreck maps", "wreck-maps"),
+        ],
+    );
+    let wreckers = titled("lighthouse-wreckers.org", "Lighthouse Wreckers");
+    let mut facebook = titled("facebook.com", "Lighthouse Fans on Facebook");
     facebook.url = Some("https://www.facebook.com/".into());
     let peer_dir = tempfile::tempdir().unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
@@ -498,7 +501,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     peer_config.bootstrap = vec![node_addr];
     let source = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
-        &stored_items(&fixture_records()),
+        &stored_items(&fixture_sites()),
     )
     .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))

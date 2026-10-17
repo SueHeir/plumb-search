@@ -20,9 +20,9 @@ use std::sync::Mutex;
 
 use libp2p::identity::Keypair;
 use libp2p::PeerId;
-use plumb_core::site::Item;
+use plumb_core::site::{self, Item};
 use plumb_core::sites::{SiteLine, SiteList};
-use plumb_core::{linker_bit, Headline, KeyPage, LinkText, Redirect, SiteRecord};
+use plumb_core::{linker_bit, Headline, KeyPage, LinkText, Redirect};
 use sha2::{Digest, Sha256};
 
 use super::answering::lookup;
@@ -47,11 +47,6 @@ fn key(seed: u8) -> Keypair {
 
 /// The stored line a node writes of a site it takes in, as the inbox
 /// holds it.
-fn line(record: &SiteRecord) -> String {
-    String::from_utf8(plumb_core::stored::line(record).unwrap()).unwrap()
-}
-
-/// [`line`] of a site's stored item.
 fn item_line(site: &Item) -> String {
     String::from_utf8(plumb_core::stored::item_as_line(site).unwrap()).unwrap()
 }
@@ -62,10 +57,9 @@ fn lines(sites: &SiteList) -> Vec<String> {
     sites.lines().map(line).collect()
 }
 
-/// `records` as the node holds them to publish: their stored items.
-fn list(records: &[SiteRecord]) -> SiteList {
-    let item = |record: &SiteRecord| record.clone().stored_item_as_is();
-    records.iter().map(item).collect()
+/// `sites` as the node holds them to publish.
+fn list(sites: &[Item]) -> SiteList {
+    sites.iter().cloned().collect()
 }
 
 fn sha(bytes: &[u8]) -> String {
@@ -89,12 +83,12 @@ fn domains(n: usize, assigned: impl Fn(&str) -> bool) -> Vec<String> {
         .collect()
 }
 
-fn crawl(domain: &str, title: &str) -> SiteRecord {
-    let mut record = SiteRecord::new(domain);
+fn crawl(domain: &str, title: &str) -> Item {
+    let mut record = site::new(domain);
     record.url = Some(format!("https://www.{domain}/"));
     record.title = Some(title.into());
-    record.description = Some(format!("All about {domain}."));
-    record.crawled_at = Some(NOW - 600);
+    record.about = Some(format!("All about {domain}."));
+    site::set_crawled(&mut record, Some(NOW - 600));
     record
 }
 
@@ -129,89 +123,124 @@ impl Sites {
     /// another site; one that went elsewhere; one crawled long ago; one it
     /// was not assigned; a site it found links to; a feed check; and a
     /// domain that is not canonical.
-    fn crawled_by_a(&self) -> Vec<SiteRecord> {
+    fn crawled_by_a(&self) -> Vec<Item> {
         let [a1, a2] = [&self.both[0], &self.both[1]];
         let mut rich = crawl(a1, " A1  Savings\u{7} Bank ");
-        rich.description = Some("Du\u{323} ba\u{301}o for savers".into());
-        rich.aliases = vec!["A1 Bank".into(), "A One".into(), "A1 Bank".into()];
-        rich.language = Some("en-US".into());
-        rich.headings = vec!["Open an account".into(), "Rates ".into()];
-        rich.body_text = Some("Save more with A1. ".repeat(80));
-        rich.terms = vec!["savings".into(), "bank".into()];
-        rich.key_pages = vec![
-            KeyPage {
-                label: "Rates".into(),
-                url: format!("https://www.{a1}/rates"),
-            },
-            KeyPage {
-                label: " Help ".into(),
-                url: format!("HTTPS://WWW.{}/help/#top", a1.to_uppercase()),
-            },
-            KeyPage {
-                label: "Elsewhere".into(),
-                url: "https://other.org/a1".into(),
-            },
-        ];
-        rich.links_to = vec![
-            a2.clone(),
-            "foo_bar.com".into(),
-            "linked.org".into(),
-            a1.clone(),
-        ];
-        rich.link_texts = vec![
-            LinkText::from_linkers("a1 bank", linker_bit(a2)),
-            LinkText::from_linkers("savings", linker_bit("elsewhere.org")),
-            LinkText::with_count("bank", 3),
-        ];
-        rich.signals.linking_domains = 5;
-        rich.signals.tranco_rank = Some(10);
-        rich.signals.official_site = true;
-        rich.search_url = Some(format!("https://www.{a1}/search?q={{searchTerms}}"));
-        rich.icon = Some("iVBORw0KGgo=".into());
-        rich.news = vec![Headline {
-            title: "Rates go up".into(),
-            url: format!("https://www.{a1}/news/rates"),
-            at: NOW - 1_200,
-        }];
-        rich.crawl_attempted_at = Some(NOW - 600);
-        rich.crawl_failures = 2;
-        rich.crawl_version = 7;
+        rich.about = Some("Du\u{323} ba\u{301}o for savers".into());
+        rich.names = vec!["A1 Bank".into(), "A One".into(), "A1 Bank".into()];
+        rich.lang = Some("en-US".into());
+        site::set_headings(&mut rich, vec!["Open an account".into(), "Rates ".into()]);
+        rich.text = Some("Save more with A1. ".repeat(80));
+        site::set_terms(&mut rich, vec!["savings".into(), "bank".into()]);
+        site::set_key_pages(
+            &mut rich,
+            vec![
+                KeyPage {
+                    label: "Rates".into(),
+                    url: format!("https://www.{a1}/rates"),
+                },
+                KeyPage {
+                    label: " Help ".into(),
+                    url: format!("HTTPS://WWW.{}/help/#top", a1.to_uppercase()),
+                },
+                KeyPage {
+                    label: "Elsewhere".into(),
+                    url: "https://other.org/a1".into(),
+                },
+            ],
+        );
+        site::set_links_to(
+            &mut rich,
+            vec![
+                a2.clone(),
+                "foo_bar.com".into(),
+                "linked.org".into(),
+                a1.clone(),
+            ],
+        );
+        site::set_link_texts(
+            &mut rich,
+            &[
+                LinkText::from_linkers("a1 bank", linker_bit(a2)),
+                LinkText::from_linkers("savings", linker_bit("elsewhere.org")),
+                LinkText::with_count("bank", 3),
+            ],
+        );
+        let mut signals = site::signals(&rich);
+        signals.linking_domains = 5;
+        signals.tranco_rank = Some(10);
+        signals.official_site = true;
+        site::set_signals(&mut rich, &signals);
+        site::set_search_url(
+            &mut rich,
+            Some(format!("https://www.{a1}/search?q={{searchTerms}}")),
+        );
+        site::set_icon(&mut rich, Some("iVBORw0KGgo=".into()));
+        site::set_news(
+            &mut rich,
+            vec![Headline {
+                title: "Rates go up".into(),
+                url: format!("https://www.{a1}/news/rates"),
+                at: NOW - 1_200,
+            }],
+        );
+        let mut marks = site::crawl_marks(&rich);
+        marks.tried = Some(NOW - 600);
+        marks.failures = 2;
+        site::set_crawl_marks(&mut rich, marks);
+        site::set_crawl_version(&mut rich, 7);
 
         let mut plain = crawl(a2, "A2 Credit Union");
-        plain.link_texts = vec![LinkText::from_linkers("credit union", linker_bit(a1))];
-        plain.signals.linking_domains = 1;
-        plain.icon = Some("R0lGODlh".into());
+        site::set_link_texts(
+            &mut plain,
+            &[LinkText::from_linkers("credit union", linker_bit(a1))],
+        );
+        let mut signals = site::signals(&plain);
+        signals.linking_domains = 1;
+        site::set_signals(&mut plain, &signals);
+        site::set_icon(&mut plain, Some("R0lGODlh".into()));
 
         let mut elsewhere = crawl(&self.only_a[0], "X1 Shop");
         elsewhere.url = Some("https://elsewhere.org/x1".into());
         let mut redirected = crawl(&self.only_a[1], "R1");
-        redirected.redirect = Some(Redirect {
-            to: "elsewhere.org".into(),
-            at: NOW - 600,
-            inner: false,
-        });
+        site::set_redirect(
+            &mut redirected,
+            Some(Redirect {
+                to: "elsewhere.org".into(),
+                at: NOW - 600,
+                inner: false,
+            }),
+        );
         let mut stale = crawl(&self.only_a[2], "Stale");
-        stale.crawled_at = Some(NOW - 10 * EPOCH_SECS);
+        site::set_crawled(&mut stale, Some(NOW - 10 * EPOCH_SECS));
         let unassigned = crawl(&self.neither, "N1 Not Assigned");
 
-        let mut linked = SiteRecord::new("linked.org");
-        linked.link_texts = vec![
-            LinkText::from_linkers("linked", linker_bit(a1) | linker_bit(a2)),
-            LinkText::from_linkers("forged", linker_bit("elsewhere.org")),
-        ];
-        linked.signals.linking_domains = 9;
+        let mut linked = site::new("linked.org");
+        site::set_link_texts(
+            &mut linked,
+            &[
+                LinkText::from_linkers("linked", linker_bit(a1) | linker_bit(a2)),
+                LinkText::from_linkers("forged", linker_bit("elsewhere.org")),
+            ],
+        );
+        let mut signals = site::signals(&linked);
+        signals.linking_domains = 9;
+        site::set_signals(&mut linked, &signals);
 
-        let mut feed = SiteRecord::new("news.example");
+        let mut feed = site::new("news.example");
         let headline = |url: &str, at: u64| Headline {
             title: "Big news".into(),
             url: url.into(),
             at,
         };
-        feed.news = vec![
-            headline("https://www.news.example/big", NOW - 600),
-            headline("https://elsewhere.org/x", NOW - 600),
-            headline("https://www.news.example/old", NOW - 30 * EPOCH_SECS),
-        ];
+        site::set_news(
+            &mut feed,
+            vec![
+                headline("https://www.news.example/big", NOW - 600),
+                headline("https://elsewhere.org/x", NOW - 600),
+                headline("https://www.news.example/old", NOW - 30 * EPOCH_SECS),
+            ],
+        );
         let uncanonical = crawl("WWW.Upper.COM", "Upper");
 
         vec![
@@ -229,60 +258,84 @@ impl Sites {
 
     /// What crawler `b` crawled of the same sites: the same homepages, by
     /// its own words, and the same links.
-    fn crawled_by_b(&self) -> Vec<SiteRecord> {
+    fn crawled_by_b(&self) -> Vec<Item> {
         let [a1, a2] = [&self.both[0], &self.both[1]];
         let mut rich = crawl(a1, "A1 Savings Bank");
-        rich.description = Some("D\u{1ef1} b\u{e1}o for savers".into());
-        rich.aliases = vec!["A1 Bank".into(), "Savings A1".into()];
-        rich.link_texts = vec![LinkText::from_linkers("A1 Bank", linker_bit(a2))];
-        rich.signals.linking_domains = 4;
-        rich.crawled_at = Some(NOW - 300);
+        rich.about = Some("D\u{1ef1} b\u{e1}o for savers".into());
+        rich.names = vec!["A1 Bank".into(), "Savings A1".into()];
+        site::set_link_texts(
+            &mut rich,
+            &[LinkText::from_linkers("A1 Bank", linker_bit(a2))],
+        );
+        let mut signals = site::signals(&rich);
+        signals.linking_domains = 4;
+        site::set_signals(&mut rich, &signals);
+        site::set_crawled(&mut rich, Some(NOW - 300));
         let mut plain = crawl(a2, "A2 Credit Union");
-        plain.link_texts = vec![LinkText::from_linkers("credit union", linker_bit(a1))];
-        plain.signals.linking_domains = 1;
-        let mut linked = SiteRecord::new("linked.org");
-        linked.link_texts = vec![LinkText::from_linkers(
-            "linked",
-            linker_bit(a1) | linker_bit(a2),
-        )];
-        linked.signals.linking_domains = 2;
+        site::set_link_texts(
+            &mut plain,
+            &[LinkText::from_linkers("credit union", linker_bit(a1))],
+        );
+        let mut signals = site::signals(&plain);
+        signals.linking_domains = 1;
+        site::set_signals(&mut plain, &signals);
+        let mut linked = site::new("linked.org");
+        site::set_link_texts(
+            &mut linked,
+            &[LinkText::from_linkers(
+                "linked",
+                linker_bit(a1) | linker_bit(a2),
+            )],
+        );
+        let mut signals = site::signals(&linked);
+        signals.linking_domains = 2;
+        site::set_signals(&mut linked, &signals);
         vec![rich, plain, linked]
     }
 
     /// Sites as the node answering holds them in its bucket table: clean,
     /// with what it knows of them besides a crawl, and some it never
     /// crawled or no longer can.
-    fn held(&self, crawled: &[SiteRecord]) -> Vec<SiteRecord> {
-        let mut held: Vec<SiteRecord> = crawled[..3].to_vec();
-        held[0].signals.harmonic_rank = Some(40);
-        held[0].kinds = vec!["bank".into()];
-        held[0].about = Some("a savings bank".into());
-        held[0].intro = Some("A1 is a savings bank.".into());
-        held[0].redirect = Some(Redirect {
-            to: "foo_bar.com".into(),
-            at: NOW - 6_000,
-            inner: true,
-        });
-        let mut ranked = SiteRecord::new("ranked.org");
-        ranked.signals.tranco_rank = Some(900);
-        ranked.aliases = vec!["Ranked".into()];
-        let mut gone = SiteRecord::new("gone.org");
-        gone.signals.tranco_rank = Some(100);
-        gone.crawled_at = Some(NOW - 400 * EPOCH_SECS);
-        gone.crawl_failures = 6;
-        gone.gone_at = Some(NOW - 30 * EPOCH_SECS);
+    fn held(&self, crawled: &[Item]) -> Vec<Item> {
+        let mut held: Vec<Item> = crawled[..3].to_vec();
+        let mut signals = site::signals(&held[0]);
+        signals.harmonic_rank = Some(40);
+        site::set_signals(&mut held[0], &signals);
+        site::set_kinds(&mut held[0], vec!["bank".into()]);
+        site::set_wikidata_about(&mut held[0], Some("a savings bank".into()));
+        site::set_intro(&mut held[0], Some("A1 is a savings bank.".into()));
+        site::set_redirect(
+            &mut held[0],
+            Some(Redirect {
+                to: "foo_bar.com".into(),
+                at: NOW - 6_000,
+                inner: true,
+            }),
+        );
+        let mut ranked = site::new("ranked.org");
+        let mut signals = site::signals(&ranked);
+        signals.tranco_rank = Some(900);
+        site::set_signals(&mut ranked, &signals);
+        ranked.names = vec!["Ranked".into()];
+        let mut gone = site::new("gone.org");
+        let mut signals = site::signals(&gone);
+        signals.tranco_rank = Some(100);
+        site::set_signals(&mut gone, &signals);
+        site::set_crawled(&mut gone, Some(NOW - 400 * EPOCH_SECS));
+        let mut marks = site::crawl_marks(&gone);
+        marks.failures = 6;
+        marks.gone = Some(NOW - 30 * EPOCH_SECS);
+        site::set_crawl_marks(&mut gone, marks);
         let mut bot = crawl("bot.org", "Just a moment...");
         bot.url = Some("https://www.bot.org/".into());
-        bot.description = None;
+        bot.about = None;
         held.extend([ranked, gone, bot]);
-        for site in &mut held {
-            site.clean();
-        }
+        held.iter_mut().for_each(site::clean);
         held
     }
 }
 
-fn sign(key: &Keypair, records: &[SiteRecord]) -> Batch {
+fn sign(key: &Keypair, records: &[Item]) -> Batch {
     Batch::sign(key, &list(records), epoch_of(NOW), MAX_SHARE_PPM, NOW)
         .unwrap()
         .unwrap()
@@ -440,9 +493,9 @@ fn the_network_sends_and_takes_in_the_golden_bytes() {
     // that fit a batch.
     let mut published = by_a.clone();
     let mut yesterday = crawl(&sites.only_a[0], "Yesterday");
-    yesterday.crawled_at = Some(NOW - EPOCH_SECS);
+    site::set_crawled(&mut yesterday, Some(NOW - EPOCH_SECS));
     let mut future = crawl(&sites.only_a[1], "Future");
-    future.crawled_at = Some(NOW + 2 * EPOCH_SECS);
+    site::set_crawled(&mut future, Some(NOW + 2 * EPOCH_SECS));
     published.extend([yesterday, future]);
     let assigned = |epoch, domain: &str| is_assigned(epoch, &a_id, domain, MAX_SHARE_PPM);
     for (epoch, sites) in by_crawl_epoch(list(&published), NOW, assigned) {
@@ -453,7 +506,7 @@ fn the_network_sends_and_takes_in_the_golden_bytes() {
 
     // A bucket answer, with the proofs of the crawls held.
     let held = sites.held(&by_a);
-    let table = Table(held.iter().map(line).collect());
+    let table = Table(held.iter().map(item_line).collect());
     let dir = tempfile::tempdir().unwrap();
     let store = {
         let mut store = BatchStore::open(dir.path()).unwrap();

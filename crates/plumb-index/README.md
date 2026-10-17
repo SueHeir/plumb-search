@@ -100,7 +100,7 @@ Each index lives in its own directory and is built the same way: in a hidden sta
 | Pages | `pages::build_page_index` | `pages::PageSearcher` | page of a page set |
 | Places | `places::build_place_index` | `places::PlaceSearcher` | place |
 
-`build_index` takes the sites as a node stores them, their stored items (`plumb_core::site`; a caller holding records turns them into items with `SiteRecord::to_stored_item`). It makes each domain canonical, merges items of the same domain with `site::merge`, folds domains that redirect into their target (their names become the target's), and skips invalid or gone sites. The writer uses a 200 MB heap (`WRITER_HEAP_BYTES`) and merges once at the end into one segment. The spelling model is built in the same pass. `IndexBuild` takes sites one at a time, for a node that streams its records file instead of holding it.
+`build_index` takes the sites as a node stores them, their stored items (`plumb_core::site`). It makes each domain canonical, merges items of the same domain with `site::merge`, folds domains that redirect into their target (their names become the target's), and skips invalid or gone sites. The writer uses a 200 MB heap (`WRITER_HEAP_BYTES`) and merges once at the end into one segment. The spelling model is built in the same pass. `IndexBuild` takes sites one at a time, for a node that streams its records file instead of holding it.
 
 All text, at index and at query time, goes through `plumb_core::normalize_text` and is then ASCII-folded, so `U.S. Bank`, `us bank` and `US BANK` are the same query.
 
@@ -148,7 +148,7 @@ The page index is searched next to the sites: a page is found by name (some kind
 ```rust
 use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
 
-let sites: Vec<_> = records.iter().map(SiteRecord::to_stored_item).collect();
+let sites: Vec<plumb_format::Item> = read_sites()?; // as `plumb_core::stored::read_item` reads them
 build_index(&dir, &sites)?;
 let searcher = Searcher::open(&dir)?;
 let results = searcher.search_full("us bank", 10, &RankConfig::default(), &SearchOptions::default())?;
