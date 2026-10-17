@@ -1,0 +1,2742 @@
+# the index
+pages 90 papers {"total":4,"publication_year":4,"publication_day":3,"earliest_day":"2015-05-27","latest_day":"2017-06-12"} languages [{"de":1,"en":51,"es":1,"fr":1},36]
+stats {"papers":{"total":4,"publication_year":4,"publication_day":3,"earliest_day":"2015-05-27","latest_day":"2017-06-12"},"pages":90,"most_views":13000000,"languages":{"de":1,"en":51,"es":1,"fr":1}}
+doc books https://openlibrary.org/works/OL17055567W
+  page {"set":"books","url":"https://openlibrary.org/works/OL17055567W","title":"C# in Depth","description":"Book by Jon Skeet","views":5000}
+  popularity Some(787204)
+  words "c" x1
+  words "depth" x1
+  words "in" x1
+  keys "csharpindepth"
+  scope "host:openlibrary.org"
+  scope "set:books"
+  scope "under:openlibrary.org"
+  scope "under:org"
+  language "unknown"
+doc books https://openlibrary.org/works/OL893415W
+  page {"set":"books","url":"https://openlibrary.org/works/OL893415W","title":"Dune","description":"Book by Frank Herbert","views":50000,"aliases":["Dune Frank Herbert"]}
+  popularity Some(1000000)
+  words "dune" x2
+  words "frank" x1
+  words "herbert" x1
+  keys "dune"
+  scope "host:openlibrary.org"
+  scope "set:books"
+  scope "under:openlibrary.org"
+  scope "under:org"
+  language "unknown"
+doc docs https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart
+  page {"set":"docs","url":"https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart","title":"String.prototype.padStart() — JavaScript","description":"The padStart() method of String values pads this string with a given string (repeated and/or truncated, if needed) so that the resulting string has a given leng","views":1666,"aliases":["MDN String.prototype.padStart()","String.prototype.padStart() MDN","JavaScript String.prototype.padStart()","String.prototype.padStart() JavaScript"],"sections":["Try it","Syntax","Parameters","Return value","Using String.prototype.padStart()","Fixed width string number conversion"]}
+  popularity Some(871015)
+  words "javascript" x3
+  words "mdn" x2
+  words "padstart" x5
+  words "prototype" x5
+  words "string" x5
+  keys "javascriptstringprototypepadstart"
+  keys "mdnstringprototypepadstart"
+  keys "stringprototypepadstartjavascript"
+  keys "stringprototypepadstartmdn"
+  scope "docs:mdn"
+  scope "host:developer.mozilla.org"
+  scope "set:docs"
+  scope "symbol:padstart"
+  scope "symbol:string.prototype.padstart"
+  scope "under:developer.mozilla.org"
+  scope "under:mozilla.org"
+  scope "under:org"
+  topic "convers"
+  topic "fix"
+  topic "given"
+  topic "has"
+  topic "javascript"
+  topic "leng"
+  topic "mdn"
+  topic "method"
+  topic "need"
+  topic "number"
+  topic "pad"
+  topic "padstart"
+  topic "paramet"
+  topic "prototyp"
+  topic "repeat"
+  topic "result"
+  topic "return"
+  topic "so"
+  topic "string"
+  topic "syntax"
+  topic "tri"
+  topic "truncat"
+  topic "use"
+  topic "valu"
+  topic "width"
+  language "unknown"
+doc docs https://docs.python.org/3/library/asyncio.html
+  page {"set":"docs","url":"https://docs.python.org/3/library/asyncio.html","title":"asyncio — Asynchronous I/O","description":"asyncio is a library to write concurrent code using the async/await syntax.","views":3000,"aliases":["Python asyncio","asyncio Python"],"sections":["Running an asyncio Program","Tasks","Sleeping"],"search":{"version":1,"symbols":[{"identifier":"asyncio.run","anchor":"asyncio.run"}],"passages":[{"heading":"Running an asyncio Program","text":"Execute the coroutine and return the result, managing the event loop.","anchor":"running-an-asyncio-program"}]}}
+  popularity Some(940041)
+  words "asynchronous" x1
+  words "asyncio" x3
+  words "io" x1
+  words "python" x2
+  keys "asynciopython"
+  keys "pythonasyncio"
+  scope "docs:python"
+  scope "host:docs.python.org"
+  scope "set:docs"
+  scope "symbol:asyncio"
+  scope "symbol:asyncio.run"
+  scope "symbol:run"
+  scope "under:docs.python.org"
+  scope "under:org"
+  scope "under:python.org"
+  topic "async"
+  topic "asynchron"
+  topic "asyncio"
+  topic "await"
+  topic "code"
+  topic "concurr"
+  topic "coroutin"
+  topic "event"
+  topic "execut"
+  topic "io"
+  topic "librari"
+  topic "loop"
+  topic "manag"
+  topic "program"
+  topic "python"
+  topic "result"
+  topic "return"
+  topic "run"
+  topic "sleep"
+  topic "syntax"
+  topic "task"
+  topic "use"
+  topic "write"
+  language "unknown"
+doc docs https://docs.python.org/3/library/index.html
+  page {"set":"docs","url":"https://docs.python.org/3/library/index.html","title":"The Python standard library","description":"This library reference manual describes the standard library distributed with Python. It also describes some of the optional components that are commonly includ","views":5000,"aliases":["Python The Python standard library","The Python standard library Python"]}
+  popularity Some(1000000)
+  words "library" x3
+  words "python" x5
+  words "standard" x3
+  words "the" x3
+  keys "pythonthepythonstandardlibrary"
+  keys "thepythonstandardlibrarypython"
+  scope "docs:python"
+  scope "host:docs.python.org"
+  scope "overview:python"
+  scope "set:docs"
+  scope "under:docs.python.org"
+  scope "under:org"
+  scope "under:python.org"
+  topic "also"
+  topic "common"
+  topic "compon"
+  topic "describ"
+  topic "distribut"
+  topic "includ"
+  topic "librari"
+  topic "manual"
+  topic "option"
+  topic "python"
+  topic "refer"
+  topic "some"
+  topic "standard"
+  language "unknown"
+doc docs https://docs.python.org/3/library/tomllib.html
+  page {"set":"docs","url":"https://docs.python.org/3/library/tomllib.html","title":"tomllib — Parse TOML files","description":"Source code: Lib/tomllib This module provides an interface for parsing TOML 1.1.0 (Tom’s Obvious Minimal Language, https://toml.io). This module does not suppor","views":5000,"aliases":["Python tomllib","tomllib Python","Parse TOML files tomllib","tomllib Parse TOML files"],"sections":["Examples","Conversion Table","Limits and interoperability considerations"]}
+  popularity Some(1000000)
+  words "files" x3
+  words "parse" x3
+  words "python" x2
+  words "toml" x3
+  words "tomllib" x5
+  keys "parsetomlfilestomllib"
+  keys "pythontomllib"
+  keys "tomllibparsetomlfiles"
+  keys "tomllibpython"
+  scope "docs:python"
+  scope "host:docs.python.org"
+  scope "set:docs"
+  scope "symbol:tomllib"
+  scope "under:docs.python.org"
+  scope "under:org"
+  scope "under:python.org"
+  topic "110"
+  topic "code"
+  topic "consider"
+  topic "convers"
+  topic "doe"
+  topic "exampl"
+  topic "file"
+  topic "https"
+  topic "interfac"
+  topic "interoper"
+  topic "io"
+  topic "languag"
+  topic "lib"
+  topic "limit"
+  topic "minim"
+  topic "modul"
+  topic "obvious"
+  topic "pars"
+  topic "provid"
+  topic "python"
+  topic "sourc"
+  topic "suppor"
+  topic "tabl"
+  topic "tom"
+  topic "toml"
+  topic "tomllib"
+  language "unknown"
+doc docs https://docs.python.org/3/reference/index.html
+  page {"set":"docs","url":"https://docs.python.org/3/reference/index.html","title":"The Python Language Reference","description":"This reference manual describes the syntax and core semantics of the language. It is terse, but attempts to be exact and complete. Elsewhere, the built-in objec","views":5000,"aliases":["Python The Python Language Reference","The Python Language Reference Python"]}
+  popularity Some(1000000)
+  words "language" x3
+  words "python" x5
+  words "reference" x3
+  words "the" x3
+  keys "pythonthepythonlanguagereference"
+  keys "thepythonlanguagereferencepython"
+  scope "docs:python"
+  scope "host:docs.python.org"
+  scope "overview:python"
+  scope "set:docs"
+  scope "under:docs.python.org"
+  scope "under:org"
+  scope "under:python.org"
+  topic "attempt"
+  topic "built"
+  topic "complet"
+  topic "core"
+  topic "describ"
+  topic "elsewher"
+  topic "exact"
+  topic "languag"
+  topic "manual"
+  topic "objec"
+  topic "python"
+  topic "refer"
+  topic "semant"
+  topic "syntax"
+  topic "ters"
+  language "unknown"
+doc docs https://docs.python.org/3/tutorial/index.html
+  page {"set":"docs","url":"https://docs.python.org/3/tutorial/index.html","title":"The Python Tutorial","description":"Python is an easy to learn, powerful programming language. It has efficient high-level data structures and a simple but effective approach to object-oriented pr","views":5000,"aliases":["Python The Python Tutorial","The Python Tutorial Python"]}
+  popularity Some(1000000)
+  words "python" x5
+  words "the" x3
+  words "tutorial" x3
+  keys "pythonthepythontutorial"
+  keys "thepythontutorialpython"
+  scope "docs:python"
+  scope "host:docs.python.org"
+  scope "overview:python"
+  scope "set:docs"
+  scope "under:docs.python.org"
+  scope "under:org"
+  scope "under:python.org"
+  topic "approach"
+  topic "data"
+  topic "easi"
+  topic "effect"
+  topic "effici"
+  topic "has"
+  topic "high"
+  topic "languag"
+  topic "learn"
+  topic "level"
+  topic "object"
+  topic "orient"
+  topic "power"
+  topic "pr"
+  topic "program"
+  topic "python"
+  topic "simpl"
+  topic "structur"
+  topic "tutori"
+  language "unknown"
+doc docs https://docs.rs/serde/latest/serde/trait.Serialize.html
+  page {"set":"docs","url":"https://docs.rs/serde/latest/serde/trait.Serialize.html","title":"Serialize in serde","description":"A data structure that can be serialized into any data format supported by Serde.","views":2000,"aliases":["serde Serialize","Serialize serde"],"sections":["Required Methods","Implementors"],"search":{"version":1,"symbols":[{"identifier":"serde::Serialize","anchor":"tymethod.serialize"}],"passages":[{"heading":"Required Methods","text":"Serialize this value into the given Serde serializer."}]}}
+  popularity Some(892456)
+  words "in" x1
+  words "serde" x3
+  words "serialize" x3
+  keys "serdeserialize"
+  keys "serializeserde"
+  scope "host:docs.rs"
+  scope "set:docs"
+  scope "symbol:serde::serialize"
+  scope "symbol:serialize"
+  scope "under:docs.rs"
+  scope "under:rs"
+  topic "ani"
+  topic "can"
+  topic "data"
+  topic "format"
+  topic "given"
+  topic "implementor"
+  topic "method"
+  topic "requir"
+  topic "serd"
+  topic "serial"
+  topic "structur"
+  topic "support"
+  topic "valu"
+  language "unknown"
+doc docs https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.text/pad-start.html
+  page {"set":"docs","url":"https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.text/pad-start.html","title":"padStart — Core API","description":"Kotlin libraries kotlin-stdlib/kotlin.text/padStart fun CharSequence.padStart(length: Int, padChar: Char = ' '): CharSequence(source) Returns a char sequence wi","views":1250,"aliases":["Kotlin padStart","padStart Kotlin","Core API padStart","padStart Core API"]}
+  popularity Some(837310)
+  words "api" x3
+  words "core" x3
+  words "kotlin" x2
+  words "padstart" x5
+  keys "coreapipadstart"
+  keys "kotlinpadstart"
+  keys "padstartcoreapi"
+  keys "padstartkotlin"
+  scope "docs:kotlin"
+  scope "host:kotlinlang.org"
+  scope "set:docs"
+  scope "symbol:padstart"
+  scope "under:kotlinlang.org"
+  scope "under:org"
+  topic "api"
+  topic "char"
+  topic "charsequ"
+  topic "core"
+  topic "fun"
+  topic "int"
+  topic "kotlin"
+  topic "length"
+  topic "librari"
+  topic "padchar"
+  topic "padstart"
+  topic "return"
+  topic "sequenc"
+  topic "sourc"
+  topic "stdlib"
+  topic "text"
+  topic "wi"
+  language "unknown"
+doc docs https://react.dev/reference/react/hooks
+  page {"set":"docs","url":"https://react.dev/reference/react/hooks","title":"Built-in React Hooks","description":"API Reference Hooks let you use different React features from your components. You can either use the built-in Hooks or combine them to build your own. This pag","views":4000,"aliases":["React Built-in React Hooks","Built-in React Hooks React"]}
+  popularity Some(973807)
+  words "built" x3
+  words "hooks" x3
+  words "in" x3
+  words "react" x5
+  keys "builtinreacthooksreact"
+  keys "reactbuiltinreacthooks"
+  scope "docs:react"
+  scope "host:react.dev"
+  scope "set:docs"
+  scope "under:dev"
+  scope "under:react.dev"
+  topic "api"
+  topic "build"
+  topic "built"
+  topic "can"
+  topic "combin"
+  topic "compon"
+  topic "differ"
+  topic "either"
+  topic "featur"
+  topic "from"
+  topic "hook"
+  topic "let"
+  topic "own"
+  topic "pag"
+  topic "react"
+  topic "refer"
+  topic "them"
+  topic "use"
+  topic "you"
+  topic "your"
+  language "unknown"
+doc films https://en.wikipedia.org/wiki/Inception
+  page {"set":"films","url":"https://en.wikipedia.org/wiki/Inception","title":"Inception","description":"2010 film by Christopher Nolan","views":310,"aliases":["Inception film"],"item":"Q25188"}
+  popularity Some(1000000)
+  words "film" x1
+  words "inception" x2
+  keys "inception"
+  scope "host:en.wikipedia.org"
+  scope "set:films"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  language "en"
+doc films https://www.wikidata.org/wiki/Q1079
+  page {"set":"films","url":"https://www.wikidata.org/wiki/Q1079","title":"Breaking Bad","description":"American television series (2008–2013)","views":290,"item":"Q1079"}
+  popularity Some(988420)
+  words "bad" x1
+  words "breaking" x1
+  keys "breakingbad"
+  scope "host:www.wikidata.org"
+  scope "set:films"
+  scope "under:org"
+  scope "under:wikidata.org"
+  scope "under:www.wikidata.org"
+  language "unknown"
+doc github https://github.com/google-deepmind/sonnet
+  page {"set":"github","url":"https://github.com/google-deepmind/sonnet","title":"google-deepmind/sonnet","description":"TensorFlow-based neural network library","views":9800}
+  popularity Some(759479)
+  words "deepmind" x1
+  words "google" x1
+  words "sonnet" x1
+  keys "googledeepmindsonnet"
+  scope "host:github.com"
+  scope "set:github"
+  scope "under:com"
+  scope "under:github.com"
+  language "en"
+doc github https://github.com/rust-lang/rust
+  page {"set":"github","url":"https://github.com/rust-lang/rust","title":"rust-lang/rust","description":"Empowering everyone to build reliable and efficient software.","site":"rust-lang.org","views":95000,"aliases":["rust"]}
+  popularity Some(947187)
+  words "lang" x1
+  words "rust" x3
+  keys "rustlangrust"
+  scope "host:github.com"
+  scope "set:github"
+  scope "under:com"
+  scope "under:github.com"
+  language "en"
+doc github https://github.com/torvalds/linux
+  page {"set":"github","url":"https://github.com/torvalds/linux","title":"torvalds/linux","description":"Linux kernel source tree","site":"kernel.org","views":180000}
+  popularity Some(1000000)
+  words "linux" x1
+  words "torvalds" x1
+  keys "torvaldslinux"
+  scope "host:github.com"
+  scope "set:github"
+  scope "under:com"
+  scope "under:github.com"
+  language "en"
+doc music https://musicbrainz.org/recording/5fb524f1-8cc8-4c04-a921-e34c0a911ea7
+  page {"set":"music","url":"https://musicbrainz.org/recording/5fb524f1-8cc8-4c04-a921-e34c0a911ea7","title":"Smells Like Teen Spirit","description":"Song by Nirvana, 1991","views":321094,"aliases":["Smells Like Teen Spirit Nirvana"],"profiles":[{"service":"youtube-video","id":"hTWKbfoikeg"},{"service":"spotify-track","id":"1f3yAtsJtY87CTmM8RLnxf"}]}
+  popularity Some(1000000)
+  words "like" x2
+  words "nirvana" x1
+  words "smells" x2
+  words "spirit" x2
+  words "teen" x2
+  keys "smellsliketeenspirit"
+  scope "host:musicbrainz.org"
+  scope "set:music"
+  scope "under:musicbrainz.org"
+  scope "under:org"
+  language "unknown"
+doc music https://musicbrainz.org/recording/8e4a59a7-5fd1-4bce-bd53-bb72d5b7d1f0
+  page {"set":"music","url":"https://musicbrainz.org/recording/8e4a59a7-5fd1-4bce-bd53-bb72d5b7d1f0","title":"Free Bird","description":"Song by Lynyrd Skynyrd, 1973","views":120000,"aliases":["Free Bird Lynyrd Skynyrd"]}
+  popularity Some(922376)
+  words "bird" x2
+  words "free" x2
+  words "lynyrd" x1
+  words "skynyrd" x1
+  keys "freebird"
+  scope "host:musicbrainz.org"
+  scope "set:music"
+  scope "under:musicbrainz.org"
+  scope "under:org"
+  language "unknown"
+doc music https://musicbrainz.org/release-group/1b022e01-4da6-387b-8658-8678046e4cef
+  page {"set":"music","url":"https://musicbrainz.org/release-group/1b022e01-4da6-387b-8658-8678046e4cef","title":"Nevermind","description":"Album by Nirvana, 1991","views":250000,"aliases":["Nevermind Nirvana"]}
+  popularity Some(980262)
+  words "nevermind" x2
+  words "nirvana" x1
+  keys "nevermind"
+  scope "host:musicbrainz.org"
+  scope "set:music"
+  scope "under:musicbrainz.org"
+  scope "under:org"
+  language "unknown"
+doc packages https://crates.io/crates/serde
+  page {"set":"packages","url":"https://crates.io/crates/serde","title":"serde","description":"A generic serialization/deserialization framework","views":700000,"package":{"registry":"crates","name":"serde","version":"1.0.215","released":"2026-01-02","license":"MIT OR Apache-2.0","repo":"https://github.com/example/serde"}}
+  popularity Some(981670)
+  words "serde" x1
+  keys "serde"
+  scope "host:crates.io"
+  scope "set:packages"
+  scope "under:crates.io"
+  scope "under:io"
+  language "unknown"
+doc packages https://pkg.go.dev/github.com/gin-gonic/gin
+  page {"set":"packages","url":"https://pkg.go.dev/github.com/gin-gonic/gin","title":"github.com/gin-gonic/gin","description":"Gin is a HTTP web framework written in Go","views":300000,"aliases":["gin"],"package":{"registry":"go","name":"github.com/gin-gonic/gin","version":"1.0.215","released":"2026-01-02","license":"MIT OR Apache-2.0","repo":"https://github.com/example/github.com/gin-gonic/gin"}}
+  popularity Some(919869)
+  words "com" x1
+  words "gin" x3
+  words "github" x1
+  words "gonic" x1
+  keys "gin"
+  keys "githubcomgingonicgin"
+  scope "host:pkg.go.dev"
+  scope "set:packages"
+  scope "under:dev"
+  scope "under:go.dev"
+  scope "under:pkg.go.dev"
+  language "unknown"
+doc packages https://pypi.org/project/requests/
+  page {"set":"packages","url":"https://pypi.org/project/requests/","title":"requests","description":"Python HTTP for Humans.","views":800000,"package":{"registry":"pypi","name":"requests","version":"1.0.215","released":"2026-01-02","license":"MIT OR Apache-2.0","repo":"https://github.com/example/requests"}}
+  popularity Some(991409)
+  words "requests" x1
+  keys "requests"
+  scope "host:pypi.org"
+  scope "set:packages"
+  scope "under:org"
+  scope "under:pypi.org"
+  language "unknown"
+doc packages https://www.npmjs.com/package/react
+  page {"set":"packages","url":"https://www.npmjs.com/package/react","title":"react","description":"React is a JavaScript library for building user interfaces.","views":900000,"package":{"registry":"npm","name":"react","version":"1.0.215","released":"2026-01-02","license":"MIT OR Apache-2.0","repo":"https://github.com/example/react"}}
+  popularity Some(1000000)
+  words "react" x1
+  keys "react"
+  scope "host:www.npmjs.com"
+  scope "set:packages"
+  scope "under:com"
+  scope "under:npmjs.com"
+  scope "under:www.npmjs.com"
+  language "unknown"
+doc papers https://doi.org/10.1038/nature14539
+  page {"paper":{"verified_arxiv":{"id":"1506.00000","title":"Deep learning","authors":["Yann LeCun"],"submitted":"2015-05-27","updated":null},"doi":"10.1038/nature14539","arxiv_id":null,"openalex_id":"W1919803322","authors":["Yann LeCun","Yoshua Bengio","Geoffrey Hinton"],"publication_date":"2015-05-27","raw_publication_date":null,"publication_year":2015,"preprint_date":null,"version_date":null,"preprint_version_date":null,"venue":"Nature","source":"openalex","count_kind":"citations","count":80000,"alternate_urls":[],"corrections":[]},"set":"papers","url":"https://doi.org/10.1038/nature14539","title":"Deep learning","description":"Deep learning allows computational models that are composed of multiple processing layers to learn representations of data.","views":80000,"website":"https://www.nature.com/articles/nature14539"}
+  popularity Some(965331)
+  words "deep" x1
+  words "learning" x1
+  keys "deeplearning"
+  scope "host:doi.org"
+  scope "set:papers"
+  scope "under:doi.org"
+  scope "under:org"
+  topic "allow"
+  topic "bengio"
+  topic "compos"
+  topic "comput"
+  topic "data"
+  topic "deep"
+  topic "geoffrey"
+  topic "hinton"
+  topic "layer"
+  topic "learn"
+  topic "lecun"
+  topic "model"
+  topic "multipl"
+  topic "process"
+  topic "represent"
+  topic "yann"
+  topic "yoshua"
+  language "unknown"
+  paper_year 2015
+  paper_day 20150527
+doc papers https://doi.org/10.1109/cvpr.2016.90
+  page {"paper":{"verified_arxiv":null,"doi":"10.1109/cvpr.2016.90","arxiv_id":null,"openalex_id":null,"authors":["Kaiming He","Xiangyu Zhang"],"publication_date":"2016-06-01","raw_publication_date":null,"publication_year":2016,"preprint_date":null,"version_date":null,"preprint_version_date":null,"venue":"Computer Vision and Pattern Recognition","source":"openalex","count_kind":"citations","count":150000,"alternate_urls":[],"corrections":[]},"set":"papers","url":"https://doi.org/10.1109/cvpr.2016.90","title":"Deep Residual Learning for Image Recognition","description":"Deeper neural networks are more difficult to train.","views":110000}
+  popularity Some(992560)
+  words "deep" x1
+  words "for" x1
+  words "image" x1
+  words "learning" x1
+  words "recognition" x1
+  words "residual" x1
+  keys "deepresiduallearningforimagerecognition"
+  scope "host:doi.org"
+  scope "set:papers"
+  scope "under:doi.org"
+  scope "under:org"
+  topic "deep"
+  topic "deeper"
+  topic "difficult"
+  topic "he"
+  topic "imag"
+  topic "kaim"
+  topic "learn"
+  topic "more"
+  topic "network"
+  topic "neural"
+  topic "recognit"
+  topic "residu"
+  topic "train"
+  topic "xiangyu"
+  topic "zhang"
+  language "unknown"
+  paper_year 2016
+  paper_day 20160601
+doc papers https://doi.org/10.48550/arxiv.1706.03762
+  page {"paper":{"verified_arxiv":null,"doi":"10.48550/arxiv.1706.03762","arxiv_id":"1706.03762","openalex_id":"W2963403868","authors":["Ashish Vaswani","Noam Shazeer","Niki Parmar"],"publication_date":"2017-06-12","raw_publication_date":null,"publication_year":2017,"preprint_date":null,"version_date":null,"preprint_version_date":null,"venue":"Advances in Neural Information Processing Systems","source":"openalex","count_kind":"citations","count":120000,"alternate_urls":[],"corrections":[]},"set":"papers","url":"https://doi.org/10.48550/arxiv.1706.03762","title":"Attention Is All You Need","description":"The dominant sequence transduction models are based on complex recurrent or convolutional neural networks.","views":120000,"website":"https://arxiv.org/abs/1706.03762"}
+  popularity Some(1000000)
+  words "all" x1
+  words "attention" x1
+  words "is" x1
+  words "need" x1
+  words "you" x1
+  keys "attentionisallyouneed"
+  scope "host:doi.org"
+  scope "set:papers"
+  scope "under:doi.org"
+  scope "under:org"
+  topic "all"
+  topic "ashish"
+  topic "attent"
+  topic "base"
+  topic "complex"
+  topic "convolut"
+  topic "domin"
+  topic "model"
+  topic "need"
+  topic "network"
+  topic "neural"
+  topic "niki"
+  topic "noam"
+  topic "parmar"
+  topic "recurr"
+  topic "sequenc"
+  topic "shazeer"
+  topic "transduct"
+  topic "vaswani"
+  topic "you"
+  language "unknown"
+  paper_year 2017
+  paper_day 20170612
+doc papers https://openalex.org/W2055043387
+  page {"paper":{"verified_arxiv":null,"doi":null,"arxiv_id":null,"openalex_id":null,"authors":["Stephen F. Altschul"],"publication_date":null,"raw_publication_date":null,"publication_year":1990,"preprint_date":null,"version_date":null,"preprint_version_date":null,"venue":null,"source":"openalex","count_kind":"citations","count":90000,"alternate_urls":[],"corrections":[]},"set":"papers","url":"https://openalex.org/W2055043387","title":"Basic local alignment search tool","description":"A new approach to rapid sequence comparison.","views":90000}
+  popularity Some(975402)
+  words "alignment" x1
+  words "basic" x1
+  words "local" x1
+  words "search" x1
+  words "tool" x1
+  keys "basiclocalalignmentsearchtool"
+  scope "host:openalex.org"
+  scope "set:papers"
+  scope "under:openalex.org"
+  scope "under:org"
+  topic "align"
+  topic "altschul"
+  topic "approach"
+  topic "basic"
+  topic "comparison"
+  topic "f"
+  topic "local"
+  topic "new"
+  topic "rapid"
+  topic "search"
+  topic "sequenc"
+  topic "stephen"
+  topic "tool"
+  language "unknown"
+  paper_year 1990
+doc podcasts https://podcastindex.org/podcast/1
+  page {"set":"podcasts","url":"https://podcastindex.org/podcast/1","title":"Dan Carlin's Hardcore History","description":"Podcast by Dan Carlin · History","site":"dancarlin.com","views":90070,"aliases":["Dan Carlin podcast"]}
+  popularity Some(975469)
+  words "carlin" x1
+  words "carlins" x1
+  words "dan" x2
+  words "hardcore" x1
+  words "history" x1
+  words "podcast" x1
+  keys "dancarlinshardcorehistory"
+  scope "host:podcastindex.org"
+  scope "set:podcasts"
+  scope "under:org"
+  scope "under:podcastindex.org"
+  language "unknown"
+doc podcasts https://podcastindex.org/podcast/743229
+  page {"set":"podcasts","url":"https://podcastindex.org/podcast/743229","title":"The Daily","description":"Podcast by The New York Times · News","site":"nytimes.com","views":120000,"aliases":["The Daily podcast"],"profiles":[{"service":"spotify-show","id":"3IM0lmZxpFAY7CwMuv9H4g"}]}
+  popularity Some(1000000)
+  words "daily" x2
+  words "podcast" x1
+  words "the" x2
+  keys "thedaily"
+  scope "host:podcastindex.org"
+  scope "set:podcasts"
+  scope "under:org"
+  scope "under:podcastindex.org"
+  language "unknown"
+doc reference https://www.healthline.com/health/dengue-fever
+  page {"set":"reference","url":"https://www.healthline.com/health/dengue-fever","title":"Dengue Fever: Symptoms, Causes, and Treatment","description":"Dengue fever is a mosquito-borne illness. Learn about its symptoms, causes and how it is treated.","views":800}
+  popularity Some(1000000)
+  words "and" x1
+  words "causes" x1
+  words "dengue" x1
+  words "fever" x1
+  words "symptoms" x1
+  words "treatment" x1
+  keys "denguefeversymptomscausesandtreatment"
+  scope "host:www.healthline.com"
+  scope "set:reference"
+  scope "under:com"
+  scope "under:healthline.com"
+  scope "under:www.healthline.com"
+  topic "about"
+  topic "born"
+  topic "caus"
+  topic "dengu"
+  topic "fever"
+  topic "how"
+  topic "ill"
+  topic "it"
+  topic "learn"
+  topic "mosquito"
+  topic "symptom"
+  topic "treat"
+  topic "treatment"
+  language "unknown"
+doc reference https://www.merriam-webster.com/dictionary/prioritize
+  page {"set":"reference","url":"https://www.merriam-webster.com/dictionary/prioritize","title":"Prioritize Definition & Meaning","description":"The meaning of PRIORITIZE is to list or rate in order of priority.","views":700}
+  popularity Some(980054)
+  words "definition" x1
+  words "meaning" x1
+  words "prioritize" x1
+  keys "prioritizedefinitionmeaning"
+  scope "host:www.merriam-webster.com"
+  scope "set:reference"
+  scope "under:com"
+  scope "under:merriam-webster.com"
+  scope "under:www.merriam-webster.com"
+  topic "definit"
+  topic "list"
+  topic "mean"
+  topic "order"
+  topic "priorit"
+  topic "prioriti"
+  topic "rate"
+  language "unknown"
+doc reference2 https://www.wikihow.com/Change-a-Car-Battery
+  page {"set":"reference2","url":"https://www.wikihow.com/Change-a-Car-Battery","title":"How to Change a Car Battery","description":"Step by step: disconnect the negative terminal first, then the positive.","views":600}
+  popularity Some(1000000)
+  words "a" x1
+  words "battery" x1
+  words "car" x1
+  words "change" x1
+  words "how" x1
+  words "to" x1
+  keys "howtochangeacarbattery"
+  scope "host:www.wikihow.com"
+  scope "set:reference2"
+  scope "under:com"
+  scope "under:wikihow.com"
+  scope "under:www.wikihow.com"
+  topic "batteri"
+  topic "car"
+  topic "chang"
+  topic "disconnect"
+  topic "first"
+  topic "how"
+  topic "negat"
+  topic "posit"
+  topic "step"
+  topic "termin"
+  language "unknown"
+doc stackexchange https://gardening.stackexchange.com/questions/1234
+  page {"set":"stackexchange","url":"https://gardening.stackexchange.com/questions/1234","title":"How to get rid of aphids on indoor plants?","description":"pest-control, aphids, houseplants","views":90000}
+  popularity Some(917803)
+  words "aphids" x1
+  words "get" x1
+  words "how" x1
+  words "indoor" x1
+  words "of" x1
+  words "on" x1
+  words "plants" x1
+  words "rid" x1
+  words "to" x1
+  keys "howtogetridofaphidsonindoorplants"
+  scope "host:gardening.stackexchange.com"
+  scope "set:stackexchange"
+  scope "under:com"
+  scope "under:gardening.stackexchange.com"
+  scope "under:stackexchange.com"
+  topic "aphid"
+  topic "control"
+  topic "get"
+  topic "housepl"
+  topic "how"
+  topic "indoor"
+  topic "pest"
+  topic "plant"
+  topic "rid"
+  language "en"
+doc stackexchange https://unix.stackexchange.com/questions/106561
+  page {"set":"stackexchange","url":"https://unix.stackexchange.com/questions/106561","title":"How do I find which process is using a port?","description":"linux, networking, ports","views":250000}
+  popularity Some(1000000)
+  words "a" x1
+  words "do" x1
+  words "find" x1
+  words "how" x1
+  words "i" x1
+  words "is" x1
+  words "port" x1
+  words "process" x1
+  words "using" x1
+  words "which" x1
+  keys "howdoifindwhichprocessisusingaport"
+  scope "host:unix.stackexchange.com"
+  scope "set:stackexchange"
+  scope "under:com"
+  scope "under:stackexchange.com"
+  scope "under:unix.stackexchange.com"
+  topic "do"
+  topic "find"
+  topic "how"
+  topic "i"
+  topic "linux"
+  topic "network"
+  topic "port"
+  topic "process"
+  topic "use"
+  topic "which"
+  language "en"
+doc stackoverflow https://stackoverflow.com/questions/2003505
+  page {"set":"stackoverflow","url":"https://stackoverflow.com/questions/2003505","title":"How do I delete a Git branch locally and remotely?","description":"git, version-control, git-branch, git-push, git-remote","views":11000000}
+  popularity Some(989802)
+  words "a" x1
+  words "and" x1
+  words "branch" x1
+  words "delete" x1
+  words "do" x1
+  words "git" x1
+  words "how" x1
+  words "i" x1
+  words "locally" x1
+  words "remotely" x1
+  keys "howdoideleteagitbranchlocallyandremotely"
+  scope "host:stackoverflow.com"
+  scope "set:stackoverflow"
+  scope "under:com"
+  scope "under:stackoverflow.com"
+  topic "branch"
+  topic "control"
+  topic "delet"
+  topic "do"
+  topic "git"
+  topic "how"
+  topic "i"
+  topic "local"
+  topic "push"
+  topic "remot"
+  topic "version"
+  language "en"
+doc stackoverflow https://stackoverflow.com/questions/36139
+  page {"set":"stackoverflow","url":"https://stackoverflow.com/questions/36139","title":"How to sort a list of strings ignoring whitespace in Python?","description":"python, list, sorting","views":40000}
+  popularity Some(646909)
+  words "a" x1
+  words "how" x1
+  words "ignoring" x1
+  words "in" x1
+  words "list" x1
+  words "of" x1
+  words "python" x1
+  words "sort" x1
+  words "strings" x1
+  words "to" x1
+  words "whitespace" x1
+  keys "howtosortalistofstringsignoringwhitespaceinpython"
+  scope "host:stackoverflow.com"
+  scope "set:stackoverflow"
+  scope "under:com"
+  scope "under:stackoverflow.com"
+  topic "how"
+  topic "ignor"
+  topic "list"
+  topic "python"
+  topic "sort"
+  topic "string"
+  topic "whitespac"
+  language "en"
+doc stackoverflow https://stackoverflow.com/questions/927358
+  page {"set":"stackoverflow","url":"https://stackoverflow.com/questions/927358","title":"How do I undo the most recent local commits in Git?","description":"git, version-control, git-commit, undo","views":13000000,"aliases":["How to revert a commit in Git?","Undo the last git commit"]}
+  popularity Some(1000000)
+  words "a" x1
+  words "commit" x2
+  words "commits" x1
+  words "do" x1
+  words "git" x3
+  words "how" x2
+  words "i" x1
+  words "in" x2
+  words "last" x1
+  words "local" x1
+  words "most" x1
+  words "recent" x1
+  words "revert" x1
+  words "the" x2
+  words "to" x1
+  words "undo" x2
+  keys "howdoiundothemostrecentlocalcommitsingit"
+  scope "host:stackoverflow.com"
+  scope "set:stackoverflow"
+  scope "under:com"
+  scope "under:stackoverflow.com"
+  topic "commit"
+  topic "control"
+  topic "do"
+  topic "git"
+  topic "how"
+  topic "i"
+  topic "last"
+  topic "local"
+  topic "most"
+  topic "recent"
+  topic "revert"
+  topic "undo"
+  topic "version"
+  language "en"
+doc subpages2 https://college.harvard.edu/admissions
+  page {"set":"subpages2","url":"https://college.harvard.edu/admissions","title":"Admissions","description":"Apply to Harvard College: first-year and transfer admissions.","views":500}
+  popularity Some(913736)
+  words "admissions" x1
+  keys "admissions"
+  scope "host:college.harvard.edu"
+  scope "set:subpages2"
+  scope "under:college.harvard.edu"
+  scope "under:edu"
+  scope "under:harvard.edu"
+  topic "admiss"
+  topic "appli"
+  topic "colleg"
+  topic "first"
+  topic "harvard"
+  topic "transfer"
+  topic "year"
+  language "unknown"
+doc subpages2 https://www.who.int/news-room/fact-sheets/detail/dengue-and-severe-dengue
+  page {"set":"subpages2","url":"https://www.who.int/news-room/fact-sheets/detail/dengue-and-severe-dengue","title":"Dengue and severe dengue","description":"WHO fact sheet on dengue: key facts, transmission, symptoms and treatment.","views":900}
+  popularity Some(1000000)
+  words "and" x1
+  words "dengue" x2
+  words "severe" x1
+  keys "dengueandseveredengue"
+  scope "host:www.who.int"
+  scope "set:subpages2"
+  scope "under:int"
+  scope "under:who.int"
+  scope "under:www.who.int"
+  topic "dengu"
+  topic "fact"
+  topic "key"
+  topic "sever"
+  topic "sheet"
+  topic "symptom"
+  topic "transmiss"
+  topic "treatment"
+  topic "who"
+  language "unknown"
+doc wanted https://www.usbank.com/home-loans/mortgage/mortgage-rates.html
+  page {"set":"wanted","url":"https://www.usbank.com/home-loans/mortgage/mortgage-rates.html","title":"Mortgage rates today","description":"Compare today's mortgage rates from U.S. Bank.","views":500}
+  popularity Some(1000000)
+  words "mortgage" x1
+  words "rates" x1
+  words "today" x1
+  keys "mortgageratestoday"
+  scope "host:www.usbank.com"
+  scope "set:wanted"
+  scope "under:com"
+  scope "under:usbank.com"
+  scope "under:www.usbank.com"
+  topic "bank"
+  topic "compar"
+  topic "from"
+  topic "mortgag"
+  topic "rate"
+  topic "today"
+  topic "us"
+  language "unknown"
+doc wikidata https://www.wikidata.org/wiki/Q30325435
+  page {"set":"wikidata","url":"https://www.wikidata.org/wiki/Q30325435","title":"Linus Tech Tips","description":"Canadian technology YouTube channel","site":"linustechtips.com","views":40,"aliases":["LTT"],"item":"Q30325435","profiles":[{"service":"youtube","id":"UCXuqSBlHAE6Xw-yeJA0Tunw"}],"facts":[{"kind":"founded","value":"2008-11-24"}]}
+  popularity Some(1000000)
+  words "linus" x1
+  words "ltt" x1
+  words "tech" x1
+  words "tips" x1
+  keys "linustechtips"
+  scope "host:www.wikidata.org"
+  scope "set:wikidata"
+  scope "under:org"
+  scope "under:wikidata.org"
+  scope "under:www.wikidata.org"
+  language "unknown"
+doc wikipedia-de https://de.wikipedia.org/wiki/Gesunde_Ern%C3%A4hrung
+  page {"set":"wikipedia-de","url":"https://de.wikipedia.org/wiki/Gesunde_Ern%C3%A4hrung","title":"Gesunde Ernährung","description":"Ernährung und Bewegung","views":4000,"item":"Q2095"}
+  popularity Some(1000000)
+  words "ernahrung" x1
+  words "gesunde" x1
+  keys "gesundeernahrung"
+  scope "host:de.wikipedia.org"
+  scope "set:wikipedia-de"
+  scope "under:de.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "beweg"
+  about "ernahr"
+  about "gesund"
+  language "de"
+doc wikipedia-en https://en.wikipedia.org/wiki/Abuse
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Abuse","title":"Abuse","description":"Improper usage or treatment","views":15000}
+  popularity Some(732785)
+  words "abuse" x1
+  keys "abuse"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "abus"
+  about "improp"
+  about "treatment"
+  about "usag"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Apple
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Apple","title":"Apple","description":"Fruit of the apple tree","views":200000,"item":"Q89"}
+  popularity Some(930174)
+  words "apple" x1
+  keys "apple"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "appl"
+  about "fruit"
+  about "tree"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Apple_Inc.
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Apple_Inc.","title":"Apple Inc.","description":"American technology company","site":"apple.com","views":400000,"aliases":["Apple Computer","Apple Inc"],"item":"Q312","profiles":[{"service":"x","id":"Apple"},{"service":"youtube","id":"UCE_M8A5yxnLfW0KghEeajjw"}],"facts":[{"kind":"founded","value":"1976-04-01"},{"kind":"founder","value":"Steve Jobs"},{"kind":"ceo","value":"Tim Cook"},{"kind":"headquarters","value":"Cupertino"}],"lead":"Apple Inc. is an American multinational technology company headquartered in Cupertino, California."}
+  popularity Some(982995)
+  words "apple" x3
+  words "computer" x1
+  words "inc" x2
+  keys "appleinc"
+  aliases "applecomputer"
+  aliases "appleinc"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "american"
+  about "appl"
+  about "compani"
+  about "comput"
+  about "inc"
+  about "technolog"
+  lead "american" x1
+  lead "appl" x1
+  lead "california" x1
+  lead "compani" x1
+  lead "cupertino" x1
+  lead "headquart" x1
+  lead "inc" x1
+  lead "multin" x1
+  lead "technolog" x1
+  site "apple.com"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Bernie_Sanders
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Bernie_Sanders","title":"Bernie Sanders","description":"American politician and activist (born 1941)","views":150000,"aliases":["Bernard Sanders"],"item":"Q359442","profiles":[{"service":"x","id":"BernieSanders"}],"website":"https://www.sanders.senate.gov/","facts":[{"kind":"born","value":"1941-09-08"}],"lead":"Bernard Sanders (born September 8, 1941) is an American politician and activist who is the senior United States senator from Vermont."}
+  popularity Some(908251)
+  words "bernard" x1
+  words "bernie" x1
+  words "sanders" x2
+  keys "berniesanders"
+  aliases "bernardsanders"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1941"
+  about "activist"
+  about "american"
+  about "bernard"
+  about "berni"
+  about "born"
+  about "politician"
+  about "sander"
+  lead "1941" x1
+  lead "8" x1
+  lead "activist" x1
+  lead "american" x1
+  lead "bernard" x1
+  lead "born" x1
+  lead "from" x1
+  lead "politician" x1
+  lead "sander" x1
+  lead "senat" x1
+  lead "senior" x1
+  lead "septemb" x1
+  lead "state" x1
+  lead "unit" x1
+  lead "vermont" x1
+  lead "who" x1
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/C_Sharp_(programming_language)
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/C_Sharp_(programming_language)","title":"C Sharp (programming language)","description":"Programming language by Microsoft","views":90000,"aliases":["C#","C Sharp"]}
+  popularity Some(869323)
+  words "c" x3
+  words "language" x1
+  words "programming" x1
+  words "sharp" x2
+  keys "csharp"
+  keys "csharpprogramminglanguage"
+  aliases "csharp"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "c"
+  about "cc"
+  about "languag"
+  about "microsoft"
+  about "program"
+  about "sharp"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Cafe_Society
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Cafe_Society","title":"Café Society","description":"Term for a set of fashionable people","views":3000,"content_language":"fr"}
+  popularity Some(610157)
+  words "cafe" x1
+  words "society" x1
+  keys "cafesociety"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "a"
+  about "cafe"
+  about "fashionable"
+  about "for"
+  about "of"
+  about "people"
+  about "set"
+  about "society"
+  about "term"
+  language "fr"
+doc wikipedia-en https://en.wikipedia.org/wiki/Chase_Bank
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Chase_Bank","title":"Chase Bank","description":"American bank","site":"chase.com","views":9000,"item":"Q524629","facts":[{"kind":"founded","value":"1799"},{"kind":"headquarters","value":"New York City"}]}
+  popularity Some(693861)
+  words "bank" x1
+  words "chase" x1
+  keys "chasebank"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "american"
+  about "bank"
+  about "chase"
+  site "chase.com"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","site":"senate.gov","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
+  popularity Some(891246)
+  words "elizabeth" x2
+  words "senator" x1
+  words "warren" x3
+  keys "elizabethwarren"
+  keys "warrenelizabeth"
+  aliases "senatorwarren"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1949"
+  about "academ"
+  about "american"
+  about "born"
+  about "elizabeth"
+  about "politician"
+  about "senat"
+  about "warren"
+  lead "1949" x1
+  lead "22" x1
+  lead "american" x1
+  lead "ann" x1
+  lead "born" x1
+  lead "elizabeth" x1
+  lead "former" x1
+  lead "june" x1
+  lead "law" x1
+  lead "politician" x1
+  lead "professor" x1
+  lead "warren" x1
+  site "senate.gov"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/France
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/France","title":"France","description":"Country in Western Europe","views":400000,"item":"Q142","facts":[{"kind":"capital","value":"Paris"},{"kind":"population","value":"68042591"},{"kind":"currency","value":"Euro"}]}
+  popularity Some(982995)
+  words "france" x1
+  keys "france"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "countri"
+  about "europ"
+  about "franc"
+  about "western"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Free_(album)
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Free_(album)","title":"Free (album)","description":"1969 studio album by Free","views":1000}
+  popularity Some(526487)
+  words "album" x1
+  words "free" x1
+  keys "free"
+  keys "freealbum"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1969"
+  about "album"
+  about "free"
+  about "studio"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Fruit
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Fruit","title":"Fruit","description":"Seed-bearing structure of flowering plants","views":250000}
+  popularity Some(947178)
+  words "fruit" x1
+  keys "fruit"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "bear"
+  about "flower"
+  about "fruit"
+  about "plant"
+  about "seed"
+  about "structur"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Hamstring
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Hamstring","title":"Hamstring","description":"Muscles at the back of the thigh","views":25000,"item":"Q215880","lead":"A hamstring is any one of the three posterior thigh muscles between the hip and the knee."}
+  popularity Some(771711)
+  words "hamstring" x1
+  keys "hamstring"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "back"
+  about "hamstr"
+  about "muscl"
+  about "thigh"
+  lead "ani" x1
+  lead "between" x1
+  lead "hamstr" x1
+  lead "hip" x1
+  lead "knee" x1
+  lead "muscl" x1
+  lead "one" x1
+  lead "posterior" x1
+  lead "thigh" x1
+  lead "three" x1
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/John_F._Kennedy
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/John_F._Kennedy","title":"John F. Kennedy","description":"President of the United States from 1961 to 1963","views":500000,"aliases":["JFK","John Kennedy"],"item":"Q9696","facts":[{"kind":"born","value":"1917-05-29"},{"kind":"died","value":"1963-11-22"}]}
+  popularity Some(1000000)
+  words "f" x1
+  words "jfk" x1
+  words "john" x2
+  words "kennedy" x2
+  keys "johnfkennedy"
+  aliases "jfk"
+  aliases "johnkennedy"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1961"
+  about "1963"
+  about "f"
+  about "from"
+  about "jfk"
+  about "john"
+  about "kennedi"
+  about "presid"
+  about "state"
+  about "unit"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Kennedy_(commentator)
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Kennedy_(commentator)","title":"Kennedy (commentator)","description":"American political commentator","views":10000,"item":"Q6390208","facts":[{"kind":"born","value":"1972-08-08"}]}
+  popularity Some(701889)
+  words "commentator" x1
+  words "kennedy" x1
+  keys "kennedy"
+  keys "kennedycommentator"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "american"
+  about "comment"
+  about "kennedi"
+  about "polit"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Lien
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Lien","title":"Lien","description":"Form of security interest","views":20000}
+  popularity Some(754707)
+  words "lien" x1
+  keys "lien"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "form"
+  about "interest"
+  about "lien"
+  about "secur"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Linked_list
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Linked_list","title":"Linked list","description":"Data structure","views":40000}
+  popularity Some(807527)
+  words "linked" x1
+  words "list" x1
+  keys "linkedlist"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "data"
+  about "link"
+  about "list"
+  about "structur"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Margaret_Thatcher
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Margaret_Thatcher","title":"Margaret Thatcher","description":"Prime Minister of the United Kingdom from 1979 to 1990","views":200000,"item":"Q7416","facts":[{"kind":"born","value":"1925-10-13"},{"kind":"died","value":"2013-04-08"}]}
+  popularity Some(930174)
+  words "margaret" x1
+  words "thatcher" x1
+  keys "margaretthatcher"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1979"
+  about "1990"
+  about "from"
+  about "kingdom"
+  about "margaret"
+  about "minist"
+  about "prime"
+  about "thatcher"
+  about "unit"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Marie_Curie","title":"Marie Curie","description":"Polish and naturalised-French physicist and chemist (1867–1934)","views":80000,"aliases":["Madame Curie","Maria Skłodowska"],"item":"Q7186","facts":[{"kind":"born","value":"1867-11-07"},{"kind":"died","value":"1934-07-04"},{"kind":"birthplace","value":"Warsaw"}],"lead":"Maria Salomea Skłodowska-Curie (7 November 1867 – 4 July 1934), known simply as Marie Curie, was a Polish and naturalised-French physicist and chemist who conducted pioneering research on radioactivity.","names":["Marie Skłodowska Curie","Curie, Marie"]}
+  popularity Some(860348)
+  words "curie" x4
+  words "madame" x1
+  words "maria" x1
+  words "marie" x3
+  words "sklodowska" x2
+  keys "curiemarie"
+  keys "mariecurie"
+  keys "mariesklodowskacurie"
+  aliases "madamecurie"
+  aliases "mariasklodowska"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1867"
+  about "1934"
+  about "chemist"
+  about "curi"
+  about "french"
+  about "madam"
+  about "mari"
+  about "maria"
+  about "naturalis"
+  about "physicist"
+  about "polish"
+  about "sklodowska"
+  lead "1867" x1
+  lead "1934" x1
+  lead "4" x1
+  lead "7" x1
+  lead "chemist" x1
+  lead "conduct" x1
+  lead "curi" x2
+  lead "french" x1
+  lead "juli" x1
+  lead "known" x1
+  lead "mari" x1
+  lead "maria" x1
+  lead "naturalis" x1
+  lead "novemb" x1
+  lead "physicist" x1
+  lead "pioneer" x1
+  lead "polish" x1
+  lead "radioact" x1
+  lead "research" x1
+  lead "salomea" x1
+  lead "simpli" x1
+  lead "sklodowska" x1
+  lead "who" x1
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Mars
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Mars","title":"Mars","description":"Fourth planet from the Sun","views":300000,"item":"Q111"}
+  popularity Some(961072)
+  words "mars" x1
+  keys "mars"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "fourth"
+  about "from"
+  about "mar"
+  about "planet"
+  about "sun"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Mars_Inc.
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Mars_Inc.","title":"Mars Inc.","description":"American multinational manufacturer of confectionery","site":"mars.com","views":40000,"aliases":["Mars Inc"],"item":"Q1048316"}
+  popularity Some(807527)
+  words "inc" x2
+  words "mars" x2
+  keys "marsinc"
+  aliases "marsinc"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "american"
+  about "confectioneri"
+  about "inc"
+  about "manufactur"
+  about "mar"
+  about "multin"
+  site "mars.com"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Meiosis
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Meiosis","title":"Meiosis","description":"Cell division producing gametes","views":50000}
+  popularity Some(824531)
+  words "meiosis" x1
+  keys "meiosis"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "cell"
+  about "divis"
+  about "gamet"
+  about "meiosi"
+  about "produc"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Memantine
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Memantine","title":"Memantine","description":"Medication used for Alzheimer's disease","views":9000}
+  popularity Some(693861)
+  words "memantine" x1
+  keys "memantine"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "alzheim"
+  about "diseas"
+  about "medic"
+  about "memantin"
+  about "use"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Mesozoic
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Mesozoic","title":"Mesozoic","description":"Era of geological history","views":40000,"item":"Q23445","lead":"The Mesozoic Era is the second-to-last era of Earth's geological history, lasting from about 252 to 66 million years ago and comprising the Triassic, Jurassic and Cretaceous Periods."}
+  popularity Some(807527)
+  words "mesozoic" x1
+  keys "mesozoic"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "era"
+  about "geolog"
+  about "histori"
+  about "mesozo"
+  lead "252" x1
+  lead "66" x1
+  lead "about" x1
+  lead "ago" x1
+  lead "compris" x1
+  lead "cretac" x1
+  lead "earth" x1
+  lead "era" x2
+  lead "from" x1
+  lead "geolog" x1
+  lead "histori" x1
+  lead "jurass" x1
+  lead "last" x2
+  lead "mesozo" x1
+  lead "million" x1
+  lead "period" x1
+  lead "second" x1
+  lead "triassic" x1
+  lead "year" x1
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Mitosis
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Mitosis","title":"Mitosis","description":"Process of cell division","views":60000}
+  popularity Some(838425)
+  words "mitosis" x1
+  keys "mitosis"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "cell"
+  about "divis"
+  about "mitosi"
+  about "process"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Napoleon
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Napoleon","title":"Napoleon","description":"French emperor and military leader (1769–1821)","views":250000,"aliases":["Napoleon Bonaparte","Napoleon I","Bonaparte"],"item":"Q517","facts":[{"kind":"born","value":"1769-08-15"},{"kind":"died","value":"1821-05-05"}],"lead":"Napoleon Bonaparte (born Napoleone di Buonaparte; 15 August 1769 – 5 May 1821) was a French military officer and statesman who rose to prominence during the French Revolution and became Emperor of the French."}
+  popularity Some(947178)
+  words "bonaparte" x2
+  words "i" x1
+  words "napoleon" x3
+  keys "napoleon"
+  aliases "bonaparte"
+  aliases "napoleonbonaparte"
+  aliases "napoleoni"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1769"
+  about "1821"
+  about "bonapart"
+  about "emperor"
+  about "french"
+  about "i"
+  about "leader"
+  about "militari"
+  about "napoleon"
+  lead "15" x1
+  lead "1769" x1
+  lead "1821" x1
+  lead "5" x1
+  lead "august" x1
+  lead "becam" x1
+  lead "bonapart" x1
+  lead "born" x1
+  lead "buonapart" x1
+  lead "di" x1
+  lead "dure" x1
+  lead "emperor" x1
+  lead "french" x3
+  lead "may" x1
+  lead "militari" x1
+  lead "napoleon" x2
+  lead "offic" x1
+  lead "promin" x1
+  lead "revolut" x1
+  lead "rose" x1
+  lead "statesman" x1
+  lead "who" x1
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/New_York_Post
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/New_York_Post","title":"New York Post","description":"American daily newspaper","site":"nypost.com","views":70000,"item":"Q1074091"}
+  popularity Some(850172)
+  words "new" x1
+  words "post" x1
+  words "york" x1
+  keys "newyorkpost"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "american"
+  about "daili"
+  about "new"
+  about "newspap"
+  about "post"
+  about "york"
+  site "nypost.com"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Paris
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Paris","title":"Paris","description":"Capital and largest city of France","views":350000,"item":"Q90","facts":[{"kind":"population","value":"2102650"}]}
+  popularity Some(972819)
+  words "paris" x1
+  keys "paris"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "capit"
+  about "citi"
+  about "franc"
+  about "largest"
+  about "pari"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Python_(genus)
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Python_(genus)","title":"Python (genus)","description":"Genus of reptiles","views":20000,"aliases":["Python snake"],"item":"Q271376","names":["Pythonidae"]}
+  popularity Some(754707)
+  words "genus" x1
+  words "python" x2
+  words "pythonidae" x1
+  words "snake" x1
+  keys "python"
+  keys "pythongenus"
+  keys "pythonidae"
+  aliases "pythonsnake"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "genus"
+  about "python"
+  about "pythonida"
+  about "reptil"
+  about "snake"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Python_(programming_language)
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Python_(programming_language)","title":"Python (programming language)","description":"General-purpose programming language","site":"python.org","views":120000,"aliases":["Python language","Python programming language"],"item":"Q28865","profiles":[{"service":"github","id":"python"},{"service":"x","id":"ThePSF"}],"facts":[{"kind":"founded","value":"1991-02-20"}],"lead":"Python is a high-level, general-purpose programming language. Its design philosophy emphasizes code readability with the use of significant indentation."}
+  popularity Some(891246)
+  words "language" x3
+  words "programming" x2
+  words "python" x3
+  keys "python"
+  keys "pythonprogramminglanguage"
+  aliases "pythonlanguage"
+  aliases "pythonprogramminglanguage"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "general"
+  about "languag"
+  about "program"
+  about "purpos"
+  about "python"
+  lead "code" x1
+  lead "design" x1
+  lead "emphas" x1
+  lead "general" x1
+  lead "high" x1
+  lead "indent" x1
+  lead "it" x1
+  lead "languag" x1
+  lead "level" x1
+  lead "philosophi" x1
+  lead "program" x1
+  lead "purpos" x1
+  lead "python" x1
+  lead "readabl" x1
+  lead "signific" x1
+  lead "use" x1
+  site "python.org"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Queen_(album)
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Queen_(album)","title":"Queen (album)","description":"1973 studio album by Queen","views":8000}
+  popularity Some(684886)
+  words "album" x1
+  words "queen" x1
+  keys "queen"
+  keys "queenalbum"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1973"
+  about "album"
+  about "queen"
+  about "studio"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Queen_(band)
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Queen_(band)","title":"Queen (band)","description":"British rock band","site":"queenonline.com","views":150000,"item":"Q15862"}
+  popularity Some(908251)
+  words "band" x1
+  words "queen" x1
+  keys "queen"
+  keys "queenband"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "band"
+  about "british"
+  about "queen"
+  about "rock"
+  site "queenonline.com"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/RMS_Titanic
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/RMS_Titanic","title":"RMS Titanic","description":"British ocean liner","views":300000,"aliases":["Titanic"],"item":"Q25173"}
+  popularity Some(961072)
+  words "rms" x1
+  words "titanic" x2
+  keys "rmstitanic"
+  aliases "titanic"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "british"
+  about "liner"
+  about "ocean"
+  about "rms"
+  about "titan"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Spider-Man:_No_Way_Home
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Spider-Man:_No_Way_Home","title":"Spider-Man: No Way Home","description":"2021 film by Jon Watts","views":200000,"aliases":["No Way Home","Spider-Man 3"],"item":"Q65"}
+  popularity Some(930174)
+  words "3" x1
+  words "home" x2
+  words "man" x2
+  words "no" x2
+  words "spider" x2
+  words "way" x2
+  keys "nowayhome"
+  keys "spidermannowayhome"
+  aliases "nowayhome"
+  aliases "spiderman3"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "2021"
+  about "3"
+  about "film"
+  about "home"
+  about "jon"
+  about "man"
+  about "spider"
+  about "watt"
+  about "way"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Sternum
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Sternum","title":"Sternum","description":"Long flat bone in the chest","views":30000,"item":"Q10520","lead":"The sternum or breastbone is a long flat bone located in the central part of the chest.","names":["Manubrium","Breastbone"]}
+  popularity Some(785604)
+  words "breastbone" x1
+  words "manubrium" x1
+  words "sternum" x1
+  keys "breastbone"
+  keys "manubrium"
+  keys "sternum"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "bone"
+  about "breastbon"
+  about "chest"
+  about "flat"
+  about "long"
+  about "manubrium"
+  about "sternum"
+  lead "bone" x1
+  lead "breastbon" x1
+  lead "central" x1
+  lead "chest" x1
+  lead "flat" x1
+  lead "locat" x1
+  lead "long" x1
+  lead "part" x1
+  lead "sternum" x1
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Tariff
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Tariff","title":"Tariff","description":"Tax on imports or exports","views":50000}
+  popularity Some(824531)
+  words "tariff" x1
+  keys "tariff"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "export"
+  about "import"
+  about "tariff"
+  about "tax"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Thatching
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Thatching","title":"Thatching","description":"Building a roof with dry vegetation","views":9000}
+  popularity Some(693861)
+  words "thatching" x1
+  keys "thatching"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "build"
+  about "dri"
+  about "roof"
+  about "thatch"
+  about "veget"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/The_Dark_Side_of_the_Moon
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/The_Dark_Side_of_the_Moon","title":"The Dark Side of the Moon","description":"1973 studio album by Pink Floyd","views":90000}
+  popularity Some(869323)
+  words "dark" x1
+  words "moon" x1
+  words "of" x1
+  words "side" x1
+  words "the" x2
+  keys "darksideofthemoon"
+  keys "thedarksideofthemoon"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1973"
+  about "album"
+  about "dark"
+  about "floyd"
+  about "moon"
+  about "pink"
+  about "side"
+  about "studio"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Tim_Cook
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Tim_Cook","title":"Tim Cook","description":"American business executive (born 1960)","views":90000,"item":"Q265852","website":"https://www.apple.com/leadership/tim-cook/","facts":[{"kind":"born","value":"1960-11-01"}]}
+  popularity Some(869323)
+  words "cook" x1
+  words "tim" x1
+  keys "timcook"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1960"
+  about "american"
+  about "born"
+  about "busi"
+  about "cook"
+  about "execut"
+  about "tim"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Titanic_(1997_film)
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Titanic_(1997_film)","title":"Titanic (1997 film)","description":"1997 film by James Cameron","views":250000}
+  popularity Some(947178)
+  words "1997" x1
+  words "film" x1
+  words "titanic" x1
+  keys "titanic"
+  keys "titanic1997film"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "1997"
+  about "cameron"
+  about "film"
+  about "jame"
+  about "titan"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Tomato
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Tomato","title":"Tomato","description":"Edible berry of the tomato plant","views":300000}
+  popularity Some(961072)
+  words "tomato" x1
+  keys "tomato"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "berri"
+  about "edibl"
+  about "plant"
+  about "tomato"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/Triassic
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Triassic","title":"Triassic","description":"First period of the Mesozoic Era","views":30000}
+  popularity Some(785604)
+  words "triassic" x1
+  keys "triassic"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "era"
+  about "first"
+  about "mesozo"
+  about "period"
+  about "triassic"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/U.S._Bank
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/U.S._Bank","title":"U.S. Bank","description":"American bank holding company","site":"usbank.com","views":12000,"aliases":["U.S. Bancorp","US Bank"],"item":"Q2015620"}
+  popularity Some(715781)
+  words "bancorp" x1
+  words "bank" x2
+  words "us" x3
+  keys "usbank"
+  aliases "usbancorp"
+  aliases "usbank"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "american"
+  about "bancorp"
+  about "bank"
+  about "compani"
+  about "hold"
+  about "us"
+  site "usbank.com"
+  language "en"
+doc wikipedia-en https://en.wikipedia.org/wiki/YouTube_Music
+  page {"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/YouTube_Music","title":"YouTube Music","description":"Music streaming service","site":"youtube.com","views":60000,"item":"Q28404534","profiles":[{"service":"x","id":"youtubemusic"}],"website":"https://music.youtube.com/"}
+  popularity Some(838425)
+  words "music" x1
+  words "youtube" x1
+  keys "youtubemusic"
+  scope "host:en.wikipedia.org"
+  scope "set:wikipedia-en"
+  scope "under:en.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "music"
+  about "servic"
+  about "stream"
+  about "youtub"
+  site "youtube.com"
+  language "en"
+doc wikipedia-es https://es.wikipedia.org/wiki/Galletas
+  page {"set":"wikipedia-es","url":"https://es.wikipedia.org/wiki/Galletas","title":"Galletas","description":"Recetas fáciles de galletas caseras","views":5000,"item":"Q13266"}
+  popularity Some(1000000)
+  words "galletas" x1
+  keys "galletas"
+  scope "host:es.wikipedia.org"
+  scope "set:wikipedia-es"
+  scope "under:es.wikipedia.org"
+  scope "under:org"
+  scope "under:wikipedia.org"
+  about "caser"
+  about "facil"
+  about "gallet"
+  about "recet"
+  language "es"
+doc wiktionary https://en.wiktionary.org/wiki/AWOL
+  page {"set":"wiktionary","url":"https://en.wiktionary.org/wiki/AWOL","title":"AWOL","description":"(adjective) Absent without leave.","views":300}
+  popularity Some(838849)
+  scope "host:en.wiktionary.org"
+  scope "set:wiktionary"
+  scope "under:en.wiktionary.org"
+  scope "under:org"
+  scope "under:wiktionary.org"
+  word "awol"
+  language "unknown"
+doc wiktionary https://en.wiktionary.org/wiki/Free
+  page {"set":"wiktionary","url":"https://en.wiktionary.org/wiki/Free","title":"Free","description":"(noun) A surname.","views":5}
+  popularity Some(263358)
+  scope "host:en.wiktionary.org"
+  scope "set:wiktionary"
+  scope "under:en.wiktionary.org"
+  scope "under:org"
+  scope "under:wiktionary.org"
+  word "free"
+  language "unknown"
+doc wiktionary https://en.wiktionary.org/wiki/free
+  page {"set":"wiktionary","url":"https://en.wiktionary.org/wiki/free","title":"free","description":"(adjective) Unconstrained.","views":900}
+  popularity Some(1000000)
+  scope "host:en.wiktionary.org"
+  scope "set:wiktionary"
+  scope "under:en.wiktionary.org"
+  scope "under:org"
+  scope "under:wiktionary.org"
+  word "free"
+  language "unknown"
+doc wiktionary https://en.wiktionary.org/wiki/prioritize
+  page {"set":"wiktionary","url":"https://en.wiktionary.org/wiki/prioritize","title":"prioritize","description":"(verb) To arrange in order of importance.","views":200}
+  popularity Some(779496)
+  scope "host:en.wiktionary.org"
+  scope "set:wiktionary"
+  scope "under:en.wiktionary.org"
+  scope "under:org"
+  scope "under:wiktionary.org"
+  word "prioritize"
+  language "unknown"
+# sites
+python.org popularity Some("0.8912")
+senate.gov popularity Some("0.8912")
+apple.com popularity Some("0.9830")
+youtube.com popularity Some("0.8384")
+chase.com popularity Some("0.6939")
+usbank.com popularity Some("0.7158")
+nypost.com popularity Some("0.8502")
+queenonline.com popularity Some("0.9083")
+mars.com popularity Some("0.8075")
+nytimes.com popularity None
+kernel.org popularity None
+example.com popularity None
+usbank.com title Some("U.S. Bank") demand Some("0.7158")
+nypost.com title Some("New York Post") demand Some("0.8502")
+python.org title Some("Python") demand Some("0.8912")
+who.int title None demand None
+knows python true
+knows curie false
+knows git false
+knows dengue false
+knows zzz false
+# query "marie curie"
+  search
+    0.9302 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603 named
+  entities
+    0.9302 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603 named whole
+  spelled right true
+# query "Marie Curie"
+  search
+    0.9302 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603 named
+  entities
+    0.9302 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603 named whole
+  spelled right true
+# query "madame curie"
+  search
+    0.8372 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603 named
+  entities
+    0.8372 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603 named whole
+  spelled right true
+# query "curie"
+  search
+    0.8372 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603 named
+  entities
+    0.2791 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603
+  spelled right true
+# query "radium discovery marie curie"
+  search
+    0.2791 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603
+  added
+    0.4186 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603 meant
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "python"
+  search
+    0.8511 wikipedia-en https://en.wikipedia.org/wiki/Python_(programming_language) pop=0.8912 named
+    0.7896 wikipedia-en https://en.wikipedia.org/wiki/Python_(genus) pop=0.7547 named
+    0.0449 stackoverflow https://stackoverflow.com/questions/36139 pop=0.6469
+  entities
+    0.8511 wikipedia-en https://en.wikipedia.org/wiki/Python_(programming_language) pop=0.8912 named
+    0.7896 wikipedia-en https://en.wikipedia.org/wiki/Python_(genus) pop=0.7547 named
+  naming docs=true
+    0.6000 docs https://docs.python.org/3/tutorial/index.html pop=1.0000
+    0.6000 docs https://docs.python.org/3/reference/index.html pop=1.0000
+    0.6000 docs https://docs.python.org/3/library/index.html pop=1.0000
+  spelled right true
+# query "python programming language"
+  search
+    0.8511 wikipedia-en https://en.wikipedia.org/wiki/Python_(programming_language) pop=0.8912 named
+    0.6000 docs https://docs.python.org/3/tutorial/index.html pop=1.0000 whole
+  entities
+    0.8511 wikipedia-en https://en.wikipedia.org/wiki/Python_(programming_language) pop=0.8912 named whole
+  naming docs=true
+    0.6000 docs https://docs.python.org/3/tutorial/index.html pop=1.0000 whole
+  spelled right true
+# query "pythonidae"
+  search
+    0.5264 wikipedia-en https://en.wikipedia.org/wiki/Python_(genus) pop=0.7547
+  entities
+    0.5264 wikipedia-en https://en.wikipedia.org/wiki/Python_(genus) pop=0.7547
+  added
+    0.5264 wikipedia-en https://en.wikipedia.org/wiki/Python_(genus) pop=0.7547
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "python snake"
+  search
+    0.7896 wikipedia-en https://en.wikipedia.org/wiki/Python_(genus) pop=0.7547 named
+  entities
+    0.7896 wikipedia-en https://en.wikipedia.org/wiki/Python_(genus) pop=0.7547 named whole
+  spelled right true
+# query "bernie sanders"
+  search
+    0.9541 wikipedia-en https://en.wikipedia.org/wiki/Bernie_Sanders pop=0.9083 named
+  entities
+    0.9541 wikipedia-en https://en.wikipedia.org/wiki/Bernie_Sanders pop=0.9083 named whole
+  spelled right true
+# query "senator bernie sanders"
+  search
+    0.8587 wikipedia-en https://en.wikipedia.org/wiki/Bernie_Sanders pop=0.9083 named
+  entities
+    0.8587 wikipedia-en https://en.wikipedia.org/wiki/Bernie_Sanders pop=0.9083 named
+  spelled right true
+# query "sanders"
+  search
+    0.8587 wikipedia-en https://en.wikipedia.org/wiki/Bernie_Sanders pop=0.9083 named
+  entities
+    0.2862 wikipedia-en https://en.wikipedia.org/wiki/Bernie_Sanders pop=0.9083
+  spelled right true
+# query "tim cook"
+  search
+    0.9347 wikipedia-en https://en.wikipedia.org/wiki/Tim_Cook pop=0.8693 named
+  entities
+    0.9347 wikipedia-en https://en.wikipedia.org/wiki/Tim_Cook pop=0.8693 named whole
+  spelled right true
+# query "apple ceo"
+  search
+    0.9651 wikipedia-en https://en.wikipedia.org/wiki/Apple pop=0.9302 named
+  spelled right true
+# query "apple"
+  search
+    0.9651 wikipedia-en https://en.wikipedia.org/wiki/Apple pop=0.9302 named
+    0.2974 wikipedia-en https://en.wikipedia.org/wiki/Apple_Inc. pop=0.9830
+  entities
+    0.9651 wikipedia-en https://en.wikipedia.org/wiki/Apple pop=0.9302 named
+    0.2974 wikipedia-en https://en.wikipedia.org/wiki/Apple_Inc. pop=0.9830
+  spelled right true
+# query "youtube music"
+  search
+    0.9192 wikipedia-en https://en.wikipedia.org/wiki/YouTube_Music pop=0.8384 named
+  entities
+    0.9192 wikipedia-en https://en.wikipedia.org/wiki/YouTube_Music pop=0.8384 named whole
+  spelled right true
+# query "chase"
+  search
+    0.2541 wikipedia-en https://en.wikipedia.org/wiki/Chase_Bank pop=0.6939
+  entities
+    0.2541 wikipedia-en https://en.wikipedia.org/wiki/Chase_Bank pop=0.6939
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.3811 wikipedia-en https://en.wikipedia.org/wiki/Chase_Bank pop=0.6939 meant
+  spelled right false
+# query "chase bank"
+  search
+    0.8469 wikipedia-en https://en.wikipedia.org/wiki/Chase_Bank pop=0.6939 named
+  entities
+    0.8469 wikipedia-en https://en.wikipedia.org/wiki/Chase_Bank pop=0.6939 named whole
+  spelled right true
+# query "us bank"
+  search
+    0.7721 wikipedia-en https://en.wikipedia.org/wiki/U.S._Bank pop=0.7158 named
+    0.6000 wanted https://www.usbank.com/home-loans/mortgage/mortgage-rates.html pop=1.0000
+  entities
+    0.7721 wikipedia-en https://en.wikipedia.org/wiki/U.S._Bank pop=0.7158 named whole
+  spelled right true
+# query "u.s. bancorp"
+  search
+    0.7721 wikipedia-en https://en.wikipedia.org/wiki/U.S._Bank pop=0.7158 named
+  entities
+    0.7721 wikipedia-en https://en.wikipedia.org/wiki/U.S._Bank pop=0.7158 named whole
+  spelled right true
+# query "new york post"
+  search
+    0.9251 wikipedia-en https://en.wikipedia.org/wiki/New_York_Post pop=0.8502 named
+  entities
+    0.9251 wikipedia-en https://en.wikipedia.org/wiki/New_York_Post pop=0.8502 named whole
+  spelled right true
+# query "manubrium"
+  search
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
+  entities
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
+  added
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "what is the manubrium"
+  search
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
+  added
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "breastbone"
+  search
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
+  entities
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
+  added
+    0.5357 wikipedia-en https://en.wikipedia.org/wiki/Sternum pop=0.7856
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "triassic jurassic cretaceous"
+  search
+    0.4971 wikipedia-en https://en.wikipedia.org/wiki/Mesozoic pop=0.8075
+    0.1786 wikipedia-en https://en.wikipedia.org/wiki/Triassic pop=0.7856
+  added
+    0.4971 wikipedia-en https://en.wikipedia.org/wiki/Mesozoic pop=0.8075
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.1786 wikipedia-en https://en.wikipedia.org/wiki/Triassic pop=0.7856
+  spelled right false
+# query "triassic"
+  search
+    0.8928 wikipedia-en https://en.wikipedia.org/wiki/Triassic pop=0.7856 named
+  spelled right true
+# query "free"
+  search
+    0.6869 wikipedia-en https://en.wikipedia.org/wiki/Free_(album) pop=0.5265 named
+  spelled right true
+  definition {"set":"wiktionary","url":"https://en.wiktionary.org/wiki/free","title":"free","description":"(adjective) Unconstrained.","views":900}
+# query "free bird"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+  known song {"set":"music","url":"https://musicbrainz.org/recording/8e4a59a7-5fd1-4bce-bd53-bb72d5b7d1f0","title":"Free Bird","description":"Song by Lynyrd Skynyrd, 1973","views":120000,"aliases":["Free Bird Lynyrd Skynyrd"]}
+# query "no way home"
+  search
+    0.8686 wikipedia-en https://en.wikipedia.org/wiki/Spider-Man:_No_Way_Home pop=0.9302 named
+  entities
+    0.8686 wikipedia-en https://en.wikipedia.org/wiki/Spider-Man:_No_Way_Home pop=0.9302 named whole
+  spelled right true
+# query "spider-man no way home"
+  search
+    0.8686 wikipedia-en https://en.wikipedia.org/wiki/Spider-Man:_No_Way_Home pop=0.9302 named
+  entities
+    0.8686 wikipedia-en https://en.wikipedia.org/wiki/Spider-Man:_No_Way_Home pop=0.9302 named whole
+  spelled right true
+# query "dark side of the moon"
+  search
+    0.8412 wikipedia-en https://en.wikipedia.org/wiki/The_Dark_Side_of_the_Moon pop=0.8693 named
+  spelled right true
+# query "queen"
+  search
+    0.8587 wikipedia-en https://en.wikipedia.org/wiki/Queen_(band) pop=0.9083 named
+    0.7582 wikipedia-en https://en.wikipedia.org/wiki/Queen_(album) pop=0.6849 named
+  entities
+    0.8587 wikipedia-en https://en.wikipedia.org/wiki/Queen_(band) pop=0.9083 named
+  spelled right true
+# query "queen album"
+  search
+    0.7582 wikipedia-en https://en.wikipedia.org/wiki/Queen_(album) pop=0.6849 named whole
+    0.2862 wikipedia-en https://en.wikipedia.org/wiki/Queen_(band) pop=0.9083
+  spelled right true
+# query "members of queen"
+  search
+    0.8587 wikipedia-en https://en.wikipedia.org/wiki/Queen_(band) pop=0.9083 named
+    0.7582 wikipedia-en https://en.wikipedia.org/wiki/Queen_(album) pop=0.6849 named
+  spelled right true
+# query "napoleon"
+  search
+    0.9736 wikipedia-en https://en.wikipedia.org/wiki/Napoleon pop=0.9472 named
+  entities
+    0.9736 wikipedia-en https://en.wikipedia.org/wiki/Napoleon pop=0.9472 named
+  spelled right true
+# query "how did napoleon become emperor"
+  search
+    0.4381 wikipedia-en https://en.wikipedia.org/wiki/Napoleon pop=0.9472 meant
+  added
+    0.4381 wikipedia-en https://en.wikipedia.org/wiki/Napoleon pop=0.9472 meant
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "hamstring insertion point"
+  search
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "tariffs"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "mars"
+  search
+    0.9805 wikipedia-en https://en.wikipedia.org/wiki/Mars pop=0.9611 named
+    0.2711 wikipedia-en https://en.wikipedia.org/wiki/Mars_Inc. pop=0.8075
+  entities
+    0.9805 wikipedia-en https://en.wikipedia.org/wiki/Mars pop=0.9611 named
+    0.2711 wikipedia-en https://en.wikipedia.org/wiki/Mars_Inc. pop=0.8075
+  spelled right true
+# query "mars bar company"
+  search
+    0.4412 wikipedia-en https://en.wikipedia.org/wiki/Mars pop=0.9611 meant
+  added
+    0.4412 wikipedia-en https://en.wikipedia.org/wiki/Mars pop=0.9611 meant
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "france"
+  search
+    0.9915 wikipedia-en https://en.wikipedia.org/wiki/France pop=0.9830 named
+  entities
+    0.9915 wikipedia-en https://en.wikipedia.org/wiki/France pop=0.9830 named
+  spelled right true
+# query "capital of france"
+  search
+    0.9915 wikipedia-en https://en.wikipedia.org/wiki/France pop=0.9830 named
+    0.5425 wikipedia-en https://en.wikipedia.org/wiki/Paris pop=0.9728
+  spelled right true
+# query "france population"
+  search
+    0.9915 wikipedia-en https://en.wikipedia.org/wiki/France pop=0.9830 named
+  spelled right true
+# query "paris"
+  search
+    0.9864 wikipedia-en https://en.wikipedia.org/wiki/Paris pop=0.9728 named
+  entities
+    0.9864 wikipedia-en https://en.wikipedia.org/wiki/Paris pop=0.9728 named
+  spelled right true
+# query "thatcher"
+  search
+    0.8686 wikipedia-en https://en.wikipedia.org/wiki/Margaret_Thatcher pop=0.9302 named
+  entities
+    0.2895 wikipedia-en https://en.wikipedia.org/wiki/Margaret_Thatcher pop=0.9302
+  spelled right true
+# query "president kennedy"
+  search
+    0.9000 wikipedia-en https://en.wikipedia.org/wiki/John_F._Kennedy pop=1.0000 named
+  entities
+    0.3375 wikipedia-en https://en.wikipedia.org/wiki/John_F._Kennedy pop=1.0000 whole
+  spelled right true
+# query "kennedy"
+  search
+    0.9000 wikipedia-en https://en.wikipedia.org/wiki/John_F._Kennedy pop=1.0000 named
+    0.7659 wikipedia-en https://en.wikipedia.org/wiki/Kennedy_(commentator) pop=0.7019 named
+  entities
+    0.7659 wikipedia-en https://en.wikipedia.org/wiki/Kennedy_(commentator) pop=0.7019 named
+    0.3000 wikipedia-en https://en.wikipedia.org/wiki/John_F._Kennedy pop=1.0000
+  spelled right true
+# query "titanic"
+  search
+    0.8825 wikipedia-en https://en.wikipedia.org/wiki/RMS_Titanic pop=0.9611 named
+    0.8762 wikipedia-en https://en.wikipedia.org/wiki/Titanic_(1997_film) pop=0.9472 named
+  entities
+    0.8825 wikipedia-en https://en.wikipedia.org/wiki/RMS_Titanic pop=0.9611 named
+  spelled right true
+# query "titanic movie"
+  search
+    0.8762 wikipedia-en https://en.wikipedia.org/wiki/Titanic_(1997_film) pop=0.9472 named whole
+  spelled right true
+# query "titanic sinking"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "mitosis vs meiosis"
+  search
+    0.9192 wikipedia-en https://en.wikipedia.org/wiki/Mitosis pop=0.8384 named
+    0.9123 wikipedia-en https://en.wikipedia.org/wiki/Meiosis pop=0.8245 named
+  spelled right true
+# query "is a tomato a fruit"
+  search
+    0.9805 wikipedia-en https://en.wikipedia.org/wiki/Tomato pop=0.9611 named
+    0.9736 wikipedia-en https://en.wikipedia.org/wiki/Fruit pop=0.9472 named
+  spelled right true
+# query "linked list"
+  search
+    0.9038 wikipedia-en https://en.wikipedia.org/wiki/Linked_list pop=0.8075 named
+  spelled right true
+# query "c#"
+  search
+    0.8412 wikipedia-en https://en.wikipedia.org/wiki/C_Sharp_(programming_language) pop=0.8693 named
+    0.1430 books https://openlibrary.org/works/OL17055567W pop=0.7872
+  spelled right true
+# query "how to remove a lien"
+  search
+    0.3948 wikipedia-en https://en.wikipedia.org/wiki/Lien pop=0.7547 meant
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.3948 wikipedia-en https://en.wikipedia.org/wiki/Lien pop=0.7547 meant
+  spelled right false
+# query "memantine abuse"
+  search
+    0.8469 wikipedia-en https://en.wikipedia.org/wiki/Memantine pop=0.6939 named
+    0.2599 wikipedia-en https://en.wikipedia.org/wiki/Abuse pop=0.7328
+  spelled right true
+# query "galletas"
+  search
+    1.0000 wikipedia-es https://es.wikipedia.org/wiki/Galletas pop=1.0000 named
+  entities
+    1.0000 wikipedia-es https://es.wikipedia.org/wiki/Galletas pop=1.0000 named
+  spelled right true
+# query "recetas fáciles galletas"
+  search
+    0.6000 wikipedia-es https://es.wikipedia.org/wiki/Galletas pop=1.0000
+  added
+    0.6000 wikipedia-es https://es.wikipedia.org/wiki/Galletas pop=1.0000
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "gesunde ernährung bewegung"
+  search
+    0.7500 wikipedia-de https://de.wikipedia.org/wiki/Gesunde_Ern%C3%A4hrung pop=1.0000
+  added
+    0.7500 wikipedia-de https://de.wikipedia.org/wiki/Gesunde_Ern%C3%A4hrung pop=1.0000
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "linux kernel"
+  search
+    0.7200 github https://github.com/torvalds/linux pop=1.0000 named whole
+  spelled right true
+# query "torvalds linux"
+  search
+    0.7200 github https://github.com/torvalds/linux pop=1.0000 named
+  spelled right true
+# query "rust github"
+  search
+    0.7010 github https://github.com/rust-lang/rust pop=0.9472 named
+  spelled right true
+# query "sonnet"
+  search
+    0.1408 github https://github.com/google-deepmind/sonnet pop=0.7595
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+    0.3959 github https://github.com/google-deepmind/sonnet pop=0.7595 meant
+  spelled right false
+# query "undo last git commit"
+  search
+    0.6000 stackoverflow https://stackoverflow.com/questions/927358 pop=1.0000 whole
+  spelled right true
+# query "how to undo the most recent commit in git"
+  search
+    0.6000 stackoverflow https://stackoverflow.com/questions/927358 pop=1.0000 whole
+  spelled right true
+# query "delete a git branch locally and remotely"
+  search
+    0.5969 stackoverflow https://stackoverflow.com/questions/2003505 pop=0.9898 whole
+  spelled right true
+# query "sort list of strings ignoring whitespace python"
+  search
+    0.4941 stackoverflow https://stackoverflow.com/questions/36139 pop=0.6469 whole
+  spelled right true
+# query "how to get rid of aphids"
+  search
+    0.5753 stackexchange https://gardening.stackexchange.com/questions/1234 pop=0.9178 whole
+  spelled right true
+# query "which process is using a port"
+  search
+    0.6000 stackexchange https://unix.stackexchange.com/questions/106561 pop=1.0000 whole
+  spelled right true
+# query "dune"
+  search
+    0.8000 books https://openlibrary.org/works/OL893415W pop=1.0000 named
+  spelled right true
+# query "dune frank herbert"
+  search
+    0.7200 books https://openlibrary.org/works/OL893415W pop=1.0000 named whole
+  spelled right true
+# query "dune book"
+  search
+    0.7200 books https://openlibrary.org/works/OL893415W pop=1.0000 named whole
+  spelled right true
+# query "c# in depth"
+  search
+    0.7149 books https://openlibrary.org/works/OL17055567W pop=0.7872 named
+    0.1869 wikipedia-en https://en.wikipedia.org/wiki/C_Sharp_(programming_language) pop=0.8693
+  spelled right true
+# query "the daily"
+  search
+    0.8000 podcasts https://podcastindex.org/podcast/743229 pop=1.0000 named
+  spelled right true
+# query "the daily podcast"
+  search
+    0.7200 podcasts https://podcastindex.org/podcast/743229 pop=1.0000 named whole
+  spelled right true
+# query "hardcore history"
+  search
+    0.2371 podcasts https://podcastindex.org/podcast/1 pop=0.9755
+  added
+    0.4445 podcasts https://podcastindex.org/podcast/1 pop=0.9755 meant
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "smells like teen spirit"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+  known song {"set":"music","url":"https://musicbrainz.org/recording/5fb524f1-8cc8-4c04-a921-e34c0a911ea7","title":"Smells Like Teen Spirit","description":"Song by Nirvana, 1991","views":321094,"aliases":["Smells Like Teen Spirit Nirvana"],"profiles":[{"service":"youtube-video","id":"hTWKbfoikeg"},{"service":"spotify-track","id":"1f3yAtsJtY87CTmM8RLnxf"}]}
+# query "smells like teen spirit nirvana"
+  search
+    0.7200 music https://musicbrainz.org/recording/5fb524f1-8cc8-4c04-a921-e34c0a911ea7 pop=1.0000 named whole
+  spelled right true
+# query "nevermind nirvana album"
+  search
+    0.7129 music https://musicbrainz.org/release-group/1b022e01-4da6-387b-8658-8678046e4cef pop=0.9803 named whole
+  spelled right true
+# query "teen spirit lyrics"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "inception"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "inception film"
+  search
+    0.7200 films https://en.wikipedia.org/wiki/Inception pop=1.0000 named whole
+  entities
+    0.7200 films https://en.wikipedia.org/wiki/Inception pop=1.0000 named whole
+  spelled right true
+# query "breaking bad"
+  search
+    0.7954 films https://www.wikidata.org/wiki/Q1079 pop=0.9884 named
+  entities
+    0.7954 films https://www.wikidata.org/wiki/Q1079 pop=0.9884 named
+  spelled right true
+# query "python tutorial"
+  search
+    0.6000 docs https://docs.python.org/3/tutorial/index.html pop=1.0000
+  added
+    0.6000 docs https://docs.python.org/3/tutorial/index.html pop=1.0000
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "tomllib"
+  search
+    0.9000 docs https://docs.python.org/3/library/tomllib.html pop=1.0000
+  naming docs=true
+    0.9000 docs https://docs.python.org/3/library/tomllib.html pop=1.0000 named whole
+  added
+    0.9000 docs https://docs.python.org/3/library/tomllib.html pop=1.0000
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "python tomllib"
+  search
+    0.9000 docs https://docs.python.org/3/library/tomllib.html pop=1.0000 named
+  spelled right true
+# query "padstart"
+  search
+    0.8420 docs https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart pop=0.8710
+    0.8268 docs https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.text/pad-start.html pop=0.8373
+  naming docs=true
+    0.8420 docs https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart pop=0.8710 named whole
+    0.8268 docs https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.text/pad-start.html pop=0.8373 named whole
+  added
+    0.8420 docs https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart pop=0.8710
+    0.8268 docs https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.text/pad-start.html pop=0.8373
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "javascript padstart"
+  search
+    0.8420 docs https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart pop=0.8710 named whole
+  spelled right true
+# query "react hooks"
+  search
+    0.5921 docs https://react.dev/reference/react/hooks pop=0.9738
+  added
+    0.5921 docs https://react.dev/reference/react/hooks pop=0.9738
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "asyncio"
+  search
+    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400
+  naming docs=true
+    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400 named whole
+  added
+    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "asyncio.run"
+  search
+    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400
+  naming docs=true
+    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400 named whole
+  added
+    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "python asyncio run"
+  search
+    0.8730 docs https://docs.python.org/3/library/asyncio.html pop=0.9400 named
+  spelled right true
+# query "tomllib site:docs.python.org"
+  naming docs=false
+    0.9000 docs https://docs.python.org/3/library/tomllib.html pop=1.0000 named whole
+  naming docs=true
+    0.9000 docs https://docs.python.org/3/library/tomllib.html pop=1.0000 named whole
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "dengue fever symptoms"
+  search
+    0.6000 reference https://www.healthline.com/health/dengue-fever pop=1.0000 whole
+  spelled right true
+# query "who dengue fact sheet"
+  search
+    0.6000 subpages2 https://www.who.int/news-room/fact-sheets/detail/dengue-and-severe-dengue pop=1.0000 whole
+  spelled right true
+# query "define prioritize"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "how to change a car battery"
+  search
+    1.0000 reference2 https://www.wikihow.com/Change-a-Car-Battery pop=1.0000 named
+  spelled right true
+# query "harvard admissions"
+  search
+    0.5741 subpages2 https://college.harvard.edu/admissions pop=0.9137 whole
+  spelled right true
+# query "us bank mortgage rates"
+  search
+    0.6000 wanted https://www.usbank.com/home-loans/mortgage/mortgage-rates.html pop=1.0000 whole
+    0.3861 wikipedia-en https://en.wikipedia.org/wiki/U.S._Bank pop=0.7158 meant
+  added
+    0.4000 wanted https://www.usbank.com/home-loans/mortgage/mortgage-rates.html pop=1.0000 page={"set":"wanted","url":"https://www.usbank.com/home-loans/mortgage/mortgage-rates.html","title":"Mortgage rates today","description":"Compare today's mortgage rates from U.S. Bank.","site":"usbank.com","views":500}
+    0.3861 wikipedia-en https://en.wikipedia.org/wiki/U.S._Bank pop=0.7158 meant
+  spelled right false
+# query "attention is all you need"
+  search
+    0.8000 papers https://doi.org/10.48550/arxiv.1706.03762 pop=1.0000 named whole
+  papers
+    1.0000 papers https://doi.org/10.48550/arxiv.1706.03762 pop=1.0000 named whole
+  spelled right true
+# query "attention is all you need paper"
+  search
+    0.9000 papers https://doi.org/10.48550/arxiv.1706.03762 pop=1.0000 named whole
+  papers
+    1.0000 papers https://doi.org/10.48550/arxiv.1706.03762 pop=1.0000 named whole
+  spelled right true
+# query "deep residual learning"
+  search
+    0.4782 papers https://doi.org/10.1109/cvpr.2016.90 pop=0.9926 whole
+  papers
+    0.5978 papers https://doi.org/10.1109/cvpr.2016.90 pop=0.9926
+  spelled right true
+# query "basic local alignment search tool"
+  search
+    0.7902 papers https://openalex.org/W2055043387 pop=0.9754 named whole
+  papers
+    0.9877 papers https://openalex.org/W2055043387 pop=0.9754 named whole
+  spelled right true
+# query "vaswani attention 2017"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "react"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "react npm"
+  search
+    0.9000 packages https://www.npmjs.com/package/react pop=1.0000 named
+  spelled right true
+# query "requests python"
+  search
+    0.8961 packages https://pypi.org/project/requests/ pop=0.9914 named
+  spelled right true
+# query "serde crate"
+  search
+    0.8918 packages https://crates.io/crates/serde pop=0.9817 named
+  spelled right true
+# query "gin golang"
+  search
+    0.8639 packages https://pkg.go.dev/github.com/gin-gonic/gin pop=0.9199 named
+  spelled right true
+# query "linus tech tips"
+  search
+    1.0000 wikidata https://www.wikidata.org/wiki/Q30325435 pop=1.0000 named
+  entities
+    1.0000 wikidata https://www.wikidata.org/wiki/Q30325435 pop=1.0000 named
+  spelled right true
+# query "ltt"
+  search
+    0.9000 wikidata https://www.wikidata.org/wiki/Q30325435 pop=1.0000 named
+  entities
+    0.9000 wikidata https://www.wikidata.org/wiki/Q30325435 pop=1.0000 named
+  spelled right true
+# query "awol"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+  definition {"set":"wiktionary","url":"https://en.wiktionary.org/wiki/AWOL","title":"AWOL","description":"(adjective) Absent without leave.","views":300}
+# query "what does awol mean"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "mesozoic era"
+  search
+    0.6100 wikipedia-en https://en.wikipedia.org/wiki/Mesozoic pop=0.8075
+    0.4166 wikipedia-en https://en.wikipedia.org/wiki/Triassic pop=0.7856
+  entities
+    0.4067 wikipedia-en https://en.wikipedia.org/wiki/Mesozoic pop=0.8075 whole
+  added
+    0.6100 wikipedia-en https://en.wikipedia.org/wiki/Mesozoic pop=0.8075
+    0.4166 wikipedia-en https://en.wikipedia.org/wiki/Triassic pop=0.7856
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "einstien"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "marie cruie"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+  spelling {"query":"marie curie"}
+  checked {"query":"marie curie"}
+  suggested page 0.9302 wikipedia-en https://en.wikipedia.org/wiki/Marie_Curie pop=0.8603
+# query "pythn"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "napolean"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "https://www.healthline.com/health/dengue-fever"
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+  typed page 1.0000 reference https://www.healthline.com/health/dengue-fever pop=1.0000 named whole
+# query "python.org"
+  search
+    0.9000 wikipedia-en https://en.wikipedia.org/wiki/Python_(programming_language) pop=0.8912 named
+  spelled right true
+# query "elizabeth warren"
+  search
+    0.9456 wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren pop=0.8912 named page={"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
+  entities
+    0.9456 wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren pop=0.8912 named whole page={"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
+  spelled right true
+# query "senator warren"
+  search
+    0.8511 wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren pop=0.8912 named page={"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
+  entities
+    0.8511 wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren pop=0.8912 named whole page={"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
+  spelled right true
+# query "warren senate"
+  search
+    0.5674 wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren pop=0.8912 page={"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
+  entities
+    0.5674 wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren pop=0.8912 whole page={"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
+  added
+    0.5674 wikipedia-en https://en.wikipedia.org/wiki/Elizabeth_Warren pop=0.8912 page={"set":"wikipedia-en","url":"https://en.wikipedia.org/wiki/Elizabeth_Warren","title":"Elizabeth Warren","description":"American politician and academic (born 1949)","views":120000,"aliases":["Senator Warren"],"item":"Q434706","profiles":[{"service":"x","id":"SenWarren"}],"website":"https://www.warren.senate.gov/","facts":[{"kind":"born","value":"1949-06-22"}],"lead":"Elizabeth Ann Warren (born June 22, 1949) is an American politician and former law professor.","names":["Warren, Elizabeth"]}
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query "cafe society"
+  search
+    0.7246 wikipedia-en https://en.wikipedia.org/wiki/Cafe_Society pop=0.6102 named
+  spelled right true
+# query "café society"
+  search
+    0.7246 wikipedia-en https://en.wikipedia.org/wiki/Cafe_Society pop=0.6102 named
+  spelled right true
+# query "serde serialize"
+  search
+    0.8516 docs https://docs.rs/serde/latest/serde/trait.Serialize.html pop=0.8925 named
+  spelled right true
+# query "serde::serialize"
+  search
+    0.8516 docs https://docs.rs/serde/latest/serde/trait.Serialize.html pop=0.8925 named
+  spelled right true
+# query "deep learning"
+  search
+    0.7861 papers https://doi.org/10.1038/nature14539 pop=0.9653 named
+    0.1594 papers https://doi.org/10.1109/cvpr.2016.90 pop=0.9926
+  papers
+    0.9827 papers https://doi.org/10.1038/nature14539 pop=0.9653 named whole
+    0.5978 papers https://doi.org/10.1109/cvpr.2016.90 pop=0.9926
+  spelled right true
+# query "deep learning lecun nature"
+  search
+    0.4043 papers https://doi.org/10.1038/nature14539 pop=0.9653
+  added
+    0.4043 papers https://doi.org/10.1038/nature14539 pop=0.9653
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false
+# query ""
+  papers
+    0.6000 papers https://doi.org/10.48550/arxiv.1706.03762 pop=1.0000
+    0.5978 papers https://doi.org/10.1109/cvpr.2016.90 pop=0.9926
+    0.5926 papers https://openalex.org/W2055043387 pop=0.9754
+    0.5896 papers https://doi.org/10.1038/nature14539 pop=0.9653
+  added
+    0.3986 wikipedia-en https://en.wikipedia.org/wiki/Hamstring pop=0.7717 meant
+  spelled right false

@@ -29,7 +29,7 @@ views  title  description  item  site  aliases          (tab-separated)
 
 A page may be followed by a `profiles` line of extra entries for it (official profiles, facts, a lead, docs sections), which readers that do not know an entry skip. Plumb keeps a page's names and a few facts about it, not its text: pages are found by name, and some kinds also by the words of their title, tags and description. Docs and reference pages are the exception, with a few short passages (see [the table below](#what-each-page-keeps)).
 
-The sets a node knows are `SETS` in [pages.rs](../crates/plumb-node/src/pages.rs). The node indexes the pages it keeps from every set together in one Tantivy index, `DIR/pages/index-<key>/` ([`plumb_index::pages`](../crates/plumb-index/src/pages.rs)). The key names the sets, their files or item sets, how many pages of each and the denylist, so a changed setting or a newer file builds a new index while the old one goes on answering searches. Pages the denylist denies are left out of the index.
+The sets a node knows are `SETS` in [pages.rs](../crates/plumb-node/src/pages.rs). The node indexes the pages it keeps from every set together in one Tantivy index, `DIR/pages/index-<key>/` ([`plumb_index::pages`](../crates/plumb-index/src/pages.rs)). The key names the sets, their files or item sets, how many pages of each and the denylist, so a changed setting or a newer file builds a new index while the old one goes on answering searches. Pages the denylist denies are left out of the index. The index keeps each page as its item of the [data format](../crates/plumb-format/README.md), with the set it came from, and searches read the page back from the item.
 
 ## The sets
 
@@ -151,7 +151,7 @@ flowchart LR
     index --> shown["place_pages: results page,<br/>/api/search, MCP"]
 ```
 
-[`Wanted::taking`](../crates/plumb-node/src/pages.rs) picks each set's source: the held item set when the node has no file, or when the item set holds as many pages as the node keeps and its generation is no older than the file; otherwise the file.
+[`Wanted::taking`](../crates/plumb-node/src/pages.rs) picks each set's source: the held item set when the node has no file, or when the item set holds as many pages as the node keeps and its generation is no older than the file; otherwise the file. A file's pages are made items as the index is built, as `plumb-tools set from-pages` makes them ([`SetItem::of_page`](../crates/plumb-index/src/pages/stored.rs)), so what a page says is worked out from its set once, at the build.
 
 ## Nodes in the network
 

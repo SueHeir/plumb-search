@@ -26,7 +26,7 @@
 //! which does with these functions what [`crate::RecordSet`] does with
 //! records.
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use plumb_format::refs::is_domain;
 use plumb_format::value::{is_language, unix_seconds};
 use plumb_format::Ref;
@@ -809,6 +809,78 @@ pub fn to_item(site: &Item) -> Result<Item> {
     sent_item(site)
 }
 
+/// The site as one line of JSON to send, the item [`to_item`] makes: how
+/// crawl batches and bucket answers carry a site ([`SiteRecord::to_line`]).
+pub fn to_line(site: &Item) -> Result<String> {
+    Ok(serde_json::to_string(&to_item(site)?)?)
+}
+
+/// The site a line [`to_line`] wrote holds, as the node takes it in: once
+/// its item keeps the format's rules ([`Item::check`]) and is a whole
+/// site, what [`from_sent`] keeps of it ([`SiteRecord::from_line`]).
+pub fn from_line(line: &str) -> Result<Item> {
+    let item: Item = serde_json::from_str(line)?;
+    item.check()?;
+    ensure!(
+        !item.is_extension() && !item.is_deleted(),
+        "item {:?} is not a whole site",
+        item.id
+    );
+    from_sent(&item)
+}
+
+/// What a node keeps of a `site` item from elsewhere, another node's or a
+/// signed set's: the parts a site has, each as it reads, and nothing of
+/// what the item holds besides (members and fields this version does not
+/// know, keys of fields it does not know, edges but key pages and linked
+/// sites, a redirect to a site no item can name, and the crawl marks, icon
+/// and headlines a node keeps of its own). Nothing is cleaned. It is the
+/// stored item ([`SiteRecord::stored_item_as_is`]) of the record
+/// [`SiteRecord::from_item`] reads.
+pub fn from_sent(sent: &Item) -> Result<Item> {
+    ensure!(sent.kind == SITE, "item {:?} is not a site", sent.id);
+    let mut site = new(sent.id.clone());
+    site.url = sent.url.clone();
+    site.title = sent.title.clone();
+    site.about = sent.about.clone();
+    site.text = sent.text.clone();
+    site.lang = sent.lang.clone();
+    site.names = sent.names.clone();
+    let owned = |text: Option<&str>| text.map(str::to_string);
+    set_headings(&mut site, headings(sent));
+    set_terms(&mut site, terms(sent));
+    set_kinds(&mut site, kinds(sent));
+    set_search_url(&mut site, owned(search_url(sent)));
+    set_intro(&mut site, owned(intro(sent)));
+    set_summary(&mut site, owned(summary(sent)));
+    set_wikidata_about(&mut site, owned(wikidata_about(sent)));
+    set_country(&mut site, owned(country(sent)));
+    set_signals(&mut site, &signals(sent));
+    set_crawled(&mut site, crawled(sent));
+    set_crawl_version(&mut site, crawl_version(sent));
+    set_link_texts(&mut site, &link_texts(sent));
+    set_redirect(&mut site, redirect(sent).filter(|r| is_domain(&r.to)));
+    set_key_pages(&mut site, key_pages(sent));
+    set_links_to(&mut site, links_to(sent));
+    Ok(site)
+}
+
+/// [`SiteRecord::add_alias`] to the item's `names`: unlike [`add_alias`],
+/// the text is not tidied but for its whitespace, as a node takes in the
+/// names of a crawl another node sent, which the format holds to Unicode
+/// NFC already.
+pub fn add_sent_alias(site: &mut Item, alias: &str) {
+    let alias = truncate_chars(&collapse_whitespace(alias), MAX_TEXT_CHARS);
+    let key = normalize_text(&alias);
+    if key.is_empty() || site.names.len() >= MAX_ALIASES {
+        return;
+    }
+    if site.names.iter().any(|name| normalize_text(name) == key) {
+        return;
+    }
+    site.names.push(alias);
+}
+
 fn field_str<'a>(site: &'a Item, name: &str) -> Option<&'a str> {
     site.fields.get(name).and_then(Value::as_str)
 }
@@ -1342,5 +1414,104 @@ pub(crate) mod tests {
         let shed = to_item(&shed.to_stored_item()).unwrap();
         assert!(!shed.fields.contains_key("terms"));
         assert_eq!(shed.site.as_deref(), Some("example.com"));
+    }
+
+    /// A site's item from elsewhere is taken in as the record read of it
+    /// was, as that record's stored item: items as nodes send them and as
+    /// they store them, and one holding all a site does not, or that does
+    /// not read.
+    #[test]
+    fn a_site_from_elsewhere_is_taken_in_as_its_record_was() {
+        let mut items = Vec::new();
+        for record in variants() {
+            items.extend(record.to_item());
+            items.push(record.clone().stored_item_as_is());
+        }
+        let mut odd = full_record().stored_item_as_is();
+        odd.site = Some("python.org".into());
+        odd.weight = Some(4.7);
+        odd.labels = vec!["label".into()];
+        odd.ids.insert("wikidata".into(), "Q28865".into());
+        odd.license = Some("CC0-1.0".into());
+        odd.fields.insert("unknown".into(), json!({"a": 1}));
+        let ranks = json!({"tranco": 5_000_000_000_u64, "harmonic": 3, "other": 1});
+        odd.fields.insert("ranks".into(), ranks);
+        odd.fields.insert(
+            "wikidata".into(),
+            json!({"about": 7, "country": "NL", "x": 1}),
+        );
+        let redirect = json!({"to": "foo_bar.com", "at": "2026-10-01T00:00:00Z"});
+        odd.fields.insert("redirect".into(), redirect);
+        odd.fields
+            .insert("crawled".into(), json!("2026-10-01T00:00:00.000Z"));
+        odd.fields.insert("headings".into(), json!(["News", 3]));
+        odd.edges.reverse();
+        odd.edges
+            .push(edge("cites", Ref::Site("example.com".into()), None));
+        odd.edges.push(edge(
+            "key_page",
+            Ref::Url("https://www.python.org/x".into()),
+            None,
+        ));
+        items.push(odd.clone());
+        let mut weightless = odd.clone();
+        weightless.weight = Some(-3.0);
+        weightless.fields.remove("ranks");
+        items.push(weightless);
+        let mut page = odd;
+        page.kind = "page".into();
+        items.push(page);
+        for item in items {
+            let record = SiteRecord::from_item(&item).map(SiteRecord::stored_item_as_is);
+            match (record, from_sent(&item)) {
+                (Ok(record), Ok(site)) => assert_eq!(site, record, "{}", item.id),
+                (Err(_), Err(_)) => {}
+                (record, site) => panic!("{}: {record:?}, {site:?}", item.id),
+            }
+        }
+        for record in variants() {
+            let line = record.to_line().unwrap();
+            let read = SiteRecord::from_line(&line).unwrap().stored_item_as_is();
+            assert_eq!(from_line(&line).unwrap(), read);
+            assert_eq!(to_line(&record.clone().stored_item_as_is()).unwrap(), line);
+            assert_eq!(to_line(&record.to_stored_item()).unwrap(), line);
+        }
+        let mut deleted = full_record().to_item().unwrap();
+        deleted.deleted = Some(plumb_format::Deleted {
+            at: "2026-10-01T00:00:00Z".into(),
+            reason: None,
+            other: Default::default(),
+        });
+        let line = serde_json::to_string(&deleted).unwrap();
+        assert!(SiteRecord::from_line(&line).is_err() && from_line(&line).is_err());
+        assert!(SiteRecord::from_line("{").is_err() && from_line("{").is_err());
+    }
+
+    /// A name from another node's crawl is added as a record adds it.
+    #[test]
+    fn a_sent_alias_is_added_as_a_record_adds_it() {
+        let long = format!("{} long", "x".repeat(999));
+        let aliases = [
+            "A1 Bank",
+            "  a1   bank ",
+            "A One\n",
+            "",
+            " ",
+            "Ca\u{301}fe",
+            &long,
+        ];
+        let mut record = SiteRecord::new("a1.example");
+        let mut site = new("a1.example");
+        for alias in aliases {
+            record.add_alias(alias);
+            add_sent_alias(&mut site, alias);
+        }
+        assert_eq!(site.names, record.aliases);
+        assert_eq!(site.names.len(), 4);
+        for i in 0..MAX_ALIASES {
+            record.add_alias(&format!("name {i}"));
+            add_sent_alias(&mut site, &format!("name {i}"));
+        }
+        assert_eq!(site.names, record.aliases);
     }
 }

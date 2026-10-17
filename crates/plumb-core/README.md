@@ -138,7 +138,7 @@ score  = 0.75 * rank + 0.25 * links
 
 ### Bucket keys
 
-[keys.rs](src/keys.rs) lets a search ask other nodes, or a browser ask a node, for sites without sending the query. Every name a site goes by (domain label, title and its parts, aliases, its top `KEY_LINK_TEXTS` link texts) gives keys: each word and the whole name joined. `record_keys` gives a record's keys and `site_keys` the same keys of the site's stored item, which a node's index build files its buckets by. A key falls in one of `BUCKETS` (16,384) buckets by `bucket_of`, a SHA-256 under `plumb-bucket-v1\0`. A node keeps the best `KEY_CAP` (32) sites of every key. A search fetches `BUCKETS_PER_SEARCH` (4) buckets, its own padded with random ones (`pick_buckets`), then keeps the sites that `matches` its keys and ranks them itself. `piece_of` cuts each bucket into `PIECES_PER_BUCKET` (4) pieces for private retrieval. `slim_record` and `lean_record` cut records down to what a bucket answer or a PIR table needs.
+[keys.rs](src/keys.rs) lets a search ask other nodes, or a browser ask a node, for sites without sending the query. Every name a site goes by (domain label, title and its parts, aliases, its top `KEY_LINK_TEXTS` link texts) gives keys: each word and the whole name joined. `site_keys` gives the keys of a site's stored item, which a node's index build files its buckets by. A key falls in one of `BUCKETS` (16,384) buckets by `bucket_of`, a SHA-256 under `plumb-bucket-v1\0`. A node keeps the best `KEY_CAP` (32) sites of every key. A search fetches `BUCKETS_PER_SEARCH` (4) buckets, its own padded with random ones (`pick_buckets`), then keeps the sites that `site_matches` its keys and ranks them itself. `piece_of` cuts each bucket into `PIECES_PER_BUCKET` (4) pieces for private retrieval. `slim_site` and `lean_site` cut a site's item down to what a bucket answer or a PIR table needs.
 
 > [!WARNING]
 > `bucket_of` and `piece_of` must give the same numbers on every node, in every browser and in every version. Changing them splits the network. The test `buckets_never_change` pins them.
@@ -173,7 +173,7 @@ plumb-net turns it on and adds the relay and the answering side; plumb-private t
 - `SiteRecord::new`, `add_alias`, `add_kind`, `add_link_text`, `merge`; `RecordSet::upsert`, `upsert_shared`, `into_sorted_vec`.
 - `link_score`, `sort_by_link_score`.
 - `normalize_text`, `joined`, `registrable_domain`, `canonical_domain`, `is_homepage_path`, `is_useful_anchor`.
-- `keys::record_keys`, `keys::query_keys`, `keys::pick_buckets`, `keys::bucket_of`.
+- `keys::site_keys`, `keys::query_keys`, `keys::pick_buckets`, `keys::bucket_of`.
 - `locks::{Locked, RwLocked}`; `storage::{StorageBudget, write_atomic, write_atomic_private, replace_file, remove_file, create_directory}`.
 - `read_jsonl` and `write_jsonl` for one JSON value per line.
 

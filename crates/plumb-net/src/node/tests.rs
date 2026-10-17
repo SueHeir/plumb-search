@@ -1,5 +1,7 @@
 //! The network node's tests.
 
+mod golden;
+
 use super::answering::holds_denied;
 use super::batches::{
     batch_chunks, by_crawl_epoch, delivery_bytes, max_delivery_bytes, queue_confirmed_delivery,
@@ -11,6 +13,25 @@ use crate::assign::{epoch_of, is_assigned};
 use crate::batch::{accept_trusted_batch, Batch, MAX_BATCH_AGE_EPOCHS, MAX_BATCH_RECORDS};
 use crate::popularity::Report;
 use crate::storage::allocation_for;
+use plumb_core::site::{self as site_item, Item};
+use plumb_core::sites::SiteList;
+use plumb_core::SiteRecord;
+
+/// A site crawled at `at` with `title`, as a node signs its crawls.
+fn crawled_at(domain: &str, title: &str, at: u64) -> Item {
+    let mut site = site_item::new(domain);
+    site.title = Some(title.into());
+    site_item::set_crawled(&mut site, Some(at));
+    site
+}
+
+/// `sites` signed with `key` as one batch of `epoch`, made at `made`.
+fn sign_sites(key: &Keypair, sites: Vec<Item>, epoch: u64, made: u64) -> Batch {
+    let sites: SiteList = sites.into_iter().collect();
+    Batch::sign(key, &sites, epoch, MAX_SHARE_PPM, made)
+        .unwrap()
+        .unwrap()
+}
 
 #[test]
 fn a_batch_naming_what_the_denylist_takes_off_is_not_relayed() {
@@ -120,21 +141,18 @@ async fn startup_replay_shutdown_cancels_the_receiver_wait() {
     let batches = dir.path().join("batches");
     let mut legacy = BatchStore::open(&batches).unwrap();
     for n in 0..6 {
-        let mut record = SiteRecord::new(format!("shutdown-replay-{n}.example"));
-        record.title = Some("Pending legacy delivery".into());
-        record.crawled_at = Some(now);
+        let site = crawled_at(
+            &format!("shutdown-replay-{n}.example"),
+            "Pending legacy delivery",
+            now,
+        );
         legacy
-            .insert(
-                &Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-                    .unwrap()
-                    .unwrap(),
-            )
+            .insert(&sign_sites(&key, vec![site], epoch_of(now), now))
             .unwrap();
     }
     drop(legacy);
-    let source = Arc::new(
-        crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
-    );
+    let source =
+        Arc::new(crate::BucketTable::build::<Item>(&dir.path().join("buckets"), &[]).unwrap());
     let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
     let mut config = NetConfig::new(dir.path().to_owned());
     config.listen.clear();
@@ -172,9 +190,8 @@ async fn cold_network_startup_accounts_its_directories_before_replay() {
         let dir = tempfile::tempdir().unwrap();
         let net_dir = dir.path().join("net");
         std::fs::create_dir(&net_dir).unwrap();
-        let source = Arc::new(
-            crate::BucketTable::build::<SiteRecord>(&net_dir.join("buckets"), &[]).unwrap(),
-        );
+        let source =
+            Arc::new(crate::BucketTable::build::<Item>(&net_dir.join("buckets"), &[]).unwrap());
         let budget = limit.map(|limit| StorageBudget::open(dir.path(), limit).unwrap());
         let mut config = NetConfig::new(net_dir.clone());
         config.listen.clear();
@@ -231,9 +248,8 @@ async fn cold_network_startup_accounts_its_directories_before_replay() {
 #[tokio::test]
 async fn a_scope_change_past_the_storage_limit_is_saved() {
     let dir = tempfile::tempdir().unwrap();
-    let source = Arc::new(
-        crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
-    );
+    let source =
+        Arc::new(crate::BucketTable::build::<Item>(&dir.path().join("buckets"), &[]).unwrap());
     let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
     let mut config = NetConfig::new(dir.path().to_owned());
     config.listen.clear();
@@ -302,12 +318,12 @@ async fn a_count_failure_still_enqueues_the_final_owned_delivery_and_acknowledgm
     let dir = tempfile::tempdir().unwrap();
     let key = Keypair::generate_ed25519();
     let now = now_unix();
-    let mut record = SiteRecord::new("confirmed-count-fault.example");
-    record.title = Some("Final confirmed output".into());
-    record.crawled_at = Some(now);
-    let batch = Batch::sign(&key, &[record.clone()], epoch_of(now), MAX_SHARE_PPM, now)
-        .unwrap()
-        .unwrap();
+    let site = crawled_at(
+        "confirmed-count-fault.example",
+        "Final confirmed output",
+        now,
+    );
+    let batch = sign_sites(&key, vec![site.clone()], epoch_of(now), now);
     let mut store = BatchStore::open(dir.path()).unwrap();
     store.insert(&batch).unwrap();
     let signed_path = dir.path().join(format!("{}.json", batch.id()));
@@ -320,14 +336,14 @@ async fn a_count_failure_still_enqueues_the_final_owned_delivery_and_acknowledgm
     queue_confirmed_delivery(
         tx.reserve_owned().await.unwrap(),
         RecordDelivery {
-            records: vec![record.clone()],
+            sites: SiteList::from_iter([site.clone()]),
             reservation: Some(reservation),
             acknowledgment: store.delivery_ack(&batch.id(), true),
         },
         |_| anyhow::bail!("injected count failure after confirmation"),
     );
     let queued = rx.recv().await.unwrap();
-    assert_eq!(queued.records, vec![record]);
+    assert_eq!(queued.sites, SiteList::from_iter([site]));
     assert_eq!(queued.reservation.as_ref().unwrap().bytes(), allowance);
     assert_eq!(budget.status().reserved_bytes, allowance);
     assert!(!marker.exists());
@@ -346,15 +362,15 @@ fn confirmed_delivery_sizing_releases_only_its_owned_surplus() {
     let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
     let used = budget.status().used_bytes;
     let other = budget.reserve(64 * 1024, false).unwrap();
-    let mut record = SiteRecord::new("counted.example");
-    record.description = Some("quoted \" text\n".repeat(100));
-    let records = vec![record];
+    let mut site = site_item::new("counted.example");
+    site.about = Some("quoted \" text\n".repeat(100));
+    let sites = SiteList::from_iter([site.clone()]);
     let mut owned = Some(budget.reserve(max_delivery_bytes(1), false).unwrap());
     // The line the inbox holds of it.
-    let encoded = plumb_core::stored::line(&records[0]).unwrap();
+    let encoded = plumb_core::stored::item_as_line(&site).unwrap();
     // One line break plus a possible recovery line break on append.
     let expected = allocation_for(encoded.len() as u64 + 2);
-    release_delivery_slack_with(&mut owned, || delivery_bytes(&records)).unwrap();
+    release_delivery_slack_with(&mut owned, || delivery_bytes(&sites)).unwrap();
     assert_eq!(owned.as_ref().unwrap().bytes(), expected);
     assert_eq!(budget.status().reserved_bytes, expected + other.bytes());
     assert_eq!(budget.status().used_bytes, used);
@@ -393,12 +409,10 @@ fn replay_past_the_storage_limit_still_delivers() {
     let me = PeerId::random();
     let now = now_unix();
     let batches = dir.path().join("batches");
-    let mut record = SiteRecord::new("insufficient-replay.example");
-    record.description = Some("x".repeat(8 * 1024));
-    record.crawled_at = Some(now);
-    let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-        .unwrap()
-        .unwrap();
+    let mut site = site_item::new("insufficient-replay.example");
+    site.about = Some("x".repeat(8 * 1024));
+    site_item::set_crawled(&mut site, Some(now));
+    let batch = sign_sites(&key, vec![site], epoch_of(now), now);
     BatchStore::open(&batches).unwrap().insert(&batch).unwrap();
     let path = batches.join(format!("{}.json", batch.id()));
     let signed = std::fs::read(&path).unwrap();
@@ -431,7 +445,7 @@ fn replay_past_the_storage_limit_still_delivers() {
     // The limit is a target, as in 0.2.0: the delivery is not held
     // back for it; crawls pause instead.
     let delivery = rx.blocking_recv().unwrap();
-    assert_eq!(delivery.records, confirmed);
+    assert_eq!(delivery.sites, confirmed);
     assert!(budget.status().backpressure);
     assert_eq!(budget.status().rejected_writes, 0);
     producer.join().unwrap();
@@ -454,12 +468,12 @@ fn a_start_replays_only_up_to_the_last_batch_not_delivered() {
     let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
     let mut ids = Vec::new();
     for n in 0..3 {
-        let mut record = SiteRecord::new(format!("site-{n}.example"));
-        record.title = Some(format!("Site {n}"));
-        record.crawled_at = Some(now - 3 + n);
-        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now - 3 + n)
-            .unwrap()
-            .unwrap();
+        let site = crawled_at(
+            &format!("site-{n}.example"),
+            &format!("Site {n}"),
+            now - 3 + n,
+        );
+        let batch = sign_sites(&key, vec![site], epoch_of(now), now - 3 + n);
         store.insert(&batch).unwrap();
         ids.push(batch.id());
     }
@@ -484,13 +498,13 @@ fn legacy_no_ack_replay_is_bounded_and_preserves_signed_batch_bytes() {
     let mut legacy = BatchStore::open(&batches).unwrap();
     let mut signed = Vec::new();
     for n in 0..12 {
-        let mut record = SiteRecord::new(format!("legacy-{n}.example"));
-        record.title = Some(format!("Legacy batch {n}"));
-        record.body_text = Some("An old-format batch without a delivery marker".into());
-        record.crawled_at = Some(now - 12 + n);
-        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now - 12 + n)
-            .unwrap()
-            .unwrap();
+        let mut site = crawled_at(
+            &format!("legacy-{n}.example"),
+            &format!("Legacy batch {n}"),
+            now - 12 + n,
+        );
+        site.text = Some("An old-format batch without a delivery marker".into());
+        let batch = sign_sites(&key, vec![site], epoch_of(now), now - 12 + n);
         legacy.insert(&batch).unwrap();
         signed.push((
             batch.id(),
@@ -538,8 +552,8 @@ fn legacy_no_ack_replay_is_bounded_and_preserves_signed_batch_bytes() {
     );
     let mut received = HashSet::new();
     while let Some(delivery) = rx.blocking_recv() {
-        assert_eq!(delivery.records.len(), 1);
-        received.insert(delivery.records[0].domain.clone());
+        assert_eq!(delivery.sites.len(), 1);
+        received.insert(delivery.sites.domains().next().unwrap().to_string());
         drop(delivery.reservation);
         delivery.acknowledgment.acknowledge().unwrap();
     }
@@ -566,13 +580,9 @@ fn pending_trusted_delivery_is_replayed_until_durably_acknowledged() {
     let key = Keypair::generate_ed25519();
     let crawler = key.public().to_peer_id();
     let me = PeerId::random();
-    let mut record = SiteRecord::new("shoes.example");
-    record.title = Some("Shoes".into());
-    record.body_text = Some("Handmade leather shoes".into());
-    record.crawled_at = Some(now);
-    let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-        .unwrap()
-        .unwrap();
+    let mut site = crawled_at("shoes.example", "Shoes", now);
+    site.text = Some("Handmade leather shoes".into());
+    let batch = sign_sites(&key, vec![site], epoch_of(now), now);
     let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
     store.insert(&batch).unwrap();
     // Delivered while the crawler was not trusted: that marker does not
@@ -594,7 +604,7 @@ fn pending_trusted_delivery_is_replayed_until_durably_acknowledged() {
     );
     let sent = rx.try_recv().unwrap();
     assert_eq!(
-        sent.records[0].body_text.as_deref(),
+        sent.sites.iter().next().unwrap().text.as_deref(),
         Some("Handmade leather shoes")
     );
     drop(sent); // Sending is not an acknowledgment.
@@ -636,23 +646,18 @@ fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
             .unwrap()
     };
     let crawled = |domain: &str| {
-        let mut record = SiteRecord::new(domain);
-        record.title = Some("Shop".into());
-        record.description = Some("Handmade shoes".into());
-        record.body_text = Some("Handmade leather shoes, made to order".into());
-        record.crawled_at = Some(now);
-        record
+        let mut site = crawled_at(domain, "Shop", now);
+        site.about = Some("Handmade shoes".into());
+        site.text = Some("Handmade leather shoes, made to order".into());
+        site
     };
     let (assigned, unassigned) = (site(true), site(false));
-    let batch = Batch::sign(
+    let batch = sign_sites(
         &key,
-        &[crawled(&assigned), crawled(&unassigned)],
+        vec![crawled(&assigned), crawled(&unassigned)],
         epoch,
-        MAX_SHARE_PPM,
         now,
-    )
-    .unwrap()
-    .unwrap();
+    );
     // The node answering holds no text for either site.
     let answer = || {
         (0..2)
@@ -673,7 +678,7 @@ fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
             ..NetSearch::default()
         };
         keep_trusted_crawls(&mut found, trusted, now);
-        let by = |d: &str| found.found.iter().find(|s| s.record.domain == d).cloned();
+        let by = |d: &str| found.found.iter().find(|s| s.site.domain() == d).cloned();
         (by(&assigned).unwrap(), by(&unassigned).unwrap())
     };
 
@@ -684,8 +689,8 @@ fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
     // assigned the site.
     assert!(a.keeps().is_none());
     let shared = a.shared.clone().expect("an assigned crawl counts");
-    assert_eq!(shared.description.as_deref(), Some("Handmade shoes"));
-    assert_eq!(shared.body_text, None);
+    assert_eq!(shared.item().about.as_deref(), Some("Handmade shoes"));
+    assert_eq!(shared.item().text, None);
     assert!(u.shared.is_none() && !u.verified);
     // Confirmed by crawlers this node counts, it is.
     let confirmed = crate::search::FoundSite {
@@ -700,8 +705,8 @@ fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
         assert!(site.verified);
         assert!(site.keeps().is_some());
         let text = Some("Handmade leather shoes, made to order");
-        assert_eq!(site.shared.unwrap().body_text.as_deref(), text);
-        assert_eq!(site.record.body_text.as_deref(), text);
+        assert_eq!(site.shared.unwrap().item().text.as_deref(), text);
+        assert_eq!(site.site.item().text.as_deref(), text);
     }
 }
 
@@ -710,15 +715,7 @@ fn the_largest_honest_answers_fit_under_the_response_caps() {
     // A batch of the most records, as many bytes as a batch may hold.
     let key = Keypair::generate_ed25519();
     let now = now_unix();
-    let mut batch = Batch::sign(
-        &key,
-        &[SiteRecord::new("a.com")],
-        epoch_of(now),
-        MAX_SHARE_PPM,
-        now,
-    )
-    .unwrap()
-    .unwrap();
+    let mut batch = sign_sites(&key, vec![site_item::new("a.com")], epoch_of(now), now);
     let line = "x".repeat(crate::batch::MAX_BATCH_BYTES / MAX_BATCH_RECORDS);
     batch.records = vec![line; MAX_BATCH_RECORDS];
     assert!(size(&BatchResponse::Batch(Some(batch.clone()))) < MAX_BATCH_RESPONSE);
@@ -752,21 +749,19 @@ fn a_node_goes_back_to_its_bootstrap_nodes_after_losing_them() {
 }
 
 #[test]
-fn a_record_with_an_icon_takes_two_lines_of_a_batch() {
-    let record = |i: usize, icon: bool| {
-        let mut r = SiteRecord::new(format!("s{i}.com").as_str());
-        r.icon = icon.then(|| "x".to_string());
-        r
+fn a_site_with_an_icon_takes_two_lines_of_a_batch() {
+    let site = |i: usize, icon: bool| {
+        let mut site = site_item::new(format!("s{i}.com"));
+        site_item::set_icon(&mut site, icon.then(|| "x".to_string()));
+        site
     };
-    let plain: Vec<SiteRecord> = (0..MAX_BATCH_RECORDS + 1)
-        .map(|i| record(i, false))
-        .collect();
-    let sizes: Vec<usize> = batch_chunks(&plain).iter().map(|c| c.len()).collect();
+    let plain: SiteList = (0..MAX_BATCH_RECORDS + 1).map(|i| site(i, false)).collect();
+    let sizes: Vec<usize> = batch_chunks(plain).iter().map(SiteList::len).collect();
     assert_eq!(sizes, [MAX_BATCH_RECORDS, 1]);
-    let iconed: Vec<SiteRecord> = (0..MAX_BATCH_RECORDS).map(|i| record(i, true)).collect();
-    let sizes: Vec<usize> = batch_chunks(&iconed).iter().map(|c| c.len()).collect();
+    let iconed: SiteList = (0..MAX_BATCH_RECORDS).map(|i| site(i, true)).collect();
+    let sizes: Vec<usize> = batch_chunks(iconed).iter().map(SiteList::len).collect();
     assert_eq!(sizes, [MAX_BATCH_RECORDS / 2, MAX_BATCH_RECORDS / 2]);
-    assert!(batch_chunks(&[]).is_empty());
+    assert!(batch_chunks(SiteList::new()).is_empty());
 }
 
 #[test]
@@ -774,21 +769,21 @@ fn crawls_are_published_in_the_epoch_they_were_made() {
     let now = 1_790_000_000;
     let day = crate::assign::EPOCH_SECS;
     let at = |domain: &str, crawled_at: Option<u64>| {
-        let mut r = SiteRecord::new(domain);
-        r.crawled_at = crawled_at;
-        r
+        let mut site = site_item::new(domain);
+        site_item::set_crawled(&mut site, crawled_at);
+        site
     };
-    let records = vec![
+    let sites = SiteList::from_iter([
         at("today.com", Some(now)),
         at("linked.com", None),
         at("yesterday.com", Some(now - day)),
         at("lastweek.com", Some(now - MAX_BATCH_AGE_EPOCHS * day)),
         at("tomorrow.com", Some(now + 2 * day)),
-    ];
-    let grouped = by_crawl_epoch(records, now, |_, _| true);
+    ]);
+    let grouped = by_crawl_epoch(sites, now, |_, _| true);
     let domains: Vec<(u64, Vec<&str>)> = grouped
         .iter()
-        .map(|(epoch, rs)| (*epoch, rs.iter().map(|r| r.domain.as_str()).collect()))
+        .map(|(epoch, sites)| (*epoch, sites.domains().collect()))
         .collect();
     let today = epoch_of(now);
     assert_eq!(
@@ -807,26 +802,26 @@ fn a_crawl_past_midnight_goes_with_the_epoch_it_was_assigned_in() {
     assert_eq!(midnight % day, 0);
     let today = epoch_of(midnight);
     let at = |domain: &str, crawled_at: u64| {
-        let mut r = SiteRecord::new(domain);
-        r.crawled_at = Some(crawled_at);
-        r
+        let mut site = site_item::new(domain);
+        site_item::set_crawled(&mut site, Some(crawled_at));
+        site
     };
-    let records = vec![
+    let sites = SiteList::from_iter([
         at("before.com", midnight - 60),
         at("after.com", midnight + 60),
         at("both.com", midnight + 60),
         at("today.com", midnight + 60),
-    ];
+    ]);
     // Each site is this node's in the epochs listed.
     let assigned = |epoch: u64, domain: &str| match domain {
         "before.com" | "after.com" => epoch == today - 1,
         "both.com" => true,
         _ => epoch == today,
     };
-    let grouped = by_crawl_epoch(records, midnight + 120, assigned);
+    let grouped = by_crawl_epoch(sites, midnight + 120, assigned);
     let domains: Vec<(u64, Vec<&str>)> = grouped
         .iter()
-        .map(|(epoch, rs)| (*epoch, rs.iter().map(|r| r.domain.as_str()).collect()))
+        .map(|(epoch, sites)| (*epoch, sites.domains().collect()))
         .collect();
     assert_eq!(
         domains,
@@ -988,8 +983,11 @@ fn answers_are_the_same_whatever_the_shape_of_the_stored_lines() {
 
     let dir = tempfile::tempdir().unwrap();
     let store = Mutex::new(BatchStore::open(dir.path()).unwrap());
-    let answer = super::answering::lookup(&new, &store, 0);
-    assert_eq!(answer, super::answering::lookup(&old, &store, 0));
+    let answer = super::answering::lookup(&new, &store, 0, now_unix());
+    assert_eq!(
+        answer,
+        super::answering::lookup(&old, &store, 0, now_unix())
+    );
     let sent = answer.records.unwrap();
     assert_eq!(sent.len(), sites.len());
     for (sent, site) in sent.iter().zip(&sites) {

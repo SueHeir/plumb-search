@@ -31,6 +31,7 @@ use tantivy::IndexReader;
 
 mod building;
 mod docs;
+mod dump;
 mod linking;
 mod named_site;
 mod page;
@@ -41,6 +42,7 @@ mod repos;
 mod scoring;
 mod search;
 mod sites;
+mod stored;
 
 pub use self::building::{build_page_index, build_page_index_with_budget, GO_ON_EVERY};
 pub use self::docs::{docs_query_topic, docs_symbol_matches};
@@ -57,6 +59,7 @@ pub(crate) use self::placing::{
 pub use self::scoring::{made_by, site_pages_after_named_article};
 pub use self::search::{DEMAND_NOTED, KNOWN_SONG_LISTENERS, KNOWN_SONG_MARGIN};
 pub use self::sites::base_title;
+pub use self::stored::SetItem;
 
 /// `name` of a page one of whose aliases the query is.
 pub const ALIAS_MATCH: f32 = 0.9;
@@ -202,8 +205,9 @@ const TITLE_INSIDE_CANDIDATES: usize = 20;
 /// Most articles found by their leads looked at for one query.
 const LEAD_CANDIDATES: usize = 20;
 
-/// Changes whenever the page index schema or indexed search fields change.
-pub const PAGE_INDEX_VERSION: &str = "v11-docs-address-symbols-short-titles-sharps-aliases";
+/// Changes whenever the page index schema, its indexed search fields or
+/// what its stored field keeps of a page change.
+pub const PAGE_INDEX_VERSION: &str = "v12-items";
 
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.

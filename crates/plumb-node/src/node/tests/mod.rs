@@ -10,7 +10,9 @@ mod agents;
 mod crawl_golden;
 mod indexes_and_rounds;
 mod meaning;
+mod network_golden;
 mod owner;
+mod pages_golden;
 mod seed_golden;
 mod sets;
 mod setup;
@@ -25,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use plumb_core::sites::SiteList;
 use plumb_core::{now_unix, write_jsonl, SiteRecord};
 use plumb_index::Hit;
 use plumb_ingest::{
@@ -75,6 +78,18 @@ fn fixture_records() -> Vec<SiteRecord> {
         .iter()
         .map(|site| SiteRecord::from_stored_item(&site).unwrap())
         .collect()
+}
+
+/// `records` as the node holds the sites it publishes and takes in from
+/// the network: their stored items, each as its line.
+fn listed(records: &[SiteRecord]) -> SiteList {
+    let item = |record: &SiteRecord| record.clone().stored_item_as_is();
+    records.iter().map(item).collect()
+}
+
+/// The stored items of `records`, cleaned as a node's sets hold them.
+fn stored_items(records: &[SiteRecord]) -> Vec<plumb_core::site::Item> {
+    records.iter().map(SiteRecord::to_stored_item).collect()
 }
 
 /// A data directory holding the fixture records, as if put there by hand.

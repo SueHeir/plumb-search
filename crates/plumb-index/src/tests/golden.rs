@@ -10,7 +10,7 @@
 //! golden file of its own (plumb-node's `outline_golden.txt`).
 //!
 //! The file was written by the build that read records, before the build
-//! moved onto items (and with [`plumb_core::keys::record_keys`]), so it
+//! moved onto items (and with the keys of the record, since gone), so it
 //! says the two make the same index. It is never
 //! written again to make a test pass: a difference is a change in what the
 //! index holds, and so in search results. When the index is meant to

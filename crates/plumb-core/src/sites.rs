@@ -300,8 +300,80 @@ pub struct SiteList {
 }
 
 impl SiteList {
+    /// A list of no sites.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn len(&self) -> usize {
         self.held.len()
+    }
+
+    /// Adds `site` at the end, as its line.
+    pub fn push(&mut self, site: Item) {
+        self.held.push(Held::of(site));
+    }
+
+    /// Adds a site held as its line at the end, as it is.
+    pub fn push_line(&mut self, site: SiteLine) {
+        self.held.push(site.0);
+    }
+
+    /// The sites' domains in order, read without their lines.
+    pub fn domains(&self) -> impl ExactSizeIterator<Item = &str> + '_ {
+        self.held.iter().map(Held::domain)
+    }
+
+    /// Keeps the sites `keep` says to, in order, each read from its line;
+    /// the lines kept are not written again.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Item) -> bool) {
+        self.held.retain(|held| keep(&held.item()));
+    }
+
+    /// Keeps only the sites of the domains for which `keep` is true, in
+    /// order, without reading any site.
+    pub fn retain_domains(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.held.retain(|held| keep(held.domain()));
+    }
+
+    /// Keeps the sites `keep` says to, in order, each read from its line
+    /// and written again as `keep` leaves it.
+    pub fn retain_mut(&mut self, mut keep: impl FnMut(&mut Item) -> bool) {
+        let held = std::mem::take(&mut self.held);
+        self.held = held
+            .into_iter()
+            .filter_map(|held| {
+                let mut site = held.item();
+                drop(held);
+                keep(&mut site).then(|| Held::of(site))
+            })
+            .collect();
+    }
+
+    /// The sites `first` says are its, and the rest, each in order, their
+    /// lines moved and not written again.
+    pub fn partition(self, mut first: impl FnMut(&Item) -> bool) -> (SiteList, SiteList) {
+        let (yes, no) = self.held.into_iter().partition(|held| first(&held.item()));
+        (SiteList { held: yes }, SiteList { held: no })
+    }
+
+    /// Sorts the sites by `key`, read off each site's item once; stable,
+    /// and the lines are moved, not written again.
+    pub fn sort_by_cached_key<K: Ord>(&mut self, mut key: impl FnMut(&Item) -> K) {
+        self.held.sort_by_cached_key(|held| key(&held.item()));
+    }
+
+    /// Splits the list in two at `at`: the sites from `at` on are returned,
+    /// and the first `at` stay.
+    pub fn split_off(&mut self, at: usize) -> SiteList {
+        SiteList {
+            held: self.held.split_off(at),
+        }
+    }
+
+    /// The sites in order, each held as its line.
+    pub fn into_lines(self) -> impl ExactSizeIterator<Item = SiteLine> {
+        self.held.into_iter().map(SiteLine)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -353,6 +425,113 @@ impl FromIterator<Item> for SiteList {
     fn from_iter<I: IntoIterator<Item = Item>>(iter: I) -> Self {
         let held = iter.into_iter().map(Held::of).collect();
         SiteList { held }
+    }
+}
+
+/// Sites held as their lines, in the order they come.
+impl FromIterator<SiteLine> for SiteList {
+    fn from_iter<I: IntoIterator<Item = SiteLine>>(iter: I) -> Self {
+        let held = iter.into_iter().map(|site| site.0).collect();
+        SiteList { held }
+    }
+}
+
+/// Adds the sites at the end, each as its line.
+impl Extend<Item> for SiteList {
+    fn extend<I: IntoIterator<Item = Item>>(&mut self, iter: I) {
+        self.held.extend(iter.into_iter().map(Held::of));
+    }
+}
+
+/// Adds another list's sites at the end, their lines as they are.
+impl Extend<SiteLine> for SiteList {
+    fn extend<I: IntoIterator<Item = SiteLine>>(&mut self, iter: I) {
+        self.held.extend(iter.into_iter().map(|site| site.0));
+    }
+}
+
+/// Two lists are the same when they hold the same lines in the same order.
+impl PartialEq for SiteList {
+    fn eq(&self, other: &SiteList) -> bool {
+        self.held.len() == other.held.len()
+            && self.held.iter().zip(&other.held).all(|(a, b)| a.0 == b.0)
+    }
+}
+
+impl Eq for SiteList {}
+
+/// One site held as a [`SiteList`] holds each of its sites: its stored
+/// line ([`stored::write_item`]), with its domain, read as its item when
+/// asked for ([`SiteLine::item`]). Code that keeps sites one by one, such
+/// as the sites a network search found, keeps them this way and not as
+/// items, which take several times the memory (see the module doc).
+#[derive(Clone)]
+pub struct SiteLine(Held);
+
+impl SiteLine {
+    /// `site` as its line.
+    pub fn of(site: Item) -> SiteLine {
+        SiteLine(Held::of(site))
+    }
+
+    /// The site's domain, read without its line.
+    pub fn domain(&self) -> &str {
+        self.0.domain()
+    }
+
+    /// The site, read from its line.
+    pub fn item(&self) -> Item {
+        self.0.item()
+    }
+
+    /// The site's stored line, without its line break.
+    pub fn line(&self) -> &[u8] {
+        self.0.line()
+    }
+
+    /// Changes the site with `change`, read from its line and written
+    /// again as `change` leaves it; returns what `change` does.
+    pub fn update<T>(&mut self, change: impl FnOnce(&mut Item) -> T) -> T {
+        let mut site = self.item();
+        let out = change(&mut site);
+        *self = SiteLine::of(site);
+        out
+    }
+}
+
+impl From<Item> for SiteLine {
+    fn from(site: Item) -> SiteLine {
+        SiteLine::of(site)
+    }
+}
+
+impl fmt::Debug for SiteLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SiteLine")
+            .field(&String::from_utf8_lossy(self.line()))
+            .finish()
+    }
+}
+
+/// Two sites held are the same when their lines are.
+impl PartialEq for SiteLine {
+    fn eq(&self, other: &SiteLine) -> bool {
+        self.0 .0 == other.0 .0
+    }
+}
+
+impl Eq for SiteLine {}
+
+/// Serialized as its item.
+impl serde::Serialize for SiteLine {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.item(), serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SiteLine {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        <Item as serde::Deserialize>::deserialize(deserializer).map(SiteLine::of)
     }
 }
 
@@ -904,6 +1083,97 @@ mod tests {
         list.truncate(2);
         assert_eq!(list.into_iter().collect::<Vec<Item>>(), items[..2]);
         assert!(SiteList::default().is_empty());
+    }
+
+    /// A list changed a site at a time holds what the same changes to its
+    /// items make, each as its line, and moves the lines it does not change.
+    #[test]
+    fn a_list_changes_as_its_items_do() {
+        let (_, sites) = both(&incoming());
+        let items: Vec<Item> = sites.into_sorted().into_iter().collect();
+        assert!(items.len() >= 4);
+        let lines = |items: &[Item]| -> Vec<Vec<u8>> {
+            items
+                .iter()
+                .map(|site| stored::item_as_line(site).unwrap())
+                .collect()
+        };
+        let mut list = SiteList::new();
+        for site in &items {
+            list.push(site.clone());
+        }
+        assert_eq!(list, items.iter().cloned().collect::<SiteList>());
+        assert_eq!(
+            list.domains().collect::<Vec<_>>(),
+            items.iter().map(|s| s.id.as_str()).collect::<Vec<_>>()
+        );
+
+        let crawled = |site: &Item| site::crawled(site).is_some();
+        let (with, without) = list.clone().partition(crawled);
+        let (want, rest): (Vec<Item>, Vec<Item>) = items.iter().cloned().partition(crawled);
+        assert_eq!(
+            with.lines().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            lines(&want)
+        );
+        assert_eq!(
+            without.lines().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            lines(&rest)
+        );
+
+        let mut kept = list.clone();
+        kept.retain(|site| site.title.is_some());
+        let want: Vec<Item> = items
+            .iter()
+            .filter(|s| s.title.is_some())
+            .cloned()
+            .collect();
+        assert_eq!(kept.iter().collect::<Vec<_>>(), want);
+        let mut by_domain = list.clone();
+        by_domain.retain_domains(|domain| domain != items[0].id);
+        assert_eq!(by_domain.iter().collect::<Vec<_>>(), items[1..]);
+
+        let mut changed = list.clone();
+        changed.retain_mut(|site| {
+            site.title = None;
+            site.id != items[1].id
+        });
+        let mut want: Vec<Item> = items.clone();
+        want.remove(1);
+        for site in &mut want {
+            site.title = None;
+        }
+        assert_eq!(
+            changed.lines().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            lines(&want)
+        );
+
+        let mut sorted = list.clone();
+        sorted.sort_by_cached_key(|site| Reverse(site.id.clone()));
+        let mut want = items.clone();
+        want.sort_by_key(|site| Reverse(site.id.clone()));
+        assert_eq!(sorted.iter().collect::<Vec<_>>(), want);
+
+        let mut head = list.clone();
+        let tail = head.split_off(1);
+        assert_eq!((head.len(), tail.len()), (1, items.len() - 1));
+        let mut joined = head.clone();
+        joined.extend(tail.into_lines());
+        assert_eq!(joined, list);
+        joined.extend(vec![items[0].clone()]);
+        assert_eq!(joined.len(), items.len() + 1);
+
+        let mut one = list.into_lines().next().unwrap();
+        assert_eq!(one.domain(), items[0].id);
+        assert_eq!(one.item(), items[0]);
+        assert_eq!(one.line(), stored::item_as_line(&items[0]).unwrap());
+        assert_eq!(one, SiteLine::of(items[0].clone()));
+        let json = serde_json::to_string(&one).unwrap();
+        assert_eq!(json.as_bytes(), one.line());
+        assert_eq!(serde_json::from_str::<SiteLine>(&json).unwrap(), one);
+        let had = one.update(|site| site.title.take());
+        assert_eq!(had, items[0].title);
+        assert_eq!(one.item().title, None);
+        assert_eq!(one.domain(), items[0].id);
     }
 
     #[test]

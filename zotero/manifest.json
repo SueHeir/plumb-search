@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Plumb Search",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Search Plumb, the open peer-to-peer search engine, from Zotero, and add papers, books, articles and sites with their details.",
   "homepage_url": "https://github.com/SueHeir/plumb-search/tree/main/zotero",
   "author": "Plumb Search contributors",

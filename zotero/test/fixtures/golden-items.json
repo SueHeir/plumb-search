@@ -1,0 +1,802 @@
+{
+ "apple": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "site",
+     "site": {
+      "domain": "apple.com",
+      "url": "https://www.apple.com/",
+      "title": "Apple",
+      "description": "Discover the innovative world of Apple and shop everything iPhone, iPad, Apple Watch, Mac, and Apple TV, plus explore accessories, entertainment, and expert device support."
+     },
+     "pages": [
+      {
+       "item": {
+        "id": "https://en.wikipedia.org/wiki/Apple_Inc.",
+        "kind": "article",
+        "title": "Apple Inc.",
+        "url": "https://en.wikipedia.org/wiki/Apple_Inc.",
+        "site": "wikipedia.org",
+        "names": [
+         "Apple Computer"
+        ],
+        "about": "American technology company",
+        "text": "Apple Inc. is an American multinational technology company headquartered in Cupertino, California.",
+        "lang": "en",
+        "weight": 400000.0,
+        "ids": {
+         "wd": "Q312"
+        },
+        "edges": [
+         {
+          "rel": "about",
+          "to": "site:apple.com"
+         }
+        ],
+        "fields": {
+         "facts": [
+          {
+           "kind": "founded",
+           "value": "1976-04-01"
+          },
+          {
+           "kind": "ceo",
+           "value": "Tim Cook"
+          },
+          {
+           "kind": "headquarters",
+           "value": "Cupertino"
+          }
+         ],
+         "profiles": [
+          {
+           "id": "Apple",
+           "service": "x"
+          }
+         ]
+        }
+       },
+       "set": "wikipedia-en",
+       "score": 0.3,
+       "named": false,
+       "popularity": 1.0,
+       "under": "apple.com",
+       "at": 0
+      }
+     ]
+    },
+    {
+     "kind": "page",
+     "page": {
+      "item": {
+       "id": "https://en.wikipedia.org/wiki/Apple",
+       "kind": "article",
+       "title": "Apple",
+       "url": "https://en.wikipedia.org/wiki/Apple",
+       "site": "wikipedia.org",
+       "about": "Fruit of the apple tree",
+       "lang": "en",
+       "weight": 200000.0,
+       "ids": {
+        "wd": "Q89"
+       }
+      },
+      "set": "wikipedia-en",
+      "score": 0.9731,
+      "named": true,
+      "popularity": 0.9463,
+      "learned": "last",
+      "at": 1
+     }
+    }
+   ]
+  }
+ },
+ "undo last git commit": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "page",
+     "page": {
+      "item": {
+       "id": "https://stackoverflow.com/questions/927358",
+       "kind": "question",
+       "title": "How do I undo the most recent local commits in Git?",
+       "url": "https://stackoverflow.com/questions/927358",
+       "site": "stackoverflow.com",
+       "names": [
+        "Undo the last git commit"
+       ],
+       "about": "git, version-control, git-commit, undo",
+       "lang": "en",
+       "weight": 13000000.0
+      },
+      "set": "stackoverflow",
+      "score": 0.6,
+      "named": false,
+      "popularity": 1.0,
+      "whole": true,
+      "at": 0
+     }
+    }
+   ]
+  }
+ },
+ "which process is using a port": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "page",
+     "page": {
+      "item": {
+       "id": "https://unix.stackexchange.com/questions/106561",
+       "kind": "question",
+       "title": "How do I find which process is using a port?",
+       "url": "https://unix.stackexchange.com/questions/106561",
+       "site": "stackexchange.com",
+       "about": "linux, networking, ports",
+       "lang": "en",
+       "weight": 250000.0
+      },
+      "set": "stackexchange",
+      "score": 0.6,
+      "named": false,
+      "popularity": 1.0,
+      "whole": true,
+      "learned": {
+       "before": "harvard.edu"
+      },
+      "at": 0
+     }
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "harvard.edu",
+      "url": "https://www.harvard.edu/index.html",
+      "title": "Harvard University",
+      "description": "Harvard University is devoted to excellence in teaching, learning, and research, and to developing leaders who make a difference globally."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "wikipedia.org",
+      "url": "https://www.wikipedia.org/",
+      "title": "Wikipedia",
+      "description": "Wikipedia is a free online encyclopedia, created and edited by volunteers around the world and hosted by the Wikimedia Foundation."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "fordfoundation.org",
+      "url": "https://www.fordfoundation.org/",
+      "title": "Home - Ford Foundation",
+      "description": "The Ford Foundation is an independent organization working to address inequality and build a future grounded in justice."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "chasecenter.com",
+      "url": "https://www.chasecenter.com/",
+      "title": "Chase Center | San Francisco's Home of the Golden State Warriors",
+      "description": "Chase Center is a sports and entertainment arena in San Francisco's Mission Bay, home of the Golden State Warriors."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "irs.gov",
+      "url": "https://www.irs.gov/",
+      "title": "Internal Revenue Service (IRS) | An official website of the United States government",
+      "description": "Find tax forms, check your refund status, make a payment and get answers to your tax questions."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "ssa.gov",
+      "url": "https://www.ssa.gov/",
+      "title": "The United States Social Security Administration",
+      "description": "Apply for retirement, disability and survivor benefits, get a replacement Social Security card, and manage your benefits online."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "va.gov",
+      "url": "https://www.va.gov/",
+      "title": "VA.gov Home | Veterans Affairs",
+      "description": "Apply for and manage the VA benefits and services you've earned as a Veteran, Servicemember or family member, like health care, disability, education and more."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "stanford.edu",
+      "url": "https://www.stanford.edu/",
+      "title": "Stanford University",
+      "description": "Stanford University, one of the world's leading teaching and research universities, is located in the heart of Silicon Valley."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "mit.edu",
+      "url": "https://www.mit.edu/",
+      "title": "MIT - Massachusetts Institute of Technology",
+      "description": "MIT is dedicated to advancing knowledge and educating students in science, technology and other areas of scholarship."
+     },
+     "pages": []
+    }
+   ]
+  }
+ },
+ "python tomllib": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "page",
+     "page": {
+      "item": {
+       "id": "https://docs.python.org/3/library/tomllib.html",
+       "kind": "docs-page",
+       "title": "tomllib — Parse TOML files",
+       "url": "https://docs.python.org/3/library/tomllib.html",
+       "site": "docs.python.org",
+       "names": [
+        "Python tomllib",
+        "tomllib Python",
+        "Parse TOML files tomllib",
+        "tomllib Parse TOML files"
+       ],
+       "about": "Source code: Lib/tomllib This module provides an interface for parsing TOML 1.1.0 (Tom’s Obvious Minimal Language, https://toml.io). This module does not suppor",
+       "weight": 5000.0,
+       "fields": {
+        "sections": [
+         "Examples",
+         "Conversion Table",
+         "Limits and interoperability considerations"
+        ]
+       }
+      },
+      "set": "docs",
+      "score": 0.9,
+      "named": true,
+      "popularity": 1.0,
+      "at": 0
+     }
+    }
+   ]
+  }
+ },
+ "dengue fever symptoms": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "page",
+     "page": {
+      "item": {
+       "id": "https://www.healthline.com/health/dengue-fever",
+       "kind": "page",
+       "title": "Dengue Fever: Symptoms, Causes, and Treatment",
+       "url": "https://www.healthline.com/health/dengue-fever",
+       "site": "healthline.com",
+       "about": "Dengue fever is a mosquito-borne illness: its symptoms, causes and treatment.",
+       "weight": 800.0
+      },
+      "set": "reference",
+      "score": 0.6,
+      "named": false,
+      "popularity": 1.0,
+      "whole": true,
+      "at": 0
+     }
+    }
+   ]
+  }
+ },
+ "cdc dengue": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "site",
+     "site": {
+      "domain": "cdc.gov",
+      "url": "https://www.cdc.gov/",
+      "title": "Centers for Disease Control and Prevention | CDC",
+      "description": "CDC works 24/7 protecting America's health, safety and security."
+     },
+     "pages": [
+      {
+       "item": {
+        "id": "https://www.cdc.gov/dengue/index.html",
+        "kind": "page",
+        "title": "Dengue and severe dengue",
+        "url": "https://www.cdc.gov/dengue/index.html",
+        "site": "cdc.gov",
+        "about": "WHO fact sheet on dengue: key facts, transmission, symptoms and treatment.",
+        "weight": 900.0,
+        "edges": [
+         {
+          "rel": "about",
+          "to": "site:cdc.gov"
+         }
+        ]
+       },
+       "set": "subpages2",
+       "score": 0.3,
+       "named": false,
+       "popularity": 1.0,
+       "under": "cdc.gov",
+       "at": 0
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "attention is all you need": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "page",
+     "page": {
+      "item": {
+       "id": "10.48550/arxiv.1706.03762",
+       "kind": "paper",
+       "title": "Attention Is All You Need",
+       "url": "https://doi.org/10.48550/arxiv.1706.03762",
+       "site": "doi.org",
+       "about": "The dominant sequence transduction models are based on recurrent networks.",
+       "weight": 120000.0,
+       "published": "2017-06-12",
+       "ids": {
+        "arxiv": "1706.03762",
+        "doi": "10.48550/arxiv.1706.03762"
+       },
+       "fields": {
+        "authors": [
+         "Ashish Vaswani",
+         "Noam Shazeer"
+        ],
+        "paper": {
+         "arxiv_id": "1706.03762",
+         "count": 120000,
+         "count_kind": "citations",
+         "doi": "10.48550/arxiv.1706.03762",
+         "publication_date": "2017-06-12",
+         "publication_year": 2017,
+         "source": "openalex"
+        },
+        "venue": "Advances in Neural Information Processing Systems",
+        "website": "https://arxiv.org/abs/1706.03762"
+       }
+      },
+      "set": "papers",
+      "score": 0.8,
+      "named": true,
+      "popularity": 1.0,
+      "whole": true,
+      "learned": {
+       "before": "youtube.com"
+      },
+      "at": 0
+     }
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "youtube.com",
+      "url": "https://www.youtube.com/",
+      "title": "YouTube",
+      "description": "Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "homedepot.com",
+      "url": "https://www.homedepot.com/",
+      "title": "The Home Depot",
+      "description": "Shop online for all your home improvement needs: appliances, tools, lumber, flooring, paint, lighting and more."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "facebook.com",
+      "url": "https://www.facebook.com/",
+      "title": "Facebook - log in or sign up",
+      "description": "Log into Facebook to start sharing and connecting with your friends, family, and people you know."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "bankofamerica.com",
+      "url": "https://www.bankofamerica.com/",
+      "title": "Bank of America - Banking, Credit Cards, Loans and Merrill Investing",
+      "description": "What would you like the power to do? At Bank of America, our purpose is to help make financial lives better through the power of every connection."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "nasa.gov",
+      "url": "https://www.nasa.gov/",
+      "title": "NASA",
+      "description": "NASA.gov brings you the latest news, images and videos from America's space agency, pioneering the future in space exploration, scientific discovery and aeronautics research."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "stanford.edu",
+      "url": "https://www.stanford.edu/",
+      "title": "Stanford University",
+      "description": "Stanford University, one of the world's leading teaching and research universities, is located in the heart of Silicon Valley."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "harvard.edu",
+      "url": "https://www.harvard.edu/index.html",
+      "title": "Harvard University",
+      "description": "Harvard University is devoted to excellence in teaching, learning, and research, and to developing leaders who make a difference globally."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "wikipedia.org",
+      "url": "https://www.wikipedia.org/",
+      "title": "Wikipedia",
+      "description": "Wikipedia is a free online encyclopedia, created and edited by volunteers around the world and hosted by the Wikimedia Foundation."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "chase.com",
+      "url": "https://www.chase.com/",
+      "title": "Chase Bank - Credit Cards, Mortgages, Commercial Banking, Auto Loans",
+      "description": "With Chase online banking you can manage your accounts, view statements, pay bills and transfer funds securely from one place."
+     },
+     "pages": []
+    }
+   ]
+  }
+ },
+ "requests python": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "page",
+     "page": {
+      "item": {
+       "id": "pypi:requests",
+       "kind": "package",
+       "title": "requests",
+       "url": "https://pypi.org/project/requests/",
+       "site": "pypi.org",
+       "about": "Python HTTP for Humans.",
+       "weight": 800000.0,
+       "ids": {
+        "pypi": "requests"
+       },
+       "fields": {
+        "package": {
+         "license": "Apache-2.0",
+         "name": "requests",
+         "registry": "pypi",
+         "released": "2026-03-01",
+         "repo": "https://github.com/example/requests",
+         "version": "2.32.3"
+        }
+       }
+      },
+      "set": "packages",
+      "score": 0.9,
+      "named": true,
+      "popularity": 1.0,
+      "at": 0
+     }
+    }
+   ]
+  }
+ },
+ "dune": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "page",
+     "page": {
+      "item": {
+       "id": "https://openlibrary.org/works/OL893415W",
+       "kind": "book",
+       "title": "Dune",
+       "url": "https://openlibrary.org/works/OL893415W",
+       "site": "openlibrary.org",
+       "names": [
+        "Dune Frank Herbert"
+       ],
+       "about": "Book by Frank Herbert",
+       "weight": 50000.0
+      },
+      "set": "books",
+      "score": 0.8,
+      "named": true,
+      "popularity": 1.0,
+      "at": 0
+     }
+    }
+   ]
+  }
+ },
+ "breaking bad": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "page",
+     "page": {
+      "item": {
+       "id": "Q1079",
+       "kind": "film",
+       "title": "Breaking Bad",
+       "url": "https://www.wikidata.org/wiki/Q1079",
+       "site": "wikidata.org",
+       "about": "American television series (2008–2013)",
+       "weight": 290.0,
+       "ids": {
+        "wd": "Q1079"
+       }
+      },
+      "set": "films",
+      "score": 0.7954,
+      "named": true,
+      "popularity": 0.9884,
+      "learned": {
+       "before": "cnn.com"
+      },
+      "at": 0
+     }
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "cnn.com",
+      "url": "https://www.cnn.com/",
+      "title": "CNN: Breaking News, Latest News and Videos",
+      "description": "View the latest news and breaking news today for U.S., world, weather, entertainment, politics and health at CNN.com."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "nytimes.com",
+      "url": "https://www.nytimes.com/",
+      "title": "The New York Times - Breaking News, US News, World News and Videos",
+      "description": "Live news, investigations, opinion, photos and video by the journalists of The New York Times from more than 150 countries around the world."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "bbc.com",
+      "url": "https://www.bbc.com/",
+      "title": "BBC Home - Breaking News, World News, US News, Sports, Business, Innovation, Climate, Culture, Travel, Video & Audio",
+      "description": "Visit BBC for trusted reporting on the latest world and US news, sports, business, climate, innovation, culture and much more."
+     },
+     "pages": []
+    }
+   ]
+  }
+ },
+ "the daily podcast": {
+  "assembled": {
+   "rows": [
+    {
+     "kind": "site",
+     "site": {
+      "domain": "nytimes.com",
+      "url": "https://www.nytimes.com/",
+      "title": "The New York Times - Breaking News, US News, World News and Videos",
+      "description": "Live news, investigations, opinion, photos and video by the journalists of The New York Times from more than 150 countries around the world."
+     },
+     "pages": [
+      {
+       "item": {
+        "id": "https://podcastindex.org/podcast/743229",
+        "kind": "podcast",
+        "title": "The Daily",
+        "url": "https://podcastindex.org/podcast/743229",
+        "site": "podcastindex.org",
+        "names": [
+         "The Daily podcast"
+        ],
+        "about": "Podcast by The New York Times · News",
+        "weight": 120000.0,
+        "edges": [
+         {
+          "rel": "about",
+          "to": "site:nytimes.com"
+         }
+        ],
+        "fields": {
+         "profiles": [
+          {
+           "id": "3IM0lmZxpFAY7CwMuv9H4g",
+           "service": "spotify-show"
+          }
+         ]
+        }
+       },
+       "set": "podcasts",
+       "score": 0.72,
+       "named": true,
+       "popularity": 1.0,
+       "whole": true,
+       "under": "nytimes.com",
+       "at": 0
+      }
+     ]
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "homedepot.com",
+      "url": "https://www.homedepot.com/",
+      "title": "The Home Depot",
+      "description": "Shop online for all your home improvement needs: appliances, tools, lumber, flooring, paint, lighting and more."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "ssa.gov",
+      "url": "https://www.ssa.gov/",
+      "title": "The United States Social Security Administration",
+      "description": "Apply for retirement, disability and survivor benefits, get a replacement Social Security card, and manage your benefits online."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "irs.gov",
+      "url": "https://www.irs.gov/",
+      "title": "Internal Revenue Service (IRS) | An official website of the United States government",
+      "description": "Find tax forms, check your refund status, make a payment and get answers to your tax questions."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "medicare.gov",
+      "url": "https://www.medicare.gov/",
+      "title": "Medicare.gov: the official U.S. government site for Medicare",
+      "description": "Compare Medicare plans, find doctors and learn what Medicare covers."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "stanford.edu",
+      "url": "https://www.stanford.edu/",
+      "title": "Stanford University",
+      "description": "Stanford University, one of the world's leading teaching and research universities, is located in the heart of Silicon Valley."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "bbc.co.uk",
+      "url": "https://www.bbc.co.uk/",
+      "title": "BBC - Home",
+      "description": "The best of the BBC, with the latest news and sport headlines, weather, TV and radio highlights and much more from across the whole of BBC Online."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "wikipedia.org",
+      "url": "https://www.wikipedia.org/",
+      "title": "Wikipedia",
+      "description": "Wikipedia is a free online encyclopedia, created and edited by volunteers around the world and hosted by the Wikimedia Foundation."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "youtube.com",
+      "url": "https://www.youtube.com/",
+      "title": "YouTube",
+      "description": "Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube."
+     },
+     "pages": []
+    },
+    {
+     "kind": "site",
+     "site": {
+      "domain": "nasa.gov",
+      "url": "https://www.nasa.gov/",
+      "title": "NASA",
+      "description": "NASA.gov brings you the latest news, images and videos from America's space agency, pioneering the future in space exploration, scientific discovery and aeronautics research."
+     },
+     "pages": []
+    }
+   ]
+  }
+ },
+ "attention is all you need, kind=paper": {
+  "pages": [
+   {
+    "item": {
+     "about": "The dominant sequence transduction models are based on recurrent networks.",
+     "fields": {
+      "authors": [
+       "Ashish Vaswani",
+       "Noam Shazeer"
+      ],
+      "paper": {
+       "arxiv_id": "1706.03762",
+       "count": 120000,
+       "count_kind": "citations",
+       "doi": "10.48550/arxiv.1706.03762",
+       "publication_date": "2017-06-12",
+       "publication_year": 2017,
+       "source": "openalex"
+      },
+      "venue": "Advances in Neural Information Processing Systems",
+      "website": "https://arxiv.org/abs/1706.03762"
+     },
+     "id": "10.48550/arxiv.1706.03762",
+     "ids": {
+      "arxiv": "1706.03762",
+      "doi": "10.48550/arxiv.1706.03762"
+     },
+     "kind": "paper",
+     "published": "2017-06-12",
+     "site": "doi.org",
+     "title": "Attention Is All You Need",
+     "url": "https://doi.org/10.48550/arxiv.1706.03762",
+     "weight": 120000.0
+    },
+    "named": true,
+    "popularity": 1.0,
+    "score": 1.0,
+    "set": "papers",
+    "whole": true
+   }
+  ]
+ }
+}

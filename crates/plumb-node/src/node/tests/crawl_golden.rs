@@ -272,7 +272,9 @@ fn result_of(target: &CrawlTarget) -> CrawlResult {
 struct Crawl {
     queued: Vec<CrawlTarget>,
     batches: usize,
-    shared: Vec<Vec<SiteRecord>>,
+    shared: Vec<plumb_core::sites::SiteList>,
+    /// The crawl's sites as it made them, before they were held as lines.
+    made: Vec<Vec<plumb_format::Item>>,
 }
 
 impl Fetcher for Crawl {
@@ -289,6 +291,9 @@ impl Fetcher for Crawl {
         self.batches += 1;
         self.shared
             .push(crate::node::worker::published_crawl(&results));
+        let mut made = plumb_crawl::to_items(&results);
+        crate::icons::attach(&mut made, &results);
+        self.made.push(made);
         Some((batch.into_iter().map(|t| t.domain).collect(), results))
     }
 }
@@ -303,9 +308,10 @@ fn steady(at: u64, started: u64) -> u64 {
     }
 }
 
-fn steady_record(record: &mut SiteRecord, started: u64) {
-    if let Some(redirect) = &mut record.redirect {
+fn steady_site(site: &mut plumb_format::Item, started: u64) {
+    if let Some(mut redirect) = plumb_core::site::redirect(site) {
         redirect.at = steady(redirect.at, started);
+        plumb_core::site::set_redirect(site, Some(redirect));
     }
 }
 
@@ -399,16 +405,30 @@ fn a_crawl_round_of_the_golden_sites_makes_the_golden_changes() {
         lines.push('\n');
     }
 
-    for (batch, mut records) in crawl.shared.into_iter().enumerate() {
-        for record in &mut records {
-            steady_record(record, started);
-            let line = record.to_line().unwrap_or_else(|err| format!("({err})"));
+    for (batch, (sites, mut made)) in crawl.shared.into_iter().zip(crawl.made).enumerate() {
+        let mut sites: Vec<plumb_format::Item> = sites.iter().collect();
+        for site in &mut sites {
+            steady_site(site, started);
+            let line = plumb_core::site::to_line(site).unwrap_or_else(|err| format!("({err})"));
             writeln!(text, "shared {batch} {line}").unwrap();
         }
+        // The size of the batch as the records' JSON of the crawl's sites
+        // as it made them, which the room to publish it was measured by
+        // before the network took items. Held as lines, a site with a
+        // link no item can name is cleaned already, as it is when signed.
+        for site in &mut made {
+            steady_site(site, started);
+        }
+        let records: Vec<SiteRecord> = (made.iter())
+            .map(|site| SiteRecord::from_stored_item(site).unwrap())
+            .collect();
         let bytes = serde_json::to_vec(&records).unwrap().len();
-        let lines: usize = records
+        let lines: usize = sites
             .iter()
-            .map(|r| 1 + usize::from(r.icon.is_some()) + usize::from(!r.news.is_empty()))
+            .map(|site| {
+                1 + usize::from(plumb_core::site::icon(site).is_some())
+                    + usize::from(!plumb_core::site::news(site).is_empty())
+            })
             .sum();
         writeln!(text, "shared {batch} bytes {bytes} lines {lines}").unwrap();
     }

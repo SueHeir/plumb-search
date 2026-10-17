@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
-use tantivy::schema::{IndexRecordOption, Value};
+use tantivy::schema::IndexRecordOption;
 use tantivy::{DocAddress, Searcher, TantivyDocument, Term};
 
 use super::scoring::{scoped_query, Described};
@@ -283,9 +283,6 @@ impl PageSearcher {
     /// The page stored at `address`.
     fn stored_page(&self, searcher: &Searcher, address: DocAddress) -> Result<Option<Page>> {
         let document: TantivyDocument = searcher.doc(address)?;
-        let stored = document
-            .get_first(self.fields.page)
-            .and_then(|v| v.as_str());
-        Ok(stored.map(serde_json::from_str).transpose()?)
+        self.read_page(&document)
     }
 }

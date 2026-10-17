@@ -332,7 +332,7 @@ fn a_signed_network_crawl_fills_in_this_nodes_copy() {
     signed.title = Some("B Shoes".into());
     signed.description = Some("Handmade shoes".into());
     let mut network = from_network(scored("b.com", 0.95));
-    network.shared = Some(signed);
+    network.shared = Some(signed.stored_item_as_is().into());
     let unsigned = from_network(scored("a.com", 1.0));
     let network = NetOutcome::Answered(NetworkResults {
         hits: vec![network, unsigned],
@@ -400,7 +400,7 @@ fn network_only_sites_lacking_main_words_come_after_this_nodes() {
     let mut signed = SiteRecord::new("krain88.com");
     signed.title = Some("Weather".into());
     let mut crawl = from_network(partial("krain88.com", 0.9));
-    crawl.shared = Some(signed);
+    crawl.shared = Some(signed.stored_item_as_is().into());
     let network = NetOutcome::Answered(NetworkResults {
         hits: vec![crawl],
         ..NetworkResults::default()

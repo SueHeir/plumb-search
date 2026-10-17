@@ -109,8 +109,8 @@ impl Task {
 
     fn on_command(&mut self, command: Command) {
         match command {
-            Command::Publish { records, reply } => {
-                let _ = reply.send(self.publish(records));
+            Command::Publish { sites, reply } => {
+                let _ = reply.send(self.publish(sites));
             }
             Command::Rechecks(limit, reply) => {
                 let _ = reply.send(self.agreement.rechecks(limit));
@@ -367,12 +367,12 @@ impl Task {
                         if self.config.follow_crawls {
                             let mut confirmed = self.agreement.observe(crawler, accepted, made);
                             self.count_credits();
-                            confirmed.extend(news);
+                            confirmed.extend(news.into_lines());
                             if let Some(permit) = permit.filter(|_| !confirmed.is_empty()) {
                                 queue_confirmed_delivery(
                                     permit,
                                     RecordDelivery {
-                                        records: confirmed,
+                                        sites: confirmed,
                                         reservation,
                                         acknowledgment: self.lock_store().delivery_ack(
                                             &id,
@@ -389,7 +389,7 @@ impl Task {
                             s.agreement = agreement;
                         });
                         debug!(
-                            "received batch {id}: kept {kept} of {lines} records from {crawler}"
+                            "received batch {id}: kept {kept} sites of {lines} records from {crawler}"
                         );
                     }
                     Ok((false, _)) => {

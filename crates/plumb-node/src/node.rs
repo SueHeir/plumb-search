@@ -2388,8 +2388,8 @@ impl StatusSource for Inner {
         Inner::denies(self, url)
     }
 
-    fn allows_record(&self, record: &mut plumb_core::SiteRecord) -> bool {
-        Inner::allows_record(self, record)
+    fn allows_site(&self, site: &mut plumb_format::Item) -> bool {
+        Inner::allows_site(self, site)
     }
 
     fn searched(&self, query: &str, results: &SearchResults) {
@@ -2444,8 +2444,8 @@ impl StatusSource for Inner {
         self.adult_list().is_some_and(|list| list.contains(domain))
     }
 
-    fn keep_from_network(&self, records: Vec<plumb_core::SiteRecord>) {
-        network::keep_found(self, records);
+    fn keep_from_network(&self, sites: plumb_core::sites::SiteList) {
+        network::keep_found(self, sites);
     }
 
     fn icon(&self, domain: &str) -> Option<Vec<u8>> {

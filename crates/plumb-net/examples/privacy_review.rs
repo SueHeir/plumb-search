@@ -90,7 +90,7 @@ fn main() -> Result<()> {
     assert!(accepted.url.is_none());
     println!(
         "Trusted fill stripped the off-domain URL for {}.",
-        accepted.domain
+        accepted.id
     );
     Ok(())
 }

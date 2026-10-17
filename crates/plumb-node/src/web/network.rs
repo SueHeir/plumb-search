@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use axum::extract::{Query, State};
 use axum::http::{Extensions, HeaderMap, StatusCode, Uri};
 use axum::response::Response;
-use plumb_core::{SafeSearch, SiteRecord};
+use plumb_core::site;
+use plumb_core::sites::SiteList;
+use plumb_core::SafeSearch;
 use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
 use plumb_net::{FoundSite, NetSearch};
 use tracing::error;
@@ -17,7 +19,7 @@ use super::home::{bad_search_query, home_or_setup, message_page};
 use super::html::html_response;
 use super::params::{error_settings, SearchParams};
 use super::results::{render_error, render_network};
-use super::{mcp, AppState, NETWORK_SEARCH_WAIT};
+use super::{mcp, AppState, StatusSource, NETWORK_SEARCH_WAIT};
 
 /// `GET /network?q=`: only what other nodes answer, for a node in the network.
 pub(crate) async fn network_page(
@@ -111,24 +113,7 @@ pub(crate) async fn network_search(
     let node = state.node.clone();
     tokio::task::spawn_blocking(move || {
         if let Some(node) = &node {
-            // What the denylist takes off is neither ranked, shown nor kept.
-            found.found.retain_mut(|site| {
-                node.allows_record(&mut site.record)
-                    && site
-                        .shared
-                        .as_mut()
-                        .is_none_or(|shared| node.allows_record(shared))
-            });
-            // Signed crawls of sites this node holds fill in what its own
-            // records lack, for its next index and search by meaning.
-            let shared: Vec<SiteRecord> = found
-                .found
-                .iter()
-                .filter_map(|site| site.keeps().cloned())
-                .collect();
-            if !shared.is_empty() {
-                node.keep_from_network(shared);
-            }
+            take_found(&**node, &mut found);
         }
         let mut results = rank_found(found, &query, limit, &rank, &options)?;
         if let Some(node) = &node {
@@ -150,7 +135,31 @@ pub(crate) async fn network_search(
     .context("the ranking task failed")?
 }
 
-fn rank_found(
+/// Takes off `found` what `node`'s denylist takes off, which is then
+/// neither ranked, shown nor kept, and hands `node` the signed crawls it
+/// keeps of the rest ([`FoundSite::keeps`]).
+pub(crate) fn take_found(node: &dyn StatusSource, found: &mut NetSearch) {
+    found.found.retain_mut(|found| {
+        found.site.update(|site| node.allows_site(site))
+            && found
+                .shared
+                .as_mut()
+                .is_none_or(|shared| shared.update(|site| node.allows_site(site)))
+    });
+    // Signed crawls of sites this node holds fill in what its own
+    // records lack, for its next index and search by meaning.
+    let shared: SiteList = found
+        .found
+        .iter()
+        .filter_map(|site| site.keeps().cloned())
+        .collect();
+    if !shared.is_empty() {
+        node.keep_from_network(shared);
+    }
+}
+
+/// The sites `found` ranked for `query` by an index of them alone.
+pub(crate) fn rank_found(
     found: NetSearch,
     query: &str,
     limit: usize,
@@ -177,7 +186,11 @@ fn rank_found(
     let sites: Vec<_> = found
         .found
         .iter()
-        .map(|f| f.record.to_stored_item())
+        .map(|found| {
+            let mut site = found.site.item();
+            site::clean(&mut site);
+            site
+        })
         .collect();
     build_index(&index, &sites)?;
     // The few sites found are no dictionary to correct typos against: the
@@ -192,7 +205,7 @@ fn rank_found(
     let by_domain: std::collections::HashMap<&str, &FoundSite> = found
         .found
         .iter()
-        .map(|f| (f.record.domain.as_str(), f))
+        .map(|found| (found.site.domain(), found))
         .collect();
     for hit in hits {
         let Some(site) = by_domain.get(hit.domain.as_str()) else {

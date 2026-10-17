@@ -87,7 +87,7 @@ By default a node holds its list of sites steady: its crawls refresh the sites i
 
 ## Crawl batches
 
-[batch.rs](../crates/plumb-net/src/batch.rs), [hash.rs](../crates/plumb-net/src/hash.rs). After each crawl batch of 500 homepages (`CRAWL_BATCH_SIZE` in plumb-node), the node signs the records it produced and publishes them:
+[batch.rs](../crates/plumb-net/src/batch.rs), [hash.rs](../crates/plumb-net/src/hash.rs). After each crawl batch of 500 homepages (`CRAWL_BATCH_SIZE` in plumb-node), the node signs the sites it crawled, each as the item it sends of the site, and publishes them:
 
 - A batch holds up to 4,096 lines (`MAX_BATCH_RECORDS`), each at most 16 KiB (`MAX_RECORD_BYTES`), at most 16 MiB in all (`MAX_BATCH_BYTES`). Each record is a `site` item of the data format ([site_item.rs](../crates/plumb-core/src/site_item.rs)) on one line, kept as the exact JSON bytes that were hashed.
 - The signed header holds the crawler's public key, the epoch, its share, the time made, the line count and the Merkle root over the lines (SHA-256 with RFC 6962 leaf and node prefixes). It is signed over fixed-width fields after the context `plumb-batch-v2\0`, and the batch id is the hash of those bytes.
@@ -134,7 +134,7 @@ sequenceDiagram
 - A node fetches at most 16 batches at once (`MAX_FETCHES`), 2 from any one node, and keeps at most 50,000 batch ids waiting.
 - A node answers at most 4 batch and report requests of other nodes at once (`MAX_LISTS_SERVING`); more get an empty answer.
 - When two nodes meet, each asks the other for the headers of the batches it holds from the last 3 epochs (`CATCH_UP_EPOCHS`) and fetches what it missed. Every 30 minutes (`RELIST_MINUTES`) a node asks the nodes it is connected to again for this epoch's and the last epoch's headers.
-- Records agreement releases reach plumb-node as a `RecordDelivery`. It appends them to `DATA/net/inbox.jsonl`, folds the inbox into its records file through the same journal crawls use, and rebuilds its index once 2,000 records came in (`REBUILD_AFTER_RECORDS`), at most every 30 minutes. A delivery not yet saved is sent again after a restart.
+- The sites agreement releases reach plumb-node as a `RecordDelivery`, each as the stored item the node keeps of it. It appends them to `DATA/net/inbox.jsonl`, folds the inbox into its records file through the same journal crawls use, and rebuilds its index once 2,000 records came in (`REBUILD_AFTER_RECORDS`), at most every 30 minutes. A delivery not yet saved is sent again after a restart.
 - A node keeps the batches it holds for 35 days (`RETAIN_EPOCHS`, `--keep-batches-days`) in `DATA/net/batches/`, serves them to others, and uses them to prove its search answers. With a storage limit, it keeps 14 days unless `--keep-batches-days` sets another number, and other crawlers' batches may take at most 20% of the limit, oldest out first; its own batches always stay.
 - `--publish-records PATH` also publishes the homepages crawled into another records file (such as one `plumb-tools crawl` fills): every 30 minutes, those crawled since the last time and within the last 6 days.
 
@@ -181,7 +181,7 @@ When a trusted node connects, the node asks it on `/plumb/trust/1` which nodes i
 
 ## Filling free space
 
-A node takes in crawls as they are shared, but one that just joined holds only the last few days of them. So every 10 minutes a node with room asks a node it trusts for its crawled sites over `/plumb/fill/1`, 1,000 at a time, best-ranked first, and takes them in like any shared crawl ([fill.rs](../crates/plumb-net/src/fill.rs), plumb-node's [node/fill.rs](../crates/plumb-node/src/node/fill.rs)). It takes at most 50,000 a round and stops at:
+A node takes in crawls as they are shared, but one that just joined holds only the last few days of them. So every 10 minutes a node with room asks a node it trusts for its crawled sites over `/plumb/fill/1`, 1,000 at a time, best-ranked first, and takes them in like any shared crawl ([fill.rs](../crates/plumb-net/src/fill.rs), plumb-node's [node/fill.rs](../crates/plumb-node/src/node/fill.rs)). An answer carries each site as its record's JSON, as every version has, and the asker keeps the stored item of what it accepts of it. It takes at most 50,000 a round and stops at:
 
 - 90% of the storage limit (`FILL_UP_TO_PERCENT`), so its own crawling keeps room;
 - the day's download limit;

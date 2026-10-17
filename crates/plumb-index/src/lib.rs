@@ -79,6 +79,7 @@ mod junk;
 mod language;
 pub mod learned;
 mod names;
+pub mod page_items;
 pub mod pages;
 pub mod places;
 mod query;

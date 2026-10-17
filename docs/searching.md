@@ -221,6 +221,75 @@ A site result (`/api/search`) has `domain`, `url`, `title`, `description`, `scor
 
 With `full=1`, the object holds `hits` (the sites), `pages` (page rows), `assembled` (the page's order: `rows` of `{"kind": "site", "site", "pages"}` or `{"kind": "page", "page"}`, with `places`, `recent`, `answer` and `profile`), and, when there are any, `answer`, `profile`, `info`, `places`, `recent`, `spelling`, `site_search` and the node's plugin results. The [Zotero plugin](../zotero/) reads `assembled.rows`, `pages` and `hits`.
 
+Each page row, in `pages` and in `assembled.rows`, gives the page as its item of Plumb's [data format](../crates/plumb-format/README.md), with the page set it came from beside it. A paper search with `full=1` gives its `pages` the same way. Nodes up to 0.4.0 give each page's own members in a `page` object in place of `item` and `set`.
+
+```json
+{
+  "item": {
+    "id": "pypi:requests",
+    "kind": "package",
+    "title": "requests",
+    "url": "https://pypi.org/project/requests/",
+    "site": "pypi.org",
+    "about": "Python HTTP for Humans.",
+    "weight": 800000.0,
+    "ids": {"pypi": "requests"},
+    "fields": {
+      "package": {"license": "Apache-2.0", "name": "requests", "registry": "pypi", "released": "2026-03-01", "repo": "https://github.com/psf/requests", "version": "2.32.3"}
+    }
+  },
+  "set": "packages",
+  "score": 0.9,
+  "named": true,
+  "popularity": 1.0,
+  "at": 0
+}
+```
+
+| Member | What it is |
+|---|---|
+| `item` | The page, as below |
+| `set` | The page set it came from: `wikipedia-en`, `papers`, `packages` and so on ([pages.md](pages.md)) |
+| `score` | How well it matches the search |
+| `named` | The whole search is its title or one of its names |
+| `popularity` | How much it is read, from 0 to 1 on a log scale where the most read page of its set is 1 |
+| `whole` | Only when true: the search asks for this page alone, so it may come before the sites |
+| `learned` | Where the learned ranking listed it on its own: `{"before": "<domain>"}` or `"last"` |
+| `meant` | Only when true: listed only for what a part of the search means |
+| `under` | The domain of the site result it is listed under |
+| `at` | Otherwise, the position of the site result it is listed before (after all of them when past the end) |
+
+A paper search's pages have no `under` and `at`. The item's members, each left out when it has none:
+
+| Member | What it is |
+|---|---|
+| `id` | Its id in its set: the Wikidata item of a film or a `wikidata` page, `<registry>:<name>` of a package, a paper's DOI, otherwise its address (a hash of one over 256 bytes) |
+| `kind` | `article`, `paper`, `book`, `film`, `show`, `song`, `album`, `podcast`, `question`, `repo`, `package`, `docs-page`, `entity`, `word` or `page` |
+| `url` | Its address, in canonical form (no `#` part) |
+| `title` | Its title |
+| `site` | The site its address is on (`wikipedia.org`) |
+| `names` | Other names it is found by, such as an article's aliases |
+| `about` | Its description, the line under its title |
+| `text` | A Wikipedia article's first sentences |
+| `lang` | Its language |
+| `weight` | How often it was read, or its set's own measure of popularity |
+| `published` | A paper's publication date |
+| `ids` | Ids elsewhere: `wd` (Wikidata), `doi` (in lowercase), `arxiv`, `openalex`, or a package's registry (`"pypi": "requests"`) |
+| `edges` | `{"rel": "about", "to": "site:<domain>"}`: the site the page is about, whose result can carry it |
+| `fields` | The rest, below |
+
+| Field | What it is |
+|---|---|
+| `website` | Its official website when that is a subdomain or an inner page of the site it is about (`https://music.youtube.com/`), or a free copy of a paper |
+| `other_names` | An article's less read redirects, and ones to its sections |
+| `profiles`, `facts` | Official profiles (`{"service", "id"}`) and facts from Wikidata (`{"kind", "value"}`) |
+| `package` | A package's `registry`, `name`, `version`, `released`, `license`, `docs`, `repo` and `homepage` |
+| `sections`, `symbols`, `passages` | A docs page's section headings, and the symbols and passages it is found by |
+| `authors`, `venue` | A paper's authors and where it came out |
+| `paper` | The rest of what the papers set says of a paper: `doi`, `arxiv_id`, `openalex_id`, `publication_date`, `publication_year` (the year alone when there is no date), `count` and what it counts (`count_kind`), `source` and other dates |
+| `corrections`, `verified_arxiv` | Corrections to a paper's details, and its arXiv record when it was checked |
+| `page` | Members of the page as its set gives them where the item says them otherwise, such as an address not in canonical form; `escaped` lists those written with escapes |
+
 The SearXNG format (`results`, `answers`, `suggestions`, `infoboxes`, `number_of_results`, plus `recent` and `places`) and Open WebUI's are described in [local-llms.md](local-llms.md).
 
 The API applies the node's defaults and the parameters given, not a browser's history or About you.

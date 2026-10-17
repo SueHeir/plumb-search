@@ -8,8 +8,10 @@
 //! does not build for WebAssembly; `plumb-node`'s tests check the two agree.
 
 use libp2p_identity::PeerId;
+use plumb_core::keys::slim_site;
 use plumb_core::oblivious::{open_response, seal_request, ClientResponse, SignedKeys};
-use plumb_core::{canonical_domain, keys::slim_record, registrable_domain, SiteRecord};
+use plumb_core::site::{self, Item};
+use plumb_core::{canonical_domain, registrable_domain};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
@@ -58,27 +60,29 @@ pub fn seal(target: &Target, bucket: u32, now: u64) -> Result<(Vec<u8>, ClientRe
         .map_err(|err| format!("{err:#}"))
 }
 
-/// Opens a sealed answer: the bucket's sites, checked as a node checks
-/// another node's (`plumb_net::search`): domains made canonical, and a URL
-/// kept only when it is on the site's own domain, since without the crawl
-/// proof (not checked here) a node could point a site anywhere.
-pub fn open(opener: ClientResponse, answer: &[u8]) -> Result<Vec<SiteRecord>, String> {
+/// Opens a sealed answer: the bucket's sites, each its item as a node
+/// takes it ([`site::from_line`]), checked as a node checks another
+/// node's (`plumb_net::search`): domains made canonical, and a URL kept
+/// only when it is on the site's own domain, since without the crawl
+/// proof (not checked here) a node could point a site anywhere. Each is
+/// trimmed as a node trims the buckets it serves ([`slim_site`]).
+pub fn open(opener: ClientResponse, answer: &[u8]) -> Result<Vec<Item>, String> {
     let response: BucketResponse =
         open_response(opener, answer).map_err(|err| format!("{err:#}"))?;
     let records = response.records.ok_or("that node has no buckets")?;
     Ok(records
         .into_iter()
-        .filter_map(|item| SiteRecord::from_line(&item.record).ok())
-        .filter_map(|mut record| {
-            record.domain = canonical_domain(&record.domain)?;
-            if record
+        .filter_map(|sent| site::from_line(&sent.record).ok())
+        .filter_map(|mut site| {
+            site.id = canonical_domain(&site.id)?;
+            if site
                 .url
                 .as_deref()
-                .is_some_and(|url| registrable_domain(url).as_deref() != Some(&record.domain))
+                .is_some_and(|url| registrable_domain(url).as_deref() != Some(&site.id))
             {
-                record.url = None;
+                site.url = None;
             }
-            Some(slim_record(record))
+            Some(slim_site(site))
         })
         .collect())
 }

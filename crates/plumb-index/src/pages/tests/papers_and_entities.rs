@@ -8,7 +8,8 @@ fn a_build_told_to_stop_leaves_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pages");
     let mut asked = 0;
-    let stopped = build_page_index_with_budget(&path, pages, None, &mut || {
+    let items = pages.map(|page| SetItem::of_page(&page));
+    let stopped = build_page_index_with_budget(&path, items, None, &|_| true, &mut || {
         asked += 1;
         bail!("stopping")
     });

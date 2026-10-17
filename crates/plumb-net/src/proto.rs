@@ -140,7 +140,7 @@ pub struct BucketResponse {
 /// answering node holds one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketRecord {
-    /// The site as its item, a line of JSON ([`plumb_core::SiteRecord::to_line`]).
+    /// The site as its item, a line of JSON ([`plumb_core::site::to_line`]).
     pub record: String,
     pub proof: Option<RecordProof>,
     /// Proofs of other crawlers' crawls of the same site that agree with

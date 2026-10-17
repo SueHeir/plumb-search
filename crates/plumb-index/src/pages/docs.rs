@@ -178,13 +178,9 @@ impl PageSearcher {
         let mut parts = Vec::new();
         for address in addresses {
             let document: TantivyDocument = searcher.doc(address)?;
-            let Some(stored) = document
-                .get_first(self.fields.page)
-                .and_then(|v| v.as_str())
-            else {
+            let Some(page) = self.read_page(&document)? else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
             if !operators_allow(ops, &page) {
                 continue;
             }

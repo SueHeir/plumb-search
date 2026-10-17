@@ -1,0 +1,244 @@
+# What plumb-private ranks of the buckets a node serves and seals:
+# see private_golden.rs before writing it again. Written on records.
+## us bank (country any, safe moderate, language any)
+buckets [2985, 15898, 4470, 5691] keys ["usbank", "bank", "us"]
+usbank.com 1.193 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+# sealed to two nodes, one lying
+usbank.com 1.193 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+## us bank (country US, safe moderate, language any)
+buckets [2985, 15898, 4470, 5691] keys ["usbank", "bank", "us"]
+usbank.com 1.253 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+# sealed to two nodes, one lying
+usbank.com 1.253 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+## us bank (country US only, safe moderate, language any)
+buckets [2985, 15898, 4470, 5691] keys ["usbank", "bank", "us"]
+usbank.com 1.253 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+# sealed to two nodes, one lying
+usbank.com 1.253 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+## us bank login (country any, safe moderate, language any)
+buckets [9758, 6749, 15898, 2985] keys ["usbanklogin", "login", "bank", "us"]
+usbank.com 1.110 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.485 text 0.281 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+deutsche-bank.de 0.433 text 0.365 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+theguardian.com 0.416 text 0.125 link 0.956 https://www.theguardian.com/ Some("News, sport and opinion from the Guardian's US edition") None
+chase.com 0.390 text 0.125 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+bank.com 0.325 text 0.292 link 0.387 https://www.bank.com/ Some("Bank") None
+pnc.com 0.309 text 0.125 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+sexybank.example 0.290 text 0.156 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+pncbank.com 0.244 text 0.125 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+usbank-login-help.com 0.203 text 0.625 link 0.000 https://usbank-login-help.com/login Some("US Bank Login Help | us bank login") None
+# sealed to two nodes, one lying
+usbank.com 1.110 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.485 text 0.281 link 0.863 https://bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+deutsche-bank.de 0.433 text 0.365 link 0.560 https://deutsche-bank.de/ Some("Deutsche Bank") None
+theguardian.com 0.416 text 0.125 link 0.956 https://www.theguardian.com/ Some("News, sport and opinion from the Guardian's US edition") None
+chase.com 0.390 text 0.125 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+bank.com 0.325 text 0.292 link 0.387 https://bank.com/ Some("Bank") None
+pnc.com 0.309 text 0.125 link 0.652 https://pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+sexybank.example 0.290 text 0.156 link 0.538 https://sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+pncbank.com 0.244 text 0.125 link 0.465 https://pncbank.com/ Some("PNC Bank") None
+usbank-login-help.com 0.203 text 0.625 link 0.000 https://usbank-login-help.com/login Some("US Bank Login Help | us bank login") None
+## usbank.com (country any, safe moderate, language any)
+buckets [5691, 5042, 1675, 10335] keys ["usbankcom", "usbank", "com"]
+usbank.com 1.193 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+# sealed to two nodes, one lying
+usbank.com 1.193 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+## chase (country US, safe moderate, language any)
+buckets [8204, 8872, 14277, 16380] keys ["chase"]
+chase.com 1.269 text 1.000 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+# sealed to two nodes, one lying
+chase.com 1.269 text 1.000 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+## bank (country DE, safe moderate, language any)
+buckets [2985, 9636, 3695, 13613] keys ["bank"]
+deutsche-bank.de 1.156 text 1.000 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 1.149 text 1.000 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+bankofamerica.com 1.142 text 1.000 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+usbank.com 1.133 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+pnc.com 1.068 text 1.000 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+bank.com 1.036 text 1.000 link 0.387 https://www.bank.com/ Some("Bank") None
+sexybank.example 0.304 text 0.179 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+pncbank.com 0.255 text 0.143 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+# sealed to two nodes, one lying
+deutsche-bank.de 1.156 text 1.000 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 1.149 text 1.000 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+bankofamerica.com 1.142 text 1.000 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+usbank.com 1.133 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+pnc.com 1.068 text 1.000 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+bank.com 1.036 text 1.000 link 0.387 https://www.bank.com/ Some("Bank") None
+sexybank.example 0.304 text 0.179 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+pncbank.com 0.255 text 0.143 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+## deutsche bank (country any, safe moderate, language de)
+buckets [5784, 2985, 5184, 665] keys ["deutschebank", "deutsche", "bank"]
+deutsche-bank.de 1.096 text 1.000 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+# sealed to two nodes, one lying
+deutsche-bank.de 1.096 text 1.000 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+## bank of america (country any, safe moderate, language any)
+buckets [5108, 951, 1488, 2985] keys ["bankofamerica", "america", "bank"]
+bankofamerica.com 1.202 text 1.000 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+usbank.com 0.561 text 0.413 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+# sealed to two nodes, one lying
+bankofamerica.com 1.202 text 1.000 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+usbank.com 0.564 text 0.413 link 0.843 https://usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+## where can i find chase login (country any, safe moderate, language any)
+buckets [14277, 6722, 5099, 9758] keys ["wherecanifindchaselogin", "chase", "login", "where"]
+chase.com 0.959 text 1.000 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+# sealed to two nodes, one lying
+chase.com 0.959 text 1.000 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+## tax refund (country any, safe moderate, language any)
+buckets [2191, 11316, 6172, 13883] keys ["taxrefund", "refund", "tax"]
+refundtracker.net 0.544 text 0.833 link 0.255 https://www.refundtracker.net/ Some("IRS refund tracker") Some("Where is my tax refund?")
+nimbus.example 0.500 text 1.000 link 0.000 https://aster.example/refunds Some("Aster refund information") None
+# sealed to two nodes, one lying
+refundtracker.net 0.502 text 0.750 link 0.255 https://refundtracker.net/ Some("IRS refund tracker") Some("Where is my tax refund?")
+nimbus.example 0.500 text 1.000 link 0.000 https://nimbus.example/ Some("Aster refund information") None
+## aster refund (country any, safe moderate, language any)
+buckets [2780, 6394, 13883, 13413] keys ["asterrefund", "refund", "aster"]
+aster.example 1.124 text 1.000 link 0.998 https://www.aster.example/ Some("Aster Observatory") None
+refundtracker.net 0.321 text 0.357 link 0.255 https://www.refundtracker.net/ Some("IRS refund tracker") Some("Where is my tax refund?")
+nimbus.example 0.167 text 0.514 link 0.000 https://aster.example/refunds Some("Aster refund information") None
+# sealed to two nodes, one lying
+aster.example 1.124 text 1.000 link 0.998 https://aster.example/ Some("Aster Observatory") None
+refundtracker.net 0.321 text 0.357 link 0.255 https://www.refundtracker.net/ Some("IRS refund tracker") Some("Where is my tax refund?")
+nimbus.example 0.279 text 0.857 link 0.000 https://nimbus.example/ Some("Aster refund information") None
+## münchen (country DE, safe moderate, language any)
+buckets [12287, 2528, 15337, 15618] keys ["münchen"]
+xn--mnchen-3ya.de 1.125 text 1.000 link 0.471 https://www.xn--mnchen-3ya.de/ Some("Stadt München") None
+# sealed to two nodes, one lying
+xn--mnchen-3ya.de 1.125 text 1.000 link 0.471 https://xn--mnchen-3ya.de/ Some("Stadt München") None
+## the guardian (country any, safe moderate, language any)
+buckets [16108, 11795, 7223, 13022] keys ["theguardian", "guardian"]
+theguardian.com 1.235 text 1.000 link 0.956 https://www.theguardian.com/ Some("News, sport and opinion from the Guardian's US edition") None
+# sealed to two nodes, one lying
+theguardian.com 1.235 text 1.000 link 0.956 https://www.theguardian.com/ Some("News, sport and opinion from the Guardian's US edition") None
+## python download (country any, safe moderate, language any)
+buckets [9938, 4667, 11098, 9406] keys ["pythondownload", "download", "python"]
+python.org 1.027 text 1.000 link 0.720 https://www.python.org/ Some("Welcome to Python.org") None
+pypi.org 0.362 text 0.217 link 0.629 https://www.pypi.org/ Some("PyPI · The Python Package Index") Some("Find, install and publish Python packages")
+# sealed to two nodes, one lying
+python.org 1.027 text 1.000 link 0.720 https://www.python.org/ Some("Welcome to Python.org") None
+pypi.org 0.362 text 0.217 link 0.629 https://www.pypi.org/ Some("PyPI · The Python Package Index") Some("Find, install and publish Python packages")
+## 楽天市場 (country any, safe moderate, language en)
+buckets [11532, 14044, 5583, 417] keys ["楽天市場"]
+rakuten.co.jp 0.834 text 1.000 link 0.668 https://www.rakuten.co.jp/ Some("楽天市場") None
+# sealed to two nodes, one lying
+rakuten.co.jp 0.834 text 1.000 link 0.668 https://www.rakuten.co.jp/ Some("楽天市場") None
+## bank videos (country any, safe moderate, language any)
+buckets [3124, 7063, 2985, 7670] keys ["bankvideos", "videos", "bank"]
+usbank.com 0.918 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.668 text 0.474 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+bank.com 0.635 text 0.632 link 0.387 https://www.bank.com/ Some("Bank") None
+deutsche-bank.de 0.622 text 0.684 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 0.546 text 0.211 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+sexybank.example 0.532 text 0.526 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+pnc.com 0.431 text 0.211 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+pncbank.com 0.338 text 0.211 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+# sealed to two nodes, one lying
+usbank.com 0.918 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.668 text 0.474 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+bank.com 0.635 text 0.632 link 0.387 https://www.bank.com/ Some("Bank") None
+deutsche-bank.de 0.622 text 0.684 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 0.546 text 0.211 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+sexybank.example 0.532 text 0.526 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+pnc.com 0.431 text 0.211 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+pncbank.com 0.338 text 0.211 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+## bank videos (country any, safe strict, language any)
+buckets [3124, 7063, 2985, 7670] keys ["bankvideos", "videos", "bank"]
+usbank.com 0.918 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.668 text 0.474 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+bank.com 0.635 text 0.632 link 0.387 https://www.bank.com/ Some("Bank") None
+deutsche-bank.de 0.622 text 0.684 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 0.546 text 0.211 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+pnc.com 0.431 text 0.211 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+pncbank.com 0.338 text 0.211 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+# sealed to two nodes, one lying
+usbank.com 0.918 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.668 text 0.474 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+bank.com 0.635 text 0.632 link 0.387 https://www.bank.com/ Some("Bank") None
+deutsche-bank.de 0.622 text 0.684 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 0.546 text 0.211 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+pnc.com 0.431 text 0.211 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+pncbank.com 0.338 text 0.211 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+## bank videos (country any, safe off, language any)
+buckets [3124, 7063, 2985, 7670] keys ["bankvideos", "videos", "bank"]
+usbank.com 0.918 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.668 text 0.474 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+bank.com 0.635 text 0.632 link 0.387 https://www.bank.com/ Some("Bank") None
+deutsche-bank.de 0.622 text 0.684 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 0.546 text 0.211 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+sexybank.example 0.532 text 0.526 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+freebankvideos.example 0.532 text 0.516 link 0.548 https://www.freebankvideos.example/ Some("Free bank videos xxx") Some("Videos of banks")
+pnc.com 0.431 text 0.211 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+pncbank.com 0.338 text 0.211 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+# sealed to two nodes, one lying
+usbank.com 0.918 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.668 text 0.474 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+bank.com 0.635 text 0.632 link 0.387 https://www.bank.com/ Some("Bank") None
+deutsche-bank.de 0.622 text 0.684 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 0.546 text 0.211 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+sexybank.example 0.532 text 0.526 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+freebankvideos.example 0.532 text 0.516 link 0.548 https://www.freebankvideos.example/ Some("Free bank videos xxx") Some("Videos of banks")
+pnc.com 0.431 text 0.211 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+pncbank.com 0.338 text 0.211 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+## bank site:usbank.com (country any, safe moderate, language any)
+buckets [2985, 9636, 3695, 13613] keys ["bank"]
+usbank.com 1.168 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+# sealed to two nodes, one lying
+usbank.com 1.168 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+## bank -chase (country any, safe moderate, language de)
+buckets [2985, 9636, 3695, 13613] keys ["bank"]
+bankofamerica.com 1.202 text 1.000 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+pnc.com 1.128 text 1.000 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+deutsche-bank.de 1.096 text 1.000 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+bank.com 1.036 text 1.000 link 0.387 https://www.bank.com/ Some("Bank") None
+sexybank.example 0.304 text 0.179 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+pncbank.com 0.255 text 0.143 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+# sealed to two nodes, one lying
+bankofamerica.com 1.202 text 1.000 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+pnc.com 1.128 text 1.000 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+deutsche-bank.de 1.096 text 1.000 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+bank.com 1.036 text 1.000 link 0.387 https://www.bank.com/ Some("Bank") None
+sexybank.example 0.304 text 0.179 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+pncbank.com 0.255 text 0.143 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+## bank video (country any, safe moderate, language any)
+buckets [2985, 13143, 6349, 10447] keys ["bankvideo", "video", "bank"]
+usbank.com 0.918 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.668 text 0.474 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+bank.com 0.635 text 0.632 link 0.387 https://www.bank.com/ Some("Bank") None
+deutsche-bank.de 0.622 text 0.684 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 0.546 text 0.211 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+sexybank.example 0.506 text 0.474 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+pnc.com 0.431 text 0.211 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+pncbank.com 0.338 text 0.211 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+# sealed to two nodes, one lying
+usbank.com 0.918 text 1.000 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.668 text 0.474 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+bank.com 0.635 text 0.632 link 0.387 https://www.bank.com/ Some("Bank") None
+deutsche-bank.de 0.622 text 0.684 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 0.546 text 0.211 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+sexybank.example 0.506 text 0.474 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+pnc.com 0.431 text 0.211 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+pncbank.com 0.338 text 0.211 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+## wells fargo (country any, safe moderate, language any)
+buckets [7716, 3693, 1338, 12353] keys ["wellsfargo", "fargo", "wells"]
+wellsfargo.com 1.087 text 1.000 link 0.534 https://wellsfargo.com/ None None
+# sealed to two nodes, one lying
+wellsfargo.com 1.087 text 1.000 link 0.534 https://wellsfargo.com/ None None
+## pnc bank (country any, safe moderate, language any)
+buckets [2985, 2952, 414, 2822] keys ["pncbank", "bank", "pnc"]
+pncbank.com 1.063 text 1.000 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+pnc.com 0.922 text 0.875 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+usbank.com 0.679 text 0.594 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.485 text 0.281 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+deutsche-bank.de 0.460 text 0.406 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 0.390 text 0.125 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+bank.com 0.379 text 0.375 link 0.387 https://www.bank.com/ Some("Bank") None
+sexybank.example 0.290 text 0.156 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")
+# sealed to two nodes, one lying
+pncbank.com 1.063 text 1.000 link 0.465 https://www.pncbank.com/ Some("PNC Bank") None
+pnc.com 0.922 text 0.875 link 0.652 https://www.pnc.com/ Some("PNC Bank - Personal & Business Banking") None
+usbank.com 0.679 text 0.594 link 0.837 https://www.usbank.com/ Some("U.S. Bank | Checking & Savings - Personal Banking") Some("Checking, savings and home loans from U.S. Bank.")
+bankofamerica.com 0.485 text 0.281 link 0.863 https://www.bankofamerica.com/ Some("Bank of America - Banking, Credit Cards, Loans") None
+deutsche-bank.de 0.460 text 0.406 link 0.560 https://www.deutsche-bank.de/ Some("Deutsche Bank") None
+chase.com 0.390 text 0.125 link 0.882 https://www.chase.com/ Some("Chase Bank - Credit Cards, Mortgages, Banking") None
+bank.com 0.379 text 0.375 link 0.387 https://www.bank.com/ Some("Bank") None
+sexybank.example 0.290 text 0.156 link 0.538 https://www.sexybank.example/ Some("Sexy bank videos") Some("Bank videos")

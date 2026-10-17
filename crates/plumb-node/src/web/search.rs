@@ -565,7 +565,16 @@ pub(crate) async fn paper_response(
         None
     };
     if json {
-        return (StatusCode::OK, security_headers(), Json(serde_json::json!({ "query": query, "kind": "paper", "results": [], "pages": hits, "coverage": coverage, "message": message }))).into_response();
+        // With `full=1`, each paper as its item, as in other searches.
+        let pages = if flag(&params.full) {
+            serde_json::json!(hits
+                .iter()
+                .map(crate::assembly::PageItem::of)
+                .collect::<Vec<_>>())
+        } else {
+            serde_json::json!(hits)
+        };
+        return (StatusCode::OK, security_headers(), Json(serde_json::json!({ "query": query, "kind": "paper", "results": [], "pages": pages, "coverage": coverage, "message": message }))).into_response();
     }
     let mut body = format!(
         "<div class=\"wrap wide\">{}<main><h1 class=\"visually-hidden\">Paper results for {}</h1>",

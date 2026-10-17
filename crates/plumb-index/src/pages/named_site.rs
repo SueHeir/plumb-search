@@ -271,13 +271,9 @@ impl PageSearcher {
             &TopDocs::with_limit(ADDRESS_CANDIDATES).order_by_score(),
         )? {
             let document: TantivyDocument = searcher.doc(address)?;
-            let Some(stored) = document
-                .get_first(self.fields.page)
-                .and_then(|v| v.as_str())
-            else {
+            let Some(page) = self.read_page(&document)? else {
                 continue;
             };
-            let page: Page = serde_json::from_str(stored)?;
             let Some(at) = address_key(&page.url) else {
                 continue;
             };
@@ -390,13 +386,9 @@ impl PageSearcher {
                 &TopDocs::with_limit(NAMED_SITE_CANDIDATES).order_by_score(),
             )? {
                 let document: TantivyDocument = searcher.doc(address)?;
-                let Some(stored) = document
-                    .get_first(self.fields.page)
-                    .and_then(|v| v.as_str())
-                else {
+                let Some(mut page) = self.read_page(&document)? else {
                     continue;
                 };
-                let mut page: Page = serde_json::from_str(stored)?;
                 let share = self.named_share(&page, named, naming);
                 if !page.is_site_page()
                     || share == 0.0

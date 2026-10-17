@@ -10,6 +10,16 @@
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
 - Such a node can go back to 0.4.0, which reads either form, but not to 0.3.1, which can't read the new lines.
+- The page index keeps each page as its item in Plumb's data format, with the set it came from, and is built from items: a page set held as a signed item set goes in as it is, and a page set's file is read as items as the index is built. Search results don't change. Every node builds its page index again at its first start, and searches the old one meanwhile. On a test of 1.5 million pages the build took about 17% longer, used about 4% more memory at its peak, and the index came out about 6% bigger.
+
+### The JSON API
+
+- `/api/search?full=1` gives each page as its item in Plumb's data format, with the page set it came from beside it: a page in `pages` and in `assembled.rows` is `{"item", "set", "score", ...}` where it was `{"page", "score", ...}`. The rest of the answer is the same, and so is `/api/search` without `full=1`. A paper search with `full=1` gives its `pages` the same way. A script that reads pages from `full=1` now finds a page's description in `about`, an article's first sentences in `text`, the site a page is about in its `about` edge (`{"rel": "about", "to": "site:apple.com"}`; the item's own `site` is the site its address is on), a paper's DOI and arXiv ID in `ids.doi` and `ids.arxiv`, its date in `published`, its authors and venue in `fields.authors` and `fields.venue`, and a package's version, release date and license in `fields.package`. [docs/searching.md](docs/searching.md#what-comes-back) describes each member. A script that also asks older nodes can tell the two forms apart by `item` or `page`, as the Zotero add-on does.
+- The Zotero add-on 0.1.1 reads pages in either form, so it works with nodes before and after this change. A copy from before lists only the sites of a full answer from a node with it, so update the add-on first.
+
+### Private search
+
+- The private search page now gets each site of a bucket as its item in Plumb's data format, trimmed, in place of the site's trimmed record (`GET /api/buckets/{table}/{n}`). Buckets come out the same size (measured on 64 buckets of a live node), and searches find and rank the same sites. The page reads both forms, so buckets a browser kept from before the upgrade still work. A private search tab left open across the upgrade can find nothing until it is reloaded.
 
 ## 0.4.0
 

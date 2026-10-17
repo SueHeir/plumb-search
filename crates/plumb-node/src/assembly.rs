@@ -2,10 +2,11 @@
 
 use plumb_core::place::{is_kind_word, Place, OSM_COPYRIGHT_URL};
 use plumb_core::{normalize_text, SafeSearch};
-use plumb_index::pages::PlacedPage;
+use plumb_format::Item;
+use plumb_index::pages::{LearnedPlace, PageHit, PlacedPage, SetItem};
 use plumb_index::places::{parse_place_query, LocationStatus, Near, PlaceResults};
 use plumb_index::{Hit, SearchOptions};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::web::http_url;
 
@@ -114,16 +115,94 @@ pub(crate) fn places(
 }
 
 /// One top-level result; supporting pages stay attached to their site.
+/// Written out (`/api/search?full=1`), each page is its [`PageItem`].
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Row<'a> {
     Site {
         site: &'a Hit,
+        #[serde(serialize_with = "placed_items")]
         pages: Vec<&'a PlacedPage>,
     },
     Page {
+        #[serde(serialize_with = "placed_item")]
         page: &'a PlacedPage,
     },
+}
+
+/// A page as `/api/search?full=1` gives it: the page as its item of the
+/// data format, made as the page index makes one of a page
+/// ([`SetItem::of_page`]), and the page set it came from, then how the
+/// search found the page and where it is listed. What a [`PlacedPage`]
+/// (or, in a paper search, a [`PageHit`]) says, with the item and set in
+/// place of the page.
+#[derive(Debug, Serialize)]
+pub(crate) struct PageItem<'a> {
+    item: Item,
+    set: String,
+    score: f32,
+    named: bool,
+    popularity: f32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    whole: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    learned: Option<&'a LearnedPlace>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    meant: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    under: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at: Option<usize>,
+}
+
+impl<'a> PageItem<'a> {
+    /// `hit` with its page as its item. The members of the page its item
+    /// says otherwise ([`SetItem::members`]), which hardly any page has,
+    /// are left out: the item is what is given.
+    pub(crate) fn of(hit: &'a PageHit) -> Self {
+        // Every member, so that one added to a page hit is not left out
+        // here unseen.
+        let PageHit {
+            page,
+            score,
+            named,
+            popularity,
+            whole,
+            learned,
+            meant,
+        } = hit;
+        let SetItem { item, set, .. } = SetItem::of_page(page);
+        PageItem {
+            item,
+            set,
+            score: *score,
+            named: *named,
+            popularity: *popularity,
+            whole: *whole,
+            learned: learned.as_ref(),
+            meant: *meant,
+            under: None,
+            at: None,
+        }
+    }
+
+    /// `placed` with its page as its item.
+    pub(crate) fn placed(placed: &'a PlacedPage) -> Self {
+        let PlacedPage { hit, under, at } = placed;
+        PageItem {
+            under: under.as_deref(),
+            at: Some(*at),
+            ..PageItem::of(hit)
+        }
+    }
+}
+
+fn placed_item<S: Serializer>(page: &&PlacedPage, serializer: S) -> Result<S::Ok, S::Error> {
+    PageItem::placed(page).serialize(serializer)
+}
+
+fn placed_items<S: Serializer>(pages: &[&PlacedPage], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(pages.iter().map(|page| PageItem::placed(page)))
 }
 
 /// The bounded output shared by adapters, preserving typed source objects.

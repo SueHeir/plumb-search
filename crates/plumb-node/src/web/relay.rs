@@ -184,7 +184,7 @@ mod tests {
         let sites = sealed::open(opener, &seal_response(reply, &answer).unwrap()).unwrap();
         assert_eq!(sites.len(), 2);
         assert_eq!(sites[0].url.as_deref(), Some("https://www.usbank.com/"));
-        assert_eq!(sites[1].domain, "chase.com");
+        assert_eq!(sites[1].id, "chase.com");
         assert_eq!(sites[1].url, None, "a URL off the site's own domain");
 
         // Keys of another node, or expired ones, are refused.

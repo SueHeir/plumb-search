@@ -64,8 +64,11 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     peer_config.bootstrap = vec![node_addr.clone()];
     // The peer trusts the node, so it may fill its space from it.
     peer_config.trusted_peers = vec![net_status.peer_id.parse().unwrap()];
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
-        .unwrap();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &stored_items(&[crawled.clone()]),
+    )
+    .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -143,7 +146,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         from_node
             .found
             .iter()
-            .any(|f| f.record.domain == "usbank.com"),
+            .any(|f| f.site.domain() == "usbank.com"),
         "{from_node:?}"
     );
 
@@ -152,7 +155,10 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     // from its own index.
     let mut published = None;
     for _ in 0..100 {
-        published = peer.publish(vec![crawled.clone()]).await.unwrap();
+        published = peer
+            .publish(listed(std::slice::from_ref(&crawled)))
+            .await
+            .unwrap();
         let (_, _, body) = get(addr, "/api/status").await;
         let status: serde_json::Value = serde_json::from_str(&body).unwrap();
         if status["network"]["agreement"]["pending_sites"] == 1 {
@@ -175,14 +181,19 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         c.bootstrap = vec![node_addr.clone()];
         c
     };
-    let empty =
-        plumb_net::BucketTable::build(&second_dir.path().join("buckets"), &[] as &[SiteRecord])
-            .unwrap();
+    let empty = plumb_net::BucketTable::build(
+        &second_dir.path().join("buckets"),
+        &[] as &[plumb_core::site::Item],
+    )
+    .unwrap();
     let (second, _records) = plumb_net::start(second_config, Arc::new(empty))
         .await
         .unwrap();
     for _ in 0..100 {
-        second.publish(vec![crawled.clone()]).await.unwrap();
+        second
+            .publish(listed(std::slice::from_ref(&crawled)))
+            .await
+            .unwrap();
         if dir.path().join("net/inbox.jsonl").exists() {
             break;
         }
@@ -261,8 +272,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     peer_config.local_discovery = false;
     peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr];
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
-        .unwrap();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &stored_items(&[crawled.clone()]),
+    )
+    .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -272,7 +286,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     .await;
     // Signed, so its answers carry the proof. One crawler is not enough
     // for the node to take the crawl from gossip.
-    assert!(peer.publish(vec![crawled.clone()]).await.unwrap().is_some());
+    assert!(peer
+        .publish(listed(std::slice::from_ref(&crawled)))
+        .await
+        .unwrap()
+        .is_some());
 
     // The node's own result shows the network's signed text, untinted.
     let mut body = String::new();
@@ -298,11 +316,11 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     // A crawl the search may keep (trusted or confirmed, see
     // plumb_net::FoundSite::keeps) goes to the inbox once, and the node's
     // next index has the text.
-    network::keep_found(&node.inner, vec![crawled.clone()]);
+    network::keep_found(&node.inner, listed(std::slice::from_ref(&crawled)));
     let kept = inbox();
     assert_eq!(kept.lines().count(), 1, "{kept}");
     assert!(kept.contains("Communities for every"), "{kept}");
-    network::keep_found(&node.inner, vec![crawled.clone()]);
+    network::keep_found(&node.inner, listed(std::slice::from_ref(&crawled)));
     assert_eq!(inbox(), kept, "kept once");
     node.refresh_now();
     wait_for(addr, "a new index", |s| {
@@ -389,7 +407,9 @@ async fn network_results_go_through_the_denylist() {
     peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr];
     let records = [keepers, wreckers, facebook];
-    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &records).unwrap();
+    let table =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&records))
+            .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
         .await
         .unwrap();
@@ -476,9 +496,11 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     peer_config.local_discovery = false;
     peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr];
-    let source =
-        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &fixture_records())
-            .unwrap();
+    let source = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &stored_items(&fixture_records()),
+    )
+    .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
         .await
         .unwrap();

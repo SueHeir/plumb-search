@@ -33,7 +33,7 @@ plumb-node runs the swarm and answers other nodes from its index through `Bucket
 | [node/task.rs](src/node/task.rs) | The swarm task: commands from handles, `Answer`s from blocking work, swarm events, the one-minute maintenance tick |
 | [node/swarm.rs](src/node/swarm.rs) | Building the swarm: transports, behaviors, per-protocol size caps, connection and relay limits |
 | [node/handle.rs](src/node/handle.rs) | The `NetHandle` methods the rest of the program calls |
-| [node/batches.rs](src/node/batches.rs) | Publishing, hearing of, fetching and holding batches; `RecordDelivery` of agreed records |
+| [node/batches.rs](src/node/batches.rs) | Publishing, hearing of, fetching and holding batches; `RecordDelivery` of agreed sites, as their stored items |
 | [node/answering.rs](src/node/answering.rs) | Answering bucket and sealed requests, relaying, and who may search this node |
 | [node/serving.rs](src/node/serving.rs) | Serving fills, page files, signed sets and profiles, a few at a time |
 | [node/gossip.rs](src/node/gossip.rs) | Popularity reports and leads, over gossip and by asking |
@@ -47,18 +47,18 @@ plumb-node runs the swarm and answers other nodes from its index through `Bucket
 | Module | What it does |
 | --- | --- |
 | [assign.rs](src/assign.rs) | Which sites a node may crawl each day (`is_assigned`, `MAX_SHARE_PPM`), and slices for `--crawl-any-site` groups |
-| [batch.rs](src/batch.rs) | Signed batches: `check`, `accept_batch`, `accept_trusted_batch`, `mostly_kept`, `RecordProof` |
+| [batch.rs](src/batch.rs) | Signed batches of sites' items: `check`, `accept_batch`, `accept_trusted_batch`, `mostly_kept`, `RecordProof` |
 | [hash.rs](src/hash.rs) | SHA-256 and the Merkle tree over a batch's records |
 | [store.rs](src/store.rs) | Batches held on disk, pruning, proofs for search answers, `CrawlerView` |
 | [agree.rs](src/agree.rs) | Agreement between crawlers: quorum, vouching, disputes and rechecks |
-| [fill.rs](src/fill.rs) | `/plumb/fill/1`: a trusted node's crawled sites, best-ranked first; `accept_record`, the checks on a site from elsewhere, which reading the set of sites shares |
+| [fill.rs](src/fill.rs) | `/plumb/fill/1`: a trusted node's crawled sites, best-ranked first, sent as records' JSON and taken in as sites' stored items; `accept_site`, the checks on a site from elsewhere, which reading the set of sites shares |
 
 **Network search**
 
 | Module | What it does |
 | --- | --- |
 | [bucket.rs](src/bucket.rs) | `BucketSource`, and `BucketTable` and `BucketWriter` for the bucket table on disk, written from sites' stored items |
-| [search.rs](src/search.rs) | Asking for buckets under throwaway identities, hedging, checking answers, `NetSearch` |
+| [search.rs](src/search.rs) | Asking for buckets under throwaway identities, hedging, checking answers, `NetSearch` and its `FoundSite`s, each site's stored item held as its line |
 | [oblivious.rs](src/oblivious.rs) | Sealed requests through a relay over `/plumb/oblivious/2`: signed keys and padding |
 | [rounds.rs](src/rounds.rs) | Scheduled background rounds and the queue of buckets they fetch |
 | [cache.rs](src/cache.rs) | The bucket cache that searches read |
@@ -81,7 +81,7 @@ plumb-node runs the swarm and answers other nodes from its index through `Bucket
 
 ### One swarm on one task
 
-`start` loads or creates the node key (`node.key` in `NetConfig::dir`), opens the report and lead stores on a blocking thread, builds the swarm and spawns `Task::run`. It returns a `NetHandle` and a receiver of `RecordDelivery`: records that agreement released, each with a storage reservation and an acknowledgment. plumb-node saves them to its inbox and calls `acknowledge()`. Deliveries not acknowledged are sent again after a restart, without awarding credits twice.
+`start` loads or creates the node key (`node.key` in `NetConfig::dir`), opens the report and lead stores on a blocking thread, builds the swarm and spawns `Task::run`. It returns a `NetHandle` and a receiver of `RecordDelivery`: the sites agreement released, as a `SiteList` of their stored items, each delivery with a storage reservation and an acknowledgment. plumb-node saves them to its inbox and calls `acknowledge()`. Deliveries not acknowledged are sent again after a restart, without awarding credits twice.
 
 ```mermaid
 flowchart LR
