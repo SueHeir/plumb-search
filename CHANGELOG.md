@@ -4,7 +4,7 @@
 
 ### Search
 
-- A second learned model puts the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first, as xe.com does for "currency converter" and chipotle.com for "chiptole". It learned from the sites test searches expect and from an LLM's grades of the sites other searches list, so it doesn't push a site that matches a search well below a bigger one. The first learned model then only places pages among the sites, as moving them again undid part of the second's work. Nodes without the sites' vectors, and searches that ask only for the news, are ordered as before.
+- A second learned model puts the first 100 sites a search finds in order before any page is placed, so a site the ranking found but listed far down can come first, as sba.gov does for "sba hubzone certification" and donotcall.gov for "how to get telemarketers to stop calling". It learned from the sites test searches expect and from an LLM's grades of the sites other searches list, so it doesn't push a site that matches a search well below a bigger one. The first learned model then only places pages among the sites, as moving them again undid part of the second's work. A site the search names, by its name, domain label or an alias, stays at least where it was. Nodes without the sites' vectors, and searches that ask only for the news, are ordered as before.
 
 ### Running a node
 

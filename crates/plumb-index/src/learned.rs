@@ -711,16 +711,23 @@ fn site_order(
             })
         };
         sites = after_leading(sites, partial, unembedded);
-        // And a site the query names, or the domain it typed, ends no lower
-        // than the hand-made ranking put it: trained on graded searches,
-        // the model put any-video-converter.com before converter.app for
-        // "converter", and `official_site` takes the first site.
-        let typed = |row: usize| {
+        // And a site the query names, whole or among other words by its
+        // domain label or an alias, or whose domain it typed, ends no
+        // lower than the hand-made ranking put it: trained on graded
+        // searches, the model put any-video-converter.com before
+        // converter.app for "converter" and capitalone.com before
+        // creditonebank.com for "credit one bank official", and
+        // `official_site` takes the first site.
+        let in_query = |row: usize| {
             site(row).is_some_and(|hit| {
-                hit.named || hit.query_evidence.as_ref().is_some_and(|e| e.typed_domain)
+                hit.named
+                    || hit
+                        .query_evidence
+                        .as_ref()
+                        .is_some_and(|e| e.typed_domain || e.full_name || e.partial_name_words > 0)
             })
         };
-        sites = no_lower(sites, typed);
+        sites = no_lower(sites, in_query);
     }
     sites
 }
@@ -1194,17 +1201,20 @@ mod tests {
         let order_of = |vector: Option<f32>| {
             // schwab.com has every word but, crawled after the vectors
             // were made, maybe no vector; wsj.com is popular and near in
-            // meaning but lacks the words.
+            // meaning but lacks the words. Neither counts as named here,
+            // which would keep it in place anyway.
             let mut schwab = site("schwab.com", 1.0, false);
             schwab.link_score = 0.4;
             let mut noted = evidence("schwab.com", 0);
             noted.semantic_closeness = vector;
+            noted.partial_name_words = 0;
             schwab.query_evidence = Some(noted);
             let mut wsj = site("wsj.com", 0.8, false);
             wsj.link_score = 0.9;
             wsj.missing_words = true;
             let mut noted = evidence("wsj.com", 0);
             noted.semantic_closeness = Some(1.0);
+            noted.partial_name_words = 0;
             wsj.query_evidence = Some(noted);
             let mut hits = vec![schwab, wsj];
             reorder_sites(&popular_first_model(), "charles schwab", &mut hits);
@@ -1217,37 +1227,49 @@ mod tests {
 
     #[test]
     fn the_site_model_puts_a_named_site_no_lower_than_it_was() {
-        let linked = |domain: &str, named: bool, link_score: f32| {
+        // `name_words`: the query's words its domain label or an alias
+        // covers.
+        let linked = |domain: &str, named: bool, name_words: usize, link_score: f32| {
             let mut hit = site(domain, 0.5, named);
             hit.link_score = link_score;
             let mut noted = evidence(domain, 0);
             noted.semantic_closeness = Some(0.8);
+            noted.partial_name_words = name_words;
             hit.query_evidence = Some(noted);
             hit
         };
-        let order_of = |hits: Vec<Hit>| {
+        let order_of = |query: &str, hits: Vec<Hit>| {
             let mut hits = hits;
-            reorder_sites(&popular_first_model(), "converter", &mut hits);
+            reorder_sites(&popular_first_model(), query, &mut hits);
             hits.into_iter().map(|hit| hit.domain).collect::<Vec<_>>()
         };
         // The named site keeps first place from a more linked one.
         let named_first = vec![
-            linked("converter.app", true, 0.3),
-            linked("any-video-converter.com", false, 0.9),
+            linked("converter.app", true, 0, 0.3),
+            linked("any-video-converter.com", false, 0, 0.9),
         ];
         assert_eq!(
-            order_of(named_first),
+            order_of("converter", named_first),
             ["converter.app", "any-video-converter.com"]
         );
         // It may still rise, and the model orders the sites around it.
         let named_last = vec![
-            linked("convert.example", false, 0.3),
-            linked("converters.example", false, 0.9),
-            linked("converter.app", true, 0.9),
+            linked("convert.example", false, 0, 0.3),
+            linked("converters.example", false, 0, 0.9),
+            linked("converter.app", true, 0, 0.9),
         ];
         assert_eq!(
-            order_of(named_last),
+            order_of("converter", named_last),
             ["converters.example", "converter.app", "convert.example"]
+        );
+        // So does a site whose domain label names it among other words.
+        let label_first = vec![
+            linked("creditonebank.com", false, 3, 0.3),
+            linked("capitalone.com", false, 0, 0.9),
+        ];
+        assert_eq!(
+            order_of("credit one bank official", label_first),
+            ["creditonebank.com", "capitalone.com"]
         );
     }
 
