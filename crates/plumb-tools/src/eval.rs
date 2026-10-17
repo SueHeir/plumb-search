@@ -714,6 +714,12 @@ fn evaluate(
     } else {
         args.limit
     };
+    // --features-out writes the hand-made order of sites the site model
+    // is trained to improve, as it does the rows (below).
+    let search_cfg = plumb_index::RankConfig {
+        learned_sites: cfg.learned_sites && features.is_none(),
+        ..*cfg
+    };
 
     let mut ranks = Vec::with_capacity(queries.len());
     for q in queries {
@@ -737,7 +743,7 @@ fn evaluate(
                 .search_meaning(
                     query,
                     fetched,
-                    cfg,
+                    &search_cfg,
                     &options,
                     query_meaning
                         .as_ref()
@@ -839,7 +845,13 @@ fn evaluate(
                 // --features-out writes the hand-made order the learned
                 // ranking is trained to improve.
                 if features.is_none() {
-                    plumb_index::learned::reorder_results(cfg, &searched, &mut lifted, &mut placed);
+                    plumb_index::learned::reorder_results(
+                        cfg,
+                        &searched,
+                        results.sites_ordered,
+                        &mut lifted,
+                        &mut placed,
+                    );
                 }
                 if let Some(spelling) = &results.spelling {
                     pages.list_suggested_page(spelling, &options, &mut placed)?;

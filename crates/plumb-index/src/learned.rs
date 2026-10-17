@@ -581,21 +581,23 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
 
 /// What `cfg` does to the first rows once pages are placed among the
 /// sites: [`reorder`] with the built-in model when
-/// [`crate::RankConfig::learned`] is on. With
-/// [`crate::RankConfig::learned_sites`] too (the default), the site model
-/// has put the sites in order already, and this model only places the
+/// [`crate::RankConfig::learned`] is on. When the site model has put the
+/// sites in order already (`sites_ordered`,
+/// [`crate::SearchResults::sites_ordered`]), this model only places the
 /// pages listed on their own among them. It learned from the hand-made
 /// order, and moving the site model's sites again undid much of its work:
 /// in a replay of the test searches, typo searches with their site first
-/// fell from 90% to 78%.
+/// fell from 90% to 78%. Otherwise, as without a meaning, it orders the
+/// sites too.
 pub fn reorder_results(
     cfg: &crate::RankConfig,
     query: &str,
+    sites_ordered: bool,
     hits: &mut Vec<Hit>,
     placed: &mut Vec<PlacedPage>,
 ) {
     if cfg.learned {
-        let moves = if cfg.learned_sites {
+        let moves = if sites_ordered {
             Moves::Pages
         } else {
             Moves::Rows

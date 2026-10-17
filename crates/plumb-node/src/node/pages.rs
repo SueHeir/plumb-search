@@ -1328,6 +1328,7 @@ pub(super) fn add_pages(
             plumb_index::learned::reorder_results(
                 &inner.rank,
                 query,
+                results.sites_ordered,
                 &mut results.hits,
                 &mut results.pages,
             );

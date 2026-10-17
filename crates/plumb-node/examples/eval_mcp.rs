@@ -139,7 +139,13 @@ impl FrozenBackend {
             })?;
         }
         results.pages = place_pages(query, &results.hits, found);
-        plumb_index::learned::reorder_results(rank, query, &mut results.hits, &mut results.pages);
+        plumb_index::learned::reorder_results(
+            rank,
+            query,
+            results.sites_ordered,
+            &mut results.hits,
+            &mut results.pages,
+        );
         plumb_index::asked_state_first(query, &mut results.hits);
         let town = |name: &str| {
             self.sites

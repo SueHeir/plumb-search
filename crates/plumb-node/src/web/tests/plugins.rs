@@ -238,6 +238,7 @@ impl SearchBackend for SongBackend {
             site_search: None,
             spelling: None,
             meant: None,
+            sites_ordered: false,
         })
     }
 

@@ -582,6 +582,10 @@ pub struct SearchResults {
     /// for the page search to add. Not sent: a node finds its own.
     #[serde(skip)]
     pub meant: Option<String>,
+    /// Whether the site model put `hits` in order ([`learned::reorder_sites`]),
+    /// so the row model only places pages among them. Not sent.
+    #[serde(skip)]
+    pub sites_ordered: bool,
 }
 
 /// A suggested spelling of a query: "amazom" -> "amazon".

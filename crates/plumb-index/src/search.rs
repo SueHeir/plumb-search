@@ -22,8 +22,8 @@ use crate::query::{matching_docs, words_after, ParsedQuery, COMPARISON_WORDS};
 use crate::rank::{best_link_score, bm25_of, domain_of, link_scores};
 use crate::schema::Fields;
 use crate::{
-    analysis, health, learned, pages, schema, spell, spell_model, CandidatePool, Hit, Meaning,
-    RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch, Spelling, WordsOrder,
+    analysis, health, learned, pages, schema, spell, spell_model, topics, CandidatePool, Hit,
+    Meaning, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch, Spelling, WordsOrder,
     FILLER_WORDS, WELL_KNOWN_LINK_SCORE,
 };
 
@@ -227,8 +227,14 @@ impl Searcher {
         if !ops.any() {
             // The site model learned from searches with closeness in
             // meaning for nearly every site; without a meaning it would
-            // read every site as far from the query.
-            let site_model = cfg.learned && cfg.learned_sites && meaning.is_some();
+            // read every site as far from the query. Nor does it order the
+            // news sites a query for the news alone lists by popularity
+            // and home country, with nothing of the query to read: "news"
+            // put buzzfeed.com before news.google.com and cnn.com.
+            let site_model = cfg.learned
+                && cfg.learned_sites
+                && meaning.is_some()
+                && !topics::asks_only_for_news(query_text);
             let depth = if site_model {
                 limit.max(learned::LEARNED_SITES)
             } else {
@@ -238,6 +244,7 @@ impl Searcher {
             if site_model {
                 learned::reorder_sites(learned::Model::sites(), query_text, &mut results.hits);
                 results.hits.truncate(limit);
+                results.sites_ordered = true;
             }
             results.meant = meaning.and_then(|meaning| meaning.nearest_page());
             if cfg.health_authorities {

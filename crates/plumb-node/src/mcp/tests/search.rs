@@ -202,6 +202,7 @@ impl SearchBackend for RichSource {
             site_search: None,
             spelling: None,
             meant: None,
+            sites_ordered: false,
         })
     }
     fn pages_of(
@@ -639,6 +640,7 @@ impl SearchBackend for Shelves {
             }),
             spelling: None,
             meant: None,
+            sites_ordered: false,
         })
     }
 

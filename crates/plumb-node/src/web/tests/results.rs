@@ -15,6 +15,7 @@ fn a_misspelled_name_offers_its_site_with_the_suggestion() {
             applied: false,
         }),
         meant: None,
+        sites_ordered: false,
     };
     let page = render_results(
         "youtbue",
@@ -50,6 +51,7 @@ fn results_for_a_spelling_say_so_and_link_the_query_as_typed() {
             applied: true,
         }),
         meant: None,
+        sites_ordered: false,
     };
     let page = render_results(
         "kayne west",
@@ -83,6 +85,7 @@ fn typos_are_searched_as_typed_with_a_suggestion() {
             applied: false,
         }),
         meant: None,
+        sites_ordered: false,
     };
     let mut settings = no_settings();
     settings.options.country = Some("DE".into());
@@ -197,6 +200,7 @@ fn site_queries_list_every_page_on_the_site() {
         site_search: None,
         spelling: None,
         meant: None,
+        sites_ordered: false,
     };
     let page = render_results(
         "einstein site:wikipedia.org",
@@ -252,6 +256,7 @@ fn a_site_shows_every_page_under_it() {
         site_search: None,
         spelling: None,
         meant: None,
+        sites_ordered: false,
     };
     let page = render_results(
         "census population clock",
@@ -281,6 +286,7 @@ fn the_source_line_says_where_results_came_from() {
         site_search: None,
         spelling: None,
         meant: None,
+        sites_ordered: false,
     };
     let mut settings = no_settings();
     settings.network = NetSetting::Off;
@@ -398,6 +404,7 @@ fn results_show_site_icons_inline_and_letters_otherwise() {
         ],
         site_search: None,
         meant: None,
+        sites_ordered: false,
     };
     let mut icons = Icons::default();
     icons
@@ -431,6 +438,7 @@ fn results_show_site_icons_inline_and_letters_otherwise() {
         hits: vec![hit("jsr.io", "https://jsr.io/", Some("JSR"), None)],
         site_search: None,
         meant: None,
+        sites_ordered: false,
     };
     let page = render_results(
         "jsr",
@@ -463,6 +471,7 @@ fn recent_headlines_follow_the_first_result_escaped() {
         ],
         site_search: None,
         meant: None,
+        sites_ordered: false,
     };
     let now = now_unix();
     let headline = |title: &str, url: &str| crate::news::RecentHeadline {
