@@ -30,8 +30,8 @@ pub(crate) struct SearchParams {
     pub(crate) country: Option<String>,
     /// `1` (or `on`, `true`): only the home country's sites and global ones.
     pub(crate) only: Option<String>,
-    /// `1`: `/api/search` answers with a
-    /// [`SearchResults`](plumb_index::SearchResults) object.
+    /// `1`: `/api/search` answers with the whole results page as an
+    /// object, each page as its item ([`crate::assembly::PageItem`]).
     pub(crate) full: Option<String>,
     /// `1` (or `on`, `true`): `/search` asks the Plumb network too.
     pub(crate) net: Option<String>,

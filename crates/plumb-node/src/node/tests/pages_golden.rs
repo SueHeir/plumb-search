@@ -14,8 +14,10 @@
 //!
 //! Written by the page index that stored each page's JSON, before the
 //! index moved onto items (step 11 of the data format plan), so that the
-//! index on items is checked against it. Never written again to make a
-//! test pass: `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-node --lib
+//! index on items is checked against it. Only the answers to `full=1` were
+//! written again since, when they came to give each page as its item
+//! (step 12), each the same but for its pages. Never written again to make
+//! a test pass: `PLUMB_WRITE_GOLDEN=1 cargo test -p plumb-node --lib
 //! pages_golden` writes it.
 
 use std::fmt::Write as _;

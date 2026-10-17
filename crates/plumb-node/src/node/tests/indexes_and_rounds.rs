@@ -60,9 +60,10 @@ async fn lists_wikipedia_articles_with_the_sites() {
         "{body}"
     );
     let (_, _, json) = get(addr, "/api/search?q=marie+curie&full=1").await;
-    let results: SearchResults = serde_json::from_str(&json).unwrap();
-    assert_eq!(results.pages[0].hit.page.title, "Marie Curie");
-    assert!(results.pages[0].hit.named);
+    let results: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(results["pages"][0]["item"]["title"], "Marie Curie");
+    assert_eq!(results["pages"][0]["set"], "wikipedia-en");
+    assert_eq!(results["pages"][0]["named"], true);
 
     // Turned off, the articles go.
     let mut settings = node.inner.settings();

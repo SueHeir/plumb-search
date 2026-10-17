@@ -1,5 +1,8 @@
 // Run with `node --test zotero/test/plumb.test.js`. The fixtures are
-// answers from plumbsearch.org, cut to the fields the plugin reads.
+// answers from plumbsearch.org, cut to the fields the plugin reads, and
+// golden-pages.json and golden-items.json, the answers to `full=1` that
+// plumb-node's src/node/tests/pages_golden.txt holds before and since
+// nodes gave each page as its item, cut the same way.
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
@@ -32,7 +35,7 @@ test("search addresses", () => {
   );
   assert.equal(
     Plumb.searchURL(node, { query: "rna", limit: 50, papers: true }),
-    "https://example.org/plumb/api/search?q=rna&limit=50&kind=paper",
+    "https://example.org/plumb/api/search?q=rna&limit=50&kind=paper&full=1",
   );
 });
 
@@ -56,6 +59,37 @@ test("results keep the node's order, with a site's own pages after it", () => {
     "paper https://doi.org/10.1093/bioinformatics/btab083",
     "paper https://doi.org/10.1016/j.jml.2007.11.007",
   ]);
+});
+
+test("pages as items give the same results as pages as nodes gave them before", () => {
+  const before = fixture("golden-pages");
+  const items = fixture("golden-items");
+  assert.deepEqual(Object.keys(items), Object.keys(before));
+  const read = new Set();
+  for (const [search, answer] of Object.entries(items)) {
+    const pages = answer.assembled?.rows.flatMap((row) => row.pages ?? [row.page]) ?? answer.pages;
+    assert.ok(pages.length && pages.every((page) => page.item && page.set && !page.page), search);
+    // The same results, each with the same values read of its page (the
+    // `page` of a result): the address, title, set, description and the
+    // rest of README's table.
+    const [results, old] = [Plumb.results(answer), Plumb.results(before[search])];
+    assert.deepEqual(results, old, search);
+    const made = (result) => [Plumb.identifier(result), Plumb.item(result, NOW)];
+    assert.deepEqual(results.map(made), old.map(made), search);
+    assert.equal(Plumb.listed(answer), Plumb.listed(before[search]), search);
+    for (const { page } of results) {
+      for (const [name, value] of Object.entries(page ?? {})) if (value != null) read.add(name);
+    }
+  }
+  // Each value is read of some page of the fixtures.
+  const names = "set url title site about text doi arxiv published venue authors version released license";
+  assert.deepEqual([...read].sort(), names.split(" ").sort());
+  // A paper's year without its date is in its item's `paper` field alone.
+  const published = (found) => Plumb.results({ pages: [found] })[0].page.published;
+  const page = { set: "papers", url: "https://doi.org/10.1000/1", title: "T" };
+  assert.equal(published({ page: { ...page, paper: { publication_year: 2008 } } }), "2008");
+  const item = { url: page.url, title: "T", fields: { paper: { publication_year: 2008 } } };
+  assert.equal(published({ item, set: "papers" }), "2008");
 });
 
 test("results drop repeats and addresses that are not http or https", () => {
@@ -124,14 +158,11 @@ test("a paper from its metadata", () => {
     description: "Paper by Ashish Vaswani et al., 2017, arXiv (Cornell University)",
     page: {
       set: "papers",
-      paper: {
-        doi: "10.48550/arXiv.1706.03762",
-        arxiv_id: "1706.03762",
-        authors: ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"],
-        publication_date: "2017-06-12",
-        publication_year: 2017,
-        venue: "arXiv (Cornell University)",
-      },
+      doi: "10.48550/arXiv.1706.03762",
+      arxiv: "1706.03762",
+      authors: ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"],
+      published: "2017-06-12",
+      venue: "arXiv (Cornell University)",
     },
   };
   // On arXiv, with arXiv's DOI, it is a preprint.
@@ -152,12 +183,12 @@ test("a paper from its metadata", () => {
   assert.equal(bare.archiveID, "arXiv:1706.03762");
   assert.equal(bare.DOI, undefined);
   // Published with a DOI of its own, it is a journal article.
-  const paper = {
-    ...result.page.paper,
+  const page = {
+    ...result.page,
     doi: "10.5555/3295222.3295349",
     venue: "Neural Information Processing Systems",
   };
-  const published = Plumb.item({ ...result, page: { set: "papers", paper } }, NOW);
+  const published = Plumb.item({ ...result, page }, NOW);
   assert.equal(published.itemType, "journalArticle");
   assert.equal(published.DOI, "10.5555/3295222.3295349");
   assert.equal(published.extra, "arXiv: 1706.03762");
