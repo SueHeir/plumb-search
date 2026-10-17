@@ -6,6 +6,7 @@
 
 - A node writes each site in its records file, its journal, its inbox and its buckets in Plumb's data format, as the site item crawl batches and signed sets carry, with what else it keeps of the site beside it, where it wrote the site's record before. The file keeps its name (`records.jsonl`) and its lines change as the node writes them again, at its next fold. It takes about 8% more space (measured on 100,000 sites). Searches, and all the node sends other nodes (bucket answers, fill answers and published crawls), come out the same.
 - Such a node can go back to 0.4.0, which reads either form, but not to 0.3.1, which can't read the new lines.
+- The page index keeps each page as its item in Plumb's data format, with the set it came from, and is built from items: a page set held as a signed item set goes in as it is, and a page set's file is read as items as the index is built. Search results don't change. Every node builds its page index again at its first start, and searches the old one meanwhile. On a test of 1.5 million pages the build took about 17% longer, used about 4% more memory at its peak, and the index came out about 6% bigger.
 
 ### Private search
 

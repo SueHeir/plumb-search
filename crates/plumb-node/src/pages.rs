@@ -27,7 +27,7 @@ use std::str::FromStr;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{articles_file_name, articles_of, is_profiles_line, PROFILES_LINE};
-use plumb_index::pages::{Page, PageSearcher};
+use plumb_index::pages::{Page, PageSearcher, SetItem};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -836,9 +836,9 @@ impl HeldPageSet {
         self.complete || self.items >= pages
     }
 
-    /// Reads up to `limit` pages of the page set `id` from the parts held,
-    /// most read first.
-    fn read(&self, id: &'static str, limit: u64) -> impl Iterator<Item = Page> {
+    /// Reads the items of up to `limit` pages of the page set `id` from
+    /// the parts held, most read first.
+    fn read(&self, id: &'static str, limit: u64) -> impl Iterator<Item = SetItem> {
         let dir = self.dir.clone();
         self.parts
             .clone()
@@ -868,10 +868,11 @@ impl HeldPageSet {
             })
             .filter_map(move |line| {
                 let item: plumb_format::Item = serde_json::from_str(&line).ok()?;
-                if item.is_extension() || item.is_deleted() {
+                // An item without a URL is no page.
+                if item.is_extension() || item.is_deleted() || item.url.is_none() {
                     return None;
                 }
-                plumb_index::items::page_of_item(&item, id)
+                Some(SetItem::new(id, item))
             })
             .take(usize::try_from(limit).unwrap_or(usize::MAX))
     }
@@ -1086,15 +1087,18 @@ pub fn open_or_build_with(
         denied.set(denied.get() + 1);
         false
     };
-    let mut pages: Box<dyn Iterator<Item = Page> + '_> = Box::new(std::iter::empty());
+    // Every page is indexed as its item: a file's pages are made items
+    // as they are read.
+    let mut items: Box<dyn Iterator<Item = SetItem>> = Box::new(std::iter::empty());
     for (set, from, count) in &wanted.sets {
         let read = match from {
             SetSource::File(file) => {
                 info!("indexing page set {} from {}", set.id, file.display());
                 let _mutation = budget.as_ref().map(|budget| budget.mutation());
                 let lease = budget.as_ref().map(|budget| budget.read_lease(file));
-                HoldingPages {
-                    pages: Box::new(set.read(file, *count)?),
+                let pages = set.read(file, *count)?;
+                HoldingItems {
+                    items: Box::new(pages.map(|page| SetItem::of_page(&page))),
                     _lease: lease,
                 }
             }
@@ -1104,16 +1108,16 @@ pub fn open_or_build_with(
                     set.id,
                     held.parts.len()
                 );
-                HoldingPages {
-                    pages: Box::new(held.read(set.id, *count)),
+                HoldingItems {
+                    items: Box::new(held.read(set.id, *count)),
                     _lease: None,
                 }
             }
-        }
-        .filter(allowed);
-        pages = Box::new(pages.chain(read));
+        };
+        items = Box::new(items.chain(read));
     }
-    let stats = plumb_index::pages::build_page_index_with_budget(&dir, pages, budget, go_on)?;
+    let stats =
+        plumb_index::pages::build_page_index_with_budget(&dir, items, budget, &allowed, go_on)?;
     info!(
         "built the page index of {} pages in {:.1}s",
         stats.pages,
@@ -1157,15 +1161,15 @@ pub fn stand_in(data_dir: &Path, key: &str) -> Option<(String, PageSearcher)> {
     })
 }
 
-struct HoldingPages {
-    pages: Box<dyn Iterator<Item = Page>>,
+struct HoldingItems {
+    items: Box<dyn Iterator<Item = SetItem>>,
     // Drop the input fd before releasing its physical allocation lease.
     _lease: Option<std::sync::Arc<plumb_core::storage::FileLease>>,
 }
-impl Iterator for HoldingPages {
-    type Item = Page;
-    fn next(&mut self) -> Option<Page> {
-        self.pages.next()
+impl Iterator for HoldingItems {
+    type Item = SetItem;
+    fn next(&mut self) -> Option<SetItem> {
+        self.items.next()
     }
 }
 

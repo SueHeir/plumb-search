@@ -79,6 +79,30 @@ pub fn page_item(page: &Page) -> Option<Item> {
 /// [`page_item`], or why `page` can't be an item.
 pub fn page_item_or_why(page: &Page) -> Result<Item, String> {
     let mut item = page_stub(page).ok_or("its URL has no canonical form")?;
+    fill(page, &mut item);
+    while too_big(&item) {
+        let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) else {
+            return Err(format!("it is over {MAX_ITEM_BYTES} bytes as an item"));
+        };
+        item.fields.remove(*field);
+    }
+    item.check().map_err(|err| format!("{err:#}"))?;
+    Ok(item)
+}
+
+/// [`page_item`] as the page index keeps it ([`crate::pages::SetItem`]):
+/// with every field, however big, a URL that has no canonical form as it
+/// is, and not checked against the format, so that it gives back as much
+/// of the page as an item can.
+pub(crate) fn index_item(page: &Page) -> Item {
+    let url = canonical_url(&page.url).unwrap_or_else(|| page.url.clone());
+    let mut item = stub(page, url);
+    fill(page, &mut item);
+    item
+}
+
+/// Fills in `item`, the stub of `page`, with all [`page_item`] says of it.
+fn fill(page: &Page, item: &mut Item) {
     item.title = clean(&page.title);
     item.site = item.url.as_deref().and_then(site_of_url);
     item.about = page.description.as_deref().and_then(clean);
@@ -104,11 +128,11 @@ pub fn page_item_or_why(page: &Page) -> Result<Item, String> {
             });
         }
     }
-    add_fields(page, &mut item);
+    add_fields(page, item);
     // Taking the URL as given can change the language a set implies, so
     // a second look can find more to keep.
     for _ in 0..3 {
-        let Some(back) = page_of_item(&item, &page.set) else {
+        let Some(back) = page_of_item(item, &page.set) else {
             break;
         };
         let mut given = match item.fields.get("page") {
@@ -120,14 +144,6 @@ pub fn page_item_or_why(page: &Page) -> Result<Item, String> {
         }
         item.fields.insert("page".into(), Value::Object(given));
     }
-    while too_big(&item) {
-        let Some(field) = SHED.iter().find(|f| item.fields.contains_key(**f)) else {
-            return Err(format!("it is over {MAX_ITEM_BYTES} bytes as an item"));
-        };
-        item.fields.remove(*field);
-    }
-    item.check().map_err(|err| format!("{err:#}"))?;
-    Ok(item)
 }
 
 /// The members `back` has otherwise than `page`, by their names in a page's
@@ -269,7 +285,11 @@ fn names_of<'a>(names: &[String], taken: impl Iterator<Item = &'a String>) -> Ve
 
 /// The id, kind, URL and outside ids of [`page_item`].
 fn page_stub(page: &Page) -> Option<Item> {
-    let url = canonical_url(&page.url)?;
+    Some(stub(page, canonical_url(&page.url)?))
+}
+
+/// [`page_stub`] with the URL `url`.
+fn stub(page: &Page, url: String) -> Item {
     let wd = page
         .item
         .as_deref()
@@ -302,7 +322,7 @@ fn page_stub(page: &Page) -> Option<Item> {
             }
         }
     }
-    Some(item)
+    item
 }
 
 /// What the `fields` of a page set's items are, for its manifest. `page`
