@@ -56,7 +56,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use plumb_core::sites::Sites;
-use plumb_core::{canonical_domain, parent_domain, site, stored, Signals, SiteRecord};
+use plumb_core::{canonical_domain, parent_domain, site, stored, Signals};
 use plumb_format::Item;
 use tracing::{info, warn};
 
@@ -513,26 +513,11 @@ pub(crate) fn measure_fold_journal(
     Ok(FoldMeasure::Bytes(counter.bytes))
 }
 
-/// Calls `each` with every record of the records file at `path`, in file
-/// order, as the file holds it: the journal is not replayed.
-pub fn for_each_record(path: &Path, mut each: impl FnMut(SiteRecord)) -> Result<()> {
-    let mut lines = Lines::open(path)?;
-    let mut line_no = 0usize;
-    while let Some((_, line)) = lines.next()? {
-        line_no += 1;
-        let record = stored::read(line)
-            .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
-        each(record);
-    }
-    Ok(())
-}
-
-/// [`for_each_record`] of the sites' stored items: calls `each` with every
-/// site of the records file at `path`, in file order, read as its stored
-/// item ([`stored::read_item`]) as the file holds it, not cleaned, and
-/// without replaying the journal. Written back with
-/// [`stored::write_item`], a site makes the line its record makes, but for
-/// a crawl or redirect time past the year 9999, which no item holds.
+/// Calls `each` with every site of the records file at `path`, in file
+/// order, read as its stored item ([`stored::read_item`]) as the file
+/// holds it, not cleaned, and without replaying the journal. Written back
+/// with [`stored::write_item`], a site makes the line its record made, but
+/// for a crawl or redirect time past the year 9999, which no item holds.
 pub fn for_each_site(path: &Path, mut each: impl FnMut(Item)) -> Result<()> {
     let mut lines = Lines::open(path)?;
     let mut line_no = 0usize;
@@ -1055,7 +1040,7 @@ impl RecordReader {
     /// The site `outline` points at, as its stored item
     /// ([`stored::read_item`]), cleaned and with page fields read off a bot
     /// check dropped ([`site::clean`], [`site::drop_bot_check`]), as loading
-    /// the file does: the item of what [`RecordReader::read`] reads.
+    /// the file does.
     pub(crate) fn read_item(&mut self, outline: &Outline) -> Result<Item> {
         let mut site = stored::read_item(self.line(outline)?)
             .with_context(|| format!("reading the site {}", outline.domain))?;
@@ -1063,20 +1048,6 @@ impl RecordReader {
         site::clean(&mut site);
         site::drop_bot_check(&mut site);
         Ok(site)
-    }
-
-    /// The record `outline` points at, cleaned and with page fields read
-    /// off a bot check dropped, as loading the file does
-    /// ([`RecordSet::upsert`]). The fold's tests read the folded file back
-    /// with it; an index build reads items ([`RecordReader::read_item`]).
-    #[cfg(test)]
-    pub(crate) fn read(&mut self, outline: &Outline) -> Result<SiteRecord> {
-        let mut record = stored::read(self.line(outline)?)
-            .with_context(|| format!("reading the record of {}", outline.domain))?;
-        same_site(&record.domain, outline)?;
-        record.clean();
-        record.drop_bot_check();
-        Ok(record)
     }
 }
 
@@ -1135,82 +1106,99 @@ fn write_lines(path: &Path, outlines: &[Outline]) -> Result<usize> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use plumb_core::{write_jsonl, LinkText, Redirect};
+    use plumb_core::{LinkText, Redirect};
 
     use super::*;
-    use crate::records::reference::{self, load_records};
-    use crate::records::RecordStore;
+    use crate::records::{load_sites, RecordStore};
+    use crate::test_lines::{item_line, old_line, write_old_lines};
 
-    fn record(domain: &str, tranco: u32) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
-        r.signals.tranco_rank = Some(tranco);
+    fn record(domain: &str, tranco: u32) -> Item {
+        let mut r = site::new(domain);
+        let mut signals = site::signals(&r);
+        signals.tranco_rank = Some(tranco);
+        site::set_signals(&mut r, &signals);
         r
     }
 
-    fn crawled(domain: &str, title: &str, at: u64) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
+    fn crawled(domain: &str, title: &str, at: u64) -> Item {
+        let mut r = site::new(domain);
         r.title = Some(title.into());
-        r.body_text = Some(format!("{title} home page text"));
-        r.link_texts = vec![LinkText::with_count(title, 2)];
-        r.crawled_at = Some(at);
+        r.text = Some(format!("{title} home page text"));
+        site::set_link_texts(&mut r, &[LinkText::with_count(title, 2)]);
+        site::set_crawled(&mut r, Some(at));
         r
+    }
+
+    /// `site` cleaned, as a node holds it ([`site::clean`]).
+    fn cleaned(site: &Item) -> Item {
+        let mut site = site.clone();
+        site::clean(&mut site);
+        site
+    }
+
+    /// The sites [`load_sites`] loads of the records file at `path`, best
+    /// link score first.
+    fn load_sorted(path: &Path) -> Vec<Item> {
+        load_sites(path).unwrap().into_sorted().iter().collect()
     }
 
     #[test]
     fn a_feed_is_in_the_language_its_site_is_written_in() {
-        let feed = |record: &SiteRecord| feed_of(&record.to_stored_item());
+        let feed = |site: &Item| feed_of(&cleaned(site));
         let mut news = crawled("lenta.example", "Лента новостей России и мира сегодня", 1);
         assert_eq!(feed(&news).language.as_deref(), Some("Cyrl"));
         assert_eq!(feed(&news).homepage, "https://lenta.example/");
         // A declaration still wins.
-        news.language = Some("en".into());
+        news.lang = Some("en".into());
         assert_eq!(feed(&news).language.as_deref(), Some("en"));
         let english = crawled("news.example", "World news", 1);
         assert_eq!(feed(&english).language, None);
         // Not of a site that redirects or failed its last crawl.
-        assert!(wants_feed(&english.to_stored_item()));
+        assert!(wants_feed(&cleaned(&english)));
         let mut failed = english.clone();
-        failed.crawl_failures = 1;
-        assert!(!wants_feed(&failed.to_stored_item()));
+        let mut marks = site::crawl_marks(&failed);
+        marks.failures = 1;
+        site::set_crawl_marks(&mut failed, marks);
+        assert!(!wants_feed(&cleaned(&failed)));
         let mut moved = english;
-        moved.redirect = Some(Redirect {
-            to: "news.example.org".into(),
-            at: 2,
-            inner: false,
-        });
-        assert!(!wants_feed(&moved.to_stored_item()));
+        site::set_redirect(
+            &mut moved,
+            Some(Redirect {
+                to: "news.example.org".into(),
+                at: 2,
+                inner: false,
+            }),
+        );
+        assert!(!wants_feed(&cleaned(&moved)));
     }
 
-    /// Every site in the records file at `path`, read a record at a time.
-    /// Each is also read as its stored item, as an index build reads it,
-    /// which is the record's.
-    fn read_all(path: &Path, outlines: &[Outline]) -> Vec<SiteRecord> {
+    /// Every site in the records file at `path`, read a site at a time as
+    /// an index build reads it.
+    fn read_all(path: &Path, outlines: &[Outline]) -> Vec<Item> {
         let mut reader = RecordReader::open(path).unwrap();
         let mut sorted = outlines.to_vec();
         sort(&mut sorted);
-        let mut items = RecordReader::open(path).unwrap();
         sorted
             .iter()
-            .map(|o| {
-                let record = reader.read(o).unwrap();
-                assert_eq!(items.read_item(o).unwrap(), record.to_stored_item());
-                record
-            })
+            .map(|o| reader.read_item(o).unwrap())
             .collect()
     }
 
     /// A records file and a journal that make every kind of change.
     pub(crate) fn file_and_journal(path: &Path) -> Vec<Change> {
         let mut parent = record("google.com", 3);
-        parent.add_alias("Google Scholar");
-        parent.about = Some("search engine".into());
+        site::add_alias(&mut parent, "Google Scholar");
+        site::set_wikidata_about(&mut parent, Some("search engine".into()));
         let mut redirecting = record("pncbank.com", 900);
-        redirecting.redirect = Some(Redirect {
-            to: "pnc.com".into(),
-            at: 40,
-            inner: false,
-        });
-        write_jsonl(
+        site::set_redirect(
+            &mut redirecting,
+            Some(Redirect {
+                to: "pnc.com".into(),
+                at: 40,
+                inner: false,
+            }),
+        );
+        write_old_lines(
             path,
             &[
                 record("a.com", 10),
@@ -1220,27 +1208,26 @@ pub(crate) mod tests {
                 redirecting,
                 record("quiet.net", 5000),
             ],
-        )
-        .unwrap();
-        let mut scholar = SiteRecord::new("scholar.google.com");
-        scholar.add_alias("Google Scholar");
-        scholar.signals.official_site = true;
+        );
+        let mut scholar = site::new("scholar.google.com");
+        site::add_alias(&mut scholar, "Google Scholar");
+        let mut signals = site::signals(&scholar);
+        signals.official_site = true;
+        site::set_signals(&mut scholar, &signals);
         let mut shared = crawled("a.com", "A shared", 70);
-        shared.body_text = None;
+        shared.text = None;
         vec![
             Change::Merge {
-                site: crawled("a.com", "A", 60).stored_item_as_is(),
+                site: crawled("a.com", "A", 60),
             },
-            Change::MergeShared {
-                site: shared.stored_item_as_is(),
-            },
+            Change::MergeShared { site: shared },
             Change::Mark {
                 domain: "b.org".into(),
                 attempted_at: Some(80),
                 failures: 2,
             },
             Change::Merge {
-                site: crawled("WWW.New.COM", "New", 90).stored_item_as_is(),
+                site: crawled("WWW.New.COM", "New", 90),
             },
             Change::Mark {
                 domain: "never.com".into(),
@@ -1248,10 +1235,10 @@ pub(crate) mod tests {
                 failures: 1,
             },
             Change::RefreshShared {
-                site: crawled("unheld.com", "Unheld", 95).stored_item_as_is(),
+                site: crawled("unheld.com", "Unheld", 95),
             },
             Change::RefreshShared {
-                site: crawled("b.org", "B again", 96).stored_item_as_is(),
+                site: crawled("b.org", "B again", 96),
             },
             Change::Gone {
                 domain: "quiet.net".into(),
@@ -1261,11 +1248,9 @@ pub(crate) mod tests {
                 domain: "pnc.com".into(),
                 names: vec!["Nothing".into()],
             },
-            Change::SubdomainSite {
-                site: scholar.stored_item_as_is(),
-            },
+            Change::SubdomainSite { site: scholar },
             Change::Merge {
-                site: crawled("new.com", "New again", 110).stored_item_as_is(),
+                site: crawled("new.com", "New again", 110),
             },
         ]
     }
@@ -1276,7 +1261,7 @@ pub(crate) mod tests {
         let path = dir.path().join("records.jsonl");
         let changes = file_and_journal(&path);
         RecordStore::open(&path).save(&changes).unwrap();
-        let loaded = load_records(&path).unwrap().into_sorted_vec();
+        let loaded = load_sorted(&path);
 
         let outlines = outline(&path).unwrap().unwrap();
         assert!(!journal_path(&path).exists());
@@ -1284,13 +1269,10 @@ pub(crate) mod tests {
         assert_eq!(read, loaded);
         // The subdomain site took its parent's rank, and its name came off
         // the parent.
-        let scholar = read
-            .iter()
-            .find(|r| r.domain == "scholar.google.com")
-            .unwrap();
-        assert_eq!(scholar.signals.tranco_rank, Some(3));
-        let google = read.iter().find(|r| r.domain == "google.com").unwrap();
-        assert!(google.aliases.is_empty());
+        let scholar = read.iter().find(|r| r.id == "scholar.google.com").unwrap();
+        assert_eq!(site::signals(scholar).tranco_rank, Some(3));
+        let google = read.iter().find(|r| r.id == "google.com").unwrap();
+        assert!(google.names.is_empty());
         // Outlines say what an index build needs.
         let by_domain = |d: &str| outlines.iter().find(|o| &*o.domain == d).unwrap();
         assert!(by_domain("quiet.net").gone);
@@ -1298,11 +1280,11 @@ pub(crate) mod tests {
             by_domain("pncbank.com").redirect_to.as_deref(),
             Some("pnc.com")
         );
-        let a = read.iter().find(|r| r.domain == "a.com").unwrap();
-        assert_eq!(by_domain("a.com").score, a.link_score());
+        let a = read.iter().find(|r| r.id == "a.com").unwrap();
+        assert_eq!(by_domain("a.com").score, site::link_score(a));
         // Read again with no journal: the same outlines, from the file.
         assert_eq!(outline(&path).unwrap().unwrap(), outlines);
-        assert_eq!(load_records(&path).unwrap().into_sorted_vec(), loaded);
+        assert_eq!(load_sorted(&path), loaded);
     }
 
     #[test]
@@ -1310,17 +1292,17 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
         let changes = file_and_journal(&path);
-        let mut held = SiteRecord::new("held.example");
-        held.description = Some("x".repeat(96 * 1024));
+        let mut held = site::new("held.example");
+        held.about = Some("x".repeat(96 * 1024));
         let mut raw = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
             .unwrap();
-        serde_json::to_writer(&mut raw, &held).unwrap();
+        raw.write_all(old_line(&held).as_bytes()).unwrap();
         raw.write_all(b"\n").unwrap();
         drop(raw);
         RecordStore::open(&path).save(&changes).unwrap();
-        let loaded = load_records(&path).unwrap().into_sorted_vec();
+        let loaded = load_sorted(&path);
         let FoldMeasure::Bytes(bytes) = measure_fold_journal(&path, &mut || Ok(())).unwrap() else {
             panic!("expected a measurable fold")
         };
@@ -1370,7 +1352,7 @@ pub(crate) mod tests {
         RecordStore::open(&path).save(&changes).unwrap();
         let file = fs::read(&path).unwrap();
         let journal = fs::read(journal_path(&path)).unwrap();
-        let loaded = load_records(&path).unwrap().into_sorted_vec();
+        let loaded = load_sorted(&path);
 
         let copy = dir.path().join("copy.jsonl");
         let (read_from, outlines) = outline_copy(&path, &copy).unwrap().unwrap();
@@ -1390,19 +1372,19 @@ pub(crate) mod tests {
     fn a_site_on_two_lines_needs_the_whole_set() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        write_jsonl(&path, &[record("a.com", 1), record("A.com", 2)]).unwrap();
+        write_old_lines(&path, &[record("a.com", 1), record("A.com", 2)]);
         assert_eq!(outline(&path).unwrap(), None);
-        write_jsonl(&path, &[record("a.com", 1), record("a.com", 2)]).unwrap();
+        write_old_lines(&path, &[record("a.com", 1), record("a.com", 2)]);
         assert_eq!(outline(&path).unwrap(), None);
         // With a journal, too, which is left for loading to replay.
         RecordStore::open(&path)
             .save(&[Change::Merge {
-                site: record("b.com", 3).stored_item_as_is(),
+                site: record("b.com", 3),
             }])
             .unwrap();
         assert_eq!(outline(&path).unwrap(), None);
         assert!(journal_path(&path).exists());
-        assert_eq!(load_records(&path).unwrap().len(), 2);
+        assert_eq!(load_sites(&path).unwrap().len(), 2);
     }
 
     #[test]
@@ -1411,7 +1393,7 @@ pub(crate) mod tests {
         let path = dir.path().join("records.jsonl");
         // a.com on two lines, b.com under another form of its domain, and a
         // journal still to fold in.
-        write_jsonl(
+        write_old_lines(
             &path,
             &[
                 record("a.com", 10),
@@ -1419,21 +1401,22 @@ pub(crate) mod tests {
                 crawled("a.com", "A", 5),
                 record("c.org", 30),
             ],
-        )
-        .unwrap();
+        );
         RecordStore::open(&path)
             .save(&[Change::Merge {
-                site: crawled("d.net", "D", 6).stored_item_as_is(),
+                site: crawled("d.net", "D", 6),
             }])
             .unwrap();
         assert_eq!(outline(&path).unwrap(), None);
-        let loaded = load_records(&path).unwrap().into_sorted_vec();
+        let loaded = load_sorted(&path);
         // What loading it whole as records and compacting them writes.
         let elsewhere = tempfile::tempdir().unwrap();
         let of_records = elsewhere.path().join("records.jsonl");
         fs::copy(&path, &of_records).unwrap();
         fs::copy(journal_path(&path), journal_path(&of_records)).unwrap();
-        reference::compact(&of_records, &load_records(&of_records).unwrap()).unwrap();
+        RecordStore::open(&of_records)
+            .compact(&load_sites(&of_records).unwrap())
+            .unwrap();
         let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
 
         let outlines = outline_merged(&path, Some(budget.clone())).unwrap();
@@ -1456,8 +1439,8 @@ pub(crate) mod tests {
 
         // A file that holds each site once comes back as it was, byte for
         // byte, whatever the shape of its lines and their order.
-        let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
-        let item = String::from_utf8(stored::line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        let line = old_line;
+        let item = item_line(&crawled("b.com", "B", 5));
         let clean = format!(
             "{}\n\n{}\r\n{item}\n",
             line(&record("quiet.net", 5000)),
@@ -1576,22 +1559,22 @@ pub(crate) mod tests {
         // this one.
         let mut elsewhere = crawled("bank.com", "Google", 5);
         elsewhere.url = Some("https://www.google.com/".into());
-        write_jsonl(&path, &[cafe, elsewhere]).unwrap();
+        write_old_lines(&path, &[cafe, elsewhere]);
         let outlines = outline(&path).unwrap().unwrap();
         let read = read_all(&path, &outlines);
-        let cafe = read.iter().find(|r| r.domain == "cafe.com").unwrap();
+        let cafe = read.iter().find(|r| r.id == "cafe.com").unwrap();
         assert_eq!(cafe.title.as_deref(), Some("Caf\u{e9}"));
         assert_eq!(cafe.url.as_deref(), Some("https://cafe.com/"));
-        let bank = read.iter().find(|r| r.domain == "bank.com").unwrap();
+        let bank = read.iter().find(|r| r.id == "bank.com").unwrap();
         assert_eq!((&bank.url, &bank.title), (&None, &None));
-        assert_eq!(read, load_records(&path).unwrap().into_sorted_vec());
+        assert_eq!(read, load_sorted(&path));
     }
 
     #[test]
     fn invalid_domains_and_blank_lines_are_left_out() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
+        let line = old_line;
         fs::write(
             &path,
             format!(
@@ -1604,22 +1587,24 @@ pub(crate) mod tests {
         .unwrap();
         let outlines = outline(&path).unwrap().unwrap();
         let read = read_all(&path, &outlines);
-        assert_eq!(read, load_records(&path).unwrap().into_sorted_vec());
+        assert_eq!(read, load_sorted(&path));
     }
 
     #[test]
-    fn a_site_at_a_time_is_each_line_s_record_as_its_stored_item() {
+    fn a_site_at_a_time_is_each_line_s_stored_item_as_the_file_holds_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
-        let item = String::from_utf8(stored::line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        let line = old_line;
+        let item = item_line(&crawled("b.com", "B", 5));
         // Records not yet clean, under a domain not canonical, twice, and
         // under one that is none; a stored item; a blank line.
         let mut untidy = crawled("Cafe.COM", " Cafe\u{301}\u{7} ", 5);
         untidy.url = Some("HTTPS://WWW.Cafe.com/index%2ehtml?".into());
-        untidy.aliases = vec![" Cafe".into(), String::new()];
-        untidy.crawl_failures = 2;
-        untidy.gone_at = Some(9);
+        untidy.names = vec![" Cafe".into(), String::new()];
+        let mut marks = site::crawl_marks(&untidy);
+        marks.failures = 2;
+        marks.gone = Some(9);
+        site::set_crawl_marks(&mut untidy, marks);
         let lines = [
             line(&untidy),
             line(&record("cafe.com", 1)),
@@ -1628,44 +1613,58 @@ pub(crate) mod tests {
             line(&record("not a domain", 2)),
         ];
         fs::write(&path, lines.join("\n")).unwrap();
-        let mut records = Vec::new();
-        for_each_record(&path, |record| records.push(record)).unwrap();
         let mut sites = Vec::new();
         for_each_site(&path, |site| sites.push(site)).unwrap();
-        assert_eq!(sites.len(), 4);
-        for (site, record) in sites.iter().zip(&records) {
-            assert_eq!(site::domain(site), record.domain);
-            assert_eq!(site::link_score(site), record.link_score());
-            assert_eq!(site.title, record.title);
-            assert_eq!(site::crawl_marks(site).gone, record.gone_at);
-            assert_eq!(
-                stored::item_as_line(site).unwrap(),
-                stored::line(record).unwrap()
-            );
-        }
+        // Each line's site as it is: not cleaned, merged or left out.
+        let expected = [
+            untidy,
+            record("cafe.com", 1),
+            crawled("b.com", "B", 5),
+            record("not a domain", 2),
+        ];
+        assert_eq!(sites, expected);
+        assert_eq!(site::crawl_marks(&sites[0]).gone, Some(9));
+        // Written back in its shape, each makes its line again.
+        let kept = [&lines[0], &lines[1], &lines[3], &lines[4]];
+        let written: Vec<String> = sites
+            .iter()
+            .zip(kept)
+            .map(|(site, line)| {
+                if line.starts_with("{\"id\":") {
+                    item_line(site)
+                } else {
+                    old_line(site)
+                }
+            })
+            .collect();
+        assert_eq!(written.iter().collect::<Vec<_>>(), kept);
         fs::write(&path, "{\"domain\":\"a.com\"}\nnot json\n").unwrap();
         let err = for_each_site(&path, |_| {}).unwrap_err();
         assert!(format!("{err:#}").contains("records.jsonl:2"), "{err:#}");
     }
 
     #[test]
-    fn the_sites_a_step_keeps_are_the_ones_it_kept_as_records() {
+    fn the_sites_a_step_keeps_are_judged_clean() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
+        let line = old_line;
         // About banks with an untidy title, through a link text or a
         // name, or not at all; an official website; a bank's page read on
         // another site, which counts for nothing; in both shapes.
         let mut untidy = crawled("tidy.com", " Cafe\u{301}\u{7}  Bank ", 5);
-        untidy.crawl_failures = 3;
+        let mut marks = site::crawl_marks(&untidy);
+        marks.failures = 3;
+        site::set_crawl_marks(&mut untidy, marks);
         let mut named = record("named.com", 9);
-        named.aliases = vec!["First Bank".into()];
+        named.names = vec!["First Bank".into()];
         let mut official = record("official.org", 4);
-        official.signals.official_site = true;
+        let mut signals = site::signals(&official);
+        signals.official_site = true;
+        site::set_signals(&mut official, &signals);
         let mut elsewhere = crawled("elsewhere.com", "Bank", 6);
         elsewhere.url = Some("https://other.org/".into());
-        elsewhere.link_texts.clear();
-        let item = |r: SiteRecord| String::from_utf8(stored::line(&r).unwrap()).unwrap();
+        site::set_link_texts(&mut elsewhere, &[]);
+        let item = |r: Item| item_line(&r);
         let lines = [
             line(&untidy),
             item(crawled("linked.com", "Savings bank", 7)),
@@ -1675,37 +1674,22 @@ pub(crate) mod tests {
             item(crawled("quiet.net", "Gardening", 8)),
         ];
         fs::write(&path, lines.join("\n")).unwrap();
-        // How the steps judged each site when they read records.
-        let records_where = |wanted: &dyn Fn(&SiteRecord) -> bool| {
-            let mut domains = HashSet::new();
-            for_each_record(&path, |mut record| {
-                record.clean();
-                record.drop_bot_check();
-                if wanted(&record) {
-                    domains.insert(record.domain.into_boxed_str());
-                }
-            })
-            .unwrap();
-            domains
-        };
         let topics = crate::about::Topics::new(&["bank".to_string()]);
         let about = domains_where(&path, |site| topics.matches_site(site)).unwrap();
-        assert_eq!(about, records_where(&|record| topics.matches(record)));
         let mut sorted: Vec<&str> = about.iter().map(|domain| &**domain).collect();
         sorted.sort_unstable();
         assert_eq!(sorted, ["linked.com", "named.com", "tidy.com"]);
         let official = domains_where(&path, |site| site::signals(site).official_site).unwrap();
-        let official_records = records_where(&|record| record.signals.official_site);
-        assert_eq!(official, official_records);
-        assert_eq!(official.len(), 1);
+        let official: Vec<&str> = official.iter().map(|domain| &**domain).collect();
+        assert_eq!(official, ["official.org"]);
     }
 
     #[test]
     fn replacing_lines_copies_them_as_the_file_holds_them() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        let line = |r: &SiteRecord| serde_json::to_string(r).unwrap();
-        let item = String::from_utf8(stored::line(&crawled("b.com", "B", 5)).unwrap()).unwrap();
+        let line = old_line;
+        let item = item_line(&crawled("b.com", "B", 5));
         // A record not yet clean, a stored item, a line break of two bytes
         // and a blank line: copied as they are.
         let raw = line(&crawled("cafe.com", "Cafe\u{301}", 5));

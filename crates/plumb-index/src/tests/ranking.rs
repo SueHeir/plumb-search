@@ -95,9 +95,9 @@ fn refund_queries_need_subject_evidence_beyond_the_brand_name() {
     let mut records = lookalike_corpus();
     let owner = records
         .iter_mut()
-        .find(|site| site.domain == "amazon.com")
+        .find(|site| site.id == "amazon.com")
         .unwrap();
-    owner.description = Some("Amazon Prime refunds and refund status".into());
+    owner.about = Some("Amazon Prime refunds and refund status".into());
     let (_dir, searcher) = build(&records);
     for query in ["amazon refund", "amazon prime refund"] {
         let hits = searcher

@@ -14,9 +14,7 @@
 //! ("Unsupported client – Canva") or a parked domain's "this domain is for
 //! sale" or bare "Hello!".
 
-use crate::{
-    canonical_domain, normalize_text, parent_domain, registrable_domain, Redirect, SiteRecord,
-};
+use crate::{canonical_domain, normalize_text, parent_domain, Redirect};
 
 /// Whole titles, after [`normalize_text`], that only a bot check has.
 const CHECK_TITLES: &[&str] = &[
@@ -514,63 +512,10 @@ impl Redirect {
     }
 }
 
-impl SiteRecord {
-    /// Whether the record's page fields came from a bot check or another
-    /// page standing in for the site's homepage ([`is_stand_in_homepage`]).
-    ///
-    /// So is a homepage read on another site's host: prevention.nih.gov's
-    /// "NIH Office of Disease Prevention" kept for nih.gov, or
-    /// play.google.com's page for google.com, from crawls before those
-    /// subdomains were sites of their own ([`crate::subsites`]); crawlers
-    /// now stop at such a redirect. And so is a hosting company's page for
-    /// a suspended account (cPanel's `/cgi-sys/suspendedpage.cgi`, titled
-    /// "Contact Support").
-    pub fn is_bot_check(&self) -> bool {
-        if let Some(url) = self.url.as_deref() {
-            let read_elsewhere = registrable_domain(url).is_some_and(|site| {
-                canonical_domain(&self.domain).is_some_and(|domain| site != domain)
-            });
-            let suspended = url
-                .to_ascii_lowercase()
-                .contains("/cgi-sys/suspendedpage.cgi");
-            if read_elsewhere || suspended {
-                return true;
-            }
-        }
-        is_stand_in_homepage(
-            &self.domain,
-            self.title.as_deref(),
-            self.description.as_deref(),
-            &self.headings,
-            self.body_text.as_deref(),
-        )
-    }
-
-    /// Clears what a bot check put in the record: url, title, description,
-    /// headings, page text, search box, key pages and `crawled_at`, so the
-    /// record no longer counts as crawled. Merged into another record, it
-    /// then leaves that record's page fields alone. Returns whether it did.
-    pub fn drop_bot_check(&mut self) -> bool {
-        if !self.is_bot_check() {
-            return false;
-        }
-        self.url = None;
-        self.title = None;
-        self.description = None;
-        self.headings.clear();
-        self.body_text = None;
-        self.terms.clear();
-        self.search_url = None;
-        self.key_pages.clear();
-        self.links_to.clear();
-        self.crawled_at = None;
-        true
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::site;
 
     fn check(domain: &str, title: &str) -> bool {
         is_bot_check_page(domain, Some(title), None, &[], None)
@@ -773,20 +718,20 @@ mod tests {
 
     #[test]
     fn dropping_a_check_keeps_the_last_good_crawl() {
-        let mut good = SiteRecord::new("example.com");
+        let mut good = site::new("example.com");
         good.title = Some("Example Shop".into());
-        good.crawled_at = Some(100);
-        let mut check = SiteRecord::new("example.com");
+        site::set_crawled(&mut good, Some(100));
+        let mut check = site::new("example.com");
         check.url = Some("https://example.com/verify".into());
         check.title = Some("KillBot Verification".into());
-        check.crawled_at = Some(200);
-        assert!(check.drop_bot_check());
-        good.merge(check);
+        site::set_crawled(&mut check, Some(200));
+        assert!(site::drop_bot_check(&mut check));
+        site::merge(&mut good, check);
         assert_eq!(good.title.as_deref(), Some("Example Shop"));
-        assert_eq!(good.crawled_at, Some(100));
+        assert_eq!(site::crawled(&good), Some(100));
 
         let mut kept = good.clone();
-        assert!(!kept.drop_bot_check());
+        assert!(!site::drop_bot_check(&mut kept));
         assert_eq!(kept, good);
     }
 
@@ -899,29 +844,31 @@ mod tests {
 
     #[test]
     fn pages_of_another_site_or_a_suspended_account_are_dropped() {
-        let record = |domain: &str, url: &str| {
-            let mut record = SiteRecord::new(domain);
-            record.url = Some(url.into());
-            record.title = Some("Some Title".into());
-            record.crawled_at = Some(100);
-            record
+        let crawled = |domain: &str, url: &str| {
+            let mut crawled = site::new(domain);
+            crawled.url = Some(url.into());
+            crawled.title = Some("Some Title".into());
+            site::set_crawled(&mut crawled, Some(100));
+            crawled
         };
-        let mut nih = record("nih.gov", "https://prevention.nih.gov/");
-        assert!(nih.drop_bot_check());
+        let mut nih = crawled("nih.gov", "https://prevention.nih.gov/");
+        assert!(site::drop_bot_check(&mut nih));
         assert_eq!(nih.title, None);
-        assert!(record("google.com", "https://play.google.com/store/games").is_bot_check());
-        assert!(record(
+        assert_eq!(site::crawled(&nih), None);
+        let play = crawled("google.com", "https://play.google.com/store/games");
+        assert!(site::is_bot_check(&play));
+        let suspended = crawled(
             "example.com",
-            "https://example.com/cgi-sys/suspendedpage.cgi"
-        )
-        .is_bot_check());
+            "https://example.com/cgi-sys/suspendedpage.cgi",
+        );
+        assert!(site::is_bot_check(&suspended));
         for (domain, url) in [
             ("nih.gov", "https://www.nih.gov/"),
             ("usbank.com", "https://www.usbank.com/index.html"),
             ("prevention.nih.gov", "https://prevention.nih.gov/"),
             ("squareup.com", "https://squareup.com/us/en"),
         ] {
-            assert!(!record(domain, url).is_bot_check(), "{url}");
+            assert!(!site::is_bot_check(&crawled(domain, url)), "{url}");
         }
     }
 

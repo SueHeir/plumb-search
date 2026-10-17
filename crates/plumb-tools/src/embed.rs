@@ -64,17 +64,24 @@ pub fn run(args: EmbedArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{write_jsonl, SiteRecord};
+    use plumb_core::site::{self, Item};
     use plumb_embed::Embedder;
     use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
     use plumb_node::meaning::MeaningIndex;
 
     use super::*;
 
-    fn record(domain: &str, title: &str) -> SiteRecord {
-        let mut record = SiteRecord::new(domain);
+    fn record(domain: &str, title: &str) -> Item {
+        let mut record = site::new(domain);
         record.title = Some(title.into());
         record
+    }
+
+    /// `site` cleaned, as a node stores it.
+    fn stored(site: &Item) -> Item {
+        let mut site = site.clone();
+        site::clean(&mut site);
+        site
     }
 
     #[test]
@@ -87,9 +94,9 @@ mod tests {
         let mut records = vec![
             record("tesla.com", "Tesla electric cars and solar energy"),
             record("bank.example", "The credit union bank"),
-            SiteRecord::new("notext.com"),
+            site::new("notext.com"),
         ];
-        write_jsonl(&records_path, &records).unwrap();
+        crate::test_sites::write(&records_path, &records);
         let args = EmbedArgs {
             records: records_path.clone(),
             model: model.clone(),
@@ -104,7 +111,7 @@ mod tests {
         // A changed site is embedded again; a gone one is dropped.
         records[1].title = Some("American airline flights".into());
         records.remove(0);
-        write_jsonl(&records_path, &records).unwrap();
+        crate::test_sites::write(&records_path, &records);
         run(EmbedArgs {
             records: records_path,
             model: model.clone(),
@@ -123,9 +130,10 @@ mod tests {
         let embedder = Embedder::load(&model).unwrap();
         assert_eq!(
             embedder
-                .embed(&plumb_embed::site_text(
-                    &record("tesla.com", "Tesla electric cars and solar energy").to_stored_item()
-                ))
+                .embed(&plumb_embed::site_text(&stored(&record(
+                    "tesla.com",
+                    "Tesla electric cars and solar energy"
+                ))))
                 .unwrap(),
             tesla
         );
@@ -133,7 +141,7 @@ mod tests {
         // Searching with the vectors finds the site nearest in meaning,
         // even with no word in common.
         let index = dir.path().join("index");
-        let sites: Vec<_> = records.iter().map(|r| r.to_stored_item()).collect();
+        let sites: Vec<_> = records.iter().map(stored).collect();
         build_index(&index, &sites).unwrap();
         let searcher = Searcher::open(&index).unwrap();
         let meaning = MeaningIndex::open(&model, &vectors_path).unwrap();

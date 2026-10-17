@@ -23,7 +23,7 @@ mod browser;
 pub use plumb_core::keys::BUCKETS_PER_SEARCH;
 use plumb_core::keys::{query_keys, site_matches};
 use plumb_core::site::{self, Item};
-use plumb_core::SiteRecord;
+use plumb_core::stored::old_record;
 pub use rank::{rank, Options, Ranked};
 use sha2::{Digest, Sha256};
 
@@ -57,7 +57,7 @@ pub fn search(
 /// instead, and a browser keeps a bucket for good at its address, which
 /// stays the same for as long as the node serves the same index, upgraded
 /// or not. So a site that is a record's JSON (one without an `id`) is read
-/// too, as the record's item ([`SiteRecord::stored_item_as_is`]).
+/// too, as the record's item ([`old_record::into_item`]).
 pub fn read_bucket(json: &str) -> Result<Vec<Item>, String> {
     if json.len() > MAX_BUCKET_BYTES {
         return Err("a bucket was too large".into());
@@ -74,8 +74,7 @@ fn read_site(value: serde_json::Value) -> Option<Item> {
         let item: Item = serde_json::from_value(value).ok()?;
         return site::from_sent(&item).ok();
     }
-    let record: SiteRecord = serde_json::from_value(value).ok()?;
-    Some(record.stored_item_as_is())
+    Some(old_record::into_item(serde_json::from_value(value).ok()?))
 }
 
 /// The random numbers that pick a search's padding buckets: the same for

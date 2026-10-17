@@ -234,33 +234,38 @@ pub fn accept_site(mut site: Item, now: u64, uncrawled: bool) -> Result<Item> {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{Headline, Redirect, SiteRecord};
+    use plumb_core::{stored, Headline, Redirect};
 
     use super::*;
     use crate::BucketTable;
 
-    fn site(domain: &str, tranco: u32, crawled: bool) -> SiteRecord {
-        let mut record = SiteRecord::new(domain);
-        record.signals.tranco_rank = Some(tranco);
+    fn site(domain: &str, tranco: u32, crawled: bool) -> Item {
+        let mut record = site::new(domain);
+        let mut signals = site::signals(&record);
+        signals.tranco_rank = Some(tranco);
+        site::set_signals(&mut record, &signals);
         if crawled {
             record.title = Some(format!("{domain} home"));
-            record.crawled_at = Some(1_000);
+            site::set_crawled(&mut record, Some(1_000));
         }
         record
+    }
+
+    /// The line `/plumb/fill/1` carries of `site`: the record's own JSON.
+    fn fill_line(site: &Item) -> String {
+        let line = String::from_utf8(stored::item_as_line(site).unwrap()).unwrap();
+        stored::record_json(line).unwrap()
     }
 
     #[test]
     fn answers_crawled_sites_best_ranked_first_a_stretch_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
-        let sites: Vec<Item> = [
+        let sites: Vec<Item> = vec![
             site("third.com", 3, true),
             site("first.com", 1, true),
             site("second.com", 2, false),
             site("fourth.com", 4, true),
-        ]
-        .iter()
-        .map(SiteRecord::to_stored_item)
-        .collect();
+        ];
         let table = BucketTable::build(&dir.path().join("b"), &sites).unwrap();
         let ranked = table.ranked(1, 2).unwrap();
         assert!(ranked[0].contains("second.com") && ranked[1].contains("third.com"));
@@ -314,14 +319,11 @@ mod tests {
             }
         }
         let dir = tempfile::tempdir().unwrap();
-        let sites: Vec<Item> = [
+        let sites: Vec<Item> = vec![
             site("first.com", 1, true),
             site("second.com", 2, true),
             site("third.com", 3, true),
-        ]
-        .iter()
-        .map(SiteRecord::to_stored_item)
-        .collect();
+        ];
         let source = WithIcons(BucketTable::build(&dir.path().join("b"), &sites).unwrap());
         let icons: Vec<Option<String>> = answer(&source, 0, 10, false)
             .records
@@ -352,21 +354,29 @@ mod tests {
     #[test]
     fn keeps_what_a_crawl_says_but_not_the_senders_bookkeeping() {
         let mut record = site("Example.COM", 5, true);
-        record.crawl_attempted_at = Some(1_500);
-        record.crawl_failures = 2;
-        record.gone_at = Some(1_200);
-        record.redirect = Some(Redirect {
-            to: "other.com".into(),
-            at: 1_100,
-            inner: false,
-        });
-        record.news = vec![Headline {
-            title: "News".into(),
-            url: "https://example.com/news".into(),
-            at: 1_000,
-        }];
-        record.icon = Some("png".into());
-        let line = serde_json::to_string(&record).unwrap();
+        let mut marks = site::crawl_marks(&record);
+        marks.tried = Some(1_500);
+        marks.failures = 2;
+        marks.gone = Some(1_200);
+        site::set_crawl_marks(&mut record, marks);
+        site::set_redirect(
+            &mut record,
+            Some(Redirect {
+                to: "other.com".into(),
+                at: 1_100,
+                inner: false,
+            }),
+        );
+        site::set_news(
+            &mut record,
+            vec![Headline {
+                title: "News".into(),
+                url: "https://example.com/news".into(),
+                at: 1_000,
+            }],
+        );
+        site::set_icon(&mut record, Some("png".into()));
+        let line = fill_line(&record);
         let kept = accept_filled(&line, 2_000).unwrap();
         assert_eq!(kept.id, "example.com");
         assert_eq!(site::signals(&kept).tranco_rank, Some(5));
@@ -378,25 +388,26 @@ mod tests {
         );
         assert_eq!(site::redirect(&kept), None);
         assert!(site::news(&kept).is_empty());
-        // The stored item of the record a node kept of it before sites
-        // were items.
+        // The site as it was sent, less the sender's bookkeeping.
         let mut expected = record.clone();
-        expected.domain = "example.com".into();
-        expected.crawl_attempted_at = None;
-        expected.crawl_failures = 0;
-        expected.redirect = None;
-        expected.news = Vec::new();
-        assert_eq!(kept, expected.clone().stored_item_as_is());
-        expected.icon = None;
+        expected.id = "example.com".into();
+        let mut marks = site::crawl_marks(&expected);
+        marks.tried = None;
+        marks.failures = 0;
+        site::set_crawl_marks(&mut expected, marks);
+        site::set_redirect(&mut expected, None);
+        site::set_news(&mut expected, Vec::new());
+        assert_eq!(kept, expected);
+        site::set_icon(&mut expected, None);
         let seed = accept_seed(&line, 2_000).unwrap();
-        assert_eq!(seed, expected.stored_item_as_is());
+        assert_eq!(seed, expected);
 
-        let uncrawled = serde_json::to_string(&site("a.com", 1, false)).unwrap();
+        let uncrawled = fill_line(&site("a.com", 1, false));
         assert!(accept_filled(&uncrawled, 2_000).is_none());
         assert_eq!(accept_seed(&uncrawled, 2_000).unwrap().id, "a.com");
         let mut future = site("b.com", 1, true);
-        future.crawled_at = Some(1_000_000);
-        let future = serde_json::to_string(&future).unwrap();
+        site::set_crawled(&mut future, Some(1_000_000));
+        let future = fill_line(&future);
         assert!(accept_filled(&future, 2_000).is_none());
         assert!(accept_seed(&future, 2_000).is_none());
         assert!(accept_filled("not json", 2_000).is_none());
@@ -420,8 +431,8 @@ mod tests {
             ] {
                 let mut record = site("Example.COM", 5, crawled);
                 record.url = Some(url.into());
-                record.about = Some("A useful site".into());
-                let line = serde_json::to_string(&record).unwrap();
+                site::set_wikidata_about(&mut record, Some("A useful site".into()));
+                let line = fill_line(&record);
                 let kept = if crawled {
                     accept_filled(&line, 2_000)
                 } else {
@@ -435,7 +446,7 @@ mod tests {
                 assert_eq!(kept.id, "example.com");
                 assert_eq!(site::signals(&kept).tranco_rank, Some(5));
                 assert_eq!(site::wikidata_about(&kept), Some("A useful site"));
-                assert_eq!(site::crawled(&kept), record.crawled_at);
+                assert_eq!(site::crawled(&kept), site::crawled(&record));
             }
         }
     }
@@ -456,7 +467,7 @@ mod tests {
             ] {
                 let mut record = site(domain, 5, crawled);
                 record.url = Some(url.into());
-                let line = serde_json::to_string(&record).unwrap();
+                let line = fill_line(&record);
                 let kept = if crawled {
                     accept_filled(&line, 2_000)
                 } else {
@@ -501,8 +512,8 @@ mod tests {
                 ),
             ] {
                 let mut record = site(domain, 5, crawled);
-                record.search_url = Some(template.into());
-                let line = serde_json::to_string(&record).unwrap();
+                site::set_search_url(&mut record, Some(template.into()));
+                let line = fill_line(&record);
                 let kept = if crawled {
                     accept_filled(&line, 2_000)
                 } else {

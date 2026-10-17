@@ -12,8 +12,8 @@
 //! official websites, sites about its topics, and ones its searchers chose,
 //! as when trimming to a storage limit).
 //!
-//! A node run with `--drop-dead-sites` cuts each dead site's record down
-//! to its ranks and crawl marks ([`plumb_core::SiteRecord::make_gone`]),
+//! A node run with `--drop-dead-sites` cuts each dead site down to its
+//! ranks and crawl marks ([`plumb_core::site::make_gone`]),
 //! which leaves it out of the index and out of what the node shares, and
 //! keeps it from being found again as new. It is tried again every three
 //! recrawl windows, and a crawl that reaches it brings it back.
@@ -80,8 +80,8 @@ pub fn find_dead<S: CrawlSite, T: Borrow<S>>(
 
 #[cfg(test)]
 mod tests {
+    use plumb_core::site::{self, CrawlMarks};
     use plumb_core::sites::Sites;
-    use plumb_core::{site, RecordSet, SiteRecord};
     use plumb_format::Item;
 
     use super::*;
@@ -89,12 +89,54 @@ mod tests {
     const NOW: u64 = 1_800_000_000;
     const DAY: u64 = SECONDS_PER_DAY;
 
-    fn site(domain: &str, failures: u32, reached_days_ago: Option<u64>) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
-        r.crawl_failures = failures;
-        r.crawled_at = reached_days_ago.map(|days| NOW - days * DAY);
-        r.crawl_attempted_at = Some(NOW - DAY);
-        r
+    fn site(domain: &str, failures: u32, reached_days_ago: Option<u64>) -> Item {
+        let mut site = site::new(domain);
+        site::set_crawled(&mut site, reached_days_ago.map(|days| NOW - days * DAY));
+        let marks = CrawlMarks {
+            tried: Some(NOW - DAY),
+            failures,
+            gone: None,
+        };
+        site::set_crawl_marks(&mut site, marks);
+        site
+    }
+
+    /// `site` linked to by `linking` sites.
+    fn linked(mut site: Item, linking: u32) -> Item {
+        let mut signals = site::signals(&site);
+        signals.linking_domains = linking;
+        site::set_signals(&mut site, &signals);
+        site
+    }
+
+    /// `site` made an official website.
+    fn official(mut site: Item) -> Item {
+        let mut signals = site::signals(&site);
+        signals.official_site = true;
+        site::set_signals(&mut site, &signals);
+        site
+    }
+
+    /// The domains of the sites of `sites` that look dead at [`NOW`],
+    /// keeping official websites.
+    fn dead_of(sites: &Sites) -> Vec<String> {
+        find_dead(sites.iter(), NOW, |site: &Item| {
+            site::signals(site).official_site
+        })
+        .into_iter()
+        .map(|site| site.id)
+        .collect()
+    }
+
+    /// Sites enough that the worst of them can look dead, all reached
+    /// lately.
+    fn many() -> Sites {
+        (0..NEVER_DEAD_BEST + 3)
+            .map(|i| {
+                let site = site(&format!("s{i}.com"), 0, Some(1));
+                linked(site, (NEVER_DEAD_BEST + 3 - i) as u32 * 10)
+            })
+            .collect()
     }
 
     #[test]
@@ -106,68 +148,36 @@ mod tests {
         assert!(!looks_dead(&site("a.com", 8, Some(30)), NOW));
         assert!(!looks_dead(&site("a.com", 0, Some(400)), NOW));
         let mut gone = site("a.com", 6, None);
-        gone.make_gone(NOW);
+        site::make_gone(&mut gone, NOW);
         assert!(!looks_dead(&gone, NOW), "already taken out");
     }
 
     #[test]
     fn the_best_sites_and_kept_ones_never_look_dead() {
-        let mut set: RecordSet = (0..NEVER_DEAD_BEST + 3)
-            .map(|i| {
-                let mut r = site(&format!("s{i}.com"), 0, Some(1));
-                r.signals.linking_domains = (NEVER_DEAD_BEST + 3 - i) as u32 * 10;
-                r
-            })
-            .collect();
-        let mut best = site("best.com", 7, None);
-        best.signals.linking_domains = 1_000_000;
-        let worst = site("worst.com", 7, None);
-        let mut official = site("official.com", 7, None);
-        official.signals.official_site = true;
-        set.extend([best, worst, official]);
-        let dead: Vec<&str> = find_dead(set.iter(), NOW, |r: &SiteRecord| r.signals.official_site)
-            .iter()
-            .map(|r| r.domain.as_str())
-            .collect();
-        assert_eq!(dead, ["worst.com"]);
+        let mut set = many();
+        set.extend([
+            linked(site("best.com", 7, None), 1_000_000),
+            site("worst.com", 7, None),
+            official(site("official.com", 7, None)),
+        ]);
+        assert_eq!(dead_of(&set), ["worst.com"]);
         // A small node keeps all of them.
-        let small: RecordSet = [site("worst.com", 7, None)].into_iter().collect();
-        assert!(find_dead(small.iter(), NOW, |_: &SiteRecord| false).is_empty());
+        let small: Sites = [site("worst.com", 7, None)].into_iter().collect();
+        assert!(find_dead(small.iter(), NOW, |_: &Item| false).is_empty());
     }
 
     #[test]
-    fn sites_items_look_dead_as_their_records_do() {
-        let mut set: RecordSet = (0..NEVER_DEAD_BEST + 3)
-            .map(|i| {
-                let mut r = site(&format!("s{i}.com"), 0, Some(1));
-                r.signals.linking_domains = (NEVER_DEAD_BEST + 3 - i) as u32 * 10;
-                r
-            })
-            .collect();
+    fn sites_look_dead_by_their_crawl_marks_best_first() {
         let mut gone = site("gone.com", 9, None);
-        gone.make_gone(NOW - DAY);
-        let mut kept = site("kept.com", 7, None);
-        kept.signals.official_site = true;
+        site::make_gone(&mut gone, NOW - DAY);
+        let mut set = many();
         set.extend([
             site("worst.com", 7, None),
             site("quiet.com", 6, Some(90)),
             site("lately.com", 8, Some(30)),
             gone,
-            kept,
+            official(site("kept.com", 7, None)),
         ]);
-        let sites: Sites = set.iter().map(SiteRecord::to_stored_item).collect();
-        let records: Vec<&str> =
-            find_dead(set.iter(), NOW, |r: &SiteRecord| r.signals.official_site)
-                .iter()
-                .map(|r| r.domain.as_str())
-                .collect();
-        let items: Vec<String> = find_dead(sites.iter(), NOW, |site: &Item| {
-            site::signals(site).official_site
-        })
-        .into_iter()
-        .map(|site| site.id)
-        .collect();
-        assert_eq!(items, records);
-        assert_eq!(items, ["quiet.com", "worst.com"]);
+        assert_eq!(dead_of(&set), ["quiet.com", "worst.com"]);
     }
 }

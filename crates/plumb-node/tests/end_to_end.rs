@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
-use plumb_core::SiteRecord;
+use plumb_core::site;
 use plumb_index::{build_index, Hit, RankConfig, Searcher};
 use plumb_node::web::{escape_html, router, IndexBackend};
 use tower::ServiceExt;
@@ -90,26 +90,33 @@ fn ingest_merges_every_fixture() {
     }
 
     // Every source reached the merged record.
-    let records: Vec<SiteRecord> =
-        plumb_core::stored::read_file(&tmp.path().join("records.jsonl")).unwrap();
+    let records: Vec<site::Item> = std::fs::read_to_string(tmp.path().join("records.jsonl"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| plumb_core::stored::read_item(line.as_bytes()).unwrap())
+        .collect();
     let usbank = records
         .iter()
-        .find(|r| r.domain == "usbank.com")
+        .find(|r| r.id == "usbank.com")
         .expect("usbank.com record");
     assert_eq!(usbank.url.as_deref(), Some("https://www.usbank.com/"));
     assert!(usbank.title.as_deref().unwrap().contains("U.S. Bank"));
-    assert!(usbank.signals.tranco_rank.is_some());
-    assert!(usbank.signals.harmonic_rank.is_some());
-    assert!(usbank.signals.official_site);
-    assert!(usbank.signals.linking_domains >= 2);
-    assert!(usbank.link_texts.iter().any(|lt| lt.text == "us bank"));
+    let signals = site::signals(usbank);
+    assert!(signals.tranco_rank.is_some());
+    assert!(signals.harmonic_rank.is_some());
+    assert!(signals.official_site);
+    assert!(signals.linking_domains >= 2);
+    assert!(site::link_texts(usbank)
+        .iter()
+        .any(|lt| lt.text == "us bank"));
     // Facebook's own front-page claim makes it official; the pages other
     // Wikidata items list on facebook.com add no aliases.
-    let facebook = records.iter().find(|r| r.domain == "facebook.com").unwrap();
-    assert!(facebook.signals.official_site);
-    assert_eq!(facebook.aliases, ["Facebook"]);
+    let facebook = records.iter().find(|r| r.id == "facebook.com").unwrap();
+    assert!(site::signals(facebook).official_site);
+    assert_eq!(facebook.names, ["Facebook"]);
     // A domain only seen as a link target is discovered.
-    assert!(records.iter().any(|r| r.domain == "github.com"));
+    assert!(records.iter().any(|r| r.id == "github.com"));
 }
 
 async fn get(app: &Router, uri: &str) -> (StatusCode, String, String) {
@@ -169,21 +176,24 @@ async fn web_app_escapes_text_from_the_web() {
     let tmp = tempfile::tempdir().unwrap();
     let index = tmp.path().join("index");
 
-    let mut evil = SiteRecord::new("evil-example.com");
+    let mut evil = site::new("evil-example.com");
     evil.url = Some("javascript:alert(document.cookie)".into());
     evil.title = Some("<script>alert('pwned')</script> Evil Example & Co".into());
-    evil.description = Some("<img src=x onerror=alert(1)> a \"quoted\" description".into());
-    evil.add_alias("Evil Example");
-    evil.signals.tranco_rank = Some(1_000);
-    let mut plain = SiteRecord::new("example.org");
+    evil.about = Some("<img src=x onerror=alert(1)> a \"quoted\" description".into());
+    site::add_alias(&mut evil, "Evil Example");
+    let mut signals = site::signals(&evil);
+    signals.tranco_rank = Some(1_000);
+    site::set_signals(&mut evil, &signals);
+    let mut plain = site::new("example.org");
     plain.url = Some("https://example.org/?a=1&b=2".into());
     plain.title = Some("Example Org".into());
     // The index is built from stored items, whose cleaning drops a URL
     // that is not the web's; put it back, since this is about what the web
     // app makes of whatever text the index holds.
-    let mut evil = evil.to_stored_item();
+    site::clean(&mut evil);
     evil.url = Some("javascript:alert(document.cookie)".into());
-    build_index(&index, &[evil, plain.to_stored_item()]).unwrap();
+    site::clean(&mut plain);
+    build_index(&index, &[evil, plain]).unwrap();
 
     // The index hands the raw text back, so escaping is up to the web app.
     let searcher = Searcher::open(&index).unwrap();

@@ -294,7 +294,7 @@ async fn a_new_node_sets_up_and_fills_from_the_set_of_sites() {
         .to_peer_id();
     let held = peer_dir.path().join("held");
     let publisher = SigningKey::from_bytes(&[7; 32]);
-    let sites: Vec<SiteRecord> = [
+    let sites: Vec<Item> = [
         "lighthouses.org",
         "uncrawledlanterns.org",
         "harbourmasters.org",
@@ -304,13 +304,15 @@ async fn a_new_node_sets_up_and_fills_from_the_set_of_sites() {
     .iter()
     .enumerate()
     .map(|(i, domain)| {
-        let mut record = SiteRecord::new(*domain);
-        record.signals.tranco_rank = Some(1 + i as u32);
-        record.about = Some(format!("keepers of {domain}"));
+        let mut record = site::new(*domain);
+        let mut signals = site::signals(&record);
+        signals.tranco_rank = Some(1 + i as u32);
+        site::set_signals(&mut record, &signals);
+        site::set_wikidata_about(&mut record, Some(format!("keepers of {domain}")));
         if !domain.starts_with("uncrawled") {
             record.url = Some(format!("https://{domain}/"));
             record.title = Some(format!("Guild of {domain}"));
-            record.crawled_at = Some(now - 600);
+            site::set_crawled(&mut record, Some(now - 600));
         }
         record
     })
@@ -321,16 +323,16 @@ async fn a_new_node_sets_up_and_fills_from_the_set_of_sites() {
     else {
         unreachable!()
     };
-    let items = sites.iter().map(|site| Some(site.to_item().unwrap()));
+    let items = sites.iter().map(|one| Some(site::to_item(one).unwrap()));
     let fields = plumb_core::site_item::site_fields();
     plumb_tools::set::write_set(items, fields, manifest, &set, &[3], 3).unwrap();
     plumb_tools::set::sign_set(&set, &publisher, None, None).unwrap();
 
     // The node holding it is trusted too, and its own list holds another
     // site: the set comes first.
-    let mut own = SiteRecord::new("trustedonly.org");
+    let mut own = site::new("trustedonly.org");
     own.url = Some("https://trustedonly.org/".into());
-    own.crawled_at = Some(now - 600);
+    site::set_crawled(&mut own, Some(now - 600));
     let table =
         plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &stored_items(&[own]))
             .unwrap();
@@ -1141,39 +1143,46 @@ fn an_index_built_from_the_records_file_leaves_out_what_the_denylist_denies() {
             deny("url:https://lighthouse-keepers.org/wreck-maps"),
         ],
     );
-    let site = |domain: &str, tranco: u32, title: &str| {
-        let mut record = SiteRecord::new(domain);
+    let ranked = |domain: &str, tranco: u32, title: &str| {
+        let mut record = site::new(domain);
         record.url = Some(format!("https://{domain}/"));
         record.title = Some(title.to_string());
-        record.signals.tranco_rank = Some(tranco);
+        let mut signals = site::signals(&record);
+        signals.tranco_rank = Some(tranco);
+        site::set_signals(&mut record, &signals);
         record
     };
-    let mut keepers = site("lighthouse-keepers.org", 2, "Lighthouse Keepers Guild");
+    let mut keepers = ranked("lighthouse-keepers.org", 2, "Lighthouse Keepers Guild");
     let page = |label: &str, path: &str| plumb_core::KeyPage {
         label: label.into(),
         url: format!("https://lighthouse-keepers.org/{path}"),
     };
-    keepers.key_pages = vec![
-        page("Visiting hours", "hours"),
-        page("Wreck maps", "wreck-maps"),
-    ];
-    let mut cove = SiteRecord::new("wreckers-cove.org");
-    cove.signals.tranco_rank = Some(4);
-    cove.redirect = Some(plumb_core::Redirect {
+    site::set_key_pages(
+        &mut keepers,
+        vec![
+            page("Visiting hours", "hours"),
+            page("Wreck maps", "wreck-maps"),
+        ],
+    );
+    let mut cove = site::new("wreckers-cove.org");
+    let mut signals = site::signals(&cove);
+    signals.tranco_rank = Some(4);
+    site::set_signals(&mut cove, &signals);
+    let redirect = plumb_core::Redirect {
         to: "lighthouse-wreckers.org".into(),
         at: 1_700_000_000,
         inner: false,
-    });
-    write_jsonl(
+    };
+    site::set_redirect(&mut cove, Some(redirect));
+    write_old_lines(
         &dir.path().join("records.jsonl"),
         &[
-            site("lighthouse-wreckers.org", 1, "Lighthouse Wreckers"),
+            ranked("lighthouse-wreckers.org", 1, "Lighthouse Wreckers"),
             keepers,
-            site("lighthouse-beacons.org", 3, "Lighthouse Beacons"),
+            ranked("lighthouse-beacons.org", 3, "Lighthouse Beacons"),
             cove,
         ],
-    )
-    .unwrap();
+    );
     let mut config = test_config(dir.path());
     config.set_publishers = vec![plumb_format::PublicKey::of(&publisher)];
     // Buckets, as for private search, and feeds to watch.
@@ -1201,14 +1210,14 @@ fn an_index_built_from_the_records_file_leaves_out_what_the_denylist_denies() {
     assert_eq!(pages, ["https://lighthouse-keepers.org/hours"]);
 
     let table = built.buckets.as_ref().expect("buckets");
-    let mut shared: Vec<SiteRecord> = table
+    let mut shared: Vec<Item> = table
         .ranked(0, table.len())
         .unwrap()
         .iter()
-        .map(|line| plumb_core::stored::read(line.as_bytes()).unwrap())
+        .map(|line| plumb_core::stored::read_item(line.as_bytes()).unwrap())
         .collect();
-    shared.sort_by(|a, b| a.domain.cmp(&b.domain));
-    let domains: Vec<&str> = shared.iter().map(|r| r.domain.as_str()).collect();
+    shared.sort_by(|a, b| a.id.cmp(&b.id));
+    let domains: Vec<&str> = shared.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(
         domains,
         [
@@ -1217,7 +1226,10 @@ fn an_index_built_from_the_records_file_leaves_out_what_the_denylist_denies() {
             "wreckers-cove.org"
         ]
     );
-    let pages: Vec<&str> = shared[1].key_pages.iter().map(|p| p.url.as_str()).collect();
+    let pages: Vec<String> = site::key_pages(&shared[1])
+        .into_iter()
+        .map(|p| p.url)
+        .collect();
     assert_eq!(pages, ["https://lighthouse-keepers.org/hours"]);
     // The keepers' and the beacons' feeds, not the wreckers'; the cove
     // redirects, and has none to watch.

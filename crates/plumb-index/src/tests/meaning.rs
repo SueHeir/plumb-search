@@ -192,7 +192,7 @@ fn partial_brands_keep_their_matching_subjects_and_explicit_navigation() {
             Signals::default(),
         ),
     ];
-    records[3].about = Some("American bank".to_string());
+    site::set_wikidata_about(&mut records[3], Some("American bank".to_string()));
     let (_dir, searcher) = build(&records);
     let meaning = FixedMeaning(vec![
         ("budget.com", 0.1),
@@ -652,7 +652,7 @@ fn a_name_some_little_site_has_does_not_keep_namesakes_of_its_words() {
 
 #[test]
 fn a_domain_that_only_spells_the_query_leaves_it_to_meaning() {
-    let found = |namesake: SiteRecord| {
+    let found = |namesake: Item| {
         let records = vec![
             namesake,
             site(
@@ -702,7 +702,7 @@ fn a_domain_that_only_spells_the_query_leaves_it_to_meaning() {
     );
     // The official site of something called that is what it names.
     let mut official = bare;
-    official.about = Some("company".to_string());
+    site::set_wikidata_about(&mut official, Some("company".to_string()));
     assert_eq!(found(official), ["email-provider.eu"]);
 }
 
@@ -720,7 +720,7 @@ fn an_official_site_is_named_inside_by_its_wikidata_name_only() {
         &[],
         bank,
     );
-    valley.about = Some("American bank".to_string());
+    site::set_wikidata_about(&mut valley, Some("American bank".to_string()));
     let records = vec![
         valley,
         site(
@@ -765,7 +765,7 @@ fn a_question_names_a_site_by_what_links_call_it() {
         &[("wikiHow", 900)],
         obscure(300_000, 40),
     );
-    wikihow.about = Some("how-to website".to_string());
+    site::set_wikidata_about(&mut wikihow, Some("how-to website".to_string()));
     let records = vec![
         wikihow,
         site(
@@ -1212,8 +1212,11 @@ fn sites_in_another_script_only_meaning_finds_are_left_out() {
             obscure(20_000, 400),
         ),
     ];
-    records[1].language = Some("en".into());
-    records[3].about = Some("Japanese restaurant review website".into());
+    records[1].lang = Some("en".into());
+    site::set_wikidata_about(
+        &mut records[3],
+        Some("Japanese restaurant review website".into()),
+    );
     let (_dir, searcher) = build(&records);
     let meaning = FixedMeaning(vec![
         ("gambling.example", 0.9),

@@ -1,6 +1,6 @@
 //! What a node keeps of each site during a crawl round: the little that
 //! choosing homepages and saving crawl marks need, about a tenth of a whole
-//! site. A round used to hold every record ([`plumb_core::RecordSet`]),
+//! site. A round used to hold every site whole, as records,
 //! well over a gigabyte for two million sites, next to everything else a
 //! node holds; the crawl results go to the records' journal as before, and
 //! the index is built from the file a site at a time
@@ -275,14 +275,14 @@ impl RoundSites {
         Ok(sites)
     }
 
-    /// The sites of `records`, each as its stored item, for tests.
+    /// A round of `sites`, for tests.
     #[cfg(test)]
-    pub(super) fn of(records: impl IntoIterator<Item = plumb_core::SiteRecord>) -> RoundSites {
-        let mut sites = RoundSites::default();
-        for record in records {
-            sites.add(&record.stored_item_as_is());
+    pub(super) fn of(sites: impl IntoIterator<Item = Item>) -> RoundSites {
+        let mut round = RoundSites::default();
+        for site in sites {
+            round.add(&site);
         }
-        sites
+        round
     }
 
     /// Adds `site`, or takes it into the one already held.
@@ -406,14 +406,15 @@ impl CrawlSet for RoundSites {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{write_jsonl, SiteRecord};
-
     use super::*;
     use crate::records::journal_path;
+    use crate::test_lines::write_old_lines;
 
-    fn record(domain: &str, tranco: u32) -> SiteRecord {
-        let mut r = SiteRecord::new(domain);
-        r.signals.tranco_rank = Some(tranco);
+    fn record(domain: &str, tranco: u32) -> Item {
+        let mut r = site::new(domain);
+        let mut signals = site::signals(&r);
+        signals.tranco_rank = Some(tranco);
+        site::set_signals(&mut r, &signals);
         r
     }
 
@@ -421,7 +422,7 @@ mod tests {
     fn a_round_holding_back_new_sites_takes_only_the_ones_it_holds() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        write_jsonl(&path, &[record("held.com", 5)]).unwrap();
+        write_old_lines(&path, &[record("held.com", 5)]);
         let mut sites = RoundSites::load(&path, Topics::default(), Keep::default()).unwrap();
         assert!(sites.takes("new.com"), "takes any site by default");
         sites.hold_new_sites(true);
@@ -435,18 +436,18 @@ mod tests {
         let path = dir.path().join("records.jsonl");
         let mut bank = record("usbank.com", 5);
         bank.title = Some("U.S. Bank".into());
-        bank.description = Some("A bank in Minneapolis".into());
+        bank.about = Some("A bank in Minneapolis".into());
         bank.url = Some("https://www.usbank.com/".into());
-        bank.crawled_at = Some(1_000);
-        bank.signals.official_site = true;
-        write_jsonl(&path, &[bank, record("quiet.net", 900)]).unwrap();
+        site::set_crawled(&mut bank, Some(1_000));
+        let mut signals = site::signals(&bank);
+        signals.official_site = true;
+        site::set_signals(&mut bank, &signals);
+        write_old_lines(&path, &[bank, record("quiet.net", 900)]);
         let mut found = record("Found.ORG", 50);
-        found.crawled_at = Some(2_000);
+        site::set_crawled(&mut found, Some(2_000));
         RecordStore::open(&path)
             .save(&[
-                Change::Merge {
-                    site: found.stored_item_as_is(),
-                },
+                Change::Merge { site: found },
                 Change::Mark {
                     domain: "quiet.net".into(),
                     attempted_at: Some(1_500),
@@ -466,8 +467,10 @@ mod tests {
         assert_eq!(bank.url(), Some("https://www.usbank.com/"));
         assert_eq!(bank.crawled_at(), Some(1_000));
         let mut official = record("usbank.com", 5);
-        official.signals.official_site = true;
-        assert_eq!(bank.link_score(), official.link_score());
+        let mut signals = site::signals(&official);
+        signals.official_site = true;
+        site::set_signals(&mut official, &signals);
+        assert_eq!(bank.link_score(), site::link_score(&official));
         assert_eq!(sites.marks("quiet.net"), (Some(1_500), 3));
         assert_eq!(sites.get("found.org").unwrap().crawled_at(), Some(2_000));
         assert!(!sites.get("quiet.net").unwrap().kept());
@@ -479,13 +482,11 @@ mod tests {
             failures: 4,
         });
         assert_eq!(sites.marks("quiet.net"), (Some(3_000), 4));
-        let mut fresh = SiteRecord::new("new.com");
-        fresh.crawled_at = Some(3_100);
-        sites.apply(Change::Merge {
-            site: fresh.stored_item_as_is(),
-        });
+        let mut fresh = site::new("new.com");
+        site::set_crawled(&mut fresh, Some(3_100));
+        sites.apply(Change::Merge { site: fresh });
         sites.apply(Change::RefreshShared {
-            site: SiteRecord::new("unheld.com").stored_item_as_is(),
+            site: site::new("unheld.com"),
         });
         assert_eq!(sites.len(), 4);
         sites.apply(Change::Gone {
@@ -507,16 +508,19 @@ mod tests {
         let path = dir.path().join("records.jsonl");
         let dead = |domain: &str, official: bool| {
             let mut r = record(domain, 1_000);
-            r.crawl_failures = crate::dead::DEAD_AFTER_FAILURES;
-            r.crawl_attempted_at = Some(now_unix());
-            r.signals.official_site = official;
+            let mut marks = site::crawl_marks(&r);
+            marks.failures = crate::dead::DEAD_AFTER_FAILURES;
+            marks.tried = Some(now_unix());
+            site::set_crawl_marks(&mut r, marks);
+            let mut signals = site::signals(&r);
+            signals.official_site = official;
+            site::set_signals(&mut r, &signals);
             r
         };
-        write_jsonl(
+        write_old_lines(
             &path,
             &[dead("official.org", true), dead("gone.com", false)],
-        )
-        .unwrap();
+        );
         let sites = RoundSites::load(&path, Topics::default(), Keep::default()).unwrap();
         assert!(sites.get("official.org").unwrap().kept());
         assert!(!sites.get("gone.com").unwrap().kept());
@@ -528,7 +532,7 @@ mod tests {
         let path = dir.path().join("records.jsonl");
         let mut titled = record("WWW.Example.com", 9);
         titled.title = Some("Example".into());
-        write_jsonl(&path, &[record("example.com", 3), titled]).unwrap();
+        write_old_lines(&path, &[record("example.com", 3), titled]);
         let sites = RoundSites::load(&path, Topics::default(), Keep::default()).unwrap();
         assert_eq!(sites.len(), 1);
         assert!(sites.get("example.com").unwrap().titled());

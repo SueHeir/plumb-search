@@ -1,49 +1,51 @@
 use plumb_core::keys::{pick_buckets, query_keys, site_keys, slim_site};
 use plumb_core::site::{self, Item};
-use plumb_core::{LinkText, SafeSearch, Signals, SiteRecord};
+use plumb_core::stored::old_record;
+use plumb_core::{LinkText, SafeSearch, Signals};
 use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
 
 use super::*;
 
-fn site(domain: &str, title: &str, tranco: Option<u32>, linking: u32) -> SiteRecord {
-    let mut r = SiteRecord::new(domain);
+fn site(domain: &str, title: &str, tranco: Option<u32>, linking: u32) -> Item {
+    let mut r = site::new(domain);
     r.title = Some(title.to_string());
-    r.signals = Signals {
-        tranco_rank: tranco,
-        linking_domains: linking,
-        ..Signals::default()
-    };
+    site::set_signals(
+        &mut r,
+        &Signals {
+            tranco_rank: tranco,
+            linking_domains: linking,
+            ..Signals::default()
+        },
+    );
     r
 }
 
-/// The items of `records`, each as it is
-/// ([`SiteRecord::stored_item_as_is`]): the sites ranked here.
-fn items(records: &[SiteRecord]) -> Vec<Item> {
-    records
-        .iter()
-        .map(|record| record.clone().stored_item_as_is())
-        .collect()
+/// `sites` as they are, not cleaned: the sites ranked here.
+fn items(sites: &[Item]) -> Vec<Item> {
+    sites.to_vec()
 }
 
-fn corpus() -> Vec<SiteRecord> {
+fn corpus() -> Vec<Item> {
     let mut usbank = site(
         "usbank.com",
         "U.S. Bank | Checking & Savings",
         Some(900),
         4000,
     );
-    usbank.link_texts = vec![LinkText::with_count("US Bank", 40)];
-    usbank.aliases = vec!["U.S. Bancorp".into()];
-    usbank.signals.official_site = true;
-    usbank.country = Some("US".into());
-    usbank.kinds = vec!["bank".into()];
+    site::set_link_texts(&mut usbank, &[LinkText::with_count("US Bank", 40)]);
+    usbank.names = vec!["U.S. Bancorp".into()];
+    let mut signals = site::signals(&usbank);
+    signals.official_site = true;
+    site::set_signals(&mut usbank, &signals);
+    site::set_country(&mut usbank, Some("US".into()));
+    site::set_kinds(&mut usbank, vec!["bank".into()]);
     let mut chase = site("chase.com", "Chase Bank", Some(200), 9000);
-    chase.country = Some("US".into());
-    chase.kinds = vec!["bank".into()];
+    site::set_country(&mut chase, Some("US".into()));
+    site::set_kinds(&mut chase, vec!["bank".into()]);
     let mut dkb = site("dkb.de", "DKB - Das Kundenkonto", Some(5000), 800);
-    dkb.kinds = vec!["bank".into()];
+    site::set_kinds(&mut dkb, vec!["bank".into()]);
     let mut irs = site("irs.gov", "Internal Revenue Service", Some(300), 7000);
-    irs.description = Some("Get a tax refund and pay taxes".into());
+    irs.about = Some("Get a tax refund and pay taxes".into());
     vec![
         usbank,
         chase,
@@ -62,12 +64,7 @@ fn corpus() -> Vec<SiteRecord> {
 }
 
 /// The top domains plumb-index gives `query` over `records`.
-fn index_top(
-    records: &[SiteRecord],
-    query: &str,
-    options: &SearchOptions,
-    n: usize,
-) -> Vec<String> {
+fn index_top(records: &[Item], query: &str, options: &SearchOptions, n: usize) -> Vec<String> {
     index_top_with_relevance(
         records,
         query,
@@ -78,7 +75,7 @@ fn index_top(
 }
 
 fn experimental_index_top(
-    records: &[SiteRecord],
+    records: &[Item],
     query: &str,
     options: &SearchOptions,
     n: usize,
@@ -87,7 +84,7 @@ fn experimental_index_top(
 }
 
 fn index_top_with_relevance(
-    records: &[SiteRecord],
+    records: &[Item],
     query: &str,
     options: &SearchOptions,
     n: usize,
@@ -95,7 +92,9 @@ fn index_top_with_relevance(
 ) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("index");
-    let sites: Vec<_> = records.iter().map(SiteRecord::to_stored_item).collect();
+    // The index is built from sites cleaned, as a node holds them.
+    let mut sites = records.to_vec();
+    sites.iter_mut().for_each(site::clean);
     build_index(&path, &sites).unwrap();
     // The browser does not correct typos.
     let options = SearchOptions {
@@ -120,24 +119,19 @@ fn index_top_with_relevance(
         .collect()
 }
 
-fn private_top(records: &[SiteRecord], query: &str, options: &Options, n: usize) -> Vec<String> {
+fn private_top(records: &[Item], query: &str, options: &Options, n: usize) -> Vec<String> {
     rank(query, &items(records), options, n)
         .into_iter()
         .map(|hit| hit.domain)
         .collect()
 }
 
-fn experimental_rank(
-    query: &str,
-    records: &[SiteRecord],
-    options: &Options,
-    n: usize,
-) -> Vec<Ranked> {
+fn experimental_rank(query: &str, records: &[Item], options: &Options, n: usize) -> Vec<Ranked> {
     rank::rank_with_whole_query_relevance(query, &items(records), options, n, true)
 }
 
 fn experimental_private_top(
-    records: &[SiteRecord],
+    records: &[Item],
     query: &str,
     options: &Options,
     n: usize,
@@ -279,13 +273,13 @@ fn every_substantive_field_can_support_a_partial_names_task() {
         let text = "Aster Observatory refund information";
         match field {
             "title" => popular.title = Some(text.into()),
-            "description" => popular.description = Some(text.into()),
-            "intro" => popular.intro = Some(text.into()),
-            "summary" => popular.summary = Some(text.into()),
-            "about" => popular.about = Some(text.into()),
-            "headings" => popular.headings = vec![text.into()],
-            "terms" => popular.terms = vec![text.into()],
-            "aliases" => popular.aliases = vec![text.into()],
+            "description" => popular.about = Some(text.into()),
+            "intro" => site::set_intro(&mut popular, Some(text.into())),
+            "summary" => site::set_summary(&mut popular, Some(text.into())),
+            "about" => site::set_wikidata_about(&mut popular, Some(text.into())),
+            "headings" => site::set_headings(&mut popular, vec![text.into()]),
+            "terms" => site::set_terms(&mut popular, vec![text.into()]),
+            "aliases" => popular.names = vec![text.into()],
             _ => unreachable!(),
         }
         let records = [
@@ -357,7 +351,7 @@ fn navigation_preserves_the_entire_subject() {
 #[test]
 fn a_redirected_homepages_words_do_not_establish_the_original_sites_task() {
     let mut popular = site("aster.example", "Aster refund information", Some(1), 90_000);
-    popular.description = Some("Aster refunds".into());
+    popular.about = Some("Aster refunds".into());
     popular.url = Some("https://nimbus.example/".into());
     let records = [
         popular,
@@ -376,7 +370,7 @@ fn a_redirected_homepages_words_do_not_establish_the_original_sites_task() {
 #[test]
 fn exact_domain_names_keep_the_native_language_exception() {
     let mut german = site("aster.de", "Aster Observatory", Some(1), 90_000);
-    german.language = Some("de".into());
+    german.lang = Some("de".into());
     let records = [german, site("nimbus.example", "Aster lab", None, 0)];
     let private_options = Options {
         language: Some("en".into()),
@@ -402,9 +396,9 @@ fn exact_domain_names_keep_the_native_language_exception() {
 #[test]
 fn the_language_filter_keeps_the_nodes_exceptions() {
     let mut rakuten = site("rakuten.example", "楽天市場", Some(300), 50_000);
-    rakuten.language = Some("ja".into());
+    rakuten.lang = Some("ja".into());
     let mut madrid = site("realmadrid.example", "Real Madrid CF", Some(300), 50_000);
-    madrid.language = Some("es".into());
+    madrid.lang = Some("es".into());
     let records = [rakuten, madrid];
     let private_options = Options {
         language: Some("en".into()),
@@ -442,7 +436,7 @@ fn a_site_an_alias_names_in_full_keeps_its_language_too() {
         Some(1),
         90_000,
     );
-    railways.aliases = vec!["Vietnam Railways".into()];
+    railways.names = vec!["Vietnam Railways".into()];
     let records = [
         railways,
         site("nimbus.example", "Vietnam travel guide", None, 0),
@@ -473,7 +467,7 @@ fn a_shared_named_subject_is_required_even_when_task_words_dominate() {
         Some(1),
         90_000,
     );
-    owner.aliases = vec!["Aster".into()];
+    owner.names = vec!["Aster".into()];
     let records = [
         owner,
         site(
@@ -494,7 +488,7 @@ fn a_shared_named_subject_is_required_even_when_task_words_dominate() {
     );
     let subject = "Aster Nimbus Zephyr Lunar Observatory Institute Lab";
     let mut owner = site("aster.example", subject, Some(1), 90_000);
-    owner.aliases = vec![subject.into()];
+    owner.names = vec![subject.into()];
     let records = [
         owner,
         site("nimbus.example", "Refund guidance", Some(2), 100_000),
@@ -513,11 +507,11 @@ fn a_shared_named_subject_is_required_even_when_task_words_dominate() {
 #[test]
 fn alias_subjects_precede_longer_domains_and_preserve_supported_qualifiers() {
     let mut owner = site("aster.example", "Aster Labs", Some(1), 90_000);
-    owner.aliases = vec!["Aster Labs".into()];
-    owner.description = Some("Banking plans qz 7 API".into());
+    owner.names = vec!["Aster Labs".into()];
+    owner.about = Some("Banking plans qz 7 API".into());
     let mut decoy = site("aster-labs-online.example", "Aster Labs Online", None, 0);
-    decoy.aliases = vec!["Aster Labs".into()];
-    decoy.description = Some("Aster Labs online banking qz 7 API".into());
+    decoy.names = vec!["Aster Labs".into()];
+    decoy.about = Some("Aster Labs online banking qz 7 API".into());
     let records = [owner, decoy];
     for query in [
         "aster labs online banking",
@@ -546,8 +540,8 @@ fn descriptive_queries_survive_self_labels_and_competing_unsupported_aliases() {
         let mut first = site(first_domain, "Nimbus village", Some(1), 90_000);
         let mut second = site(second_domain, "Nimbus magazine", Some(2), 80_000);
         if aliases {
-            first.aliases = vec!["Nimbus".into()];
-            second.aliases = vec!["Nimbus".into()];
+            first.names = vec!["Nimbus".into()];
+            second.names = vec!["Nimbus".into()];
         }
         let records = [
             first,
@@ -567,12 +561,14 @@ fn descriptive_queries_survive_self_labels_and_competing_unsupported_aliases() {
 #[test]
 fn complete_alias_identity_survives_borrowed_homepage_and_partial_rivals() {
     let mut owner = site("aster.example", "Borrowed portal", Some(1), 90_000);
-    owner.aliases = vec!["Nimbus Research".into()];
-    owner.signals.official_site = true;
-    owner.about = Some("Research organization".into());
+    owner.names = vec!["Nimbus Research".into()];
+    let mut signals = site::signals(&owner);
+    signals.official_site = true;
+    site::set_signals(&mut owner, &signals);
+    site::set_wikidata_about(&mut owner, Some("Research organization".into()));
     owner.url = Some("https://other.example/".into());
     let mut rival = site("nimbus.example", "Nimbus Research guidance", None, 0);
-    rival.aliases = vec!["Nimbus".into()];
+    rival.names = vec!["Nimbus".into()];
     let records = [owner, rival];
     let query = "nimbus research";
     assert_eq!(
@@ -588,8 +584,8 @@ fn complete_alias_identity_survives_borrowed_homepage_and_partial_rivals() {
 #[test]
 fn a_complete_hostname_written_as_words_keeps_address_lookup() {
     let mut owner = site("aa.example", "Aster Research", Some(1), 90_000);
-    owner.aliases = vec!["Aster Research".into()];
-    let records = [owner, SiteRecord::new("asterresearch.fr")];
+    owner.names = vec!["Aster Research".into()];
+    let records = [owner, site::new("asterresearch.fr")];
     let query = "asterresearch fr";
     assert_eq!(
         experimental_private_top(&records, query, &Options::default(), 1),
@@ -609,9 +605,11 @@ fn a_bare_query_domain_needs_corroboration_except_when_typed() {
         Some(1),
         90_000,
     );
-    owner.aliases = vec!["Aster".into()];
-    let mut copier = SiteRecord::new("asterrefund.test");
-    copier.signals.tranco_rank = Some(500_000);
+    owner.names = vec!["Aster".into()];
+    let mut copier = site::new("asterrefund.test");
+    let mut signals = site::signals(&copier);
+    signals.tranco_rank = Some(500_000);
+    site::set_signals(&mut copier, &signals);
     let records = [owner, copier];
     let ranked = experimental_rank("aster refund", &records, &Options::default(), 2);
     assert_eq!(ranked[0].domain, "aster.example");
@@ -695,6 +693,11 @@ fn search_keeps_only_sites_with_the_query_keys_once_each() {
     }
 }
 
+/// The record a node of an earlier version sent of `site`.
+fn record(site: &Item) -> old_record::SiteRecord {
+    old_record::of_item(site).unwrap()
+}
+
 /// A bucket holds trimmed items, or, as a browser may still have cached
 /// it from a node of an earlier version, trimmed records' JSON; either
 /// ranks the same.
@@ -706,17 +709,18 @@ fn buckets_read_back_in_either_form_and_skip_bad_sites() {
     let json = format!(
         "[{}, {{\"domain\": 5}}, {{\"id\": 5}}, {page}, {}]",
         serde_json::to_string(&slim[0]).unwrap(),
-        serde_json::to_string(&records[1]).unwrap()
+        serde_json::to_string(&record(&records[1])).unwrap()
     );
     let sites = read_bucket(&json).unwrap();
     let domains: Vec<&str> = sites.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(domains, ["usbank.com", "chase.com"]);
-    assert_eq!(sites[1], records[1].clone().stored_item_as_is());
+    assert_eq!(sites[1], records[1]);
     assert!(read_bucket("not json").is_err());
     assert!(read_bucket(&" ".repeat(MAX_BUCKET_BYTES + 1)).is_err());
 
     let as_items = serde_json::to_string(&slim).unwrap();
-    let as_records = serde_json::to_string(&records).unwrap();
+    let as_records: Vec<old_record::SiteRecord> = records.iter().map(record).collect();
+    let as_records = serde_json::to_string(&as_records).unwrap();
     let (_, keys) = pick_buckets("us bank", || 3);
     let found = |json: &str| {
         let answers = vec![read_bucket(json).unwrap()];
@@ -787,7 +791,9 @@ fn padding_repeats_for_a_query_in_one_browser_only() {
 #[test]
 fn copies_keep_the_less_favorable_popularity() {
     let mut boosted = site("phish.example", "US Bank", Some(1), 90_000);
-    boosted.signals.official_site = true;
+    let mut signals = site::signals(&boosted);
+    signals.official_site = true;
+    site::set_signals(&mut boosted, &signals);
     let honest = site("phish.example", "Other text", Some(800_000), 2);
     let merged = rank::merge_copies(items(&[boosted, honest]));
     assert_eq!(merged.len(), 1);
@@ -808,7 +814,7 @@ fn safe_search_and_language_filter_as_in_the_index() {
         300,
     ));
     let mut german = site("bankde.example", "Bank Deutschland", Some(3500), 300);
-    german.language = Some("de".into());
+    german.lang = Some("de".into());
     records.push(german);
     let cases = [
         (SafeSearch::Off, None),
@@ -918,7 +924,7 @@ fn script_language_filters_keep_multilingual_controls_and_native_private_parity(
         .enumerate()
         .map(|(i, (language, title, _))| {
             let mut record = site(&format!("sample{i}.example"), title, Some(5000), 300);
-            record.language = language.map(str::to_string);
+            record.lang = language.map(str::to_string);
             record
         })
         .collect();
@@ -951,12 +957,7 @@ fn script_language_filters_keep_multilingual_controls_and_native_private_parity(
     assert_eq!(compare("lab", None).len(), limit);
     let english = compare("lab", Some("en"));
     for (i, (_, _, keep)) in cases.iter().enumerate() {
-        assert_eq!(
-            english.contains(&records[i].domain),
-            *keep,
-            "{}",
-            cases[i].1
-        );
+        assert_eq!(english.contains(&records[i].id), *keep, "{}", cases[i].1);
     }
     // Shared scripts keep candidates without asserting a particular language.
     for (language, expected) in [
@@ -968,7 +969,7 @@ fn script_language_filters_keep_multilingual_controls_and_native_private_parity(
         ("ar", 4),
     ] {
         assert!(
-            compare("lab", Some(language)).contains(&records[expected].domain),
+            compare("lab", Some(language)).contains(&records[expected].id),
             "{language}"
         );
     }
@@ -980,26 +981,26 @@ fn script_language_filters_keep_multilingual_controls_and_native_private_parity(
         } else {
             0
         };
-        assert!(found.contains(&records[expected].domain), "{language}");
+        assert!(found.contains(&records[expected].id), "{language}");
     }
     assert!(
-        compare("lab", Some("ko")).contains(&records[1].domain),
+        compare("lab", Some("ko")).contains(&records[1].id),
         "Han alone can also be Korean"
     );
     // Valid declarations override the fallback, including Han-heavy Korean.
     for (language, index) in [("az", 14), ("uz", 15), ("kk", 16), ("ko", 17), ("ja", 18)] {
-        assert!(compare("lab", Some(language)).contains(&records[index].domain));
+        assert!(compare("lab", Some(language)).contains(&records[index].id));
     }
     // Full typed names retain the current native/private exception.
     for i in [0, 1, 13, 17] {
         assert_eq!(
-            compare(&records[i].domain, Some("en")),
-            vec![records[i].domain.clone()]
+            compare(&records[i].id, Some("en")),
+            vec![records[i].id.clone()]
         );
     }
     // Native-script queries use the same filter semantics, rather than an
     // English-only query special case.
     for (query, language, index) in [("научные", "ru", 0), ("البحوث", "ar", 4)] {
-        assert!(compare(query, Some(language)).contains(&records[index].domain));
+        assert!(compare(query, Some(language)).contains(&records[index].id));
     }
 }

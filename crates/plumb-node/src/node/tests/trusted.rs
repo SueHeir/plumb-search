@@ -12,16 +12,18 @@ async fn a_node_fills_its_free_space_with_a_trusted_node_s_crawls() {
         .public()
         .to_peer_id();
     let now = now_unix();
-    let sites: Vec<SiteRecord> = ["harbourmasters.org", "tidetables.net", "uncrawled.org"]
+    let sites: Vec<Item> = ["harbourmasters.org", "tidetables.net", "uncrawled.org"]
         .iter()
         .enumerate()
         .map(|(i, domain)| {
-            let mut record = SiteRecord::new(*domain);
-            record.signals.tranco_rank = Some(10 + i as u32);
+            let mut record = site::new(*domain);
+            let mut signals = site::signals(&record);
+            signals.tranco_rank = Some(10 + i as u32);
+            site::set_signals(&mut record, &signals);
             if !domain.starts_with("uncrawled") {
                 record.url = Some(format!("https://{domain}/"));
                 record.title = Some(format!("Guild of {domain}"));
-                record.crawled_at = Some(now - 600);
+                site::set_crawled(&mut record, Some(now - 600));
             }
             record
         })
@@ -110,12 +112,13 @@ async fn shows_the_recent_headlines_a_trusted_node_shares() {
 
     let now = now_unix();
     let checked = |domain: &str, title: &str| {
-        let mut record = SiteRecord::new(domain);
-        record.news = vec![plumb_core::Headline {
+        let mut record = site::new(domain);
+        let news = vec![plumb_core::Headline {
             title: title.into(),
             url: format!("https://www.{domain}/story"),
             at: now - 600,
         }];
+        site::set_news(&mut record, news);
         record
     };
     let shared = vec![
@@ -168,15 +171,17 @@ async fn crawled_peer(
         .public()
         .to_peer_id();
     let now = now_unix();
-    let sites: Vec<SiteRecord> = domains
+    let sites: Vec<Item> = domains
         .iter()
         .enumerate()
         .map(|(i, domain)| {
-            let mut record = SiteRecord::new(*domain);
-            record.signals.tranco_rank = Some(10 + i as u32);
+            let mut record = site::new(*domain);
+            let mut signals = site::signals(&record);
+            signals.tranco_rank = Some(10 + i as u32);
+            site::set_signals(&mut record, &signals);
             record.url = Some(format!("https://{domain}/"));
             record.title = Some(format!("Guild of {domain}"));
-            record.crawled_at = Some(now - 600);
+            site::set_crawled(&mut record, Some(now - 600));
             record
         })
         .collect();

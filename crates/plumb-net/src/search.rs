@@ -1124,17 +1124,15 @@ mod tests {
     use crate::batch::Batch;
     use crate::proto::BucketRecord;
     use plumb_core::sites::SiteList;
-    use plumb_core::SiteRecord;
 
-    /// `records` as a node holds its crawls to sign: their stored items.
-    fn listed(records: &[SiteRecord]) -> SiteList {
-        let item = |record: &SiteRecord| record.clone().stored_item_as_is();
-        records.iter().map(item).collect()
+    /// `sites` as a node holds its crawls to sign.
+    fn listed(sites: &[Item]) -> SiteList {
+        sites.iter().cloned().collect()
     }
 
-    fn item(record: &SiteRecord) -> BucketRecord {
+    fn item(record: &Item) -> BucketRecord {
         BucketRecord {
-            record: record.to_line().unwrap(),
+            record: site::to_line(record).unwrap(),
             proof: None,
             also: Vec::new(),
         }
@@ -1158,14 +1156,13 @@ mod tests {
 
     #[test]
     fn unproven_records_link_only_to_their_own_site_and_drop_bookkeeping() {
-        let mut lying = SiteRecord::new("usbank.com");
+        let mut lying = site::new("usbank.com");
         lying.url = Some("https://usbank-login.example/".into());
-        lying.crawl_failures = 4;
-        let checked = check_answer(
-            vec![item(&lying), item(&SiteRecord::new("not a domain"))],
-            0,
-        )
-        .unwrap();
+        let mut marks = site::crawl_marks(&lying);
+        marks.failures = 4;
+        site::set_crawl_marks(&mut lying, marks);
+        let checked =
+            check_answer(vec![item(&lying), item(&site::new("not a domain"))], 0).unwrap();
         assert_eq!(checked.len(), 1);
         let site = checked[0].site.item();
         assert_eq!(site.url, None);
@@ -1181,9 +1178,9 @@ mod tests {
             .map(|i| format!("bank{i}.com"))
             .find(|d| is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
             .unwrap();
-        let mut record = SiteRecord::new(domain.as_str());
+        let mut record = site::new(domain.as_str());
         record.title = Some("Real Bank".into());
-        record.crawled_at = Some(now);
+        site::set_crawled(&mut record, Some(now));
         let batch = Batch::sign(
             &key,
             &listed(std::slice::from_ref(&record)),
@@ -1198,14 +1195,14 @@ mod tests {
         let mut shown = record.clone();
         shown.title = Some("Log in here".into());
         let forged = BucketRecord {
-            record: shown.to_line().unwrap(),
+            record: site::to_line(&shown).unwrap(),
             proof: Some(forged_proof),
             also: Vec::new(),
         };
-        assert!(check_answer(vec![item(&SiteRecord::new("other.com")), forged], now).is_none());
+        assert!(check_answer(vec![item(&site::new("other.com")), forged], now).is_none());
 
         let honest = BucketRecord {
-            record: shown.to_line().unwrap(),
+            record: site::to_line(&shown).unwrap(),
             proof: Some(batch.proof(0)),
             also: Vec::new(),
         };
@@ -1217,7 +1214,7 @@ mod tests {
     #[test]
     fn only_an_answer_with_a_signed_crawl_earns_credits() {
         assert!(!earns(&check_answer(Vec::new(), 0).unwrap()));
-        let unsigned = check_answer(vec![item(&SiteRecord::new("a.com"))], 0).unwrap();
+        let unsigned = check_answer(vec![item(&site::new("a.com"))], 0).unwrap();
         assert!(!earns(&unsigned));
         let mut signed = unsigned;
         signed[0].verified = true;
@@ -1226,13 +1223,17 @@ mod tests {
 
     #[test]
     fn two_answers_keep_the_less_favorable_popularity() {
-        let mut boosted = SiteRecord::new("phish.com");
-        boosted.signals.tranco_rank = Some(1);
-        boosted.signals.official_site = true;
-        let mut honest = SiteRecord::new("phish.com");
-        honest.signals.tranco_rank = Some(900_000);
-        let site = |record: SiteRecord| FoundSite {
-            site: SiteLine::of(record.stored_item_as_is()),
+        let mut boosted = site::new("phish.com");
+        let mut signals = site::signals(&boosted);
+        signals.tranco_rank = Some(1);
+        signals.official_site = true;
+        site::set_signals(&mut boosted, &signals);
+        let mut honest = site::new("phish.com");
+        let mut signals = site::signals(&honest);
+        signals.tranco_rank = Some(900_000);
+        site::set_signals(&mut honest, &signals);
+        let site = |record: Item| FoundSite {
+            site: SiteLine::of(record),
             verified: false,
             crawler: None,
             answers: 1,
@@ -1263,9 +1264,9 @@ mod tests {
         keys.iter()
             .zip(titles)
             .map(|(key, title)| {
-                let mut record = SiteRecord::new(domain.as_str());
+                let mut record = site::new(domain.as_str());
                 record.title = Some(title.to_string());
-                record.crawled_at = Some(now);
+                site::set_crawled(&mut record, Some(now));
                 Batch::sign(key, &listed(&[record]), epoch_of(now), MAX_SHARE_PPM, now)
                     .unwrap()
                     .unwrap()
@@ -1349,7 +1350,7 @@ mod tests {
             proof: Some(batches[0].proof(0)),
             also: vec![batches[1].proof(0)],
         };
-        let checked = check_answer(vec![old, item(&SiteRecord::new("other.com"))], now).unwrap();
+        let checked = check_answer(vec![old, item(&site::new("other.com"))], now).unwrap();
         assert_eq!(checked.len(), 2);
         assert!(!checked[0].verified && !checked[0].confirmed);
 
@@ -1375,9 +1376,9 @@ mod tests {
             .map(|i| format!("bank{i}.com"))
             .find(|d| !is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
             .unwrap();
-        let mut record = SiteRecord::new(domain.as_str());
+        let mut record = site::new(domain.as_str());
         record.title = Some("Real Bank".into());
-        record.crawled_at = Some(now);
+        site::set_crawled(&mut record, Some(now));
         let batch = Batch::sign(&key, &listed(&[record]), epoch_of(now), MAX_SHARE_PPM, now)
             .unwrap()
             .unwrap();
@@ -1386,7 +1387,7 @@ mod tests {
             proof: Some(batch.proof(0)),
             also: Vec::new(),
         };
-        let checked = check_answer(vec![unassigned, item(&SiteRecord::new("other.com"))], now)
+        let checked = check_answer(vec![unassigned, item(&site::new("other.com"))], now)
             .expect("the answer is kept");
         assert_eq!(checked.len(), 2);
         assert!(!checked[0].verified);
@@ -1411,7 +1412,7 @@ mod tests {
         let now = 1_790_000_000;
         let dir = tempfile::tempdir().unwrap();
         let cache = BucketCache::open(dir.path(), now);
-        let record = SiteRecord::new("acme.com");
+        let record = site::new("acme.com");
         cache.put(bucket_of("acme"), vec![vec![item(&record)]], now);
         let stale = cache_search("acme", &cache, now + crate::cache::FRESH_FOR);
         assert_eq!(stale.found.len(), 1);

@@ -975,7 +975,6 @@ fn keep_shared_icon(icons: &IconStore, site: &mut Item) {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::SiteRecord;
     use plumb_net::popularity::{Popular, MAX_POPULARITY_BONUS};
 
     use super::*;
@@ -1025,26 +1024,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let icons = IconStore::new(dir.path());
         // A 1x1 PNG is too small to be an icon: dropped, but still not kept.
-        let mut tiny = SiteRecord::new("tiny.com");
-        tiny.icon = Some("iVBORw0KGgo=".into());
-        let mut tiny = tiny.stored_item_as_is();
+        let mut tiny = site::new("tiny.com");
+        site::set_icon(&mut tiny, Some("iVBORw0KGgo=".into()));
         keep_shared_icon(&icons, &mut tiny);
         assert_eq!(tiny, plumb_core::site::new("tiny.com"));
         assert_eq!(icons.get("tiny.com"), None);
 
         let png = plumb_crawl::normalize_icon(&crate::icons::tests::bmp()).unwrap();
-        let mut record = SiteRecord::new("a.com");
-        record.icon = Some(base64::engine::general_purpose::STANDARD.encode(&png));
-        let mut site = record.stored_item_as_is();
-        keep_shared_icon(&icons, &mut site);
-        assert_eq!(site, plumb_core::site::new("a.com"));
+        let mut record = site::new("a.com");
+        site::set_icon(
+            &mut record,
+            Some(base64::engine::general_purpose::STANDARD.encode(&png)),
+        );
+        keep_shared_icon(&icons, &mut record);
+        assert_eq!(record, plumb_core::site::new("a.com"));
         assert!(icons.get("a.com").unwrap().starts_with(b"\x89PNG"));
     }
 
     #[test]
     fn a_damaged_inbox_line_is_skipped_not_fatal() {
         let line = |domain: &str| {
-            let mut line = serde_json::to_vec(&SiteRecord::new(domain)).unwrap();
+            // As versions up to 0.4 wrote it: the record's own JSON.
+            let mut line = crate::test_lines::old_line(&site::new(domain)).into_bytes();
             line.push(b'\n');
             line
         };
@@ -1137,26 +1138,33 @@ mod tests {
     #[test]
     fn published_crawls_are_the_same_whatever_the_shape_of_the_stored_lines() {
         let dir = tempfile::tempdir().unwrap();
-        let mut record = SiteRecord::new("python.org");
+        let mut record = site::new("python.org");
         record.url = Some("https://www.python.org/".into());
         record.title = Some(" Welcome\u{7} to Python.org ".into());
-        record.body_text = Some("Python lets you work quickly. ".repeat(60));
-        record.key_pages = vec![plumb_core::KeyPage {
-            label: "Downloads".into(),
-            url: "https://www.python.org/downloads/".into(),
-        }];
-        record.links_to = vec!["pypi.org".into()];
-        record.signals.tranco_rank = Some(512);
-        record.crawled_at = Some(1_791_605_520);
-        record.crawl_attempted_at = Some(1_791_605_600);
-        record.crawl_failures = 1;
-        record.icon = Some("iVBORw0KGgo=".into());
-        let records = [record, SiteRecord::new("ranked.com")];
-        let read = |name: &str, line: &dyn Fn(&SiteRecord) -> Vec<u8>| {
+        record.text = Some("Python lets you work quickly. ".repeat(60));
+        site::set_key_pages(
+            &mut record,
+            vec![plumb_core::KeyPage {
+                label: "Downloads".into(),
+                url: "https://www.python.org/downloads/".into(),
+            }],
+        );
+        site::set_links_to(&mut record, vec!["pypi.org".into()]);
+        let mut signals = site::signals(&record);
+        signals.tranco_rank = Some(512);
+        site::set_signals(&mut record, &signals);
+        site::set_crawled(&mut record, Some(1_791_605_520));
+        let mut marks = site::crawl_marks(&record);
+        marks.tried = Some(1_791_605_600);
+        marks.failures = 1;
+        site::set_crawl_marks(&mut record, marks);
+        site::set_icon(&mut record, Some("iVBORw0KGgo=".into()));
+        let records = [record, site::new("ranked.com")];
+        let read = |name: &str, line: &dyn Fn(&Item) -> String| {
             let path = dir.path().join(name);
             let mut file = Vec::new();
             for record in &records {
-                file.extend(line(record));
+                file.extend(line(record).into_bytes());
                 file.push(b'\n');
             }
             fs::write(&path, file).unwrap();
@@ -1164,16 +1172,10 @@ mod tests {
             crate::outline::for_each_site(&path, |site| read.push(site)).unwrap();
             read
         };
-        let old = read("old.jsonl", &|record| serde_json::to_vec(record).unwrap());
-        let new = read("new.jsonl", &|record| {
-            plumb_core::stored::line(record).unwrap()
-        });
+        let old = read("old.jsonl", &crate::test_lines::old_line);
+        let new = read("new.jsonl", &crate::test_lines::item_line);
         assert_eq!(new, old);
-        let items: Vec<Item> = records
-            .iter()
-            .map(|r| r.clone().stored_item_as_is())
-            .collect();
-        assert_eq!(new, items);
+        assert_eq!(new, records);
         let sent = |sites: &[Item]| -> Vec<String> {
             let facts = sites.iter().map(crawl_facts);
             facts.map(|facts| site::to_line(&facts).unwrap()).collect()

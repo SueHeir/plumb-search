@@ -144,40 +144,6 @@ impl CrawlSite for Item {
     }
 }
 
-/// What choosing homepages read of a record, before a crawl's sites were
-/// their stored items: kept for the tests, which check that a site's item
-/// is picked, and judged dead ([`crate::dead`]), as its record was.
-#[cfg(test)]
-impl CrawlSite for plumb_core::SiteRecord {
-    fn domain(&self) -> &str {
-        &self.domain
-    }
-
-    fn url(&self) -> Option<&str> {
-        self.url.as_deref()
-    }
-
-    fn link_score(&self) -> f32 {
-        plumb_core::SiteRecord::link_score(self)
-    }
-
-    fn crawled_at(&self) -> Option<u64> {
-        self.crawled_at
-    }
-
-    fn crawl_attempted_at(&self) -> Option<u64> {
-        self.crawl_attempted_at
-    }
-
-    fn crawl_failures(&self) -> u32 {
-        self.crawl_failures
-    }
-
-    fn gone_at(&self) -> Option<u64> {
-        self.gone_at
-    }
-}
-
 /// The sites a crawl changes as it goes ([`crawl_rolling`]): a whole set of
 /// sites ([`Sites`]), as `plumb-tools crawl` holds it, or what a node keeps
 /// of each site during a round.

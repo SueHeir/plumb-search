@@ -81,12 +81,14 @@ fn main() -> Result<()> {
         REPORT_THRESHOLD
     );
 
-    let mut poisoned = plumb_core::SiteRecord::new("usbank.com");
+    let mut poisoned = plumb_core::site::new("usbank.com");
     poisoned.url = Some("https://attacker.example/".into());
-    poisoned.crawled_at = Some(plumb_core::now_unix());
-    let accepted =
-        plumb_net::fill::accept_filled(&serde_json::to_string(&poisoned)?, plumb_core::now_unix())
-            .expect("the trusted-fill parser accepts this record");
+    plumb_core::site::set_crawled(&mut poisoned, Some(plumb_core::now_unix()));
+    // A fill answer carries each site as the record's own JSON.
+    let line = String::from_utf8(plumb_core::stored::item_as_line(&poisoned)?)?;
+    let line = plumb_core::stored::record_json(line)?;
+    let accepted = plumb_net::fill::accept_filled(&line, plumb_core::now_unix())
+        .expect("the trusted-fill parser accepts this record");
     assert!(accepted.url.is_none());
     println!(
         "Trusted fill stripped the off-domain URL for {}.",

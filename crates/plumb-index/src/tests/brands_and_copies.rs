@@ -103,7 +103,7 @@ fn bare_names_lose_to_a_site_with_its_own_subject_evidence() {
     assert_eq!(top(&searcher, "you tubemusic"), "you-tubemusic.com");
     // The same site can win with actual indexed subject evidence;
     // the bare domain itself cannot supply the missing Music term.
-    records[0].description = Some("Enjoy the videos and music you love.".into());
+    records[0].about = Some("Enjoy the videos and music you love.".into());
     let (_dir, supported) = build(&records);
     assert_eq!(top(&supported, "youtube music"), "youtube.com");
 }
@@ -251,7 +251,7 @@ fn hyphenated_look_alikes_of_the_named_site_are_left_out() {
         &[],
         obscure(250_000, 4),
     );
-    official.about = Some("charity".into());
+    site::set_wikidata_about(&mut official, Some("charity".into()));
     let records = [
         site(
             "youtube.com",
@@ -408,7 +408,7 @@ fn near_copies_of_a_better_known_site_are_left_out() {
         Sign up for our newsletter to hear about new styles first.";
     let shop = |domain: &str, title: &str, body: &str, signals: Signals| {
         let mut record = site(domain, Some(title), None, &[], &[], signals);
-        record.body_text = Some(body.to_string());
+        record.text = Some(body.to_string());
         record
     };
     let copy_text = text.replace("1952", "1953").replace("fifty", "sixty");
@@ -457,7 +457,7 @@ fn a_spam_network_with_one_text_is_listed_once() {
         your first programs in a weekend.";
     let page = |domain: &str, title: &str, body: &str| {
         let mut record = site(domain, Some(title), None, &[], &[], obscure(50_000, 20));
-        record.body_text = Some(body.to_string());
+        record.text = Some(body.to_string());
         record
     };
     let pizza = "Joe's Pizza: New York style pizza by the slice, baked in a coal oven \
@@ -843,8 +843,8 @@ fn country_copies_of_a_site_are_listed_once() {
             popular(rank, 1_000),
         )
     };
-    let official = |mut record: SiteRecord| {
-        record.about = Some("Something Wikidata describes".into());
+    let official = |mut record: Item| {
+        site::set_wikidata_about(&mut record, Some("Something Wikidata describes".into()));
         record
     };
     let records = [
@@ -895,7 +895,7 @@ fn country_copies_of_a_site_are_listed_once() {
     assert_eq!(top(&searcher, "google.de"), "google.de");
     // A country site that is the official site of something stays.
     let mut cbc_ca = site("cbc.ca", Some("CBC"), None, &[], &[], popular(300, 500));
-    cbc_ca.about = Some("Canadian public broadcaster".into());
+    site::set_wikidata_about(&mut cbc_ca, Some("Canadian public broadcaster".into()));
     let records = [
         site("cbc.com", Some("CBC"), None, &[], &[], popular(200, 600)),
         cbc_ca,
@@ -1086,7 +1086,7 @@ fn scores_blend_text_and_popularity() {
     let hits = search("us bank");
     let usbank = &hits[0];
     assert_eq!(usbank.domain, "usbank.com");
-    let record_score = corpus()[0].link_score();
+    let record_score = site::link_score(&corpus()[0]);
     assert!((usbank.link_score - record_score).abs() < 1e-6);
     let label_bonus = |hit: &Hit, share: f32| {
         if hit.domain == "usbank.com" {
@@ -1133,7 +1133,7 @@ fn a_brand_site_for_the_country_searched_for_is_listed() {
         )
     };
     let mut amazon = shop("amazon.com", "Amazon.com", 5);
-    amazon.about = Some("American online retailer".into());
+    site::set_wikidata_about(&mut amazon, Some("American online retailer".into()));
     let records = [
         amazon,
         shop("amazon.co.uk", "Amazon.co.uk", 200),

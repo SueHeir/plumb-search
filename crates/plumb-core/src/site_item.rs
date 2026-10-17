@@ -1,8 +1,9 @@
 //! A crawled site as an item of the data format ([`plumb_format`]): kind
-//! `site`, its id the registrable domain. [`SiteRecord::to_item`] makes one
-//! and [`SiteRecord::from_item`] reads it back, so sets of sites
-//! (`plumb/sites`), crawl batches and bucket answers carry sites as items,
-//! the last two a line of JSON each ([`SiteRecord::to_line`]).
+//! `site`, its id the registrable domain. [`crate::site::to_item`] makes
+//! the one a site sends and [`crate::site::from_sent`] takes one in, so
+//! sets of sites (`plumb/sites`), crawl batches and bucket answers carry
+//! sites as items, the last two a line of JSON each
+//! ([`crate::site::to_line`]).
 //!
 //! The item's own members hold what any reader of items understands: the
 //! homepage's URL, title and description (`about`), the start of its text
@@ -34,26 +35,22 @@
 //! on their own. So do links to hosts the format cannot name as a site
 //! (with a `_`), and URLs that do not come out canonical.
 //!
-//! [`SiteRecord::clean`] puts a record itself in its item's form, short of
-//! cutting its text, so that a clean record comes back from its item as it
-//! was, but for a redirect to a site no item can name. Records are cleaned
-//! where they enter a set ([`crate::RecordSet::upsert`]).
+//! [`crate::site::clean`] puts a site in this form, short of cutting its
+//! text, and a set cleans each site it takes
+//! ([`crate::sites::Sites::upsert`]). A node keeps a clean site as its
+//! stored item ([`crate::stored`]), which holds what the item it sends
+//! leaves out besides.
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, Result};
 use plumb_format::item::{MAX_ITEM_BYTES, MAX_TEXT_CHARS};
 use plumb_format::refs::is_domain;
 use plumb_format::urls::{canonical_url, is_canonical};
-use plumb_format::value::{is_language, normalize_text, unix_seconds};
+use plumb_format::value::{normalize_text, unix_seconds};
 use plumb_format::{Edge, FieldSpec, Item, Ref};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use unicode_normalization::{is_nfc_quick, IsNormalized};
-
-use crate::key_pages::{KeyPage, MAX_KEY_PAGES};
-use crate::{
-    canonical_domain, sort_and_cap_link_texts, LinkText, Redirect, SiteRecord, MAX_LINKS_TO,
-};
 
 /// The kind of a site's item.
 pub const SITE: &str = "site";
@@ -82,9 +79,9 @@ pub fn site_fields() -> BTreeMap<String, FieldSpec> {
     .expect("the site fields are well formed")
 }
 
-/// The site a line [`SiteRecord::to_line`] wrote names, and when it was
+/// The site a line [`crate::site::to_line`] wrote names, and when it was
 /// crawled, read without checking the rest: enough to note where a crawl
-/// of a site is, for much less work than [`SiteRecord::from_line`].
+/// of a site is, for much less work than [`crate::site::from_line`].
 pub fn crawl_of_line(line: &str) -> Option<(String, Option<u64>)> {
     #[derive(serde::Deserialize)]
     struct Line {
@@ -102,366 +99,8 @@ pub fn crawl_of_line(line: &str) -> Option<(String, Option<u64>)> {
     (line.kind == SITE).then(|| (line.id, crawled.and_then(|at| u64::try_from(at).ok())))
 }
 
-impl SiteRecord {
-    /// Puts the site in the form its item has ([`SiteRecord::to_item`]):
-    /// text in Unicode NFC, control characters made spaces, trimmed; URLs
-    /// in canonical form; and only the language tag, key pages, linked
-    /// sites and crawl time an item can hold. What comes out empty or has
-    /// no such form is dropped, names and kinds are kept once each, and
-    /// link texts that come out the same are counted together. The page
-    /// text is not cut, unlike the item's, and a node's own bookkeeping,
-    /// the icon and headlines are left as they are. So is a redirect,
-    /// which folding reads even to a site no item can name (with a `_`),
-    /// but for its site's canonical spelling, and unless its date has no
-    /// timestamp (past the year 9999). Cleaning a clean record changes
-    /// nothing.
-    pub fn clean(&mut self) {
-        self.url = self.url.take().and_then(canonical_owned);
-        self.title = self.title.take().and_then(tidy);
-        self.description = self.description.take().and_then(tidy);
-        self.body_text = self.body_text.take().and_then(tidy);
-        self.language = self.language.take().filter(|lang| is_language(lang));
-        self.aliases = once(tidy_all(std::mem::take(&mut self.aliases)));
-        self.headings = tidy_all(std::mem::take(&mut self.headings));
-        self.terms = tidy_keywords(std::mem::take(&mut self.terms));
-        self.kinds = once(tidy_keywords(std::mem::take(&mut self.kinds)));
-        self.search_url = self.search_url.take().and_then(tidy_keyword);
-        let mut link_texts: Vec<LinkText> = Vec::with_capacity(self.link_texts.len());
-        for mut link_text in std::mem::take(&mut self.link_texts) {
-            let Some(text) = tidy(link_text.text) else {
-                continue;
-            };
-            match link_texts.iter_mut().find(|kept| kept.text == text) {
-                Some(kept) => {
-                    link_text.text = text;
-                    kept.absorb(&link_text);
-                }
-                None => {
-                    link_text.text = text;
-                    link_texts.push(link_text);
-                }
-            }
-        }
-        sort_and_cap_link_texts(&mut link_texts);
-        self.link_texts = link_texts;
-        self.about = self.about.take().and_then(tidy);
-        self.country = self.country.take().and_then(tidy_keyword);
-        self.intro = self.intro.take().and_then(tidy);
-        self.summary = self.summary.take().and_then(tidy);
-        self.crawled_at = self.crawled_at.filter(|&at| timestamp(at).is_some());
-        self.redirect = self.redirect.take().filter(|r| timestamp(r.at).is_some());
-        if let Some(redirect) = &mut self.redirect {
-            if let Some(to) = canonical_domain(&redirect.to) {
-                redirect.to = to;
-            }
-        }
-        self.key_pages = std::mem::take(&mut self.key_pages)
-            .into_iter()
-            .filter_map(|page| {
-                Some(KeyPage {
-                    url: canonical_owned(page.url)?,
-                    label: tidy(page.label)?,
-                })
-            })
-            .take(MAX_KEY_PAGES)
-            .collect();
-        self.links_to.retain(|site| is_domain(site));
-        self.links_to.truncate(MAX_LINKS_TO);
-    }
-
-    /// This site as an item ([`crate::site_item`]), of the record as
-    /// [`SiteRecord::clean`] makes it, with its text cut to the format's
-    /// 1,000 characters. Errors when the item would not be a valid one, for
-    /// a domain that is no id or a record too big even after shedding.
-    pub fn to_item(&self) -> Result<Item> {
-        let mut site = self.clone();
-        site.clean();
-        site.clean_to_item()
-    }
-
-    /// [`SiteRecord::to_item`] of a clean record.
-    fn clean_to_item(self) -> Result<Item> {
-        sent_item(self.whole_item())
-    }
-
-    /// This site as a node stores it ([`crate::stored`]): its item with all
-    /// a clean record holds, which an item sent elsewhere may not (the
-    /// whole page text, every field however big, a redirect to a site no
-    /// item can name), and fields of its own for the rest: the node's
-    /// crawl marks (`"crawl": {"tried": 1791605600, "failures": 2, "gone":
-    /// 1791000000}`, unix seconds as the record keeps them), and the icon
-    /// and headlines a crawl from another node brings into the inbox
-    /// (`"icon"`, and `"news"` as the record's [`crate::Headline`]s). Never
-    /// sent, so never checked against the format's rules.
-    pub fn to_stored_item(&self) -> Item {
-        let mut site = self.clone();
-        site.clean();
-        site.stored_item_as_is()
-    }
-
-    /// [`SiteRecord::to_stored_item`] of the record as it is, not cleaned:
-    /// the item a stored line holds of it ([`crate::stored`]).
-    pub fn stored_item_as_is(mut self) -> Item {
-        let mut crawl = Map::new();
-        if let Some(tried) = self.crawl_attempted_at {
-            crawl.insert("tried".into(), json!(tried));
-        }
-        if self.crawl_failures > 0 {
-            crawl.insert("failures".into(), json!(self.crawl_failures));
-        }
-        if let Some(gone) = self.gone_at {
-            crawl.insert("gone".into(), json!(gone));
-        }
-        let (icon, news) = (self.icon.take(), std::mem::take(&mut self.news));
-        let mut item = self.whole_item();
-        if !crawl.is_empty() {
-            item.fields.insert("crawl".into(), Value::Object(crawl));
-        }
-        if let Some(icon) = icon {
-            item.fields.insert("icon".into(), json!(icon));
-        }
-        if !news.is_empty() {
-            item.fields.insert("news".into(), json!(news));
-        }
-        item
-    }
-
-    /// The site a stored item holds ([`SiteRecord::to_stored_item`]), as
-    /// it is: the record of [`SiteRecord::stored_item_as_is`]. Code that
-    /// makes sites as items hands them on this way to what still takes
-    /// records, such as the journal's changes.
-    pub fn from_stored_item(item: &Item) -> Result<SiteRecord> {
-        let mut record = SiteRecord::read_item(item, true)?;
-        if let Some(crawl) = item.fields.get("crawl") {
-            record.crawl_attempted_at = crawl.get("tried").and_then(Value::as_u64);
-            record.crawl_failures = number(crawl.get("failures")).unwrap_or_default();
-            record.gone_at = crawl.get("gone").and_then(Value::as_u64);
-        }
-        record.icon = string(item.fields.get("icon"));
-        if let Some(news) = item.fields.get("news") {
-            record.news = serde_json::from_value(news.clone())?;
-        }
-        Ok(record)
-    }
-
-    /// The item of a clean record with all it holds: its whole page text,
-    /// every field, and a redirect to any site.
-    fn whole_item(self) -> Item {
-        let fields = self.fields();
-        let mut item = Item {
-            kind: SITE.into(),
-            url: self.url,
-            title: self.title,
-            about: self.description,
-            text: self.body_text,
-            lang: self.language,
-            names: self.aliases,
-            weight: (self.signals.linking_domains > 0)
-                .then(|| f64::from(self.signals.linking_domains)),
-            fields,
-            id: self.domain,
-            ..Item::default()
-        };
-        for page in self.key_pages {
-            item.edges
-                .push(edge("key_page", Ref::Url(page.url), Some(page.label)));
-        }
-        for site in self.links_to {
-            item.edges.push(edge("links_to", Ref::Site(site), None));
-        }
-        item
-    }
-
-    /// The site a `site` item holds ([`crate::site_item`]). Members and
-    /// fields it does not know, or that do not read, are left out.
-    pub fn from_item(item: &Item) -> Result<SiteRecord> {
-        SiteRecord::read_item(item, false)
-    }
-
-    /// [`SiteRecord::from_item`], taking a redirect to a site no item can
-    /// name when the item is `stored`.
-    fn read_item(item: &Item, stored: bool) -> Result<SiteRecord> {
-        ensure!(item.kind == SITE, "item {:?} is not a site", item.id);
-        let field = |name: &str| item.fields.get(name);
-        let member = |name: &str, key: &str| field(name).and_then(|value| value.get(key));
-        let mut record = SiteRecord {
-            domain: item.id.clone(),
-            url: item.url.clone(),
-            title: item.title.clone(),
-            description: item.about.clone(),
-            body_text: item.text.clone(),
-            aliases: item.names.clone(),
-            language: item.lang.clone(),
-            headings: strings(field("headings")),
-            terms: strings(field("terms")),
-            search_url: string(field("search_url")),
-            kinds: strings(field("kinds")),
-            intro: string(field("intro")),
-            summary: string(field("summary")),
-            about: string(member("wikidata", "about")),
-            country: string(member("wikidata", "country")),
-            crawled_at: field("crawled")
-                .and_then(Value::as_str)
-                .and_then(unix_seconds)
-                .and_then(|unix| u64::try_from(unix).ok()),
-            crawl_version: number(field("crawl_version")).unwrap_or_default(),
-            ..SiteRecord::default()
-        };
-        let signals = &mut record.signals;
-        signals.linking_domains = item.weight.map_or(0, |weight| weight as u32);
-        signals.tranco_rank = number(member("ranks", "tranco"));
-        signals.harmonic_rank = number(member("ranks", "harmonic"));
-        signals.pagerank_rank = number(member("ranks", "pagerank"));
-        signals.official_site = member("wikidata", "official_site") == Some(&Value::Bool(true));
-        signals.sitelinks = number(member("wikidata", "sitelinks")).unwrap_or_default();
-        signals.fact_checks = number(member("fact_checks", "checked")).unwrap_or_default();
-        signals.fact_agrees = number(member("fact_checks", "agreed")).unwrap_or_default();
-        record.link_texts = field("link_texts")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|link_text| {
-                let linkers = match link_text.get("linkers") {
-                    Some(hex) => u64::from_str_radix(hex.as_str()?, 16).ok()?,
-                    None => 0,
-                };
-                Some(LinkText {
-                    text: string(link_text.get("text"))?,
-                    count: number(link_text.get("count"))?,
-                    linkers,
-                })
-            })
-            .collect();
-        record.redirect = field("redirect").and_then(|redirect| {
-            Some(Redirect {
-                to: string(redirect.get("to")).filter(|to| stored || is_domain(to))?,
-                at: redirect
-                    .get("at")
-                    .and_then(Value::as_str)
-                    .and_then(unix_seconds)
-                    .and_then(|unix| u64::try_from(unix).ok())?,
-                inner: redirect.get("inner") == Some(&Value::Bool(true)),
-            })
-        });
-        for edge in &item.edges {
-            match (edge.rel.as_str(), &edge.to) {
-                ("links_to", Ref::Site(site)) => record.links_to.push(site.clone()),
-                ("key_page", Ref::Url(url)) => {
-                    if let Some(label) = &edge.text {
-                        record.key_pages.push(KeyPage {
-                            label: label.clone(),
-                            url: url.clone(),
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(record)
-    }
-
-    /// This site as one line of JSON, the item [`SiteRecord::to_item`]
-    /// makes: how crawl batches and bucket answers carry a site.
-    pub fn to_line(&self) -> Result<String> {
-        Ok(serde_json::to_string(&self.to_item()?)?)
-    }
-
-    /// The site of a line [`SiteRecord::to_line`] wrote, once its item
-    /// keeps the format's rules ([`Item::check`]).
-    pub fn from_line(line: &str) -> Result<SiteRecord> {
-        let item: Item = serde_json::from_str(line)?;
-        item.check()?;
-        ensure!(
-            !item.is_extension() && !item.is_deleted(),
-            "item {:?} is not a whole site",
-            item.id
-        );
-        SiteRecord::from_item(&item)
-    }
-
-    /// The item's fields ([`site_fields`]) of a clean record, each only
-    /// when it says something. The redirect is there whatever its site.
-    fn fields(&self) -> BTreeMap<String, Value> {
-        let mut fields = BTreeMap::new();
-        let mut put = |name: &str, value: Value| {
-            let empty = match &value {
-                Value::Null => true,
-                Value::Array(list) => list.is_empty(),
-                Value::Object(map) => map.is_empty(),
-                _ => false,
-            };
-            if !empty {
-                fields.insert(name.to_string(), value);
-            }
-        };
-        put("headings", json!(self.headings));
-        put("terms", json!(self.terms));
-        put("kinds", json!(self.kinds));
-        put("search_url", json!(self.search_url));
-        let link_texts: Vec<Value> = self
-            .link_texts
-            .iter()
-            .map(|link_text| {
-                let mut object = json!({"text": link_text.text, "count": link_text.count});
-                if link_text.linkers != 0 {
-                    object["linkers"] = json!(format!("{:016x}", link_text.linkers));
-                }
-                object
-            })
-            .collect();
-        put("link_texts", Value::Array(link_texts));
-        let signals = &self.signals;
-        let mut ranks = Map::new();
-        let mut rank = |key: &str, rank: Option<u64>| {
-            if let Some(rank) = rank {
-                ranks.insert(key.into(), json!(rank));
-            }
-        };
-        rank("tranco", signals.tranco_rank.map(u64::from));
-        rank("harmonic", signals.harmonic_rank);
-        rank("pagerank", signals.pagerank_rank);
-        put("ranks", Value::Object(ranks));
-        let mut wikidata = Map::new();
-        if let Some(about) = &self.about {
-            wikidata.insert("about".into(), json!(about));
-        }
-        if let Some(country) = &self.country {
-            wikidata.insert("country".into(), json!(country));
-        }
-        if signals.official_site {
-            wikidata.insert("official_site".into(), json!(true));
-        }
-        if signals.sitelinks > 0 {
-            wikidata.insert("sitelinks".into(), json!(signals.sitelinks));
-        }
-        put("wikidata", Value::Object(wikidata));
-        if signals.fact_checks > 0 || signals.fact_agrees > 0 {
-            put(
-                "fact_checks",
-                json!({"checked": signals.fact_checks, "agreed": signals.fact_agrees}),
-            );
-        }
-        put("intro", json!(self.intro));
-        put("summary", json!(self.summary));
-        put("crawled", json!(self.crawled_at.and_then(timestamp)));
-        if self.crawl_version > 0 {
-            put("crawl_version", json!(self.crawl_version));
-        }
-        if let Some(redirect) = &self.redirect {
-            if let Some(at) = timestamp(redirect.at) {
-                let mut object = json!({"to": redirect.to, "at": at});
-                if redirect.inner {
-                    object["inner"] = json!(true);
-                }
-                put("redirect", object);
-            }
-        }
-        fields
-    }
-}
-
 /// The item a clean site sends of the item with all it holds and nothing
-/// of the node's own ([`SiteRecord::to_item`], [`crate::site::to_item`]):
+/// of the node's own ([`crate::site::to_item`]):
 /// its text cut to the format's 1,000 characters, a redirect to a site no
 /// item can name left out, and fields shed until it fits. Errors when it
 /// would not be a valid item.
@@ -642,81 +281,19 @@ pub(crate) fn timestamp(unix: u64) -> Option<String> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
-    use crate::{Headline, Redirect, Signals};
+    use crate::site::tests::full_site;
+    use crate::site::{self, from_line, from_sent, to_item, to_line, CrawlMarks};
+    use crate::{KeyPage, LinkText, Redirect, Signals};
 
-    /// A site with every member a site item carries, and the ones it
-    /// leaves out.
-    pub(crate) fn full_record() -> SiteRecord {
-        SiteRecord {
-            domain: "python.org".into(),
-            url: Some("https://www.python.org/".into()),
-            title: Some("Welcome to Python.org".into()),
-            description: Some("The official home of the Python Programming Language".into()),
-            headings: vec!["Get Started".into(), "Download".into()],
-            body_text: Some("Python is a programming language that lets you work quickly.".into()),
-            terms: vec!["python".into(), "download python".into(), "python".into()],
-            link_texts: vec![
-                LinkText::from_linkers("python", 0x00a1_b2c3_d4e5_f607),
-                LinkText::with_count("python.org", 3),
-            ],
-            aliases: vec!["Python".into(), "Python Software Foundation".into()],
-            signals: Signals {
-                harmonic_rank: Some(300),
-                pagerank_rank: Some(250),
-                tranco_rank: Some(512),
-                linking_domains: 412,
-                official_site: true,
-                sitelinks: 150,
-                fact_checks: 12,
-                fact_agrees: 11,
-            },
-            crawled_at: Some(1_791_605_520),
-            crawl_attempted_at: Some(1_791_605_600),
-            country: Some("US".into()),
-            kinds: vec!["programming language".into()],
-            about: Some("general-purpose programming language".into()),
-            intro: Some("Python is a high-level, general-purpose programming language.".into()),
-            summary: Some("The home of the Python programming language.".into()),
-            search_url: Some("https://www.python.org/search/?q={searchTerms}".into()),
-            language: Some("en".into()),
-            key_pages: vec![
-                KeyPage {
-                    label: "Downloads".into(),
-                    url: "https://www.python.org/downloads/".into(),
-                },
-                KeyPage {
-                    label: "Docs".into(),
-                    url: "https://docs.python.org/3/".into(),
-                },
-            ],
-            links_to: vec!["psf.org".into(), "pypi.org".into()],
-            crawl_failures: 2,
-            crawl_version: 7,
-            gone_at: Some(1_791_000_000),
-            redirect: Some(Redirect {
-                to: "python.com".into(),
-                at: 1_791_605_520,
-                inner: true,
-            }),
-            icon: Some("iVBORw0KGgo=".into()),
-            news: vec![Headline {
-                title: "Python 3.15 is out".into(),
-                url: "https://www.python.org/news/".into(),
-                at: 1_791_605_520,
-            }],
+    /// `site` without the node's own parts, which an item sent elsewhere
+    /// leaves out: its crawl marks, icon and headlines.
+    fn as_carried(mut site: Item) -> Item {
+        for name in ["crawl", "icon", "news"] {
+            site.fields.remove(name);
         }
-    }
-
-    /// `record` without what a site item leaves out.
-    fn as_carried(mut record: SiteRecord) -> SiteRecord {
-        record.crawl_attempted_at = None;
-        record.crawl_failures = 0;
-        record.gone_at = None;
-        record.icon = None;
-        record.news = Vec::new();
-        record
+        site
     }
 
     fn check_fields(item: &Item) {
@@ -731,8 +308,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_site_comes_back_from_its_item() {
-        let record = full_record();
-        let item = record.to_item().unwrap();
+        let item = to_item(&full_site()).unwrap();
         check_fields(&item);
         // Every field the item can hold is used.
         let unused: Vec<_> = site_fields()
@@ -743,52 +319,46 @@ pub(crate) mod tests {
         assert_eq!(item.fields["crawled"], "2026-10-10T04:12:00Z");
         assert_eq!(
             item.fields["link_texts"][0],
-            json!({"text": "python", "count": record.link_texts[0].count, "linkers": "00a1b2c3d4e5f607"})
+            json!({"text": "python", "count": 39, "linkers": "00a1b2c3d4e5f607"})
         );
         assert_eq!(item.weight, Some(412.0));
         assert_eq!(
             item.fields["redirect"],
             json!({"to": "python.com", "at": "2026-10-10T04:12:00Z", "inner": true})
         );
-        assert_eq!(SiteRecord::from_item(&item).unwrap(), as_carried(record));
+        assert_eq!(item, as_carried(full_site()));
+        assert_eq!(from_sent(&item).unwrap(), item);
 
         // Through JSON, as a set carries it.
         let json = serde_json::to_string(&item).unwrap();
         let read: Item = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            SiteRecord::from_item(&read).unwrap(),
-            as_carried(full_record())
-        );
+        assert_eq!(from_sent(&read).unwrap(), item);
         // As a line, as a batch or a bucket answer carries it.
-        let line = full_record().to_line().unwrap();
+        let line = to_line(&full_site()).unwrap();
         assert_eq!(line, json);
-        assert_eq!(
-            SiteRecord::from_line(&line).unwrap(),
-            as_carried(full_record())
-        );
+        assert_eq!(from_line(&line).unwrap(), item);
     }
 
     #[test]
     fn a_line_is_read_only_as_a_whole_site_that_keeps_the_format_s_rules() {
-        let line = |value: Value| SiteRecord::from_line(&value.to_string());
+        let line = |value: Value| from_line(&value.to_string());
         assert!(line(json!({"id": "example.com", "kind": "site"})).is_ok());
-        // A site record of its own, as nodes before v0.4.0 sent them.
-        let old = serde_json::to_string(&SiteRecord::new("example.com")).unwrap();
-        assert!(SiteRecord::from_line(&old).is_err());
+        // A site's record JSON, as nodes before v0.4.0 sent them.
+        assert!(from_line(r#"{"domain":"example.com","signals":{}}"#).is_err());
         assert!(line(json!({"id": "example.com", "kind": "page"})).is_err());
         assert!(line(json!({"id": "example.com", "extends": "site:example.com"})).is_err());
         let not_canonical =
             json!({"id": "example.com", "kind": "site", "url": "HTTPS://example.com"});
         assert!(line(not_canonical).is_err());
-        assert!(SiteRecord::from_line("not json").is_err());
+        assert!(from_line("not json").is_err());
     }
 
     #[test]
     fn a_line_says_its_site_and_crawl_time_without_being_read_whole() {
-        let line = full_record().to_line().unwrap();
-        let crawled = full_record().crawled_at;
+        let line = to_line(&full_site()).unwrap();
+        let crawled = Some(1_791_605_520);
         assert_eq!(crawl_of_line(&line), Some(("python.org".into(), crawled)));
-        let never = SiteRecord::new("example.com").to_line().unwrap();
+        let never = to_line(&site::new("example.com")).unwrap();
         assert_eq!(crawl_of_line(&never), Some(("example.com".into(), None)));
         assert_eq!(
             crawl_of_line(r#"{"icon_of": "example.com", "png": ""}"#),
@@ -802,30 +372,38 @@ pub(crate) mod tests {
 
     #[test]
     fn a_site_never_crawled_comes_back_with_its_ranks_and_names() {
-        let mut record = SiteRecord::new("example.com");
-        record.signals.tranco_rank = Some(90_000);
-        record.add_alias("Example");
-        let item = record.to_item().unwrap();
+        let mut site = site::new("example.com");
+        let ranked = Signals {
+            tranco_rank: Some(90_000),
+            ..Signals::default()
+        };
+        site::set_signals(&mut site, &ranked);
+        site::add_alias(&mut site, "Example");
+        let item = to_item(&site).unwrap();
         assert_eq!(item.url, None);
         assert_eq!(item.site.as_deref(), Some("example.com"));
         check_fields(&item);
-        assert_eq!(SiteRecord::from_item(&item).unwrap(), record);
         assert_eq!(
-            SiteRecord::from_item(&SiteRecord::new("example.com").to_item().unwrap()).unwrap(),
-            SiteRecord::new("example.com")
+            serde_json::to_string(&item).unwrap(),
+            r#"{"id":"example.com","kind":"site","site":"example.com","names":["Example"],"fields":{"ranks":{"tranco":90000}}}"#
         );
+        let mut sent = from_sent(&item).unwrap();
+        assert_eq!(sent.site.take(), None);
+        assert_eq!(sent, site);
+        let bare = to_item(&site::new("example.com")).unwrap();
+        assert_eq!(from_sent(&bare).unwrap(), site::new("example.com"));
     }
 
     #[test]
     fn text_and_urls_are_made_fit_for_an_item() {
-        let mut record = SiteRecord::new("example.com");
+        let mut site = site::new("example.com");
         // Decomposed é, a tab, and a URL with a default port.
-        record.title = Some("Cafe\u{301}\tMenu".into());
-        record.url = Some("https://example.com:443/a/../b".into());
-        record.body_text = Some("word ".repeat(400));
-        record.language = Some("not a language".into());
-        record.terms = vec!["two\nlines".into(), " ".into()];
-        record.key_pages = vec![
+        site.title = Some("Cafe\u{301}\tMenu".into());
+        site.url = Some("https://example.com:443/a/../b".into());
+        site.text = Some("word ".repeat(400));
+        site.lang = Some("not a language".into());
+        site::set_terms(&mut site, vec!["two\nlines".into(), " ".into()]);
+        let pages = vec![
             KeyPage {
                 label: "Menu".into(),
                 url: "https://example.com/menu#top".into(),
@@ -840,135 +418,149 @@ pub(crate) mod tests {
                 url: "https://example.com/blank".into(),
             },
         ];
-        record.links_to = vec!["foo_bar.blogspot.com".into(), "example.org".into()];
-        let item = record.to_item().unwrap();
+        site::set_key_pages(&mut site, pages);
+        let links = vec!["foo_bar.blogspot.com".into(), "example.org".into()];
+        site::set_links_to(&mut site, links);
+        let item = to_item(&site).unwrap();
         let back: Item = serde_json::from_str(&serde_json::to_string(&item).unwrap()).unwrap();
-        let back = SiteRecord::from_item(&back).unwrap();
         assert_eq!(
-            back.key_pages,
+            site::key_pages(&back),
             [KeyPage {
                 label: "Menu".into(),
                 url: "https://example.com/menu".into(),
             }]
         );
-        assert_eq!(back.links_to, ["example.org"]);
+        assert_eq!(site::links_to(&back), ["example.org"]);
         assert_eq!(item.title.as_deref(), Some("Caf\u{e9} Menu"));
         assert_eq!(item.url.as_deref(), Some("https://example.com/b"));
         assert_eq!(item.text.as_ref().unwrap().chars().count(), 999);
         assert_eq!(item.lang, None);
         assert_eq!(item.fields["terms"], json!(["two lines"]));
 
-        record.url = Some("https://example.com/%%41b".into());
-        assert_eq!(record.to_item().unwrap().url, None);
+        site.url = Some("https://example.com/%%41b".into());
+        assert_eq!(to_item(&site).unwrap().url, None);
         // A host the format cannot name as a site is no item's site.
-        let item = SiteRecord::new("foo_bar.blogspot.com").to_item().unwrap();
+        let item = to_item(&site::new("foo_bar.blogspot.com")).unwrap();
         assert_eq!(item.site, None);
     }
 
     #[test]
-    fn a_clean_record_is_in_its_item_s_form_and_comes_back_from_it() {
-        let mut record = full_record();
-        record.url = Some("https://www.python.org/?".into());
-        record.title = Some(" Welcome to\u{7}Python.org\n".into());
+    fn a_clean_site_is_in_its_item_s_form() {
+        let mut site = full_site();
+        site.url = Some("https://www.python.org/?".into());
+        site.title = Some(" Welcome to\u{7}Python.org\n".into());
         // Decomposed: the same name and link text as the composed ones.
-        record.aliases.push("Caf\u{e9}".into());
-        record.aliases.push("Cafe\u{301}".into());
-        record
-            .link_texts
-            .push(LinkText::from_linkers("Caf\u{e9}", 0b01));
-        record
-            .link_texts
-            .push(LinkText::from_linkers("Cafe\u{301}", 0b10));
-        record.kinds.push(" programming language\n".into());
-        record.body_text = Some(format!("{}\u{0}", "word ".repeat(400)));
-        record.language = Some("en_US".into());
-        record.key_pages[0].url = "https://www.python.org/downloads/#top".into();
-        record.key_pages.push(KeyPage {
+        site.names.push("Caf\u{e9}".into());
+        site.names.push("Cafe\u{301}".into());
+        let mut link_texts = site::link_texts(&site);
+        link_texts.push(LinkText::from_linkers("Caf\u{e9}", 0b01));
+        link_texts.push(LinkText::from_linkers("Cafe\u{301}", 0b10));
+        site::set_link_texts(&mut site, &link_texts);
+        let mut kinds = site::kinds(&site);
+        kinds.push(" programming language\n".into());
+        site::set_kinds(&mut site, kinds);
+        site.text = Some(format!("{}\u{0}", "word ".repeat(400)));
+        site.lang = Some("en_US".into());
+        let mut pages = site::key_pages(&site);
+        pages[0].url = "https://www.python.org/downloads/#top".into();
+        pages.push(KeyPage {
             label: "Odd".into(),
             url: "https://www.python.org/%%41b".into(),
         });
-        record
-            .links_to
-            .extend(["foo_bar.blogspot.com".into(), "index_.shtml".into()]);
-        record.redirect.as_mut().unwrap().to = "WWW.Python.COM".into();
+        site::set_key_pages(&mut site, pages);
+        let mut links = site::links_to(&site);
+        links.extend(["foo_bar.blogspot.com".into(), "index_.shtml".into()]);
+        site::set_links_to(&mut site, links);
+        let mut redirect = site::redirect(&site).unwrap();
+        redirect.to = "WWW.Python.COM".into();
+        site::set_redirect(&mut site, Some(redirect));
 
-        let mut clean = record.clone();
-        clean.clean();
+        let mut clean = site.clone();
+        site::clean(&mut clean);
         assert_eq!(clean.url.as_deref(), Some("https://www.python.org/"));
         assert_eq!(clean.title.as_deref(), Some("Welcome to Python.org"));
-        assert_eq!(clean.aliases[2..], ["Caf\u{e9}"]);
-        let cafe = clean.link_texts.iter().find(|lt| lt.text == "Caf\u{e9}");
+        assert_eq!(clean.names[2..], ["Caf\u{e9}"]);
+        let link_texts = site::link_texts(&clean);
+        let cafe = link_texts.iter().find(|lt| lt.text == "Caf\u{e9}");
         assert_eq!(cafe.unwrap().linkers, 0b11);
-        assert_eq!(clean.link_texts.len(), 3);
-        assert_eq!(clean.kinds, ["programming language"]);
+        assert_eq!(link_texts.len(), 3);
+        assert_eq!(site::kinds(&clean), ["programming language"]);
         // The page text is not cut.
-        assert_eq!(clean.body_text.as_ref().unwrap().len(), 1_999);
-        assert_eq!(clean.language, None);
-        assert_eq!(clean.key_pages, full_record().key_pages);
-        assert_eq!(clean.links_to, full_record().links_to);
-        assert_eq!(clean.redirect, full_record().redirect);
+        assert_eq!(clean.text.as_ref().unwrap().len(), 1_999);
+        assert_eq!(clean.lang, None);
+        let full = full_site();
+        assert_eq!(site::key_pages(&clean), site::key_pages(&full));
+        assert_eq!(site::links_to(&clean), site::links_to(&full));
+        assert_eq!(site::redirect(&clean), site::redirect(&full));
         // What the item leaves out stays as it was.
-        let marks = |r: &SiteRecord| (r.crawl_attempted_at, r.crawl_failures, r.gone_at);
-        assert_eq!(marks(&clean), marks(&record));
-        assert_eq!((&clean.icon, &clean.news), (&record.icon, &record.news));
+        assert_eq!(site::crawl_marks(&clean), site::crawl_marks(&site));
+        assert_eq!(site::icon(&clean), site::icon(&site));
+        assert_eq!(site::news(&clean), site::news(&site));
 
         let mut again = clean.clone();
-        again.clean();
+        site::clean(&mut again);
         assert_eq!(again, clean);
 
-        let item = record.to_item().unwrap();
-        assert_eq!(item, clean.to_item().unwrap());
-        let mut back = as_carried(clean.clone());
-        back.body_text = item.text.clone();
-        assert_eq!(SiteRecord::from_item(&item).unwrap(), back);
+        let item = to_item(&site).unwrap();
+        assert_eq!(item, to_item(&clean).unwrap());
+        let mut sent = as_carried(clean.clone());
+        sent.text = item.text.clone();
+        assert_eq!(from_sent(&item).unwrap(), sent);
 
-        let mut set = crate::RecordSet::new();
-        set.upsert(record);
-        assert_eq!(set.get("python.org"), Some(&clean));
+        let mut set = crate::sites::Sites::new();
+        set.upsert(site);
+        assert_eq!(set.get("python.org"), Some(clean));
 
-        let mut late = SiteRecord::new("example.com");
-        late.crawled_at = Some(253_402_300_800);
-        late.clean();
-        assert_eq!(late, SiteRecord::new("example.com"));
+        let mut late = site::new("example.com");
+        site::set_crawled(&mut late, Some(253_402_300_800));
+        assert_eq!(late, site::new("example.com"));
         // A redirect stays, for folding, to a site no item can name too.
-        let mut underscore = SiteRecord::new("example.com");
+        let mut underscore = site::new("example.com");
         let redirect = Redirect {
             to: "foo_bar.com".into(),
             at: 1_791_605_520,
             inner: false,
         };
-        underscore.redirect = Some(redirect.clone());
-        underscore.clean();
-        assert_eq!(underscore.redirect, Some(redirect));
-        assert!(!underscore
-            .to_item()
-            .unwrap()
-            .fields
-            .contains_key("redirect"));
+        site::set_redirect(&mut underscore, Some(redirect.clone()));
+        site::clean(&mut underscore);
+        assert_eq!(site::redirect(&underscore), Some(redirect));
+        let sent = to_item(&underscore).unwrap();
+        assert!(!sent.fields.contains_key("redirect"));
     }
 
     #[test]
-    fn a_clean_record_comes_back_whole_from_its_stored_item() {
-        let mut record = full_record();
-        record.body_text = Some("word ".repeat(400));
+    fn a_stored_item_holds_all_a_clean_site_does() {
+        let mut site = full_site();
+        site.text = Some("word ".repeat(400).trim_end().to_string());
         // Over 16 KiB, which an item sent elsewhere sheds.
-        record.terms = (0..100)
+        let terms = (0..100)
             .map(|i| format!("term {i} {}", "x".repeat(150)))
             .collect();
-        record.redirect.as_mut().unwrap().to = "foo_bar.com".into();
-        record.signals.fact_checks = 0;
-        record.signals.fact_agrees = 2;
-        record.clean();
-        let item = record.to_stored_item();
-        assert!(item.fields.contains_key("crawl"));
-        let json = serde_json::to_string(&item).unwrap();
+        site::set_terms(&mut site, terms);
+        let mut redirect = site::redirect(&site).unwrap();
+        redirect.to = "foo_bar.com".into();
+        site::set_redirect(&mut site, Some(redirect));
+        let facts = Signals {
+            fact_checks: 0,
+            fact_agrees: 2,
+            ..site::signals(&site)
+        };
+        site::set_signals(&mut site, &facts);
+        site::clean(&mut site);
+        assert!(site.fields.contains_key("crawl"));
+        assert_eq!(
+            site.fields["fact_checks"],
+            json!({"checked": 0, "agreed": 2})
+        );
+        let json = serde_json::to_string(&site).unwrap();
         let back: Item = serde_json::from_str(&json).unwrap();
-        assert_eq!(SiteRecord::from_stored_item(&back).unwrap(), record);
+        assert_eq!(back, site);
         // A site never crawled has no crawl marks to store.
-        let bare = SiteRecord::new("example.com").to_stored_item();
+        let mut bare = site::new("example.com");
+        site::set_crawl_marks(&mut bare, CrawlMarks::default());
         assert!(bare.fields.is_empty());
         // Sent elsewhere, the same site is cut down to the format's rules.
-        let sent = record.to_item().unwrap();
+        let sent = to_item(&site).unwrap();
         assert!(!sent.fields.contains_key("redirect"));
         assert!(!sent.fields.contains_key("crawl"));
         assert!(!sent.fields.contains_key("icon"));
@@ -1031,21 +623,24 @@ pub(crate) mod tests {
 
     #[test]
     fn an_item_too_big_sheds_terms_then_headings_then_link_texts() {
-        let mut record = full_record();
-        record.terms = (0..100)
+        let mut site = full_site();
+        let terms = (0..100)
             .map(|i| format!("term {i} {}", "x".repeat(150)))
             .collect();
-        let item = record.to_item().unwrap();
+        site::set_terms(&mut site, terms);
+        let item = to_item(&site).unwrap();
         assert!(!item.fields.contains_key("terms"));
         assert!(item.fields.contains_key("headings"));
 
-        record.headings = (0..8)
+        let headings = (0..8)
             .map(|i| format!("{i} {}", "y".repeat(1_000)))
             .collect();
-        record.link_texts = (0..32)
+        site::set_headings(&mut site, headings);
+        let link_texts: Vec<LinkText> = (0..32)
             .map(|i| LinkText::with_count(format!("{i} {}", "z".repeat(290)), 1))
             .collect();
-        let item = record.to_item().unwrap();
+        site::set_link_texts(&mut site, &link_texts);
+        let item = to_item(&site).unwrap();
         assert!(!item.fields.contains_key("headings"));
         assert!(item.fields.contains_key("link_texts"));
         assert!(item.fields.contains_key("intro"));
@@ -1058,7 +653,7 @@ pub(crate) mod tests {
             kind: "page".into(),
             ..Item::default()
         };
-        assert!(SiteRecord::from_item(&item).is_err());
+        assert!(from_sent(&item).is_err());
     }
 
     #[test]

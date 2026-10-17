@@ -4,7 +4,7 @@
 use super::*;
 use crate::hits::{is_garbled, is_unfilled};
 
-fn bank_corpus() -> Vec<SiteRecord> {
+fn bank_corpus() -> Vec<Item> {
     let bank = |domain: &str, alias: &str, country: &str, rank: u32| {
         with_facts(
             site(domain, None, None, &[alias], &[], popular(rank, 5_000)),
@@ -168,7 +168,7 @@ fn news_topic_language_filter_uses_the_same_script_fallback() {
         &[],
         popular(500, 30000),
     );
-    declared.language = Some("en".into());
+    declared.lang = Some("en".into());
     let records = [
         site(
             "inferred.example",
@@ -380,10 +380,16 @@ fn site_search_links_hand_off_the_rest_of_the_query() {
         &[],
         ranked(5_000, 100),
     );
-    shop.search_url = Some("https://www.acme-shop.com/find?q={searchTerms}".into());
+    site::set_search_url(
+        &mut shop,
+        Some("https://www.acme-shop.com/find?q={searchTerms}".into()),
+    );
     records.push(shop);
     let mut liar = site("liar.com", Some("Liar"), None, &[], &[], ranked(5_000, 100));
-    liar.search_url = Some("https://evil.example/?q={searchTerms}".into());
+    site::set_search_url(
+        &mut liar,
+        Some("https://evil.example/?q={searchTerms}".into()),
+    );
     records.push(liar);
     let (_dir, searcher) = build(&records);
     let full = |q: &str| {
@@ -477,7 +483,7 @@ fn unfilled_template_descriptions_and_check_addresses_are_not_shown() {
         &[],
         ranked(30_000, 30),
     );
-    surbl.about = Some("anti-spam blocklist".into());
+    site::set_wikidata_about(&mut surbl, Some("anti-spam blocklist".into()));
     // Crawled into a check, whose address leads nowhere now.
     let mut skyscanner = site(
         "skyscanner.nl",
@@ -601,7 +607,10 @@ fn a_big_site_named_last_is_searched_for_the_words_before() {
 fn site_search_needs_the_site_first_and_more_than_a_common_word() {
     let mut records = corpus();
     let mut get = site("get.gov", Some("Get"), None, &[], &[], ranked(50_000, 10));
-    get.search_url = Some("https://get.gov/search?q={searchTerms}".into());
+    site::set_search_url(
+        &mut get,
+        Some("https://get.gov/search?q={searchTerms}".into()),
+    );
     records.push(get);
     for i in 0..25 {
         records.push(site(
@@ -644,7 +653,7 @@ fn safe_search_and_language_leave_sites_out() {
         &[],
         ranked(700, 5_000),
     );
-    studio.kinds = vec!["pornographic film studio".into()];
+    site::set_kinds(&mut studio, vec!["pornographic film studio".into()]);
     records.push(studio);
     records.push(site(
         "banklingerie.example",
@@ -662,7 +671,7 @@ fn safe_search_and_language_leave_sites_out() {
         &[],
         ranked(760, 5_000),
     );
-    german.language = Some("de".into());
+    german.lang = Some("de".into());
     records.push(german);
     // Says no language, but its title is Russian.
     records.push(site(
@@ -691,7 +700,7 @@ fn safe_search_and_language_leave_sites_out() {
         &[],
         ranked(745, 5_000),
     );
-    template.language = Some("en".into());
+    template.lang = Some("en".into());
     records.push(template);
     let (_dir, searcher) = build(&records);
     let with = |options: SearchOptions| {
@@ -781,7 +790,7 @@ fn a_query_in_another_script_than_the_language_keeps_its_sites() {
         &[],
         ranked(50, 50_000),
     );
-    rakuten.language = Some("ja".into());
+    rakuten.lang = Some("ja".into());
     let records = [
         rakuten,
         // Says no language, but its title is Arabic.
@@ -832,7 +841,7 @@ fn a_query_in_another_script_than_the_language_keeps_its_sites() {
 fn a_query_in_another_language_keeps_its_sites() {
     let declared = |domain: String, title: String, language: &str| {
         let mut record = site(&domain, Some(&title), None, &[], &[], ranked(900, 5_000));
-        record.language = Some(language.into());
+        record.lang = Some(language.into());
         record
     };
     let mut records = Vec::new();
@@ -991,7 +1000,7 @@ fn brand_names_find_the_official_site() {
 fn sites_the_query_names_keep_their_language() {
     let foreign = |domain: &str, title: &str, alias: &[&str], language: &str, signals| {
         let mut record = site(domain, Some(title), None, alias, &[], signals);
-        record.language = Some(language.into());
+        record.lang = Some(language.into());
         record
     };
     let mut records = corpus();

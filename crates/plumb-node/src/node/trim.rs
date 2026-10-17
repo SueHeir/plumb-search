@@ -330,36 +330,45 @@ fn site_usage(inner: &Inner) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{RecordSet, SiteRecord};
+    use plumb_core::sites::Sites;
 
     use super::*;
-    use crate::records::reference::{load_records, replace_records, sorted_by_link_score};
+    use crate::records::{load_sites, replace_sites};
 
-    fn set_of(n: usize) -> RecordSet {
-        let mut set = RecordSet::new();
+    fn set_of(n: usize) -> Sites {
+        let mut set = Sites::new();
         for i in 0..n {
-            let mut record = SiteRecord::new(format!("site{i}.com"));
+            let mut site = site::new(format!("site{i}.com"));
             // Lower numbers rank higher.
-            record.signals.linking_domains = (n - i) as u32;
-            set.upsert(record);
+            let mut signals = site::signals(&site);
+            signals.linking_domains = (n - i) as u32;
+            site::set_signals(&mut site, &signals);
+            set.upsert(site);
         }
         set
     }
 
     /// A records file at `path` of the sites of [`set_of`]`(n)`, as a node
     /// writes it, once `change` has changed them.
-    fn file_of(path: &Path, n: usize, change: impl FnOnce(&mut RecordSet)) {
+    fn file_of(path: &Path, n: usize, change: impl FnOnce(&mut Sites)) {
         let mut set = set_of(n);
         change(&mut set);
-        replace_records(path, sorted_by_link_score(&set)).unwrap();
+        replace_sites(path, &set.into_sorted()).unwrap();
     }
 
     /// The records file a whole set writes at `path` of the sites `left`
     /// holds but `drops`: best link score first, each site on one line.
-    fn expected_file(path: &Path, mut left: RecordSet, drops: &[String]) -> Vec<u8> {
-        left.retain(|record| !drops.contains(&record.domain));
-        replace_records(path, sorted_by_link_score(&left)).unwrap();
+    fn expected_file(path: &Path, mut left: Sites, drops: &[String]) -> Vec<u8> {
+        left.retain_domains(|domain| !drops.iter().any(|drop| drop == domain));
+        replace_sites(path, &left.into_sorted()).unwrap();
         std::fs::read(path).unwrap()
+    }
+
+    /// Makes `site` an official website.
+    fn official(site: &mut Item) {
+        let mut signals = site::signals(site);
+        signals.official_site = true;
+        site::set_signals(site, &signals);
     }
 
     fn keep_nothing() -> Keep {
@@ -409,8 +418,10 @@ mod tests {
         let n = MIN_SITES_KEPT + 4;
         let last = |k: usize| format!("site{}.com", n - 1 - k);
         file_of(&path, n, |set| {
-            set.entry(&last(0)).title = Some("Woodworking tools".into());
-            set.entry(&last(1)).signals.official_site = true;
+            set.update(&last(0), |site| {
+                site.title = Some("Woodworking tools".into());
+            });
+            set.update(&last(1), official);
         });
         let keep = Keep {
             topics: Topics::new(&["woodworking".to_owned()]),
@@ -452,12 +463,12 @@ mod tests {
     #[test]
     fn a_full_node_takes_new_sites_only_about_its_topics_or_official() {
         let topics = Topics::new(&["chess".to_owned()]);
-        let mut chess = SiteRecord::new("chess.example");
+        let mut chess = site::new("chess.example");
         chess.title = Some("Play chess online".into());
-        let mut official = SiteRecord::new("bank.example");
-        official.signals.official_site = true;
-        assert!(keeps_new_site(&chess.stored_item_as_is(), &topics));
-        assert!(keeps_new_site(&official.stored_item_as_is(), &topics));
+        let mut bank = site::new("bank.example");
+        official(&mut bank);
+        assert!(keeps_new_site(&chess, &topics));
+        assert!(keeps_new_site(&bank, &topics));
         assert!(!keeps_new_site(&site::new("other.example"), &topics));
     }
 
@@ -470,21 +481,21 @@ mod tests {
         let n = MIN_SITES_KEPT + 20;
         let last = |k: usize| format!("site{}.com", n - 1 - k);
         file_of(path, n, |set| {
-            set.entry(&last(0)).signals.official_site = true;
-            set.entry(&last(2)).title = Some("Woodworking tools".into());
+            set.update(&last(0), official);
+            set.update(&last(2), |site| {
+                site.title = Some("Woodworking tools".into());
+            });
         });
-        let mut crawled = SiteRecord::new(last(4));
+        let mut crawled = site::new(last(4));
         crawled.title = Some("Woodworking club".into());
-        crawled.crawled_at = Some(1_700_000_000);
+        site::set_crawled(&mut crawled, Some(1_700_000_000));
         crate::records::RecordStore::open(path)
             .save(&[
                 // A site below them all.
                 crate::records::Change::Merge {
                     site: site::new("unlinked.example"),
                 },
-                crate::records::Change::Merge {
-                    site: crawled.stored_item_as_is(),
-                },
+                crate::records::Change::Merge { site: crawled },
                 crate::records::Change::Gone {
                     domain: last(6),
                     at: 1_700_000_000,
@@ -498,14 +509,14 @@ mod tests {
     }
 
     #[test]
-    fn dropping_sites_a_record_at_a_time_drops_what_the_whole_set_drops() {
+    fn dropping_sites_a_site_at_a_time_drops_what_the_whole_set_drops() {
         let dir = tempfile::tempdir().unwrap();
         let streamed = dir.path().join("streamed").join("records.jsonl");
         std::fs::create_dir_all(streamed.parent().unwrap()).unwrap();
         let keep = file_to_trim(&streamed);
         assert!(journal_path(&streamed).exists());
         // The sites as loading the file gives them, its journal replayed.
-        let left = load_records(&streamed).unwrap();
+        let left = load_sites(&streamed).unwrap();
         // 1,000 bytes a site, 4,500 to free: five sites.
         let (sites, free) = (1_000 * (MIN_SITES_KEPT as u64 + 21), 4_500);
 
@@ -546,19 +557,20 @@ mod tests {
         let n = MIN_SITES_KEPT + 5;
         file_of(&path, n, |_| {});
         // The best site again, on a line of its own.
-        let mut again = SiteRecord::new("site0.com");
+        let mut again = site::new("site0.com");
         again.title = Some("Site zero".into());
-        let append = |record: &SiteRecord| {
+        // As versions up to 0.4 wrote it: the record's own JSON.
+        let append = |site: &Item| {
             let mut file = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&path)
                 .unwrap();
-            writeln!(file, "{}", serde_json::to_string(record).unwrap()).unwrap();
+            writeln!(file, "{}", crate::test_lines::old_line(site)).unwrap();
         };
         append(&again);
         assert_eq!(outline::outline(&path).unwrap(), None);
         // Loading merges the two lines.
-        let left = load_records(&path).unwrap();
+        let left = load_sites(&path).unwrap();
         assert_eq!(left.len(), n);
         assert_eq!(left.get("site0.com").unwrap().title, again.title);
 
@@ -585,6 +597,6 @@ mod tests {
             Err(anyhow::anyhow!("stopped"))
         });
         assert!(stopped.is_err());
-        assert_eq!(load_records(&path).unwrap().len(), n - 2);
+        assert_eq!(load_sites(&path).unwrap().len(), n - 2);
     }
 }

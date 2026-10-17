@@ -27,7 +27,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use plumb_core::collapse_whitespace;
-use plumb_core::{site, SiteRecord};
+use plumb_core::site;
 use plumb_format::Item;
 use plumb_index::pages::PlacedPage;
 use plumb_index::Hit;
@@ -406,14 +406,9 @@ impl Topics {
         topics.join(",")
     }
 
-    /// Whether `record` is about one of the topics: every word of a topic
-    /// is in its name, description, Wikidata facts or headings.
-    pub fn matches(&self, record: &SiteRecord) -> bool {
-        !self.topics.is_empty() && self.any_in(&record_words(record))
-    }
-
-    /// [`Topics::matches`] of a site's stored item ([`plumb_core::site`]):
-    /// the same words, read off the item.
+    /// Whether a site's stored item ([`plumb_core::site`]) is about one of
+    /// the topics: every word of a topic is in its name, description,
+    /// Wikidata facts or headings.
     pub fn matches_site(&self, site: &Item) -> bool {
         !self.topics.is_empty() && self.any_in(&site_words(site))
     }
@@ -426,31 +421,9 @@ impl Topics {
     }
 }
 
-/// The words a site record is matched on.
-fn record_words(record: &SiteRecord) -> HashSet<String> {
-    let mut words = HashSet::new();
-    let mut add = |text: &str| words.extend(words_of(text));
-    add(&record.domain.replace(['.', '-'], " "));
-    for text in [&record.title, &record.description, &record.about]
-        .into_iter()
-        .flatten()
-    {
-        add(text);
-    }
-    for text in record
-        .kinds
-        .iter()
-        .chain(&record.aliases)
-        .chain(&record.headings)
-    {
-        add(text);
-    }
-    words
-}
-
-/// [`record_words`] of a site's stored item: the record's description is
-/// the item's `about`, the record's `about` (Wikidata's description) is
-/// [`site::wikidata_about`], and its aliases are the item's names.
+/// The words a site is matched on: of its domain, title, description
+/// (the item's `about`), Wikidata's description
+/// ([`site::wikidata_about`]), kinds, names and headings.
 fn site_words(site: &Item) -> HashSet<String> {
     let mut words = HashSet::new();
     let mut add = |text: &str| words.extend(words_of(text));
@@ -776,16 +749,16 @@ mod tests {
     }
 
     #[test]
-    fn topics_match_site_records_and_profiles_add_theirs() {
-        let mut steam = SiteRecord::new("steampowered.com");
+    fn topics_match_sites_and_profiles_add_theirs() {
+        let mut steam = site::new("steampowered.com");
         steam.title = Some("Welcome to Steam".into());
-        steam.kinds = vec!["video game".into()];
-        let mut bank = SiteRecord::new("chase.com");
+        site::set_kinds(&mut steam, vec!["video game".into()]);
+        let mut bank = site::new("chase.com");
         bank.title = Some("Chase Bank".into());
         let topics = Topics::new(&["Games".to_owned(), "games".to_owned()]);
-        assert!(topics.matches(&steam));
-        assert!(!topics.matches(&bank));
-        assert!(!Topics::default().matches(&steam));
+        assert!(topics.matches_site(&steam));
+        assert!(!topics.matches_site(&bank));
+        assert!(!Topics::default().matches_site(&steam));
         assert_eq!(topics.key(), Topics::new(&["game".to_owned()]).key());
 
         let dir = tempfile::tempdir().unwrap();
@@ -800,18 +773,18 @@ mod tests {
     }
 
     #[test]
-    fn topics_match_a_site_s_item_as_they_match_its_record() {
-        // A record with each word in one field only.
-        let mut record = SiteRecord::new("rust-lang.org");
-        record.title = Some("Programming".into());
-        record.description = Some("Reliable software".into());
-        record.about = Some("general-purpose language".into());
-        record.kinds = vec!["compiler".into()];
-        record.aliases = vec!["Ferris".into()];
-        record.headings = vec!["Why Rust?".into()];
-        record.body_text = Some("memory safety".into());
-        record.terms = vec!["borrow".into()];
-        let site = record.to_stored_item();
+    fn topics_match_a_site_s_names_descriptions_facts_and_headings() {
+        // A site with each word in one field only.
+        let mut site = site::new("rust-lang.org");
+        site.title = Some("Programming".into());
+        site.about = Some("Reliable software".into());
+        site::set_wikidata_about(&mut site, Some("general-purpose language".into()));
+        site::set_kinds(&mut site, vec!["compiler".into()]);
+        site.names = vec!["Ferris".into()];
+        site::set_headings(&mut site, vec!["Why Rust?".into()]);
+        site.text = Some("memory safety".into());
+        site::set_terms(&mut site, vec!["borrow".into()]);
+        site::clean(&mut site);
         for (topic, matched) in [
             ("rust lang", true),
             ("org", true),
@@ -827,7 +800,6 @@ mod tests {
             ("ferris crab", false),
         ] {
             let topics = Topics::new(&[topic.to_owned()]);
-            assert_eq!(topics.matches(&record), matched, "{topic}");
             assert_eq!(topics.matches_site(&site), matched, "{topic}");
         }
         assert!(!Topics::default().matches_site(&site));

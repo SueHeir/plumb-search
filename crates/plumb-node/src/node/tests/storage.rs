@@ -66,7 +66,7 @@ async fn the_inbox_past_the_storage_limit_still_takes_records() {
     budget.recount(dir.path()).unwrap();
     budget.set_limit(budget.status().used_bytes);
     // The limit is a target, as in 0.2.0: records peers sent are kept.
-    let record = SiteRecord::new("waiting.example");
+    let record = site::new("waiting.example");
     crate::node::network::append_inbox(&node.inner, &listed(&[record])).unwrap();
     let inbox = std::fs::read(&node.inner.paths.inbox).unwrap();
     assert!(inbox.starts_with(prefix));
@@ -137,17 +137,17 @@ async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
     let node = start(test_config(dir.path())).await.unwrap();
     wait_for(node.addr(), "initial index", ready_and_idle).await;
     let budget = node.inner.storage.clone().unwrap();
-    let mut large = SiteRecord::new("quota-fold.example");
-    large.description = Some("large protected journal ".repeat(50_000));
+    let mut large = site::new("quota-fold.example");
+    large.about = Some("large protected journal ".repeat(50_000));
     crate::records::RecordStore::open(&node.inner.paths.records)
         .save(&[crate::records::Change::Merge {
-            site: large.clone().stored_item_as_is(),
+            site: large.clone(),
         }])
         .unwrap();
     plumb_core::storage::create_directory(&node.inner.paths.net, Some(&budget)).unwrap();
     crate::node::network::append_inbox(
         &node.inner,
-        &listed(&[SiteRecord::new("protected-inbox.example")]),
+        &listed(&[site::new("protected-inbox.example")]),
     )
     .unwrap();
     let inbox = std::fs::read(&node.inner.paths.inbox).unwrap();
@@ -157,7 +157,7 @@ async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
     // The limit is a target, as in 0.2.0: the rewrites and folds a node
     // makes, those that trim it back under the limit among them, run past
     // it rather than leave the node stuck over it.
-    let seed = [large.clone().stored_item_as_is()].into_iter().collect();
+    let seed = [large.clone()].into_iter().collect();
     crate::node::worker::save_seed_sites(&node.inner, &seed).unwrap();
     crate::node::round::RoundSites::load_with_budget(
         &node.inner.paths.records,
@@ -193,19 +193,17 @@ async fn raw_replacements_and_implicit_folds_run_past_the_storage_limit() {
 #[test]
 fn absorbing_the_inbox_waits_for_whoever_holds_the_records() {
     let dir = tempfile::tempdir().unwrap();
-    write_jsonl(
+    write_old_lines(
         &dir.path().join("records.jsonl"),
-        &[SiteRecord::new("held.example")],
-    )
-    .unwrap();
+        &[site::new("held.example")],
+    );
     let config = test_config(dir.path());
     let rank = RankConfig::default();
     let opened = open_data_dir(&config, rank).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let inner = Arc::new(Inner::new(config, rank, opened, stopped, None));
     std::fs::create_dir_all(&inner.paths.net).unwrap();
-    crate::node::network::append_inbox(&inner, &listed(&[SiteRecord::new("sent.example")]))
-        .unwrap();
+    crate::node::network::append_inbox(&inner, &listed(&[site::new("sent.example")])).unwrap();
     // The embedding job holds them while it folds the journal away.
     let held = inner.hold_records();
     let absorbing = {
@@ -230,16 +228,16 @@ fn two_inbox_absorptions_cross_the_real_fold_threshold_under_receiving_contentio
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("records.jsonl");
     let record = |i: usize, at: u64| {
-        let mut record = SiteRecord::new(format!("site-{i}.example"));
-        record.description = Some("x".repeat(4 * 1024));
+        let mut record = site::new(format!("site-{i}.example"));
+        record.about = Some("x".repeat(4 * 1024));
         record.title = Some(format!("Received site {i}"));
-        record.crawled_at = Some(at);
+        site::set_crawled(&mut record, Some(at));
         record
     };
     // Written as the node writes it, so that the fold's output is as long.
     let mut raw = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
     for i in 0..RECORDS {
-        plumb_core::stored::write(&mut raw, &record(i, 1)).unwrap();
+        plumb_core::stored::write_item(&mut raw, &record(i, 1)).unwrap();
         raw.write_all(b"\n").unwrap();
     }
     raw.into_inner().unwrap().sync_all().unwrap();
@@ -310,8 +308,8 @@ fn two_inbox_absorptions_cross_the_real_fold_threshold_under_receiving_contentio
         assert!(!inner.paths.inbox.exists());
         assert!(!inner.paths.absorbing.exists());
         let mut count = 0;
-        crate::outline::for_each_record(&path, |record| {
-            assert_eq!(record.crawled_at, Some(at));
+        crate::outline::for_each_site(&path, |site| {
+            assert_eq!(site::crawled(&site), Some(at));
             count += 1;
         })
         .unwrap();
@@ -422,25 +420,23 @@ fn a_fold_past_the_limit_installs_its_output_and_keeps_the_old_reader_charged() 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("records.jsonl");
     let record = |i: usize, at: u64| {
-        let mut r = SiteRecord::new(format!("site-{i}.example"));
+        let mut r = site::new(format!("site-{i}.example"));
         r.url = Some(format!("https://site-{i}.example/"));
-        r.description = Some("x".repeat(4 * 1024));
-        r.crawled_at = Some(at);
+        r.about = Some("x".repeat(4 * 1024));
+        site::set_crawled(&mut r, Some(at));
         r
     };
     // Written as the node writes it, so that the fold's output is as long.
     let mut raw = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
     for i in 0..32_768 {
-        plumb_core::stored::write(&mut raw, &record(i, 1)).unwrap();
+        plumb_core::stored::write_item(&mut raw, &record(i, 1)).unwrap();
         raw.write_all(b"\n").unwrap();
     }
     raw.into_inner().unwrap().sync_all().unwrap();
     let journal = crate::records::journal_path(&path);
-    write_jsonl(
+    plumb_core::write_jsonl(
         &journal,
-        &[crate::records::Change::MergeShared {
-            site: record(0, 2).stored_item_as_is(),
-        }],
+        &[crate::records::Change::MergeShared { site: record(0, 2) }],
     )
     .unwrap();
     let absorbing = dir.path().join("inbox.absorbing");
@@ -496,14 +492,14 @@ fn a_fold_past_the_limit_installs_its_output_and_keeps_the_old_reader_charged() 
         std::io::BufReader::new(reader.try_clone().unwrap())
             .read_line(&mut line)
             .unwrap();
-        let old = plumb_core::stored::read(line.as_bytes()).unwrap();
-        assert_eq!(old.crawled_at, Some(1));
+        let old = plumb_core::stored::read_item(line.as_bytes()).unwrap();
+        assert_eq!(site::crawled(&old), Some(1));
         line.clear();
         std::io::BufReader::new(std::fs::File::open(&path).unwrap())
             .read_line(&mut line)
             .unwrap();
-        let new = plumb_core::stored::read(line.as_bytes()).unwrap();
-        assert_eq!(new.crawled_at, Some(2));
+        let new = plumb_core::stored::read_item(line.as_bytes()).unwrap();
+        assert_eq!(site::crawled(&new), Some(2));
     }
     drop(reader);
     drop(lease);
@@ -527,23 +523,21 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
     let path = dir.path().join("records.jsonl");
     let journal = crate::records::journal_path(&path);
     let record = |i: usize, at: u64| {
-        let mut record = SiteRecord::new(format!("site-{i}.example"));
+        let mut record = site::new(format!("site-{i}.example"));
         record.url = Some(format!("https://site-{i}.example/"));
         record.title = Some(format!("Retained crawl {i}"));
-        record.description = Some("x".repeat(4 * 1024));
-        record.crawled_at = Some(at);
+        record.about = Some("x".repeat(4 * 1024));
+        site::set_crawled(&mut record, Some(at));
         record
     };
     let mut raw = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
     let mut pending = std::io::BufWriter::new(std::fs::File::create(&journal).unwrap());
     for i in 0..RECORDS {
-        serde_json::to_writer(&mut raw, &record(i, 1)).unwrap();
+        raw.write_all(old_line(&record(i, 1)).as_bytes()).unwrap();
         raw.write_all(b"\n").unwrap();
         serde_json::to_writer(
             &mut pending,
-            &crate::records::Change::MergeShared {
-                site: record(i, 2).stored_item_as_is(),
-            },
+            &crate::records::Change::MergeShared { site: record(i, 2) },
         )
         .unwrap();
         pending.write_all(b"\n").unwrap();
@@ -576,7 +570,7 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
             // the receiver writes them.
             let bytes = records
                 .iter()
-                .map(|record| plumb_core::stored::line(record).unwrap().len() as u64 + 1)
+                .map(|site| item_line(site).len() as u64 + 1)
                 .sum::<u64>();
             initial_delivery_bytes.push(plumb_core::storage::allocation_for(bytes + 1));
         }
@@ -839,12 +833,8 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         std::io::BufReader::new(old_reader.try_clone().unwrap())
             .read_line(&mut line)
             .unwrap();
-        assert_eq!(
-            plumb_core::stored::read(line.as_bytes())
-                .unwrap()
-                .crawled_at,
-            Some(1)
-        );
+        let old = plumb_core::stored::read_item(line.as_bytes()).unwrap();
+        assert_eq!(site::crawled(&old), Some(1));
     }
     drop(old_reader);
     drop(old_lease);
@@ -898,8 +888,8 @@ async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_ac
         tokio::task::spawn_blocking(move || crate::records::RecordStore::open(&worker.paths.records).with_budget(worker.storage.clone()).fold()).await??;
         ledger_checkpoint("final-fold");
         let mut sites = 0;
-        crate::outline::for_each_record(&path, |record| {
-            assert!(record.crawled_at.unwrap() >= now - BATCHES as u64);
+        crate::outline::for_each_site(&path, |site| {
+            assert!(site::crawled(&site).unwrap() >= now - BATCHES as u64);
             sites += 1;
         })?;
         anyhow::ensure!(sites == RECORDS, "raw records were lost");
@@ -1028,18 +1018,20 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
     // receiver writes it, and with each a mention of the site: over 64 MiB.
     let earlier = {
         let symbols = |chars: usize| "\u{1d11e}".repeat(chars);
-        let mut record = SiteRecord::new(&domains[0]);
-        record.crawled_at = Some(now + 1);
-        record.description = Some("same".into());
-        record.signals.linking_domains = 1;
+        let mut record = site::new(&domains[0]);
+        site::set_crawled(&mut record, Some(now + 1));
+        record.about = Some("same".into());
+        let mut signals = site::signals(&record);
+        signals.linking_domains = 1;
+        site::set_signals(&mut record, &signals);
         for n in 0..plumb_core::MAX_ALIASES {
-            record.add_alias(&format!("{n} {}", symbols(200)));
+            site::add_alias(&mut record, &format!("{n} {}", symbols(200)));
         }
-        let room = plumb_net::batch::MAX_RECORD_BYTES - record.to_line().unwrap().len();
+        let room = plumb_net::batch::MAX_RECORD_BYTES - site::to_line(&record).unwrap().len();
         let pad = format!("{}{}", symbols(room / 4), ".".repeat(room % 4));
-        record.description = Some(format!("same{pad}"));
+        record.about = Some(format!("same{pad}"));
         assert_eq!(
-            record.to_line().unwrap().len(),
+            site::to_line(&record).unwrap().len(),
             plumb_net::batch::MAX_RECORD_BYTES
         );
         record
@@ -1049,8 +1041,8 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
         for chunk in domains.chunks(1024) {
             let records: Vec<_> = chunk
                 .iter()
-                .map(|domain| SiteRecord {
-                    domain: domain.clone(),
+                .map(|domain| Item {
+                    id: domain.clone(),
                     ..earlier.clone()
                 })
                 .collect();
@@ -1083,10 +1075,12 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
     let thin: Vec<_> = domains
         .iter()
         .map(|domain| {
-            let mut record = SiteRecord::new(domain);
-            record.crawled_at = Some(now);
-            record.description = Some("same".into());
-            record.signals.linking_domains = 1;
+            let mut record = site::new(domain);
+            site::set_crawled(&mut record, Some(now));
+            record.about = Some("same".into());
+            let mut signals = site::signals(&record);
+            signals.linking_domains = 1;
+            site::set_signals(&mut record, &signals);
             record
         })
         .collect();
@@ -1100,17 +1094,18 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
     let trigger_signed = std::fs::read(batches.join(format!("{trigger_id}.json"))).unwrap();
 
     let good_peer = good_key.public().to_peer_id();
-    let mut good = SiteRecord::new("following-replay.example");
+    let mut good = site::new("following-replay.example");
     good.title = Some("Smaller batch after unsupported output".into());
-    good.crawled_at = Some(now);
-    good.news = vec![plumb_core::Headline::checked(
-        &good.domain,
+    site::set_crawled(&mut good, Some(now));
+    let news = vec![plumb_core::Headline::checked(
+        &good.id,
         "Following headline",
         "https://following-replay.example/news",
         now,
         now,
     )
     .unwrap()];
+    site::set_news(&mut good, news);
     let following = Batch::sign(&good_key, &listed(&[good]), epoch, MAX_SHARE_PPM, made + 1)
         .unwrap()
         .unwrap();
@@ -1245,12 +1240,7 @@ async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_
             assert!(batches
                 .join(format!("{following_id}.delivered-trusted"))
                 .exists());
-            assert_eq!(
-                plumb_core::stored::read_file(&inner.paths.inbox)
-                    .unwrap()
-                    .len(),
-                1
-            );
+            assert_eq!(read_sites(&inner.paths.inbox).len(), 1);
             assert_eq!(inner.news.headline_count(), 1);
         } else {
             assert!(
@@ -1351,11 +1341,11 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
         let (net, mut received) = plumb_net::start(net_config.clone(), table.clone())
             .await
             .unwrap();
-        let mut record = SiteRecord::new("owned-growth.example");
+        let mut record = site::new("owned-growth.example");
         record.url = Some("https://owned-growth.example/".into());
         record.title = Some("Confirmed output survives admission failure".into());
-        record.description = Some("x".repeat(12 * 1024));
-        record.crawled_at = Some(now_unix());
+        record.about = Some("x".repeat(12 * 1024));
+        site::set_crawled(&mut record, Some(now_unix()));
         let id = source.publish(listed(&[record])).await.unwrap().unwrap();
         let mut delivery = tokio::time::timeout(Duration::from_secs(20), received.recv())
             .await
@@ -1414,12 +1404,7 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
                 .unwrap()
                 .unwrap();
             assert_eq!(budget.status().rejected_writes, rejected);
-            assert_eq!(
-                plumb_core::stored::read_file(&inner.paths.inbox)
-                    .unwrap()
-                    .len(),
-                1
-            );
+            assert_eq!(read_sites(&inner.paths.inbox).len(), 1);
             assert_eq!(inner.inbox_records.load(Ordering::SeqCst), 1);
             assert!(marker.is_file());
         }
@@ -1457,12 +1442,7 @@ async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_paylo
             )
             .await;
             assert!(marker.is_file());
-            assert_eq!(
-                plumb_core::stored::read_file(&inner.paths.inbox)
-                    .unwrap()
-                    .len(),
-                1
-            );
+            assert_eq!(read_sites(&inner.paths.inbox).len(), 1);
         } else {
             assert!(
                 tokio::time::timeout(Duration::from_millis(300), replayed.recv())
@@ -1500,7 +1480,7 @@ async fn a_pending_network_delivery_survives_inbox_io_failure_without_restart() 
     plumb_core::storage::create_directory(&node.inner.paths.inbox, Some(&budget)).unwrap();
     let delivery = tokio::spawn(crate::node::network::persist_delivery(
         node.inner.clone(),
-        listed(&[SiteRecord::new("retry-inbox.example")]),
+        listed(&[site::new("retry-inbox.example")]),
         SiteList::new(),
         None,
         None,
@@ -1525,9 +1505,9 @@ async fn a_pending_network_delivery_survives_inbox_io_failure_without_restart() 
         .await
         .unwrap()
         .unwrap();
-    let inbox: Vec<SiteRecord> = plumb_core::stored::read_file(&node.inner.paths.inbox).unwrap();
+    let inbox = read_sites(&node.inner.paths.inbox);
     assert_eq!(inbox.len(), 1);
-    assert_eq!(inbox[0].domain, "retry-inbox.example");
+    assert_eq!(inbox[0].id, "retry-inbox.example");
     assert_eq!(node.inner.inbox_records.load(Ordering::SeqCst), 1);
     assert_eq!(budget.status().reserved_bytes, 0);
     assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
@@ -1540,7 +1520,7 @@ async fn publishing_an_external_corpus_fold_cannot_free_node_storage_room() {
     let dir = seeded_dir();
     let external = tempfile::tempdir().unwrap();
     let path = external.path().join("records.jsonl");
-    write_jsonl(&path, &[SiteRecord::new("external-publish.example")]).unwrap();
+    write_old_lines(&path, &[site::new("external-publish.example")]);
     let mut store = crate::records::RecordStore::open(&path);
     for n in 0..100 {
         store
@@ -1620,15 +1600,16 @@ async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_t
     let raw = std::fs::read(&receiver.inner.paths.records).unwrap();
     let inbox_path = receiver.inner.paths.inbox.clone();
     plumb_core::storage::create_directory(&inbox_path, Some(budget)).unwrap();
-    let mut record = SiteRecord::new("restart-inbox.example");
+    let mut record = site::new("restart-inbox.example");
     record.url = Some("https://restart-inbox.example/".into());
     record.title = Some("Durable receiver restart".into());
-    record.crawled_at = Some(now_unix());
-    record.news = vec![plumb_core::Headline {
+    site::set_crawled(&mut record, Some(now_unix()));
+    let news = vec![plumb_core::Headline {
         title: "A headline that survives receiver restart".into(),
         url: "https://restart-inbox.example/receiver-restart".into(),
         at: now_unix(),
     }];
+    site::set_news(&mut record, news);
     let id = source.publish(listed(&[record])).await.unwrap().unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     while receiver
@@ -1688,9 +1669,9 @@ async fn a_receiver_restart_recovers_an_unacknowledged_inbox_without_crediting_t
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let inbox: Vec<SiteRecord> = plumb_core::stored::read_file(&inbox_path).unwrap();
+    let inbox = read_sites(&inbox_path);
     assert_eq!(inbox.len(), 1);
-    assert_eq!(inbox[0].domain, "restart-inbox.example");
+    assert_eq!(inbox[0].id, "restart-inbox.example");
     assert_eq!(
         crate::news::NewsStore::open(&receiver.inner.paths.news).headline_count(),
         1
@@ -1777,16 +1758,17 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
         plumb_core::storage::create_directory(&news_dir, Some(budget)).unwrap();
         let blocked = news_dir.join("headlines.json");
         plumb_core::storage::create_directory(&blocked, Some(budget)).unwrap();
-        let mut record = SiteRecord::new("headline-persist.example");
-        record.news = vec![plumb_core::Headline {
+        let mut record = site::new("headline-persist.example");
+        let news = vec![plumb_core::Headline {
             title: "News survives a failed durable write".into(),
             url: "https://headline-persist.example/story".into(),
             at: now_unix(),
         }];
+        site::set_news(&mut record, news);
         if with_raw {
             record.url = Some("https://headline-persist.example/".into());
             record.title = Some("A raw crawl with its headline".into());
-            record.crawled_at = Some(now_unix());
+            site::set_crawled(&mut record, Some(now_unix()));
         }
         let id = source.publish(listed(&[record])).await.unwrap().unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -1833,12 +1815,14 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(crate::news::NewsStore::open(&news_dir).headline_count(), 1);
-        let inbox: Vec<SiteRecord> =
-            plumb_core::stored::read_file(&receiver.inner.paths.inbox).unwrap_or_default();
+        let inbox = match receiver.inner.paths.inbox.is_file() {
+            true => read_sites(&receiver.inner.paths.inbox),
+            false => Vec::new(),
+        };
         let held = crate::records::load_sites(&receiver.inner.paths.records).unwrap();
         let durable_raw = inbox
             .iter()
-            .filter(|r| r.domain == "headline-persist.example")
+            .filter(|r| r.id == "headline-persist.example")
             .count()
             + usize::from(held.contains("headline-persist.example"));
         assert_eq!(durable_raw, usize::from(with_raw));
@@ -1878,8 +1862,10 @@ async fn headline_write_failure_keeps_news_only_and_mixed_deliveries_for_restart
 #[test]
 fn new_topics_make_room_in_the_records_file() {
     let site = |domain: &str, tranco: u32, title: &str| {
-        let mut r = SiteRecord::new(domain);
-        r.signals.tranco_rank = Some(tranco);
+        let mut r = site::new(domain);
+        let mut signals = site::signals(&r);
+        signals.tranco_rank = Some(tranco);
+        site::set_signals(&mut r, &signals);
         r.title = Some(title.into());
         r
     };
@@ -1895,10 +1881,10 @@ fn new_topics_make_room_in_the_records_file() {
         if twice {
             records.push(site("chess.com", 5_000, "Chess"));
         }
-        write_jsonl(&path, &records).unwrap();
+        write_old_lines(&path, &records);
         crate::records::RecordStore::open(&path)
             .save(&[crate::records::Change::Merge {
-                site: site("seriouseats.com", 7_000, "Serious Eats cooking").stored_item_as_is(),
+                site: site("seriouseats.com", 7_000, "Serious Eats cooking"),
             }])
             .unwrap();
         assert_eq!(
@@ -1920,11 +1906,7 @@ fn new_topics_make_room_in_the_records_file() {
 
         let built = crate::node::worker::make_room_for_new_topics(&inner).unwrap();
         assert_eq!(built.docs, 4, "twice: {twice}");
-        let mut left: Vec<String> = plumb_core::stored::read_file(&path)
-            .unwrap()
-            .into_iter()
-            .map(|r: SiteRecord| r.domain)
-            .collect();
+        let mut left: Vec<String> = read_sites(&path).into_iter().map(|r| r.id).collect();
         left.sort();
         assert_eq!(
             left,

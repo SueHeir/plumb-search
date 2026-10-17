@@ -356,10 +356,10 @@ mod tests {
     }
 
     #[test]
-    fn terms_are_written_into_a_copy_as_a_record_set_writes_them() {
+    fn terms_are_written_into_a_copy_of_the_sites_loaded() {
         let dir = tempfile::tempdir().unwrap();
         let records = dir.path().join("records.jsonl");
-        crate::test_sites::write(&records, &crate::test_sites::records());
+        crate::test_sites::write(&records, &crate::test_sites::sites());
         let page = |domain: &str, title: Option<&str>, text: &str| PageText {
             domain: domain.into(),
             title: title.map(str::to_string),
@@ -391,17 +391,20 @@ mod tests {
         };
         run_terms(args()).unwrap();
 
-        // What a record set made of the same file writes.
+        // The sites of the same file, with the terms of each page of a site
+        // they hold set.
         let picker = Picker::new(&args());
-        let mut set = crate::test_sites::load_records(&records);
+        let mut sites = plumb_node::records::load_sites(&records).unwrap();
         for page in &pages {
             let terms = picker.terms(&page.full_text());
-            if !terms.is_empty() && set.get(&page.domain).is_some() {
-                set.entry(&page.domain).terms = terms;
+            if !terms.is_empty() && sites.contains(&page.domain) {
+                sites.update(&page.domain, |site| {
+                    plumb_core::site::set_terms(site, terms)
+                });
             }
         }
         let expected = dir.path().join("expected.jsonl");
-        crate::test_sites::write_sorted(&expected, &set);
+        crate::test_sites::write_sorted(&expected, &sites);
         assert_eq!(
             String::from_utf8(std::fs::read(&out).unwrap()).unwrap(),
             String::from_utf8(std::fs::read(&expected).unwrap()).unwrap()

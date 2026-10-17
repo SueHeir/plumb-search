@@ -97,122 +97,41 @@ fn report(set: &Sites, now: u64, show: usize, keeps: impl Fn(&Item) -> bool) -> 
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{now_unix, RecordSet, SiteRecord};
-    use plumb_node::crawl::CrawlSite;
+    use plumb_core::site::CrawlMarks;
 
     use super::*;
+    use crate::test_sites::ranks;
 
     const DAY: u64 = SECONDS_PER_DAY;
 
-    /// A record as judging sites dead read it before sites were their
-    /// stored items.
-    struct Record<'a>(&'a SiteRecord);
-
-    impl CrawlSite for Record<'_> {
-        fn domain(&self) -> &str {
-            &self.0.domain
-        }
-
-        fn url(&self) -> Option<&str> {
-            self.0.url.as_deref()
-        }
-
-        fn link_score(&self) -> f32 {
-            self.0.link_score()
-        }
-
-        fn crawled_at(&self) -> Option<u64> {
-            self.0.crawled_at
-        }
-
-        fn crawl_attempted_at(&self) -> Option<u64> {
-            self.0.crawl_attempted_at
-        }
-
-        fn crawl_failures(&self) -> u32 {
-            self.0.crawl_failures
-        }
-
-        fn gone_at(&self) -> Option<u64> {
-            self.0.gone_at
-        }
-    }
-
-    /// [`report`] as it was made of records.
-    fn record_report(
-        set: &RecordSet,
-        now: u64,
-        show: usize,
-        keeps: impl Fn(&SiteRecord) -> bool,
-    ) -> String {
-        let dead: Vec<&SiteRecord> = find_dead(set.iter().map(Record), now, |record: &Record| {
-            keeps(record.0)
-        })
-        .into_iter()
-        .map(|record| record.0)
-        .collect();
-        let failing = set
-            .iter()
-            .filter(|record| record.gone_at.is_none() && record.crawl_failures > 0)
-            .count();
-        let gone = set.iter().filter(|record| record.gone_at.is_some()).count();
-        let never_reached = dead.iter().filter(|r| r.crawled_at.is_none()).count();
-        let mut out = format!(
-            "{} sites in the records; {} could not be reached on their last try\n",
-            group_thousands(set.len() as u64),
-            group_thousands(failing as u64)
-        );
-        out += &format!(
-            "{} look dead ({} never reached by any crawl); --drop-dead-sites would take them \
-             out of the index\n",
-            group_thousands(dead.len() as u64),
-            group_thousands(never_reached as u64)
-        );
-        if gone > 0 {
-            out += &format!("{} were taken out already\n", group_thousands(gone as u64));
-        }
-        for record in dead.iter().take(show) {
-            let last = record.crawled_at.map_or_else(
-                || "never reached".to_owned(),
-                |at| {
-                    format!(
-                        "last reached {} days ago",
-                        now.saturating_sub(at) / SECONDS_PER_DAY
-                    )
-                },
-            );
-            out += &format!(
-                "  {} ({} failed tries, {last})\n",
-                record.domain, record.crawl_failures
-            );
-        }
-        out
-    }
-
     #[test]
-    fn dead_sites_are_counted_and_named_as_they_were_of_records() {
+    fn dead_sites_are_counted_and_named() {
         let now = now_unix();
         let failing = |domain: &str, failures: u32, reached_days_ago: Option<u64>| {
-            let mut record = SiteRecord::new(domain);
-            record.crawl_failures = failures;
-            record.crawled_at = reached_days_ago.map(|days| now - days * DAY);
-            record.crawl_attempted_at = Some(now - DAY);
-            record
+            let mut site = site::new(domain);
+            site::set_crawled(&mut site, reached_days_ago.map(|days| now - days * DAY));
+            let marks = CrawlMarks {
+                tried: Some(now - DAY),
+                failures,
+                gone: None,
+            };
+            site::set_crawl_marks(&mut site, marks);
+            site
         };
-        let mut records = crate::test_sites::records();
+        let mut sites = crate::test_sites::sites();
         // Enough better sites that the worst can look dead.
         for i in 0..10_000 {
-            let mut record = SiteRecord::new(format!("s{i}.com"));
-            record.signals.linking_domains = 50;
-            records.push(record);
+            let mut site = site::new(format!("s{i}.com"));
+            ranks(&mut site, |signals| signals.linking_domains = 50);
+            sites.push(site);
         }
         let mut official = failing("official.org", 9, None);
-        official.signals.official_site = true;
+        ranks(&mut official, |signals| signals.official_site = true);
         let mut chess = failing("chessclub.org", 7, Some(200));
         chess.title = Some("The Chess Club".into());
         let mut kept = failing("kept.org", 8, None);
-        kept.signals.linking_domains = 1;
-        records.extend([
+        ranks(&mut kept, |signals| signals.linking_domains = 1);
+        sites.extend([
             failing("dead.org", 7, None),
             failing("quiet.org", 6, Some(90)),
             failing("lately.org", 8, Some(30)),
@@ -224,21 +143,25 @@ mod tests {
         ]);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.jsonl");
-        crate::test_sites::write(&path, &records);
+        crate::test_sites::write(&path, &sites);
         let sites = load_sites(&path).unwrap();
-        let set = crate::test_sites::load_records(&path);
         let topics = plumb_node::about::Topics::new(&["chess".to_owned()]);
+        let head = "10,018 sites in the records; 9 could not be reached on their last try\n\
+                    3 look dead (1 never reached by any crawl); --drop-dead-sites would take \
+                    them out of the index\n\
+                    1 were taken out already\n";
+        let named = [
+            "  dead.org (7 failed tries, never reached)\n",
+            "  quiet.org (6 failed tries, last reached 90 days ago)\n",
+            "  shouting.org (6 failed tries, last reached 61 days ago)\n",
+        ];
         for show in [0, 2, 20] {
             let report = report(&sites, now, show, |site| {
                 site::signals(site).official_site
                     || site.id == "kept.org"
                     || topics.matches_site(site)
             });
-            let expected = record_report(&set, now, show, |record| {
-                record.signals.official_site
-                    || record.domain == "kept.org"
-                    || topics.matches(record)
-            });
+            let expected = head.to_owned() + &named[..show.min(named.len())].concat();
             assert_eq!(report, expected, "{show}");
         }
         let report = report(&sites, now, 20, |site| site::signals(site).official_site);
