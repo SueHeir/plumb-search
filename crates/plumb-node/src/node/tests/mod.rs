@@ -12,6 +12,7 @@ mod indexes_and_rounds;
 mod meaning;
 mod network_golden;
 mod owner;
+mod pages_golden;
 mod seed_golden;
 mod sets;
 mod setup;

@@ -31,6 +31,7 @@ use tantivy::IndexReader;
 
 mod building;
 mod docs;
+mod dump;
 mod linking;
 mod named_site;
 mod page;
@@ -41,6 +42,7 @@ mod repos;
 mod scoring;
 mod search;
 mod sites;
+mod stored;
 
 pub use self::building::{build_page_index, build_page_index_with_budget, GO_ON_EVERY};
 pub use self::docs::{docs_query_topic, docs_symbol_matches};
