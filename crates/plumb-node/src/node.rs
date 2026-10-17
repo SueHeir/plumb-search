@@ -2204,6 +2204,19 @@ impl SearchBackend for Inner {
         self.search_with_rank(query, limit, options, Some(rank))
     }
 
+    fn search_names(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let rank = RankConfig {
+            learned_sites: false,
+            ..self.rank
+        };
+        self.search_with_rank(query, limit, options, Some(&rank))
+    }
+
     fn places(
         &self,
         query: &str,

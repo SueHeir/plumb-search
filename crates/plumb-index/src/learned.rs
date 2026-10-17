@@ -709,8 +709,29 @@ fn site_order(
             })
         };
         sites = after_leading(sites, partial, unembedded);
+        // And a site the query names, or the domain it typed, ends no lower
+        // than the hand-made ranking put it: trained on graded searches,
+        // the model put any-video-converter.com before converter.app for
+        // "converter", and `official_site` takes the first site.
+        let typed = |row: usize| {
+            site(row).is_some_and(|hit| {
+                hit.named || hit.query_evidence.as_ref().is_some_and(|e| e.typed_domain)
+            })
+        };
+        sites = no_lower(sites, typed);
     }
     sites
+}
+
+/// `order` with each row `keep` holds placed no later than its own index,
+/// its place in the listed order (rows there are all sites).
+fn no_lower(mut order: Vec<usize>, keep: impl Fn(usize) -> bool) -> Vec<usize> {
+    let mut kept = Vec::with_capacity(order.len());
+    for at in 0..order.len() {
+        let due = order.iter().position(|&row| row <= at && keep(row));
+        kept.push(order.remove(due.unwrap_or(0)));
+    }
+    kept
 }
 
 fn reorder_rows(
@@ -1190,6 +1211,42 @@ mod tests {
         assert_eq!(order_of(None), ["schwab.com", "wsj.com"]);
         // With a vector, the model may judge them.
         assert_eq!(order_of(Some(0.2)), ["wsj.com", "schwab.com"]);
+    }
+
+    #[test]
+    fn the_site_model_puts_a_named_site_no_lower_than_it_was() {
+        let linked = |domain: &str, named: bool, link_score: f32| {
+            let mut hit = site(domain, 0.5, named);
+            hit.link_score = link_score;
+            let mut noted = evidence(domain, 0);
+            noted.semantic_closeness = Some(0.8);
+            hit.query_evidence = Some(noted);
+            hit
+        };
+        let order_of = |hits: Vec<Hit>| {
+            let mut hits = hits;
+            reorder_sites(&popular_first_model(), "converter", &mut hits);
+            hits.into_iter().map(|hit| hit.domain).collect::<Vec<_>>()
+        };
+        // The named site keeps first place from a more linked one.
+        let named_first = vec![
+            linked("converter.app", true, 0.3),
+            linked("any-video-converter.com", false, 0.9),
+        ];
+        assert_eq!(
+            order_of(named_first),
+            ["converter.app", "any-video-converter.com"]
+        );
+        // It may still rise, and the model orders the sites around it.
+        let named_last = vec![
+            linked("convert.example", false, 0.3),
+            linked("converters.example", false, 0.9),
+            linked("converter.app", true, 0.9),
+        ];
+        assert_eq!(
+            order_of(named_last),
+            ["converters.example", "converter.app", "convert.example"]
+        );
     }
 
     #[test]

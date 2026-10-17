@@ -52,6 +52,45 @@ fn official_site_says_how_sure_it_is_and_why() {
     assert_eq!(answer["found"], false);
 }
 
+/// Lists a popular site first for a search, and the site the name names
+/// first when asked whose site it is, as the site model may.
+struct Ordered;
+
+impl SearchBackend for Ordered {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok(vec![
+            hit("any-video-converter.com", 1.0, 0.9, false),
+            hit("converter.app", 0.9, 0.3, true),
+        ])
+    }
+
+    fn search_names(
+        &self,
+        query: &str,
+        limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let mut hits = self.search(query, limit)?;
+        hits.reverse();
+        Ok(SearchResults {
+            hits,
+            ..SearchResults::default()
+        })
+    }
+
+    fn num_docs(&self) -> u64 {
+        2
+    }
+}
+
+#[test]
+fn official_site_looks_names_up_without_the_search_order() {
+    let mcp = Mcp::new(Arc::new(Ordered), None);
+    let answer =
+        &call(&mcp, "official_site", json!({ "name": "Converter" }))["result"]["structuredContent"];
+    assert_eq!(answer["domain"], "converter.app");
+}
+
 #[test]
 fn official_site_falls_back_on_a_packages_home_page() {
     let mcp = Mcp::new(Arc::new(Packages), None);
