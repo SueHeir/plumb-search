@@ -564,10 +564,11 @@ fn observe(
         .iter()
         .map(|p| p.hit.page.url.clone())
         .collect::<Vec<_>>();
-    if cfg.learned && typed.is_none() && !ops.any() {
-        plumb_index::learned::reorder(
-            plumb_index::learned::Model::builtin(),
+    if typed.is_none() && !ops.any() {
+        plumb_index::learned::reorder_results(
+            cfg,
             words,
+            found.sites_ordered,
             &mut found.hits,
             &mut placed,
         );

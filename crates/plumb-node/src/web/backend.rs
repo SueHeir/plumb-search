@@ -46,6 +46,19 @@ pub trait SearchBackend: Send + Sync {
         let _ = rank;
         self.search_full(query, limit, options)
     }
+    /// [`SearchBackend::search_full`] to find whose site a name or domain
+    /// is (`official_site`, `check_lookalike`, `site_info`): without the
+    /// site model ([`RankConfig::learned_sites`]), which orders sites by how
+    /// well they serve a search, not by whose they are. By default the same
+    /// as `search_full`.
+    fn search_names(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        self.search_full(query, limit, options)
+    }
     /// Number of sites that can be found.
     fn num_docs(&self) -> u64;
     /// The places `query` asks for, when it asks for places somewhere
@@ -248,6 +261,19 @@ impl SearchBackend for IndexBackend {
     ) -> Result<SearchResults> {
         let meaning = self.meaning.get();
         self.search_full_with(query, limit, options, meaning.as_deref(), Some(rank))
+    }
+
+    fn search_names(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let rank = RankConfig {
+            learned_sites: false,
+            ..self.rank
+        };
+        self.search_ranked(query, limit, options, &rank)
     }
 
     fn num_docs(&self) -> u64 {

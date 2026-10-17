@@ -70,6 +70,7 @@
 //! `us bank` and `US BANK` are the same query and `nestle` finds `Nestlé`.
 
 mod analysis;
+pub mod candidates;
 pub mod health;
 mod hits;
 mod indexing;
@@ -288,8 +289,17 @@ pub struct RankConfig {
     /// worse), the described ones most of all.
     pub drop_namesakes: bool,
     /// Put the first results in the order the learned ranking gives
-    /// ([`learned::reorder`]), once pages are placed among the sites.
+    /// ([`learned::reorder_results`]), once pages are placed among the
+    /// sites.
     pub learned: bool,
+    /// With [`RankConfig::learned`] and a [`Meaning`], put the first
+    /// [`learned::LEARNED_SITES`] sites in the order the site model gives
+    /// ([`learned::reorder_sites`]) before anything else moves them. The
+    /// learned order then only places pages among them. Off: it ordered
+    /// sites better in replays, but on a node, where pages and named
+    /// sites are placed too, the Batch evals found it no better (review
+    /// 162 better, 192 worse).
+    pub learned_sites: bool,
     /// Rank typo corrections by the spelling model learned from the
     /// index's words ([`spell_model`]): what the edits cost against how
     /// common the correction is. Without it, or without a model, fewest
@@ -355,6 +365,7 @@ impl Default for RankConfig {
             add_named_site: true,
             drop_namesakes: false,
             learned: true,
+            learned_sites: false,
             spelling_channel: true,
             real_word_weight: None,
             context_weight: None,
@@ -574,6 +585,10 @@ pub struct SearchResults {
     /// for the page search to add. Not sent: a node finds its own.
     #[serde(skip)]
     pub meant: Option<String>,
+    /// Whether the site model put `hits` in order ([`learned::reorder_sites`]),
+    /// so the row model only places pages among them. Not sent.
+    #[serde(skip)]
+    pub sites_ordered: bool,
 }
 
 /// A suggested spelling of a query: "amazom" -> "amazon".

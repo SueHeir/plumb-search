@@ -59,6 +59,10 @@ pub struct TrainOptions {
     pub noise: f64,
     /// Seed of a net's starting weights and noise.
     pub seed: u64,
+    /// How many of each search's first rows it trains on: the
+    /// [`LEARNED_ROWS`] the model moves, or more to train one that reads
+    /// deeper.
+    pub rows: usize,
 }
 
 impl Default for TrainOptions {
@@ -75,6 +79,7 @@ impl Default for TrainOptions {
             epochs: 60,
             noise: 0.1,
             seed: 1,
+            rows: LEARNED_ROWS,
         }
     }
 }
@@ -102,18 +107,18 @@ pub fn ideal_dcg(gains: &[f64]) -> f64 {
         .sum()
 }
 
-/// The training rows of `queries`: every query's first
-/// [`LEARNED_ROWS`] rows end to end, their [`gain`]s, and where each
+/// The training rows of `queries`: every query's first `depth` rows end
+/// to end, their [`gain`]s, and where each
 /// query's rows start and end. Queries whose rows there are all worth
 /// the same are left out.
 type Rows = (Vec<[f64; FEATURES.len()]>, Vec<f64>, Vec<(usize, usize)>);
 
-fn training_rows(queries: &[TrainingQuery]) -> Rows {
+fn training_rows(queries: &[TrainingQuery], depth: usize) -> Rows {
     let mut x: Vec<[f64; FEATURES.len()]> = Vec::new();
     let mut labels: Vec<f64> = Vec::new();
     let mut groups: Vec<(usize, usize)> = Vec::new();
     for q in queries {
-        let rows = &q.rows[..q.rows.len().min(LEARNED_ROWS)];
+        let rows = &q.rows[..q.rows.len().min(depth)];
         if rows.iter().all(|r| gain(r) == gain(&rows[0])) {
             continue;
         }
@@ -130,7 +135,7 @@ fn training_rows(queries: &[TrainingQuery]) -> Rows {
 /// labelled rows first, by `options.objective`. Deterministic: the same
 /// queries and options give the same model.
 pub fn train(queries: &[TrainingQuery], options: TrainOptions) -> Model {
-    let (x, labels, groups) = training_rows(queries);
+    let (x, labels, groups) = training_rows(queries, options.rows);
     if options.learner == Learner::Net {
         return Model::new(Vec::new(), Some(net::train(&x, &labels, &groups, options)));
     }
@@ -539,6 +544,42 @@ mod tests {
                 assert!((read.score(&x) - model.score(&x)).abs() < 1e-9);
             }
         }
+    }
+
+    #[test]
+    fn learns_from_rows_below_the_tenth_when_asked_to() {
+        // The answer, the one named site, is listed 13th of 15.
+        let queries: Vec<TrainingQuery> = (0..40)
+            .map(|i| {
+                let rows = (0..15)
+                    .map(|r| {
+                        let named = r == 12;
+                        let hit = site(&format!("site{r}.com"), 1.0 - r as f32 / 20.0, named);
+                        let mut row = RowSignals::site(&hit, &[]);
+                        row.label = u8::from(named);
+                        row
+                    })
+                    .collect();
+                TrainingQuery {
+                    searched: format!("query {i}"),
+                    rows,
+                }
+            })
+            .collect();
+        let deep = TrainOptions {
+            rows: 15,
+            ..TrainOptions::default()
+        };
+        let model = train(&queries, deep);
+        for q in &queries {
+            assert_eq!(model.order_first(&q.searched, &q.rows, 15)[0], 12);
+        }
+        // Trained on the first ten rows only, it never sees the answer.
+        let shallow = train(&queries, TrainOptions::default());
+        assert_eq!(
+            shallow.order_first(&queries[0].searched, &queries[0].rows, 15)[0],
+            0
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ impl Mcp {
         };
         let mut searches = 0;
         // The site itself: a typed hostname names it.
-        let own = self.lookup(&domain, 1, options)?;
+        let own = self.lookup_name(&domain, 1, options)?;
         searches += 1;
         let site = own.hits.into_iter().find(|hit| hit.domain == domain);
         let site_trusted = site
@@ -41,7 +41,7 @@ impl Mcp {
                 break;
             }
             searches += 1;
-            let results = self.lookup(&query, 1, options)?;
+            let results = self.lookup_name(&query, 1, options)?;
             // A typo of a name ("twiter") is searched as typed; the name
             // it is a typo of is looked up next.
             if let Some(spelling) = results.spelling {

@@ -20,7 +20,7 @@ impl Mcp {
             .unwrap_or(&host);
         let folded = bare_host != domain;
         let asked_page = asked_page(input);
-        let results = self.lookup(&domain, 3, options)?;
+        let results = self.lookup_name(&domain, 3, options)?;
         let hit = results.hits.iter().find(|hit| hit.domain == domain);
         let mut answer = match hit {
             None => json!({ "domain": domain, "found": false }),

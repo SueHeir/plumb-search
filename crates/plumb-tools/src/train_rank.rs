@@ -87,6 +87,12 @@ pub struct TrainRankArgs {
     /// looking at the other half.
     #[arg(long, value_name = "K")]
     pub folds: Option<usize>,
+    /// How many of each search's first rows the model reads, is trained
+    /// on and moves: the [`LEARNED_ROWS`] a node's model moves, or more
+    /// (as many as `eval --limit` listed) to try one that reads deeper.
+    /// Top-1, top-3 and MRR still count the first [`LEARNED_ROWS`].
+    #[arg(long, value_name = "N", default_value_t = LEARNED_ROWS)]
+    pub rows: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -123,6 +129,7 @@ impl TrainRankArgs {
             epochs: self.epochs,
             noise: self.noise,
             seed: self.seed,
+            rows: self.rows,
         }
     }
 }
@@ -187,8 +194,8 @@ pub fn run(args: TrainRankArgs) -> Result<()> {
     if let Some(path) = &args.orders_out {
         let mut out = String::new();
         for s in &searches {
-            let rows = &s.rows[..s.rows.len().min(LEARNED_ROWS)];
-            let order = model.order(&s.searched, rows);
+            let rows = &s.rows[..s.rows.len().min(args.rows)];
+            let order = model.order_first(&s.searched, rows, args.rows);
             let line = serde_json::json!({
                 "suite": s.suite, "half": s.half, "query": s.query, "order": order,
             });
@@ -196,7 +203,7 @@ pub fn run(args: TrainRankArgs) -> Result<()> {
         }
         std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))?;
     }
-    print!("{}", report(&model, &searches));
+    print!("{}", report(&model, &searches, args.rows));
     Ok(())
 }
 
@@ -228,9 +235,9 @@ fn cross_validate(half: &[&Written], folds: usize, options: TrainOptions) -> Res
             .collect();
         let model = train(&training(&trained), options);
         for (_, s) in judged {
-            graded.extend(ndcg(&model, s));
+            graded.extend(ndcg(&model, s, options.rows));
             if !s.expected.is_empty() {
-                let (b, l) = ranks(&model, s);
+                let (b, l) = ranks(&model, s, options.rows);
                 base.push(b);
                 learned.push(l);
             }
@@ -272,41 +279,48 @@ fn ndcg_column(graded: &[(f64, f64)]) -> String {
     )
 }
 
-/// NDCG of the graded rows within the first [`LEARNED_ROWS`], in the
-/// order listed and in the order `model` gives; `None` for a search
+/// NDCG@[`LEARNED_ROWS`] of the graded rows among the first `depth`, in
+/// the order listed and in the order `model` gives; `None` for a search
 /// whose rows are not graded or all graded 0.
-fn ndcg(model: &Model, search: &Written) -> Option<(f64, f64)> {
-    let rows = &search.rows[..search.rows.len().min(LEARNED_ROWS)];
+fn ndcg(model: &Model, search: &Written, depth: usize) -> Option<(f64, f64)> {
+    let rows = &search.rows[..search.rows.len().min(depth)];
     if rows.iter().all(|r| r.grade.is_none()) {
         return None;
     }
     let gains: Vec<f64> = rows.iter().map(gain).collect();
-    let best = ideal_dcg(&gains);
+    let mut best_gains = gains.clone();
+    best_gains.sort_by(|a, b| b.total_cmp(a));
+    best_gains.truncate(LEARNED_ROWS);
+    let best = ideal_dcg(&best_gains);
     if best <= 0.0 {
         return None;
     }
     let dcg = |order: &mut dyn Iterator<Item = usize>| -> f64 {
-        order.enumerate().map(|(p, i)| gains[i] * discount(p)).sum()
+        order
+            .take(LEARNED_ROWS)
+            .enumerate()
+            .map(|(p, i)| gains[i] * discount(p))
+            .sum()
     };
     let base = dcg(&mut (0..rows.len()));
-    let learned = dcg(&mut model.order(&search.searched, rows).into_iter());
+    let learned = dcg(&mut model.order_first(&search.searched, rows, depth).into_iter());
     Some((base / best, learned / best))
 }
 
-/// The rank of the first labelled row within the first [`LEARNED_ROWS`],
-/// in the order listed and in the order `model` gives.
-fn ranks(model: &Model, search: &Written) -> (Option<usize>, Option<usize>) {
-    let rows = &search.rows[..search.rows.len().min(LEARNED_ROWS)];
+/// The rank of the first labelled row within the first `depth`, in the
+/// order listed and in the order `model` gives.
+fn ranks(model: &Model, search: &Written, depth: usize) -> (Option<usize>, Option<usize>) {
+    let rows = &search.rows[..search.rows.len().min(depth)];
     let base = rows.iter().position(|r| r.label > 0).map(|i| i + 1);
     let learned = model
-        .order(&search.searched, rows)
+        .order_first(&search.searched, rows, depth)
         .iter()
         .position(|&i| rows[i].label > 0)
         .map(|i| i + 1);
     (base, learned)
 }
 
-fn report(model: &Model, searches: &[Written]) -> String {
+fn report(model: &Model, searches: &[Written], depth: usize) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -326,9 +340,9 @@ fn report(model: &Model, searches: &[Written]) -> String {
             };
             let (base, learned): (Vec<_>, Vec<_>) = judged()
                 .filter(|s| !s.expected.is_empty())
-                .map(|s| ranks(model, s))
+                .map(|s| ranks(model, s, depth))
                 .unzip();
-            let graded: Vec<(f64, f64)> = judged().filter_map(|s| ndcg(model, s)).collect();
+            let graded: Vec<(f64, f64)> = judged().filter_map(|s| ndcg(model, s, depth)).collect();
             if base.is_empty() && graded.is_empty() {
                 continue;
             }

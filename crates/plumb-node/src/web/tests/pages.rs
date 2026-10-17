@@ -497,6 +497,7 @@ fn plugins_are_shown_what_articles_are_about_and_mark_them_up() {
         site_search: None,
         spelling: None,
         meant: None,
+        sites_ordered: false,
     };
     let shown = shown_results(&results, 10);
     assert_eq!(shown.len(), 2);

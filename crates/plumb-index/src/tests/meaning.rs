@@ -1298,3 +1298,48 @@ fn a_year_is_not_asked_of_a_site() {
     assert!(year.contains(&"hurricanes.example".to_string()), "{year:?}");
     assert!(!year.contains(&"atlantic.example".to_string()), "{year:?}");
 }
+
+#[test]
+fn the_site_model_leaves_a_search_for_the_news_alone() {
+    let records = vec![
+        site(
+            "nytimes.com",
+            Some("The New York Times"),
+            Some("Breaking news, world news and multimedia."),
+            &["The New York Times"],
+            &[],
+            popular(30, 20_000),
+        ),
+        site(
+            "newsexample.org",
+            Some("News example"),
+            Some("Examples of news stories."),
+            &[],
+            &[],
+            ranked(300_000, 5),
+        ),
+    ];
+    let (_dir, searcher) = build(&records);
+    let meaning = near_and_far(&[("newsexample.org", 0.6)], &[("nytimes.com", 0.3)]);
+    let site_model = RankConfig {
+        learned_sites: true,
+        ..RankConfig::default()
+    };
+    let ordered = |query: &str| {
+        searcher
+            .search_meaning(
+                query,
+                10,
+                &site_model,
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap()
+            .sites_ordered
+    };
+    // Its news sites are listed by popularity and home country, with
+    // nothing of the query for the model to read; the row model orders
+    // them as it did before.
+    assert!(!ordered("latest news"));
+    assert!(ordered("news examples"));
+}

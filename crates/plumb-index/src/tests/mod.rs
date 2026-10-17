@@ -3,6 +3,7 @@
 
 mod brands_and_copies;
 mod building;
+mod candidates;
 mod golden;
 mod junk;
 mod kinds_and_filters;

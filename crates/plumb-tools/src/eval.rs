@@ -29,6 +29,7 @@ use tracing::info;
 use crate::cli::{EvalArgs, Half};
 use plumb_node::meaning::MeaningIndex;
 
+mod candidates;
 pub mod contracts;
 mod rerank;
 
@@ -257,6 +258,9 @@ pub fn run(args: EvalArgs) -> Result<()> {
         None => Vec::new(),
     };
     let setup = open_setup(&args)?;
+    if let Some(path) = &args.candidates_out {
+        return candidates::write(&args, &setup, &suites, &cfg, path);
+    }
     if args.recall {
         for suite in &suites {
             if suites.len() > 1 {
@@ -710,6 +714,12 @@ fn evaluate(
     } else {
         args.limit
     };
+    // --features-out writes the hand-made order of sites the site model
+    // is trained to improve, as it does the rows (below).
+    let search_cfg = plumb_index::RankConfig {
+        learned_sites: cfg.learned_sites && features.is_none(),
+        ..*cfg
+    };
 
     let mut ranks = Vec::with_capacity(queries.len());
     for q in queries {
@@ -733,7 +743,7 @@ fn evaluate(
                 .search_meaning(
                     query,
                     fetched,
-                    cfg,
+                    &search_cfg,
                     &options,
                     query_meaning
                         .as_ref()
@@ -834,10 +844,11 @@ fn evaluate(
                 let mut placed = place_pages(&searched, &lifted, found);
                 // --features-out writes the hand-made order the learned
                 // ranking is trained to improve.
-                if cfg.learned && features.is_none() {
-                    plumb_index::learned::reorder(
-                        plumb_index::learned::Model::builtin(),
+                if features.is_none() {
+                    plumb_index::learned::reorder_results(
+                        cfg,
                         &searched,
+                        results.sites_ordered,
                         &mut lifted,
                         &mut placed,
                     );
@@ -1263,7 +1274,8 @@ fn listed_with_pages(hits: &[Hit], pages: Vec<PlacedPage>) -> Vec<Vec<String>> {
     listed
 }
 
-/// Most listed rows of a query `--features-out` writes.
+/// Most listed rows of a query `--features-out` writes, unless more sites
+/// were asked for (`--limit`), to train a model that reads deeper.
 const FEATURE_ROWS: usize = 30;
 
 /// One query's listed rows with everything that ranked them, for
@@ -1341,7 +1353,7 @@ fn feature_rows(
                 row
             }),
     );
-    rows.truncate(FEATURE_ROWS);
+    rows.truncate(FEATURE_ROWS.max(hits.len()));
     json!({
         "line": q.line,
         "query": q.query,

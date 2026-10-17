@@ -422,6 +422,7 @@ fn an_article_the_query_names_gets_an_info_box() {
         site_search: None,
         spelling: None,
         meant: None,
+        sites_ordered: false,
     };
     let page = render_results(
         "marie curie",
