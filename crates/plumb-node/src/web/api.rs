@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use plumb_core::sites::SiteLine;
 use plumb_index::pages::{place_operator_pages, place_pages};
-use plumb_index::{Hit, SearchResults};
+use plumb_index::{Hit, SearchResults, SiteSearch, Spelling};
 use serde::Serialize;
 use tracing::error;
 
@@ -21,6 +21,7 @@ use super::search::{
     shown_results,
 };
 use super::{answers, mcp, places, AppState};
+use crate::assembly::{PageItem, Row};
 use crate::news::Recent;
 use crate::plugins::PluginResults;
 
@@ -168,24 +169,23 @@ pub(crate) async fn api_search(
                 answer: extras.answer.as_ref(),
                 profile: extras.profile.as_ref(),
             };
-            let mut limited = SearchResults {
-                site_search: results.site_search.clone(),
-                spelling: results.spelling.clone(),
-                ..Default::default()
-            };
+            let (mut hits, mut pages) = (Vec::new(), Vec::new());
             for row in &assembled.rows {
                 match row {
-                    crate::assembly::Row::Site { site, pages } => {
-                        limited.hits.push((*site).clone());
-                        limited.pages.extend(pages.iter().map(|p| (**p).clone()));
+                    Row::Site { site, pages: under } => {
+                        hits.push(*site);
+                        pages.extend(under.iter().map(|page| PageItem::placed(page)));
                     }
-                    crate::assembly::Row::Page { page } => limited.pages.push((*page).clone()),
+                    Row::Page { page } => pages.push(PageItem::placed(page)),
                 }
             }
             let body = FullResults {
                 assembled,
                 recent,
-                results: &limited,
+                hits,
+                pages,
+                site_search: results.site_search.as_ref(),
+                spelling: results.spelling.as_ref(),
                 answer: extras.answer.clone(),
                 profile: extras.profile.clone(),
                 info,
@@ -247,14 +247,21 @@ pub(crate) async fn api_recent(
 }
 
 /// `/api/search?full=1`: the results, and the instant answer and info box
-/// the results page shows with them.
+/// the results page shows with them. `hits` to `spelling` are the
+/// members of a [`SearchResults`] of the rows listed, each page as its
+/// item ([`PageItem`]).
 #[derive(Serialize)]
 struct FullResults<'a> {
     assembled: crate::assembly::Assembled<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recent: Option<Recent>,
-    #[serde(flatten)]
-    results: &'a SearchResults,
+    hits: Vec<&'a Hit>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pages: Vec<PageItem<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    site_search: Option<&'a SiteSearch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spelling: Option<&'a Spelling>,
     #[serde(skip_serializing_if = "Option::is_none")]
     answer: Option<plumb_answer::Answer>,
     #[serde(skip_serializing_if = "Option::is_none")]

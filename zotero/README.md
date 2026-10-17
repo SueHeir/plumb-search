@@ -73,12 +73,26 @@ Searches go to the node you set and nowhere else; plumbsearch.org keeps no acces
 | Search | Request |
 | --- | --- |
 | Everything | `GET <node>/api/search?q=<query>&limit=<25, 50 or 100>&full=1` |
-| Papers only | `GET <node>/api/search?q=<query>&limit=<n>&kind=paper` |
+| Papers only | `GET <node>/api/search?q=<query>&limit=<n>&kind=paper&full=1` |
 
 `results()` reads the rows in the node's order, each address once:
 
-1. `assembled.rows`, from `full=1`. A `site` row is a site result, followed by its own `pages`; a `page` row is a page placed among the sites. Each page's fields (`set`, `url`, `title`, `description`, `lead`, `paper`, `package`) are under its `page`.
+1. `assembled.rows`, from `full=1`. A `site` row is a site result, followed by its own `pages`; a `page` row is a page placed among the sites.
 2. Without `assembled`, `pages` and then `hits`. A paper search answers with `pages` alone.
+
+Each page is its `item` of Plumb's data format, with the `set` it came from beside it ([docs/searching.md](../docs/searching.md#what-comes-back)). Nodes up to 0.4.0 give the page's own members under `page` instead, in a paper search with `full=1` too. `readItem()` and `readPage()` read the same values of either:
+
+| Value | Of an item | Of a node's `page` before items |
+| --- | --- | --- |
+| Address, title | `url`, `title` | `url`, `title` |
+| The site the page is about | Its `about` edge to `site:<domain>` (the item's own `site` is the site its address is on) | `site` |
+| Description | `about` | `description` |
+| An article's first sentences | `text` | `lead` |
+| Its page set | `set`, beside the item | `set` |
+| DOI, arXiv ID | `ids.doi`, `ids.arxiv` | `paper.doi`, `paper.arxiv_id` |
+| A paper's date | `published`, or the year alone in `fields.paper.publication_year` | `paper.publication_date`, or `paper.publication_year` |
+| Venue, authors | `fields.venue`, `fields.authors` | `paper.venue`, `paper.authors` |
+| Version, release date, license | `fields.package.version`, `released`, `license` | `package.version`, `released`, `license` |
 
 The page's `set` gives a result's kind: `wikipedia-*` is an article, `papers` a paper, `books` a book, and so on (`KINDS`). `listed()` counts the rows, and **More results** shows when the node listed as many as it was asked for. A 503 answer means the node is still building its index.
 
@@ -97,7 +111,7 @@ Only `http` and `https` addresses are kept, and the search window sets every tit
 | [prefs.js](prefs.js) | The settings' defaults |
 | [locale/en-US/plumb-search.ftl](locale/en-US/plumb-search.ftl) | Every string the plugin shows |
 | [manifest.json](manifest.json) | Its id, `plumb-search@plumbsearch.org`, version and the Zotero versions it runs on |
-| [test/plumb.test.js](test/plumb.test.js) | Tests of `plumb.js`, on answers from plumbsearch.org in [test/fixtures/](test/fixtures), cut to the fields the plugin reads |
+| [test/plumb.test.js](test/plumb.test.js) | Tests of `plumb.js`, on answers from plumbsearch.org in [test/fixtures/](test/fixtures), cut to the fields the plugin reads, and on the answers plumb-node's [pages_golden.txt](../crates/plumb-node/src/node/tests/pages_golden.txt) holds, with pages as items and as nodes gave them before (`golden-items.json`, `golden-pages.json`) |
 
 With Node.js 18 or newer, from the repository root:
 
