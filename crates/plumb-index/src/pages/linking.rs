@@ -24,10 +24,24 @@ use tantivy::{DocAddress, Searcher, TantivyDocument, Term};
 use super::scoring::{scoped_query, Described};
 use super::sites::{base_title, short_titles, title_qualifier};
 use super::{
-    Page, PageHit, PageSearcher, ASKING_WORDS, ENTITY_MATCH, MEANT_READS, MIN_PARTIAL_SCORE,
-    POPULARITY_SHARE, TITLE_INSIDE_CANDIDATES,
+    Page, PageHit, PageSearcher, ASKING_WORDS, DOCS_SET, ENTITY_MATCH, GITHUB_SET, MEANT_READS,
+    MIN_PARTIAL_SCORE, PACKAGES_SET, POPULARITY_SHARE, STACKEXCHANGE_SET, STACKOVERFLOW_SET,
+    TITLE_INSIDE_CANDIDATES,
 };
 use crate::analysis;
+
+/// Sets whose pages meaning lists only when words found a page of one of
+/// them too, so the search is about code or asks a question. Their short
+/// titles stood nearest many searches about something else on hpc:
+/// "einwohnerzahl tokio" listed tokio-rs/tokio, "cequ" ceil(3), "burger
+/// kng" a repository.
+const MEANT_WITH_WORDS: [&str; 5] = [
+    DOCS_SET,
+    GITHUB_SET,
+    PACKAGES_SET,
+    STACKOVERFLOW_SET,
+    STACKEXCHANGE_SET,
+];
 
 impl PageSearcher {
     /// The articles within `scope` that parts of the query `words` mean,
@@ -236,7 +250,8 @@ impl PageSearcher {
     /// the first sites. Words found it too when it is in `found`: it is
     /// then listed as they scored it, or as meant when only meaning lists
     /// it. Nothing is added when a page found is named by the whole query
-    /// or answers it whole, as words find those better. A page only
+    /// or answers it whole, as words find those better, and a page of
+    /// [`MEANT_WITH_WORDS`] only when words found one too. A page only
     /// meaning found is never placed under its site. Callers check the
     /// searcher's options ([`super::options_allow`]) after, as for any
     /// page found.
@@ -244,14 +259,17 @@ impl PageSearcher {
         if found.iter().any(|hit| hit.named || hit.whole) {
             return Ok(());
         }
+        let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
+        let about_code = found.iter().any(|hit| with_words(&hit.page));
         for url in urls {
             let hit = match found.iter().position(|hit| hit.page.url == *url) {
                 Some(at) if found[at].score >= MIN_PARTIAL_SCORE => return Ok(()),
                 Some(at) => found.remove(at),
                 None => {
                     // The next nearest stands in for one the index lacks.
-                    let Some(mut hit) = self.page_at(url)?.filter(|hit| hit.page.url == *url)
-                    else {
+                    let Some(mut hit) = self.page_at(url)?.filter(|hit| {
+                        hit.page.url == *url && (about_code || !with_words(&hit.page))
+                    }) else {
                         continue;
                     };
                     // Found by meaning alone, it is listed on its own and
