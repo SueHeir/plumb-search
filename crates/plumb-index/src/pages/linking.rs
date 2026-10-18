@@ -9,9 +9,9 @@
 //! says another word of the query or the part is the article's plain title
 //! and has what the query is most about.
 //!
-//! A node with article vectors also adds the article nearest the whole
-//! query in meaning ([`PageSearcher::add_meant`]): "micro naps" means
-//! Microsleep, "dextocardia" Dextrocardia, which no word names.
+//! A node with page vectors also adds the page nearest the whole query in
+//! meaning ([`PageSearcher::add_meant`]): "micro naps" means Microsleep,
+//! "dextocardia" Dextrocardia, which no word names.
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,10 +24,49 @@ use tantivy::{DocAddress, Searcher, TantivyDocument, Term};
 use super::scoring::{scoped_query, Described};
 use super::sites::{base_title, short_titles, title_qualifier};
 use super::{
-    Page, PageHit, PageSearcher, ASKING_WORDS, ENTITY_MATCH, MEANT_READS, MIN_PARTIAL_SCORE,
-    POPULARITY_SHARE, TITLE_INSIDE_CANDIDATES,
+    Page, PageHit, PageSearcher, ASKING_WORDS, DOCS_SET, ENTITY_MATCH, GITHUB_SET, MEANT_READS,
+    MIN_PARTIAL_SCORE, PACKAGES_SET, POPULARITY_SHARE, STACKEXCHANGE_SET, STACKOVERFLOW_SET,
+    TITLE_INSIDE_CANDIDATES,
 };
-use crate::analysis;
+use crate::{analysis, MeantPage};
+
+/// Sets whose pages meaning lists only when words found a page of one of
+/// them too, so the search is about code or asks a question. Their short
+/// titles stood nearest many searches about something else on hpc:
+/// "einwohnerzahl tokio" listed tokio-rs/tokio, "cequ" ceil(3), "burger
+/// kng" a repository.
+const MEANT_WITH_WORDS: [&str; 5] = [
+    DOCS_SET,
+    GITHUB_SET,
+    PACKAGES_SET,
+    STACKOVERFLOW_SET,
+    STACKEXCHANGE_SET,
+];
+
+/// Least cosine at which meaning lists a page that is not an article. On
+/// hpc's review searches, of the books, papers, songs, films, site pages,
+/// Wiktionary entries and Wikidata items that would have taken the place,
+/// 86 of 95 below 0.75 were wrong and none right ("harvard" a page on
+/// chessprogramming.org), while 24 of 44 from 0.85 were what the search
+/// wanted ("levitating by dua lipa", "who dengue fact sheet"), 10 wrong:
+/// a better share than the articles meaning lists.
+const MEANT_OTHER_LEAST: f32 = 0.85;
+
+/// Least popularity ([`PageHit::popularity`]) of an article meaning lists,
+/// about 300 reads in the week the article set counts. Of the articles
+/// #718's file listed for hpc's review and everyday searches, checked by
+/// hand, none read less was right: 8 were wrong ("tesla cincinnati ohio"
+/// to Diaz v. Tesla, Inc.) and 3 on the topic.
+const MEANT_ARTICLE_LEAST: f32 = 0.36;
+
+/// Least sum of an article's cosine, how far it stands out of its set
+/// ([`MeantPage::gap`]) and popularity for meaning to list it. Each tells
+/// right from wrong only somewhat, and wrong articles were read about as
+/// much as the right ones that mattered; together they tell better. Of
+/// the articles #718's file listed for hpc's review and everyday searches,
+/// checked by hand, those under 1.15 were 28 wrong ("24 and me login" to
+/// 24 (number)), 7 on the topic and 3 right.
+const MEANT_ARTICLE_SUM: f32 = 1.15;
 
 impl PageSearcher {
     /// The articles within `scope` that parts of the query `words` mean,
@@ -229,54 +268,99 @@ impl PageSearcher {
         Ok(most.filter(|_| !more))
     }
 
-    /// Adds to `found` (best first) the article at `url`, the one nearest
-    /// the query in meaning ([`crate::Meaning::nearest_page`]), scored as a
-    /// linked article is ([`ENTITY_MATCH`]) and marked [`PageHit::meant`],
-    /// so it comes after the first sites. Words found it too when it is in
-    /// `found`: it is then listed as they scored it, or as meant when only
-    /// meaning lists it. Nothing is added when a page found is named by the
-    /// whole query or answers it whole, as words find those better. An
-    /// article only meaning found is never placed under its site. Callers
-    /// check the searcher's options ([`super::options_allow`]) after, as
-    /// for any page found.
-    pub fn add_meant(&self, url: Option<&str>, found: &mut Vec<PageHit>) -> Result<()> {
-        let Some(url) = url else {
-            return Ok(());
-        };
+    /// Adds to `found` (best first) the first page of `meant` the index
+    /// holds, the pages nearest the query in meaning with their cosines
+    /// ([`crate::Meaning::nearest_pages`]), scored as a linked article is
+    /// ([`ENTITY_MATCH`]) and marked [`PageHit::meant`], so it comes after
+    /// the first sites. Words found it too when it is in `found`: it is
+    /// then listed as they scored it, or as meant when only meaning lists
+    /// it, though a page they list that is not an article gives way to the
+    /// next. Nothing is added when a page found is named by the whole
+    /// query or answers it whole, as words find those better, a page of
+    /// [`MEANT_WITH_WORDS`] only when words found one too, an article only
+    /// from [`MEANT_ARTICLE_LEAST`] and [`MEANT_ARTICLE_SUM`], and any page
+    /// that is not an article, those of [`MEANT_WITH_WORDS`] too, only
+    /// from [`MEANT_OTHER_LEAST`] and after the pages words list. A page
+    /// that would score too little to be placed ([`MIN_PARTIAL_SCORE`])
+    /// gives way to the next. A page only meaning found is never placed
+    /// under its site. Callers check the searcher's options
+    /// ([`super::options_allow`]) after, as for any page found.
+    pub fn add_meant(&self, meant: &[MeantPage], found: &mut Vec<PageHit>) -> Result<()> {
         if found.iter().any(|hit| hit.named || hit.whole) {
             return Ok(());
         }
-        let hit = match found.iter().position(|hit| hit.page.url == url) {
-            Some(at) if found[at].score >= MIN_PARTIAL_SCORE => return Ok(()),
-            Some(at) => found.remove(at),
-            None => {
-                let Some(mut hit) = self
-                    .page_at(url)?
-                    .filter(|hit| hit.page.url == url && hit.page.is_article())
-                else {
-                    return Ok(());
-                };
-                // Found by meaning alone, it is listed on its own and never
-                // under its site, where it would lift that site in the
-                // learned order: "spectrum jacksonville nc" put
-                // spectrumcentercharlotte.com third under Spectrum Center.
-                hit.page.site = None;
-                hit.score = 0.0;
-                (hit.named, hit.whole) = (false, false);
-                hit
-            }
-        };
-        let weight = 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity;
-        let hit = PageHit {
-            score: hit.score.max(ENTITY_MATCH * weight),
-            meant: true,
-            ..hit
-        };
-        let at = found
-            .iter()
-            .position(|kept| kept.score < hit.score)
-            .unwrap_or(found.len());
-        found.insert(at, hit);
+        let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
+        let about_code = found.iter().any(|hit| with_words(&hit.page));
+        let weight = |hit: &PageHit| 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity;
+        for MeantPage { url, cosine, gap } in meant {
+            // An article counts when it is read enough and near enough,
+            // another page when it is near enough. Either must score
+            // enough as meant for placing to keep it, or the search would
+            // be left with none: a paper cited a few times scores too
+            // little however near it is.
+            let counts = |hit: &PageHit| {
+                let kept = ENTITY_MATCH * weight(hit) >= MIN_PARTIAL_SCORE;
+                kept && if hit.page.is_article() {
+                    hit.popularity >= MEANT_ARTICLE_LEAST
+                        && cosine + gap + hit.popularity >= MEANT_ARTICLE_SUM
+                } else {
+                    *cosine >= MEANT_OTHER_LEAST
+                }
+            };
+            let hit = match found.iter().position(|hit| hit.page.url == *url) {
+                Some(at) => {
+                    let listed = found[at].score >= MIN_PARTIAL_SCORE;
+                    if listed && found[at].page.is_article() {
+                        return Ok(());
+                    }
+                    // A page of another kind words list, or one that does
+                    // not count, does not keep out the next nearest: on hpc
+                    // a question words listed kept Robinhood Markets from
+                    // "robin hood stocks app".
+                    if listed || !counts(&found[at]) {
+                        continue;
+                    }
+                    found.remove(at)
+                }
+                None => {
+                    // The next nearest stands in for one the index lacks.
+                    let Some(mut hit) = self.page_at(url)?.filter(|hit| {
+                        hit.page.url == *url
+                            && counts(hit)
+                            && (about_code || !with_words(&hit.page))
+                    }) else {
+                        continue;
+                    };
+                    // Found by meaning alone, it is listed on its own and
+                    // never under its site, where it would lift that site
+                    // in the learned order: "spectrum jacksonville nc" put
+                    // spectrumcentercharlotte.com third under Spectrum
+                    // Center.
+                    hit.page.site = None;
+                    hit.score = 0.0;
+                    (hit.named, hit.whole) = (false, false);
+                    hit
+                }
+            };
+            let hit = PageHit {
+                score: hit.score.max(ENTITY_MATCH * weight(&hit)),
+                meant: true,
+                ..hit
+            };
+            // A page that is not an article takes no place of one words
+            // list: on hpc the isbn gem pushed out the Stack Overflow
+            // question "convert ISBN-10 to ISBN-13" wanted, and certbot's
+            // repository a Server Fault question on getting a certificate.
+            let article = hit.page.is_article();
+            let at = found
+                .iter()
+                .position(|kept| {
+                    kept.score < hit.score && (article || kept.score < MIN_PARTIAL_SCORE)
+                })
+                .unwrap_or(found.len());
+            found.insert(at, hit);
+            return Ok(());
+        }
         Ok(())
     }
 

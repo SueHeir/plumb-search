@@ -246,7 +246,7 @@ impl Searcher {
                 results.hits.truncate(limit);
                 results.sites_ordered = true;
             }
-            results.meant = meaning.and_then(|meaning| meaning.nearest_page());
+            results.meant = meaning.map_or_else(Vec::new, |meaning| meaning.nearest_pages());
             if cfg.health_authorities {
                 health::authorities_first(
                     query_text,

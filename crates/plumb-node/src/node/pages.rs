@@ -1247,8 +1247,8 @@ pub(super) fn add_pages(
             {
                 warn!("searching pages in the other number: {err:#}");
             }
-            if let Err(err) = searcher.add_meant(results.meant.as_deref(), &mut found) {
-                warn!("adding the article nearest in meaning: {err:#}");
+            if let Err(err) = searcher.add_meant(&results.meant, &mut found) {
+                warn!("adding the page nearest in meaning: {err:#}");
             }
             if let Some(wanted) = &wanted {
                 add_wanted(wanted, query, &mut found);

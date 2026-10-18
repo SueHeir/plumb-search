@@ -237,7 +237,7 @@ impl SearchBackend for SongBackend {
             pages: self.pages.clone(),
             site_search: None,
             spelling: None,
-            meant: None,
+            meant: Vec::new(),
             sites_ordered: false,
         })
     }

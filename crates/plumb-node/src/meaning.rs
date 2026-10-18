@@ -16,7 +16,7 @@ use plumb_embed::{
     site_text_words, text_hash, Embedder, ModelId, Vectors, MODEL_FILES, MODEL_NAME,
 };
 use plumb_format::Item;
-use plumb_index::Meaning;
+use plumb_index::{Meaning, MeantPage};
 use tracing::{info, warn};
 
 use crate::cli::{MeaningArgs, QueryInstruction};
@@ -33,10 +33,10 @@ const NEAREST: usize = 1_000;
 /// (median) where an unrelated site led, 0.15 where meaning found the
 /// right one.
 const LEAST_SPREAD: f32 = 0.15;
-/// Articles nearest a query in meaning looked at for the one to list
-/// ([`nearest_page`]).
+/// Pages of each set nearest a query in meaning looked at for the one to
+/// list ([`nearest_page`]).
 const NEAREST_PAGES: usize = 10;
-/// How far the nearest article's cosine must stand above the last of the
+/// How far the nearest page's cosine must stand above the last of the
 /// [`NEAREST_PAGES`] for it to be listed. As with sites, the raw cosine
 /// can't tell a right article from one nobody asked for. How far the
 /// nearest stood out could, somewhat: of 7,902 searches on hpc, this kept
@@ -62,9 +62,9 @@ pub fn vectors_set(model: &ModelId) -> String {
 pub struct MeaningIndex {
     embedder: Embedder,
     vectors: RwLock<Vectors>,
-    /// Vectors of Wikipedia articles by address (`plumb-tools
-    /// embed-pages`), when given.
-    pages: Option<Vectors>,
+    /// Vectors of pages by address (`plumb-tools embed-pages`), a set of
+    /// pages to each, when given.
+    pages: Vec<Vectors>,
     instruction: QueryInstruction,
 }
 
@@ -91,7 +91,7 @@ impl MeaningIndex {
         MeaningIndex {
             embedder,
             vectors: RwLock::new(vectors),
-            pages: None,
+            pages: Vec::new(),
             instruction: QueryInstruction::default(),
         }
     }
@@ -103,26 +103,41 @@ impl MeaningIndex {
         };
         let mut meaning = Self::open(model, vectors)?;
         meaning.instruction = args.query_instruction;
-        if let Some(pages) = &args.page_vectors {
+        for pages in &args.page_vectors {
             meaning.load_pages(pages)?;
         }
         Ok(Some(meaning))
     }
 
-    /// Takes the article vectors in `path` too, which this model must have
-    /// made, so searches list the article nearest them in meaning. Every
-    /// search reads the whole file, about 470 bytes an article (230 MB for
-    /// the 500,000 most read), so it stays in memory.
+    /// Takes the page vectors in `path` too, a file or a directory of
+    /// `.bin` files, which this model must have made, so searches list a
+    /// page nearest them in meaning. Every search reads every file, about
+    /// 470 bytes a page (230 MB for the 500,000 most-read articles, 6.2 GB
+    /// for all 13.3M pages), so they stay in memory. One file that can't be
+    /// used keeps them all out, so a node never searches part of a
+    /// directory unawares.
     pub fn load_pages(&mut self, path: &Path) -> Result<()> {
-        let pages = Vectors::load(path)?;
-        if !made_by(&pages, &self.embedder) {
-            bail!(
-                "the article vectors in {} were made by another model; run plumb-tools embed-pages again",
-                path.display()
-            );
+        let files = page_vector_files(path)?;
+        if files.is_empty() {
+            bail!("no .bin vectors files in {}", path.display());
         }
-        info!("loaded {} article vectors", pages.len());
-        self.pages = Some(pages);
+        let mut loaded = Vec::with_capacity(files.len());
+        for file in files {
+            let pages = Vectors::load(&file)?;
+            if !made_by(&pages, &self.embedder) {
+                bail!(
+                    "the page vectors in {} were made by another model; run plumb-tools embed-pages again",
+                    file.display()
+                );
+            }
+            info!(
+                "loaded {} page vectors from {}",
+                pages.len(),
+                file.display()
+            );
+            loaded.push(pages);
+        }
+        self.pages.extend(loaded);
         Ok(())
     }
 
@@ -184,11 +199,8 @@ impl MeaningIndex {
         };
         // Before taking the sites' vectors, which the embedding job may be
         // waiting to add to.
-        let page = self
-            .pages
-            .as_ref()
-            .and_then(|pages| nearest_page(pages, &query[0]));
-        Some(QueryMeaning::new(self.read(), query, instruction, page))
+        let pages = nearest_pages(&self.pages, &query[0]);
+        Some(QueryMeaning::new(self.read(), query, instruction, pages))
     }
 }
 
@@ -225,8 +237,8 @@ impl SharedMeaning {
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
     nearest: Vec<String>,
-    /// The article nearest the query ([`nearest_page`]).
-    page: Option<String>,
+    /// The pages nearest the query ([`nearest_pages`]).
+    pages: Vec<MeantPage>,
     /// The query's vectors (one, or as it is and after the instruction)
     /// with the cosines of the nearest and of the last of the nearest sites.
     spreads: Vec<Spread>,
@@ -259,7 +271,7 @@ impl<'a> QueryMeaning<'a> {
         vectors: RwLockReadGuard<'a, Vectors>,
         query: Vec<Vec<i8>>,
         combine: QueryInstruction,
-        page: Option<String>,
+        pages: Vec<MeantPage>,
     ) -> Self {
         let mut nearest = None;
         let spreads = query
@@ -288,7 +300,7 @@ impl<'a> QueryMeaning<'a> {
         QueryMeaning {
             vectors,
             nearest: nearest.unwrap_or_default(),
-            page,
+            pages,
             spreads,
             combine,
         }
@@ -304,8 +316,8 @@ impl Meaning for QueryMeaning<'_> {
         self.nearest.clone()
     }
 
-    fn nearest_page(&self) -> Option<String> {
-        self.page.clone()
+    fn nearest_pages(&self) -> Vec<MeantPage> {
+        self.pages.clone()
     }
 
     fn plain_closeness(&self, domain: &str) -> Option<Option<f32>> {
@@ -331,20 +343,61 @@ impl Meaning for QueryMeaning<'_> {
     }
 }
 
-/// The address of the article in `pages` nearest `query`, the first of a
-/// query's vectors as the nearest sites are (after the instruction, as
-/// nodes embed searches), when it stands [`LEAST_PAGE_GAP`] above the
-/// last of the [`NEAREST_PAGES`].
-fn nearest_page(pages: &Vectors, query: &[i8]) -> Option<String> {
+/// The nearest page of each of `sets` that stands out ([`nearest_page`]),
+/// nearest first. The sets are read at once, as each search reads them
+/// all.
+fn nearest_pages(sets: &[Vectors], query: &[i8]) -> Vec<MeantPage> {
+    let mut found: Vec<MeantPage> = match sets {
+        [] => Vec::new(),
+        [pages] => nearest_page(pages, query).into_iter().collect(),
+        _ => std::thread::scope(|scope| {
+            let reading: Vec<_> = sets
+                .iter()
+                .map(|pages| scope.spawn(|| nearest_page(pages, query)))
+                .collect();
+            reading
+                .into_iter()
+                .filter_map(|reading| reading.join().ok().flatten())
+                .collect()
+        }),
+    };
+    found.sort_by(|a, b| b.cosine.total_cmp(&a.cosine));
+    found
+}
+
+/// The page in `pages` nearest `query`, the first of a query's vectors as
+/// the nearest sites are (after the instruction, as nodes embed searches),
+/// when it stands [`LEAST_PAGE_GAP`] above the last of the
+/// [`NEAREST_PAGES`].
+fn nearest_page(pages: &Vectors, query: &[i8]) -> Option<MeantPage> {
     let found = pages.nearest(query, NEAREST_PAGES);
     match (found.first(), found.last()) {
         (Some(&(url, best)), Some(&(_, last)))
             if found.len() == NEAREST_PAGES && best - last >= LEAST_PAGE_GAP =>
         {
-            Some(url.to_string())
+            Some(MeantPage {
+                url: url.to_string(),
+                cosine: best,
+                gap: best - last,
+            })
         }
         _ => None,
     }
+}
+
+/// The page vectors files `path` names: itself, or the `.bin` files in it
+/// when it is a directory, in name order.
+pub fn page_vector_files(path: &Path) -> Result<Vec<PathBuf>> {
+    if !path.is_dir() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let mut files = std::fs::read_dir(path)
+        .with_context(|| format!("listing {}", path.display()))?
+        .map(|entry| Ok(entry?.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    files.retain(|file| file.extension().is_some_and(|ext| ext == "bin"));
+    files.sort();
+    Ok(files)
 }
 
 /// Loads the model in `dir`.
@@ -791,27 +844,38 @@ mod tests {
     }
 
     #[test]
-    fn the_nearest_article_is_listed_only_when_it_stands_out() {
-        // Ten articles at these cosines to a query pointing along x.
-        let articles = |cosines: &[f32]| {
+    fn the_nearest_page_of_each_set_is_listed_only_when_it_stands_out() {
+        // Pages of `set` at these cosines to a query pointing along x.
+        let pages = |set: &str, cosines: &[f32]| {
             let mut pages = Vectors::new([0; 32], 2);
             for (n, cosine) in cosines.iter().enumerate() {
                 let sine = (1.0 - cosine * cosine).sqrt();
                 let vector = [(cosine * 127.0) as i8, (sine * 127.0) as i8];
-                let url = format!("https://en.wikipedia.org/wiki/{n}");
+                let url = format!("https://{set}/{n}");
                 pages.insert(&url, text_hash(&url), &vector).unwrap();
             }
             pages
         };
-        let nearest = |pages: &Vectors| nearest_page(pages, &[127, 0]);
-        let stands_out = articles(&[1.0, 0.95, 0.94, 0.94, 0.93, 0.93, 0.92, 0.92, 0.91, 0.9]);
-        assert_eq!(
-            nearest(&stands_out).as_deref(),
-            Some("https://en.wikipedia.org/wiki/0")
+        let nearest = |sets: &[Vectors]| -> Vec<String> {
+            let found = nearest_pages(sets, &[127, 0]);
+            found.into_iter().map(|page| page.url).collect()
+        };
+        let stands_out = [1.0, 0.95, 0.94, 0.94, 0.93, 0.93, 0.92, 0.92, 0.91, 0.9];
+        let bunched = [1.0, 0.99, 0.99, 0.98, 0.98, 0.98, 0.98, 0.97, 0.97, 0.97];
+        let farther = [0.9, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8];
+        assert_eq!(nearest(&[pages("a", &stands_out)]), ["https://a/0"]);
+        assert!(nearest(&[pages("a", &bunched)]).is_empty());
+        assert!(
+            nearest(&[pages("a", &[1.0, 0.5])]).is_empty(),
+            "too few to tell"
         );
-        let bunched = articles(&[1.0, 0.99, 0.99, 0.98, 0.98, 0.98, 0.98, 0.97, 0.97, 0.97]);
-        assert_eq!(nearest(&bunched), None);
-        assert_eq!(nearest(&articles(&[1.0, 0.5])), None, "too few to tell");
+        // One from each set that stands out, nearest first.
+        let sets = [
+            pages("far", &farther),
+            pages("bunched", &bunched),
+            pages("near", &stands_out),
+        ];
+        assert_eq!(nearest(&sets), ["https://near/0", "https://far/0"]);
     }
 
     #[test]

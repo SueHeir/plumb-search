@@ -201,7 +201,7 @@ impl SearchBackend for RichSource {
             }],
             site_search: None,
             spelling: None,
-            meant: None,
+            meant: Vec::new(),
             sites_ordered: false,
         })
     }
@@ -639,7 +639,7 @@ impl SearchBackend for Shelves {
                 url: format!("https://{site}/search?q={}", ops.site_terms),
             }),
             spelling: None,
-            meant: None,
+            meant: Vec::new(),
             sites_ordered: false,
         })
     }

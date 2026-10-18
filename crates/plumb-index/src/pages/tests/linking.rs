@@ -125,9 +125,18 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     let mut sleep = article("Microsleep", "Brief episode of sleep", 900_000, &[]);
     sleep.site = Some("c.com".into());
     let url = sleep.url.clone();
+    let meant = [meant_page(&url, 0.8)];
+    let requests = package("pypi", "requests", 100_000);
+    let rare = package("pypi", "tinylib", 10);
+    let trocar = article("Trocar", "Surgical instrument", 10, &[]);
+    let spooner = article("Ryan Spooner", "Canadian ice hockey player", 3_000, &[]);
     let (_dir, s) = searcher(&[
         sleep.clone(),
         article("Napoleon", "French emperor (1769–1821)", 500_000, &[]),
+        requests.clone(),
+        rare.clone(),
+        trocar.clone(),
+        spooner.clone(),
     ]);
     let mut sites: Vec<crate::Hit> = ["a.com", "b.com", "c.com", "d.com", "e.com"]
         .iter()
@@ -138,7 +147,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     // under its site, which it would lift.
     let mut found = s.search("micro naps", 5).unwrap();
     assert!(found.is_empty());
-    s.add_meant(Some(&url), &mut found).unwrap();
+    s.add_meant(&meant, &mut found).unwrap();
     assert_eq!(found.len(), 1);
     assert!(found[0].meant && !found[0].named && !found[0].whole);
     assert!(found[0].score >= MIN_PARTIAL_SCORE);
@@ -163,20 +172,109 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         meant: false,
     };
     let mut found = vec![found_by_words(0.5)];
-    s.add_meant(Some(&url), &mut found).unwrap();
+    s.add_meant(&meant, &mut found).unwrap();
     assert!(found.len() == 1 && found[0].score == 0.5 && !found[0].meant);
     let mut found = vec![found_by_words(0.1)];
-    s.add_meant(Some(&url), &mut found).unwrap();
+    s.add_meant(&meant, &mut found).unwrap();
     assert!(found.len() == 1 && found[0].score >= MIN_PARTIAL_SCORE && found[0].meant);
     // Words find a page the query names better.
     let mut found = s.search("napoleon", 5).unwrap();
     let before: Vec<String> = found.iter().map(|hit| hit.page.url.clone()).collect();
-    s.add_meant(Some(&url), &mut found).unwrap();
+    s.add_meant(&meant, &mut found).unwrap();
     let after: Vec<String> = found.iter().map(|hit| hit.page.url.clone()).collect();
     assert_eq!(after, before);
-    // An address the pages lack adds nothing.
+    // An address the pages lack adds nothing; the next nearest stands in
+    // for it. A package only when words found code too, and as a page that
+    // is not an article, only when it is near.
+    let nowhere = meant_page("https://en.wikipedia.org/wiki/Nowhere", 0.95);
     let mut found = Vec::new();
-    s.add_meant(Some("https://en.wikipedia.org/wiki/Nowhere"), &mut found)
+    s.add_meant(std::slice::from_ref(&nowhere), &mut found)
         .unwrap();
     assert!(found.is_empty());
+    let nearest = [
+        nowhere,
+        meant_page(&requests.url, 0.9),
+        meant_page(&url, 0.8),
+    ];
+    s.add_meant(&nearest, &mut found).unwrap();
+    assert_eq!(titles(&found), ["Microsleep"]);
+    // An article read too little to count gives way too: "traductor" was
+    // not Trocar.
+    let mut found = Vec::new();
+    s.add_meant(
+        &[meant_page(&trocar.url, 0.9), meant_page(&url, 0.8)],
+        &mut found,
+    )
+    .unwrap();
+    assert_eq!(titles(&found), ["Microsleep"]);
+    // So does one read enough but neither near nor standing out much:
+    // "spooner wisc" was not Ryan Spooner either.
+    let weak = crate::MeantPage {
+        gap: 0.05,
+        ..meant_page(&spooner.url, 0.5)
+    };
+    let mut found = Vec::new();
+    s.add_meant(&[weak, meant_page(&url, 0.8)], &mut found)
+        .unwrap();
+    assert_eq!(titles(&found), ["Microsleep"]);
+    let mut found = Vec::new();
+    s.add_meant(&[meant_page(&spooner.url, 0.7)], &mut found)
+        .unwrap();
+    assert_eq!(titles(&found), ["Ryan Spooner"]);
+    let flask = || PageHit {
+        page: package("pypi", "flask", 1_000),
+        score: 0.1,
+        named: false,
+        popularity: 0.1,
+        whole: false,
+        learned: None,
+        meant: false,
+    };
+    let mut found = vec![flask()];
+    s.add_meant(&nearest, &mut found).unwrap();
+    assert_eq!(titles(&found), ["requests", "flask"]);
+    assert!(found[0].meant);
+    // It comes after one words list, though it scores more: the two pages
+    // placing lists are not one of them short.
+    let flask_after = PageHit {
+        score: MIN_PARTIAL_SCORE,
+        ..flask()
+    };
+    assert!(found[0].score > flask_after.score);
+    let mut found = vec![flask_after];
+    s.add_meant(&nearest, &mut found).unwrap();
+    assert_eq!(titles(&found), ["flask", "requests"]);
+    let farther = [meant_page(&requests.url, 0.8), nearest[2].clone()];
+    let mut found = vec![flask()];
+    s.add_meant(&farther, &mut found).unwrap();
+    assert_eq!(titles(&found), ["Microsleep", "flask"]);
+    // Nor does one that would score too little to be placed, however
+    // near: placing would drop it and leave the search with none.
+    let mut found = vec![flask()];
+    s.add_meant(
+        &[meant_page(&rare.url, 0.95), nearest[2].clone()],
+        &mut found,
+    )
+    .unwrap();
+    assert_eq!(titles(&found), ["Microsleep", "flask"]);
+    // Nor does one words list well, near or not: the article follows.
+    let flask_listed = PageHit {
+        score: 0.5,
+        ..flask()
+    };
+    for cosine in [0.8, 0.9] {
+        let mut found = vec![flask_listed.clone()];
+        let listed = [
+            meant_page(&flask_listed.page.url, cosine),
+            nearest[2].clone(),
+        ];
+        s.add_meant(&listed, &mut found).unwrap();
+        assert_eq!(found.len(), 2);
+        assert!(found
+            .iter()
+            .any(|hit| hit.page.title == "Microsleep" && hit.meant));
+        assert!(found
+            .iter()
+            .any(|hit| hit.page.title == "flask" && hit.score == 0.5 && !hit.meant));
+    }
 }

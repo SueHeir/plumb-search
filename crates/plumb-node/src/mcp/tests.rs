@@ -121,7 +121,7 @@ impl SearchBackend for Packages {
             pages,
             site_search: None,
             spelling: None,
-            meant: None,
+            meant: Vec::new(),
             sites_ordered: false,
         })
     }
@@ -212,7 +212,7 @@ fn results(hits: Vec<Hit>, pages: Vec<PlacedPage>) -> SearchResults {
         pages,
         site_search: None,
         spelling: None,
-        meant: None,
+        meant: Vec::new(),
         sites_ordered: false,
     }
 }
