@@ -274,9 +274,11 @@ impl PageSearcher {
         for (url, cosine) in meant {
             let near = |page: &Page| page.is_article() || *cosine >= MEANT_OTHER_LEAST;
             let hit = match found.iter().position(|hit| hit.page.url == *url) {
+                // Too far to count, even when words list it, so it does not
+                // keep out a nearer article.
+                Some(at) if !near(&found[at].page) => continue,
                 Some(at) if found[at].score >= MIN_PARTIAL_SCORE => return Ok(()),
-                Some(at) if near(&found[at].page) => found.remove(at),
-                Some(_) => continue,
+                Some(at) => found.remove(at),
                 None => {
                     // The next nearest stands in for one the index lacks.
                     let Some(mut hit) = self.page_at(url)?.filter(|hit| {

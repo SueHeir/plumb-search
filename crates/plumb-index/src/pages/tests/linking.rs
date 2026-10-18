@@ -205,4 +205,16 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     let mut found = vec![flask()];
     s.add_meant(&farther, &mut found).unwrap();
     assert_eq!(titles(&found), ["Microsleep", "flask"]);
+    // Nor does one words list well stop a nearer article.
+    let flask_listed = PageHit {
+        score: 0.5,
+        ..flask()
+    };
+    let mut found = vec![flask_listed.clone()];
+    let farther = [(flask_listed.page.url.clone(), 0.8), nearest[2].clone()];
+    s.add_meant(&farther, &mut found).unwrap();
+    assert_eq!(found.len(), 2);
+    assert!(found
+        .iter()
+        .any(|hit| hit.page.title == "Microsleep" && hit.meant));
 }
