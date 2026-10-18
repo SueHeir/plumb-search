@@ -1197,10 +1197,13 @@ fn golden_text(dir: &Path, searcher: &PageSearcher) -> String {
             .find(|hit| !hit.named)
             .map(|hit| hit.page.url.clone())
         {
-            searcher.add_meant(Some(&meant), &mut found).unwrap();
+            searcher.add_meant(&[meant], &mut found).unwrap();
         }
         searcher
-            .add_meant(Some("https://en.wikipedia.org/wiki/Hamstring"), &mut found)
+            .add_meant(
+                &["https://en.wikipedia.org/wiki/Hamstring".into()],
+                &mut found,
+            )
             .unwrap();
         searcher
             .add_named_site_page(query, &sites, &mut found)

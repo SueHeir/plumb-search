@@ -21,7 +21,8 @@ use plumb_embed::{page_text, text_hash, Embedder, Vectors, MODEL_BASE_URL};
 use plumb_node::block_on;
 use plumb_node::cli::parse_positive;
 use plumb_node::meaning::{
-    embed_sites, ensure_model, load_embedder, load_vectors_for, ToEmbed, QUERY_INSTRUCTION,
+    embed_sites, ensure_model, load_embedder, load_vectors_for, page_vector_files, ToEmbed,
+    QUERY_INSTRUCTION,
 };
 
 /// Pages embedded between saves of the vectors file. A save writes the
@@ -149,9 +150,11 @@ pub struct PageMeaningArgs {
     /// Directory of the model that made the vectors.
     #[arg(long, value_name = "DIR")]
     pub model: PathBuf,
-    /// Page vectors `embed-pages` made.
-    #[arg(long, value_name = "FILE")]
-    pub vectors: PathBuf,
+    /// Page vectors `embed-pages` made, a file or a directory of them. Given
+    /// more than once, or as a directory, each search is reported for each
+    /// file.
+    #[arg(long, value_name = "PATH", required = true)]
+    pub vectors: Vec<PathBuf>,
     /// Searches, one per line: `id<TAB>query<TAB>title`, where the title is
     /// the English Wikipedia article the search wants, or `-` for none.
     #[arg(long, value_name = "FILE")]
@@ -173,6 +176,8 @@ struct Found {
     id: String,
     query: String,
     wanted: String,
+    /// The vectors file's name without `.bin`.
+    set: String,
     held: bool,
     plain: Nearest,
     instructed: Nearest,
@@ -189,13 +194,21 @@ struct Nearest {
     titles: Vec<String>,
 }
 
-/// `plumb-tools page-meaning`: for each search, the pages nearest it in
-/// meaning and where the wanted article comes among them, written to
-/// `--out`, with recall at 1, 3, 10 and `--nearest` printed for searches
-/// whose article has a vector.
+/// `plumb-tools page-meaning`: for each search and vectors file, the
+/// pages nearest it in meaning and where the wanted article comes among
+/// them, written to `--out`, with recall at 1, 3, 10 and `--nearest`
+/// printed for searches whose article has a vector.
 pub fn run_page_meaning(args: PageMeaningArgs) -> Result<()> {
     let embedder = load_embedder(&args.model)?;
-    let vectors = Vectors::load(&args.vectors)?;
+    let mut sets = Vec::new();
+    for path in &args.vectors {
+        for file in page_vector_files(path)? {
+            let name = file
+                .file_stem()
+                .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+            sets.push((name, Vectors::load(&file)?));
+        }
+    }
     let mut searches = Vec::new();
     for line in BufReader::new(
         File::open(&args.queries).with_context(|| format!("opening {}", args.queries.display()))?,
@@ -222,42 +235,46 @@ pub fn run_page_meaning(args: PageMeaningArgs) -> Result<()> {
                     searches.get(next.fetch_add(1, Ordering::Relaxed))
                 {
                     let key = title_key(wanted);
-                    let held = wanted != "-"
-                        && vectors
-                            .get(&plumb_core::article::article_url("en", wanted))
-                            .is_some();
-                    let near = |vector: Option<Vec<i8>>| {
-                        vector.map_or_else(Nearest::default, |vector| {
-                            nearest(&vectors, &vector, args.nearest, &key)
+                    let url = plumb_core::article::article_url("en", wanted);
+                    let plain = embedder.embed_query(query).ok();
+                    let instructed = instructed_vector(&embedder, query);
+                    let rows: Vec<Found> = sets
+                        .iter()
+                        .map(|(set, vectors)| {
+                            let near = |vector: &Option<Vec<i8>>| {
+                                vector.as_deref().map_or_else(Nearest::default, |vector| {
+                                    nearest(vectors, vector, args.nearest, &key)
+                                })
+                            };
+                            Found {
+                                id: id.clone(),
+                                query: query.clone(),
+                                wanted: wanted.clone(),
+                                set: set.clone(),
+                                held: wanted != "-" && vectors.get(&url).is_some(),
+                                plain: near(&plain),
+                                instructed: near(&instructed),
+                            }
                         })
-                    };
-                    let plain = near(embedder.embed_query(query).ok());
-                    let instructed = near(instructed_vector(&embedder, query));
-                    found.locked().push(Found {
-                        id: id.clone(),
-                        query: query.clone(),
-                        wanted: wanted.clone(),
-                        held,
-                        plain,
-                        instructed,
-                    });
+                        .collect();
+                    found.locked().extend(rows);
                 }
             });
         }
     });
     let mut found = found.into_inner().unwrap_or_else(|err| err.into_inner());
-    found.sort_by(|a, b| a.id.cmp(&b.id));
+    found.sort_by(|a, b| (&a.id, &a.set).cmp(&(&b.id, &b.set)));
     let mut out = BufWriter::new(
         File::create(&args.out).with_context(|| format!("creating {}", args.out.display()))?,
     );
     writeln!(
         out,
-        "id\tquery\twanted\theld\tplain_rank\tplain_first\tplain_tenth\tplain_titles\tinstructed_rank\tinstructed_first\tinstructed_tenth\tinstructed_titles"
+        "id\tquery\twanted\theld\tplain_rank\tplain_first\tplain_tenth\tplain_titles\tinstructed_rank\tinstructed_first\tinstructed_tenth\tinstructed_titles\tset"
     )?;
     for f in &found {
         writeln!(
             out,
-            "{}\t{}\t{}\t{}\t{}\t{:.3}\t{:.3}\t{}\t{}\t{:.3}\t{:.3}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{:.3}\t{:.3}\t{}\t{}\t{:.3}\t{:.3}\t{}\t{}",
             f.id,
             f.query,
             f.wanted,
@@ -270,14 +287,19 @@ pub fn run_page_meaning(args: PageMeaningArgs) -> Result<()> {
             f.instructed.first,
             f.instructed.tenth,
             f.instructed.titles.join(" | "),
+            f.set,
         )?;
     }
     out.flush()?;
     let held: Vec<&Found> = found.iter().filter(|f| f.held).collect();
     println!(
-        "{} searches, {} want an article, {} of those articles have a vector",
-        found.len(),
-        found.iter().filter(|f| f.wanted != "-").count(),
+        "{} searches in {} vectors files, {} want an article, {} vectors of those articles",
+        searches.len(),
+        sets.len(),
+        searches
+            .iter()
+            .filter(|(_, _, wanted)| wanted != "-")
+            .count(),
         held.len()
     );
     for (name, of) in [
@@ -430,9 +452,13 @@ mod tests {
         let queries = dir.path().join("queries.tsv");
         std::fs::write(&queries, "q1\telectric cars\tTesla\nq2\tsolar\t-\n").unwrap();
         let out = dir.path().join("out.tsv");
+        // A directory of vectors files: each search is reported for each.
+        let more = dir.path().join("more");
+        std::fs::create_dir(&more).unwrap();
+        std::fs::copy(&vectors, more.join("copy.bin")).unwrap();
         run_page_meaning(PageMeaningArgs {
             model,
-            vectors,
+            vectors: vec![vectors, more],
             queries,
             out: out.clone(),
             nearest: 2,
@@ -440,11 +466,14 @@ mod tests {
         })
         .unwrap();
         // The test model's vectors mean nothing, so only check that the
-        // wanted article is held and among the two nearest.
+        // wanted article is held and among the two nearest in both.
         let written = std::fs::read_to_string(out).unwrap();
-        let first: Vec<&str> = written.lines().nth(1).unwrap().split('\t').collect();
-        assert_eq!(first[..4], ["q1", "electric cars", "Tesla", "1"]);
-        assert!(["1", "2"].contains(&first[4]), "{first:?}");
-        assert_eq!(written.lines().count(), 3);
+        assert_eq!(written.lines().count(), 5);
+        for (line, set) in written.lines().skip(1).zip(["copy", "pages"]) {
+            let row: Vec<&str> = line.split('\t').collect();
+            assert_eq!(row[..4], ["q1", "electric cars", "Tesla", "1"]);
+            assert!(["1", "2"].contains(&row[4]), "{row:?}");
+            assert_eq!(row[12], set);
+        }
     }
 }

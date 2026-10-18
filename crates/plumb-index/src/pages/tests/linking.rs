@@ -125,9 +125,12 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     let mut sleep = article("Microsleep", "Brief episode of sleep", 900_000, &[]);
     sleep.site = Some("c.com".into());
     let url = sleep.url.clone();
+    let meant = [url.clone()];
+    let requests = package("pypi", "requests", 100_000);
     let (_dir, s) = searcher(&[
         sleep.clone(),
         article("Napoleon", "French emperor (1769–1821)", 500_000, &[]),
+        requests.clone(),
     ]);
     let mut sites: Vec<crate::Hit> = ["a.com", "b.com", "c.com", "d.com", "e.com"]
         .iter()
@@ -138,7 +141,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     // under its site, which it would lift.
     let mut found = s.search("micro naps", 5).unwrap();
     assert!(found.is_empty());
-    s.add_meant(Some(&url), &mut found).unwrap();
+    s.add_meant(&meant, &mut found).unwrap();
     assert_eq!(found.len(), 1);
     assert!(found[0].meant && !found[0].named && !found[0].whole);
     assert!(found[0].score >= MIN_PARTIAL_SCORE);
@@ -163,20 +166,26 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         meant: false,
     };
     let mut found = vec![found_by_words(0.5)];
-    s.add_meant(Some(&url), &mut found).unwrap();
+    s.add_meant(&meant, &mut found).unwrap();
     assert!(found.len() == 1 && found[0].score == 0.5 && !found[0].meant);
     let mut found = vec![found_by_words(0.1)];
-    s.add_meant(Some(&url), &mut found).unwrap();
+    s.add_meant(&meant, &mut found).unwrap();
     assert!(found.len() == 1 && found[0].score >= MIN_PARTIAL_SCORE && found[0].meant);
     // Words find a page the query names better.
     let mut found = s.search("napoleon", 5).unwrap();
     let before: Vec<String> = found.iter().map(|hit| hit.page.url.clone()).collect();
-    s.add_meant(Some(&url), &mut found).unwrap();
+    s.add_meant(&meant, &mut found).unwrap();
     let after: Vec<String> = found.iter().map(|hit| hit.page.url.clone()).collect();
     assert_eq!(after, before);
-    // An address the pages lack adds nothing.
+    // An address the pages lack adds nothing; the next nearest, of any
+    // kind, stands in for it.
+    let nowhere = "https://en.wikipedia.org/wiki/Nowhere".to_string();
     let mut found = Vec::new();
-    s.add_meant(Some("https://en.wikipedia.org/wiki/Nowhere"), &mut found)
+    s.add_meant(std::slice::from_ref(&nowhere), &mut found)
         .unwrap();
     assert!(found.is_empty());
+    s.add_meant(&[nowhere, requests.url.clone(), url], &mut found)
+        .unwrap();
+    assert_eq!(titles(&found), ["requests"]);
+    assert!(found[0].meant);
 }

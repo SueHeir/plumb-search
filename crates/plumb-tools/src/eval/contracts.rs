@@ -514,7 +514,7 @@ fn observe(
     if typed.is_none() && !ops.any() {
         if let Some(pages) = &scoped_pages {
             pages.add_other_number(words, &found.hits, &mut raw_pages, 10)?;
-            pages.add_meant(found.meant.as_deref(), &mut raw_pages)?;
+            pages.add_meant(&found.meant, &mut raw_pages)?;
         }
     }
     let mut filtered: Vec<_> = raw_pages

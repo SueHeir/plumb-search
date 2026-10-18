@@ -9,9 +9,9 @@
 //! says another word of the query or the part is the article's plain title
 //! and has what the query is most about.
 //!
-//! A node with article vectors also adds the article nearest the whole
-//! query in meaning ([`PageSearcher::add_meant`]): "micro naps" means
-//! Microsleep, "dextocardia" Dextrocardia, which no word names.
+//! A node with page vectors also adds the page nearest the whole query in
+//! meaning ([`PageSearcher::add_meant`]): "micro naps" means Microsleep,
+//! "dextocardia" Dextrocardia, which no word names.
 
 use std::collections::{HashMap, HashSet};
 
@@ -229,54 +229,55 @@ impl PageSearcher {
         Ok(most.filter(|_| !more))
     }
 
-    /// Adds to `found` (best first) the article at `url`, the one nearest
-    /// the query in meaning ([`crate::Meaning::nearest_page`]), scored as a
-    /// linked article is ([`ENTITY_MATCH`]) and marked [`PageHit::meant`],
-    /// so it comes after the first sites. Words found it too when it is in
-    /// `found`: it is then listed as they scored it, or as meant when only
-    /// meaning lists it. Nothing is added when a page found is named by the
-    /// whole query or answers it whole, as words find those better. An
-    /// article only meaning found is never placed under its site. Callers
-    /// check the searcher's options ([`super::options_allow`]) after, as
-    /// for any page found.
-    pub fn add_meant(&self, url: Option<&str>, found: &mut Vec<PageHit>) -> Result<()> {
-        let Some(url) = url else {
-            return Ok(());
-        };
+    /// Adds to `found` (best first) the first page of `urls` the index
+    /// holds, the pages nearest the query in meaning
+    /// ([`crate::Meaning::nearest_pages`]), scored as a linked article is
+    /// ([`ENTITY_MATCH`]) and marked [`PageHit::meant`], so it comes after
+    /// the first sites. Words found it too when it is in `found`: it is
+    /// then listed as they scored it, or as meant when only meaning lists
+    /// it. Nothing is added when a page found is named by the whole query
+    /// or answers it whole, as words find those better. A page only
+    /// meaning found is never placed under its site. Callers check the
+    /// searcher's options ([`super::options_allow`]) after, as for any
+    /// page found.
+    pub fn add_meant(&self, urls: &[String], found: &mut Vec<PageHit>) -> Result<()> {
         if found.iter().any(|hit| hit.named || hit.whole) {
             return Ok(());
         }
-        let hit = match found.iter().position(|hit| hit.page.url == url) {
-            Some(at) if found[at].score >= MIN_PARTIAL_SCORE => return Ok(()),
-            Some(at) => found.remove(at),
-            None => {
-                let Some(mut hit) = self
-                    .page_at(url)?
-                    .filter(|hit| hit.page.url == url && hit.page.is_article())
-                else {
-                    return Ok(());
-                };
-                // Found by meaning alone, it is listed on its own and never
-                // under its site, where it would lift that site in the
-                // learned order: "spectrum jacksonville nc" put
-                // spectrumcentercharlotte.com third under Spectrum Center.
-                hit.page.site = None;
-                hit.score = 0.0;
-                (hit.named, hit.whole) = (false, false);
-                hit
-            }
-        };
-        let weight = 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity;
-        let hit = PageHit {
-            score: hit.score.max(ENTITY_MATCH * weight),
-            meant: true,
-            ..hit
-        };
-        let at = found
-            .iter()
-            .position(|kept| kept.score < hit.score)
-            .unwrap_or(found.len());
-        found.insert(at, hit);
+        for url in urls {
+            let hit = match found.iter().position(|hit| hit.page.url == *url) {
+                Some(at) if found[at].score >= MIN_PARTIAL_SCORE => return Ok(()),
+                Some(at) => found.remove(at),
+                None => {
+                    // The next nearest stands in for one the index lacks.
+                    let Some(mut hit) = self.page_at(url)?.filter(|hit| hit.page.url == *url)
+                    else {
+                        continue;
+                    };
+                    // Found by meaning alone, it is listed on its own and
+                    // never under its site, where it would lift that site
+                    // in the learned order: "spectrum jacksonville nc" put
+                    // spectrumcentercharlotte.com third under Spectrum
+                    // Center.
+                    hit.page.site = None;
+                    hit.score = 0.0;
+                    (hit.named, hit.whole) = (false, false);
+                    hit
+                }
+            };
+            let weight = 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity;
+            let hit = PageHit {
+                score: hit.score.max(ENTITY_MATCH * weight),
+                meant: true,
+                ..hit
+            };
+            let at = found
+                .iter()
+                .position(|kept| kept.score < hit.score)
+                .unwrap_or(found.len());
+            found.insert(at, hit);
+            return Ok(());
+        }
         Ok(())
     }
 

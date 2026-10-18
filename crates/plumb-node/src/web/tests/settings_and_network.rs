@@ -33,7 +33,7 @@ impl SearchBackend for OptionsBackend {
                 url: self.link.clone(),
             }),
             spelling: None,
-            meant: None,
+            meant: Vec::new(),
             sites_ordered: false,
         })
     }
@@ -432,7 +432,7 @@ fn network_only_sites_are_merged_by_score_and_tinted() {
         hits: local.clone(),
         site_search: None,
         spelling: None,
-        meant: None,
+        meant: Vec::new(),
         sites_ordered: false,
     };
     let page = render_results(
