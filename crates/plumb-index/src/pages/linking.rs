@@ -258,8 +258,9 @@ impl PageSearcher {
     /// ([`ENTITY_MATCH`]) and marked [`PageHit::meant`], so it comes after
     /// the first sites. Words found it too when it is in `found`: it is
     /// then listed as they scored it, or as meant when only meaning lists
-    /// it. Nothing is added when a page found is named by the whole query
-    /// or answers it whole, as words find those better, a page of
+    /// it, though a page they list that is not an article gives way to the
+    /// next. Nothing is added when a page found is named by the whole
+    /// query or answers it whole, as words find those better, a page of
     /// [`MEANT_WITH_WORDS`] only when words found one too, and a page that
     /// is not an article only from [`MEANT_OTHER_LEAST`]. A page only
     /// meaning found is never placed under its site. Callers check the
@@ -274,11 +275,20 @@ impl PageSearcher {
         for (url, cosine) in meant {
             let near = |page: &Page| page.is_article() || *cosine >= MEANT_OTHER_LEAST;
             let hit = match found.iter().position(|hit| hit.page.url == *url) {
-                // Too far to count, even when words list it, so it does not
-                // keep out a nearer article.
-                Some(at) if !near(&found[at].page) => continue,
-                Some(at) if found[at].score >= MIN_PARTIAL_SCORE => return Ok(()),
-                Some(at) => found.remove(at),
+                Some(at) => {
+                    let listed = found[at].score >= MIN_PARTIAL_SCORE;
+                    if listed && found[at].page.is_article() {
+                        return Ok(());
+                    }
+                    // A page of another kind words list, or one too far to
+                    // count, does not keep out the next nearest: on hpc a
+                    // question words listed kept Robinhood Markets from
+                    // "robin hood stocks app".
+                    if listed || !near(&found[at].page) {
+                        continue;
+                    }
+                    found.remove(at)
+                }
                 None => {
                     // The next nearest stands in for one the index lacks.
                     let Some(mut hit) = self.page_at(url)?.filter(|hit| {
