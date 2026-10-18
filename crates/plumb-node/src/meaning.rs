@@ -113,9 +113,16 @@ impl MeaningIndex {
     /// `.bin` files, which this model must have made, so searches list a
     /// page nearest them in meaning. Every search reads every file, about
     /// 470 bytes a page (230 MB for the 500,000 most-read articles, 6.2 GB
-    /// for all 13.3M pages), so they stay in memory.
+    /// for all 13.3M pages), so they stay in memory. One file that can't be
+    /// used keeps them all out, so a node never searches part of a
+    /// directory unawares.
     pub fn load_pages(&mut self, path: &Path) -> Result<()> {
-        for file in page_vector_files(path)? {
+        let files = page_vector_files(path)?;
+        if files.is_empty() {
+            bail!("no .bin vectors files in {}", path.display());
+        }
+        let mut loaded = Vec::with_capacity(files.len());
+        for file in files {
             let pages = Vectors::load(&file)?;
             if !made_by(&pages, &self.embedder) {
                 bail!(
@@ -128,8 +135,9 @@ impl MeaningIndex {
                 pages.len(),
                 file.display()
             );
-            self.pages.push(pages);
+            loaded.push(pages);
         }
+        self.pages.extend(loaded);
         Ok(())
     }
 

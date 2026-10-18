@@ -278,23 +278,29 @@ impl PageSearcher {
     /// next. Nothing is added when a page found is named by the whole
     /// query or answers it whole, as words find those better, a page of
     /// [`MEANT_WITH_WORDS`] only when words found one too, an article only
-    /// from [`MEANT_ARTICLE_LEAST`] and [`MEANT_ARTICLE_SUM`], and any
-    /// other page only from
-    /// [`MEANT_OTHER_LEAST`] and after the pages words list. A page only
-    /// meaning found is never placed under its site. Callers check the
-    /// searcher's options ([`super::options_allow`]) after, as for any
-    /// page found.
+    /// from [`MEANT_ARTICLE_LEAST`] and [`MEANT_ARTICLE_SUM`], and any page
+    /// that is not an article, those of [`MEANT_WITH_WORDS`] too, only
+    /// from [`MEANT_OTHER_LEAST`] and after the pages words list. A page
+    /// that would score too little to be placed ([`MIN_PARTIAL_SCORE`])
+    /// gives way to the next. A page only meaning found is never placed
+    /// under its site. Callers check the searcher's options
+    /// ([`super::options_allow`]) after, as for any page found.
     pub fn add_meant(&self, meant: &[MeantPage], found: &mut Vec<PageHit>) -> Result<()> {
         if found.iter().any(|hit| hit.named || hit.whole) {
             return Ok(());
         }
         let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
         let about_code = found.iter().any(|hit| with_words(&hit.page));
+        let weight = |hit: &PageHit| 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity;
         for MeantPage { url, cosine, gap } in meant {
             // An article counts when it is read enough and near enough,
-            // another page when it is near enough.
+            // another page when it is near enough. Either must score
+            // enough as meant for placing to keep it, or the search would
+            // be left with none: a paper cited a few times scores too
+            // little however near it is.
             let counts = |hit: &PageHit| {
-                if hit.page.is_article() {
+                let kept = ENTITY_MATCH * weight(hit) >= MIN_PARTIAL_SCORE;
+                kept && if hit.page.is_article() {
                     hit.popularity >= MEANT_ARTICLE_LEAST
                         && cosine + gap + hit.popularity >= MEANT_ARTICLE_SUM
                 } else {
@@ -336,9 +342,8 @@ impl PageSearcher {
                     hit
                 }
             };
-            let weight = 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity;
             let hit = PageHit {
-                score: hit.score.max(ENTITY_MATCH * weight),
+                score: hit.score.max(ENTITY_MATCH * weight(&hit)),
                 meant: true,
                 ..hit
             };

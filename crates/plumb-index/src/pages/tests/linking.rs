@@ -127,12 +127,14 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     let url = sleep.url.clone();
     let meant = [meant_page(&url, 0.8)];
     let requests = package("pypi", "requests", 100_000);
+    let rare = package("pypi", "tinylib", 10);
     let trocar = article("Trocar", "Surgical instrument", 10, &[]);
     let spooner = article("Ryan Spooner", "Canadian ice hockey player", 3_000, &[]);
     let (_dir, s) = searcher(&[
         sleep.clone(),
         article("Napoleon", "French emperor (1769–1821)", 500_000, &[]),
         requests.clone(),
+        rare.clone(),
         trocar.clone(),
         spooner.clone(),
     ]);
@@ -246,6 +248,15 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     let mut found = vec![flask()];
     s.add_meant(&farther, &mut found).unwrap();
     assert_eq!(titles(&found), ["Microsleep", "flask"]);
+    // Nor does one that would score too little to be placed, however
+    // near: placing would drop it and leave the search with none.
+    let mut found = vec![flask()];
+    s.add_meant(
+        &[meant_page(&rare.url, 0.95), nearest[2].clone()],
+        &mut found,
+    )
+    .unwrap();
+    assert_eq!(titles(&found), ["Microsleep", "flask"]);
     // Nor does one words list well, near or not: the article follows.
     let flask_listed = PageHit {
         score: 0.5,
@@ -262,5 +273,8 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         assert!(found
             .iter()
             .any(|hit| hit.page.title == "Microsleep" && hit.meant));
+        assert!(found
+            .iter()
+            .any(|hit| hit.page.title == "flask" && hit.score == 0.5 && !hit.meant));
     }
 }
