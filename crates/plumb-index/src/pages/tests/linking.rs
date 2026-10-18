@@ -125,7 +125,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     let mut sleep = article("Microsleep", "Brief episode of sleep", 900_000, &[]);
     sleep.site = Some("c.com".into());
     let url = sleep.url.clone();
-    let meant = [url.clone()];
+    let meant = [(url.clone(), 0.8)];
     let requests = package("pypi", "requests", 100_000);
     let (_dir, s) = searcher(&[
         sleep.clone(),
@@ -178,16 +178,17 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     let after: Vec<String> = found.iter().map(|hit| hit.page.url.clone()).collect();
     assert_eq!(after, before);
     // An address the pages lack adds nothing; the next nearest stands in
-    // for it. A package only when words found code too.
-    let nowhere = "https://en.wikipedia.org/wiki/Nowhere".to_string();
+    // for it. A package only when words found code too, and as a page that
+    // is not an article, only when it is near.
+    let nowhere = ("https://en.wikipedia.org/wiki/Nowhere".to_string(), 0.95);
     let mut found = Vec::new();
     s.add_meant(std::slice::from_ref(&nowhere), &mut found)
         .unwrap();
     assert!(found.is_empty());
-    let nearest = [nowhere, requests.url.clone(), url];
+    let nearest = [nowhere, (requests.url.clone(), 0.9), (url, 0.8)];
     s.add_meant(&nearest, &mut found).unwrap();
     assert_eq!(titles(&found), ["Microsleep"]);
-    let mut found = vec![PageHit {
+    let flask = || PageHit {
         page: package("pypi", "flask", 1_000),
         score: 0.1,
         named: false,
@@ -195,8 +196,13 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         whole: false,
         learned: None,
         meant: false,
-    }];
+    };
+    let mut found = vec![flask()];
     s.add_meant(&nearest, &mut found).unwrap();
     assert_eq!(titles(&found), ["requests", "flask"]);
     assert!(found[0].meant);
+    let farther = [(requests.url.clone(), 0.8), nearest[2].clone()];
+    let mut found = vec![flask()];
+    s.add_meant(&farther, &mut found).unwrap();
+    assert_eq!(titles(&found), ["Microsleep", "flask"]);
 }

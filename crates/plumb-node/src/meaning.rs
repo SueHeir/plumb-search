@@ -230,7 +230,7 @@ pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
     nearest: Vec<String>,
     /// The pages nearest the query ([`nearest_pages`]).
-    pages: Vec<String>,
+    pages: Vec<(String, f32)>,
     /// The query's vectors (one, or as it is and after the instruction)
     /// with the cosines of the nearest and of the last of the nearest sites.
     spreads: Vec<Spread>,
@@ -263,7 +263,7 @@ impl<'a> QueryMeaning<'a> {
         vectors: RwLockReadGuard<'a, Vectors>,
         query: Vec<Vec<i8>>,
         combine: QueryInstruction,
-        pages: Vec<String>,
+        pages: Vec<(String, f32)>,
     ) -> Self {
         let mut nearest = None;
         let spreads = query
@@ -308,7 +308,7 @@ impl Meaning for QueryMeaning<'_> {
         self.nearest.clone()
     }
 
-    fn nearest_pages(&self) -> Vec<String> {
+    fn nearest_pages(&self) -> Vec<(String, f32)> {
         self.pages.clone()
     }
 
@@ -338,7 +338,7 @@ impl Meaning for QueryMeaning<'_> {
 /// The nearest page of each of `sets` that stands out ([`nearest_page`]),
 /// nearest first. The sets are read at once, as each search reads them
 /// all.
-fn nearest_pages(sets: &[Vectors], query: &[i8]) -> Vec<String> {
+fn nearest_pages(sets: &[Vectors], query: &[i8]) -> Vec<(String, f32)> {
     let mut found: Vec<(String, f32)> = match sets {
         [] => Vec::new(),
         [pages] => nearest_page(pages, query).into_iter().collect(),
@@ -354,7 +354,7 @@ fn nearest_pages(sets: &[Vectors], query: &[i8]) -> Vec<String> {
         }),
     };
     found.sort_by(|a, b| b.1.total_cmp(&a.1));
-    found.into_iter().map(|(url, _)| url).collect()
+    found
 }
 
 /// The address and cosine of the page in `pages` nearest `query`, the
@@ -844,7 +844,10 @@ mod tests {
             }
             pages
         };
-        let nearest = |sets: &[Vectors]| nearest_pages(sets, &[127, 0]);
+        let nearest = |sets: &[Vectors]| -> Vec<String> {
+            let found = nearest_pages(sets, &[127, 0]);
+            found.into_iter().map(|(url, _)| url).collect()
+        };
         let stands_out = [1.0, 0.95, 0.94, 0.94, 0.93, 0.93, 0.92, 0.92, 0.91, 0.9];
         let bunched = [1.0, 0.99, 0.99, 0.98, 0.98, 0.98, 0.98, 0.97, 0.97, 0.97];
         let farther = [0.9, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8];

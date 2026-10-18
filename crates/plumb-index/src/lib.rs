@@ -394,10 +394,11 @@ pub trait Meaning {
     fn plain_closeness(&self, _domain: &str) -> Option<Option<f32>> {
         None
     }
-    /// Addresses of the pages nearest the query in meaning, nearest first:
-    /// one from each set of page vectors the node has, where it stands out
-    /// from the next nearest ([`pages::PageSearcher::add_meant`]).
-    fn nearest_pages(&self) -> Vec<String> {
+    /// Addresses of the pages nearest the query in meaning, each with its
+    /// cosine, nearest first: one from each set of page vectors the node
+    /// has, where it stands out from the next nearest
+    /// ([`pages::PageSearcher::add_meant`]).
+    fn nearest_pages(&self) -> Vec<(String, f32)> {
         Vec::new()
     }
 }
@@ -584,7 +585,7 @@ pub struct SearchResults {
     /// The pages nearest the query in meaning ([`Meaning::nearest_pages`]),
     /// for the page search to add one of. Not sent: a node finds its own.
     #[serde(skip)]
-    pub meant: Vec<String>,
+    pub meant: Vec<(String, f32)>,
     /// Whether the site model put `hits` in order ([`learned::reorder_sites`]),
     /// so the row model only places pages among them. Not sent.
     #[serde(skip)]

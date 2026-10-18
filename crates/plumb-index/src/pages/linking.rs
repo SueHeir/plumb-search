@@ -43,6 +43,15 @@ const MEANT_WITH_WORDS: [&str; 5] = [
     STACKEXCHANGE_SET,
 ];
 
+/// Least cosine at which meaning lists a page that is not an article. On
+/// hpc's review searches, of the books, papers, songs, films, site pages,
+/// Wiktionary entries and Wikidata items that would have taken the place,
+/// 86 of 95 below 0.75 were wrong and none right ("harvard" a page on
+/// chessprogramming.org), while 24 of 44 from 0.85 were what the search
+/// wanted ("levitating by dua lipa", "who dengue fact sheet"), 10 wrong:
+/// a better share than the articles meaning lists.
+const MEANT_OTHER_LEAST: f32 = 0.85;
+
 impl PageSearcher {
     /// The articles within `scope` that parts of the query `words` mean,
     /// each with its part, added to `addresses` when not found otherwise.
@@ -243,32 +252,37 @@ impl PageSearcher {
         Ok(most.filter(|_| !more))
     }
 
-    /// Adds to `found` (best first) the first page of `urls` the index
-    /// holds, the pages nearest the query in meaning
+    /// Adds to `found` (best first) the first page of `meant` the index
+    /// holds, the pages nearest the query in meaning with their cosines
     /// ([`crate::Meaning::nearest_pages`]), scored as a linked article is
     /// ([`ENTITY_MATCH`]) and marked [`PageHit::meant`], so it comes after
     /// the first sites. Words found it too when it is in `found`: it is
     /// then listed as they scored it, or as meant when only meaning lists
     /// it. Nothing is added when a page found is named by the whole query
-    /// or answers it whole, as words find those better, and a page of
-    /// [`MEANT_WITH_WORDS`] only when words found one too. A page only
+    /// or answers it whole, as words find those better, a page of
+    /// [`MEANT_WITH_WORDS`] only when words found one too, and a page that
+    /// is not an article only from [`MEANT_OTHER_LEAST`]. A page only
     /// meaning found is never placed under its site. Callers check the
     /// searcher's options ([`super::options_allow`]) after, as for any
     /// page found.
-    pub fn add_meant(&self, urls: &[String], found: &mut Vec<PageHit>) -> Result<()> {
+    pub fn add_meant(&self, meant: &[(String, f32)], found: &mut Vec<PageHit>) -> Result<()> {
         if found.iter().any(|hit| hit.named || hit.whole) {
             return Ok(());
         }
         let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
         let about_code = found.iter().any(|hit| with_words(&hit.page));
-        for url in urls {
+        for (url, cosine) in meant {
+            let near = |page: &Page| page.is_article() || *cosine >= MEANT_OTHER_LEAST;
             let hit = match found.iter().position(|hit| hit.page.url == *url) {
                 Some(at) if found[at].score >= MIN_PARTIAL_SCORE => return Ok(()),
-                Some(at) => found.remove(at),
+                Some(at) if near(&found[at].page) => found.remove(at),
+                Some(_) => continue,
                 None => {
                     // The next nearest stands in for one the index lacks.
                     let Some(mut hit) = self.page_at(url)?.filter(|hit| {
-                        hit.page.url == *url && (about_code || !with_words(&hit.page))
+                        hit.page.url == *url
+                            && near(&hit.page)
+                            && (about_code || !with_words(&hit.page))
                     }) else {
                         continue;
                     };
