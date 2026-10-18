@@ -53,11 +53,13 @@ const MEANT_WITH_WORDS: [&str; 5] = [
 const MEANT_OTHER_LEAST: f32 = 0.85;
 
 /// Least popularity ([`PageHit::popularity`]) of an article meaning lists,
-/// about 300 reads in the week the article set counts. Of the articles
+/// about 750 reads in the week the article set counts. Of the articles
 /// #718's file listed for hpc's review and everyday searches, checked by
-/// hand, none read less was right: 8 were wrong ("tesla cincinnati ohio"
-/// to Diaz v. Tesla, Inc.) and 3 on the topic.
-const MEANT_ARTICLE_LEAST: f32 = 0.36;
+/// hand, those read less were wrong nearly twice as often as right (69 to
+/// 37: "24 and me login" to 24 (number), "aribnb" to
+/// Azobisisobutyronitrile), while of those read more 55% were right and
+/// 29% wrong.
+const MEANT_ARTICLE_LEAST: f32 = 0.42;
 
 impl PageSearcher {
     /// The articles within `scope` that parts of the query `words` mean,
