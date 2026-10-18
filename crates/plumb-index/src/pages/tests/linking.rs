@@ -201,6 +201,16 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     s.add_meant(&nearest, &mut found).unwrap();
     assert_eq!(titles(&found), ["requests", "flask"]);
     assert!(found[0].meant);
+    // It comes after one words list, though it scores more: the two pages
+    // placing lists are not one of them short.
+    let flask_after = PageHit {
+        score: MIN_PARTIAL_SCORE,
+        ..flask()
+    };
+    assert!(found[0].score > flask_after.score);
+    let mut found = vec![flask_after];
+    s.add_meant(&nearest, &mut found).unwrap();
+    assert_eq!(titles(&found), ["flask", "requests"]);
     let farther = [(requests.url.clone(), 0.8), nearest[2].clone()];
     let mut found = vec![flask()];
     s.add_meant(&farther, &mut found).unwrap();

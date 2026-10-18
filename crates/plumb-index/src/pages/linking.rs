@@ -262,8 +262,9 @@ impl PageSearcher {
     /// next. Nothing is added when a page found is named by the whole
     /// query or answers it whole, as words find those better, a page of
     /// [`MEANT_WITH_WORDS`] only when words found one too, and a page that
-    /// is not an article only from [`MEANT_OTHER_LEAST`]. A page only
-    /// meaning found is never placed under its site. Callers check the
+    /// is not an article only from [`MEANT_OTHER_LEAST`] and after the
+    /// pages words list. A page only meaning found is never placed under
+    /// its site. Callers check the
     /// searcher's options ([`super::options_allow`]) after, as for any
     /// page found.
     pub fn add_meant(&self, meant: &[(String, f32)], found: &mut Vec<PageHit>) -> Result<()> {
@@ -315,9 +316,16 @@ impl PageSearcher {
                 meant: true,
                 ..hit
             };
+            // A page that is not an article takes no place of one words
+            // list: on hpc the isbn gem pushed out the Stack Overflow
+            // question "convert ISBN-10 to ISBN-13" wanted, and certbot's
+            // repository a Server Fault question on getting a certificate.
+            let article = hit.page.is_article();
             let at = found
                 .iter()
-                .position(|kept| kept.score < hit.score)
+                .position(|kept| {
+                    kept.score < hit.score && (article || kept.score < MIN_PARTIAL_SCORE)
+                })
                 .unwrap_or(found.len());
             found.insert(at, hit);
             return Ok(());
