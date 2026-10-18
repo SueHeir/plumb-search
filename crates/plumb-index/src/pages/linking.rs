@@ -28,7 +28,7 @@ use super::{
     MIN_PARTIAL_SCORE, PACKAGES_SET, POPULARITY_SHARE, STACKEXCHANGE_SET, STACKOVERFLOW_SET,
     TITLE_INSIDE_CANDIDATES,
 };
-use crate::analysis;
+use crate::{analysis, MeantPage};
 
 /// Sets whose pages meaning lists only when words found a page of one of
 /// them too, so the search is about code or asks a question. Their short
@@ -58,6 +58,15 @@ const MEANT_OTHER_LEAST: f32 = 0.85;
 /// hand, none read less was right: 8 were wrong ("tesla cincinnati ohio"
 /// to Diaz v. Tesla, Inc.) and 3 on the topic.
 const MEANT_ARTICLE_LEAST: f32 = 0.36;
+
+/// Least sum of an article's cosine, how far it stands out of its set
+/// ([`MeantPage::gap`]) and popularity for meaning to list it. Each tells
+/// right from wrong only somewhat, and wrong articles were read about as
+/// much as the right ones that mattered; together they tell better. Of
+/// the articles #718's file listed for hpc's review and everyday searches,
+/// checked by hand, those under 1.15 were 28 wrong ("24 and me login" to
+/// 24 (number)), 7 on the topic and 3 right.
+const MEANT_ARTICLE_SUM: f32 = 1.15;
 
 impl PageSearcher {
     /// The articles within `scope` that parts of the query `words` mean,
@@ -269,23 +278,25 @@ impl PageSearcher {
     /// next. Nothing is added when a page found is named by the whole
     /// query or answers it whole, as words find those better, a page of
     /// [`MEANT_WITH_WORDS`] only when words found one too, an article only
-    /// from [`MEANT_ARTICLE_LEAST`], and any other page only from
+    /// from [`MEANT_ARTICLE_LEAST`] and [`MEANT_ARTICLE_SUM`], and any
+    /// other page only from
     /// [`MEANT_OTHER_LEAST`] and after the pages words list. A page only
     /// meaning found is never placed under its site. Callers check the
     /// searcher's options ([`super::options_allow`]) after, as for any
     /// page found.
-    pub fn add_meant(&self, meant: &[(String, f32)], found: &mut Vec<PageHit>) -> Result<()> {
+    pub fn add_meant(&self, meant: &[MeantPage], found: &mut Vec<PageHit>) -> Result<()> {
         if found.iter().any(|hit| hit.named || hit.whole) {
             return Ok(());
         }
         let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
         let about_code = found.iter().any(|hit| with_words(&hit.page));
-        for (url, cosine) in meant {
-            // An article counts when it is read enough, another page when
-            // it is near enough.
+        for MeantPage { url, cosine, gap } in meant {
+            // An article counts when it is read enough and near enough,
+            // another page when it is near enough.
             let counts = |hit: &PageHit| {
                 if hit.page.is_article() {
                     hit.popularity >= MEANT_ARTICLE_LEAST
+                        && cosine + gap + hit.popularity >= MEANT_ARTICLE_SUM
                 } else {
                     *cosine >= MEANT_OTHER_LEAST
                 }

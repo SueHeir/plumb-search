@@ -88,6 +88,15 @@ fn titles(hits: &[PageHit]) -> Vec<&str> {
     hits.iter().map(|h| h.page.title.as_str()).collect()
 }
 
+/// A page meaning found at `cosine`, standing well out of its set.
+fn meant_page(url: &str, cosine: f32) -> crate::MeantPage {
+    crate::MeantPage {
+        url: url.into(),
+        cosine,
+        gap: 0.2,
+    }
+}
+
 fn package(registry: &str, name: &str, views: u64) -> Page {
     let registry = plumb_core::packages::registry(registry).unwrap();
     Page::from_package(Article {

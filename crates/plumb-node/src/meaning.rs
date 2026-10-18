@@ -16,7 +16,7 @@ use plumb_embed::{
     site_text_words, text_hash, Embedder, ModelId, Vectors, MODEL_FILES, MODEL_NAME,
 };
 use plumb_format::Item;
-use plumb_index::Meaning;
+use plumb_index::{Meaning, MeantPage};
 use tracing::{info, warn};
 
 use crate::cli::{MeaningArgs, QueryInstruction};
@@ -230,7 +230,7 @@ pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
     nearest: Vec<String>,
     /// The pages nearest the query ([`nearest_pages`]).
-    pages: Vec<(String, f32)>,
+    pages: Vec<MeantPage>,
     /// The query's vectors (one, or as it is and after the instruction)
     /// with the cosines of the nearest and of the last of the nearest sites.
     spreads: Vec<Spread>,
@@ -263,7 +263,7 @@ impl<'a> QueryMeaning<'a> {
         vectors: RwLockReadGuard<'a, Vectors>,
         query: Vec<Vec<i8>>,
         combine: QueryInstruction,
-        pages: Vec<(String, f32)>,
+        pages: Vec<MeantPage>,
     ) -> Self {
         let mut nearest = None;
         let spreads = query
@@ -308,7 +308,7 @@ impl Meaning for QueryMeaning<'_> {
         self.nearest.clone()
     }
 
-    fn nearest_pages(&self) -> Vec<(String, f32)> {
+    fn nearest_pages(&self) -> Vec<MeantPage> {
         self.pages.clone()
     }
 
@@ -338,8 +338,8 @@ impl Meaning for QueryMeaning<'_> {
 /// The nearest page of each of `sets` that stands out ([`nearest_page`]),
 /// nearest first. The sets are read at once, as each search reads them
 /// all.
-fn nearest_pages(sets: &[Vectors], query: &[i8]) -> Vec<(String, f32)> {
-    let mut found: Vec<(String, f32)> = match sets {
+fn nearest_pages(sets: &[Vectors], query: &[i8]) -> Vec<MeantPage> {
+    let mut found: Vec<MeantPage> = match sets {
         [] => Vec::new(),
         [pages] => nearest_page(pages, query).into_iter().collect(),
         _ => std::thread::scope(|scope| {
@@ -353,21 +353,25 @@ fn nearest_pages(sets: &[Vectors], query: &[i8]) -> Vec<(String, f32)> {
                 .collect()
         }),
     };
-    found.sort_by(|a, b| b.1.total_cmp(&a.1));
+    found.sort_by(|a, b| b.cosine.total_cmp(&a.cosine));
     found
 }
 
-/// The address and cosine of the page in `pages` nearest `query`, the
-/// first of a query's vectors as the nearest sites are (after the
-/// instruction, as nodes embed searches), when it stands
-/// [`LEAST_PAGE_GAP`] above the last of the [`NEAREST_PAGES`].
-fn nearest_page(pages: &Vectors, query: &[i8]) -> Option<(String, f32)> {
+/// The page in `pages` nearest `query`, the first of a query's vectors as
+/// the nearest sites are (after the instruction, as nodes embed searches),
+/// when it stands [`LEAST_PAGE_GAP`] above the last of the
+/// [`NEAREST_PAGES`].
+fn nearest_page(pages: &Vectors, query: &[i8]) -> Option<MeantPage> {
     let found = pages.nearest(query, NEAREST_PAGES);
     match (found.first(), found.last()) {
         (Some(&(url, best)), Some(&(_, last)))
             if found.len() == NEAREST_PAGES && best - last >= LEAST_PAGE_GAP =>
         {
-            Some((url.to_string(), best))
+            Some(MeantPage {
+                url: url.to_string(),
+                cosine: best,
+                gap: best - last,
+            })
         }
         _ => None,
     }
@@ -846,7 +850,7 @@ mod tests {
         };
         let nearest = |sets: &[Vectors]| -> Vec<String> {
             let found = nearest_pages(sets, &[127, 0]);
-            found.into_iter().map(|(url, _)| url).collect()
+            found.into_iter().map(|page| page.url).collect()
         };
         let stands_out = [1.0, 0.95, 0.94, 0.94, 0.93, 0.93, 0.92, 0.92, 0.91, 0.9];
         let bunched = [1.0, 0.99, 0.99, 0.98, 0.98, 0.98, 0.98, 0.97, 0.97, 0.97];

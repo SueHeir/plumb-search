@@ -125,14 +125,16 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     let mut sleep = article("Microsleep", "Brief episode of sleep", 900_000, &[]);
     sleep.site = Some("c.com".into());
     let url = sleep.url.clone();
-    let meant = [(url.clone(), 0.8)];
+    let meant = [meant_page(&url, 0.8)];
     let requests = package("pypi", "requests", 100_000);
     let trocar = article("Trocar", "Surgical instrument", 10, &[]);
+    let spooner = article("Ryan Spooner", "Canadian ice hockey player", 3_000, &[]);
     let (_dir, s) = searcher(&[
         sleep.clone(),
         article("Napoleon", "French emperor (1769–1821)", 500_000, &[]),
         requests.clone(),
         trocar.clone(),
+        spooner.clone(),
     ]);
     let mut sites: Vec<crate::Hit> = ["a.com", "b.com", "c.com", "d.com", "e.com"]
         .iter()
@@ -182,20 +184,41 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     // An address the pages lack adds nothing; the next nearest stands in
     // for it. A package only when words found code too, and as a page that
     // is not an article, only when it is near.
-    let nowhere = ("https://en.wikipedia.org/wiki/Nowhere".to_string(), 0.95);
+    let nowhere = meant_page("https://en.wikipedia.org/wiki/Nowhere", 0.95);
     let mut found = Vec::new();
     s.add_meant(std::slice::from_ref(&nowhere), &mut found)
         .unwrap();
     assert!(found.is_empty());
-    let nearest = [nowhere, (requests.url.clone(), 0.9), (url.clone(), 0.8)];
+    let nearest = [
+        nowhere,
+        meant_page(&requests.url, 0.9),
+        meant_page(&url, 0.8),
+    ];
     s.add_meant(&nearest, &mut found).unwrap();
     assert_eq!(titles(&found), ["Microsleep"]);
     // An article read too little to count gives way too: "traductor" was
     // not Trocar.
     let mut found = Vec::new();
-    s.add_meant(&[(trocar.url.clone(), 0.9), (url, 0.8)], &mut found)
+    s.add_meant(
+        &[meant_page(&trocar.url, 0.9), meant_page(&url, 0.8)],
+        &mut found,
+    )
+    .unwrap();
+    assert_eq!(titles(&found), ["Microsleep"]);
+    // So does one read enough but neither near nor standing out much:
+    // "spooner wisc" was not Ryan Spooner either.
+    let weak = crate::MeantPage {
+        gap: 0.05,
+        ..meant_page(&spooner.url, 0.5)
+    };
+    let mut found = Vec::new();
+    s.add_meant(&[weak, meant_page(&url, 0.8)], &mut found)
         .unwrap();
     assert_eq!(titles(&found), ["Microsleep"]);
+    let mut found = Vec::new();
+    s.add_meant(&[meant_page(&spooner.url, 0.7)], &mut found)
+        .unwrap();
+    assert_eq!(titles(&found), ["Ryan Spooner"]);
     let flask = || PageHit {
         page: package("pypi", "flask", 1_000),
         score: 0.1,
@@ -219,7 +242,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     let mut found = vec![flask_after];
     s.add_meant(&nearest, &mut found).unwrap();
     assert_eq!(titles(&found), ["flask", "requests"]);
-    let farther = [(requests.url.clone(), 0.8), nearest[2].clone()];
+    let farther = [meant_page(&requests.url, 0.8), nearest[2].clone()];
     let mut found = vec![flask()];
     s.add_meant(&farther, &mut found).unwrap();
     assert_eq!(titles(&found), ["Microsleep", "flask"]);
@@ -230,7 +253,10 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     };
     for cosine in [0.8, 0.9] {
         let mut found = vec![flask_listed.clone()];
-        let listed = [(flask_listed.page.url.clone(), cosine), nearest[2].clone()];
+        let listed = [
+            meant_page(&flask_listed.page.url, cosine),
+            nearest[2].clone(),
+        ];
         s.add_meant(&listed, &mut found).unwrap();
         assert_eq!(found.len(), 2);
         assert!(found
