@@ -127,10 +127,12 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     let url = sleep.url.clone();
     let meant = [(url.clone(), 0.8)];
     let requests = package("pypi", "requests", 100_000);
+    let trocar = article("Trocar", "Surgical instrument", 10, &[]);
     let (_dir, s) = searcher(&[
         sleep.clone(),
         article("Napoleon", "French emperor (1769–1821)", 500_000, &[]),
         requests.clone(),
+        trocar.clone(),
     ]);
     let mut sites: Vec<crate::Hit> = ["a.com", "b.com", "c.com", "d.com", "e.com"]
         .iter()
@@ -185,8 +187,14 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     s.add_meant(std::slice::from_ref(&nowhere), &mut found)
         .unwrap();
     assert!(found.is_empty());
-    let nearest = [nowhere, (requests.url.clone(), 0.9), (url, 0.8)];
+    let nearest = [nowhere, (requests.url.clone(), 0.9), (url.clone(), 0.8)];
     s.add_meant(&nearest, &mut found).unwrap();
+    assert_eq!(titles(&found), ["Microsleep"]);
+    // An article read too little to count gives way too: "traductor" was
+    // not Trocar.
+    let mut found = Vec::new();
+    s.add_meant(&[(trocar.url.clone(), 0.9), (url, 0.8)], &mut found)
+        .unwrap();
     assert_eq!(titles(&found), ["Microsleep"]);
     let flask = || PageHit {
         page: package("pypi", "flask", 1_000),

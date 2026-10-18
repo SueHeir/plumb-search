@@ -52,6 +52,13 @@ const MEANT_WITH_WORDS: [&str; 5] = [
 /// a better share than the articles meaning lists.
 const MEANT_OTHER_LEAST: f32 = 0.85;
 
+/// Least popularity ([`PageHit::popularity`]) of an article meaning lists,
+/// about 300 reads in the week the article set counts. Of the articles
+/// #718's file listed for hpc's review and everyday searches, checked by
+/// hand, none read less was right: 8 were wrong ("tesla cincinnati ohio"
+/// to Diaz v. Tesla, Inc.) and 3 on the topic.
+const MEANT_ARTICLE_LEAST: f32 = 0.36;
+
 impl PageSearcher {
     /// The articles within `scope` that parts of the query `words` mean,
     /// each with its part, added to `addresses` when not found otherwise.
@@ -261,10 +268,10 @@ impl PageSearcher {
     /// it, though a page they list that is not an article gives way to the
     /// next. Nothing is added when a page found is named by the whole
     /// query or answers it whole, as words find those better, a page of
-    /// [`MEANT_WITH_WORDS`] only when words found one too, and a page that
-    /// is not an article only from [`MEANT_OTHER_LEAST`] and after the
-    /// pages words list. A page only meaning found is never placed under
-    /// its site. Callers check the
+    /// [`MEANT_WITH_WORDS`] only when words found one too, an article only
+    /// from [`MEANT_ARTICLE_LEAST`], and any other page only from
+    /// [`MEANT_OTHER_LEAST`] and after the pages words list. A page only
+    /// meaning found is never placed under its site. Callers check the
     /// searcher's options ([`super::options_allow`]) after, as for any
     /// page found.
     pub fn add_meant(&self, meant: &[(String, f32)], found: &mut Vec<PageHit>) -> Result<()> {
@@ -274,18 +281,26 @@ impl PageSearcher {
         let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
         let about_code = found.iter().any(|hit| with_words(&hit.page));
         for (url, cosine) in meant {
-            let near = |page: &Page| page.is_article() || *cosine >= MEANT_OTHER_LEAST;
+            // An article counts when it is read enough, another page when
+            // it is near enough.
+            let counts = |hit: &PageHit| {
+                if hit.page.is_article() {
+                    hit.popularity >= MEANT_ARTICLE_LEAST
+                } else {
+                    *cosine >= MEANT_OTHER_LEAST
+                }
+            };
             let hit = match found.iter().position(|hit| hit.page.url == *url) {
                 Some(at) => {
                     let listed = found[at].score >= MIN_PARTIAL_SCORE;
                     if listed && found[at].page.is_article() {
                         return Ok(());
                     }
-                    // A page of another kind words list, or one too far to
-                    // count, does not keep out the next nearest: on hpc a
-                    // question words listed kept Robinhood Markets from
+                    // A page of another kind words list, or one that does
+                    // not count, does not keep out the next nearest: on hpc
+                    // a question words listed kept Robinhood Markets from
                     // "robin hood stocks app".
-                    if listed || !near(&found[at].page) {
+                    if listed || !counts(&found[at]) {
                         continue;
                     }
                     found.remove(at)
@@ -294,7 +309,7 @@ impl PageSearcher {
                     // The next nearest stands in for one the index lacks.
                     let Some(mut hit) = self.page_at(url)?.filter(|hit| {
                         hit.page.url == *url
-                            && near(&hit.page)
+                            && counts(hit)
                             && (about_code || !with_words(&hit.page))
                     }) else {
                         continue;
