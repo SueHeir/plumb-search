@@ -396,8 +396,9 @@ pub trait Meaning {
     }
     /// The pages nearest the query in meaning, nearest first: one from
     /// each set of page vectors the node has, where it stands out from the
-    /// next nearest ([`pages::PageSearcher::add_meant`]).
-    fn nearest_pages(&self) -> Vec<MeantPage> {
+    /// next nearest ([`pages::PageSearcher::add_meant`]), each with how
+    /// near it is to the nearest of `sites`, the domains listed first.
+    fn nearest_pages(&self, _sites: &[&str]) -> Vec<MeantPage> {
         Vec::new()
     }
 }
@@ -411,6 +412,9 @@ pub struct MeantPage {
     /// How far that stands above the cosine of the last of the nearest
     /// pages of its set.
     pub gap: f32,
+    /// Its cosine to the nearest in meaning of the sites listed first,
+    /// when any of them has a vector.
+    pub sites: Option<f32>,
 }
 
 /// What [`build_index`] built. Every site given is a document, merged into

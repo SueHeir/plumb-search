@@ -47,6 +47,10 @@ pub const KEEPS_ITS_NAME_LINK_SCORE: f32 = 0.4;
 /// ([`Searcher::site_search_at_end`]): "new york times".
 const MAX_END_NAME_WORDS: usize = 3;
 
+/// Sites listed first that a page nearest the query in meaning is weighed
+/// against ([`crate::MeantPage::sites`]), as hpc's hand check measured.
+const MEANT_PAGE_SITES: usize = 5;
+
 impl Searcher {
     /// Opens the index in `dir`. Fails when there is none, or when it was
     /// built with a different schema (rebuild it then).
@@ -246,7 +250,13 @@ impl Searcher {
                 results.hits.truncate(limit);
                 results.sites_ordered = true;
             }
-            results.meant = meaning.map_or_else(Vec::new, |meaning| meaning.nearest_pages());
+            let sites: Vec<&str> = results
+                .hits
+                .iter()
+                .take(MEANT_PAGE_SITES)
+                .map(|hit| hit.domain.as_str())
+                .collect();
+            results.meant = meaning.map_or_else(Vec::new, |meaning| meaning.nearest_pages(&sites));
             if cfg.health_authorities {
                 health::authorities_first(
                     query_text,

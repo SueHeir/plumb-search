@@ -221,6 +221,19 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     s.add_meant(&[meant_page(&spooner.url, 0.7)], &mut found)
         .unwrap();
     assert_eq!(titles(&found), ["Ryan Spooner"]);
+    // Far from every site listed, it needs more: "www.supershuttle.com"
+    // lists supershuttle.com, and was not super.com.
+    let near_sites = |sites| crate::MeantPage {
+        sites,
+        ..meant_page(&spooner.url, 0.5)
+    };
+    let mut found = Vec::new();
+    s.add_meant(&[near_sites(Some(0.4)), meant_page(&url, 0.8)], &mut found)
+        .unwrap();
+    assert_eq!(titles(&found), ["Microsleep"]);
+    let mut found = Vec::new();
+    s.add_meant(&[near_sites(Some(0.8))], &mut found).unwrap();
+    assert_eq!(titles(&found), ["Ryan Spooner"]);
     let flask = || PageHit {
         page: package("pypi", "flask", 1_000),
         score: 0.1,
