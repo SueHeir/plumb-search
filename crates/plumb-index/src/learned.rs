@@ -635,19 +635,24 @@ fn reorder_moving(
     let (records, rest): (Vec<PlacedPage>, Vec<PlacedPage>) = std::mem::take(placed)
         .into_iter()
         .partition(|page| crate::pages::is_record(&page.hit));
-    let (mut nearest, rest): (Vec<PlacedPage>, Vec<PlacedPage>) =
-        rest.into_iter().partition(|page| {
-            page.under.is_none()
-                && crate::pages::only_meant(&page.hit)
-                && meant == Some(page.hit.page.url.as_str())
-        });
+    let (nearest, rest): (Vec<PlacedPage>, Vec<PlacedPage>) = rest.into_iter().partition(|page| {
+        page.under.is_none()
+            && crate::pages::only_meant(&page.hit)
+            && meant == Some(page.hit.page.url.as_str())
+    });
     *placed = rest;
     reorder_rows(model, query, hits, placed, moves);
-    for page in &mut nearest {
+    // Pages listed on their own stay in the order they are listed, before
+    // the pages under sites.
+    for mut page in nearest {
         page.hit.learned = Some(learned_place(hits, page.at));
+        let at = placed
+            .iter()
+            .position(|p| p.under.is_some() || p.at > page.at)
+            .unwrap_or(placed.len());
+        placed.insert(at, page);
     }
     placed.splice(0..0, records);
-    placed.extend(nearest);
 }
 
 /// Where a page listed on its own before the site at `at` of `hits` is.
@@ -1472,12 +1477,15 @@ mod tests {
             None,
         );
         let query = "calories in a shot";
-        let order_of = |meant: Option<&str>, pages: Vec<PageHit>| {
-            let mut hits: Vec<Hit> = ["a.com", "b.com", "c.com", "d.com", "e.com"]
+        let five = || -> Vec<Hit> {
+            ["a.com", "b.com", "c.com", "d.com", "e.com"]
                 .into_iter()
                 .enumerate()
                 .map(|(i, domain)| site(domain, 0.9 - i as f32 / 10.0, false))
-                .collect();
+                .collect()
+        };
+        let order_of = |meant: Option<&str>, pages: Vec<PageHit>| {
+            let mut hits = five();
             let mut placed = place_pages(query, &hits, pages);
             reorder_moving(
                 &later_first,
@@ -1506,7 +1514,31 @@ mod tests {
             (sites.clone(), vec![PARTIAL_AFTER])
         );
         // One meant by part of the query is read as before.
-        assert_ne!(order_of(None, vec![shot]).0, sites);
+        assert_ne!(order_of(None, vec![shot.clone()]).0, sites);
+        // It keeps its place among the pages: before one listed later.
+        let mut hits = five();
+        let later = PlacedPage {
+            at: 4,
+            under: None,
+            hit: article("Shot (album)", false),
+        };
+        let shot = PlacedPage {
+            at: PARTIAL_AFTER,
+            under: None,
+            hit: shot,
+        };
+        let mut placed = vec![later, shot];
+        let tied = tied_model();
+        reorder_moving(
+            &tied,
+            query,
+            &mut hits,
+            &mut placed,
+            Moves::Rows,
+            Some(&url),
+        );
+        let ats: Vec<usize> = placed.iter().map(|page| page.at).collect();
+        assert_eq!(ats, [PARTIAL_AFTER, 4]);
     }
 
     #[test]
