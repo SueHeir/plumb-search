@@ -147,7 +147,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     // under its site, which it would lift.
     let mut found = s.search("micro naps", 5).unwrap();
     assert!(found.is_empty());
-    s.add_meant(&meant, &mut found).unwrap();
+    s.add_meant("micro naps", &meant, &mut found).unwrap();
     assert_eq!(found.len(), 1);
     assert!(found[0].meant && !found[0].named && !found[0].whole);
     assert!(found[0].score >= MIN_PARTIAL_SCORE);
@@ -172,17 +172,17 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         meant: false,
     };
     let mut found = vec![found_by_words(0.5)];
-    assert_eq!(s.add_meant(&meant, &mut found).unwrap(), None);
+    assert_eq!(s.add_meant("", &meant, &mut found).unwrap(), None);
     assert!(found.len() == 1 && found[0].score == 0.5 && !found[0].meant);
     let mut found = vec![found_by_words(0.1)];
-    s.add_meant(&meant, &mut found).unwrap();
+    s.add_meant("", &meant, &mut found).unwrap();
     assert!(found.len() == 1 && found[0].score >= MIN_PARTIAL_SCORE && found[0].meant);
     // Words find a page the query names better.
     let mut found = s.search("napoleon", 5).unwrap();
     let named = found[0].clone();
     assert!(named.named);
     let before = found.clone();
-    assert_eq!(s.add_meant(&meant, &mut found).unwrap(), None);
+    assert_eq!(s.add_meant("napoleon", &meant, &mut found).unwrap(), None);
     assert_eq!(titles(&found), titles(&before));
     // An article goes before the pages words found in part, though they
     // score more, so placing lists it: "eye test chart" listed Eye
@@ -194,7 +194,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         ..found_by_words(score)
     };
     let mut found = vec![in_part(&named.page, 0.45, 1.0), in_part(&spooner, 0.4, 1.0)];
-    s.add_meant(&meant, &mut found).unwrap();
+    s.add_meant("", &meant, &mut found).unwrap();
     assert_eq!(titles(&found), ["Microsleep", "Napoleon", "Ryan Spooner"]);
     let placed = place_pages("micro naps", &sites, found);
     assert!(placed.iter().any(|p| p.hit.page.title == "Microsleep"));
@@ -203,7 +203,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         in_part(&spooner, 0.4, 1.0),
         found_by_words(0.35),
     ];
-    assert_eq!(s.add_meant(&meant, &mut found).unwrap(), None);
+    assert_eq!(s.add_meant("", &meant, &mut found).unwrap(), None);
     assert_eq!(titles(&found), ["Microsleep", "Napoleon", "Ryan Spooner"]);
     assert!(found[0].score == 0.35 && !found[0].meant);
     let mut found = vec![
@@ -213,19 +213,29 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         },
         in_part(&spooner, 0.4, 1.0),
     ];
-    s.add_meant(&meant, &mut found).unwrap();
+    s.add_meant("", &meant, &mut found).unwrap();
     assert_eq!(titles(&found), ["Napoleon", "Microsleep", "Ryan Spooner"]);
+    // A medical search lists health sources first, so there the article
+    // goes by score and takes no place of a page words list.
+    let medical = "urinary tract infection symptoms men";
+    let in_part_pages = || vec![in_part(&named.page, 0.6, 1.0), in_part(&spooner, 0.5, 1.0)];
+    let mut found = in_part_pages();
+    s.add_meant(medical, &meant, &mut found).unwrap();
+    assert_eq!(titles(&found), ["Napoleon", "Ryan Spooner", "Microsleep"]);
+    let mut found = [in_part_pages(), vec![found_by_words(0.35)]].concat();
+    assert_eq!(s.add_meant(medical, &meant, &mut found).unwrap(), None);
+    assert_eq!(titles(&found), ["Napoleon", "Ryan Spooner", "Microsleep"]);
     // One words list but that does not count stays as they found it.
     let mut found = vec![in_part(&trocar, 0.5, 0.1)];
     let trocar_meant = [meant_page(&trocar.url, 0.9), meant_page(&url, 0.8)];
-    assert_eq!(s.add_meant(&trocar_meant, &mut found).unwrap(), None);
+    assert_eq!(s.add_meant("", &trocar_meant, &mut found).unwrap(), None);
     assert!(titles(&found) == ["Trocar"] && !found[0].meant);
     // An address the pages lack adds nothing; the next nearest stands in
     // for it. A package only when words found code too, and as a page that
     // is not an article, only when it is near.
     let nowhere = meant_page("https://en.wikipedia.org/wiki/Nowhere", 0.95);
     let mut found = Vec::new();
-    s.add_meant(std::slice::from_ref(&nowhere), &mut found)
+    s.add_meant("", std::slice::from_ref(&nowhere), &mut found)
         .unwrap();
     assert!(found.is_empty());
     let nearest = [
@@ -233,12 +243,13 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         meant_page(&requests.url, 0.9),
         meant_page(&url, 0.8),
     ];
-    s.add_meant(&nearest, &mut found).unwrap();
+    s.add_meant("", &nearest, &mut found).unwrap();
     assert_eq!(titles(&found), ["Microsleep"]);
     // An article read too little to count gives way too: "traductor" was
     // not Trocar.
     let mut found = Vec::new();
     s.add_meant(
+        "",
         &[meant_page(&trocar.url, 0.9), meant_page(&url, 0.8)],
         &mut found,
     )
@@ -251,11 +262,11 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         ..meant_page(&spooner.url, 0.5)
     };
     let mut found = Vec::new();
-    s.add_meant(&[weak, meant_page(&url, 0.8)], &mut found)
+    s.add_meant("", &[weak, meant_page(&url, 0.8)], &mut found)
         .unwrap();
     assert_eq!(titles(&found), ["Microsleep"]);
     let mut found = Vec::new();
-    s.add_meant(&[meant_page(&spooner.url, 0.7)], &mut found)
+    s.add_meant("", &[meant_page(&spooner.url, 0.7)], &mut found)
         .unwrap();
     assert_eq!(titles(&found), ["Ryan Spooner"]);
     // Far from every site listed, it needs more: "www.supershuttle.com"
@@ -265,11 +276,16 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         ..meant_page(&spooner.url, 0.5)
     };
     let mut found = Vec::new();
-    s.add_meant(&[near_sites(Some(0.4)), meant_page(&url, 0.8)], &mut found)
-        .unwrap();
+    s.add_meant(
+        "",
+        &[near_sites(Some(0.4)), meant_page(&url, 0.8)],
+        &mut found,
+    )
+    .unwrap();
     assert_eq!(titles(&found), ["Microsleep"]);
     let mut found = Vec::new();
-    s.add_meant(&[near_sites(Some(0.8))], &mut found).unwrap();
+    s.add_meant("", &[near_sites(Some(0.8))], &mut found)
+        .unwrap();
     assert_eq!(titles(&found), ["Ryan Spooner"]);
     let flask = || PageHit {
         page: package("pypi", "flask", 1_000),
@@ -281,7 +297,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
         meant: false,
     };
     let mut found = vec![flask()];
-    s.add_meant(&nearest, &mut found).unwrap();
+    s.add_meant("", &nearest, &mut found).unwrap();
     assert_eq!(titles(&found), ["requests", "flask"]);
     assert!(found[0].meant);
     // It comes after one words list, though it scores more: the two pages
@@ -292,16 +308,17 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
     };
     assert!(found[0].score > flask_after.score);
     let mut found = vec![flask_after];
-    s.add_meant(&nearest, &mut found).unwrap();
+    s.add_meant("", &nearest, &mut found).unwrap();
     assert_eq!(titles(&found), ["flask", "requests"]);
     let farther = [meant_page(&requests.url, 0.8), nearest[2].clone()];
     let mut found = vec![flask()];
-    s.add_meant(&farther, &mut found).unwrap();
+    s.add_meant("", &farther, &mut found).unwrap();
     assert_eq!(titles(&found), ["Microsleep", "flask"]);
     // Nor does one that would score too little to be placed, however
     // near: placing would drop it and leave the search with none.
     let mut found = vec![flask()];
     s.add_meant(
+        "",
         &[meant_page(&rare.url, 0.95), nearest[2].clone()],
         &mut found,
     )
@@ -318,7 +335,7 @@ fn the_article_nearest_in_meaning_comes_after_three_sites() {
             meant_page(&flask_listed.page.url, cosine),
             nearest[2].clone(),
         ];
-        s.add_meant(&listed, &mut found).unwrap();
+        s.add_meant("", &listed, &mut found).unwrap();
         assert_eq!(found.len(), 2);
         assert!(found
             .iter()

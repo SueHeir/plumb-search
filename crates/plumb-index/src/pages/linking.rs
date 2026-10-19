@@ -292,6 +292,8 @@ impl PageSearcher {
     /// the first sites. An article goes before the pages words found only
     /// in part, so it takes one of the places placing gives pages; one
     /// they list moves there too, but keeps their score and is not marked.
+    /// In a medical `query` ([`crate::health::is_medical`]) it goes by
+    /// score instead, so it takes no place of a page words list.
     /// Nothing is added when a page found is named by the whole query, as
     /// words find those better, and a page found that answers the query
     /// whole is left as it is; a page words list that is not an article
@@ -309,6 +311,7 @@ impl PageSearcher {
     /// ([`crate::learned::reorder_results`]).
     pub fn add_meant(
         &self,
+        query: &str,
         meant: &[MeantPage],
         found: &mut Vec<PageHit>,
     ) -> Result<Option<String>> {
@@ -320,6 +323,11 @@ impl PageSearcher {
         if found.iter().any(|hit| hit.named) {
             return Ok(None);
         }
+        // A medical search lists health sources first (crate::health), and
+        // an article takes no place of a page words list there: on hpc
+        // Urinary tract infection pushed out the NHS page for "urinary
+        // tract infection symptoms men".
+        let medical = crate::health::is_medical(query);
         let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
         let about_code = found.iter().any(|hit| with_words(&hit.page));
         let weight = |hit: &PageHit| 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity;
@@ -360,7 +368,7 @@ impl PageSearcher {
                     // pages found in part, as Tariff for "what is a tariff
                     // code".
                     if listed && words.page.is_article() {
-                        if counts(words) {
+                        if counts(words) && !medical {
                             let hit = found.remove(at);
                             let before = found.iter().position(|kept| !kept.whole);
                             found.insert(before.map_or(at, |first| first.min(at)), hit);
@@ -411,10 +419,12 @@ impl PageSearcher {
             let at = found
                 .iter()
                 .position(|kept| {
-                    if hit.page.is_article() {
-                        !kept.whole
-                    } else {
+                    if !hit.page.is_article() {
                         kept.score < hit.score && kept.score < MIN_PARTIAL_SCORE
+                    } else if medical {
+                        kept.score < hit.score
+                    } else {
+                        !kept.whole
                     }
                 })
                 .unwrap_or(found.len());
