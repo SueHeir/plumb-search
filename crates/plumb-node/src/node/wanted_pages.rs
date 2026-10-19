@@ -9,9 +9,11 @@
 //! a second apart; each store and its index take about 40 MB at most.
 //!
 //! An AI app's `fetch_pages` ([`Inner::fetch_asked`]) visits its site at
-//! once, one site at a time across the node, and builds the index again
-//! before it answers. The owner's own app asked, so it does not wait for
-//! background updates, only for the download and storage limits.
+//! once and builds the index again before it answers. One such visit, or
+//! one round on the asked store, runs at a time (`Inner::asking`), so no
+//! site is visited twice at once and the store has one writer. The
+//! owner's own app asked, so it does not wait for background updates,
+//! only for the download and storage limits.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -20,7 +22,7 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use plumb_core::locks::RwLocked;
 use plumb_core::now_unix;
-use plumb_crawl::{follow_links, CrawlConfig, WantedPage};
+use plumb_crawl::{follow_links, CrawlConfig, Lead, WantedPage};
 use serde::Serialize;
 use tracing::{info, warn};
 
@@ -36,6 +38,8 @@ const CONCURRENCY: usize = 8;
 /// Longest `fetch_pages` waits for one page, so that a visit of
 /// [`crate::wanted_pages::ASKED_FETCHES`] pages ends within a few minutes.
 const ASKED_PAGE_TIME: Duration = Duration::from_secs(15);
+/// Longest `fetch_pages` waits for another visit to end.
+const ASKED_WAIT: Duration = Duration::from_secs(30);
 /// Wait between two rounds.
 #[cfg(not(test))]
 const ROUND_EVERY: Duration = Duration::from_secs(10 * 60);
@@ -50,16 +54,25 @@ type Store = fn(&Inner) -> &WantedPages;
 /// asked for have their links followed again whether or not the node
 /// looks for its searches' pages.
 pub(super) async fn run(inner: Arc<Inner>) {
-    let stores: [(Store, bool); 2] = [
-        (|inner| &inner.wanted_pages, inner.config.wanted_pages),
-        (|inner| &inner.asked_pages, true),
+    // Each store, whether it is on, and whether it is the asked one.
+    let stores: [(Store, bool, bool); 2] = [
+        (
+            |inner| &inner.wanted_pages,
+            inner.config.wanted_pages,
+            false,
+        ),
+        (|inner| &inner.asked_pages, true, true),
     ];
     loop {
         let max_pages = max_pages(inner.settings().storage_limit_mb);
         // Pages found are shown next to the page sets' only.
         let shown = inner.pages.read_locked().is_some();
         let paused = inner.pause().is_some();
-        for (store, on) in stores {
+        for (store, on, asked) in stores {
+            let _one_visit = match asked {
+                true => Some(inner.asking.lock().await),
+                false => None,
+            };
             store(&inner).prune(now_unix(), max_pages);
             if on && shown && !paused {
                 round(&inner, store).await;
@@ -95,6 +108,7 @@ impl Inner {
     /// its links for them now, and keeps and indexes what it finds. Blocks
     /// for up to a few minutes: call it off async threads.
     pub(super) fn fetch_asked(&self, start: &str, words: Vec<String>) -> Result<Fetched> {
+        let url = url::Url::parse(start)?;
         let Some(domain) = plumb_core::registrable_domain(start) else {
             bail!("{start} is not a site's address");
         };
@@ -110,15 +124,25 @@ impl Inner {
         if let Some(pause) = limits {
             bail!("{}", pause.reason);
         }
+        let runtime = tokio::runtime::Handle::current();
+        let Ok(_one_visit) = runtime.block_on(tokio::time::timeout(ASKED_WAIT, self.asking.lock()))
+        else {
+            bail!("this node is busy fetching another site's pages; try again in a minute");
+        };
+        let homepage = format!("{}://{}/", url.scheme(), url.host_str().unwrap_or(&domain));
+        let given = (url.path() != "/" || url.query().is_some()).then(|| Lead {
+            url: start.to_string(),
+            label: words.join(" "),
+            depth: 1,
+        });
         let store = &self.asked_pages;
-        let target = store.ask(&domain, start, words.clone(), now_unix());
+        let target = store.ask(&domain, &homepage, given, words.clone(), now_unix());
         let cfg = CrawlConfig {
             target_deadline: ASKED_PAGE_TIME,
             ..self.follow_config()
         };
         let may_want = |url: &str| self.may_want(url);
-        let followed = tokio::runtime::Handle::current().block_on(async {
-            let _one_site = self.asking.lock().await;
+        let followed = runtime.block_on(async {
             tokio::select! {
                 followed = follow_links(vec![target.clone()], &cfg, &may_want) => Some(followed),
                 () = self.stopped() => None,
@@ -127,7 +151,9 @@ impl Inner {
         let Some(followed) = followed else {
             bail!("the node is stopping");
         };
-        self.add_downloaded(cfg.downloaded.swap(0, Ordering::Relaxed))?;
+        if let Err(err) = self.add_downloaded(cfg.downloaded.swap(0, Ordering::Relaxed)) {
+            warn!("cannot count the downloads of pages an AI app asked for: {err:#}");
+        }
         let fetched = followed.iter().map(|visit| visit.fetched).sum();
         let new = store.apply(
             std::slice::from_ref(&target),
@@ -137,17 +163,20 @@ impl Inner {
         );
         store.build_index()?;
         store.save()?;
-        let pages = store.pages_of(&domain);
         self.journal.info(format!(
             "An AI app asked for pages of {domain} about \"{}\": {fetched} fetched, {new} new",
             words.join(" ")
         ));
+        let pages = store.pages_of(&domain).into_iter();
         Ok(Fetched {
             site: domain,
             words,
             fetched,
             new,
-            pages: pages.into_iter().take(MAX_PAGES_LISTED).collect(),
+            pages: pages
+                .filter(|page| !self.denies(&page.url))
+                .take(MAX_PAGES_LISTED)
+                .collect(),
         })
     }
 }

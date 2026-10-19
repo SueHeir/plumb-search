@@ -235,6 +235,7 @@ fn fetch_pages_starts_on_the_site_given_and_lists_what_it_keeps() {
         json!({ "site": "localhost", "about": "exoplanets" }),
         json!({ "site": "ftp://nasa.gov/", "about": "exoplanets" }),
         json!({ "site": "http://127.0.0.1/", "about": "exoplanets" }),
+        json!({ "site": "https://nasa.gov:6379/", "about": "exoplanets" }),
     ] {
         let reply = call(&mcp, "fetch_pages", arguments.clone());
         assert_eq!(reply["error"]["code"], INVALID_PARAMS, "{arguments}");

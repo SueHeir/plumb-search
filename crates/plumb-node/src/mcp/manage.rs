@@ -190,8 +190,11 @@ fn start_url(site: &str) -> Result<String, (i64, String)> {
         true => site.to_string(),
         false => format!("https://{}/", site.trim_end_matches('/')),
     };
+    // A site's usual port only: its pages are shown to people.
     match plumb_crawl::http_url(&url) {
-        Ok(url) if registrable_domain(url.as_str()).is_some() => Ok(url.to_string()),
+        Ok(url) if url.port().is_none() && registrable_domain(url.as_str()).is_some() => {
+            Ok(url.to_string())
+        }
         _ => Err((
             INVALID_PARAMS,
             format!("site must be a site's address (nasa.gov) or a page of it; got {site:?}"),

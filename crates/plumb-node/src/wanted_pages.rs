@@ -94,6 +94,9 @@ pub struct WantedPages {
     index: RwLock<Option<(u64, Arc<PageSearcher>)>>,
     /// How long words and pages are kept: [`WANT_KEPT`] or [`ASKED_KEPT`].
     kept: u64,
+    /// Most hops from a site wanted to the sites its pages link to:
+    /// [`MAX_HOPS`], or none for the pages an AI app asked for.
+    max_hops: u8,
 }
 
 #[derive(Debug, Default)]
@@ -109,6 +112,10 @@ struct Pages {
     index: u64,
     #[serde(skip)]
     dirty: bool,
+    /// Counts the changes that call for a new index, so a build that saw
+    /// the pages before one does not count as current.
+    #[serde(skip)]
+    changes: u64,
 }
 
 /// A site the store holds words or pages of, as
@@ -240,6 +247,7 @@ impl Pages {
         self.pages.insert(page.url.clone(), Found { page, at: now });
         if changed {
             self.index = 0;
+            self.changes += 1;
         }
         self.dirty = true;
         changed
@@ -253,6 +261,7 @@ impl Pages {
         self.pages.retain(|_, found| found.at + kept > now);
         if self.pages.len() != before {
             self.index = 0;
+            self.changes += 1;
             self.dirty = true;
         }
         if self.pages.len() <= max_pages {
@@ -268,6 +277,7 @@ impl Pages {
             self.pages.remove(url);
         }
         self.index = 0;
+        self.changes += 1;
         self.dirty = true;
     }
 }
@@ -297,12 +307,15 @@ impl WantedPages {
             building: Mutex::new(()),
             budget: None,
             kept: WANT_KEPT,
+            max_hops: MAX_HOPS,
         }
     }
 
-    /// Keeps words and pages `kept` seconds instead of [`WANT_KEPT`].
-    pub fn keeping(mut self, kept: u64) -> Self {
-        self.kept = kept;
+    /// The store of the pages AI apps ask for: kept [`ASKED_KEPT`], and
+    /// never followed on to other sites, which no one chose.
+    pub fn for_asks(mut self) -> Self {
+        self.kept = ASKED_KEPT;
+        self.max_hops = 0;
         self
     }
 
@@ -380,8 +393,16 @@ impl WantedPages {
 
     /// Notes that pages of the site at `homepage` with `words` are wanted,
     /// as an AI app asked through `fetch_pages`, and gives the visit that
-    /// looks for them now: the site's leads from earlier visits first.
-    pub fn ask(&self, domain: &str, homepage: &str, words: Vec<String>, now: u64) -> FollowTarget {
+    /// looks for them now: the page the app gave (`start`) and the site's
+    /// leads from earlier visits first.
+    pub fn ask(
+        &self,
+        domain: &str,
+        homepage: &str,
+        start: Option<Lead>,
+        words: Vec<String>,
+        now: u64,
+    ) -> FollowTarget {
         let mut sites = self.sites.write_locked();
         let want = Want {
             words: words.clone(),
@@ -392,11 +413,16 @@ impl WantedPages {
         FollowTarget {
             domain: domain.to_string(),
             homepage: homepage.to_string(),
-            leads: sites
-                .sites
-                .get(domain)
-                .map(|site| site.leads.clone())
-                .unwrap_or_default(),
+            leads: start
+                .into_iter()
+                .chain(
+                    sites
+                        .sites
+                        .get(domain)
+                        .into_iter()
+                        .flat_map(|site| site.leads.clone()),
+                )
+                .collect(),
             wants: vec![words],
             max_fetches: ASKED_FETCHES,
         }
@@ -541,7 +567,7 @@ impl WantedPages {
                         hops: cause.hops + 1,
                         ..cause.clone()
                     };
-                    (want.hops <= MAX_HOPS && allowed(&lead.url)).then_some((lead, want))
+                    (want.hops <= self.max_hops && allowed(&lead.url)).then_some((lead, want))
                 })
                 .collect();
             let domain = visit.domain;
@@ -584,7 +610,7 @@ impl WantedPages {
             let copy = pages.dirty.then(|| Pages {
                 pages: pages.pages.clone(),
                 index: pages.index,
-                dirty: false,
+                ..Pages::default()
             });
             pages.dirty = false;
             copy
@@ -640,7 +666,7 @@ impl WantedPages {
     /// few seconds and up to about 100 MB.
     pub fn build_index(&self) -> Result<()> {
         let _building = self.building.locked();
-        let mut pages: Vec<WantedPage> = {
+        let (mut pages, changes): (Vec<WantedPage>, u64) = {
             let pages = self.pages.read_locked();
             let built = self.index.read_locked().as_ref().map(|(n, _)| *n);
             let current = match built {
@@ -650,11 +676,8 @@ impl WantedPages {
             if current {
                 return Ok(());
             }
-            pages
-                .pages
-                .values()
-                .map(|found| found.page.clone())
-                .collect()
+            let copy = pages.pages.values().map(|found| found.page.clone());
+            (copy.collect(), pages.changes)
         };
         // Each set's most viewed page comes first (see
         // `build_page_index_with_budget`).
@@ -668,8 +691,11 @@ impl WantedPages {
         *self.index.write_locked() = built;
         {
             let mut pages = self.pages.write_locked();
-            pages.index = kept;
-            pages.dirty = true;
+            // Pages that came or went during the build wait for the next.
+            if pages.changes == changes {
+                pages.index = kept;
+                pages.dirty = true;
+            }
         }
         self.remove_indexes_but(kept);
         Ok(())

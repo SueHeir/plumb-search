@@ -1587,7 +1587,7 @@ impl Inner {
             .with_budget(storage.clone());
         let asked_pages = crate::wanted_pages::WantedPages::open(&opened.paths.asked)
             .with_budget(storage.clone())
-            .keeping(crate::wanted_pages::ASKED_KEPT);
+            .for_asks();
         Inner {
             config,
             paths: opened.paths,

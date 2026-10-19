@@ -179,7 +179,7 @@ The token can read the node's status and change its settings, features and refre
 
 ## Behind a reverse proxy or tunnel
 
-A few things are kept to the computer Plumb runs on: changing settings on the panel, plugin buttons, and the MCP tools that fetch or keep things for your AI apps (`read_page`, findings, and sharing findings with other nodes). Plumb counts a request as local only when all three hold:
+A few things are kept to the computer Plumb runs on: changing settings on the panel, plugin buttons, and the MCP tools that fetch or keep things for your AI apps (`read_page`, findings, sharing findings with other nodes, and the tools that [improve search](mcp.md#improving-search-for-you)). Plumb counts a request as local only when all three hold:
 
 - it connects from the machine itself (a loopback address such as `127.0.0.1` or `::1`),
 - it was sent to a local name (`localhost` or a name under it, a `127.x.x.x` address or `[::1]`), and

@@ -357,14 +357,22 @@ fn searches_and_pages_are_forgotten_on_time() {
 #[test]
 fn pages_an_app_asks_for_are_kept_a_year_and_summed_up_by_site() {
     let dir = tempfile::tempdir().unwrap();
-    let store = WantedPages::open(dir.path()).keeping(ASKED_KEPT);
+    let store = WantedPages::open(dir.path()).for_asks();
     let lead = Lead {
         url: "https://www.nasa.gov/exoplanets/".into(),
         label: "Exoplanets".into(),
         depth: 1,
     };
-    let asked = |now| store.ask("nasa.gov", "https://nasa.gov/", words(&["exoplanet"]), now);
-    let target = asked(NOW);
+    let asked = |start, now| {
+        store.ask(
+            "nasa.gov",
+            "https://nasa.gov/",
+            start,
+            words(&["exoplanet"]),
+            now,
+        )
+    };
+    let target = asked(None, NOW);
     assert_eq!(target.max_fetches, ASKED_FETCHES);
     assert!(target.leads.is_empty());
     let page = |path: &str, depth| WantedPage {
@@ -380,11 +388,27 @@ fn pages_an_app_asks_for_are_kept_a_year_and_summed_up_by_site() {
             (page("exoplanets/", 1), 0),
         ],
         leads: vec![lead.clone()],
+        elsewhere: vec![(
+            Lead {
+                url: "https://www.esa.int/exoplanets".into(),
+                ..lead.clone()
+            },
+            0,
+        )],
         ..Followed::default()
     };
     assert_eq!(store.apply(&[target], vec![followed], NOW, |_| true), 2);
-    // Asked again, the visit starts on the leads of the last one.
-    assert_eq!(asked(NOW + 1).leads, [lead]);
+    // Asked again, the visit starts on the page given, then the leads of
+    // the last one.
+    let given = Lead {
+        url: "https://www.nasa.gov/exoplanets/catalog".into(),
+        label: "exoplanet".into(),
+        depth: 1,
+    };
+    assert_eq!(
+        asked(Some(given.clone()), NOW + 1).leads,
+        [given, lead.clone()]
+    );
     let pages = store.pages_of("nasa.gov");
     assert_eq!(
         pages,
@@ -393,6 +417,7 @@ fn pages_an_app_asks_for_are_kept_a_year_and_summed_up_by_site() {
     assert!(store.pages_of("esa.int").is_empty());
     let (sites, kept) = store.summary();
     assert_eq!(kept, 2);
+    // No one chose the sites its pages link to.
     assert_eq!(sites.len(), 1);
     assert_eq!(sites[0].site, "nasa.gov");
     assert_eq!(sites[0].pages, 2);

@@ -34,7 +34,7 @@
 //! same computer that does not say who it forwards for, every request looks
 //! local (see `docs/docker.md`), so such a node should not share findings.
 //!
-//! The tools that change what the node shows (`grade_site`, `fetch_pages`,
+//! The tools that change what the node shows (`fetch_pages`,
 //! `focus_topics`) and `node_tuning` go to the same apps as findings: those
 //! on the node's own computer, or every client with `--mcp-manage`.
 

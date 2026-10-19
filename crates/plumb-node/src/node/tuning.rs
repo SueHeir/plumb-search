@@ -36,6 +36,7 @@ pub struct Tuning {
 impl Inner {
     pub(super) fn tuning(&self) -> Tuning {
         let (mut asked_sites, asked_pages) = self.asked_pages.summary();
+        asked_sites.retain(|site| !self.denies(&format!("https://{}/", site.site)));
         asked_sites.truncate(MAX_SITES_LISTED);
         Tuning {
             focus_topics: self.settings().focus_topics,

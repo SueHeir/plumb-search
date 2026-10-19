@@ -179,6 +179,20 @@ async fn an_ai_app_has_the_node_fetch_a_site_s_pages_and_sees_what_it_asked() {
     assert!(requested.iter().any(|path| path == "/sheets/dengue"));
     assert!(!requested.iter().any(|path| path == "/about"));
 
+    // A request a proxy passes on gets none of the tools.
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nX-Forwarded-For: 203.0.113.9\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    assert!(response.contains("\"search\""), "{response}");
+    assert!(!response.contains("fetch_pages"), "{response}");
+
     let (tuning, text) = super::agents::mcp_call(addr, "node_tuning", serde_json::json!({})).await;
     assert_eq!(tuning["asked_pages"], 1, "{text}");
     assert_eq!(tuning["asked_sites"][0]["site"], "healthexample.org");
