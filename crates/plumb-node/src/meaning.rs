@@ -237,8 +237,8 @@ impl SharedMeaning {
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
     nearest: Vec<String>,
-    /// The pages nearest the query ([`nearest_pages`]).
-    pages: Vec<MeantPage>,
+    /// The pages nearest the query ([`nearest_pages`]), with their vectors.
+    pages: Vec<(MeantPage, &'a [i8])>,
     /// The query's vectors (one, or as it is and after the instruction)
     /// with the cosines of the nearest and of the last of the nearest sites.
     spreads: Vec<Spread>,
@@ -271,7 +271,7 @@ impl<'a> QueryMeaning<'a> {
         vectors: RwLockReadGuard<'a, Vectors>,
         query: Vec<Vec<i8>>,
         combine: QueryInstruction,
-        pages: Vec<MeantPage>,
+        pages: Vec<(MeantPage, &'a [i8])>,
     ) -> Self {
         let mut nearest = None;
         let spreads = query
@@ -316,8 +316,20 @@ impl Meaning for QueryMeaning<'_> {
         self.nearest.clone()
     }
 
-    fn nearest_pages(&self) -> Vec<MeantPage> {
-        self.pages.clone()
+    fn nearest_pages(&self, sites: &[&str]) -> Vec<MeantPage> {
+        let near = |vector: &[i8]| {
+            sites
+                .iter()
+                .filter_map(|site| self.vectors.closeness(vector, site))
+                .reduce(f32::max)
+        };
+        self.pages
+            .iter()
+            .map(|(page, vector)| MeantPage {
+                sites: near(vector),
+                ..page.clone()
+            })
+            .collect()
     }
 
     fn plain_closeness(&self, domain: &str) -> Option<Option<f32>> {
@@ -344,10 +356,10 @@ impl Meaning for QueryMeaning<'_> {
 }
 
 /// The nearest page of each of `sets` that stands out ([`nearest_page`]),
-/// nearest first. The sets are read at once, as each search reads them
-/// all.
-fn nearest_pages(sets: &[Vectors], query: &[i8]) -> Vec<MeantPage> {
-    let mut found: Vec<MeantPage> = match sets {
+/// nearest first, with its vector. The sets are read at once, as each
+/// search reads them all.
+fn nearest_pages<'a>(sets: &'a [Vectors], query: &[i8]) -> Vec<(MeantPage, &'a [i8])> {
+    let mut found: Vec<_> = match sets {
         [] => Vec::new(),
         [pages] => nearest_page(pages, query).into_iter().collect(),
         _ => std::thread::scope(|scope| {
@@ -361,7 +373,7 @@ fn nearest_pages(sets: &[Vectors], query: &[i8]) -> Vec<MeantPage> {
                 .collect()
         }),
     };
-    found.sort_by(|a, b| b.cosine.total_cmp(&a.cosine));
+    found.sort_by(|(a, _), (b, _)| b.cosine.total_cmp(&a.cosine));
     found
 }
 
@@ -369,17 +381,19 @@ fn nearest_pages(sets: &[Vectors], query: &[i8]) -> Vec<MeantPage> {
 /// the nearest sites are (after the instruction, as nodes embed searches),
 /// when it stands [`LEAST_PAGE_GAP`] above the last of the
 /// [`NEAREST_PAGES`].
-fn nearest_page(pages: &Vectors, query: &[i8]) -> Option<MeantPage> {
+fn nearest_page<'a>(pages: &'a Vectors, query: &[i8]) -> Option<(MeantPage, &'a [i8])> {
     let found = pages.nearest(query, NEAREST_PAGES);
     match (found.first(), found.last()) {
         (Some(&(url, best)), Some(&(_, last)))
             if found.len() == NEAREST_PAGES && best - last >= LEAST_PAGE_GAP =>
         {
-            Some(MeantPage {
+            let page = MeantPage {
                 url: url.to_string(),
                 cosine: best,
                 gap: best - last,
-            })
+                sites: None,
+            };
+            Some((page, pages.get(url)?.1))
         }
         _ => None,
     }
@@ -858,7 +872,7 @@ mod tests {
         };
         let nearest = |sets: &[Vectors]| -> Vec<String> {
             let found = nearest_pages(sets, &[127, 0]);
-            found.into_iter().map(|page| page.url).collect()
+            found.into_iter().map(|(page, _)| page.url).collect()
         };
         let stands_out = [1.0, 0.95, 0.94, 0.94, 0.93, 0.93, 0.92, 0.92, 0.91, 0.9];
         let bunched = [1.0, 0.99, 0.99, 0.98, 0.98, 0.98, 0.98, 0.97, 0.97, 0.97];
@@ -876,6 +890,34 @@ mod tests {
             pages("near", &stands_out),
         ];
         assert_eq!(nearest(&sets), ["https://near/0", "https://far/0"]);
+    }
+
+    #[test]
+    fn a_page_is_weighed_against_the_nearest_of_the_sites_listed() {
+        let mut sites = Vectors::new([0; 32], 2);
+        for (domain, vector) in [("near.example", [127, 0]), ("far.example", [0, 127])] {
+            sites.insert(domain, text_hash(domain), &vector).unwrap();
+        }
+        let sites = RwLock::new(sites);
+        let page = MeantPage {
+            url: "https://pages.example/".into(),
+            cosine: 0.9,
+            gap: 0.1,
+            sites: None,
+        };
+        let vector = [120, 40];
+        let meaning = QueryMeaning::new(
+            sites.read_locked(),
+            vec![vec![127, 0]],
+            QueryInstruction::Off,
+            vec![(page, &vector[..])],
+        );
+        let near = |listed: &[&str]| meaning.nearest_pages(listed)[0].sites;
+        let both = near(&["far.example", "near.example"]).unwrap();
+        assert!((both - 0.949).abs() < 0.01, "{both}");
+        assert!((near(&["far.example"]).unwrap() - 0.316).abs() < 0.01);
+        assert_eq!(near(&["none.example"]), None);
+        assert_eq!(near(&[]), None);
     }
 
     #[test]

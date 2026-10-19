@@ -68,6 +68,23 @@ const MEANT_ARTICLE_LEAST: f32 = 0.36;
 /// 24 (number)), 7 on the topic and 3 right.
 const MEANT_ARTICLE_SUM: f32 = 1.15;
 
+/// How near in meaning an article meaning lists usually is to the nearest
+/// of the first sites listed ([`MeantPage::sites`]): the median on hpc. An
+/// article farther from all of them needs [`MEANT_SITES_SHARE`] of the
+/// difference more than [`MEANT_ARTICLE_SUM`]: "synonyms for broken"
+/// lists merriam-webster.com and thesaurus.com, far from Broken (1993
+/// film). Of the articles the sum kept for hpc's review and everyday
+/// searches, checked by hand, this left out 35 wrong ("www.supershuttle.com"
+/// to super.com), 11 on the topic and 5 right. The right ones were mostly
+/// the answer to a search whose sites are poor ("detritous" to Detritus),
+/// but the node's closeness of those sites to the search did not tell
+/// them apart.
+const MEANT_SITES_TYPICAL: f32 = 0.72;
+
+/// How much of an article's distance from the sites past
+/// [`MEANT_SITES_TYPICAL`] it must make up.
+const MEANT_SITES_SHARE: f32 = 0.5;
+
 impl PageSearcher {
     /// The articles within `scope` that parts of the query `words` mean,
     /// each with its part, added to `addresses` when not found otherwise.
@@ -278,8 +295,9 @@ impl PageSearcher {
     /// next. Nothing is added when a page found is named by the whole
     /// query or answers it whole, as words find those better, a page of
     /// [`MEANT_WITH_WORDS`] only when words found one too, an article only
-    /// from [`MEANT_ARTICLE_LEAST`] and [`MEANT_ARTICLE_SUM`], and any page
-    /// that is not an article, those of [`MEANT_WITH_WORDS`] too, only
+    /// from [`MEANT_ARTICLE_LEAST`] and [`MEANT_ARTICLE_SUM`] (higher when
+    /// it is far from the sites listed, [`MEANT_SITES_TYPICAL`]), and any
+    /// page that is not an article, those of [`MEANT_WITH_WORDS`] too, only
     /// from [`MEANT_OTHER_LEAST`] and after the pages words list. A page
     /// that would score too little to be placed ([`MIN_PARTIAL_SCORE`])
     /// gives way to the next. A page only meaning found is never placed
@@ -292,7 +310,14 @@ impl PageSearcher {
         let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
         let about_code = found.iter().any(|hit| with_words(&hit.page));
         let weight = |hit: &PageHit| 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity;
-        for MeantPage { url, cosine, gap } in meant {
+        for MeantPage {
+            url,
+            cosine,
+            gap,
+            sites,
+        } in meant
+        {
+            let far = sites.map_or(0.0, |near| (MEANT_SITES_TYPICAL - near).max(0.0));
             // An article counts when it is read enough and near enough,
             // another page when it is near enough. Either must score
             // enough as meant for placing to keep it, or the search would
@@ -302,7 +327,8 @@ impl PageSearcher {
                 let kept = ENTITY_MATCH * weight(hit) >= MIN_PARTIAL_SCORE;
                 kept && if hit.page.is_article() {
                     hit.popularity >= MEANT_ARTICLE_LEAST
-                        && cosine + gap + hit.popularity >= MEANT_ARTICLE_SUM
+                        && cosine + gap + hit.popularity
+                            >= MEANT_ARTICLE_SUM + MEANT_SITES_SHARE * far
                 } else {
                     *cosine >= MEANT_OTHER_LEAST
                 }

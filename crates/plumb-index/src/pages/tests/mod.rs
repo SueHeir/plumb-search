@@ -94,6 +94,7 @@ fn meant_page(url: &str, cosine: f32) -> crate::MeantPage {
         url: url.into(),
         cosine,
         gap: 0.2,
+        sites: None,
     }
 }
 
