@@ -291,10 +291,11 @@ impl PageSearcher {
     /// ([`ENTITY_MATCH`]) and marked [`PageHit::meant`], so it comes after
     /// the first sites. An article goes before the pages words found only
     /// in part, so it takes one of the places placing gives pages; one
-    /// words found too moves there as meant. A page words name or that
-    /// answers the query whole is left as they found it, and so is an
-    /// article they list that does not count; a page they list that is not
-    /// an article gives way to the next. A page of [`MEANT_WITH_WORDS`] is
+    /// they list moves there too, but keeps their score and is not marked.
+    /// Nothing is added when a page found is named by the whole query, as
+    /// words find those better, and a page found that answers the query
+    /// whole is left as it is; a page words list that is not an article
+    /// gives way to the next. A page of [`MEANT_WITH_WORDS`] is
     /// added only when words found one too, an article only from
     /// [`MEANT_ARTICLE_LEAST`] and [`MEANT_ARTICLE_SUM`] (higher when it is
     /// far from the sites listed, [`MEANT_SITES_TYPICAL`]), and any page
@@ -311,6 +312,14 @@ impl PageSearcher {
         meant: &[MeantPage],
         found: &mut Vec<PageHit>,
     ) -> Result<Option<String>> {
+        // After a page the query names, meaning added a part of it on hpc
+        // ("Matthew McConaughey filmography", "Political positions of
+        // Zohran Mamdani"). A page that answers the query whole only has
+        // all its words, and kept out Laundry symbol for "laundry care
+        // symbols" (bhg.com's page).
+        if found.iter().any(|hit| hit.named) {
+            return Ok(None);
+        }
         let with_words = |page: &Page| MEANT_WITH_WORDS.contains(&page.set.as_str());
         let about_code = found.iter().any(|hit| with_words(&hit.page));
         let weight = |hit: &PageHit| 1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity;
@@ -341,15 +350,28 @@ impl PageSearcher {
                 Some(at) => {
                     let words = &found[at];
                     let listed = words.score >= MIN_PARTIAL_SCORE;
-                    let article = words.page.is_article();
-                    if words.named || words.whole || listed && article && !counts(words) {
+                    if words.whole {
+                        return Ok(None);
+                    }
+                    // An article words list stays theirs: marked as meant it
+                    // would come after three sites and leave the learned
+                    // order, and on hpc Folate fell from first to fourth
+                    // for "source of folic acid". It only moves before the
+                    // pages found in part, as Tariff for "what is a tariff
+                    // code".
+                    if listed && words.page.is_article() {
+                        if counts(words) {
+                            let hit = found.remove(at);
+                            let before = found.iter().position(|kept| !kept.whole);
+                            found.insert(before.map_or(at, |first| first.min(at)), hit);
+                        }
                         return Ok(None);
                     }
                     // A page of another kind words list, or one that does
                     // not count, does not keep out the next nearest: on hpc
                     // a question words listed kept Robinhood Markets from
                     // "robin hood stocks app".
-                    if listed && !article || !counts(words) {
+                    if listed || !counts(words) {
                         continue;
                     }
                     found.remove(at)
@@ -382,16 +404,15 @@ impl PageSearcher {
             // An article goes before the pages words found only in part,
             // though they score more: placing lists two pages, and on hpc
             // Eye examination and Lea test kept out Eye chart for "eye test
-            // chart", Harmonized System and a question Tariff for "what is
-            // a tariff code". A page that is not an article takes no place
-            // of one words list: the isbn gem pushed out the Stack Overflow
+            // chart". A page that is not an article takes no place of one
+            // words list: the isbn gem pushed out the Stack Overflow
             // question "convert ISBN-10 to ISBN-13" wanted, and certbot's
             // repository a Server Fault question on getting a certificate.
             let at = found
                 .iter()
                 .position(|kept| {
                     if hit.page.is_article() {
-                        !kept.named && !kept.whole
+                        !kept.whole
                     } else {
                         kept.score < hit.score && kept.score < MIN_PARTIAL_SCORE
                     }
